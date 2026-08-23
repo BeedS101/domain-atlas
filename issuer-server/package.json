@@ -1,0 +1,10 @@
+{
+  "name": "domain-atlas-issuer-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal real issuer for the Example Plaza demo domain — generates a real ECDSA P-256 keypair, signs domain-atlas-item/1.0 credentials, and serves the .well-known files a verifier fetches. Zero dependencies (Node's built-in http/crypto only) — nothing to npm install. Replaces the plain static server on port 8001 for demo-domain-a only; demo-domain-b stays a plain static server on purpose, to prove it needs no special integration with the issuer to verify what it hands out.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

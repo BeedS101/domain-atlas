@@ -1,0 +1,11 @@
+{
+  "format": "procedural-v1",
+  "floor": { "size": [20, 20], "color": "#20232b" },
+  "objects": [
+    { "type": "box", "position": [0, 1, -5], "size": [3, 2, 0.3], "color": "#5a6bd6", "label": "Example Museum" },
+    { "type": "box", "position": [0, 0.6, -1], "size": [0.8, 1.2, 0.8], "color": "#c9a13b", "label": "Exhibit" }
+  ],
+  "portalMarkers": [
+    { "position": [0, 0, 4], "portalIndex": 0 }
+  ]
+}

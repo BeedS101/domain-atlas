@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Domain Atlas — Spatial Web Reader",
+  "version": "1.3.0",
+  "description": "Detects a domain's spatial manifest (/.well-known/spatial.json) and lets you step into the worlds it declares, within a domain or across domains, carrying a real signed-credential wallet — items, loadouts with transfer-on-loss, fungible resources, and trading-station settlement — between them.",
+  "permissions": ["storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": { "default_title": "Domain Atlas" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["viewer.html", "viewer.js", "wallet.js", "gltf-mini.js", "identity-popup.html", "identity-popup.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

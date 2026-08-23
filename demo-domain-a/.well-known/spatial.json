@@ -1,0 +1,141 @@
+{
+  "spec": "domain-atlas/1.0",
+  "domain": "localhost:8001",
+  "owner": {
+    "name": "Example Plaza Demo",
+    "contact": "demo@localhost"
+  },
+  "defaultWorld": "plaza",
+  "worlds": [
+    {
+      "id": "plaza",
+      "name": "Example Plaza",
+      "entry": {
+        "scene": "/spatial/plaza/scene.json",
+        "renderer": ["procedural-v1"]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": true,
+        "identityRequired": false,
+        "itemDropsAllowed": true,
+        "acceptedItemClasses": ["atlas.wearable", "atlas.badge", "atlas.wearable.ring"],
+        "trustedIssuers": "any"
+      },
+      "profile": {
+        "genre": "marketplace",
+        "scale": "district",
+        "capabilities": { "building": "owner-only", "vehicles": false, "combat": "none", "landOwnership": false }
+      },
+      "portals": [
+        { "kind": "world", "to": "museum", "label": "Enter the Museum" },
+        { "kind": "world", "to": "arena", "label": "Enter the Arena" },
+        { "kind": "world", "to": "market", "label": "Enter the Trading Post" },
+        {
+          "kind": "domain",
+          "to": "localhost:8002",
+          "label": "Walk to Neighbor Workshop",
+          "manifest": "http://localhost:8002/.well-known/spatial.json"
+        },
+        { "kind": "world", "to": "lobby", "label": "Enter the Lobby" }
+      ]
+    },
+    {
+      "id": "arena",
+      "name": "Example Arena",
+      "entry": {
+        "scene": "/spatial/arena/scene.json",
+        "renderer": ["procedural-v1"]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": true,
+        "identityRequired": true,
+        "itemDropsAllowed": false,
+        "acceptedItemClasses": [],
+        "trustedIssuers": "any"
+      },
+      "profile": {
+        "genre": "arena",
+        "scale": "room",
+        "capabilities": { "building": "none", "vehicles": false, "combat": "pvp", "landOwnership": false }
+      },
+      "portals": [
+        { "kind": "world", "to": "plaza", "label": "Back to the Plaza" }
+      ]
+    },
+    {
+      "id": "market",
+      "name": "Example Trading Post",
+      "entry": {
+        "scene": "/spatial/market/scene.json",
+        "renderer": ["procedural-v1"]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": true,
+        "identityRequired": true,
+        "itemDropsAllowed": false,
+        "acceptedItemClasses": [],
+        "trustedIssuers": "any"
+      },
+      "profile": {
+        "genre": "trading-station",
+        "scale": "room",
+        "capabilities": { "building": "none", "vehicles": false, "combat": "none", "landOwnership": false }
+      },
+      "portals": [
+        { "kind": "world", "to": "plaza", "label": "Back to the Plaza" }
+      ]
+    },
+    {
+      "id": "museum",
+      "name": "Example Museum",
+      "entry": {
+        "scene": "/spatial/museum/scene.json",
+        "renderer": ["procedural-v1"]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": true,
+        "identityRequired": false,
+        "itemDropsAllowed": false,
+        "acceptedItemClasses": [],
+        "trustedIssuers": "self"
+      },
+      "profile": {
+        "genre": "gallery",
+        "scale": "building",
+        "capabilities": { "building": "none", "vehicles": false, "combat": "none", "landOwnership": false }
+      },
+      "portals": [
+        { "kind": "world", "to": "plaza", "label": "Back to the Plaza" }
+      ]
+    },
+    {
+      "id": "lobby",
+      "name": "Example Lobby",
+      "entry": {
+        "scene": "/spatial/lobby/scene.json",
+        "renderer": ["gltf-mini-v1"]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": true,
+        "identityRequired": false,
+        "itemDropsAllowed": false,
+        "acceptedItemClasses": [],
+        "trustedIssuers": "self"
+      },
+      "profile": {
+        "genre": "lobby",
+        "scale": "room",
+        "capabilities": { "building": "none", "vehicles": false, "combat": "none", "landOwnership": false }
+      },
+      "portals": [
+        { "kind": "world", "to": "plaza", "label": "Back to the Plaza" }
+      ]
+    }
+  ],
+  "updated": "2026-08-27T00:00:00Z"
+}

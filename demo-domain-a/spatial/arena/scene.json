@@ -1,0 +1,12 @@
+{
+  "format": "procedural-v1",
+  "floor": { "size": [16, 16], "color": "#2a1620" },
+  "objects": [
+    { "type": "box", "position": [0, 1, -5], "size": [3, 2, 0.3], "color": "#8f2d2d", "label": "Example Arena" },
+    { "type": "box", "position": [-3, 0.4, 0], "size": [0.6, 0.8, 0.6], "color": "#c05a1f", "label": "" },
+    { "type": "box", "position": [3, 0.4, 0], "size": [0.6, 0.8, 0.6], "color": "#57a593", "label": "" }
+  ],
+  "portalMarkers": [
+    { "position": [0, 0, 5], "portalIndex": 0 }
+  ]
+}

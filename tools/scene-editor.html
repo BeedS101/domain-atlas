@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Domain Atlas — Lobby Scene Editor</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b1b1f; color: #e8e8ec; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+  #app { display: grid; grid-template-columns: 240px 1fr 260px; grid-template-rows: 52px 1fr 30px; height: 100%; }
+  header { grid-column: 1 / 4; display: flex; align-items: center; gap: 10px; padding: 0 14px; background: #26262c; border-bottom: 1px solid #38383f; }
+  header h1 { font-size: 14px; font-weight: 600; margin: 0 14px 0 0; white-space: nowrap; }
+  button { background: #35353d; color: #e8e8ec; border: 1px solid #47474f; border-radius: 5px; padding: 6px 11px; font-size: 12.5px; cursor: pointer; }
+  button:hover { background: #40404a; }
+  button.primary { background: #3b6ea5; border-color: #4a80bd; }
+  button.primary:hover { background: #4579b5; }
+  button.active { background: #4a7f3b; border-color: #5c9c4a; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #left, #right { background: #202024; overflow-y: auto; padding: 10px; box-sizing: border-box; }
+  #left { border-right: 1px solid #38383f; }
+  #right { border-left: 1px solid #38383f; }
+  #viewport { position: relative; background: #101013; }
+  #viewport canvas { display: block; }
+  footer { grid-column: 1 / 4; display: flex; align-items: center; padding: 0 14px; background: #26262c; border-top: 1px solid #38383f; font-size: 11.5px; color: #9a9aa4; gap: 18px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #9a9aa4; margin: 14px 0 6px; }
+  h2:first-child { margin-top: 0; }
+  .list-item { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .list-item:hover { background: #2c2c33; }
+  .list-item.selected { background: #3b6ea5; }
+  .list-item .idx { color: #8a8a94; margin-right: 6px; font-variant-numeric: tabular-nums; }
+  .field { margin-bottom: 8px; }
+  .field label { display: block; font-size: 11px; color: #9a9aa4; margin-bottom: 3px; }
+  .field input[type=number], .field input[type=text] { width: 100%; box-sizing: border-box; background: #141417; border: 1px solid #3c3c44; color: #e8e8ec; border-radius: 4px; padding: 5px 7px; font-size: 12.5px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  .empty-hint { color: #6f6f78; font-size: 12px; padding: 8px; }
+  #status { position: absolute; top: 10px; left: 10px; background: rgba(20,20,23,0.85); padding: 6px 10px; border-radius: 5px; font-size: 12px; max-width: 60%; white-space: pre-line; pointer-events: none; }
+  #status:empty { display: none; }
+  .warn { color: #e0a53b; }
+  .modelbtn { display: block; width: 100%; text-align: left; margin-bottom: 3px; font-size: 11.5px; padding: 5px 8px; }
+  input[type=file] { display: none; }
+  .filerow { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #9a9aa4; }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Domain Atlas — Scene Editor</h1>
+    <button id="btnLoadScene">Load scene.json</button>
+    <input type="file" id="fileScene" accept=".json">
+    <button id="btnLoadModels">Load furniture models…</button>
+    <input type="file" id="fileModels" accept=".glb" multiple>
+    <span class="spacer"></span>
+    <button id="btnExport" class="primary" disabled>Download updated scene.json</button>
+  </header>
+
+  <div id="left">
+    <h2>Placed objects</h2>
+    <div id="objectList"><div class="empty-hint">Load a scene.json to begin.</div></div>
+    <h2>Add furniture</h2>
+    <div id="modelPalette"><div class="empty-hint">Load furniture models to populate this list.</div></div>
+  </div>
+
+  <div id="viewport">
+    <div id="status"></div>
+  </div>
+
+  <div id="right">
+    <div id="inspector"><div class="empty-hint">Click an object in the scene or the list to edit it.</div></div>
+    <h2>Spawn point</h2>
+    <div class="field">
+      <button id="btnSetSpawn">Click floor to move spawn here</button>
+    </div>
+    <div class="field">
+      <label>Facing (startYaw, degrees)</label>
+      <input type="number" id="spawnYaw" value="0" step="15">
+    </div>
+    <div class="field">
+      <button id="btnViewFromSpawn" style="width:100%;">View from spawn point</button>
+      <div class="empty-hint" style="padding:6px 2px 0;">
+        The free-orbit view is great for placing things, but it's easy to
+        rotate an object until it looks right from wherever you're
+        orbiting — which can look backwards from the one fixed viewpoint
+        your actual site's camera uses. Use this to check from the real
+        vantage point before exporting.
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span>Left-drag: orbit · Right-drag: pan · Scroll: zoom · Click object: select</span>
+    <span class="spacer"></span>
+    <span id="modeButtons">
+      <button id="btnModeMove" class="active">Move</button>
+      <button id="btnModeRotate">Rotate</button>
+      <button id="btnResetView">Reset view</button>
+    </span>
+  </footer>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@latest/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@latest/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+// Domain Atlas — standalone lobby scene editor.
+//
+// This is a completely separate tool from the extension's gltf-mini.js
+// renderer. gltf-mini.js is hand-rolled because it has to ship *inside*
+// the extension with zero dependencies. This file has no such constraint —
+// it's a one-off tool you open directly in your own browser, so it uses
+// the real Three.js from a CDN. It reads and writes exactly the scene.json
+// shape gltf-mini.js expects (floor/ambientLight/directionalLight/camera/
+// objects[]/portalMarkers[], with each object's rotationY in DEGREES and
+// an optional uniform "scale") — nothing here needs to match Three.js's
+// own conventions except where they happen to line up (which, for a
+// straight position + Y-rotation + uniform-scale placement, they do).
+
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const statusEl = document.getElementById('status');
+function setStatus(msg, isWarn) {
+  statusEl.textContent = msg || '';
+  statusEl.className = isWarn ? 'warn' : '';
+}
+
+// ---------- three.js boilerplate ----------
+
+const viewport = document.getElementById('viewport');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+viewport.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101013);
+
+const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 200);
+camera.position.set(6, 6, 9);
+
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.target.set(0, 0.8, 0);
+// Defaults scale both pan and zoom speed by current distance-to-target —
+// great for a flythrough, bad for close-up placement work, where it makes
+// dragging feel like it grinds to a halt the closer you get. Speed the base
+// rates up, and put a floor under how close you can zoom so that speed can
+// never decay toward zero.
+orbit.panSpeed = 2.5;
+orbit.zoomSpeed = 2.5;
+orbit.minDistance = 1.5;
+orbit.maxDistance = 60;
+const DEFAULT_CAMERA_POS = camera.position.clone();
+const DEFAULT_TARGET = orbit.target.clone();
+orbit.update();
+
+const transform = new TransformControls(camera, renderer.domElement);
+transform.addEventListener('dragging-changed', (e) => { orbit.enabled = !e.value; });
+transform.addEventListener('objectChange', () => refreshInspectorFromMesh());
+// TransformControls' API split the interactive gizmo out into getHelper()
+// in newer three.js releases (the "transform" object itself is now just
+// the controller logic, not a scene-addable visual). Support both shapes
+// since this file pins to three@latest and can't be test-run here to
+// confirm which one you'll actually get.
+scene.add(typeof transform.getHelper === 'function' ? transform.getHelper() : transform);
+
+let ambientLight = new THREE.AmbientLight(0xffffff, 0.55);
+let directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+scene.add(ambientLight, directionalLight);
+
+let floorMesh = null;
+let gridHelper = null;
+
+function resize() {
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+
+// ---------- state ----------
+
+let sceneData = null;          // the loaded scene.json, minus "objects" (kept live in placements)
+let placements = [];           // [{ modelPath, root: THREE.Object3D }]
+let modelBlobUrls = new Map(); // basename -> blob: URL, from "Load furniture models"
+let selected = null;           // a placements[] entry, or null
+let spawnMarker = null;        // THREE.Group (marker + facing arrow)
+let settingSpawn = false;
+let cameraStart = [0, 1.6, 0]; // [x, y, z]
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+
+// ---------- loading scene.json ----------
+
+document.getElementById('btnLoadScene').onclick = () => document.getElementById('fileScene').click();
+document.getElementById('fileScene').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    loadSceneData(data);
+  } catch (err) {
+    setStatus('Could not read that file as scene.json: ' + err.message, true);
+  }
+});
+
+function loadSceneData(data) {
+  // Clear any previously placed objects.
+  for (const p of placements) scene.remove(p.root);
+  placements = [];
+  selected = null;
+  transform.detach();
+  renderInspector();
+  renderObjectList();
+
+  sceneData = data;
+
+  // Floor
+  if (floorMesh) scene.remove(floorMesh);
+  if (gridHelper) scene.remove(gridHelper);
+  const [fw, fd] = (data.floor && data.floor.size) || [10, 10];
+  const floorColor = (data.floor && data.floor.color) || '#333333';
+  floorMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(fw, fd),
+    new THREE.MeshStandardMaterial({ color: floorColor, side: THREE.DoubleSide })
+  );
+  floorMesh.rotation.x = -Math.PI / 2;
+  floorMesh.userData.isFloor = true;
+  scene.add(floorMesh);
+  gridHelper = new THREE.GridHelper(Math.max(fw, fd), Math.max(fw, fd), 0x555555, 0x333333);
+  scene.add(gridHelper);
+
+  // Lights
+  const ai = (data.ambientLight && data.ambientLight.intensity) ?? 0.55;
+  ambientLight.intensity = ai;
+  const dir = (data.directionalLight && data.directionalLight.direction) || [-0.4, -1, -0.3];
+  directionalLight.position.set(-dir[0], -dir[1], -dir[2]).multiplyScalar(10);
+  directionalLight.intensity = 1;
+
+  // Camera / spawn point
+  cameraStart = (data.camera && data.camera.start) || [0, 1.6, 0];
+  document.getElementById('spawnYaw').value = (data.camera && data.camera.startYaw) || 0;
+  updateSpawnMarker();
+
+  // Objects — placed once their models are available (see loadPlacements()).
+  loadPlacements(data.objects || []);
+
+  // Portal markers — reference-only visuals, re-created fresh each load.
+  portalRingMeshes.forEach((m) => scene.remove(m));
+  portalRingMeshes = renderPortalMarkers(data.portalMarkers);
+
+  setStatus('Loaded scene.json — ' + (data.objects || []).length + ' object(s). ' +
+    (modelBlobUrls.size ? '' : 'Now load the furniture models to see them.'));
+  document.getElementById('btnExport').disabled = false;
+}
+let portalRingMeshes = [];
+
+// ---------- loading furniture models ----------
+
+document.getElementById('btnLoadModels').onclick = () => document.getElementById('fileModels').click();
+document.getElementById('fileModels').addEventListener('change', (e) => {
+  for (const file of e.target.files) {
+    if (modelBlobUrls.has(file.name)) URL.revokeObjectURL(modelBlobUrls.get(file.name));
+    modelBlobUrls.set(file.name, URL.createObjectURL(file));
+  }
+  renderModelPalette();
+  setStatus(modelBlobUrls.size + ' model(s) available.');
+  // Re-resolve any objects that were waiting on models, and any queued adds.
+  if (sceneData) loadPlacements(sceneData.objects || [], /*onlyMissing*/ true);
+});
+
+function basenameOf(modelPath) {
+  return modelPath.split('/').pop();
+}
+
+// The rotate gizmo drives the object through a quaternion under the hood,
+// and Three.js's Euler reads back out of a quaternion in the (-180, 180]
+// range — so an object originally at, say, 270° comes back as -90° the
+// moment you touch it with the gizmo (mathematically identical rotation,
+// but it doesn't match the positive 0-360 convention this project's
+// scene.json files already use, and looks like corruption if you're
+// comparing numbers). Normalize to [0, 360) everywhere a rotationY value
+// is shown or exported so it's consistent regardless of how it got set.
+function normDeg(deg) {
+  return ((deg % 360) + 360) % 360;
+}
+
+const gltfLoader = new GLTFLoader();
+function loadGlbByPath(modelPath) {
+  const name = basenameOf(modelPath);
+  const url = modelBlobUrls.get(name);
+  if (!url) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    gltfLoader.load(url, (gltf) => resolve(gltf.scene), undefined, (err) => {
+      console.error('Failed to load', name, err);
+      resolve(null);
+    });
+  });
+}
+
+function placeholderBox() {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(0.4, 0.4, 0.4),
+    new THREE.MeshBasicMaterial({ color: 0xff3355, wireframe: true })
+  );
+  return mesh;
+}
+
+async function loadPlacements(objects, onlyMissing) {
+  let missing = 0;
+  for (let i = 0; i < objects.length; i++) {
+    if (onlyMissing && placements[i] && placements[i].root.userData.resolved) continue;
+    const obj = objects[i];
+    const loadedScene = await loadGlbByPath(obj.model);
+    let root = placements[i] && placements[i].root;
+    if (root) scene.remove(root);
+    root = new THREE.Group();
+    if (loadedScene) {
+      root.add(loadedScene);
+      root.userData.resolved = true;
+    } else {
+      root.add(placeholderBox());
+      root.userData.resolved = false;
+      missing++;
+    }
+    root.position.fromArray(obj.position || [0, 0, 0]);
+    root.rotation.y = THREE.MathUtils.degToRad(obj.rotationY || 0);
+    root.scale.setScalar(obj.scale || 1);
+    root.userData.isPlacement = true;
+    root.userData.index = i;
+    scene.add(root);
+    placements[i] = { modelPath: obj.model, root };
+  }
+  placements.length = objects.length;
+  renderObjectList();
+  if (missing) {
+    setStatus(missing + ' object(s) reference a model you haven\'t loaded yet — shown as red wireframe boxes. Click "Load furniture models…" and select the missing .glb file(s).', true);
+  }
+}
+
+// ---------- object list / model palette (left sidebar) ----------
+
+function renderObjectList() {
+  const el = document.getElementById('objectList');
+  if (!placements.length) { el.innerHTML = '<div class="empty-hint">No objects yet.</div>'; return; }
+  el.innerHTML = '';
+  placements.forEach((p, i) => {
+    const div = document.createElement('div');
+    div.className = 'list-item' + (selected === p ? ' selected' : '');
+    div.innerHTML = '<span><span class="idx">' + i + '</span>' + basenameOf(p.modelPath) + '</span>';
+    div.onclick = () => select(p);
+    el.appendChild(div);
+  });
+}
+
+function renderModelPalette() {
+  const el = document.getElementById('modelPalette');
+  if (!modelBlobUrls.size) { el.innerHTML = '<div class="empty-hint">Load furniture models to populate this list.</div>'; return; }
+  el.innerHTML = '';
+  [...modelBlobUrls.keys()].sort().forEach((name) => {
+    const btn = document.createElement('button');
+    btn.className = 'modelbtn';
+    btn.textContent = '+ ' + name;
+    btn.onclick = () => addObject('/assets/furniture/' + name);
+    el.appendChild(btn);
+  });
+}
+
+async function addObject(modelPath) {
+  const target = orbit.target.clone();
+  const obj = { model: modelPath, position: [Math.round(target.x * 10) / 10, 0, Math.round(target.z * 10) / 10], rotationY: 0 };
+  const i = placements.length;
+  const loadedScene = await loadGlbByPath(modelPath);
+  const root = new THREE.Group();
+  if (loadedScene) { root.add(loadedScene); root.userData.resolved = true; }
+  else { root.add(placeholderBox()); root.userData.resolved = false; }
+  root.position.fromArray(obj.position);
+  root.userData.isPlacement = true;
+  root.userData.index = i;
+  scene.add(root);
+  placements[i] = { modelPath, root };
+  renderObjectList();
+  select(placements[i]);
+}
+
+// ---------- selection + inspector (right sidebar) ----------
+
+function select(p) {
+  selected = p;
+  transform.attach(p.root);
+  renderObjectList();
+  renderInspector();
+}
+
+function deselect() {
+  selected = null;
+  transform.detach();
+  renderObjectList();
+  renderInspector();
+}
+
+function renderInspector() {
+  const el = document.getElementById('inspector');
+  if (!selected) { el.innerHTML = '<div class="empty-hint">Click an object in the scene or the list to edit it.</div>'; return; }
+  const pos = selected.root.position;
+  const rotDeg = normDeg(THREE.MathUtils.radToDeg(selected.root.rotation.y));
+  const scaleVal = selected.root.scale.x;
+  el.innerHTML =
+    '<h2>Selected: ' + basenameOf(selected.modelPath) + '</h2>' +
+    '<div class="field"><label>Position (X, Y, Z)</label><div class="row3">' +
+      '<input type="number" id="fx" step="0.05" value="' + pos.x.toFixed(2) + '">' +
+      '<input type="number" id="fy" step="0.05" value="' + pos.y.toFixed(2) + '">' +
+      '<input type="number" id="fz" step="0.05" value="' + pos.z.toFixed(2) + '">' +
+    '</div></div>' +
+    '<div class="field"><label>Rotation Y (degrees)</label><input type="number" id="fry" step="5" value="' + rotDeg.toFixed(0) + '"></div>' +
+    '<div class="field"><label>Scale (uniform, 1 = normal size)</label><input type="number" id="fscale" step="0.05" value="' + scaleVal.toFixed(2) + '"></div>' +
+    '<button id="btnDelete" style="width:100%;background:#6b2f34;border-color:#833a41;">Delete this object</button>';
+
+  const apply = () => {
+    selected.root.position.set(parseFloat(fx.value) || 0, parseFloat(fy.value) || 0, parseFloat(fz.value) || 0);
+    selected.root.rotation.y = THREE.MathUtils.degToRad(parseFloat(fry.value) || 0);
+    selected.root.scale.setScalar(parseFloat(fscale.value) || 1);
+  };
+  const fx = document.getElementById('fx'), fy = document.getElementById('fy'), fz = document.getElementById('fz');
+  const fry = document.getElementById('fry'), fscale = document.getElementById('fscale');
+  [fx, fy, fz, fry, fscale].forEach((inp) => inp.addEventListener('change', apply));
+  document.getElementById('btnDelete').onclick = () => {
+    scene.remove(selected.root);
+    const idx = placements.indexOf(selected);
+    placements.splice(idx, 1);
+    placements.forEach((p, i) => { p.root.userData.index = i; });
+    deselect();
+    renderObjectList();
+  };
+}
+
+function refreshInspectorFromMesh() {
+  if (!selected) return;
+  const fx = document.getElementById('fx');
+  if (!fx) return; // inspector not open on this object for some reason
+  const pos = selected.root.position;
+  fx.value = pos.x.toFixed(2);
+  document.getElementById('fy').value = pos.y.toFixed(2);
+  document.getElementById('fz').value = pos.z.toFixed(2);
+  document.getElementById('fry').value = normDeg(THREE.MathUtils.radToDeg(selected.root.rotation.y)).toFixed(0);
+}
+
+// ---------- click-to-select in the viewport ----------
+
+renderer.domElement.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  pointerDownPos = [e.clientX, e.clientY];
+});
+let pointerDownPos = null;
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (e.button !== 0 || !pointerDownPos) return;
+  const moved = Math.hypot(e.clientX - pointerDownPos[0], e.clientY - pointerDownPos[1]);
+  pointerDownPos = null;
+  if (moved > 4) return; // was a drag/orbit, not a click
+  if (transform.dragging) return;
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+
+  if (settingSpawn) {
+    if (!floorMesh) return;
+    const hit = raycaster.intersectObject(floorMesh)[0];
+    if (hit) {
+      cameraStart = [Math.round(hit.point.x * 100) / 100, 1.6, Math.round(hit.point.z * 100) / 100];
+      updateSpawnMarker();
+    }
+    return;
+  }
+
+  const hits = raycaster.intersectObjects(placements.map((p) => p.root), true);
+  if (hits.length) {
+    let o = hits[0].object;
+    while (o && !o.userData.isPlacement) o = o.parent;
+    if (o) { select(placements[o.userData.index]); return; }
+  }
+  deselect();
+});
+
+// ---------- spawn point marker ----------
+
+function updateSpawnMarker() {
+  if (spawnMarker) scene.remove(spawnMarker);
+  spawnMarker = new THREE.Group();
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 16), new THREE.MeshBasicMaterial({ color: 0x33ccff }));
+  spawnMarker.add(dot);
+  const yawDeg = parseFloat(document.getElementById('spawnYaw').value) || 0;
+  const yawRad = THREE.MathUtils.degToRad(yawDeg);
+  const dir = new THREE.Vector3(Math.sin(yawRad), 0, -Math.cos(yawRad)); // matches gltf-mini.js's forward convention
+  const arrow = new THREE.ArrowHelper(dir, new THREE.Vector3(0, 0, 0), 0.9, 0x33ccff, 0.3, 0.2);
+  spawnMarker.add(arrow);
+  spawnMarker.position.set(cameraStart[0], 0.02, cameraStart[2]);
+  scene.add(spawnMarker);
+}
+document.getElementById('spawnYaw').addEventListener('change', updateSpawnMarker);
+document.getElementById('btnSetSpawn').onclick = () => {
+  settingSpawn = !settingSpawn;
+  document.getElementById('btnSetSpawn').classList.toggle('active', settingSpawn);
+  document.getElementById('btnSetSpawn').textContent = settingSpawn ? 'Click the floor now…' : 'Click floor to move spawn here';
+};
+
+// ---------- portal markers (reference only — not editable here) ----------
+
+function renderPortalMarkers(markers) {
+  return (markers || []).map((m) => {
+    const ring = new THREE.Mesh(
+      new THREE.CylinderGeometry(m.radius || 0.8, m.radius || 0.8, 0.05, 24),
+      new THREE.MeshBasicMaterial({ color: 0xff8a3d, transparent: true, opacity: 0.35 })
+    );
+    ring.position.set(m.position[0], 0.03, m.position[2]);
+    scene.add(ring);
+    return ring;
+  });
+}
+
+// ---------- mode toggle ----------
+
+document.getElementById('btnModeMove').onclick = () => setMode('translate');
+document.getElementById('btnModeRotate').onclick = () => setMode('rotate');
+document.getElementById('btnResetView').onclick = () => {
+  camera.position.copy(DEFAULT_CAMERA_POS);
+  orbit.target.copy(DEFAULT_TARGET);
+  orbit.update();
+};
+document.getElementById('btnViewFromSpawn').onclick = () => {
+  if (!sceneData) return;
+  const yawDeg = parseFloat(document.getElementById('spawnYaw').value) || 0;
+  const yawRad = THREE.MathUtils.degToRad(yawDeg);
+  // Same forward-vector convention as gltf-mini.js's camera (see mat4View):
+  // forward at yaw 0 is -Z.
+  const dir = new THREE.Vector3(Math.sin(yawRad), 0, -Math.cos(yawRad));
+  const eye = new THREE.Vector3(cameraStart[0], cameraStart[1], cameraStart[2]);
+  camera.position.copy(eye);
+  orbit.target.copy(eye).add(dir.multiplyScalar(3));
+  orbit.update();
+};
+function setMode(mode) {
+  transform.setMode(mode);
+  // Y-only rotation, matching gltf-mini.js — hide BOTH the X and Z rotation
+  // rings in rotate mode (a real bug fix: this used to leave X grabbable,
+  // so an accidental X-rotation would look fine in the editor but silently
+  // vanish on export, since only rotation.y ever gets written to rotationY).
+  transform.showX = mode !== 'rotate';
+  transform.showZ = mode !== 'rotate';
+  document.getElementById('btnModeMove').classList.toggle('active', mode === 'translate');
+  document.getElementById('btnModeRotate').classList.toggle('active', mode === 'rotate');
+}
+
+// ---------- export ----------
+
+document.getElementById('btnExport').onclick = () => {
+  if (!sceneData) return;
+  const round = (n, d) => Math.round(n * 10 ** d) / 10 ** d;
+  const out = {
+    floor: sceneData.floor,
+    ambientLight: sceneData.ambientLight,
+    directionalLight: sceneData.directionalLight,
+    camera: { start: [round(cameraStart[0], 2), cameraStart[1], round(cameraStart[2], 2)], startYaw: round(parseFloat(document.getElementById('spawnYaw').value) || 0, 0) },
+    objects: placements.map((p) => {
+      const o = {
+        model: p.modelPath,
+        position: [round(p.root.position.x, 2), round(p.root.position.y, 2), round(p.root.position.z, 2)],
+        rotationY: round(normDeg(THREE.MathUtils.radToDeg(p.root.rotation.y)), 0)
+      };
+      const scaleVal = round(p.root.scale.x, 2);
+      if (scaleVal !== 1) o.scale = scaleVal;
+      return o;
+    }),
+    portalMarkers: sceneData.portalMarkers || []
+  };
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'scene.json';
+  a.click();
+  setStatus('Downloaded scene.json — upload it over your existing spatial/lobby/scene.json via cPanel File Manager.');
+};
+
+resize();
+animate();
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "format": "procedural-v1",
+  "floor": { "size": [24, 24], "color": "#1b2830" },
+  "objects": [
+    { "type": "box", "position": [0, 1, -6], "size": [3, 2, 0.3], "color": "#c05a1f", "label": "Example Plaza" },
+    { "type": "box", "position": [-4, 0.5, -2], "size": [1, 1, 1], "color": "#2c7568", "label": "Compass Stall" },
+    { "type": "box", "position": [4, 0.5, -2], "size": [1, 1, 1], "color": "#2c7568", "label": "Ring Stall" }
+  ],
+  "portalMarkers": [
+    { "position": [-6, 0, 4], "portalIndex": 0 },
+    { "position": [-2, 0, 4], "portalIndex": 1 },
+    { "position": [2, 0, 4], "portalIndex": 2 },
+    { "position": [6, 0, 4], "portalIndex": 3 },
+    { "position": [0, 0, 7], "portalIndex": 4 }
+  ],
+  "interactables": [
+    { "position": [-4, 0.5, -2], "label": "Bronze Compass", "action": "issue", "class": "atlas.wearable", "oncePerUser": true },
+    { "position": [4, 0.5, -2], "label": "Merchant's Signet Ring", "action": "issue", "class": "atlas.wearable.ring", "oncePerUser": true }
+  ]
+}

@@ -1,0 +1,7 @@
+# Lets the browser call clean URLs like /atlas/issue and /atlas/resource/trade
+# (no .php extension — matches what extension/wallet.js already calls, so
+# nothing in the extension needs to change to use this PHP backend instead
+# of the Node one).
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^(.+)$ $1.php [L]

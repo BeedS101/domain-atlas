@@ -1,0 +1,36 @@
+{
+  "floor": { "size": [10, 9], "color": "#3a2f22" },
+  "ambientLight": { "intensity": 0.55 },
+  "directionalLight": { "direction": [-0.45, -1, -0.35] },
+  "camera": { "start": [0, 1.6, 2.4], "startYaw": 0 },
+  "objects": [
+    { "model": "/assets/furniture/desk.glb", "position": [-1.214, 0, -3.432], "rotationY": 0 },
+    { "model": "/assets/furniture/chairDesk.glb", "position": [-0.834, 0, -3.836], "rotationY": 0 },
+    { "model": "/assets/furniture/computerScreen.glb", "position": [-0.992, 0.38, -3.646], "rotationY": 0 },
+    { "model": "/assets/furniture/computerKeyboard.glb", "position": [-0.682, 0.38, -3.502], "rotationY": 0 },
+    { "model": "/assets/furniture/lampRoundTable.glb", "position": [-0.564, 0.38, -3.532], "rotationY": 0 },
+
+    { "model": "/assets/furniture/rugRectangle.glb", "position": [4.41, 0, 2.135], "rotationY": 90 },
+    { "model": "/assets/furniture/loungeSofaCorner.glb", "position": [3.6, 0, 1.0], "rotationY": 90 },
+    { "model": "/assets/furniture/loungeChair.glb", "position": [4.186, 0, 0.844], "rotationY": -50 },
+    { "model": "/assets/furniture/tableCoffee.glb", "position": [4.05, 0.01, 1.22], "rotationY": 90 },
+    { "model": "/assets/furniture/lampRoundFloor.glb", "position": [4.24, 0, 1.76], "rotationY": 0 },
+    { "model": "/assets/furniture/sideTable.glb", "position": [2.043, 0, 0.95], "rotationY": 0 },
+
+    { "model": "/assets/furniture/cabinetTelevision.glb", "position": [3.2, 0, -3.65], "rotationY": 0 },
+    { "model": "/assets/furniture/televisionModern.glb", "position": [3.2, 0.31, -3.6], "rotationY": 0 },
+
+    { "model": "/assets/furniture/bookcaseClosedWide.glb", "position": [-4.15, 0, -2.2], "rotationY": 90 },
+    { "model": "/assets/furniture/books.glb", "position": [-4.055, 0.62, -2.95], "rotationY": 90 },
+    { "model": "/assets/furniture/books.glb", "position": [-4.113, 0.62, -2.676], "rotationY": 70 },
+
+    { "model": "/assets/furniture/pottedPlant.glb", "position": [4.5, 0, -0.6], "rotationY": 0 },
+    { "model": "/assets/furniture/plantSmall1.glb", "position": [-4.5, 0, 3.9], "rotationY": 0 },
+    { "model": "/assets/furniture/plantSmall2.glb", "position": [4.5, 0, -4.1], "rotationY": 0 },
+
+    { "model": "/assets/furniture/coatRackStanding.glb", "position": [-3.9, 0, 3.8], "rotationY": 0 }
+  ],
+  "portalMarkers": [
+    { "position": [0, 0, 4.2], "radius": 0.8, "portalIndex": 0 }
+  ]
+}

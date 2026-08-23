@@ -1,0 +1,41 @@
+{
+  "spec": "domain-atlas/1.0",
+  "domain": "localhost:8002",
+  "owner": {
+    "name": "Neighbor Workshop Demo",
+    "contact": "demo@localhost"
+  },
+  "defaultWorld": "workshop",
+  "worlds": [
+    {
+      "id": "workshop",
+      "name": "Neighbor Workshop",
+      "entry": {
+        "scene": "/spatial/workshop/scene.json",
+        "renderer": ["procedural-v1"]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": true,
+        "identityRequired": false,
+        "itemDropsAllowed": true,
+        "acceptedItemClasses": ["atlas.wearable", "atlas.badge"],
+        "trustedIssuers": "any"
+      },
+      "profile": {
+        "genre": "workshop",
+        "scale": "building",
+        "capabilities": { "building": "residents", "vehicles": false, "combat": "none", "landOwnership": false }
+      },
+      "portals": [
+        {
+          "kind": "domain",
+          "to": "localhost:8001",
+          "label": "Walk back to Example Plaza",
+          "manifest": "http://localhost:8001/.well-known/spatial.json"
+        }
+      ]
+    }
+  ],
+  "updated": "2026-08-22T00:00:00Z"
+}

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Create Atlas Identity</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0e161b; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Segoe UI, sans-serif; color: #e7edef;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; padding: 24px; text-align: center;
+  }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  p { font-size: 13px; color: #a9b8bf; line-height: 1.5; max-width: 320px; margin: 0 0 20px; }
+  button {
+    font-family: inherit; font-size: 14px; cursor: pointer;
+    border-radius: 999px; padding: 12px 22px; border: 1px solid #57ab9b;
+    background: #141f26; color: #57a593;
+  }
+  button:hover { background: #1a2932; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { font-size: 12px; color: #a9b8bf; margin-top: 16px; min-height: 16px; }
+  #status.error { color: #e08a4c; }
+  #status.ok { color: #57a593; }
+</style>
+</head>
+<body>
+  <h1>Create your Atlas identity</h1>
+  <p>
+    This opens as its own tab on purpose — some browsers only offer a
+    device passkey (Windows Hello, Touch ID, etc.) from a real top-level
+    page, not from a panel embedded inside another site. If you don't have
+    a hardware security key, this is the option most likely to work.
+  </p>
+  <button id="createBtn" type="button">Create Atlas Identity</button>
+  <div id="status"></div>
+
+  <script src="wallet.js"></script>
+  <script src="identity-popup.js"></script>
+</body>
+</html>

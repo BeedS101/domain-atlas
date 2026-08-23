@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Domain Atlas Viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0e161b; overflow: hidden; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, sans-serif; color: #e7edef; }
+
+  #bar {
+    position: fixed; top: 0; left: 0; right: 0; height: 56px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; background: rgba(14,22,27,0.92);
+    border-bottom: 1px solid #2c3c44; z-index: 10;
+  }
+  #placeLabel { font-size: 14px; }
+  #placeLabel .domain { color: #a9b8bf; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; margin-left: 8px; }
+  #controls { display: flex; align-items: center; gap: 10px; }
+  button {
+    font-family: inherit; font-size: 13px; cursor: pointer;
+    border-radius: 999px; padding: 8px 14px; border: 1px solid #2c3c44;
+    background: #141f26; color: #e7edef;
+  }
+  button:hover { border-color: #57ab9b; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  #closeBtn { border-color: #c05a1f; color: #e08a4c; }
+  #status { font-size: 12px; color: #a9b8bf; max-width: 260px; text-align: right; }
+
+  #scene { display: block; margin-top: 56px; }
+  #scene3d { display: none; position: fixed; top: 56px; left: 0; right: 0; bottom: 0; width: 100%; height: calc(100% - 56px); outline: none; touch-action: none; }
+  #scene3d.active { display: block; }
+  #scene3dHint {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
+    padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44; display: none;
+  }
+  #scene3dHint.active { display: block; }
+  #hint {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
+    padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44;
+  }
+
+  #walletBtn { position: relative; }
+  #walletBadge {
+    position: absolute; top: -6px; right: -6px; background: #57a593; color: #0e161b;
+    font-size: 10px; font-weight: 700; border-radius: 999px; min-width: 16px; height: 16px;
+    display: none; align-items: center; justify-content: center; padding: 0 3px;
+  }
+  #walletBadge.show { display: flex; }
+
+  #walletPanel {
+    display: none; position: fixed; top: 56px; right: 0; bottom: 0; width: 360px;
+    background: rgba(14,22,27,0.97); border-left: 1px solid #2c3c44; z-index: 11;
+    padding: 16px; overflow-y: auto; font-size: 13px;
+  }
+  #walletPanel.open { display: block; }
+  #walletPanel h3 {
+    margin: 20px 0 10px; font-size: 12px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em;
+    border-top: 1px solid #2c3c44; padding-top: 14px;
+  }
+  #walletPanel h3:first-of-type { margin-top: 0; border-top: none; padding-top: 0; }
+  .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; color: #a9b8bf; word-break: break-all; }
+  .btn-col { display: flex; flex-direction: column; gap: 8px; }
+  .btn-col button { width: 100%; }
+  .btn-row { display: flex; gap: 8px; }
+  .btn-row button { flex: 1; }
+  .item-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+  /* .info-card shares .wallet-item's look (Hidden items, Recent worlds —
+     neither is a held credential) but is a DIFFERENT class deliberately:
+     .wallet-item means "a credential this wallet actually holds," and a
+     test or future feature querying for that shouldn't also match a
+     navigation-history entry or a hidden-items row just because they look
+     the same. */
+  .wallet-item, .info-card { border: 1px solid #2c3c44; border-radius: 8px; padding: 10px; }
+  .wallet-item .name, .info-card .name { font-weight: 600; margin-bottom: 2px; }
+  .wallet-item .meta, .info-card .meta { font-size: 11px; color: #a9b8bf; }
+  .wallet-item .verdict, .info-card .verdict { font-size: 11px; margin-top: 6px; }
+  .wallet-item .verdict.valid, .info-card .verdict.valid { color: #57a593; }
+  .wallet-item .verdict.invalid, .info-card .verdict.invalid { color: #e08a4c; }
+  .wallet-item .item-actions, .info-card .item-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .wallet-item .item-actions button, .info-card .item-actions button { flex: 1; font-size: 11px; padding: 6px 8px; min-width: 70px; }
+  .wallet-item .item-actions button.danger-btn, .info-card .item-actions button.danger-btn { border-color: #c0405a; color: #f2a4b4; }
+  .wallet-item .item-actions button.danger-btn:hover, .info-card .item-actions button.danger-btn:hover { border-color: #e0607a; }
+  /* Per-card "Properties (N) ▸" expand/collapse link — reuses the same
+     chevron-rotation idiom as .settings-category-toggle above, just sized
+     down and styled as a plain text link instead of a full accordion row. */
+  .properties-link {
+    background: none; border: none; padding: 0; margin-top: 6px; font: inherit;
+    font-size: 11px; color: #6fa8dc; text-decoration: underline; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .properties-link:hover { color: #8fbfe8; }
+  .properties-link .chevron { font-size: 9px; color: inherit; transition: transform 0.15s ease; }
+  .properties-link.open .chevron { transform: rotate(90deg); }
+  .properties-detail { margin-top: 4px; font-size: 11px; color: #a9b8bf; }
+  .properties-detail div { padding: 1px 0; }
+  .resource-group-header {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    margin-top: 10px; font-size: 11px; color: #a9b8bf;
+  }
+  /* .resource-group-header sets its own `display: flex` above, which would
+     otherwise win over the UA stylesheet's `[hidden] { display: none }` at
+     equal specificity (author rules beat UA rules in the cascade) — this
+     rule makes the search filter's `el.hidden = true` actually hide it. */
+  .resource-group-header[hidden] { display: none; }
+  .resource-group-header button { font-size: 11px; padding: 5px 10px; white-space: nowrap; }
+  .empty-note { color: #a9b8bf; font-size: 12px; }
+  #loadoutNote { font-size: 12px; color: #e0b84c; margin-bottom: 8px; }
+  #tradeStatus { font-size: 11px; color: #a9b8bf; margin-top: 8px; }
+
+  .subhead { font-size: 11px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em; margin: 14px 0 6px; }
+
+  .settings-category { border-bottom: 1px solid #2c3c44; margin-top: 4px; }
+  .settings-category:first-child { margin-top: 0; }
+  .settings-category-toggle {
+    width: 100%; display: flex; align-items: center; justify-content: space-between;
+    background: none; border: none; padding: 12px 0; cursor: pointer;
+    font-size: 11px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em; text-align: left;
+  }
+  .settings-category-toggle:hover { color: #e6eef1; }
+  .settings-category-toggle .chevron { font-size: 10px; transition: transform 0.15s ease; color: #6b7d85; }
+  .settings-category.open .settings-category-toggle .chevron { transform: rotate(90deg); }
+  .settings-category-body { display: none; padding-bottom: 14px; }
+  .settings-category.open .settings-category-body { display: block; }
+  #walletPanelFooter { border-top: 1px solid #2c3c44; margin-top: 4px; padding-top: 12px; }
+  .warn-box {
+    border: 1px solid #c0405a; background: rgba(192,64,90,0.12); color: #f2a4b4;
+    border-radius: 8px; padding: 10px; font-size: 11px; margin: 8px 0; line-height: 1.5;
+  }
+  .warn-box strong { color: #ff8fa3; }
+  input[type="text"], input[type="password"], input[type="file"], textarea {
+    width: 100%; font-family: inherit; font-size: 12px; background: #141f26; color: #e7edef;
+    border: 1px solid #2c3c44; border-radius: 6px; padding: 8px; margin-top: 4px; margin-bottom: 8px;
+  }
+  textarea { font-family: "SFMono-Regular", Consolas, monospace; resize: vertical; min-height: 44px; }
+  label.check-row { display: flex; align-items: flex-start; gap: 8px; font-size: 11px; color: #a9b8bf; margin: 8px 0; cursor: pointer; }
+  #seedRevealBox { display: none; }
+  #seedRevealBox.show { display: block; }
+  #seedPhraseText {
+    font-family: "SFMono-Regular", Consolas, monospace; font-size: 13px; color: #e0b84c;
+    background: #141f26; border: 1px solid #2c3c44; border-radius: 6px; padding: 10px;
+    margin: 8px 0; word-break: break-word; user-select: all;
+  }
+
+  /* Wallet panel is one of several mutually-exclusive "screens" — which one
+     shows depends on whether an identity exists on this device yet, and
+     whether it's been unlocked this browser session. See viewer.js's
+     showWalletScreen(). */
+  .wallet-screen { display: none; }
+  .wallet-screen.active { display: block; }
+  .btn-secondary { border-color: #2c3c44; color: #a9b8bf; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <div id="placeLabel">Loading space… <span class="domain"></span></div>
+    <div id="controls">
+      <span id="status"></span>
+      <button id="walletBtn" type="button">🎒 Wallet<span id="walletBadge"></span></button>
+      <button id="closeBtn" type="button">Close</button>
+    </div>
+  </div>
+  <canvas id="scene"></canvas>
+  <canvas id="scene3d" tabindex="0"></canvas>
+  <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain</div>
+  <div id="scene3dHint">WASD to walk · drag to look · walk into a glowing ring to take that portal</div>
+
+  <div id="walletPanel">
+
+    <!-- Screen: no identity on this device yet -->
+    <div id="onboardingChoiceScreen" class="wallet-screen">
+      <h3>Set up your wallet</h3>
+      <div class="subhead">Password identity</div>
+      <div class="warn-box">
+        One password protects your identity on this device. You'll enter it once per browser session — Domain Atlas doesn't ask again until you fully close and reopen the browser.
+        <strong>There is no password reset. If you lose your password and your seed phrase together, your identity and everything owned by it cannot be recovered — not by this wallet, not by us, not by anyone.</strong>
+      </div>
+      <div class="btn-col">
+        <button id="chooseNewBtn" type="button">Create a new identity</button>
+        <button id="chooseImportBtn" type="button">Import an existing identity</button>
+      </div>
+      <div class="subhead">Passkey identity</div>
+      <div class="warn-box">
+        Uses a hardware-backed passkey instead — Windows Hello, Touch ID, or a security key. No password to remember or lose, but the key never leaves the device/authenticator: it can't be exported or backed up to a file the way the password identity can.
+      </div>
+      <div class="btn-col">
+        <button id="chooseWebAuthnBtn" type="button">Use a passkey instead</button>
+      </div>
+    </div>
+
+    <!-- Screen: creating a brand-new identity -->
+    <div id="createScreen" class="wallet-screen">
+      <h3>Choose a password</h3>
+      <div class="warn-box">This unlocks your wallet on this device, once per browser session. At least 8 characters.</div>
+      <input type="password" id="newPasswordInput" placeholder="Password">
+      <input type="password" id="newPasswordConfirmInput" placeholder="Confirm password">
+      <div id="createScreenStatus" class="mono"></div>
+      <div class="btn-col">
+        <button id="confirmCreateBtn" type="button">Create identity</button>
+        <button id="createScreenImportInsteadBtn" type="button" class="btn-secondary">Import an identity file instead</button>
+        <button id="backFromCreateBtn" type="button" class="btn-secondary">Back</button>
+      </div>
+    </div>
+
+    <!-- Shown right after creation, over the create screen -->
+    <div id="seedRevealBox">
+      <div class="warn-box">
+        <strong>Write this seed phrase down now, on paper, and store it somewhere safe.</strong>
+        It will not be shown again. You'll need it, together with your password, to move this identity to another device — either one alone is not enough.
+      </div>
+      <div id="seedPhraseText"></div>
+      <label class="check-row">
+        <input type="checkbox" id="seedConfirmCheck">
+        <span>I've written down my seed phrase and understand it won't be shown again.</span>
+      </label>
+      <button id="seedConfirmBtn" type="button" disabled>Continue into wallet</button>
+    </div>
+
+    <!-- Screen: importing an identity from a backup file -->
+    <div id="importScreen" class="wallet-screen">
+      <h3>Import your identity</h3>
+      <div class="warn-box">You'll need the backup file, its password, and its seed phrase — all three, together.</div>
+      <input type="file" id="onboardImportFileInput" accept="application/json">
+      <input type="password" id="onboardImportPasswordInput" placeholder="Password">
+      <textarea id="onboardImportSeedInput" placeholder="Seed phrase (all 16 words, space-separated)"></textarea>
+      <div id="importScreenStatus" class="mono"></div>
+      <div class="btn-col">
+        <button id="confirmImportBtn" type="button">Import identity</button>
+        <button id="backFromImportBtn" type="button" class="btn-secondary">Back</button>
+      </div>
+    </div>
+
+    <!-- Screen: setting up (or switching to) a WebAuthn passkey identity -->
+    <div id="webauthnCreateScreen" class="wallet-screen">
+      <h3>Create a passkey identity</h3>
+      <div class="warn-box">Your browser will prompt you for Windows Hello, Touch ID, or a security key. Nothing is typed here — the passkey itself is the secret, and it never leaves your device.</div>
+      <div id="webauthnCreateScreenStatus" class="mono"></div>
+      <div class="btn-col">
+        <button id="confirmWebAuthnCreateBtn" type="button">Create passkey</button>
+        <button id="backFromWebAuthnCreateBtn" type="button" class="btn-secondary">Back</button>
+      </div>
+    </div>
+
+    <!-- Screen: identity exists on this device, not yet unlocked this session -->
+    <div id="unlockScreen" class="wallet-screen">
+      <h3>Unlock your wallet</h3>
+      <input type="password" id="unlockPasswordInput" placeholder="Password">
+      <div id="unlockScreenStatus" class="mono"></div>
+      <div class="btn-col">
+        <button id="unlockBtn" type="button">Unlock</button>
+      </div>
+    </div>
+
+    <!-- Screen: wallet settings — identity method, backup, and (room for)
+         more. Each future setting is meant to be its own .subhead block
+         here, same shape as "Identity method" and "Backup" below, rather
+         than growing the main wallet screen. -->
+    <div id="settingsScreen" class="wallet-screen">
+      <h3>Settings</h3>
+
+      <div class="settings-category" data-category="identity-method">
+        <button type="button" class="settings-category-toggle"><span>Identity method</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div id="identityModeLabel" class="mono">—</div>
+          <div class="btn-col" style="margin-top:8px;">
+            <button id="switchIdentityModeBtn" type="button" class="btn-secondary"></button>
+            <button id="lockWalletBtn" type="button" class="btn-secondary">Lock wallet</button>
+          </div>
+
+          <!-- Password identity only — a passkey has no password to change.
+               Re-derives from the current password like exporting does
+               (see wallet.js's changePassword), so this can't be done just
+               by having an unlocked session; the old password itself is
+               required. -->
+          <div id="changePasswordSection" style="margin-top:16px;">
+            <div class="subhead" style="margin:0 0 6px;">Change password</div>
+            <div class="warn-box">This only affects future unlocks. An identity backup file you already exported stays protected by whatever password (and seed phrase) was active when you made it — not this new one.</div>
+            <input type="password" id="changePasswordCurrentInput" placeholder="Current password">
+            <input type="password" id="changePasswordNewInput" placeholder="New password (min 8 characters)">
+            <input type="password" id="changePasswordConfirmInput" placeholder="Confirm new password">
+            <div class="btn-col">
+              <button id="changePasswordBtn" type="button" class="btn-secondary">Change password</button>
+            </div>
+            <div id="changePasswordStatus" class="mono"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-category" data-category="identity-backup">
+        <button type="button" class="settings-category-toggle"><span>Identity backup</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div id="backupLocalSection">
+            <div class="warn-box">Exporting always re-asks for your password, even though the wallet is already unlocked — so being at an unlocked wallet isn't enough on its own to walk away with a portable copy of your identity.</div>
+            <input type="password" id="exportPasswordInput" placeholder="Password">
+            <textarea id="exportSeedInput" placeholder="Seed phrase (all 16 words, space-separated)"></textarea>
+            <div class="btn-col">
+              <button id="exportIdentityBtn" type="button">Export identity file</button>
+            </div>
+            <div id="exportStatus" class="mono"></div>
+          </div>
+          <div id="backupWebAuthnNote" class="empty-note" style="display:none;">Passkey identities are hardware-bound by design and can't be exported to a file — the passkey itself is your only backup (Windows Hello, Touch ID, and security keys have their own sync/backup story, separate from Domain Atlas).</div>
+        </div>
+      </div>
+
+      <!-- Deliberately a separate, lower-stakes flow from Identity backup
+           above: this moves public credentials (what you own), not the
+           private key (who you are) — no password needed, see wallet.js's
+           importWallet for why merging the two isn't a good idea. -->
+      <div class="settings-category" data-category="wallet-backup">
+        <button type="button" class="settings-category-toggle"><span>Wallet backup</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="empty-note">Your items and resource balances — no password needed, since these are already public, issuer-signed claims rather than secrets.</div>
+          <div class="btn-col" style="margin-top:8px;">
+            <button id="exportBtn" type="button">Export wallet (atlas-wallet-export/1.0)</button>
+            <button id="importWalletBtn" type="button">Import wallet file</button>
+          </div>
+          <input type="file" id="importWalletFileInput" accept="application/json" style="display:none;">
+          <div id="importWalletStatus" class="mono"></div>
+        </div>
+      </div>
+
+      <!-- "Hide" replaced "Delete" on item cards: it stays local-only and
+           reversible, same idea as Wallet backup above, so a "unique" item
+           you'll never get reissued can't be lost by a stray click. -->
+      <div class="settings-category" data-category="hidden-items">
+        <button type="button" class="settings-category-toggle"><span>Hidden items</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="empty-note">Hidden from the main wallet view, not deleted — the credential and its verification are unaffected. Unhide to bring one back.</div>
+          <div id="hiddenItemsList" class="item-list" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
+      <div class="btn-col" style="margin-top:16px;">
+        <button id="backFromSettingsBtn" type="button" class="btn-secondary">Back to wallet</button>
+      </div>
+    </div>
+
+    <!-- Screen: unlocked — the actual wallet -->
+    <div id="mainWalletScreen" class="wallet-screen">
+      <!-- Same collapsible-category pattern as Settings (see the JS
+           comment on walletPanel's click listener). Identity, Items, and
+           Resources default OPEN — they're what "your wallet" actually
+           means, the reason you opened this panel — while Counterparty's
+           items, Trading station, and Recent worlds default closed, since
+           they're situational: a two-party demo concept, a genre only some
+           worlds have, and a navigation convenience, respectively. -->
+      <div class="settings-category open" data-category="identity">
+        <button type="button" class="settings-category-toggle"><span>Identity</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div id="walletIdentity" class="mono">—</div>
+
+          <!-- Local-only nickname — see wallet.js's setAlias. Never signed,
+               never shown to anyone else; just replaces the raw key in
+               THIS wallet's own display. Leaving the field blank and
+               saving clears it back to the raw key. -->
+          <input type="text" id="aliasInput" placeholder="Nickname (optional, only visible to you)" maxlength="24" style="margin-top:8px;">
+          <div class="btn-col">
+            <button id="setAliasBtn" type="button" class="btn-secondary">Save nickname</button>
+          </div>
+          <div id="aliasStatus" class="mono"></div>
+
+          <div id="counterpartyIdentity" class="mono" style="margin-top:8px;">No counterparty yet — a second local keypair standing in for another visitor (see README).</div>
+          <div class="btn-col" style="margin-top:8px;">
+            <button id="createCounterpartyBtn" type="button">Create counterparty identity</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-category" data-category="recent-worlds">
+        <button type="button" class="settings-category-toggle"><span>Recent worlds</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="empty-note">The last 10 places you've visited, most recent first. Click one to jump back.</div>
+          <div id="recentWorldsList" class="item-list" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
+      <div class="settings-category open" data-category="items">
+        <button type="button" class="settings-category-toggle"><span>Items</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="btn-col">
+            <button id="requestItemBtn" type="button">Request item from this world</button>
+            <button id="presentBtn" type="button">Present identity (verify possession)</button>
+            <button id="reverifyBtn" type="button">Re-verify wallet against current issuers</button>
+          </div>
+          <div id="loadoutNote"></div>
+          <input type="text" id="itemsSearchInput" placeholder="Search your items…" style="margin-top:8px;">
+          <div id="selfItemsList" class="item-list"></div>
+
+          <!-- Only populated (and only then made visible) when something
+               is currently dropped in THIS world — see refreshDroppedItemsDisplay
+               in viewer.js. Local-only: nothing here was ever transferred to
+               anyone, it's just this item sitting in the scene until you
+               either click its marker in-world or hit Pick up here. -->
+          <div id="droppedItemsSection" hidden>
+            <div class="subhead">Dropped in this world</div>
+            <div id="droppedItemsList" class="item-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-category" data-category="counterparty-items">
+        <button type="button" class="settings-category-toggle"><span>Counterparty's items</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <input type="text" id="counterpartyItemsSearchInput" placeholder="Search counterparty's items…">
+          <div id="counterpartyItemsList" class="item-list" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
+      <div class="settings-category open" data-category="resources">
+        <button type="button" class="settings-category-toggle"><span>Resources</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="btn-row">
+            <button id="mintIronBtn" type="button">Mine 20 iron (self)</button>
+            <button id="mintGoldBtn" type="button">Mine 10 gold (counterparty)</button>
+          </div>
+          <input type="text" id="resourcesSearchInput" placeholder="Search resources…" style="margin-top:8px;">
+          <div class="subhead">Yours</div>
+          <div id="selfResourceList" class="item-list"></div>
+          <div class="subhead">Counterparty's</div>
+          <div id="counterpartyResourceList" class="item-list"></div>
+        </div>
+      </div>
+
+      <div class="settings-category" data-category="trading">
+        <button type="button" class="settings-category-toggle"><span>Trading station</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div id="tradeNote" class="empty-note">Visit the Trading Post to trade.</div>
+          <div class="btn-col">
+            <button id="tradeBtn" type="button" disabled>Settle trade: 10 iron ⇄ 5 gold</button>
+          </div>
+          <div id="tradeStatus"></div>
+        </div>
+      </div>
+
+      <!-- Anchored at the very bottom of the panel, outside any collapsible
+           category, so it's reachable no matter which categories are open
+           or closed — see the JS comment near openSettingsBtn's listener
+           for why this lives here instead of next to #walletBtn. -->
+      <div class="btn-col" id="walletPanelFooter">
+        <button id="openSettingsBtn" type="button" class="btn-secondary">⚙ Settings</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="wallet.js"></script>
+  <script src="gltf-mini.js"></script>
+  <script src="viewer.js"></script>
+</body>
+</html>
