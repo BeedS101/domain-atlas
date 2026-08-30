@@ -162,17 +162,97 @@
     return new ctype.array(bin, byteOffset, count);
   }
 
+  // ---------- persistent asset cache (IndexedDB, keyed by URL) ----------
+  //
+  // GLB models are the one part of a domain-atlas world that can actually be
+  // big (a furniture kit runs low-single-digit MB), so unlike the manifest
+  // and scene.json — fetched fresh every visit on purpose, since portal and
+  // policy changes should apply immediately — these are worth a real local
+  // cache. "Real" meaning: not fetch()'s opaque cache: 'force-cache' (which
+  // never checks the server again once cached, so an updated model would
+  // silently never reach a returning visitor), but an explicit
+  // conditional-GET cache we control — store the raw bytes plus the
+  // server's Last-Modified, and on every load ask the server "is this still
+  // current?" via If-Modified-Since. A 304 skips the download entirely; a
+  // 200 means it actually changed, so the cache is replaced. This lives in
+  // the extension's own IndexedDB (the viewer iframe is extension-origin,
+  // so the cache is shared across every domain visited, not per-site) and
+  // degrades to "no cache, always fetch" if IndexedDB is unavailable for
+  // any reason — never something this loader should hard-fail over.
+
+  const ASSET_DB_NAME = 'domain-atlas-asset-cache';
+  const ASSET_STORE = 'assets';
+  let assetDbPromise = null;
+
+  function openAssetDb() {
+    if (assetDbPromise) return assetDbPromise;
+    assetDbPromise = new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') return reject(new Error('indexedDB unavailable'));
+      const req = indexedDB.open(ASSET_DB_NAME, 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore(ASSET_STORE, { keyPath: 'url' }); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('indexedDB open failed'));
+    });
+    return assetDbPromise;
+  }
+
+  async function getCachedAsset(url) {
+    try {
+      const db = await openAssetDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(ASSET_STORE, 'readonly');
+        const req = tx.objectStore(ASSET_STORE).get(url);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (err) {
+      return null; // no cache — every load just behaves like a fresh fetch
+    }
+  }
+
+  async function putCachedAsset(url, buffer, lastModified) {
+    try {
+      const db = await openAssetDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(ASSET_STORE, 'readwrite');
+        tx.objectStore(ASSET_STORE).put({ url, buffer, lastModified, cachedAt: Date.now() });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (err) {
+      // Non-fatal — the model still rendered from the fetch that just
+      // happened; it just won't be cached for next time.
+    }
+  }
+
+  async function fetchModelBuffer(url) {
+    const cached = await getCachedAsset(url);
+    const headers = cached && cached.lastModified ? { 'If-Modified-Since': cached.lastModified } : {};
+    let res;
+    try {
+      // cache: 'no-store' bypasses the browser's own opaque HTTP cache so
+      // this conditional check is the only thing deciding freshness — no
+      // second, invisible caching layer second-guessing it.
+      res = await fetch(url, { cache: 'no-store', headers });
+    } catch (networkErr) {
+      if (cached) return cached.buffer; // offline/unreachable — stale beats broken
+      throw networkErr;
+    }
+    if (res.status === 304 && cached) return cached.buffer;
+    if (!res.ok) throw new Error('Could not fetch model: ' + url);
+    const buffer = await res.arrayBuffer();
+    const lastModified = res.headers.get('Last-Modified');
+    if (lastModified) putCachedAsset(url, buffer, lastModified); // fire-and-forget
+    return buffer;
+  }
+
   // ---------- model loading (cached by URL) ----------
 
   const modelCache = new Map(); // url -> Promise<parsedModel>
 
   function loadModel(gl, url) {
     if (modelCache.has(url)) return modelCache.get(url);
-    const promise = fetch(url, { cache: 'force-cache' })
-      .then((res) => {
-        if (!res.ok) throw new Error('Could not fetch model: ' + url);
-        return res.arrayBuffer();
-      })
+    const promise = fetchModelBuffer(url)
       .then((buffer) => {
         const { json: gltf, bin } = parseGLB(buffer);
         const primitives = [];
@@ -656,5 +736,120 @@
     return { ready, loadScene: (s) => loadScene(s), stop, start, destroy, camera };
   }
 
-  window.MiniGLTF = { init };
+  // ---------- cache management API (Settings -> Cache) ----------
+  //
+  // Everything above this manages the cache from the inside, keyed by URL.
+  // This is the outside view viewer.js's Settings screen uses: grouped by
+  // origin ("site" — this cache is shared extension-wide, not per-domain,
+  // so origin is the closest thing to "site" it actually has), with real
+  // byte totals, clear-by-site, and a JSON export/import round-trip.
+  // IndexedDB can hold an ArrayBuffer directly, but JSON can't, so
+  // export/import is the one place this cache touches base64 at all.
+
+  async function getAllCachedAssets() {
+    try {
+      const db = await openAssetDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(ASSET_STORE, 'readonly');
+        const req = tx.objectStore(ASSET_STORE).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function originOf(url) {
+    try { return new URL(url).origin; } catch (err) { return 'unknown'; }
+  }
+
+  async function listCacheBySite() {
+    const all = await getAllCachedAssets();
+    const bySite = new Map(); // origin -> { origin, bytes, count }
+    for (const entry of all) {
+      const origin = originOf(entry.url);
+      const stat = bySite.get(origin) || { origin, bytes: 0, count: 0 };
+      stat.bytes += entry.buffer.byteLength;
+      stat.count += 1;
+      bySite.set(origin, stat);
+    }
+    return [...bySite.values()].sort((a, b) => b.bytes - a.bytes);
+  }
+
+  async function cacheTotalBytes() {
+    const all = await getAllCachedAssets();
+    return all.reduce((sum, e) => sum + e.buffer.byteLength, 0);
+  }
+
+  async function clearCacheSite(origin) {
+    const db = await openAssetDb();
+    const all = await getAllCachedAssets();
+    const urlsToDelete = all.filter((e) => originOf(e.url) === origin).map((e) => e.url);
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(ASSET_STORE, 'readwrite');
+      urlsToDelete.forEach((url) => tx.objectStore(ASSET_STORE).delete(url));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function clearAllCache() {
+    const db = await openAssetDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(ASSET_STORE, 'readwrite');
+      tx.objectStore(ASSET_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  function bufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const CHUNK = 0x8000; // avoid one giant String.fromCharCode(...bytes) call
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
+  }
+
+  function base64ToBuffer(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  async function exportCache() {
+    const all = await getAllCachedAssets();
+    return {
+      format: 'domain-atlas-asset-cache/1.0',
+      exportedAt: new Date().toISOString(),
+      entries: all.map((e) => ({ url: e.url, lastModified: e.lastModified, cachedAt: e.cachedAt, bytesBase64: bufferToBase64(e.buffer) }))
+    };
+  }
+
+  async function importCache(data) {
+    if (!data || !Array.isArray(data.entries)) throw new Error('Not a domain-atlas-asset-cache export');
+    let imported = 0;
+    for (const entry of data.entries) {
+      if (!entry.url || !entry.bytesBase64) continue;
+      await putCachedAsset(entry.url, base64ToBuffer(entry.bytesBase64), entry.lastModified);
+      imported++;
+    }
+    return { imported };
+  }
+
+  window.MiniGLTF = {
+    init,
+    cache: {
+      listBySite: listCacheBySite,
+      totalBytes: cacheTotalBytes,
+      clearSite: clearCacheSite,
+      clearAll: clearAllCache,
+      exportAll: exportCache,
+      importAll: importCache
+    }
+  };
 })();

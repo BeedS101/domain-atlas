@@ -155,25 +155,80 @@ client would. It signs for real; it just isn't a hardware-backed key. Click
    or neither does — no in-between state where one party paid and the
    other didn't.
 
-## 5. Verify it yourself
+## 5. Try the directory service
+
+A reference implementation of SPEC.md §3.3 — a crawler/index/search
+service, separate from either issuer on purpose (a directory indexes OTHER
+domains; it doesn't issue credentials for its own). Zero dependencies,
+same as the issuer:
+
+```bash
+node directory-server/server.js
+```
+
+With both demo domains already running, submit them and search:
+
+```bash
+curl -X POST http://localhost:8003/submit -H "Content-Type: application/json" \
+  -d '{"manifest":"http://localhost:8001/.well-known/spatial.json"}'
+curl -X POST http://localhost:8003/submit -H "Content-Type: application/json" \
+  -d '{"manifest":"http://localhost:8002/.well-known/spatial.json"}'
+
+curl "http://localhost:8003/search?scale=district"
+curl "http://localhost:8003/search?q=workshop"
+```
+
+Or open `http://localhost:8003` for a small search UI. Results are ranked
+by inbound `"kind": "domain"` portal count — the same insight PageRank
+started from, applied to this much smaller graph — and domain-anchored vs.
+key-anchored listings are always labeled, never presented as equivalent
+(§3.6.1). A background scheduler re-crawls every submitted manifest on an
+interval (60s by default; override with `DIRECTORY_CRAWL_INTERVAL_MS`), so
+a world that changes its name, genre, or `discoverable` flag is picked up
+on its next scheduled pass, not instantly — the same eventual consistency
+a real search index has with the live web.
+
+## 6. Verify it yourself
 
 ```bash
 node test/verify.js                    # manifest + portal mechanism
 node test/verify-wallet.js             # identity, issuance, cross-domain verification, revocation, export
 node test/verify-loadout-trading.js    # loadouts/transfer-on-loss, resources, trading station settlement
+node test/verify-directory.js          # directory service: crawl/index/rank, filters, free-text, key-anchored verification
+node test/verify-asset-cache.js        # gltf-mini's local GLB cache: fresh on first load, 304'd on repeat, re-fetched on real change
 ```
 
-All three need a display (`xvfb-run -a node test/verify.js` if running
-headless on Linux) and both demo domains already running. They use a CDP
-virtual authenticator to stand in for a real passkey device — the WebAuthn
-ceremonies they drive are still real, just auto-approved instead of
-waiting on a fingerprint reader. Each checks, over real network requests
-and real signatures, every step described above — including that a
-tampered or revoked credential is correctly rejected, and that the
-loadout/trading suite's loser-signed transfer and two-party trade actually
-require both keys. Screenshots land in `test/` as `01`–`04`
-(manifest/portal), `wallet-01`–`wallet-04` (identity/item wallet), and
-`lt-01`–`lt-05` (loadout loss and trade settlement).
+The first three (plus `verify-asset-cache.js`) need a display (`xvfb-run -a
+node test/verify.js` if running headless on Linux) and both demo domains
+already running. `verify.js`, `verify-wallet.js`, and
+`verify-loadout-trading.js` use a CDP virtual authenticator to stand in for
+a real passkey device — the WebAuthn ceremonies they drive are still real,
+just auto-approved instead of waiting on a fingerprint reader. Each checks,
+over real network requests and real signatures, every step described
+above — including that a tampered or revoked credential is correctly
+rejected, and that the loadout/trading suite's loser-signed transfer and
+two-party trade actually require both keys. Screenshots land in `test/` as
+`01`–`04` (manifest/portal), `wallet-01`–`wallet-04` (identity/item
+wallet), and `lt-01`–`lt-05` (loadout loss and trade settlement).
+
+`verify-asset-cache.js` walks into the Lobby (the one `gltf-mini-v1` world,
+§3's real-WebGL renderer) twice in two separate page loads sharing one
+browser profile. The first visit downloads every referenced GLB fresh
+(200). Before the second visit it bumps one file's mtime forward on disk —
+a real, on-server change — then confirms only that one file comes back
+freshly downloaded (200) while every other, unchanged GLB comes back `304
+Not Modified`: proof the cache is honoring a real conditional GET
+(`If-Modified-Since` against the server's `Last-Modified`) rather than
+either always re-fetching or never checking again. Screenshots land as
+`cache-01`/`cache-02`.
+
+`verify-directory.js` is different — it's testing a JSON API, not a
+browser UI, so it needs no display and drives the directory service (with
+both demo domains already running) directly over `fetch`. It also spawns
+its own short-lived, isolated instance of the directory server on a
+throwaway port to prove the background re-crawl scheduler actually picks
+up a manifest change on its own, without waiting out or polluting the
+main instance's 60-second interval.
 
 ## What this does and doesn't prove
 

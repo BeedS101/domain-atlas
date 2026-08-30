@@ -27,6 +27,19 @@ async function openIdentityMethodCategory(frame) {
   }
 }
 
+// aliasInput/setAliasBtn live under the main wallet screen's own "Identity"
+// category, collapsed by default now (see viewer.html) — open it once;
+// unlike the Settings screen above, this category's open/closed state is
+// just a class on a DOM node that survives a lock/unlock cycle, so one
+// open here covers the whole test.
+async function openIdentityCategory(frame) {
+  const category = frame.locator('#mainWalletScreen .settings-category[data-category="identity"]');
+  if (!(await category.evaluate((el) => el.classList.contains('open')))) {
+    await category.locator('.settings-category-toggle').click();
+    await frame.waitForFunction(() => document.querySelector('#mainWalletScreen .settings-category[data-category="identity"]').classList.contains('open'), { timeout: 5000 });
+  }
+}
+
 (async () => {
   const userDataDir = path.resolve(__dirname, '.chrome-profile-alias');
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -60,6 +73,7 @@ async function openIdentityMethodCategory(frame) {
     const rawIdentityLabel = await frame.locator('#walletIdentity').textContent();
     if (!rawIdentityLabel.startsWith('Identity:')) throw new Error('Expected the raw-key display before any alias is set, got: ' + rawIdentityLabel);
     console.log('PASS: identity created, shown as the raw key before any alias exists ->', rawIdentityLabel);
+    await openIdentityCategory(frame);
 
     console.log('STEP 1: an obviously profane alias is rejected, nothing changes');
     await frame.locator('#aliasInput').fill('fuckface');

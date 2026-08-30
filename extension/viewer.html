@@ -332,6 +332,38 @@
         </div>
       </div>
 
+      <!-- "Hide" is now the resource card's primary action too, same reason
+           as items: an unspent balance is real value, and Delete (still
+           available, still confirm-guarded) can't be undone. -->
+      <div class="settings-category" data-category="hidden-resources">
+        <button type="button" class="settings-category-toggle"><span>Hidden resources</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="empty-note">Hidden from the main wallet view, not deleted — the balance and its verification are unaffected. Unhide to bring one back.</div>
+          <div id="hiddenResourcesList" class="item-list" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
+      <!-- Local cache of downloaded world assets (currently just GLB models
+           for gltf-mini-v1 worlds — see gltf-mini.js's conditional-GET
+           cache). Lives in this extension's own IndexedDB, shared across
+           every domain visited, so "per site" here means grouped by the
+           origin each cached file was fetched from. -->
+      <div class="settings-category" data-category="cache">
+        <button type="button" class="settings-category-toggle"><span>Cache</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="empty-note">Downloaded scene assets (currently 3D models), kept locally so revisiting a world doesn't re-download what hasn't changed.</div>
+          <div id="cacheTotalLine" class="mono" style="margin-top:8px;">—</div>
+          <div id="cacheSitesList" class="item-list" style="margin-top:8px;"></div>
+          <div class="btn-col" style="margin-top:8px;">
+            <button id="exportCacheBtn" type="button" class="btn-secondary">Export cache</button>
+            <button id="importCacheBtn" type="button" class="btn-secondary">Import cache file</button>
+            <button id="clearAllCacheBtn" type="button" class="danger-btn">Clear entire cache</button>
+          </div>
+          <input type="file" id="importCacheFileInput" accept="application/json" style="display:none;">
+          <div id="importCacheStatus" class="mono"></div>
+        </div>
+      </div>
+
       <div class="btn-col" style="margin-top:16px;">
         <button id="backFromSettingsBtn" type="button" class="btn-secondary">Back to wallet</button>
       </div>
@@ -340,13 +372,16 @@
     <!-- Screen: unlocked — the actual wallet -->
     <div id="mainWalletScreen" class="wallet-screen">
       <!-- Same collapsible-category pattern as Settings (see the JS
-           comment on walletPanel's click listener). Identity, Items, and
-           Resources default OPEN — they're what "your wallet" actually
-           means, the reason you opened this panel — while Counterparty's
-           items, Trading station, and Recent worlds default closed, since
-           they're situational: a two-party demo concept, a genre only some
-           worlds have, and a navigation convenience, respectively. -->
-      <div class="settings-category open" data-category="identity">
+           comment on walletPanel's click listener). Items and Resources
+           default OPEN — they're what "your wallet" actually means, the
+           reason you opened this panel — while Identity, Counterparty's
+           items, Trading station, and Recent worlds default closed.
+           Identity used to default open too, but your public key/nickname/
+           counterparty controls aren't what most visits to this panel are
+           actually for, so it's tucked away the same as the situational
+           categories now — just a tap on its header away, same as any
+           other collapsed category here. -->
+      <div class="settings-category" data-category="identity">
         <button type="button" class="settings-category-toggle"><span>Identity</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
           <div id="walletIdentity" class="mono">—</div>

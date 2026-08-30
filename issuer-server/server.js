@@ -119,7 +119,7 @@ const RESOURCE_CLASSES = new Set(['atlas.element.iron', 'atlas.element.gold']);
 
 const MIME = {
   '.html': 'text/html', '.js': 'application/javascript', '.json': 'application/json',
-  '.png': 'image/png', '.svg': 'image/svg+xml', '.css': 'text/css'
+  '.png': 'image/png', '.svg': 'image/svg+xml', '.css': 'text/css', '.glb': 'model/gltf-binary'
 };
 
 function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
@@ -250,11 +250,28 @@ function serveStatic(req, res) {
   if (urlPath === '/') urlPath = '/index.html';
   const filePath = path.join(DEMO_DOMAIN_A, urlPath);
   if (!filePath.startsWith(DEMO_DOMAIN_A)) { res.writeHead(403); return res.end('Forbidden'); }
-  fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); return res.end('Not found'); }
-    const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': (MIME[ext] || 'application/octet-stream'), 'Access-Control-Allow-Origin': '*' });
-    res.end(data);
+  fs.stat(filePath, (statErr, stat) => {
+    if (statErr) { res.writeHead(404); return res.end('Not found'); }
+    // HTTP-date only carries second precision, so truncate the file's mtime
+    // the same way before comparing — otherwise a real unchanged file could
+    // spuriously look "newer" than the If-Modified-Since a client echoes
+    // back (which itself only has second precision), and would never 304.
+    const lastModified = new Date(Math.floor(stat.mtimeMs / 1000) * 1000).toUTCString();
+    const ifModifiedSince = req.headers['if-modified-since'];
+    if (ifModifiedSince && new Date(ifModifiedSince).getTime() >= new Date(lastModified).getTime()) {
+      res.writeHead(304, { 'Last-Modified': lastModified, 'Access-Control-Allow-Origin': '*' });
+      return res.end();
+    }
+    fs.readFile(filePath, (err, data) => {
+      if (err) { res.writeHead(404); return res.end('Not found'); }
+      const ext = path.extname(filePath);
+      res.writeHead(200, {
+        'Content-Type': (MIME[ext] || 'application/octet-stream'),
+        'Last-Modified': lastModified,
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(data);
+    });
   });
 }
 

@@ -1,0 +1,10 @@
+{
+  "name": "domain-atlas-directory-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reference directory service for SPEC.md §3.3 — crawls submitted manifests on a schedule, indexes every discoverable world, ranks by inbound 'kind: domain' portal count, and answers POST /submit and GET /search. A separate service from either issuer on purpose: a directory indexes OTHER domains, it doesn't issue credentials for its own. Zero dependencies (Node's built-in http/crypto/fetch only) — nothing to npm install.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

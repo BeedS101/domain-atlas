@@ -892,8 +892,36 @@ const AtlasWallet = (() => {
   // Local-only removal, same idea as deleteItem above — no server involved,
   // just decluttering this wallet's own view of a balance it's done with
   // (e.g. a zero-quantity leftover, or one already folded into a merge).
+  // Still destructive though: a balance with real quantity left on it is
+  // exactly as unrecoverable as a deleted item if this was the only local
+  // copy, so hideResource below (not this) is what the resource card's
+  // primary action uses now — delete stays available as a secondary,
+  // confirm-guarded action for a stub that's genuinely done.
   async function deleteResource(ownerPublicKey, credentialId) {
     const wallet = (await getResourceWallet(ownerPublicKey)).filter((e) => e.credential.id !== credentialId);
+    await saveResourceWallet(ownerPublicKey, wallet);
+  }
+
+  // Non-destructive counterpart to deleteResource, same shape as
+  // hideItem/unhideItem above and for the same reason: a resource balance
+  // can represent real spendable value, so losing it to a stray click is
+  // just as bad as losing an item. The balance stays in local storage
+  // (still exported in backups, still re-verifiable, still spendable if
+  // unhidden) and only gets an entry.hidden flag the UI uses to leave it
+  // out of the main resource list.
+  async function hideResource(ownerPublicKey, credentialId) {
+    const wallet = await getResourceWallet(ownerPublicKey);
+    const entry = wallet.find((e) => e.credential.id === credentialId);
+    if (!entry) return;
+    entry.hidden = true;
+    await saveResourceWallet(ownerPublicKey, wallet);
+  }
+
+  async function unhideResource(ownerPublicKey, credentialId) {
+    const wallet = await getResourceWallet(ownerPublicKey);
+    const entry = wallet.find((e) => e.credential.id === credentialId);
+    if (!entry) return;
+    delete entry.hidden;
     await saveResourceWallet(ownerPublicKey, wallet);
   }
 
@@ -1244,7 +1272,7 @@ const AtlasWallet = (() => {
     getWallet, requestItem, verifyCredential, reverifyAll, exportWallet, importWallet, deleteItem,
     hideItem, unhideItem,
     getResourceWallet, mintResource, verifyResourceCredential, splitResource,
-    consolidateResources, deleteResource,
+    consolidateResources, deleteResource, hideResource, unhideResource,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
     dropItem, pickUpItem, getDroppedItems, getDroppedItemsInWorld,
     proposeIntent, settleTrade, verifySignedPayload,

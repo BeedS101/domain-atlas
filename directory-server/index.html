@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas Directory</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    background: #12181c; color: #dbe4e8;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 28px 20px 18px; border-bottom: 1px solid #223038;
+    background: #161e23;
+  }
+  header h1 { margin: 0 0 4px; font-size: 20px; }
+  header p { margin: 0; color: #8fa2ab; font-size: 13px; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px; }
+  .search-row {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px;
+  }
+  input, select, button {
+    font: inherit; background: #1b2830; color: #dbe4e8;
+    border: 1px solid #2c3b44; border-radius: 6px; padding: 9px 11px;
+  }
+  #q { flex: 1 1 260px; min-width: 180px; }
+  select { flex: 0 0 auto; }
+  button {
+    background: #2c7568; border-color: #2c7568; color: #eafff9;
+    cursor: pointer; font-weight: 600;
+  }
+  button:hover { background: #338576; }
+  #status { color: #8fa2ab; font-size: 13px; margin: 0 0 14px; }
+  .card {
+    border: 1px solid #223038; border-radius: 8px; padding: 14px 16px;
+    margin-bottom: 10px; background: #161e23;
+  }
+  .card-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .card h3 { margin: 0; font-size: 16px; }
+  .badge {
+    display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+  }
+  .badge.domain { background: #1f3a52; color: #7fc3ff; }
+  .badge.key { background: #4a3a1f; color: #ffcf7f; }
+  .badge.stale { background: #4a1f1f; color: #ff9f9f; }
+  .meta { color: #8fa2ab; font-size: 13px; margin-top: 6px; }
+  .meta span:not(:last-child)::after { content: " · "; color: #4a5a63; }
+  .empty { color: #6c7d86; padding: 30px 0; text-align: center; }
+  code { background: #1b2830; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Domain Atlas Directory</h1>
+  <p>A reference implementation of SPEC.md §3.3 — crawls submitted manifests on a schedule and ranks worlds by inbound <code>"kind": "domain"</code> portal count. Anyone may run a competing directory against the same public manifests.</p>
+</header>
+<main>
+  <div class="search-row">
+    <input id="q" type="text" placeholder="Search name, genre, domain…">
+    <select id="scale">
+      <option value="">Any scale</option>
+      <option>room</option><option>building</option><option>district</option>
+      <option>planet</option><option>system</option><option>galaxy</option>
+    </select>
+    <select id="combat">
+      <option value="">Any combat</option>
+      <option value="none">none</option><option value="pve">pve</option><option value="pvp">pvp</option>
+    </select>
+    <button id="searchBtn">Search</button>
+  </div>
+  <p id="status">Loading…</p>
+  <div id="results"></div>
+</main>
+
+<script>
+const statusEl = document.getElementById('status');
+const resultsEl = document.getElementById('results');
+const qEl = document.getElementById('q');
+const scaleEl = document.getElementById('scale');
+const combatEl = document.getElementById('combat');
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function renderCard(w) {
+  const anchorLabel = w.anchorType === 'domain'
+    ? `<span class="badge domain">🌐 ${esc(w.domain)}</span>`
+    : `<span class="badge key">🔑 key-anchored</span>`;
+  const staleBadge = w.stale ? `<span class="badge stale">stale</span>` : '';
+  const capabilities = w.capabilities || {};
+  return `
+    <div class="card">
+      <div class="card-top">
+        <h3>${esc(w.name || w.worldId)}</h3>
+        <div>${anchorLabel} ${staleBadge}</div>
+      </div>
+      <div class="meta">
+        ${w.ownerName ? `<span>${esc(w.ownerName)}</span>` : ''}
+        <span>${esc(w.genre || 'unlisted genre')}</span>
+        <span>${esc(w.scale || 'unlisted scale')}</span>
+        <span>combat: ${esc(capabilities.combat || 'none')}</span>
+        <span>guest access: ${esc(w.guestAccess || 'unknown')}</span>
+        <span>linked from ${w.inboundPortalCount} place${w.inboundPortalCount === 1 ? '' : 's'}</span>
+      </div>
+    </div>`;
+}
+
+async function runSearch() {
+  statusEl.textContent = 'Searching…';
+  const params = new URLSearchParams();
+  if (qEl.value.trim()) params.set('q', qEl.value.trim());
+  if (scaleEl.value) params.set('scale', scaleEl.value);
+  if (combatEl.value) params.set('combat', combatEl.value);
+  const res = await fetch('/search?' + params.toString());
+  const data = await res.json();
+  if (data.results.length === 0) {
+    resultsEl.innerHTML = '<p class="empty">No worlds found. Submit a manifest via POST /submit to add one.</p>';
+  } else {
+    resultsEl.innerHTML = data.results.map(renderCard).join('');
+  }
+  statusEl.textContent = `${data.count} world${data.count === 1 ? '' : 's'} found`;
+}
+
+document.getElementById('searchBtn').addEventListener('click', runSearch);
+qEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
+scaleEl.addEventListener('change', runSearch);
+combatEl.addEventListener('change', runSearch);
+
+runSearch();
+</script>
+</body>
+</html>

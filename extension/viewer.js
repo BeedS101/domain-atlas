@@ -107,7 +107,15 @@ const importWalletBtn = document.getElementById('importWalletBtn');
 const importWalletFileInput = document.getElementById('importWalletFileInput');
 const importWalletStatusEl = document.getElementById('importWalletStatus');
 const hiddenItemsListEl = document.getElementById('hiddenItemsList');
+const hiddenResourcesListEl = document.getElementById('hiddenResourcesList');
 const recentWorldsListEl = document.getElementById('recentWorldsList');
+const cacheTotalLineEl = document.getElementById('cacheTotalLine');
+const cacheSitesListEl = document.getElementById('cacheSitesList');
+const exportCacheBtn = document.getElementById('exportCacheBtn');
+const importCacheBtn = document.getElementById('importCacheBtn');
+const importCacheFileInput = document.getElementById('importCacheFileInput');
+const importCacheStatusEl = document.getElementById('importCacheStatus');
+const clearAllCacheBtn = document.getElementById('clearAllCacheBtn');
 const backFromSettingsBtn = document.getElementById('backFromSettingsBtn');
 
 const mainWalletScreen = document.getElementById('mainWalletScreen');
@@ -184,7 +192,7 @@ async function enterWorld(worldId) {
   const manifest = currentManifest;
   const world = manifest.worlds.find((w) => w.id === worldId) || manifest.worlds[0];
   currentWorld = world;
-  refreshRequestButton();
+  await refreshRequestButton();
   refreshWorldGates();
 
   placeLabel.innerHTML = world.name + ' <span class="domain">' + manifest.domain + ' · ' + world.id + '</span>';
@@ -594,13 +602,35 @@ function combatOf(world) {
   return (world && world.profile && world.profile.capabilities && world.profile.capabilities.combat) || 'none';
 }
 
-function refreshRequestButton() {
+// Same oncePerUser courtesy check handleInteractable() uses for an in-scene
+// "issue" stall (see the note there) — extended here so the generic
+// "Request item from this world" button behaves the same way instead of
+// letting repeated clicks quietly fill the wallet with duplicates. Still
+// just a per-device courtesy, not real protocol-level scarcity (SPEC.md).
+async function alreadyHasRequestableItem(world) {
+  const classes = world && world.policy && world.policy.itemDropsAllowed ? (world.policy.acceptedItemClasses || []) : [];
+  if (classes.length === 0) return false;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return false;
+  const wallet = await AtlasWallet.getWallet(identity.publicKey);
+  return wallet.some((e) => e.credential.asset.class === classes[0] && e.credential.issuer.domain === manifestDomainOf(currentManifest));
+}
+
+async function refreshRequestButton() {
   const world = currentWorld;
   const classes = world && world.policy && world.policy.itemDropsAllowed ? (world.policy.acceptedItemClasses || []) : [];
-  requestItemBtn.disabled = classes.length === 0;
-  requestItemBtn.textContent = classes.length
-    ? 'Request ' + classes[0] + ' from ' + world.name
-    : 'This world issues nothing';
+  if (classes.length === 0) {
+    requestItemBtn.disabled = true;
+    requestItemBtn.textContent = 'This world issues nothing';
+    return;
+  }
+  if (await alreadyHasRequestableItem(world)) {
+    requestItemBtn.disabled = true;
+    requestItemBtn.textContent = 'Already collected ' + classes[0] + ' from ' + world.name;
+    return;
+  }
+  requestItemBtn.disabled = false;
+  requestItemBtn.textContent = 'Request ' + classes[0] + ' from ' + world.name;
 }
 
 function refreshWorldGates() {
@@ -1105,6 +1135,7 @@ function renderResourceCard(entry, container, opts) {
   if (half > 0) {
     html += '<button data-action="split" data-id="' + entry.credential.id + '" data-amount="' + half + '">Send ' + half + ' to ' + opts.otherLabel + '</button>';
   }
+  html += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   html += '<button data-action="delete" data-id="' + entry.credential.id + '" class="danger-btn">Delete</button>';
   html += '</div>';
   el.innerHTML = html;
@@ -1145,25 +1176,78 @@ async function refreshResourcesDisplay() {
   const identity = await AtlasWallet.getIdentity();
   const counterparty = await AtlasWallet.getCounterparty();
 
-  const selfRes = identity ? await AtlasWallet.getResourceWallet(identity.publicKey) : [];
+  const selfResAll = identity ? await AtlasWallet.getResourceWallet(identity.publicKey) : [];
+  const selfRes = selfResAll.filter((e) => !e.hidden);
   selfResourceListEl.innerHTML = '';
   if (selfRes.length === 0) {
-    selfResourceListEl.innerHTML = '<div class="empty-note">You hold no resources yet.</div>';
+    selfResourceListEl.innerHTML = '<div class="empty-note">' + (selfResAll.length ? 'Everything here is hidden — manage it in Settings.' : 'You hold no resources yet.') + '</div>';
   } else {
     groupResourceEntries(selfRes).forEach((group) => renderResourceGroup(group, selfResourceListEl, { otherLabel: 'counterparty', role: 'self' }));
   }
 
-  const cpRes = counterparty ? await AtlasWallet.getResourceWallet(counterparty.publicKey) : [];
+  const cpResAll = counterparty ? await AtlasWallet.getResourceWallet(counterparty.publicKey) : [];
+  const cpRes = cpResAll.filter((e) => !e.hidden);
   counterpartyResourceListEl.innerHTML = '';
   if (cpRes.length === 0) {
-    counterpartyResourceListEl.innerHTML = '<div class="empty-note">Counterparty holds no resources yet.</div>';
+    counterpartyResourceListEl.innerHTML = '<div class="empty-note">' + (cpResAll.length ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no resources yet.') + '</div>';
   } else {
     groupResourceEntries(cpRes).forEach((group) => renderResourceGroup(group, counterpartyResourceListEl, { otherLabel: 'self', role: 'counterparty' }));
   }
 
   applyListFilter(selfResourceListEl, resourcesSearchInput.value);
   applyListFilter(counterpartyResourceListEl, resourcesSearchInput.value);
+
+  await refreshHiddenResourcesDisplay();
 }
+
+// Settings-screen counterpart to the filtering above, same shape and
+// reasoning as refreshHiddenItemsDisplay: lists every hidden resource
+// balance (self and counterparty) with an Unhide button, so hiding a
+// balance is never a one-way trip the way deleting one is.
+function renderHiddenResourceCard(entry, ownerLabel, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.innerHTML =
+    '<div class="name">' + entry.credential.quantity + ' × ' + entry.credential.class + '</div>' +
+    '<div class="meta">issued by ' + entry.credential.issuer.domain + ' · ' + ownerLabel + '</div>' +
+    renderPropertiesToggle(entry.credential.properties) +
+    '<div class="item-actions">' +
+    '<button data-action="unhide" data-owner="' + ownerLabel + '" data-id="' + entry.credential.id + '">Unhide</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshHiddenResourcesDisplay() {
+  if (!hiddenResourcesListEl) return;
+  const identity = await AtlasWallet.getIdentity();
+  const counterparty = await AtlasWallet.getCounterparty();
+  const selfHidden = identity ? (await AtlasWallet.getResourceWallet(identity.publicKey)).filter((e) => e.hidden) : [];
+  const cpHidden = counterparty ? (await AtlasWallet.getResourceWallet(counterparty.publicKey)).filter((e) => e.hidden) : [];
+  hiddenResourcesListEl.innerHTML = '';
+  if (selfHidden.length === 0 && cpHidden.length === 0) {
+    hiddenResourcesListEl.innerHTML = '<div class="empty-note">No hidden resources.</div>';
+    return;
+  }
+  selfHidden.forEach((entry) => renderHiddenResourceCard(entry, 'self', hiddenResourcesListEl));
+  cpHidden.forEach((entry) => renderHiddenResourceCard(entry, 'counterparty', hiddenResourcesListEl));
+}
+
+hiddenResourcesListEl && hiddenResourcesListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  if (btn.dataset.action === 'toggle-properties') {
+    const detail = btn.nextElementSibling;
+    if (!detail) return;
+    detail.hidden = !detail.hidden;
+    btn.classList.toggle('open', !detail.hidden);
+    return;
+  }
+  if (btn.dataset.action !== 'unhide') return;
+  const owner = btn.dataset.owner === 'self' ? await AtlasWallet.getIdentity() : await AtlasWallet.getCounterparty();
+  if (!owner) return;
+  await AtlasWallet.unhideResource(owner.publicKey, btn.dataset.id);
+  await refreshResourcesDisplay();
+});
 
 // ---------- wallet: onboarding / unlock / create / import / export ----------
 //
@@ -1337,13 +1421,13 @@ lockWalletBtn.addEventListener('click', async () => {
 // Collapsible categories: a .settings-category has a heading (the
 // .settings-category-toggle button) and a body (.settings-category-body)
 // that's shown only while its category carries an .open class — present in
-// the HTML by default on categories meant to start open (Identity, Items,
+// the HTML by default on categories meant to start open (Items and
 // Resources on the main wallet screen), absent on ones that start closed
-// (everything on Settings, plus Counterparty's items / Trading station /
-// Recent worlds on the main wallet screen). One delegated listener on
-// walletPanel — the shared ancestor of every wallet-screen — covers both
-// screens' categories, and any future one, without needing a listener per
-// screen.
+// (everything on Settings, plus Identity / Counterparty's items / Trading
+// station / Recent worlds on the main wallet screen). One delegated
+// listener on walletPanel — the shared ancestor of every wallet-screen —
+// covers both screens' categories, and any future one, without needing a
+// listener per screen.
 walletPanel.addEventListener('click', (e) => {
   const toggle = e.target.closest('.settings-category-toggle');
   if (!toggle) return;
@@ -1362,6 +1446,8 @@ walletPanel.addEventListener('click', (e) => {
 openSettingsBtn.addEventListener('click', async () => {
   await refreshIdentityModeControls();
   await refreshHiddenItemsDisplay();
+  await refreshHiddenResourcesDisplay();
+  await refreshCacheDisplay();
   showWalletScreen('settingsScreen');
 });
 
@@ -1487,9 +1573,99 @@ importWalletFileInput.addEventListener('change', async () => {
   }
 });
 
+// ---------- cache management (Settings -> Cache) ----------
+//
+// Reads from gltf-mini.js's asset cache via window.MiniGLTF.cache — same
+// document, same origin, so no message-passing needed, just calling
+// straight into the other script's exposed API. Same export/import shape
+// as the wallet export above: a downloaded JSON file, re-imported via a
+// hidden file input.
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function renderCacheSiteCard(site, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.innerHTML =
+    '<div class="name">' + site.origin + '</div>' +
+    '<div class="meta">' + site.count + ' file' + (site.count === 1 ? '' : 's') + ' · ' + formatBytes(site.bytes) + '</div>' +
+    '<div class="item-actions">' +
+    '<button data-action="clear-site" data-origin="' + site.origin + '" class="danger-btn">Clear</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshCacheDisplay() {
+  if (!cacheSitesListEl || !window.MiniGLTF || !window.MiniGLTF.cache) return;
+  const sites = await window.MiniGLTF.cache.listBySite();
+  const total = sites.reduce((sum, s) => sum + s.bytes, 0);
+  cacheTotalLineEl.textContent = sites.length
+    ? formatBytes(total) + ' total across ' + sites.length + ' site' + (sites.length === 1 ? '' : 's')
+    : 'Nothing cached yet.';
+  cacheSitesListEl.innerHTML = '';
+  sites.forEach((site) => renderCacheSiteCard(site, cacheSitesListEl));
+}
+
+cacheSitesListEl && cacheSitesListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn || btn.dataset.action !== 'clear-site') return;
+  if (!confirm('Clear the cached assets from ' + btn.dataset.origin + '? They\'ll simply re-download next time you visit a world there.')) return;
+  await window.MiniGLTF.cache.clearSite(btn.dataset.origin);
+  await refreshCacheDisplay();
+});
+
+clearAllCacheBtn && clearAllCacheBtn.addEventListener('click', async () => {
+  if (!confirm('Clear the entire asset cache, across every site? Everything will simply re-download next time it\'s needed.')) return;
+  await window.MiniGLTF.cache.clearAll();
+  await refreshCacheDisplay();
+});
+
+exportCacheBtn && exportCacheBtn.addEventListener('click', async () => {
+  const data = await window.MiniGLTF.cache.exportAll();
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'atlas-asset-cache-export.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+importCacheBtn && importCacheBtn.addEventListener('click', () => importCacheFileInput.click());
+
+importCacheFileInput && importCacheFileInput.addEventListener('change', async () => {
+  const file = importCacheFileInput.files && importCacheFileInput.files[0];
+  importCacheFileInput.value = '';
+  if (!file) return;
+  importCacheStatusEl.textContent = 'Importing…';
+  try {
+    const fileData = JSON.parse(await file.text());
+    const result = await window.MiniGLTF.cache.importAll(fileData);
+    importCacheStatusEl.textContent = result.imported + ' cached file(s) imported.';
+    await refreshCacheDisplay();
+  } catch (err) {
+    importCacheStatusEl.textContent = 'Import failed: ' + err.message;
+  }
+});
+
 requestItemBtn.addEventListener('click', async () => {
   const world = currentWorld;
   const assetClass = world.policy.acceptedItemClasses[0];
+  // Defensive re-check: the button's disabled state already reflects this
+  // (see refreshRequestButton), but a click event queued right before a
+  // refresh could still slip through, same double-click concern
+  // handleInteractable() guards against for stalls.
+  if (await alreadyHasRequestableItem(world)) {
+    statusEl.textContent = 'Already collected ' + assetClass + ' — check your wallet.';
+    await refreshRequestButton();
+    return;
+  }
   requestItemBtn.disabled = true;
   requestItemBtn.textContent = 'Requesting…';
   try {
@@ -1498,7 +1674,7 @@ requestItemBtn.addEventListener('click', async () => {
   } catch (err) {
     statusEl.textContent = 'Issuance failed: ' + err.message;
   } finally {
-    refreshRequestButton();
+    await refreshRequestButton();
   }
 });
 
@@ -1602,8 +1778,11 @@ function resourceActionHandler(listEl, role, toRole) {
       } catch (err) {
         statusEl.textContent = 'Split failed: ' + err.message;
       }
+    } else if (btn.dataset.action === 'hide') {
+      await AtlasWallet.hideResource(who.publicKey, btn.dataset.id);
+      await refreshResourcesDisplay();
     } else if (btn.dataset.action === 'delete') {
-      if (!confirm('Remove this balance from view here? This only clears it locally — it does not revoke the credential.')) return;
+      if (!confirm('Permanently remove this balance? Unlike Hide, this can\'t be undone — if this is your only local copy of an unspent balance, you lose the ability to present or split it. This only clears it locally; it does not revoke the credential.')) return;
       await AtlasWallet.deleteResource(who.publicKey, btn.dataset.id);
       await refreshResourcesDisplay();
     } else if (btn.dataset.action === 'consolidate-group') {

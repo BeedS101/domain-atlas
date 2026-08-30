@@ -98,6 +98,9 @@ async function clickPortalTo(frame, targetWorld) {
     await frame.locator('#seedConfirmBtn').click();
     await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
 
+    // Identity now defaults to a collapsed category on the main wallet
+    // screen (see viewer.html) — expand it before its buttons are clickable.
+    await frame.locator('[data-category="identity"] .settings-category-toggle').click();
     await frame.locator('#createCounterpartyBtn').click();
     await frame.waitForFunction(() => document.getElementById('counterpartyIdentity').textContent.startsWith('Counterparty:'), { timeout: 5000 });
     console.log('PASS: self (password-protected) and counterparty (local ECDSA) identities created');
