@@ -1,5 +1,5 @@
 // Regression check for a null-pointer race the drop/pick-up feature
-// introduced: refreshItemsDisplay() runs once, unawaited, as soon as
+// introduced: refreshInventoryDisplay() runs once, unawaited, as soon as
 // viewer.js parses (bottom of the file) — BEFORE loadManifest()'s fetch
 // has resolved and set currentManifest/currentWorld (both start out
 // `null`, see their declarations near the top of viewer.js). For a
@@ -14,7 +14,7 @@
 // hoping to win that race under Playwright/localhost's much faster and
 // more consistent timing, this forces the exact moment directly: create an
 // identity, then reset currentManifest/currentWorld to null (simulating
-// "the manifest fetch hasn't resolved yet") and call refreshItemsDisplay()
+// "the manifest fetch hasn't resolved yet") and call refreshInventoryDisplay()
 // straight from the page, the same way the bottom of viewer.js does. Not
 // part of the permanent suite, same reasoning as the other manual-*.js
 // scripts.
@@ -39,7 +39,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
   try {
     const page = await context.newPage();
 
-    console.log('SETUP: creating an identity (a returning user is what makes refreshItemsDisplay() actually reach the vulnerable line)');
+    console.log('SETUP: creating an identity (a returning user is what makes refreshInventoryDisplay() actually reach the vulnerable line)');
     await page.goto('http://localhost:8001', { waitUntil: 'load' });
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
@@ -56,24 +56,24 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
     console.log('PASS: identity created');
 
-    console.log('STEP 1: forcing currentManifest/currentWorld back to null (the state they hold before loadManifest() resolves) and calling refreshItemsDisplay() directly, the same unguarded call viewer.js makes at parse time');
-    // currentManifest/currentWorld/refreshItemsDisplay are bare top-level
+    console.log('STEP 1: forcing currentManifest/currentWorld back to null (the state they hold before loadManifest() resolves) and calling refreshInventoryDisplay() directly, the same unguarded call viewer.js makes at parse time');
+    // currentManifest/currentWorld/refreshInventoryDisplay are bare top-level
     // identifiers in viewer.js's classic <script> — reachable directly here,
     // not via window.*, per the same gotcha noted in manual-drop-pickup.js.
     const result = await frame.evaluate(async () => {
       currentManifest = null;
       currentWorld = null;
       try {
-        await refreshItemsDisplay();
+        await refreshInventoryDisplay();
         return { ok: true };
       } catch (err) {
         return { ok: false, message: err.message };
       }
     });
     if (!result.ok) {
-      throw new Error('refreshItemsDisplay() threw with a null manifest/world: ' + result.message);
+      throw new Error('refreshInventoryDisplay() threw with a null manifest/world: ' + result.message);
     }
-    console.log('PASS: refreshItemsDisplay() tolerated a null manifest/world instead of throwing');
+    console.log('PASS: refreshInventoryDisplay() tolerated a null manifest/world instead of throwing');
 
     console.log('\nALL NULL-MANIFEST RACE CHECKS PASSED');
   } catch (err) {

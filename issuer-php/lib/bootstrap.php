@@ -22,8 +22,13 @@ function cors_headers() {
 // "Issuer refused: " with nothing after the colon — impossible to diagnose
 // from the browser side. With this, the real reason comes back instead.
 set_exception_handler(function ($e) {
+  // Task #42: an exception thrown with a specific HTTP status in mind
+  // (e.g. mint_asset_by_class()'s 400 "sold out" case) carries it via the
+  // Exception's own $code — getCode() is 0 when nothing set one
+  // explicitly, so that falls back to 500 same as before. Mirrors
+  // issuer-server/server.js's `err.statusCode || 500`.
   if (!headers_sent()) {
-    http_response_code(500);
+    http_response_code($e->getCode() ?: 500);
     header('Content-Type: application/json');
     cors_headers();
   }
@@ -161,8 +166,9 @@ function verify_envelope($payload, $envelope) {
   return false;
 }
 
-// Verifies a resource/item credential this issuer itself signed — used
-// before trusting a balance presented back to us for a split or a trade.
+// Verifies an asset credential this issuer itself signed — used before
+// trusting a balance presented back to us for a reissue, split,
+// consolidate, or trade.
 function verify_own_credential_signature($publicKeyB64url, $credential, $payload) {
   try {
     $pubPem = ec_raw_point_to_pem(b64url_decode($publicKeyB64url));
@@ -174,53 +180,115 @@ function verify_own_credential_signature($publicKeyB64url, $credential, $payload
   }
 }
 
-function issue_resource($privateKey, $publicKeyB64url, $ownerPublicKey, $cls, $quantity, $supersedes) {
-  $properties = atlas_resource_properties($cls);
+// The signed payload shape (SPEC.md §5: canonicalize({id, asset, owner,
+// quantity, supersedes, issuedAt})) — used both to re-verify a presented
+// credential's signature (before honoring a reissue/split/consolidate/
+// trade request against it) and, via issue_asset() below, to build the
+// payload a fresh signature covers. Mirrors issuer-server/server.js's
+// assetPayloadOf().
+function asset_payload_of($credential) {
+  return [
+    'id' => $credential['id'], 'asset' => $credential['asset'], 'owner' => $credential['owner'],
+    'quantity' => $credential['quantity'], 'supersedes' => $credential['supersedes'], 'issuedAt' => $credential['issuedAt'],
+  ];
+}
+
+// The one issuance path for every asset credential this bundle signs —
+// unique (fungible: false, quantity always 1) and fungible (quantity any
+// positive integer) alike (SPEC.md §5). Shared by atlas/asset/issue.php
+// (supersedes always null — a first minting), atlas/asset/reissue.php
+// (supersedes names the id being replaced, non-fungible only), and the
+// split/consolidate/trade endpoints (supersedes names one or more ids
+// being replaced, fungible only). Keeping one signing path for all of
+// them is what guarantees they can never drift out of sync on the
+// payload shape the way independent inline arrays eventually would —
+// mirrors issuer-server/server.js's issueAsset().
+function issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes) {
   $payload = [
-    'id' => 'urn:atlas:resource:' . atlas_uuid(),
-    'class' => $cls,
-    'quantity' => $quantity,
+    'id' => 'urn:atlas:asset:' . atlas_uuid(),
+    'asset' => $asset,
     'owner' => ['publicKey' => $ownerPublicKey],
+    'quantity' => $quantity,
     'supersedes' => $supersedes,
     'issuedAt' => iso_now(),
   ];
-  if (!empty($properties)) $payload['properties'] = $properties;
   $signature = atlas_sign($privateKey, $payload);
-  $credential = [
-    'credential' => 'domain-atlas-resource/1.0',
-    'id' => $payload['id'],
-    'issuer' => ['domain' => atlas_domain(), 'publicKey' => $publicKeyB64url],
-    'class' => $payload['class'],
-    'quantity' => $payload['quantity'],
-    'owner' => $payload['owner'],
-    'supersedes' => $payload['supersedes'],
-    'issuedAt' => $payload['issuedAt'],
-    'signature' => $signature,
-  ];
-  if (!empty($payload['properties'])) $credential['properties'] = $payload['properties'];
-  return $credential;
+  return array_merge(
+    ['credential' => 'domain-atlas-asset/1.0'],
+    $payload,
+    ['issuer' => ['domain' => atlas_domain(), 'publicKey' => $publicKeyB64url], 'signature' => $signature]
+  );
 }
 
-function resource_payload_of($credential) {
-  $payload = [
-    'id' => $credential['id'], 'class' => $credential['class'], 'quantity' => $credential['quantity'],
-    'owner' => $credential['owner'], 'supersedes' => $credential['supersedes'], 'issuedAt' => $credential['issuedAt'],
-  ];
-  if (!empty($credential['properties'])) $payload['properties'] = $credential['properties'];
-  return $payload;
+// Builds `asset` fresh from ATLAS_ASSET_CATALOG (via
+// atlas_asset_catalog_entry() in store.php) and signs it via issue_asset()
+// above — the "looked up fresh on every mint/split/consolidate/trade,
+// never copied from an old balance" discipline SPEC.md §5 requires for
+// `fungible`/`presentation`/`properties`. Used by every endpoint that
+// mints a NEW balance of an existing class (issue, split, consolidate,
+// trade); reissue is the one exception — it patches an existing
+// credential's own `asset` snapshot instead, since a non-fungible asset's
+// properties are deliberately per-instance rather than per-class
+// (SPEC.md §5.1.1). Mirrors issuer-server/server.js's mintAssetByClass().
+function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cls, $quantity, $supersedes) {
+  if (!isset(ATLAS_ASSET_CATALOG[$cls])) throw new Exception('unknown asset class: ' . $cls);
+  $catalogEntry = ATLAS_ASSET_CATALOG[$cls];
+
+  // Task #42: cap/serial tracking only applies to genuinely NEW supply
+  // ($supersedes === null — see reserve_supply()'s comment in store.php),
+  // and only when this class opted in via 'serialized' and/or 'maxSupply'.
+  // A split/consolidate/trade re-mint always passes a non-null
+  // $supersedes, so it skips this entirely.
+  $serial = null;
+  $serialized = !empty($catalogEntry['serialized']);
+  $maxSupply = isset($catalogEntry['maxSupply']) ? $catalogEntry['maxSupply'] : null;
+  if ($supersedes === null && ($serialized || $maxSupply !== null)) {
+    $reservation = reserve_supply($cls, $quantity, $maxSupply);
+    if (!$reservation['ok']) {
+      $err = new Exception(
+        $catalogEntry['name'] . ' (' . $cls . ') is sold out: ' . $reservation['current'] . '/' . $reservation['maxSupply'] . ' already issued',
+        400
+      );
+      throw $err;
+    }
+    $serial = $reservation['serial'];
+  }
+
+  $asset = atlas_asset_catalog_entry($cls);
+  if ($asset === null) throw new Exception('unknown asset class: ' . $cls);
+  if ($serialized) {
+    $properties = isset($asset['properties']) ? $asset['properties'] : [];
+    $properties['atlas.serial'] = (string) $serial;
+    $properties['atlas.editionSize'] = (string) $maxSupply;
+    $asset['properties'] = $properties;
+  }
+  return issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes);
 }
 
-function check_presented_balance($publicKeyB64url, $credential, $expectedOwner, $expectedClass, $minQuantity) {
-  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-resource/1.0') {
-    return 'not a resource credential';
+// Validates an asset credential presented back to us for a split,
+// consolidate, or trade — all three of which only make sense for a
+// fungible class (SPEC.md §5.4: quantity is definitionally 1 on a
+// fungible:false credential, so there is nothing for this arithmetic to
+// do to it). Checked directly against the credential's own SIGNED
+// asset.fungible field, not re-derived from ATLAS_ASSET_CATALOG, so this
+// holds even for a credential minted under a since-changed catalog entry.
+// Mirrors issuer-server/server.js's checkPresentedAsset().
+function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass, $minQuantity) {
+  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
+    return 'not an asset credential';
   }
   if (!isset($credential['owner']['publicKey']) || $credential['owner']['publicKey'] !== $expectedOwner) {
-    return 'balance does not belong to this signer';
+    return 'asset does not belong to this signer';
   }
-  if (!isset($credential['class']) || $credential['class'] !== $expectedClass) return 'balance is the wrong class';
-  if (!isset($credential['quantity']) || $credential['quantity'] < $minQuantity) return 'balance has insufficient quantity';
-  if (is_revoked($credential['id'])) return 'balance already revoked';
-  $ok = verify_own_credential_signature($publicKeyB64url, $credential, resource_payload_of($credential));
-  if (!$ok) return 'balance signature does not check out';
+  if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
+    return 'asset is the wrong class';
+  }
+  if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== true) {
+    return 'asset class is not fungible — cannot split, consolidate, or trade a unique asset';
+  }
+  if (!isset($credential['quantity']) || $credential['quantity'] < $minQuantity) return 'asset has insufficient quantity';
+  if (is_revoked($credential['id'])) return 'asset already revoked';
+  $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+  if (!$ok) return 'asset signature does not check out';
   return null;
 }

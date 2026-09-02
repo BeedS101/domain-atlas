@@ -18,7 +18,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 // to the main wallet screen — so every click on it needs Settings and that
 // category re-opened first.
 async function openIdentityMethodCategory(frame) {
-  await frame.locator('#openSettingsBtn').click();
+  await frame.locator('#settingsTabBtn').click();
   await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
   const category = frame.locator('.settings-category[data-category="identity-method"]');
   if (!(await category.evaluate((el) => el.classList.contains('open')))) {

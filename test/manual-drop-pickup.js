@@ -73,28 +73,28 @@ async function projectItemMarkers(frame) {
     await frame.locator('#seedConfirmBtn').click();
     await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
     console.log('PASS: identity + one item (Bronze Compass) ready');
 
     console.log('STEP 1: pressing Escape right after "Drop here" cancels the placement — the item never leaves the wallet');
-    await frame.locator('#selfItemsList .wallet-item button[data-action="drop"]').click();
+    await frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]').click();
     await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
     await frame.locator('body').press('Escape');
     await frame.waitForFunction(() => document.getElementById('status').textContent === 'Drop cancelled.', { timeout: 5000 });
-    const stillThereAfterCancel = await frame.locator('#selfItemsList .wallet-item').count();
+    const stillThereAfterCancel = await frame.locator('#selfCollectiblesList .wallet-item').count();
     if (stillThereAfterCancel !== 1) throw new Error('Escape should have left the item exactly where it was, still carried');
     const droppedSectionHiddenAfterCancel = await frame.locator('#droppedItemsSection').isHidden();
     if (!droppedSectionHiddenAfterCancel) throw new Error('Nothing should be dropped after cancelling with Escape');
     console.log('PASS: Escape backed out of placement, nothing dropped');
 
     console.log('STEP 2: "Drop here" then clicking the scene places the item there — it leaves the normal list and appears under "Dropped in this world"');
-    await frame.locator('#selfItemsList .wallet-item button[data-action="drop"]').click();
+    await frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]').click();
     await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
     // A drop-in-progress claims the very next canvas click no matter where
     // it lands, so any on-canvas point works here.
     await frame.locator('#scene').click({ position: { x: 90, y: 90 } });
     await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
     const droppedVisible = await frame.locator('#droppedItemsSection').isVisible();
     if (!droppedVisible) throw new Error('Expected the "Dropped in this world" section to show after dropping');
     const droppedRowText = await frame.locator('#droppedItemsList .info-card').textContent();
@@ -107,7 +107,7 @@ async function projectItemMarkers(frame) {
     const [marker] = await projectItemMarkers(frame);
     await frame.locator('#scene').click({ position: { x: marker.sx, y: marker.sy } });
     await frame.waitForFunction(() => document.getElementById('status').textContent === 'Picked it back up.', { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });
     const droppedHiddenAfterMarkerPickup = await frame.locator('#droppedItemsSection').isHidden();
     if (!droppedHiddenAfterMarkerPickup) throw new Error('Expected "Dropped in this world" to disappear once nothing is dropped');
     const markerCountAfter = await frame.evaluate(() => (window.__atlasScene.itemMarkers || []).length);
@@ -115,12 +115,12 @@ async function projectItemMarkers(frame) {
     console.log('PASS: clicking the in-scene marker picked the item back up, marker and "Dropped" section both gone');
 
     console.log('STEP 4: drop again, this time pick it up via the wallet-panel "Pick up" button instead of the scene');
-    await frame.locator('#selfItemsList .wallet-item button[data-action="drop"]').click();
+    await frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]').click();
     await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
     await frame.locator('#scene').click({ position: { x: 260, y: 180 } });
     await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
     await frame.locator('#droppedItemsList button[data-action="pick-up"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });
     const droppedHiddenAfterListPickup = await frame.locator('#droppedItemsSection').isHidden();
     if (!droppedHiddenAfterListPickup) throw new Error('Expected "Dropped in this world" to disappear after using its own Pick up button');
     console.log('PASS: the wallet-panel "Pick up" button works too, independent of finding the marker in the scene');

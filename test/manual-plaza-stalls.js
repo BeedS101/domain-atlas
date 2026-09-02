@@ -88,9 +88,9 @@ async function projectInteractables(frame) {
     const statusAfterSecondCompass = await frame.locator('#status').textContent();
     console.log('PASS:', statusAfterSecondCompass);
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length > 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 5000 });
     const compassCount = await frame.evaluate(() => {
-      return [...document.querySelectorAll('#selfItemsList .wallet-item .name')].filter((el) => el.textContent.includes('Bronze Compass')).length;
+      return [...document.querySelectorAll('#selfCollectiblesList .wallet-item .name')].filter((el) => el.textContent.includes('Bronze Compass')).length;
     });
     if (compassCount !== 1) throw new Error('Expected exactly one Bronze Compass in the wallet, got ' + compassCount);
     console.log('PASS: exactly one Bronze Compass in the wallet despite two clicks');
@@ -107,7 +107,7 @@ async function projectInteractables(frame) {
     console.log('STEP 4: the ring card\'s Properties panel shows the array value readably, not as "a,b,c"');
     await frame.locator('#walletBtn').click();
     await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
-    const ringCard = frame.locator('#selfItemsList .wallet-item', { hasText: 'Signet Ring' });
+    const ringCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Signet Ring' });
     await ringCard.locator('button[data-action="toggle-properties"]').click();
     const detailText = await ringCard.locator('.properties-detail').textContent();
     if (!detailText.includes('fire resistance, silent step, luck +2')) {

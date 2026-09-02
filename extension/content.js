@@ -60,6 +60,11 @@
     // The viewer is a cross-origin (extension) iframe, so WebAuthn is
     // blocked by default Permissions Policy unless explicitly delegated —
     // this is what actually lets the identity/wallet ceremonies run.
+    // (There used to be a "fullscreen" delegation here too, for an
+    // in-iframe Fullscreen button — removed in favor of a plain "F11 for
+    // fullscreen" hint, see viewer.js, since requestFullscreen() from
+    // inside a cross-origin iframe turned out to be an unreliable fight
+    // not worth having when the browser's own shortcut already works.)
     iframe.allow = 'publickey-credentials-create; publickey-credentials-get';
     Object.assign(iframe.style, {
       position: 'fixed',

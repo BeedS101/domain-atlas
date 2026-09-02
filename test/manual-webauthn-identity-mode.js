@@ -23,7 +23,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 // to mainWalletScreen). So every click on the switch button needs Settings
 // re-opened and that category re-opened first.
 async function openIdentityMethodCategory(frame) {
-  await frame.locator('#openSettingsBtn').click();
+  await frame.locator('#settingsTabBtn').click();
   await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
   const category = frame.locator('.settings-category[data-category="identity-method"]');
   if (!(await category.evaluate((el) => el.classList.contains('open')))) {
@@ -82,7 +82,7 @@ async function openIdentityMethodCategory(frame) {
     await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 10000 });
     // mainWalletScreen going active happens synchronously; the async
     // refreshIdentityDisplay()/refreshItemsDisplay() chain that actually
-    // fills in identityModeLabel and selfItemsList can still be in flight
+    // fills in identityModeLabel and selfCollectiblesList can still be in flight
     // right after — wait for the label's real value, not just the screen.
     await frame.waitForFunction(() => document.getElementById('identityModeLabel').textContent === 'Using: passkey identity', { timeout: 5000 });
     const modeAfterCreate = await frame.locator('#identityModeLabel').textContent();
@@ -100,7 +100,7 @@ async function openIdentityMethodCategory(frame) {
 
     console.log('STEP 4: requesting a real item while "self" is the passkey identity — proves signing dispatch, not just presence checks');
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
     console.log('PASS: item issued to the passkey identity\'s public key');
 
     console.log('STEP 5: switching to a password identity — none exists yet, should route to set one up');
@@ -127,7 +127,7 @@ async function openIdentityMethodCategory(frame) {
     // right after the mode label updates — wait for the list to actually
     // settle at empty instead of reading .count() immediately, which could
     // catch a stale render still showing the passkey identity's item.
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
     console.log('PASS: password identity\'s wallet is empty — confirms each identity mechanism keeps its own separate wallet');
 
     console.log('STEP 7: switching back to the passkey identity — should be instant (no re-creation), and its item should reappear');
@@ -136,7 +136,7 @@ async function openIdentityMethodCategory(frame) {
     if (switchLabelNow !== 'Switch to passkey identity') throw new Error('Expected "Switch to passkey identity", got: ' + switchLabelNow);
     await frame.locator('#switchIdentityModeBtn').click();
     await frame.waitForFunction(() => document.getElementById('identityModeLabel').textContent === 'Using: passkey identity', { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length > 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 5000 });
     const walletIdentityAfterSwitchBack = await frame.locator('#walletIdentity').textContent();
     console.log('PASS: switched back to the passkey identity instantly, its item is back ->', walletIdentityAfterSwitchBack);
 

@@ -34,7 +34,7 @@ async function projectPortals(frame) {
 }
 
 async function openCacheCategory(frame) {
-  await frame.locator('#openSettingsBtn').click();
+  await frame.locator('#settingsTabBtn').click();
   await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
   const category = frame.locator('.settings-category[data-category="cache"]');
   if (!(await category.evaluate((el) => el.classList.contains('open')))) {

@@ -64,6 +64,14 @@
     return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]);
   }
 
+  // Same construction as mat4RotateY above, just around X instead of Y —
+  // this is what swings the player character's arms/legs forward and back
+  // (see buildCharacter/the walk-cycle code near the render loop).
+  function mat4RotateX(rad) {
+    const c = Math.cos(rad), s = Math.sin(rad);
+    return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]);
+  }
+
   function mat4Scale(s) {
     const m = mat4Identity();
     m[0] = s; m[5] = s; m[10] = s;
@@ -496,6 +504,94 @@
     };
   }
 
+  // ---------- player character (#33 — a visible avatar, not just a floating
+  // camera) ----------
+  //
+  // Same "no external asset needed" spirit as the floor and portal markers
+  // above: a small blocky humanoid built entirely out of boxes, no GLB
+  // required (there's no character model in the furniture kit this project
+  // ships with — see the header comment for why that kit is what's here at
+  // all). Flat-colored boxes read fine at this art style's scale and don't
+  // need a "which way is the front" to look right, which conveniently means
+  // the character doesn't need to visually face any particular direction —
+  // only the arm/leg SWING direction (see the walk-cycle code in init())
+  // actually has to line up with travel direction.
+
+  // A single box, built the same non-indexed-triangle-soup way as
+  // buildFloor/buildPortalRing above (this renderer never culls backfaces,
+  // so winding order doesn't matter here either). yMin/yMax are measured
+  // from the box's own local origin, which is what lets a caller decide
+  // whether a part hangs below its pivot (arms, legs — yMin negative, yMax
+  // 0) or rises above it (torso, head — yMin 0, yMax positive).
+  function buildBox(gl, w, yMin, yMax, d, color) {
+    const hw = w / 2, hd = d / 2;
+    const positions = [];
+    const normals = [];
+    function quad(v0, v1, v2, v3, n) {
+      positions.push(...v0, ...v1, ...v2, ...v0, ...v2, ...v3);
+      for (let i = 0; i < 6; i++) normals.push(...n);
+    }
+    quad([-hw,yMax,-hd], [-hw,yMax,hd], [hw,yMax,hd], [hw,yMax,-hd], [0,1,0]);   // top
+    quad([-hw,yMin,hd], [-hw,yMin,-hd], [hw,yMin,-hd], [hw,yMin,hd], [0,-1,0]);  // bottom
+    quad([hw,yMin,-hd], [hw,yMax,-hd], [hw,yMax,hd], [hw,yMin,hd], [1,0,0]);     // right
+    quad([-hw,yMin,hd], [-hw,yMax,hd], [-hw,yMax,-hd], [-hw,yMin,-hd], [-1,0,0]); // left
+    quad([-hw,yMin,hd], [hw,yMin,hd], [hw,yMax,hd], [-hw,yMax,hd], [0,0,1]);     // front
+    quad([hw,yMin,-hd], [-hw,yMin,-hd], [-hw,yMax,-hd], [hw,yMax,-hd], [0,0,-1]);// back
+    return {
+      color,
+      modelMatrix: mat4Identity(),
+      vao: {
+        positionBuffer: createBuffer(gl, gl.ARRAY_BUFFER, new Float32Array(positions)),
+        normalBuffer: createBuffer(gl, gl.ARRAY_BUFFER, new Float32Array(normals)),
+        indexBuffer: null,
+        indexCount: positions.length / 3,
+        indexType: null
+      }
+    };
+  }
+
+  // Proportions are eyeballed against the default 1.6 eye height most
+  // scenes start the camera at (see camera.pos below): hip+torso+most of
+  // the head lands the eyes roughly inside the head box, so at camera
+  // distance 0 (see cameraDistance in init()) the camera sits about where
+  // a head would be without anything needing to be perfectly to-scale.
+  function buildCharacter(gl) {
+    const LEG_LEN = 0.85, LEG_W = 0.15, LEG_D = 0.15;
+    const TORSO_H = 0.50, TORSO_W = 0.36, TORSO_D = 0.20;
+    const HEAD_SIZE = 0.32;
+    const ARM_LEN = 0.52, ARM_W = 0.13, ARM_D = 0.13;
+    const hipY = LEG_LEN;
+    const shoulderY = hipY + TORSO_H;
+    const skin = [0.85, 0.68, 0.53, 1];
+    const shirt = [0.24, 0.47, 0.40, 1];
+    const pants = [0.17, 0.22, 0.26, 1];
+    return {
+      hipY, shoulderY, headSize: HEAD_SIZE,
+      shoulderOffsetX: TORSO_W / 2 + ARM_W / 2 + 0.02,
+      hipOffsetX: TORSO_W / 2 - LEG_W / 2 - 0.02,
+      torso: buildBox(gl, TORSO_W, 0, TORSO_H, TORSO_D, shirt),
+      head: buildBox(gl, HEAD_SIZE, 0, HEAD_SIZE, HEAD_SIZE, skin),
+      armL: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
+      armR: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
+      legL: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, pants),
+      legR: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, pants)
+    };
+  }
+
+  // Bounds for the player-character size setting (Settings -> "Player
+  // character" -> Size). Kept in sync by eye with the same bounds on the
+  // slider itself (extension/viewer.html's #characterScaleInput min/max)
+  // and the storage-side clamp in wallet.js's getCharacterScale/
+  // setCharacterScale — this is the last line of defense against a
+  // corrupt/out-of-range value ever reaching mat4Scale.
+  const MIN_CHARACTER_SCALE = 0.5;
+  const MAX_CHARACTER_SCALE = 2;
+  function clampCharacterScale(s) {
+    const n = Number(s);
+    if (!Number.isFinite(n)) return 1;
+    return Math.max(MIN_CHARACTER_SCALE, Math.min(MAX_CHARACTER_SCALE, n));
+  }
+
   // ---------- public entry point ----------
 
   function init(canvas, opts) {
@@ -529,11 +625,101 @@
       pitch: 0
     };
 
+    // Visible player character (#33) — built once, independent of which
+    // scene is loaded (it's a fixed avatar, not scene content).
+    const character = buildCharacter(gl);
+    let walkPhase = 0;
+
+    // Camera distance (mouse scroll wheel) replaces the old discrete
+    // first-/third-person toggle with one continuous zoom: 0 is exactly
+    // the original first-person view (camera = eyes, nothing new added to
+    // the frustum — bit-for-bit the same as every release before this),
+    // and it smoothly pulls back into a third-person chase view as it
+    // increases. Always starts at 0 (first-person) on entering a world —
+    // deliberately NOT persisted the way the old toggle setting was, since
+    // "scroll to zoom" reads as a live camera control, not a saved
+    // preference.
+    const MAX_CAMERA_DISTANCE = 5;
+    const MAX_FOLLOW_HEIGHT = 1.7;
+    const CAMERA_SCROLL_STEP = 0.4;
+    const HEAD_VISIBLE_DISTANCE = 0.4; // below this, camera is still basically at eye level — drawing the head would just block the view
+    let cameraDistance = 0;
+
+    function onWheel(e) {
+      e.preventDefault(); // this is a camera control, not a page-scroll gesture
+      const dir = e.deltaY > 0 ? 1 : (e.deltaY < 0 ? -1 : 0);
+      cameraDistance = Math.max(0, Math.min(MAX_CAMERA_DISTANCE, cameraDistance + dir * CAMERA_SCROLL_STEP));
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    // The character's own facing, separate from camera.yaw (look
+    // direction). Turns to face whatever direction is actually being
+    // walked in (see the movement block in frame()) and simply holds its
+    // last facing while standing still — deliberately NOT tied to
+    // camera.yaw, or strafing (A/D with the mouse untouched) would slide
+    // the character sideways without ever turning to face the way it's
+    // moving, and the walk-cycle leg swing (a fixed forward/back motion in
+    // the character's own local frame) would look like moonwalking.
+    let characterYaw = camera.yaw;
+    let lastCharBase = mat4Identity(); // see the comment where this gets set, in frame()
+    // Stashed the same way as lastCharBase, for the same reason — see
+    // getCharacterFloorY() in the returned API below for what this is for
+    // (broadcasting a FLOOR-relative height over presence, not the
+    // camera's eye height).
+    let lastCharacterBaseY = 0;
+    // Purely a visual size preference (Settings -> "Player character" ->
+    // Size) — doesn't touch collision (PLAYER_RADIUS, below, stays fixed),
+    // walk speed, or how far the camera follows; it only scales the
+    // rendered mesh in charBase.
+    let characterScale = clampCharacterScale(opts.characterScale);
+
+    // Other visitors currently in this same world (#66) — viewer.js owns
+    // the actual presence WebSocket connection and message protocol; this
+    // file only knows how to render whatever roster it's told about via
+    // upsertRemotePlayer/removeRemotePlayer below. Purely visual: no
+    // collision, no interaction, and always drawn at the DEFAULT scale (1)
+    // regardless of this viewer's own characterScale — that slider is a
+    // personal preference about how YOUR OWN character looks, not
+    // something meaningful to apply to someone else's model.
+    const remotePlayers = new Map(); // id -> { x,y,z,yaw (rendered/interpolated), tx,ty,tz,tyaw (last network target), walkPhase }
+    const REMOTE_LERP_RATE = 10; // higher = snaps to the network position faster, lower = smoother but laggier
+    function lerpAngle(a, b, t) {
+      // Shortest-path angular interpolation — a plain (a + (b-a)*t) lerp
+      // would spin the long way around every time a remote player's yaw
+      // crosses the -pi/pi wraparound, which happens constantly for
+      // perfectly ordinary turning.
+      const diff = ((b - a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+      return a + diff * t;
+    }
+
     const keys = {};
     let dragging = false, lastX = 0, lastY = 0;
     let portalCooldown = new Set();
 
-    function onKeyDown(e) { keys[e.code] = true; }
+    // Held mouse buttons, tracked separately from the pointerdown/up drag
+    // handling below — mousedown/mouseup (unlike pointerdown/up, which only
+    // fire on the FIRST button down / LAST button up for a mouse) fire once
+    // per individual button, so this is what actually lets "both left and
+    // right held together" be detected as its own chord, regardless of
+    // whether the player is also drag-looking.
+    const heldMouseButtons = new Set();
+    function onMouseDown(e) { heldMouseButtons.add(e.button); }
+    function onMouseUp(e) { heldMouseButtons.delete(e.button); }
+
+    // Jump/crouch are purely a camera-height effect layered on top of the
+    // standing eye height captured here — collision is XZ-only (see
+    // tryMove/boundingBoxes) and portal triggers only look at X/Z too, so
+    // neither needs to know about this; it's just what the camera shows.
+    const standingEyeY = camera.pos[1];
+    let jumpOffset = 0, jumpVelocity = 0, airborne = false;
+    const JUMP_SPEED = 3.2, GRAVITY = 9.0, CROUCH_AMOUNT = 0.6;
+
+    function onKeyDown(e) {
+      // Space scrolling the host page would be a strange side effect of
+      // jumping — nothing here is meant to scroll, so stop that specific
+      // default without touching any other key's normal behavior.
+      if (e.code === 'Space') e.preventDefault();
+      keys[e.code] = true;
+    }
     function onKeyUp(e) { keys[e.code] = false; }
     function onPointerDown(e) { dragging = true; lastX = e.clientX; lastY = e.clientY; canvas.setPointerCapture(e.pointerId); }
     function onPointerUp(e) { dragging = false; try { canvas.releasePointerCapture(e.pointerId); } catch (err) {} }
@@ -558,6 +744,8 @@
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('contextmenu', onContextMenu);
+    canvas.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mouseup', onMouseUp);
 
     async function loadScene(newSceneData) {
       sceneData = newSceneData;
@@ -567,7 +755,32 @@
       floorPrim = buildFloor(gl, floor.size, floor.color);
 
       const objects = sceneData.objects || [];
-      const loaded = await Promise.all(objects.map((obj) => loadModel(gl, opts.resolveAssetUrl(obj.model))));
+      const urls = objects.map((obj) => opts.resolveAssetUrl(obj.model));
+      // Progress (#36) is tracked by UNIQUE url, not by placed object — a
+      // scene can place the same furniture piece many times (one couch
+      // model, six placements), and loadModel already coalesces repeats to
+      // one fetch via modelCache below, so reporting per-placement would
+      // both over-count the real download work and jump around instead of
+      // advancing steadily. opts.onLoadProgress is optional — every
+      // existing caller of MiniGLTF.init that predates this still works
+      // unchanged with no progress reporting at all.
+      const uniqueUrls = Array.from(new Set(urls));
+      let loadedCount = 0;
+      if (opts.onLoadProgress) opts.onLoadProgress(0, uniqueUrls.length);
+      const modelByUrl = new Map();
+      await Promise.all(uniqueUrls.map((url) =>
+        loadModel(gl, url).then((model) => {
+          modelByUrl.set(url, model);
+          loadedCount++;
+          // Whether this particular url resolved instantly (a 304 cache
+          // hit, or an already-in-flight duplicate from modelCache) or took
+          // a real download, it counts as one more asset ready — the bar
+          // still advances correctly either way, it just may jump quickly
+          // through cached entries and pause longer on real downloads.
+          if (opts.onLoadProgress) opts.onLoadProgress(loadedCount, uniqueUrls.length);
+        })
+      ));
+      const loaded = urls.map((url) => modelByUrl.get(url));
       objects.forEach((obj, i) => {
         const model = loaded[i];
         const rotY = ((obj.rotationY || 0) * Math.PI) / 180;
@@ -675,15 +888,56 @@
       if (keys['KeyS'] || keys['ArrowDown']) { mx -= forward[0]; mz -= forward[1]; }
       if (keys['KeyD'] || keys['ArrowRight']) { mx += right[0]; mz += right[1]; }
       if (keys['KeyA'] || keys['ArrowLeft']) { mx -= right[0]; mz -= right[1]; }
+      // Holding left + right mouse buttons together is a walk-forward
+      // chord, same idea as W — folded into the same forward vector so it
+      // combines and normalizes with the keyboard controls instead of
+      // fighting them.
+      if (heldMouseButtons.has(0) && heldMouseButtons.has(2)) { mx += forward[0]; mz += forward[1]; }
       const mlen = Math.hypot(mx, mz);
-      if (mlen > 0.0001) {
+      const isMoving = mlen > 0.0001;
+      if (isMoving) {
         mx = (mx / mlen) * speed * dt;
         mz = (mz / mlen) * speed * dt;
         // Try each axis independently so movement "slides" along an
         // obstacle instead of stopping dead the moment either axis collides.
         tryMove(mx, 0);
         tryMove(0, mz);
+        // Same [sin(yaw), -cos(yaw)] convention the forward/right vectors
+        // above are built from — inverting it here turns "which way am I
+        // actually walking" back into a yaw the character can face.
+        characterYaw = Math.atan2(mx, -mz);
       }
+
+      // Walk-cycle: a plain sine swing for arms/legs, phase only advancing
+      // while actually moving (not merely holding a key against a wall) so
+      // the character doesn't visibly "walk in place" when blocked, and
+      // snapping straight back to the neutral pose the instant movement
+      // stops rather than easing out — simple, and at this art style's
+      // scale/duration the difference isn't visible.
+      if (isMoving) walkPhase += dt * (speed > 3 ? 11 : 8);
+      const limbSwing = isMoving ? Math.sin(walkPhase) * 0.55 : 0;
+
+      // Jump: a simple vertical arc layered on top of the standing eye
+      // height. Space only starts a new jump while grounded (the
+      // `!airborne` guard), so holding it down doesn't launch a second jump
+      // mid-air.
+      if (keys['Space'] && !airborne) { airborne = true; jumpVelocity = JUMP_SPEED; }
+      if (airborne) {
+        jumpOffset += jumpVelocity * dt;
+        jumpVelocity -= GRAVITY * dt;
+        if (jumpOffset <= 0) { jumpOffset = 0; jumpVelocity = 0; airborne = false; }
+      }
+      // Crouch: only while grounded, so a mid-air Ctrl press doesn't yank
+      // the camera down mid-jump.
+      const crouchOffset = (!airborne && (keys['ControlLeft'] || keys['ControlRight'])) ? CROUCH_AMOUNT : 0;
+      camera.pos[1] = standingEyeY + jumpOffset - crouchOffset;
+      // The character's feet sit at this same relative height (0 = normal
+      // standing ground level) — jump lifts it, crouch lowers it, exactly
+      // like the camera, since XZ position and vertical offset are shared
+      // between "where the camera is" and "where the character stands" in
+      // both view modes.
+      const characterBaseY = jumpOffset - crouchOffset;
+      lastCharacterBaseY = characterBaseY; // see getCharacterFloorY() below
 
       // Portal proximity check (planar distance, camera Y ignored).
       portalTriggers.forEach((trigger, idx) => {
@@ -706,7 +960,29 @@
 
       const aspect = canvas.width / Math.max(1, canvas.height);
       const projection = mat4Perspective(Math.PI / 3, aspect, 0.05, 100);
-      const view = mat4View(camera.pos, camera.yaw, camera.pitch);
+      // Scroll-wheel camera distance (replaces the old first-/third-person
+      // toggle — see cameraDistance's declaration above): pull the eye
+      // back along the same forward vector mat4View itself derives from
+      // yaw/pitch, scaled by how far the wheel has zoomed out, then hand
+      // it the SAME yaw/pitch to look along — so it ends up looking back
+      // over the character toward wherever they're headed, with no
+      // separate "look at the character" math needed. At distance 0 this
+      // reduces to exactly the plain first-person view (eye = fwd*0 = no
+      // offset at all), so there's no seam between the two.
+      let view;
+      if (cameraDistance > 0) {
+        const cosP = Math.cos(camera.pitch), sinP = Math.sin(camera.pitch);
+        const fwd = [Math.sin(camera.yaw) * cosP, sinP, -Math.cos(camera.yaw) * cosP];
+        const heightOffset = (cameraDistance / MAX_CAMERA_DISTANCE) * MAX_FOLLOW_HEIGHT;
+        const eye = [
+          camera.pos[0] - fwd[0] * cameraDistance,
+          standingEyeY + characterBaseY + heightOffset - fwd[1] * cameraDistance,
+          camera.pos[2] - fwd[2] * cameraDistance
+        ];
+        view = mat4View(eye, camera.yaw, camera.pitch);
+      } else {
+        view = mat4View(camera.pos, camera.yaw, camera.pitch);
+      }
       gl.uniformMatrix4fv(prog.uniforms.projection, false, projection);
       gl.uniformMatrix4fv(prog.uniforms.view, false, view);
       const light = (sceneData.directionalLight && sceneData.directionalLight.direction) || [-0.4, -1, -0.3];
@@ -717,6 +993,77 @@
       portalTriggers.forEach((tr) => { bindAndDraw(tr.ring, view, projection); bindAndDraw(tr.beacon, view, projection); });
       placedPrimitives.forEach((prim) => bindAndDraw(prim, view, projection));
 
+      // Player character. Close to distance 0 the head is deliberately
+      // skipped — the camera is still basically at head height there, so
+      // drawing it would just put a big colored box in front of the lens
+      // — but the rest of the body still draws, so looking down (or
+      // scrolling out, where the head fades into view) actually shows a
+      // body, which is the point of #33.
+      // mat4RotateY and the camera's own [sin(yaw), -cos(yaw)] forward/right
+      // convention turn in OPPOSITE directions from each other — they were
+      // built independently (mat4RotateY for placing static furniture at an
+      // author-chosen angle, forward/right for movement) and nothing tied
+      // their sign conventions together until now. A plain box torso/head
+      // is symmetric enough that this mismatch was invisible before this
+      // feature (walking straight forward always kept characterYaw equal to
+      // camera.yaw, so it "looked right" either way); it only shows up once
+      // the arms/legs — the one asymmetric part — need to actually turn
+      // toward a DIFFERENT direction than the camera, i.e. exactly the
+      // strafing case. Negating here is what makes mat4RotateY spin the
+      // same way characterYaw's own [sin,-cos] convention expects.
+      const charBase = mat4Multiply(
+        mat4Translate(camera.pos[0], characterBaseY, camera.pos[2]),
+        mat4Multiply(mat4RotateY(-characterYaw), mat4Scale(characterScale))
+      );
+      // Stashed so getCharacterFacingWorldDir() (below, in the returned
+      // API) can read the SAME matrix that actually got used to place the
+      // character parts this frame, instead of recomputing its own copy —
+      // a recomputed copy would just reapply whatever sign convention it
+      // was written with and could never actually catch a mismatch between
+      // this line and itself.
+      lastCharBase = charBase;
+      // Factored out so the exact same draw code places both the local
+      // player (below) and every remote player (further below) — the only
+      // difference between them is which base matrix and limb-swing phase
+      // gets passed in.
+      const drawCharacterAt = (base, swing, showHead) => {
+        const drawPart = (localMatrix, part) => {
+          bindAndDraw({ vao: part.vao, color: part.color, modelMatrix: mat4Multiply(base, localMatrix) }, view, projection);
+        };
+        if (showHead) drawPart(mat4Translate(0, character.shoulderY, 0), character.head);
+        drawPart(mat4Translate(0, character.hipY, 0), character.torso);
+        drawPart(mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing)), character.armL);
+        drawPart(mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing)), character.armR);
+        drawPart(mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing)), character.legL);
+        drawPart(mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing)), character.legR);
+      };
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE);
+
+      // Other visitors (#66) — interpolate each toward its last known
+      // network position/yaw (upsertRemotePlayer, in the returned API,
+      // just updates the target; the actual smoothing happens here every
+      // frame) and walk-animate from how far it actually moved THIS frame,
+      // since a remote player's held keys aren't something this client
+      // ever sees — only its reported positions.
+      const remoteLerpT = Math.min(1, dt * REMOTE_LERP_RATE);
+      remotePlayers.forEach((rp) => {
+        const prevX = rp.x, prevZ = rp.z;
+        rp.x += (rp.tx - rp.x) * remoteLerpT;
+        rp.y += (rp.ty - rp.y) * remoteLerpT;
+        rp.z += (rp.tz - rp.z) * remoteLerpT;
+        rp.yaw = lerpAngle(rp.yaw, rp.tyaw, remoteLerpT);
+        const movedDist = Math.hypot(rp.x - prevX, rp.z - prevZ);
+        const rpMoving = movedDist > 0.0004;
+        if (rpMoving) rp.walkPhase += dt * 8;
+        const rpSwing = rpMoving ? Math.sin(rp.walkPhase) * 0.55 : 0;
+        // Same [sin,-cos]-vs-mat4RotateY sign fix as the local character's
+        // own charBase above — negate the yaw here too, or a remote
+        // player's arms/legs would turn to face the mirror of wherever
+        // they're actually walking.
+        const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4RotateY(-rp.yaw));
+        drawCharacterAt(rpBase, rpSwing, true); // always show the head — this is never our own first-person view
+      });
+
       rafId = requestAnimationFrame(frame);
     }
 
@@ -724,16 +1071,107 @@
     function stop() { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } }
     function destroy() {
       stop();
+      remotePlayers.clear();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       canvas.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('contextmenu', onContextMenu);
+      canvas.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mouseup', onMouseUp);
+      canvas.removeEventListener('wheel', onWheel);
     }
 
     const ready = loadScene(sceneData).then(() => start());
-    return { ready, loadScene: (s) => loadScene(s), stop, start, destroy, camera };
+    return {
+      ready, loadScene: (s) => loadScene(s), stop, start, destroy, camera,
+      // Camera distance is normally driven by the mouse wheel (see onWheel
+      // above), but exposed read/write here too — read for tests/debugging
+      // that don't want to simulate real wheel events, write for a test
+      // that wants to jump straight to a known distance without depending
+      // on CAMERA_SCROLL_STEP's exact value.
+      getCameraDistance: () => cameraDistance,
+      setCameraDistance: (d) => { cameraDistance = Math.max(0, Math.min(MAX_CAMERA_DISTANCE, Number(d) || 0)); },
+      getMaxCameraDistance: () => MAX_CAMERA_DISTANCE,
+      // Whether the player is mid-drag actively looking around right now
+      // (see `dragging` / onPointerDown/onPointerMove above). viewer.js's
+      // fullscreen cursor auto-hide reads this so a look-drag's own
+      // continuous mousemove events don't count as "show the cursor" —
+      // otherwise turning with the mouse would keep the cursor visible the
+      // whole time, defeating the point of hiding it.
+      isLookDragging: () => dragging,
+      // Purely cosmetic size multiplier on the rendered character model —
+      // see characterScale's declaration above for what it does and does
+      // NOT affect (collision, speed, camera-follow distance are all
+      // untouched). Read for the Settings slider to show the current
+      // value, write for it to apply a change live without re-entering
+      // the world.
+      getCharacterScale: () => characterScale,
+      setCharacterScale: (s) => { characterScale = clampCharacterScale(s); },
+      // Debug/test hook — lets a script confirm the character actually
+      // turns to face its travel direction (see the characterYaw comment
+      // above) without needing to read pixels back off the canvas.
+      getCharacterYaw: () => characterYaw,
+      // The character's FLOOR-relative height (0 = standing on the ground,
+      // negative while crouching, positive mid-jump) — see the comment
+      // above characterBaseY's own declaration in frame(). This is what
+      // viewer.js's currentLocalPose() broadcasts as the `y` of a presence
+      // move/sync, NOT camera.pos[1] (the eye height a first-person camera
+      // actually sits at, typically ~1.6 units off the ground): every
+      // OTHER client places a remote player's character model directly at
+      // the y it receives (see upsertRemotePlayer/the remotePlayers.forEach
+      // draw loop below) — send eye height and a remote character renders
+      // hovering roughly at head height above the floor instead of
+      // standing on it, which is exactly the bug this getter exists to
+      // prevent from creeping back in.
+      getCharacterFloorY: () => lastCharacterBaseY,
+      // A second, independent debug hook: where the character's own local
+      // -Z ("its front") actually ends up in world space once rendered.
+      // Reads lastCharBase — the EXACT matrix frame() used to place every
+      // character part this frame — rather than recomputing a fresh one
+      // from characterYaw, on purpose: a recomputed copy would just
+      // reapply whatever sign convention it was written with and could
+      // never catch a mismatch between that formula and charBase's own
+      // (which is exactly how the original version of this fix's mirrored
+      // bug slipped past this same test — the hook agreed with itself
+      // instead of checking the real render matrix). Normalized before
+      // returning so characterScale (baked into lastCharBase too) doesn't
+      // change this vector's magnitude — callers just want a direction.
+      getCharacterFacingWorldDir: () => {
+        const x = -lastCharBase[8], z = -lastCharBase[10];
+        const len = Math.hypot(x, z) || 1;
+        return [x / len, z / len];
+      },
+      // ---------- presence (#66) ----------
+      // viewer.js owns the actual WebSocket connection and join/move/left
+      // message protocol against presence-server; this file only renders
+      // whatever roster it's told about. upsertRemotePlayer both creates a
+      // new remote player (snapping straight to its first reported
+      // position — nothing to interpolate in FROM yet) and updates an
+      // existing one's target (smoothed toward every frame, see
+      // REMOTE_LERP_RATE above).
+      upsertRemotePlayer: (id, state) => {
+        const x = Number(state.x) || 0, y = Number(state.y) || 0, z = Number(state.z) || 0, yaw = Number(state.yaw) || 0;
+        const existing = remotePlayers.get(id);
+        if (existing) {
+          existing.tx = x; existing.ty = y; existing.tz = z; existing.tyaw = yaw;
+        } else {
+          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0 });
+        }
+      },
+      removeRemotePlayer: (id) => { remotePlayers.delete(id); },
+      getRemotePlayerCount: () => remotePlayers.size,
+      getRemotePlayerIds: () => Array.from(remotePlayers.keys()),
+      // Debug/test hook, same convention as getCharacterFacingWorldDir
+      // above — reads the actual interpolated render state a test can
+      // observe, not the raw network target, so a test can confirm
+      // interpolation is genuinely happening frame to frame.
+      getRemotePlayerRenderState: (id) => {
+        const rp = remotePlayers.get(id);
+        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw } : null;
+      }
+    };
   }
 
   // ---------- cache management API (Settings -> Cache) ----------

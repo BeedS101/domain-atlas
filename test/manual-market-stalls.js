@@ -101,8 +101,8 @@ async function projectInteractables(frame) {
     if (!statusAfterIron.includes('atlas.element.iron')) throw new Error('Expected the status line to mention iron: ' + statusAfterIron);
     // Confirm it actually landed in the wallet, not just a status message.
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfResourceList .wallet-item').length > 0, { timeout: 5000 });
-    const ironCardText = await frame.locator('#selfResourceList .wallet-item').first().textContent();
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 5000 });
+    const ironCardText = await frame.locator('#selfCollectiblesList .wallet-item').first().textContent();
     if (!ironCardText.includes('atlas.element.iron')) throw new Error('Expected iron in the self resource list: ' + ironCardText);
     console.log('PASS: clicking the iron stall actually minted iron into the wallet ->', statusAfterIron);
 
@@ -129,7 +129,7 @@ async function projectInteractables(frame) {
     const statusAfterGold = await frame.locator('#status').textContent();
     if (!statusAfterGold.includes('atlas.element.gold')) throw new Error('Expected the status line to mention gold: ' + statusAfterGold);
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#counterpartyResourceList .wallet-item').length > 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#counterpartyCollectiblesList .wallet-item').length > 0, { timeout: 5000 });
     console.log('PASS: with a counterparty in place, the gold stall minted gold for it ->', statusAfterGold);
 
     console.log('\nALL MARKET STALL CHECKS PASSED');

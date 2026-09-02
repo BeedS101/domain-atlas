@@ -78,7 +78,7 @@ function shot(name) {
     console.log('PASS: identity created, 16-word seed phrase captured ->', originalIdentityLabel);
 
     console.log('STEP 4: locking the wallet, then reopening — should route to the unlock screen, not onboarding');
-    await frame.locator('#openSettingsBtn').click();
+    await frame.locator('#settingsTabBtn').click();
     await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
     // Settings categories are collapsed by default — open "Identity method" before using its lock button.
     await frame.locator('.settings-category[data-category="identity-method"] .settings-category-toggle').click();
@@ -110,7 +110,7 @@ function shot(name) {
     console.log('PASS: unlocked with the correct password, same identity ->', unlockedLabel);
 
     console.log('STEP 7: export with the correct password but a malformed (too-short) seed phrase — distinct validation message');
-    await frame.locator('#openSettingsBtn').click();
+    await frame.locator('#settingsTabBtn').click();
     await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
     // Settings categories are collapsed by default — open "Identity backup" before using its export fields.
     await frame.locator('.settings-category[data-category="identity-backup"] .settings-category-toggle').click();

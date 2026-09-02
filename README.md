@@ -19,6 +19,8 @@ domain-atlas/
 │   └── wallet.js                  identity + credential verification (§5, §6)
 ├── issuer-server/                a real credential issuer for demo-domain-a
 │                                    (also plays the "trading station" role — see §4 below)
+├── directory-server/              crawler/index/search over other domains' manifests (§3.3)
+├── presence-server/                hand-rolled WebSocket server for multiplayer presence
 ├── demo-domain-a/                 "Example Plaza" — FOUR worlds: plaza, museum, arena, market
 ├── demo-domain-b/                 "Neighbor Workshop" — one world, plain static server
 └── test/
@@ -188,7 +190,125 @@ a world that changes its name, genre, or `discoverable` flag is picked up
 on its next scheduled pass, not instantly — the same eventual consistency
 a real search index has with the live web.
 
-## 6. Verify it yourself
+## 6. Try multiplayer presence
+
+Other visitors in the same world, visible and moving in real time — a
+separate service on purpose (same reasoning as the directory server: this
+isn't the issuer's job), zero dependencies, hand-rolled WebSocket framing
+(RFC 6455) over Node's own `http`/`crypto` rather than pulling in `ws`:
+
+```bash
+node presence-server/server.js
+```
+
+It listens on `http://localhost:8004`, upgrading `/presence` connections
+to WebSocket. Rooms are keyed by `domain::world`, so visitors only ever see
+others in the exact same world. Walk into the Lobby (the one
+`gltf-mini-v1` world) from two separate browser profiles at once and each
+sees the other's character walking around, positions smoothed between the
+network updates rather than snapping.
+
+This is presence, not a production multiplayer backend — there's no
+server-side movement authority, anti-cheat, or persistence; a client
+reports its own position and the server just relays it to the room. It's
+also entirely optional at runtime: if `presence-server` isn't running, or
+becomes unreachable mid-session, the extension fails the connection
+silently and world entry and single-player movement are completely
+unaffected — you just won't see anyone else.
+
+**Polling fallback (no WebSocket needed).** WebSocket needs a persistent
+process bound to a port, which plain cPanel/Apache+PHP shared hosting
+can't run at all — the same constraint that made the issuer need a PHP
+port (see `issuer-php/README.txt`). So `presence-server` also answers a
+plain HTTP polling API (`POST /presence/poll/join`, `/sync`, `/leave`)
+backed by the exact same rooms as the WebSocket side — a WS visitor and a
+polling visitor in the same world see each other correctly either way. The
+extension tries WebSocket first and only falls back to polling if that
+fails or hangs, entirely on its own; nothing to configure beyond a
+manifest field (see below). To see the fallback path itself in action
+against the Node server rather than trust it's there, run it with
+`PRESENCE_DISABLE_WS=1` (rejects every WebSocket upgrade, simulating a
+polling-only host) — multiplayer still works, just on a ~2s update cycle
+instead of continuous.
+
+Which endpoint the extension talks to is manifest-declared, not hardcoded:
+a domain adds an optional top-level `"presence"` field to its
+`.well-known/spatial.json` (e.g. `"presence": "https://example.com"`) and
+`extension/viewer.js` derives both the WebSocket URL and the polling base
+from it. No manifest field at all (every local demo domain in this repo)
+falls back to the Node dev default, `localhost:8004`.
+
+That per-domain field is what makes `presence-php/` real rather than
+theoretical: a plain-PHP port of ONLY the polling routes (no WebSocket —
+see `presence-php/README.txt` for exactly why that half can't be ported to
+shared hosting in any language), deployable to a real domain's actual cPanel
+hosting the same way `issuer-php/` already is. Point a domain's `presence`
+field at a host running just this PHP bundle and the extension's own
+WS-then-poll fallback logic does the rest — there's no separate
+"polling-only" flag to set anywhere.
+
+## 7. Friends, Favorites, and the Social tab
+
+The wallet's top tab bar is now Wallet / Social / Settings — the old
+standalone Mail tab moved inside Social, alongside two new sections:
+Friends (#67) and Favorites (#61). Open the Social tab and its own
+sub-tab-bar switches between the three.
+
+**Friends work live, through presence — not through mail.** Adding a
+friend needs both people simultaneously in the same `domain::world` room:
+open the Friends tab while standing in a world with someone else in it,
+and "People here now" lists them with an Add friend button (only if
+they've got an unlocked wallet identity announced — an anonymous visitor
+can't be friended, same "presence never requires an identity" principle
+world entry itself has always had). Clicking it sends a `friend-request`
+signal over whichever presence transport is actually connected right now
+(WebSocket or the polling fallback, transparently) to exactly that one
+other visitor. On their side it shows up under "Friend requests" with
+Accept/Decline; accepting saves the friend on both ends — the accepter
+immediately, and the original sender automatically once the
+`friend-request-accepted` reply signal reaches them back, no second click
+needed. This only works while both of you are still in the room: a
+request or its reply can't be relayed to someone who's already left, same
+as the roster itself only ever shows who's actually there.
+
+This deliberately does NOT go through the existing mail system. Mail
+(`AtlasWallet.checkAllMail`) is domain-issuer-to-subscriber only —
+messages are addressed by `credentialId` and fetched per-domain from
+credentials the wallet already holds, and there's no way to even discover
+a stranger's `credentialId` to mail them (see `issuer-php/README.txt`'s
+note on why there's deliberately no public subscriber-listing endpoint).
+Friends needed a genuine peer-to-peer channel between two arbitrary
+visitors, so it rides a new, narrow **signal relay** built into presence
+itself instead: `presence-server/server.js`'s `relaySignal()` (WS message
+type `'signal'` / `POST /presence/poll/signal`) and `presence-php`'s
+`poll/signal.php` twin. The vocabulary is closed to exactly three kinds —
+`friend-request`, `friend-request-accepted`, `friend-request-declined` —
+the server relays them (pushed immediately to a WebSocket member, queued
+into `pendingSignals` and picked up on the next poll `sync` for a polling
+one) without ever inspecting or storing anything beyond that.
+
+**Favorites bookmark a domain+world**, independent of the auto-pruned
+Recent Worlds list on the main Wallet screen (Favorites are explicit
+add/remove only, and you control their order). "Favorite this domain"
+appears while you're actually standing in a world; the Favorites list
+itself shows every bookmark with a live "N here now" status line, pulled
+fresh from that domain's own presence backend every time the list renders
+(`GET /presence/status?domain=...&world=...` — reports who's in a room
+without creating a member the way joining would). If any of your saved
+friends are in that count, they're named right there too — "3 here now ·
+friends here: Nomad". That cross-referencing happens **entirely on your
+own device**: the status endpoint only ever returns who's actually
+present (id, name, publicKey), and your friends list is matched against
+it locally. No server, including presence-server itself, ever sees your
+friends list.
+
+**Quick lock.** A 🔒 button now sits in the top control bar next to
+Wallet, for locking without opening the wallet panel first — distinct
+from the existing Lock button buried in Settings → Identity method, which
+is still there for anyone who navigates in that way. It only shows up
+while there's actually an unlocked local-password identity to lock.
+
+## 8. Verify it yourself
 
 ```bash
 node test/verify.js                    # manifest + portal mechanism
@@ -221,6 +341,17 @@ Not Modified`: proof the cache is honoring a real conditional GET
 (`If-Modified-Since` against the server's `Last-Modified`) rather than
 either always re-fetching or never checking again. Screenshots land as
 `cache-01`/`cache-02`.
+
+While a `gltf-mini-v1` world's models are downloading, a small progress
+overlay now shows over the 3D canvas ("Loading world assets… N / 19" for
+the Lobby) instead of a blank wait — tracked by unique model url, not by
+placed object, so a scene reusing one model many times doesn't inflate the
+count past what's actually being fetched, and a cache hit (304, or an
+already-loaded model from earlier this session) still counts as "loaded"
+the moment it resolves, same as a fresh download. See
+`test/manual-scene-load-progress.js` for a check that artificially slows
+the network to actually observe it advancing rather than trusting it's
+there.
 
 `verify-directory.js` is different — it's testing a JSON API, not a
 browser UI, so it needs no display and drives the directory service (with

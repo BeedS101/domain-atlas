@@ -1,0 +1,9 @@
+# Lets the browser call clean URLs like /presence/poll/join and
+# /presence/poll/sync (no .php extension — matches what
+# extension/viewer.js's pollPresence() already calls, so nothing in the
+# extension needs to change to use this PHP backend instead of Node's
+# presence-server's own polling routes). Same rule as issuer-php's
+# atlas/.htaccess, scoped to this folder instead.
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^(.+)$ $1.php [L]

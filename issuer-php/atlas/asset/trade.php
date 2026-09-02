@@ -1,7 +1,11 @@
 <?php
-// POST /atlas/resource/trade — mirrors issuer-server/server.js's same route
+// POST /atlas/asset/trade — mirrors issuer-server/server.js's same route
 // (this server plays the trading-station role — see that file's header
 // comment for why issuer and station are the same process in this demo).
+// Fungible only, per SPEC.md §7: offer/want only ever name a class and a
+// quantity, which is exactly what a fungible balance is and exactly what
+// a fungible:false asset isn't. check_presented_asset() below enforces
+// this the same way it does for split/consolidate.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
@@ -47,23 +51,23 @@ $mirrors = $offerA['class'] === $wantB['class'] && $offerA['quantity'] === $want
         && $offerB['class'] === $wantA['class'] && $offerB['quantity'] === $wantA['quantity'];
 if (!$mirrors) send_json(400, ['error' => 'intents do not mirror — offer/want mismatch']);
 
-// 3. Settle — check both presented balances actually cover the offer, then issue.
-$probA = check_presented_balance($kp['publicKeyB64url'], $balanceA, $pubA, $offerA['class'], $offerA['quantity']);
+// 3. Settle — check both presented balances actually cover the offer (and are fungible), then issue.
+$probA = check_presented_asset($kp['publicKeyB64url'], $balanceA, $pubA, $offerA['class'], $offerA['quantity']);
 if ($probA) send_json(400, ['error' => 'balanceA: ' . $probA]);
-$probB = check_presented_balance($kp['publicKeyB64url'], $balanceB, $pubB, $offerB['class'], $offerB['quantity']);
+$probB = check_presented_asset($kp['publicKeyB64url'], $balanceB, $pubB, $offerB['class'], $offerB['quantity']);
 if ($probB) send_json(400, ['error' => 'balanceB: ' . $probB]);
 
 $remainderA = $balanceA['quantity'] - $offerA['quantity'];
 $remainderB = $balanceB['quantity'] - $offerB['quantity'];
 
 $aRemainder = $remainderA > 0
-  ? issue_resource($kp['privateKey'], $kp['publicKeyB64url'], $pubA, $offerA['class'], $remainderA, $balanceA['id'])
+  ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $pubA, $offerA['class'], $remainderA, $balanceA['id'])
   : null;
-$aReceived = issue_resource($kp['privateKey'], $kp['publicKeyB64url'], $pubA, $wantA['class'], $wantA['quantity'], $balanceA['id']);
+$aReceived = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $pubA, $wantA['class'], $wantA['quantity'], $balanceA['id']);
 $bRemainder = $remainderB > 0
-  ? issue_resource($kp['privateKey'], $kp['publicKeyB64url'], $pubB, $offerB['class'], $remainderB, $balanceB['id'])
+  ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $pubB, $offerB['class'], $remainderB, $balanceB['id'])
   : null;
-$bReceived = issue_resource($kp['privateKey'], $kp['publicKeyB64url'], $pubB, $wantB['class'], $wantB['quantity'], $balanceB['id']);
+$bReceived = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $pubB, $wantB['class'], $wantB['quantity'], $balanceB['id']);
 
 // 4. Atomicity — both sides' pre-trade balances are only revoked once every
 // new credential above has actually been signed, so a failure earlier in

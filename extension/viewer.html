@@ -49,6 +49,43 @@
     display: none; align-items: center; justify-content: center; padding: 0 3px;
   }
   #walletBadge.show { display: flex; }
+  #walletTabBtn { position: relative; }
+  #socialTabBtn { position: relative; }
+  #socialBadge {
+    position: absolute; top: -6px; right: -6px; background: #e0b84c; color: #16222a;
+    font-size: 10px; font-weight: 700; border-radius: 999px; min-width: 16px; height: 16px;
+    display: none; align-items: center; justify-content: center; padding: 0 3px;
+  }
+  #socialBadge.show { display: flex; }
+
+  /* Sub-tab-bar pattern, shared by every tab that has its own second level
+     of tabbing — Social's Mail/Friends/Favorites (#socialSubtabBar) and
+     Inventory's Collectibles/Documents (#inventorySubtabBar) both use this
+     one class rather than each inventing their own look. A smaller echo of
+     #walletTabBar's own look, nested one level in. */
+  .subtab-bar { display: flex; gap: 6px; margin-bottom: 14px; }
+  .subtab-bar button { flex: 1; font-size: 12px; padding: 6px 10px; position: relative; }
+  .subtab-bar button.active-subtab { background: #1d2f38; border-color: #4a90a4; color: #fff6ef; }
+  .subtab-badge {
+    position: absolute; top: -6px; right: -6px; background: #e0b84c; color: #16222a;
+    font-size: 10px; font-weight: 700; border-radius: 999px; min-width: 16px; height: 16px;
+    display: none; align-items: center; justify-content: center; padding: 0 3px;
+  }
+  .subtab-badge.show { display: flex; }
+  /* Generic show-one-hide-the-rest sub-screen, shared by Social's three
+     sub-screens and Inventory's two (Collectibles/Documents) — same
+     pattern as .wallet-screen one level up, just for a nested tab bar. */
+  .subscreen { display: none; }
+  .subscreen.active { display: block; }
+  .mail-card { position: relative; }
+  .mail-card.unread::before {
+    content: ''; position: absolute; top: 14px; left: -10px; width: 7px; height: 7px;
+    border-radius: 999px; background: #e0b84c;
+  }
+  .mail-card .mail-domain { font-size: 11px; color: #a9b8bf; margin-bottom: 2px; }
+  .mail-card .mail-subject { font-weight: 600; margin-bottom: 4px; }
+  .mail-card .mail-meta { font-size: 11px; color: #a9b8bf; margin-bottom: 6px; }
+  .mail-card .mail-body { font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
 
   #walletPanel {
     display: none; position: fixed; top: 56px; right: 0; bottom: 0; width: 360px;
@@ -67,11 +104,11 @@
   .btn-row { display: flex; gap: 8px; }
   .btn-row button { flex: 1; }
   .item-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
-  /* .info-card shares .wallet-item's look (Hidden items, Recent worlds —
+  /* .info-card shares .wallet-item's look (Hidden assets, Recent worlds —
      neither is a held credential) but is a DIFFERENT class deliberately:
      .wallet-item means "a credential this wallet actually holds," and a
      test or future feature querying for that shouldn't also match a
-     navigation-history entry or a hidden-items row just because they look
+     navigation-history entry or a hidden-assets row just because they look
      the same. */
   .wallet-item, .info-card { border: 1px solid #2c3c44; border-radius: 8px; padding: 10px; }
   .wallet-item .name, .info-card .name { font-weight: 600; margin-bottom: 2px; }
@@ -124,7 +161,6 @@
   .settings-category.open .settings-category-toggle .chevron { transform: rotate(90deg); }
   .settings-category-body { display: none; padding-bottom: 14px; }
   .settings-category.open .settings-category-body { display: block; }
-  #walletPanelFooter { border-top: 1px solid #2c3c44; margin-top: 4px; padding-top: 12px; }
   .warn-box {
     border: 1px solid #c0405a; background: rgba(192,64,90,0.12); color: #f2a4b4;
     border-radius: 8px; padding: 10px; font-size: 11px; margin: 8px 0; line-height: 1.5;
@@ -151,6 +187,32 @@
   .wallet-screen { display: none; }
   .wallet-screen.active { display: block; }
   .btn-secondary { border-color: #2c3c44; color: #a9b8bf; }
+  /* Only shown on the two screens it makes sense to jump directly between
+     (Wallet, Settings) — see showWalletScreen() in viewer.js. Onboarding,
+     unlock, and identity-creation screens have nothing to tab between yet,
+     so the bar stays hidden there and those screens keep their own
+     dedicated back buttons instead. */
+  #walletTabBar { display: none; gap: 8px; margin-bottom: 14px; }
+  #walletTabBar.visible { display: flex; }
+  #walletTabBar button { flex: 1; }
+  #walletTabBar button.active-tab { background: #1d2f38; border-color: #4a90a4; color: #fff6ef; }
+
+  /* Scene asset download progress (#36) — an overlay centered on the 3D
+     canvas while a gltf-mini-v1 world's GLB models are loading, so a
+     scene with many assets shows real progress instead of a blank canvas
+     with only the top bar's "Fetching scene…" text to go on. Hidden
+     entirely (not just empty) for a scene with nothing to download, and
+     for every non-3D world — see updateSceneLoadProgress() in viewer.js. */
+  #sceneLoadProgress {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    z-index: 5; background: rgba(20,31,38,0.92); border: 1px solid #2c3c44;
+    border-radius: 10px; padding: 16px 22px; min-width: 220px; text-align: center;
+    display: none;
+  }
+  #sceneLoadProgress.active { display: block; }
+  #sceneLoadProgress .scene-load-progress-label { font-size: 12px; color: #a9b8bf; margin-bottom: 8px; }
+  #sceneLoadProgress .scene-load-progress-track { height: 6px; border-radius: 999px; background: #1b2830; overflow: hidden; }
+  #sceneLoadProgress .scene-load-progress-fill { height: 100%; width: 0%; background: #57a593; transition: width 120ms linear; }
 </style>
 </head>
 <body>
@@ -159,15 +221,44 @@
     <div id="controls">
       <span id="status"></span>
       <button id="walletBtn" type="button">🎒 Wallet<span id="walletBadge"></span></button>
+      <!-- Quick lock (#67 follow-up request): a one-click lock reachable
+           without opening the wallet panel first, distinct from the
+           existing Lock button buried in Settings -> Identity method
+           (#lockWalletBtn below, still there for anyone who navigates in
+           via that route). Only shown while there's actually something
+           unlocked to lock — see refreshQuickLockButtonVisibility() in
+           viewer.js. -->
+      <button id="quickLockWalletBtn" type="button" title="Lock wallet">🔒</button>
       <button id="closeBtn" type="button">Close</button>
     </div>
   </div>
   <canvas id="scene"></canvas>
   <canvas id="scene3d" tabindex="0"></canvas>
+  <!-- Scene asset download progress (#36) — see updateSceneLoadProgress()
+       in viewer.js and loadScene's onLoadProgress callback in gltf-mini.js. -->
+  <div id="sceneLoadProgress">
+    <div class="scene-load-progress-label">Loading world assets… <span id="sceneLoadProgressCount">0 / 0</span></div>
+    <div class="scene-load-progress-track"><div id="sceneLoadProgressFill" class="scene-load-progress-fill"></div></div>
+  </div>
   <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain</div>
-  <div id="scene3dHint">WASD to walk · drag to look · walk into a glowing ring to take that portal</div>
+  <div id="scene3dHint">WASD to walk · drag to look · scroll to zoom out · walk into a glowing ring to take that portal · F11 for fullscreen</div>
 
   <div id="walletPanel">
+
+    <div id="walletTabBar">
+      <!-- assetUpdatesBadge (SPEC.md §5.1.1): count of adopted asset
+           reissues the owner hasn't opened the Wallet tab to see yet —
+           same subtab-badge look and "cleared by opening the tab" idea as
+           socialBadge below, just for "an asset you hold changed" instead
+           of "new mail arrived". -->
+      <button id="walletTabBtn" type="button">Wallet<span id="assetUpdatesBadge" class="subtab-badge"></span></button>
+      <!-- Social (#61/#67): Mail moved in here alongside the new Friends
+           and Favorites sub-sections — see #socialScreen below. socialBadge
+           is the COMBINED count (unread mail + pending incoming friend
+           requests); each sub-tab also carries its own count. -->
+      <button id="socialTabBtn" type="button">Social<span id="socialBadge"></span></button>
+      <button id="settingsTabBtn" type="button">Settings</button>
+    </div>
 
     <!-- Screen: no identity on this device yet -->
     <div id="onboardingChoiceScreen" class="wallet-screen">
@@ -311,7 +402,7 @@
       <div class="settings-category" data-category="wallet-backup">
         <button type="button" class="settings-category-toggle"><span>Wallet backup</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
-          <div class="empty-note">Your items and resource balances — no password needed, since these are already public, issuer-signed claims rather than secrets.</div>
+          <div class="empty-note">Your assets — no password needed, since these are already public, issuer-signed claims rather than secrets.</div>
           <div class="btn-col" style="margin-top:8px;">
             <button id="exportBtn" type="button">Export wallet (atlas-wallet-export/1.0)</button>
             <button id="importWalletBtn" type="button">Import wallet file</button>
@@ -321,25 +412,17 @@
         </div>
       </div>
 
-      <!-- "Hide" replaced "Delete" on item cards: it stays local-only and
-           reversible, same idea as Wallet backup above, so a "unique" item
-           you'll never get reissued can't be lost by a stray click. -->
-      <div class="settings-category" data-category="hidden-items">
-        <button type="button" class="settings-category-toggle"><span>Hidden items</span><span class="chevron">▸</span></button>
+      <!-- "Hide" is the primary de-clutter action on every asset card,
+           unique and fungible alike (task #44 merged the former separate
+           "Hidden items"/"Hidden resources" accordions into this one): it
+           stays local-only and reversible, so a one-of-a-kind collectible
+           you'll never get reissued, or a resource balance that's real
+           spendable value, can't be lost by a stray click. -->
+      <div class="settings-category" data-category="hidden-assets">
+        <button type="button" class="settings-category-toggle"><span>Hidden assets</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
-          <div class="empty-note">Hidden from the main wallet view, not deleted — the credential and its verification are unaffected. Unhide to bring one back.</div>
-          <div id="hiddenItemsList" class="item-list" style="margin-top:8px;"></div>
-        </div>
-      </div>
-
-      <!-- "Hide" is now the resource card's primary action too, same reason
-           as items: an unspent balance is real value, and Delete (still
-           available, still confirm-guarded) can't be undone. -->
-      <div class="settings-category" data-category="hidden-resources">
-        <button type="button" class="settings-category-toggle"><span>Hidden resources</span><span class="chevron">▸</span></button>
-        <div class="settings-category-body">
-          <div class="empty-note">Hidden from the main wallet view, not deleted — the balance and its verification are unaffected. Unhide to bring one back.</div>
-          <div id="hiddenResourcesList" class="item-list" style="margin-top:8px;"></div>
+          <div class="empty-note">Hidden from Inventory, not deleted — the credential and its verification are unaffected. Unhide to bring one back.</div>
+          <div id="hiddenAssetsList" class="item-list" style="margin-top:8px;"></div>
         </div>
       </div>
 
@@ -364,6 +447,23 @@
         </div>
       </div>
 
+      <!-- Player character size — a purely visual scale on the rendered
+           character model in 3D (gltf-mini-v1) worlds (see gltf-mini.js's
+           characterScale). Doesn't affect movement speed or collision.
+           No effect in 2D (procedural-v1) worlds, which have no visible
+           character at all. -->
+      <div class="settings-category" data-category="player-character">
+        <button type="button" class="settings-category-toggle"><span>Player character</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="empty-note">3D worlds only. Changes size immediately if you're in one right now.</div>
+          <label style="display:flex; align-items:center; gap:8px; margin-top:8px;">
+            <span>Size</span>
+            <input type="range" id="characterScaleInput" min="0.5" max="2" step="0.1" value="1" style="flex:1;">
+            <span id="characterScaleValue" class="mono">1.0×</span>
+          </label>
+        </div>
+      </div>
+
       <div class="btn-col" style="margin-top:16px;">
         <button id="backFromSettingsBtn" type="button" class="btn-secondary">Back to wallet</button>
       </div>
@@ -372,15 +472,14 @@
     <!-- Screen: unlocked — the actual wallet -->
     <div id="mainWalletScreen" class="wallet-screen">
       <!-- Same collapsible-category pattern as Settings (see the JS
-           comment on walletPanel's click listener). Items and Resources
-           default OPEN — they're what "your wallet" actually means, the
-           reason you opened this panel — while Identity, Counterparty's
-           items, Trading station, and Recent worlds default closed.
-           Identity used to default open too, but your public key/nickname/
-           counterparty controls aren't what most visits to this panel are
-           actually for, so it's tucked away the same as the situational
-           categories now — just a tap on its header away, same as any
-           other collapsed category here. -->
+           comment on walletPanel's click listener). Inventory defaults
+           OPEN — it's what "your wallet" actually means, the reason you
+           opened this panel — while Identity, Trading station, and Recent
+           worlds default closed. Identity used to default open too, but
+           your public key/nickname/counterparty controls aren't what most
+           visits to this panel are actually for, so it's tucked away the
+           same as the situational categories now — just a tap on its
+           header away, same as any other collapsed category here. -->
       <div class="settings-category" data-category="identity">
         <button type="button" class="settings-category-toggle"><span>Identity</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
@@ -411,8 +510,20 @@
         </div>
       </div>
 
-      <div class="settings-category open" data-category="items">
-        <button type="button" class="settings-category-toggle"><span>Items</span><span class="chevron">▸</span></button>
+      <!-- Inventory (task #44): the former separate "Items" and
+           "Resources" accordions merged into one section, since both now
+           hold the same underlying credential type (domain-atlas-asset/1.0)
+           — the only real difference is `asset.presentation`, a pure
+           UI-routing hint with no backend meaning. Two sub-tabs split on
+           that value 1:1: Collectibles (presentation: "collectible" —
+           fungible and non-fungible together, e.g. a Bronze Compass
+           alongside stacks of Iron/Gold Ingots) and Documents
+           (presentation: "document" — currently just atlas.membership).
+           Reuses the exact sub-tab-bar pattern Social's Mail/Friends/
+           Favorites already established (.subtab-bar/.subscreen), not a
+           new one. -->
+      <div class="settings-category open" data-category="inventory">
+        <button type="button" class="settings-category-toggle"><span>Inventory</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
           <div class="btn-col">
             <button id="requestItemBtn" type="button">Request item from this world</button>
@@ -420,41 +531,53 @@
             <button id="reverifyBtn" type="button">Re-verify wallet against current issuers</button>
           </div>
           <div id="loadoutNote"></div>
-          <input type="text" id="itemsSearchInput" placeholder="Search your items…" style="margin-top:8px;">
-          <div id="selfItemsList" class="item-list"></div>
 
-          <!-- Only populated (and only then made visible) when something
-               is currently dropped in THIS world — see refreshDroppedItemsDisplay
-               in viewer.js. Local-only: nothing here was ever transferred to
-               anyone, it's just this item sitting in the scene until you
-               either click its marker in-world or hit Pick up here. -->
-          <div id="droppedItemsSection" hidden>
-            <div class="subhead">Dropped in this world</div>
-            <div id="droppedItemsList" class="item-list"></div>
+          <div id="inventorySubtabBar" class="subtab-bar">
+            <button id="collectiblesSubtabBtn" type="button">Collectibles</button>
+            <button id="documentsSubtabBtn" type="button">Documents</button>
           </div>
-        </div>
-      </div>
 
-      <div class="settings-category" data-category="counterparty-items">
-        <button type="button" class="settings-category-toggle"><span>Counterparty's items</span><span class="chevron">▸</span></button>
-        <div class="settings-category-body">
-          <input type="text" id="counterpartyItemsSearchInput" placeholder="Search counterparty's items…">
-          <div id="counterpartyItemsList" class="item-list" style="margin-top:8px;"></div>
-        </div>
-      </div>
+          <!-- Sub-screen: Collectibles — every asset with
+               presentation: "collectible", fungible and non-fungible
+               together in one list. A stackable (fungible) card shows its
+               quantity ("Iron Ingot ×47"); a unique (non-fungible) card
+               shows none. -->
+          <div id="collectiblesSubscreen" class="subscreen active">
+            <div class="btn-row">
+              <button id="mintIronBtn" type="button">Mine 20 iron (self)</button>
+              <button id="mintGoldBtn" type="button">Mine 10 gold (counterparty)</button>
+            </div>
+            <input type="text" id="collectiblesSearchInput" placeholder="Search collectibles…" style="margin-top:8px;">
+            <div class="subhead">Yours</div>
+            <div id="selfCollectiblesList" class="item-list"></div>
 
-      <div class="settings-category open" data-category="resources">
-        <button type="button" class="settings-category-toggle"><span>Resources</span><span class="chevron">▸</span></button>
-        <div class="settings-category-body">
-          <div class="btn-row">
-            <button id="mintIronBtn" type="button">Mine 20 iron (self)</button>
-            <button id="mintGoldBtn" type="button">Mine 10 gold (counterparty)</button>
+            <!-- Only populated (and only then made visible) when something
+                 is currently dropped in THIS world — see
+                 refreshInventoryDisplay in viewer.js. Local-only: nothing
+                 here was ever transferred to anyone, it's just this asset
+                 sitting in the scene until you either click its marker
+                 in-world or hit Pick up here. -->
+            <div id="droppedItemsSection" hidden>
+              <div class="subhead">Dropped in this world</div>
+              <div id="droppedItemsList" class="item-list"></div>
+            </div>
+
+            <div class="subhead">Counterparty's</div>
+            <div id="counterpartyCollectiblesList" class="item-list"></div>
           </div>
-          <input type="text" id="resourcesSearchInput" placeholder="Search resources…" style="margin-top:8px;">
-          <div class="subhead">Yours</div>
-          <div id="selfResourceList" class="item-list"></div>
-          <div class="subhead">Counterparty's</div>
-          <div id="counterpartyResourceList" class="item-list"></div>
+
+          <!-- Sub-screen: Documents — every asset with
+               presentation: "document" (currently just atlas.membership,
+               per the issuer's catalog — this panel works even though
+               it's sparse today). Same Yours/Counterparty's shape as
+               Collectibles above. -->
+          <div id="documentsSubscreen" class="subscreen">
+            <input type="text" id="documentsSearchInput" placeholder="Search documents…" style="margin-top:8px;">
+            <div class="subhead">Yours</div>
+            <div id="selfDocumentsList" class="item-list"></div>
+            <div class="subhead">Counterparty's</div>
+            <div id="counterpartyDocumentsList" class="item-list"></div>
+          </div>
         </div>
       </div>
 
@@ -469,13 +592,102 @@
         </div>
       </div>
 
-      <!-- Anchored at the very bottom of the panel, outside any collapsible
-           category, so it's reachable no matter which categories are open
-           or closed — see the JS comment near openSettingsBtn's listener
-           for why this lives here instead of next to #walletBtn. -->
-      <div class="btn-col" id="walletPanelFooter">
-        <button id="openSettingsBtn" type="button" class="btn-secondary">⚙ Settings</button>
+    </div>
+
+    <!-- Screen: Social (#61/#67) — Mail, Friends, and Favorites, as three
+         sub-sections of one tab rather than three top-level tabs. Mail used
+         to be its own top-level tab; it moved in here so all the "other
+         people / other domains you keep coming back to" features live in
+         one place. -->
+    <div id="socialScreen" class="wallet-screen">
+
+      <div id="socialSubtabBar" class="subtab-bar">
+        <button id="mailSubtabBtn" type="button">Mail<span id="mailBadge" class="subtab-badge"></span></button>
+        <button id="friendsSubtabBtn" type="button">Friends<span id="friendRequestsBadge" class="subtab-badge"></span></button>
+        <button id="favoritesSubtabBtn" type="button">Favorites</button>
       </div>
+
+      <!-- Sub-screen: Mail — correspondence a domain sent about a
+           credential you hold (see AtlasWallet.checkAllMail in wallet.js).
+           Holding a credential like a membership card from a domain is
+           what "hearing from it" actually means here — there's no
+           separate subscribe step. -->
+      <div id="mailSubscreen" class="subscreen">
+        <!-- Subscribing IS requesting an atlas.membership credential from
+             whichever domain you're currently in — see AtlasWallet.mintAsset
+             and checkAllMail's "holding the credential is the subscription"
+             design. Deliberately independent of #requestItemBtn / any world's
+             acceptedItemClasses list (see refreshSubscribeButton in viewer.js):
+             this is "subscribe to the domain", not "pick up this world's
+             collectible". Hidden entirely (not just disabled) once you already
+             hold that domain's membership card, per explicit request. -->
+        <div id="subscribeSection">
+          <h3>Subscribe</h3>
+          <div class="subhead">Get a membership card from the domain you're currently in — holding it is what lets that domain send you mail.</div>
+          <div class="btn-row">
+            <button id="subscribeBtn" type="button" class="btn-secondary">Subscribe</button>
+          </div>
+          <div id="subscribeStatus" class="empty-note" style="margin-top:6px;"></div>
+        </div>
+
+        <h3>Mail</h3>
+        <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere.</div>
+        <div class="btn-row">
+          <button id="checkMailNowBtn" type="button" class="btn-secondary">Check now</button>
+        </div>
+        <div id="mailLastChecked" class="empty-note" style="margin-top:8px;"></div>
+
+        <h3>Check frequency</h3>
+        <div class="subhead">How often the wallet checks for new mail on its own, while it's open.</div>
+        <div class="btn-row">
+          <input id="mailIntervalInput" type="number" min="1" step="1" style="width:70px;" aria-label="Mail check interval in minutes" />
+          <span>minutes</span>
+          <button id="saveMailIntervalBtn" type="button" class="btn-secondary">Save</button>
+        </div>
+        <div id="mailIntervalStatus" class="empty-note" style="margin-top:6px;"></div>
+
+        <h3>Messages</h3>
+        <div class="btn-row">
+          <button id="markAllMailReadBtn" type="button" class="btn-secondary">Mark all read</button>
+          <button id="clearAllMailBtn" type="button" class="btn-secondary">Clear all</button>
+        </div>
+        <div id="mailList" class="item-list"></div>
+      </div>
+
+      <!-- Sub-screen: Friends (#67) — friend requests happen LIVE, over the
+           same presence connection that makes other visitors show up as
+           walking characters (see connectPresence/pollPresence's signal
+           relay in viewer.js, and relaySignal() in presence-server.js).
+           There's no mail-based or standalone way to friend-request someone
+           — both people have to be in the same room at the same moment,
+           same as actually meeting them. -->
+      <div id="friendsSubscreen" class="subscreen">
+        <h3>People here now</h3>
+        <div class="subhead">Other visitors currently in this same world. Only someone with an unlocked wallet identity can be added.</div>
+        <div id="friendsHereList" class="item-list"></div>
+
+        <h3>Friend requests</h3>
+        <div class="subhead">Only live while you're still in the same world as whoever sent it — a request can't be answered after either of you leaves.</div>
+        <div id="friendRequestsList" class="item-list"></div>
+
+        <h3>Friends</h3>
+        <div id="friendsList" class="item-list"></div>
+      </div>
+
+      <!-- Sub-screen: Favorites (#61) — bookmarked domains, with a live
+           "who's here right now" status pulled from that domain's own
+           presence backend (see fetchPresenceStatus in viewer.js) and
+           cross-referenced against the Friends list ENTIRELY LOCALLY — no
+           server ever sees this visitor's friends list, see the privacy
+           note in presence-server.js's status route. -->
+      <div id="favoritesSubscreen" class="subscreen">
+        <div class="btn-row">
+          <button id="addCurrentFavoriteBtn" type="button" class="btn-secondary">Favorite this domain</button>
+        </div>
+        <div id="addCurrentFavoriteStatus" class="empty-note" style="margin-top:6px;"></div>
+        <div id="favoritesList" class="item-list" style="margin-top:14px;"></div>
+      </div>
+
     </div>
 
   </div>

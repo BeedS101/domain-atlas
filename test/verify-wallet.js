@@ -95,10 +95,10 @@ async function projectPortals(frame) {
     await frame.waitForFunction(() => !document.getElementById('requestItemBtn').disabled, { timeout: 5000 });
     await requestBtn.click();
     await frame.waitForFunction(
-      () => document.querySelectorAll('#selfItemsList .wallet-item').length > 0,
+      () => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0,
       { timeout: 15000 }
     );
-    const walletText = await frame.locator('#selfItemsList').textContent();
+    const walletText = await frame.locator('#selfCollectiblesList').textContent();
     console.log('PASS: item issued and stored in wallet ->', walletText.replace(/\s+/g, ' ').trim());
     if (!walletText.includes('✓')) throw new Error('Expected the freshly issued item to verify as valid');
     if (!walletText.includes('Bronze Compass')) throw new Error('Expected the Bronze Compass item');
@@ -129,7 +129,7 @@ async function projectPortals(frame) {
     await frame.locator('#reverifyBtn').click();
     await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === true, { timeout: 5000 }).catch(() => {});
     await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === false, { timeout: 15000 });
-    const walletTextAfterCross = await frame.locator('#selfItemsList').textContent();
+    const walletTextAfterCross = await frame.locator('#selfCollectiblesList').textContent();
     if (!walletTextAfterCross.includes('✓')) throw new Error('Item should still verify as valid from a different domain');
     // properties live inside `asset`, covered by the same signature as
     // name/class/model — if they'd been tampered with or dropped in
@@ -140,7 +140,7 @@ async function projectPortals(frame) {
     await page.screenshot({ path: shot('wallet-03-reverified-cross-domain.png') });
 
     console.log('STEP 7: exporting the wallet (atlas-wallet-export/1.0) — lives under Settings now');
-    await frame.locator('#openSettingsBtn').click();
+    await frame.locator('#settingsTabBtn').click();
     await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
     // Settings categories are collapsed by default — open "Wallet backup" before using its export button.
     await frame.locator('.settings-category[data-category="wallet-backup"] .settings-category-toggle').click();
@@ -173,7 +173,7 @@ async function projectPortals(frame) {
     await frame.locator('#reverifyBtn').click();
     await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === true, { timeout: 5000 }).catch(() => {});
     await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === false, { timeout: 15000 });
-    const walletTextAfterRevoke = await frame.locator('#selfItemsList').textContent();
+    const walletTextAfterRevoke = await frame.locator('#selfCollectiblesList').textContent();
     if (!walletTextAfterRevoke.includes('✗')) throw new Error('Revoked item should now show as invalid');
     if (!walletTextAfterRevoke.toLowerCase().includes('revoked')) throw new Error('Reason should mention revocation');
     console.log('PASS: revoked item now correctly shows as invalid, reason mentions revocation');

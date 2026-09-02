@@ -1,10 +1,12 @@
 // Domain Atlas — wallet (v1.2 of the prototype)
 //
-// A real implementation of SPEC.md §5 (items), §5.2 (loadouts and
-// transfer-on-loss), §5.4 (fungible resources), and §6 (identity) — plus
-// the client half of §7 (trading stations), whose settlement lives in
-// issuer-server/server.js. Nothing here is simulated; everything that can
-// be checked cryptographically, is.
+// A real implementation of SPEC.md §5 (asset credentials — unique and
+// fungible in one shape, as of the task #44 merge), §5.2 (loadouts and
+// transfer-on-loss, non-fungible), §5.4 (splitting/consolidating fungible
+// balances), and §6 (identity) — plus the client half of §7 (trading
+// stations, fungible), whose settlement lives in issuer-server/server.js.
+// Nothing here is simulated; everything that can be checked
+// cryptographically, is.
 //
 // Two identities exist in this wallet on purpose:
 //   - "self"        — YOU. Backed by either of two interchangeable
@@ -627,12 +629,59 @@ const AtlasWallet = (() => {
     return false;
   }
 
-  // ---------- item wallet (§5), keyed by owner public key so both
-  // identities' held items can be shown side by side ----------
+  // ---------- asset wallet (§5), keyed by owner public key so both
+  // identities' held assets can be shown side by side ----------
+  //
+  // As of the task #44 merge, there is exactly one wallet, one storage
+  // shape, and one function set for every asset credential this build
+  // handles — unique (asset.fungible: false, quantity always 1, moved
+  // whole via §5.2 loadout/transfer) and fungible (quantity any positive
+  // integer, splittable/consolidatable/tradeable via §5.4/§5.4.1/§7)
+  // alike. This replaces the former, fully parallel item-wallet/
+  // resource-wallet pair (getWallet/getResourceWallet, hideItem/
+  // hideResource, deleteItem/deleteResource, mintItem/mintResource, plus
+  // resource-only split/consolidate and item-only update-notice handling)
+  // with ONE store (atlasWallets) and ONE set of functions that branch
+  // internally on asset.fungible only where the arithmetic actually
+  // differs (splitting, consolidating, auto-merging, loadout/PvP loss).
+
+  // Task #44 was a clean-cut migration — no dual-schema verifier shim, old
+  // local wallet data was meant to just stop being relevant. What that
+  // missed: the unified store reuses the exact storage key the former
+  // ITEM-only wallet used (`atlasWallets`), so a device that used this
+  // extension before the merge still has pre-merge item entries sitting
+  // right here, and separately still has an entirely orphaned
+  // `atlasResourceWallets` key nothing reads anymore. Neither is a valid
+  // domain-atlas-asset/1.0 credential — a pre-merge item was signed over a
+  // payload with no quantity/fungible/presentation, and a pre-merge
+  // resource never had an `asset` wrapper at all — so neither can be
+  // carried forward or reissued into the new shape; they just went stale
+  // the moment the schema changed. Left in place, they cause exactly the
+  // two symptoms this purge fixes: the unified card renderer can't display
+  // something missing fields it assumes exist (so old holdings silently
+  // vanish from view), while the "already collected this class" courtesy
+  // check (alreadyHasRequestableItem in viewer.js) only ever read
+  // credential.asset.class — a field pre-merge ITEMS happened to already
+  // have — so it kept blocking a fresh request for the same class even
+  // though nothing valid was actually being shown. Filtering here, on the
+  // one read path everything else already funnels through, means any
+  // wallet that predates the merge self-corrects the moment it's touched,
+  // no manual reset needed.
+  function isPostMergeAssetCredential(entry) {
+    return !!(entry && entry.credential && entry.credential.credential === 'domain-atlas-asset/1.0');
+  }
 
   async function getWallet(ownerPublicKey) {
-    const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
-    return (atlasWallets || {})[ownerPublicKey] || [];
+    const { atlasWallets, atlasResourceWallets } = await chrome.storage.local.get(['atlasWallets', 'atlasResourceWallets']);
+    const wallets = atlasWallets || {};
+    const entries = wallets[ownerPublicKey] || [];
+    const cleaned = entries.filter(isPostMergeAssetCredential);
+    if (cleaned.length !== entries.length) {
+      wallets[ownerPublicKey] = cleaned;
+      await chrome.storage.local.set({ atlasWallets: wallets });
+    }
+    if (atlasResourceWallets) await chrome.storage.local.remove('atlasResourceWallets'); // fully orphaned since the merge — nothing valid to salvage, nothing else reads it
+    return cleaned;
   }
 
   async function saveWallet(ownerPublicKey, entries) {
@@ -642,25 +691,49 @@ const AtlasWallet = (() => {
     await chrome.storage.local.set({ atlasWallets: wallets });
   }
 
-  async function requestItem(issuerDomain, assetClass) {
-    const identity = await getIdentity();
-    if (!identity) throw new Error('Create an identity first.');
-    const res = await fetch(baseUrl(issuerDomain) + '/atlas/issue', {
+  // The one issuance entry point for every asset class this build can
+  // mint (SPEC.md §5) — `role` picks which local identity receives it
+  // ('self' or 'counterparty', same as every other role-taking function
+  // below), `quantity` is omitted (or 1) for a non-fungible class and a
+  // caller-chosen positive integer for a fungible one. The issuer itself
+  // is the real authority on what's required for a given class (see
+  // /atlas/asset/issue's own validation) — this is just the one HTTP call
+  // and local bookkeeping, not a second copy of that rule.
+  async function mintAsset(role, issuerDomain, assetClass, quantity) {
+    const owner = await identityOf(role);
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/issue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ownerPublicKey: identity.publicKey, assetClass })
+      body: JSON.stringify({ ownerPublicKey: owner.publicKey, assetClass, ...(quantity !== undefined ? { quantity } : {}) })
     });
-    if (!res.ok) throw new Error('Issuer refused: ' + (await res.text()));
+    if (!res.ok) throw new Error('Mint failed: ' + (await res.text()));
     const credential = await res.json();
     const verdict = await verifyCredential(credential);
-    const wallet = await getWallet(identity.publicKey);
+    const wallet = await getWallet(owner.publicKey);
     wallet.push({ credential, lastVerdict: verdict });
-    await saveWallet(identity.publicKey, wallet);
+    await saveWallet(owner.publicKey, wallet);
+    await autoConsolidateAssetWallet(owner.publicKey);
     return { credential, verdict };
   }
 
+  // The signed payload shape (SPEC.md §5): canonicalize({id, asset, owner,
+  // quantity, supersedes, issuedAt}) — one shape for unique and fungible
+  // assets alike, replacing the former separate itemPayloadOf/
+  // resourcePayloadOf pair. Every asset credential this build issues or
+  // adopts always carries every one of these keys explicitly (quantity: 1
+  // and supersedes: null for a first minting of a unique asset), so
+  // referencing them directly here is safe.
+  function assetPayloadOf(credential) {
+    return {
+      id: credential.id, asset: credential.asset, owner: credential.owner,
+      quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
+    };
+  }
+
   // The four checks from SPEC.md §5, steps 1/2/4 — step 3 (fresh WebAuthn
-  // assertion) is presentIdentity() below.
+  // assertion) is presentIdentity() below. One verification path for
+  // every asset now, replacing verifyCredential/verifyResourceCredential's
+  // former near-identical duplication.
   async function verifyCredential(credential) {
     try {
       const base = baseUrl(credential.issuer.domain);
@@ -676,8 +749,7 @@ const AtlasWallet = (() => {
       });
       if (!activeKey) return { valid: false, reason: 'issuer key was not valid at issuedAt' };
 
-      const payload = { id: credential.id, asset: credential.asset, owner: credential.owner, issuedAt: credential.issuedAt };
-      const data = new TextEncoder().encode(canonicalize(payload));
+      const data = new TextEncoder().encode(canonicalize(assetPayloadOf(credential)));
       const publicKey = await crypto.subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
       const sigOk = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
       if (!sigOk) return { valid: false, reason: 'signature does not match' };
@@ -690,25 +762,26 @@ const AtlasWallet = (() => {
     }
   }
 
-  // Removes an item from this wallet's LOCAL view only — there's no way to
-  // ask the issuer to un-issue a credential, and nothing here pretends to.
-  // This is for decluttering (a duplicate, a revoked item you're done
+  // Removes an asset from this wallet's LOCAL view only — there's no way
+  // to ask the issuer to un-issue a credential, and nothing here pretends
+  // to. This is for decluttering (a duplicate, a revoked asset you're done
   // tracking) — the credential itself, wherever else a copy of it exists,
   // is unaffected. Also drops it from the loadout, in case it was loaded.
-  async function deleteItem(ownerPublicKey, credentialId) {
+  async function deleteAsset(ownerPublicKey, credentialId) {
     const wallet = (await getWallet(ownerPublicKey)).filter((e) => e.credential.id !== credentialId);
     await saveWallet(ownerPublicKey, wallet);
     await unloadItem(credentialId);
   }
 
-  // Hiding is the non-destructive counterpart to deleteItem above: the
+  // Hiding is the non-destructive counterpart to deleteAsset above: the
   // credential stays in local storage (still exported in backups, still
   // re-verifiable) and only gets an entry.hidden flag that the UI uses to
-  // leave it out of the main item list. Unlike delete, this can't lose an
-  // item that has no other copy anywhere — it's always reachable again from
-  // Settings. Also unloads it, same reasoning as delete: a hidden item
-  // shouldn't stay "loaded into this world" where it's no longer visible.
-  async function hideItem(ownerPublicKey, credentialId) {
+  // leave it out of the main Inventory list. Unlike delete, this can't
+  // lose an asset that has no other copy anywhere — it's always reachable
+  // again from Settings -> Hidden assets. Also unloads it, same reasoning
+  // as delete: a hidden asset shouldn't stay "loaded into this world"
+  // where it's no longer visible.
+  async function hideAsset(ownerPublicKey, credentialId) {
     const wallet = await getWallet(ownerPublicKey);
     const entry = wallet.find((e) => e.credential.id === credentialId);
     if (!entry) return;
@@ -717,7 +790,7 @@ const AtlasWallet = (() => {
     await unloadItem(credentialId);
   }
 
-  async function unhideItem(ownerPublicKey, credentialId) {
+  async function unhideAsset(ownerPublicKey, credentialId) {
     const wallet = await getWallet(ownerPublicKey);
     const entry = wallet.find((e) => e.credential.id === credentialId);
     if (!entry) return;
@@ -725,82 +798,18 @@ const AtlasWallet = (() => {
     await saveWallet(ownerPublicKey, wallet);
   }
 
-  // ---------- resource wallet (§5.4), same keyed-by-owner shape ----------
+  // ---------- splitting and consolidating fungible balances (§5.4) ----------
+  // Fungible-only — a non-fungible asset's quantity is definitionally 1
+  // (SPEC.md §5), so there's nothing for this arithmetic to do to it; the
+  // issuer's /atlas/asset/split and /atlas/asset/consolidate endpoints
+  // reject a fungible:false credential outright, and these client-side
+  // entry points simply surface whatever error that 400 carries rather
+  // than duplicating the check here.
 
-  async function getResourceWallet(ownerPublicKey) {
-    const { atlasResourceWallets } = await chrome.storage.local.get('atlasResourceWallets');
-    return (atlasResourceWallets || {})[ownerPublicKey] || [];
-  }
-
-  async function saveResourceWallet(ownerPublicKey, entries) {
-    const { atlasResourceWallets } = await chrome.storage.local.get('atlasResourceWallets');
-    const wallets = atlasResourceWallets || {};
-    wallets[ownerPublicKey] = entries;
-    await chrome.storage.local.set({ atlasResourceWallets: wallets });
-  }
-
-  function resourcePayloadOf(credential) {
-    return {
-      id: credential.id, class: credential.class, quantity: credential.quantity,
-      owner: credential.owner, supersedes: credential.supersedes,
-      // properties (SPEC.md §5.4) is optional and, when present, was part
-      // of what the issuer actually signed — it has to be reconstructed
-      // here too, or a properties-bearing balance would look tampered
-      // with purely from this client omitting a field the issuer included.
-      ...(credential.properties ? { properties: credential.properties } : {}),
-      issuedAt: credential.issuedAt
-    };
-  }
-
-  async function verifyResourceCredential(credential) {
-    try {
-      const base = baseUrl(credential.issuer.domain);
-      const [keyDoc, revDoc] = await Promise.all([
-        fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json()),
-        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
-      ]);
-      const issuedAt = new Date(credential.issuedAt).getTime();
-      const activeKey = (keyDoc.keys || []).find((k) => {
-        const from = new Date(k.validFrom).getTime();
-        const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
-        return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
-      });
-      if (!activeKey) return { valid: false, reason: 'issuer key was not valid at issuedAt' };
-
-      const data = new TextEncoder().encode(canonicalize(resourcePayloadOf(credential)));
-      const publicKey = await crypto.subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
-      const sigOk = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
-      if (!sigOk) return { valid: false, reason: 'signature does not match' };
-
-      const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
-      if (revoked) return { valid: false, reason: 'revoked by issuer' };
-      return { valid: true, reason: 'signature verified against issuer key; not revoked' };
-    } catch (err) {
-      return { valid: false, reason: 'verification error: ' + err.message };
-    }
-  }
-
-  async function mintResource(role, issuerDomain, cls, quantity) {
-    const owner = await identityOf(role);
-    const res = await fetch(baseUrl(issuerDomain) + '/atlas/resource/issue', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ownerPublicKey: owner.publicKey, class: cls, quantity })
-    });
-    if (!res.ok) throw new Error('Mint failed: ' + (await res.text()));
-    const credential = await res.json();
-    const verdict = await verifyResourceCredential(credential);
-    const wallet = await getResourceWallet(owner.publicKey);
-    wallet.push({ credential, lastVerdict: verdict });
-    await saveResourceWallet(owner.publicKey, wallet);
-    await autoConsolidateResourceWallet(owner.publicKey);
-    return { credential, verdict };
-  }
-
-  async function splitResource(role, credential, sendAmount, toRole) {
+  async function splitAsset(role, credential, sendAmount, toRole) {
     const fromOwner = await identityOf(role);
     const toOwner = await identityOf(toRole);
-    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/resource/split', {
+    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/split', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ credential, sendAmount, toPublicKey: toOwner.publicKey })
@@ -808,32 +817,32 @@ const AtlasWallet = (() => {
     if (!res.ok) throw new Error('Split failed: ' + (await res.text()));
     const { sent, remainder } = await res.json();
 
-    let fromWallet = (await getResourceWallet(fromOwner.publicKey)).filter((e) => e.credential.id !== credential.id);
-    if (remainder) fromWallet.push({ credential: remainder, lastVerdict: await verifyResourceCredential(remainder) });
-    await saveResourceWallet(fromOwner.publicKey, fromWallet);
-    if (remainder) await autoConsolidateResourceWallet(fromOwner.publicKey);
+    let fromWallet = (await getWallet(fromOwner.publicKey)).filter((e) => e.credential.id !== credential.id);
+    if (remainder) fromWallet.push({ credential: remainder, lastVerdict: await verifyCredential(remainder) });
+    await saveWallet(fromOwner.publicKey, fromWallet);
+    if (remainder) await autoConsolidateAssetWallet(fromOwner.publicKey);
 
-    const toWallet = await getResourceWallet(toOwner.publicKey);
-    toWallet.push({ credential: sent, lastVerdict: await verifyResourceCredential(sent) });
-    await saveResourceWallet(toOwner.publicKey, toWallet);
-    await autoConsolidateResourceWallet(toOwner.publicKey);
+    const toWallet = await getWallet(toOwner.publicKey);
+    toWallet.push({ credential: sent, lastVerdict: await verifyCredential(sent) });
+    await saveWallet(toOwner.publicKey, toWallet);
+    await autoConsolidateAssetWallet(toOwner.publicKey);
 
     return { sent, remainder };
   }
 
   // Merges several balances of the same class AND issuer into one — the
-  // inverse of splitResource. Unlike deleteItem/deleteResource below, this
-  // genuinely changes what's owned (N credentials become 1 with the summed
+  // inverse of splitAsset. Unlike deleteAsset above, this genuinely
+  // changes what's owned (N credentials become 1 with the summed
   // quantity), so it has to go through the issuer: only the issuer's
-  // signature can vouch for the new total, the same reason splitResource's
-  // remainder does. See /atlas/resource/consolidate in issuer-server and
+  // signature can vouch for the new total, the same reason splitAsset's
+  // remainder does. See /atlas/asset/consolidate in issuer-server and
   // issuer-php for the other half. This is the low-level primitive both
-  // the manual "Consolidate" button (consolidateResources) and automatic
-  // consolidation (autoConsolidateResourceWallet, below) build on.
-  async function mergeResourceGroup(ownerPublicKey, credentials) {
+  // the manual "Consolidate" button (consolidateAsset) and automatic
+  // consolidation (autoConsolidateAssetWallet, below) build on.
+  async function mergeAssetGroup(ownerPublicKey, credentials) {
     if (!credentials || credentials.length < 2) return null;
     const issuerDomain = credentials[0].issuer.domain;
-    const res = await fetch(baseUrl(issuerDomain) + '/atlas/resource/consolidate', {
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/consolidate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ credentials })
@@ -842,19 +851,19 @@ const AtlasWallet = (() => {
     const merged = await res.json();
 
     const mergedIds = new Set(credentials.map((c) => c.id));
-    let wallet = (await getResourceWallet(ownerPublicKey)).filter((e) => !mergedIds.has(e.credential.id));
-    wallet.push({ credential: merged, lastVerdict: await verifyResourceCredential(merged) });
-    await saveResourceWallet(ownerPublicKey, wallet);
+    let wallet = (await getWallet(ownerPublicKey)).filter((e) => !mergedIds.has(e.credential.id));
+    wallet.push({ credential: merged, lastVerdict: await verifyCredential(merged) });
+    await saveWallet(ownerPublicKey, wallet);
     return merged;
   }
 
   // Manual entry point — the "Consolidate" button in the UI.
-  async function consolidateResources(role, credentials) {
+  async function consolidateAsset(role, credentials) {
     if (!credentials || credentials.length < 2) {
       throw new Error('Pick at least two balances of the same class and issuer to consolidate.');
     }
     const owner = await identityOf(role);
-    return mergeResourceGroup(owner.publicKey, credentials);
+    return mergeAssetGroup(owner.publicKey, credentials);
   }
 
   // Automatic entry point — called after anything that can leave a wallet
@@ -862,67 +871,35 @@ const AtlasWallet = (() => {
   // (minting, a split's remainder/received side, a trade's received side,
   // importing a wallet file), so balances get folded into one as they
   // arise instead of the user having to notice and merge them by hand.
-  // Scans the WHOLE resource wallet, not just the class that just changed,
-  // so it also cleans up anything an earlier merge attempt failed to (a
-  // network hiccup, say) — the manual button stays as a fallback either
-  // way. A failed merge here is swallowed rather than thrown: it would
-  // otherwise turn "the mint/split/trade itself succeeded" into a visible
-  // error over what's genuinely just housekeeping on top of it; the
-  // balances are left separate and still individually valid, and the
-  // manual "Consolidate" button remains available to retry.
-  async function autoConsolidateResourceWallet(ownerPublicKey) {
-    const wallet = await getResourceWallet(ownerPublicKey);
+  // Scans the WHOLE wallet, but only ever groups entries whose
+  // asset.fungible is true — a non-fungible asset is one-of-a-kind by
+  // definition (SPEC.md §5), so grouping two credentials of the same class
+  // would silently destroy the very thing that makes each one unique.
+  // Within that fungible subset, class + issuer domain is still what has
+  // to match for balances to be mergeable, same as before this merge. A
+  // failed merge here is swallowed rather than thrown: it would otherwise
+  // turn "the mint/split/trade itself succeeded" into a visible error over
+  // what's genuinely just housekeeping on top of it; the balances are left
+  // separate and still individually valid, and the manual "Consolidate"
+  // button remains available to retry.
+  async function autoConsolidateAssetWallet(ownerPublicKey) {
+    const wallet = await getWallet(ownerPublicKey);
     const groups = new Map();
     for (const entry of wallet) {
-      const key = entry.credential.class + '::' + entry.credential.issuer.domain;
+      if (!entry.credential.asset.fungible) continue;
+      const key = entry.credential.asset.class + '::' + entry.credential.issuer.domain;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(entry.credential);
     }
     for (const group of groups.values()) {
       if (group.length > 1) {
         try {
-          await mergeResourceGroup(ownerPublicKey, group);
+          await mergeAssetGroup(ownerPublicKey, group);
         } catch (err) {
           // Leave this group as separate, individually-valid balances.
         }
       }
     }
-  }
-
-  // Local-only removal, same idea as deleteItem above — no server involved,
-  // just decluttering this wallet's own view of a balance it's done with
-  // (e.g. a zero-quantity leftover, or one already folded into a merge).
-  // Still destructive though: a balance with real quantity left on it is
-  // exactly as unrecoverable as a deleted item if this was the only local
-  // copy, so hideResource below (not this) is what the resource card's
-  // primary action uses now — delete stays available as a secondary,
-  // confirm-guarded action for a stub that's genuinely done.
-  async function deleteResource(ownerPublicKey, credentialId) {
-    const wallet = (await getResourceWallet(ownerPublicKey)).filter((e) => e.credential.id !== credentialId);
-    await saveResourceWallet(ownerPublicKey, wallet);
-  }
-
-  // Non-destructive counterpart to deleteResource, same shape as
-  // hideItem/unhideItem above and for the same reason: a resource balance
-  // can represent real spendable value, so losing it to a stray click is
-  // just as bad as losing an item. The balance stays in local storage
-  // (still exported in backups, still re-verifiable, still spendable if
-  // unhidden) and only gets an entry.hidden flag the UI uses to leave it
-  // out of the main resource list.
-  async function hideResource(ownerPublicKey, credentialId) {
-    const wallet = await getResourceWallet(ownerPublicKey);
-    const entry = wallet.find((e) => e.credential.id === credentialId);
-    if (!entry) return;
-    entry.hidden = true;
-    await saveResourceWallet(ownerPublicKey, wallet);
-  }
-
-  async function unhideResource(ownerPublicKey, credentialId) {
-    const wallet = await getResourceWallet(ownerPublicKey);
-    const entry = wallet.find((e) => e.credential.id === credentialId);
-    if (!entry) return;
-    delete entry.hidden;
-    await saveResourceWallet(ownerPublicKey, wallet);
   }
 
   // ---------- loadout (§5.2) ----------
@@ -1055,7 +1032,7 @@ const AtlasWallet = (() => {
   }
 
   async function settleTrade(issuerDomain, intentSelf, intentCounterparty, balanceSelf, balanceCounterparty) {
-    const res = await fetch(baseUrl(issuerDomain) + '/atlas/resource/trade', {
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/trade', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ intentA: intentSelf, intentB: intentCounterparty, balanceA: balanceSelf, balanceB: balanceCounterparty })
@@ -1066,17 +1043,17 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     const counterparty = await getCounterparty();
 
-    let selfWallet = (await getResourceWallet(identity.publicKey)).filter((e) => e.credential.id !== balanceSelf.id);
-    if (aRemainder) selfWallet.push({ credential: aRemainder, lastVerdict: await verifyResourceCredential(aRemainder) });
-    selfWallet.push({ credential: aReceived, lastVerdict: await verifyResourceCredential(aReceived) });
-    await saveResourceWallet(identity.publicKey, selfWallet);
-    await autoConsolidateResourceWallet(identity.publicKey);
+    let selfWallet = (await getWallet(identity.publicKey)).filter((e) => e.credential.id !== balanceSelf.id);
+    if (aRemainder) selfWallet.push({ credential: aRemainder, lastVerdict: await verifyCredential(aRemainder) });
+    selfWallet.push({ credential: aReceived, lastVerdict: await verifyCredential(aReceived) });
+    await saveWallet(identity.publicKey, selfWallet);
+    await autoConsolidateAssetWallet(identity.publicKey);
 
-    let cpWallet = (await getResourceWallet(counterparty.publicKey)).filter((e) => e.credential.id !== balanceCounterparty.id);
-    if (bRemainder) cpWallet.push({ credential: bRemainder, lastVerdict: await verifyResourceCredential(bRemainder) });
-    cpWallet.push({ credential: bReceived, lastVerdict: await verifyResourceCredential(bReceived) });
-    await saveResourceWallet(counterparty.publicKey, cpWallet);
-    await autoConsolidateResourceWallet(counterparty.publicKey);
+    let cpWallet = (await getWallet(counterparty.publicKey)).filter((e) => e.credential.id !== balanceCounterparty.id);
+    if (bRemainder) cpWallet.push({ credential: bRemainder, lastVerdict: await verifyCredential(bRemainder) });
+    cpWallet.push({ credential: bReceived, lastVerdict: await verifyCredential(bReceived) });
+    await saveWallet(counterparty.publicKey, cpWallet);
+    await autoConsolidateAssetWallet(counterparty.publicKey);
 
     return { aRemainder, aReceived, bRemainder, bReceived };
   }
@@ -1185,6 +1162,154 @@ const AtlasWallet = (() => {
     return atlasRecentWorlds || [];
   }
 
+  // ---------- friends (#67) ----------
+  //
+  // A deliberate, user-curated list of other people's Atlas identities —
+  // distinct from setAlias/getAlias above (which just labels a key you've
+  // already interacted with) and from getCounterparty (a single local demo
+  // keypair standing in for "another visitor" in trade tests, not a real
+  // contact). Keyed by publicKey, one entry per key (re-adding an existing
+  // friend upserts their saved name rather than duplicating).
+  //
+  // How someone actually gets added (task #67's own open question,
+  // resolved this build): extension/viewer.js's live presence "signal"
+  // relay — presence-server.js/presence-php's protocol, extended
+  // specifically for this (see their own header comments) — lets either
+  // side send a friend request while you're both actually standing in the
+  // same room right now; the other side accepts or declines on the spot,
+  // and both wallets call addFriend() locally at that moment. The presence
+  // server only ever relays the request/response between two live
+  // connections; it never sees or stores anyone's friends list — that stays
+  // entirely client-side, here.
+  //
+  // Same "outside the wallet" scope as Recent worlds above: friends are a
+  // client convenience with no ownership/security meaning, untouched by
+  // locking, identity-switch, or wallet import/export.
+
+  async function getFriends() {
+    const { atlasFriends } = await chrome.storage.local.get('atlasFriends');
+    return atlasFriends || [];
+  }
+
+  async function addFriend(publicKey, name) {
+    if (!publicKey) throw new Error('No public key to add as a friend.');
+    const trimmedName = (name || '').trim().slice(0, MAX_ALIAS_LENGTH) || 'Friend';
+    if (aliasContainsBlockedWord(trimmedName)) throw new Error('That name isn\'t allowed here — try something else.');
+    const identity = await getIdentity();
+    if (identity && identity.publicKey === publicKey) throw new Error('That\'s your own identity, not someone else\'s.');
+    const friends = await getFriends();
+    const existing = friends.find((f) => f.publicKey === publicKey);
+    if (existing) {
+      // Re-adding (e.g. a later live request from the same person) just
+      // refreshes the saved name rather than creating a duplicate entry.
+      existing.name = trimmedName;
+    } else {
+      friends.push({ publicKey, name: trimmedName, addedAt: new Date().toISOString() });
+    }
+    await chrome.storage.local.set({ atlasFriends: friends });
+  }
+
+  async function removeFriend(publicKey) {
+    const friends = await getFriends();
+    const remaining = friends.filter((f) => f.publicKey !== publicKey);
+    await chrome.storage.local.set({ atlasFriends: remaining });
+  }
+
+  // ---------- favorite domains (#61) ----------
+  //
+  // Explicit, user-curated, reorderable — distinct from Recent worlds
+  // above (recency-ordered, auto-pruned, no curation). Domain-level per
+  // the original request: favoriting a domain, not one specific world
+  // within it (Recent worlds already covers "the exact world I was just
+  // in"; favorites is "places I want to be able to jump back to").
+  //
+  // The array's own order IS the display/teleport order — moveFavoriteDomain
+  // below reorders by swapping adjacent array positions, so no separate
+  // numeric "order" field is needed for it to survive add/remove.
+  //
+  // worldId/worldName/presenceBase are captured at add-time from whatever
+  // manifest was current (see viewer.js's addCurrentDomainToFavorites) —
+  // worldId lets teleporting land on a real world without needing
+  // manifest.defaultWorld to still mean the same thing later, and
+  // presenceBase is what lets the live "how many people are here now"
+  // status (viewer.js's fetchPresenceStatus) query the right presence
+  // server for a domain that isn't the one currently active, without
+  // re-fetching that domain's manifest just to ask.
+  //
+  // Same "outside the wallet" scope as Recent worlds and Friends above.
+
+  async function getFavoriteDomains() {
+    const { atlasFavoriteDomains } = await chrome.storage.local.get('atlasFavoriteDomains');
+    return atlasFavoriteDomains || [];
+  }
+
+  async function isFavoriteDomain(domain) {
+    const favorites = await getFavoriteDomains();
+    return favorites.some((f) => f.domain === domain);
+  }
+
+  async function addFavoriteDomain(entry) {
+    if (!entry || !entry.domain || !entry.manifestUrl) throw new Error('Missing domain/manifest to favorite.');
+    const favorites = await getFavoriteDomains();
+    if (favorites.some((f) => f.domain === entry.domain)) return; // already favorited — adding again is a no-op, not a duplicate or an error
+    favorites.push({
+      domain: entry.domain,
+      manifestUrl: entry.manifestUrl,
+      worldId: entry.worldId || null,
+      worldName: entry.worldName || entry.domain,
+      presenceBase: entry.presenceBase || null,
+      addedAt: new Date().toISOString()
+    });
+    await chrome.storage.local.set({ atlasFavoriteDomains: favorites });
+  }
+
+  async function removeFavoriteDomain(domain) {
+    const favorites = await getFavoriteDomains();
+    const remaining = favorites.filter((f) => f.domain !== domain);
+    await chrome.storage.local.set({ atlasFavoriteDomains: remaining });
+  }
+
+  // direction is 'up' or 'down' — swaps this entry with its immediate
+  // neighbor in that direction. A no-op at either end of the list rather
+  // than an error, so a UI button can just always be clickable and this
+  // quietly does nothing when there's nowhere to move.
+  async function moveFavoriteDomain(domain, direction) {
+    const favorites = await getFavoriteDomains();
+    const index = favorites.findIndex((f) => f.domain === domain);
+    if (index === -1) return;
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= favorites.length) return;
+    [favorites[index], favorites[targetIndex]] = [favorites[targetIndex], favorites[index]];
+    await chrome.storage.local.set({ atlasFavoriteDomains: favorites });
+  }
+
+  // ---------- player character size (#33 follow-up) ----------
+  //
+  // A purely cosmetic size multiplier on the rendered character model (see
+  // buildCharacter/charBase in gltf-mini.js) — doesn't touch movement
+  // speed, collision radius, or camera-follow distance, just how big the
+  // character LOOKS. Same reasoning as Recent worlds above it for living
+  // outside any per-identity wallet: a client display preference with no
+  // ownership meaning, untouched by locking/identity-switch/import-export.
+  const DEFAULT_CHARACTER_SCALE = 1;
+  const MIN_CHARACTER_SCALE = 0.5;
+  const MAX_CHARACTER_SCALE = 2;
+
+  function clampCharacterScale(n) {
+    return Number.isFinite(n) ? Math.max(MIN_CHARACTER_SCALE, Math.min(MAX_CHARACTER_SCALE, n)) : DEFAULT_CHARACTER_SCALE;
+  }
+
+  async function getCharacterScale() {
+    const { atlasCharacterScale } = await chrome.storage.local.get('atlasCharacterScale');
+    return clampCharacterScale(Number(atlasCharacterScale));
+  }
+
+  async function setCharacterScale(scale) {
+    const clamped = clampCharacterScale(Number(scale));
+    await chrome.storage.local.set({ atlasCharacterScale: clamped });
+    return clamped;
+  }
+
   // ---------- misc ----------
 
   async function reverifyAll() {
@@ -1194,73 +1319,336 @@ const AtlasWallet = (() => {
       const wallet = await getWallet(who.publicKey);
       for (const entry of wallet) entry.lastVerdict = await verifyCredential(entry.credential);
       await saveWallet(who.publicKey, wallet);
-
-      const resWallet = await getResourceWallet(who.publicKey);
-      for (const entry of resWallet) entry.lastVerdict = await verifyResourceCredential(entry.credential);
-      await saveResourceWallet(who.publicKey, resWallet);
     }
   }
 
   async function exportWallet() {
     const identity = await getIdentity();
-    const items = identity ? await getWallet(identity.publicKey) : [];
-    const resources = identity ? await getResourceWallet(identity.publicKey) : [];
+    const assets = identity ? await getWallet(identity.publicKey) : [];
     return {
       format: 'atlas-wallet-export/1.0',
       identity: identity ? { publicKey: identity.publicKey } : null,
-      credentials: [...items.map((w) => w.credential), ...resources.map((w) => w.credential)],
+      credentials: assets.map((w) => w.credential),
       exportedAt: new Date().toISOString()
     };
   }
 
   // The counterpart to exportWallet() above — re-populates this wallet's
-  // LOCAL item/resource lists from a previously exported file. This is not
-  // a trust operation the way importIdentity() is: nothing here is secret,
-  // and every credential gets independently re-verified against its own
-  // issuer (verifyCredential/verifyResourceCredential — real signature +
-  // revocation checks) before it's trusted, exactly as if it had just been
-  // issued. A credential whose `owner` doesn't match the currently active
-  // identity is skipped rather than silently relabeled as yours — an
-  // export file can be handed around, but importing it can't be used to
-  // make someone else's credential show up as your own. Already-present
-  // ids (by credential id) are skipped too, so importing the same file
-  // twice is harmless.
+  // LOCAL asset list from a previously exported file. This is not a trust
+  // operation the way importIdentity() is: nothing here is secret, and
+  // every credential gets independently re-verified against its own
+  // issuer (verifyCredential — real signature + revocation checks) before
+  // it's trusted, exactly as if it had just been issued. A credential
+  // whose `owner` doesn't match the currently active identity is skipped
+  // rather than silently relabeled as yours — an export file can be handed
+  // around, but importing it can't be used to make someone else's
+  // credential show up as your own. Already-present ids (by credential id)
+  // are skipped too, so importing the same file twice is harmless.
   async function importWallet(fileData) {
     if (!fileData || fileData.format !== 'atlas-wallet-export/1.0') throw new Error('Not an Atlas wallet export file.');
     const identity = await getIdentity();
     if (!identity) throw new Error('Unlock your wallet first.');
 
     const credentials = Array.isArray(fileData.credentials) ? fileData.credentials : [];
-    const items = credentials.filter((c) => c && c.credential === 'domain-atlas-item/1.0');
-    const resources = credentials.filter((c) => c && c.credential === 'domain-atlas-resource/1.0');
+    const assets = credentials.filter((c) => c && c.credential === 'domain-atlas-asset/1.0');
 
-    let itemsAdded = 0, itemsSkippedDuplicate = 0, itemsSkippedNotOwned = 0;
+    let assetsAdded = 0, assetsSkippedDuplicate = 0, assetsSkippedNotOwned = 0;
     const wallet = await getWallet(identity.publicKey);
-    for (const credential of items) {
-      if (credential.owner && credential.owner.publicKey !== identity.publicKey) { itemsSkippedNotOwned++; continue; }
-      if (wallet.some((e) => e.credential.id === credential.id)) { itemsSkippedDuplicate++; continue; }
+    for (const credential of assets) {
+      if (credential.owner && credential.owner.publicKey !== identity.publicKey) { assetsSkippedNotOwned++; continue; }
+      if (wallet.some((e) => e.credential.id === credential.id)) { assetsSkippedDuplicate++; continue; }
       wallet.push({ credential, lastVerdict: await verifyCredential(credential) });
-      itemsAdded++;
+      assetsAdded++;
     }
-    if (itemsAdded > 0) await saveWallet(identity.publicKey, wallet);
-
-    let resourcesAdded = 0, resourcesSkippedDuplicate = 0, resourcesSkippedNotOwned = 0;
-    const resWallet = await getResourceWallet(identity.publicKey);
-    for (const credential of resources) {
-      if (credential.owner && credential.owner.publicKey !== identity.publicKey) { resourcesSkippedNotOwned++; continue; }
-      if (resWallet.some((e) => e.credential.id === credential.id)) { resourcesSkippedDuplicate++; continue; }
-      resWallet.push({ credential, lastVerdict: await verifyResourceCredential(credential) });
-      resourcesAdded++;
-    }
-    if (resourcesAdded > 0) {
-      await saveResourceWallet(identity.publicKey, resWallet);
-      await autoConsolidateResourceWallet(identity.publicKey);
+    if (assetsAdded > 0) {
+      await saveWallet(identity.publicKey, wallet);
+      await autoConsolidateAssetWallet(identity.publicKey);
     }
 
-    return {
-      itemsAdded, itemsSkippedDuplicate, itemsSkippedNotOwned,
-      resourcesAdded, resourcesSkippedDuplicate, resourcesSkippedNotOwned
-    };
+    return { assetsAdded, assetsSkippedDuplicate, assetsSkippedNotOwned };
+  }
+
+  // ---------- mail (correspondence tied to a held credential) ----------
+  //
+  // A domain can send a message about a specific credential it issued —
+  // scoped by credentialId, signed the exact same way any other credential
+  // is (see /atlas/mail/send + /atlas/mail/check in issuer-server), and
+  // verified here against the exact same .well-known/atlas-key.json
+  // mechanism verifyCredential() already uses above. There's no separate
+  // "subscribe" step: requesting a class like atlas.membership (see
+  // ITEM_CATALOG) and holding the resulting credential IS the
+  // subscription, because checkAllMail() below only ever asks about
+  // credential ids currently sitting in the wallet — hide or delete that
+  // credential and there's nothing left to ask about, which is the
+  // unsubscribe.
+
+  const DEFAULT_MAIL_INTERVAL_MINUTES = 30;
+
+  async function getMailSettings() {
+    const { atlasMailSettings } = await chrome.storage.local.get('atlasMailSettings');
+    return { intervalMinutes: DEFAULT_MAIL_INTERVAL_MINUTES, lastCheckedAt: null, ...(atlasMailSettings || {}) };
+  }
+
+  async function setMailCheckInterval(minutes) {
+    const n = Number(minutes);
+    if (!Number.isFinite(n) || n < 1) throw new Error('Interval must be at least 1 minute.');
+    const settings = await getMailSettings();
+    settings.intervalMinutes = Math.round(n);
+    await chrome.storage.local.set({ atlasMailSettings: settings });
+  }
+
+  async function getMail(ownerPublicKey) {
+    const { atlasMail } = await chrome.storage.local.get('atlasMail');
+    return (atlasMail || {})[ownerPublicKey] || [];
+  }
+
+  async function saveMail(ownerPublicKey, entries) {
+    const { atlasMail } = await chrome.storage.local.get('atlasMail');
+    const all = atlasMail || {};
+    all[ownerPublicKey] = entries;
+    await chrome.storage.local.set({ atlasMail: all });
+  }
+
+  async function markMailRead(ownerPublicKey, messageId) {
+    const entries = await getMail(ownerPublicKey);
+    const entry = entries.find((e) => e.message.id === messageId);
+    if (!entry) return;
+    entry.read = true;
+    await saveMail(ownerPublicKey, entries);
+  }
+
+  async function markAllMailRead(ownerPublicKey) {
+    const entries = await getMail(ownerPublicKey);
+    entries.forEach((e) => { e.read = true; });
+    await saveMail(ownerPublicKey, entries);
+  }
+
+  // A message you've deleted needs to STAY gone across future checks —
+  // checkAllMail() below dedupes against ids it's already stored, but
+  // deleting removes it from that same array, so without tracking deleted
+  // ids separately a deleted message would just come right back on the
+  // next periodic check. This is the "seen but deleted" list that stops
+  // that: small, just ids, kept forever per owner (there's no protocol-
+  // level way to ask a domain to stop offering an old message, so this is
+  // the only thing that can permanently suppress it client-side).
+  async function getDeletedMailIds(ownerPublicKey) {
+    const { atlasDeletedMailIds } = await chrome.storage.local.get('atlasDeletedMailIds');
+    return (atlasDeletedMailIds || {})[ownerPublicKey] || [];
+  }
+
+  async function addDeletedMailIds(ownerPublicKey, ids) {
+    if (!ids.length) return;
+    const { atlasDeletedMailIds } = await chrome.storage.local.get('atlasDeletedMailIds');
+    const all = atlasDeletedMailIds || {};
+    const existing = new Set(all[ownerPublicKey] || []);
+    ids.forEach((id) => existing.add(id));
+    all[ownerPublicKey] = Array.from(existing);
+    await chrome.storage.local.set({ atlasDeletedMailIds: all });
+  }
+
+  async function deleteMailMessage(ownerPublicKey, messageId) {
+    const entries = await getMail(ownerPublicKey);
+    const remaining = entries.filter((e) => e.message.id !== messageId);
+    await saveMail(ownerPublicKey, remaining);
+    await addDeletedMailIds(ownerPublicKey, [messageId]);
+  }
+
+  async function clearAllMail(ownerPublicKey) {
+    const entries = await getMail(ownerPublicKey);
+    await addDeletedMailIds(ownerPublicKey, entries.map((e) => e.message.id));
+    await saveMail(ownerPublicKey, []);
+  }
+
+  // Same shape of check as verifyCredential() above, just over a mail
+  // payload instead of a credential payload — an unverified message is
+  // never trusted or shown, same as an unverified credential.
+  async function verifyMailMessage(domain, message) {
+    try {
+      const base = baseUrl(domain);
+      const keyDoc = await fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json());
+      const sentAt = new Date(message.sentAt).getTime();
+      const activeKey = (keyDoc.keys || []).find((k) => {
+        const from = new Date(k.validFrom).getTime();
+        const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+        return sentAt >= from && sentAt <= until;
+      });
+      if (!activeKey) return false;
+      const payload = { id: message.id, credentialId: message.credentialId, subject: message.subject, body: message.body, sentAt: message.sentAt };
+      const data = new TextEncoder().encode(canonicalize(payload));
+      const publicKey = await crypto.subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+      return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(message.signature), data);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // ---------- asset update notices (SPEC.md §5.1.1) ----------
+  //
+  // A durable, per-owner record of assets this wallet has adopted a
+  // reissued replacement for — the notification-side counterpart to mail's
+  // read/unread tracking above, same shape of problem: something arrived
+  // in the background and the UI needs a small, unobtrusive "you should
+  // look at this" signal (a badge count) until the owner actually opens
+  // the Wallet tab and sees it, at which point it's marked seen the same
+  // way opening Mail doesn't mark messages read until clicked — except
+  // here "opening the tab" IS the read action, since the wallet screen
+  // itself already shows the replacement asset front and center. Reissue
+  // itself stays non-fungible-only (a fungible class's properties are
+  // fixed per class, not per credential — see issuer-server's own note),
+  // but this handling isn't gated on that: `updates` can carry a plain
+  // `status: "revoked"` entry for ANY asset, fungible or not, so both
+  // branches below apply uniformly rather than assuming non-fungible.
+  async function getAssetUpdateNotices(ownerPublicKey) {
+    const { atlasAssetUpdateNotices } = await chrome.storage.local.get('atlasAssetUpdateNotices');
+    return (atlasAssetUpdateNotices || {})[ownerPublicKey] || [];
+  }
+
+  async function saveAssetUpdateNotices(ownerPublicKey, notices) {
+    const { atlasAssetUpdateNotices } = await chrome.storage.local.get('atlasAssetUpdateNotices');
+    const all = atlasAssetUpdateNotices || {};
+    all[ownerPublicKey] = notices;
+    await chrome.storage.local.set({ atlasAssetUpdateNotices: all });
+  }
+
+  async function markAssetUpdateNoticesSeen(ownerPublicKey) {
+    const notices = await getAssetUpdateNotices(ownerPublicKey);
+    if (notices.every((n) => n.seen)) return; // nothing to write
+    notices.forEach((n) => { n.seen = true; });
+    await saveAssetUpdateNotices(ownerPublicKey, notices);
+  }
+
+  // Handles the `updates` array a domain's /atlas/mail/check response may
+  // now carry alongside `messages` (see checkAllMail below) — one entry
+  // per requested credential id that isn't simply still active.
+  //
+  // For `status: "superseded"`, this is the one place a network response
+  // gets to change what a wallet holds, so it's held to the same bar as
+  // any other credential: verify the new credential's signature against
+  // the issuing domain's CURRENT key (verifyCredential — the exact §5
+  // check, re-fetched fresh, not trusted from the response), confirm its
+  // `owner.publicKey` actually matches this identity (a domain cannot use
+  // this channel to hand a visitor's wallet someone else's asset), and
+  // confirm `supersedes` actually names the id being replaced (a domain
+  // cannot use an unrelated valid credential to silently swap in a
+  // different asset). Only once all three hold does the old entry get
+  // replaced. A `newCredential` that fails any check is discarded — the
+  // old (now-revoked) entry stays exactly as it was, no different from any
+  // other verification failure this wallet already handles.
+  async function processAssetUpdates(ownerPublicKey, domain, updates) {
+    if (!updates || updates.length === 0) return;
+    const wallet = await getWallet(ownerPublicKey);
+    const notices = await getAssetUpdateNotices(ownerPublicKey);
+    let walletChanged = false;
+    let noticesChanged = false;
+
+    for (const update of updates) {
+      const idx = wallet.findIndex((e) => e.credential.id === update.id);
+      if (idx === -1) continue; // not something this wallet currently holds — nothing to do
+
+      if (update.status === 'superseded' && update.newCredential) {
+        const newCredential = update.newCredential;
+        if (
+          newCredential.credential !== 'domain-atlas-asset/1.0' ||
+          !newCredential.issuer || newCredential.issuer.domain !== domain ||
+          !newCredential.owner || newCredential.owner.publicKey !== ownerPublicKey ||
+          newCredential.supersedes !== update.id
+        ) continue; // never adopt anything that doesn't check out structurally, before even touching crypto
+
+        const verdict = await verifyCredential(newCredential);
+        if (!verdict.valid) continue; // never adopt anything that doesn't verify
+
+        const oldEntry = wallet[idx];
+        wallet.splice(idx, 1, { credential: newCredential, lastVerdict: verdict, ...(oldEntry.hidden ? { hidden: true } : {}) });
+        await unloadItem(update.id); // the old id can no longer be in any world's loadout
+        walletChanged = true;
+        noticesChanged = true;
+        notices.push({
+          id: 'urn:atlas:asset-update:' + newCredential.id,
+          oldId: update.id,
+          newId: newCredential.id,
+          name: newCredential.asset.name,
+          domain,
+          supersededAt: new Date().toISOString(),
+          seen: false
+        });
+      } else if (update.status === 'revoked') {
+        // Not a reissue — just a plain revocation this wallet hadn't
+        // noticed yet. Re-verifying refreshes the displayed verdict
+        // immediately rather than waiting for a manual "Re-verify wallet".
+        wallet[idx].lastVerdict = await verifyCredential(wallet[idx].credential);
+        walletChanged = true;
+      }
+    }
+
+    if (walletChanged) await saveWallet(ownerPublicKey, wallet);
+    if (noticesChanged) await saveAssetUpdateNotices(ownerPublicKey, notices);
+  }
+
+  // The actual periodic check: gathers every domain the current self
+  // identity holds a credential from, asks each domain's
+  // /atlas/mail/check for anything tied to those specific credential ids,
+  // verifies each message's signature before trusting it, and stores
+  // whatever's new. A domain being unreachable just gets skipped, same
+  // reasoning as reverifyAll not letting one bad domain block the rest.
+  // Returns how many new (verified) messages arrived, across all domains.
+  //
+  // `opts.onlyDomain` restricts the check to one issuing domain instead of
+  // every domain this wallet holds something from — this is what lets
+  // entering a world (viewer.js's enterWorld) trigger an immediate,
+  // scoped check ("did anything I hold FROM THIS DOMAIN change?") through
+  // the exact same code path the periodic background loop already uses,
+  // rather than standing up a second, competing check mechanism.
+  async function checkAllMail(opts = {}) {
+    const identity = await getIdentity();
+    if (!identity) return 0;
+
+    const assets = await getWallet(identity.publicKey);
+    const byDomain = new Map(); // domain -> Set(credentialId)
+    assets.forEach((entry) => {
+      const domain = entry.credential.issuer && entry.credential.issuer.domain;
+      if (!domain) return;
+      if (opts.onlyDomain && domain !== opts.onlyDomain) return;
+      if (!byDomain.has(domain)) byDomain.set(domain, new Set());
+      byDomain.get(domain).add(entry.credential.id);
+    });
+
+    const existing = await getMail(identity.publicKey);
+    // deletedIds (see deleteMailMessage/clearAllMail) keeps a message you
+    // removed from resurfacing here — knownIds alone isn't enough, since
+    // deleting a message takes it OUT of `existing`.
+    const deletedIds = new Set(await getDeletedMailIds(identity.publicKey));
+    const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds]);
+    let newCount = 0;
+
+    for (const [domain, idSet] of byDomain) {
+      try {
+        const base = baseUrl(domain);
+        const res = await fetch(base + '/atlas/mail/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ credentialIds: Array.from(idSet) })
+        });
+        const { messages, updates } = await res.json();
+        for (const message of (messages || [])) {
+          if (knownIds.has(message.id)) continue;
+          const ok = await verifyMailMessage(domain, message);
+          if (!ok) continue; // never surface anything that doesn't check out
+          existing.push({ message: { ...message, domain }, read: false, receivedAt: new Date().toISOString() });
+          knownIds.add(message.id);
+          newCount++;
+        }
+        await processAssetUpdates(identity.publicKey, domain, updates);
+      } catch (err) {
+        // unreachable domain — move on, don't let it block the others
+      }
+    }
+
+    existing.sort((a, b) => new Date(b.message.sentAt) - new Date(a.message.sentAt));
+    await saveMail(identity.publicKey, existing);
+    const settings = await getMailSettings();
+    settings.lastCheckedAt = new Date().toISOString();
+    await chrome.storage.local.set({ atlasMailSettings: settings });
+    return newCount;
   }
 
   return {
@@ -1269,14 +1657,19 @@ const AtlasWallet = (() => {
     getIdentityMode, setIdentityMode, hasLocalIdentity, hasWebAuthnIdentity,
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
     getCounterparty, createCounterparty,
-    getWallet, requestItem, verifyCredential, reverifyAll, exportWallet, importWallet, deleteItem,
-    hideItem, unhideItem,
-    getResourceWallet, mintResource, verifyResourceCredential, splitResource,
-    consolidateResources, deleteResource, hideResource, unhideResource,
+    getWallet, mintAsset, verifyCredential, reverifyAll, exportWallet, importWallet, deleteAsset,
+    hideAsset, unhideAsset,
+    splitAsset, consolidateAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
     dropItem, pickUpItem, getDroppedItems, getDroppedItemsInWorld,
     proposeIntent, settleTrade, verifySignedPayload,
     recordWorldVisit, getRecentWorlds,
-    setAlias, clearAlias, getAlias
+    getCharacterScale, setCharacterScale,
+    setAlias, clearAlias, getAlias,
+    getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
+    markAllMailRead, deleteMailMessage, clearAllMail,
+    getAssetUpdateNotices, markAssetUpdateNoticesSeen,
+    getFriends, addFriend, removeFriend,
+    getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain
   };
 })();

@@ -15,6 +15,28 @@ const hintEl = document.getElementById('hint');
 const placeLabel = document.getElementById('placeLabel');
 const statusEl = document.getElementById('status');
 const closeBtn = document.getElementById('closeBtn');
+const sceneLoadProgressEl = document.getElementById('sceneLoadProgress');
+const sceneLoadProgressCountEl = document.getElementById('sceneLoadProgressCount');
+const sceneLoadProgressFillEl = document.getElementById('sceneLoadProgressFill');
+
+// Scene asset download progress (#36) — driven by gltf-mini.js's
+// loadScene() via the onLoadProgress option passed into MiniGLTF.init
+// below, counting UNIQUE model urls loaded so far vs the total for this
+// scene (see that file's own comment on why unique-url, not per-placed-
+// object). total===0 means either a scene with no GLB objects at all (a
+// bare procedural room) or the progress hook simply wasn't used — either
+// way there's nothing meaningful to show, so the bar stays hidden rather
+// than flashing a 0/0.
+function updateSceneLoadProgress(loaded, total) {
+  if (!sceneLoadProgressEl) return;
+  if (!total) { sceneLoadProgressEl.classList.remove('active'); return; }
+  sceneLoadProgressEl.classList.add('active');
+  if (sceneLoadProgressCountEl) sceneLoadProgressCountEl.textContent = loaded + ' / ' + total;
+  if (sceneLoadProgressFillEl) sceneLoadProgressFillEl.style.width = Math.round((loaded / total) * 100) + '%';
+}
+function hideSceneLoadProgress() {
+  if (sceneLoadProgressEl) sceneLoadProgressEl.classList.remove('active');
+}
 
 // ---------- stale extension context ----------
 // Reloading the unpacked extension (chrome://extensions -> Reload, or an
@@ -43,9 +65,431 @@ window.addEventListener('unhandledrejection', (event) => {
 // for the previous one. See enterWorld().
 let active3D = null;
 
+// ---------- presence (multiplayer, #66 + polling fallback #68) ----------
+// A live connection to presence-server telling this domain+world "room"
+// who else is here and where. Only meaningful for 3D (gltf-mini-v1)
+// worlds, since that's the only renderer with a visible character at all
+// (#33) — see enterWorld() for where this connects/disconnects. Its own
+// small lifecycle, deliberately separate from active3D's: a presence
+// server that's down, slow, or unreachable must never block or break
+// entering a world — multiplayer is an enhancement layered on top of
+// single-player, not a requirement of it (see the try/catch/'error'
+// listener below, and pollPresence()'s own silent give-up).
+//
+// Two transports, one visible API (connectPresence/disconnectPresence):
+// WebSocket is tried first (real-time, what presence-server's /presence
+// endpoint is built for). If that fails outright — most commonly because
+// the actual deployment target can't run a persistent WebSocket process at
+// all, e.g. plain cPanel/Apache+PHP shared hosting (see presence-server/
+// server.js's own header comment on why, and issuer-php/README.txt for
+// the same constraint already hit once for the issuer) — this falls back
+// to plain HTTP polling against the SAME server's /presence/poll/* routes,
+// which share the exact same rooms as the WebSocket side. Either way,
+// active3D.upsertRemotePlayer()/removeRemotePlayer() is all either path
+// ever calls; gltf-mini.js's rendering/interpolation has no idea which
+// transport is in use, and doesn't need to.
+//
+// The presence endpoint is now a per-domain, manifest-declared thing —
+// enterWorld() passes manifest.presence through to connectPresence() as
+// `presenceBase`. This is NOT part of SPEC.md; it's a plain, optional,
+// implementation-only convenience field the same way `presence-server`
+// itself isn't part of the formal protocol. A manifest with no `presence`
+// field (every existing local demo domain) falls back to
+// PRESENCE_DEFAULT_BASE below, so nothing about local dev changes.
+//
+// Given a base like "https://example.com" or "http://localhost:8004",
+// presenceWsUrlFor() derives the WebSocket URL by swapping the scheme
+// (http->ws, https->wss) and appending /presence; the HTTP polling base
+// is the base as given, with /presence/poll/* appended per call. A domain
+// whose presence lives entirely on plain PHP/Apache (see presence-php/,
+// task #68) simply has no working WebSocket route at that derived
+// wss://.../presence URL — the connection attempt fails fast, and the
+// existing WS-then-poll fallback logic (unchanged, added for task #68)
+// picks up the SAME base for polling automatically. No separate
+// "transport capability" flag needed in the manifest: a domain either
+// answers the WS upgrade or it doesn't, and the client already handles
+// both outcomes.
+const PRESENCE_DEFAULT_BASE = 'http://localhost:8004';
+function presenceWsUrlFor(base) {
+  return base.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/presence';
+}
+const PRESENCE_MOVE_INTERVAL_MS = 150; // WebSocket: how often a move is sent
+const PRESENCE_POLL_INTERVAL_MS = 2000; // polling fallback: one sync (move + roster fetch) per tick — server's staleness timeout is generous enough to tolerate a couple of missed ticks
+const PRESENCE_WS_CONNECT_TIMEOUT_MS = 2500; // how long to let a WebSocket attempt hang before giving up on it and trying polling instead
+
+let presenceSocket = null;
+let presenceMoveTimer = null;
+// A polling attempt has no server-assigned id to compare identity against
+// until its join fetch actually resolves — unlike the WebSocket path,
+// where `socket` itself is that identity from the very first line of
+// connectPresence(). presencePollToken plays the same role for polling:
+// set synchronously the moment pollPresence() is called, so a join
+// response that comes back after a NEWER attempt has already taken over
+// (a fast enterWorld() -> enterWorld() -> enterWorld(), or a WS attempt
+// that succeeded in the meantime) can recognize it's stale and back out,
+// instead of resurrecting presence for a world already left behind.
+let presencePollToken = null;
+let presencePollId = null; // server-assigned id, set once join resolves and this attempt is still current
+let presencePollTimer = null;
+let presencePollHttpBase = null; // the base this poll session's id belongs to — needed by disconnectPresence()'s leave beacon
+
+// This visitor's own identity as announced to the current presence room
+// (Friends, #67) — null/null for an anonymous visitor with no unlocked
+// wallet, same as what actually gets sent in the join message. Needed by
+// the "Add friend" action so it can announce who's asking, without having
+// to re-look-up the wallet identity at click time (the identity might get
+// locked between joining a room and clicking Add friend on someone in it —
+// this keeps the signal consistent with whatever was actually announced).
+let presenceOwnPublicKey = null;
+let presenceOwnName = null;
+
+// Live roster metadata (Friends, #67): id -> {name, publicKey}, separate
+// from gltf-mini.js's remotePlayers (render-only — position/yaw for
+// interpolation, no name or publicKey at all). Used by the Friends screen
+// to show "who's here right now" with an Add-friend action, and to
+// recognize an incoming signal's `from` id as someone actually present.
+let presenceRosterMeta = new Map();
+function notePresenceRosterMeta(id, name, publicKey) {
+  presenceRosterMeta.set(id, { name: name || 'Visitor', publicKey: publicKey || null });
+}
+function clearPresenceRosterMeta() { presenceRosterMeta = new Map(); }
+
+// Friend-request state (Friends, #67), scoped to the CURRENT presence
+// connection — same "live through presence" design as the rest of this
+// feature: a request only makes sense while both parties are simultaneously
+// in the room, so none of this survives disconnectPresence() (see there).
+// presencePendingIncoming: requests aimed at THIS visitor, waiting on an
+// Accept/Decline click, {from, publicKey, name, receivedAt}[].
+// presencePendingSentRequests: ids THIS visitor has already sent a
+// friend-request to, so the "Add friend" button can show "Request sent"
+// instead of letting a second request pile up.
+let presencePendingIncoming = [];
+let presencePendingSentRequests = new Set();
+
+function presenceIsConnected() {
+  return !!(presenceSocket && presenceSocket.readyState === WebSocket.OPEN) || !!presencePollId;
+}
+
+// True once a domain+world's presence backend has relayed a signal back at
+// this visitor — routed to the Friends screen's "Friend requests" /
+// "Add friend" state, and to the top Social tab's badge count. See
+// ALLOWED_SIGNAL_KINDS in presence-server.js/store.php for the closed
+// vocabulary this handles; anything else is simply not sent by either
+// backend, so there's nothing else to branch on here.
+function handleIncomingSignal(msg) {
+  if (!msg || typeof msg.from !== 'string') return;
+  if (msg.kind === 'friend-request') {
+    if (presencePendingIncoming.some((r) => r.from === msg.from)) return; // already have one from them, don't duplicate
+    presencePendingIncoming.push({ from: msg.from, publicKey: msg.publicKey || null, name: msg.name || 'Visitor', receivedAt: Date.now() });
+  } else if (msg.kind === 'friend-request-accepted') {
+    presencePendingSentRequests.delete(msg.from);
+    if (msg.publicKey) {
+      // Save using the identity THEY just confirmed in this reply, not
+      // whatever roster snapshot was on screen when the request was sent —
+      // that snapshot could in principle be stale by the time they answer.
+      AtlasWallet.addFriend(msg.publicKey, msg.name || 'Friend').then(() => { if (socialFriendsTabActive()) refreshFriendsDisplay(); }).catch(() => {});
+    }
+  } else if (msg.kind === 'friend-request-declined') {
+    presencePendingSentRequests.delete(msg.from);
+  }
+  updateSocialBadge();
+  if (socialFriendsTabActive()) refreshFriendsDisplay();
+}
+
+// Sends a friend-request-family signal to another member of the CURRENT
+// room, over whichever transport is actually connected right now — a
+// live WS send if one's open, otherwise the polling relay route. No-op if
+// neither transport is connected (nothing to relay through).
+function sendSignal(toId, kind, publicKey, name) {
+  if (presenceSocket && presenceSocket.readyState === WebSocket.OPEN) {
+    presenceSocket.send(JSON.stringify({ type: 'signal', to: toId, kind, publicKey, name }));
+    return;
+  }
+  if (presencePollId && presencePollHttpBase) {
+    fetch(presencePollHttpBase + '/presence/poll/signal', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: presencePollId, to: toId, kind, publicKey, name })
+    }).catch(() => {});
+  }
+}
+
+// Read-only "who's in this world right now" for a domain+world the caller
+// ISN'T necessarily present in (Favorites, #61) — a favorited domain the
+// visitor hasn't opened this session. Never throws; an unreachable or
+// misconfigured presence backend just reads as "nobody's status
+// available," same "presence is a pure enhancement, never an error"
+// posture connectPresence/pollPresence already have.
+async function fetchPresenceStatus(domain, worldId, presenceBase) {
+  const base = presenceBase || PRESENCE_DEFAULT_BASE;
+  try {
+    const res = await fetch(base + '/presence/status?domain=' + encodeURIComponent(domain) + '&world=' + encodeURIComponent(worldId));
+    if (!res.ok) return { count: 0, roster: [] };
+    const body = await res.json();
+    return { count: body.count || 0, roster: body.roster || [] };
+  } catch (err) {
+    return { count: 0, roster: [] };
+  }
+}
+
+function currentLocalPose() {
+  if (!active3D) return null;
+  const pos = active3D.camera.pos;
+  // y is FLOOR-relative (getCharacterFloorY()), not pos[1] (the camera's
+  // own eye height, ~1.6 units off the ground while standing) — a remote
+  // client places the received y directly as where a character's feet
+  // stand, so broadcasting eye height renders everyone else hovering
+  // roughly at head height instead of standing on the floor. See
+  // getCharacterFloorY()'s own comment in gltf-mini.js for the full story.
+  return { x: pos[0], y: active3D.getCharacterFloorY(), z: pos[2], yaw: active3D.getCharacterYaw() };
+}
+
+// Reconciles a polling roster response (the full "everyone else in the
+// room right now" list) against what's currently rendered — upserts
+// anyone present, removes anyone that dropped out since the last poll.
+// This is polling's substitute for the WebSocket side's individual
+// joined/moved/left push events: no persistent connection to push down,
+// so every tick just re-syncs the whole picture instead.
+let presencePollKnownIds = new Set();
+function reconcilePollRoster(roster) {
+  if (!active3D) return;
+  const seen = new Set();
+  (roster || []).forEach((m) => { active3D.upsertRemotePlayer(m.id, m); seen.add(m.id); });
+  presencePollKnownIds.forEach((id) => { if (!seen.has(id)) active3D.removeRemotePlayer(id); });
+  presencePollKnownIds = seen;
+}
+
+function disconnectPresence() {
+  if (presenceMoveTimer) { clearInterval(presenceMoveTimer); presenceMoveTimer = null; }
+  if (presenceSocket) {
+    const socket = presenceSocket;
+    presenceSocket = null;
+    try { socket.close(); } catch (err) {}
+  }
+  presencePollToken = null; // invalidates any in-flight join or running interval from this point on, see pollPresence()
+  if (presencePollTimer) { clearInterval(presencePollTimer); presencePollTimer = null; }
+  if (presencePollId) {
+    const id = presencePollId;
+    const base = presencePollHttpBase;
+    presencePollId = null;
+    presencePollHttpBase = null;
+    presencePollKnownIds = new Set();
+    // Best-effort — a closed tab won't reach this, that's what the
+    // server's staleness sweep (task #68) is for. A clean world switch or
+    // overlay close reaches it fine, so it's worth sending when possible.
+    fetch(base + '/presence/poll/leave', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
+    }).catch(() => {});
+  }
+  window.__atlasPresenceOwnId = null;
+  // Friend-request state is scoped to this one presence connection (#67,
+  // see presencePendingIncoming's own comment) — leaving the room means
+  // any not-yet-answered request can't be replied to anymore anyway (the
+  // relay only works within the sender's current room), so there's nothing
+  // useful left to keep around.
+  presenceOwnPublicKey = null;
+  presenceOwnName = null;
+  clearPresenceRosterMeta();
+  presencePendingIncoming = [];
+  presencePendingSentRequests = new Set();
+  if (socialFriendsTabActive()) refreshFriendsDisplay();
+  updateSocialBadge();
+}
+
+function pollPresence(domain, worldId, displayName, httpBase, publicKey) {
+  const base = httpBase || PRESENCE_DEFAULT_BASE;
+  const token = {}; // this attempt's own identity — see the presencePollToken comment above
+  presencePollToken = token;
+  presenceOwnPublicKey = publicKey || null;
+  presenceOwnName = displayName;
+
+  fetch(base + '/presence/poll/join', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ domain, world: worldId, name: displayName, publicKey })
+  })
+    .then((r) => r.json())
+    .then((welcome) => {
+      // Superseded by a later enterWorld() call (or a WS attempt that
+      // succeeded in the meantime) before this join actually resolved —
+      // leave the room we just joined rather than let a visitor "linger"
+      // server-side in a world they've already left, and don't touch any
+      // state a newer attempt now owns.
+      if (presencePollToken !== token || !active3D) {
+        fetch(base + '/presence/poll/leave', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: welcome.id })
+        }).catch(() => {});
+        return;
+      }
+      presencePollId = welcome.id;
+      presencePollHttpBase = base;
+      window.__atlasPresenceOwnId = welcome.id;
+      (welcome.roster || []).forEach((m) => notePresenceRosterMeta(m.id, m.name, m.publicKey));
+      reconcilePollRoster(welcome.roster);
+      if (socialFriendsTabActive()) refreshFriendsDisplay();
+      presencePollTimer = setInterval(() => {
+        if (presencePollToken !== token) return; // disconnectPresence() already clears this timer too — just a defensive guard
+        const pose = currentLocalPose() || {};
+        fetch(base + '/presence/poll/sync', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.assign({ id: welcome.id }, pose))
+        })
+          .then((r) => r.json())
+          .then((res) => {
+            if (presencePollToken !== token) return;
+            (res.roster || []).forEach((m) => notePresenceRosterMeta(m.id, m.name, m.publicKey));
+            presencePollKnownIds.forEach((id) => { if (!(res.roster || []).some((m) => m.id === id)) presenceRosterMeta.delete(id); });
+            reconcilePollRoster(res.roster);
+            if (socialFriendsTabActive()) refreshFriendsDisplay();
+            (res.signals || []).forEach((sig) => handleIncomingSignal(sig)); // friend requests etc (#67) — see poll/sync.php and its Node twin
+          })
+          .catch(() => {}); // a dropped tick just tries again next interval — no need to escalate
+      }, PRESENCE_POLL_INTERVAL_MS);
+    })
+    .catch(() => {}); // presence, including its fallback, stays a pure enhancement — never surfaced as an error
+}
+
+function connectPresence(domain, worldId, displayName, presenceBase, publicKey) {
+  const base = presenceBase || PRESENCE_DEFAULT_BASE;
+  let socket;
+  try {
+    socket = new WebSocket(presenceWsUrlFor(base));
+  } catch (err) {
+    pollPresence(domain, worldId, displayName, base, publicKey); // WebSocket unsupported/blocked outright — go straight to polling
+    return;
+  }
+
+  // If the WebSocket attempt hasn't opened OR failed within this window
+  // (a presence server that exists but never completes the handshake,
+  // rather than one that's cleanly unreachable and errors fast), stop
+  // waiting on it and fall back to polling anyway — a visitor shouldn't
+  // go without any presence at all just because one transport hung.
+  //
+  // Guarded by `presenceSocket === socket`, not just `settled`: if
+  // disconnectPresence() already ran (a fast world switch, say), it will
+  // have set presenceSocket to null (or a newer socket) and closed this
+  // one itself — this timer firing afterward must NOT then call
+  // pollPresence() for a world already left behind, since that stale call
+  // could otherwise clobber a legitimately newer session's token.
+  let settled = false;
+  const fallbackTimer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    if (presenceSocket !== socket) return; // superseded — nothing to fall back FOR
+    presenceSocket = null;
+    try { socket.close(); } catch (err) {}
+    pollPresence(domain, worldId, displayName, base, publicKey);
+  }, PRESENCE_WS_CONNECT_TIMEOUT_MS);
+
+  presenceSocket = socket;
+  presenceOwnPublicKey = publicKey || null;
+  presenceOwnName = displayName;
+
+  socket.addEventListener('open', () => {
+    // Superseded by a later enterWorld() call (disconnectPresence(), then
+    // a new connectPresence()) before this particular connection actually
+    // finished opening — let it die quietly rather than join a room for a
+    // world the visitor has already left.
+    if (presenceSocket !== socket) { try { socket.close(); } catch (err) {} return; }
+    settled = true;
+    clearTimeout(fallbackTimer);
+    socket.send(JSON.stringify({ type: 'join', domain, world: worldId, name: displayName, publicKey }));
+    presenceMoveTimer = setInterval(() => {
+      const pose = currentLocalPose();
+      if (!pose || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify(Object.assign({ type: 'move' }, pose)));
+    }, PRESENCE_MOVE_INTERVAL_MS);
+  });
+
+  socket.addEventListener('message', (ev) => {
+    if (presenceSocket !== socket || !active3D) return; // stale connection, or the world already changed out from under it
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (err) { return; }
+    if (!msg || typeof msg.type !== 'string') return;
+    if (msg.type === 'welcome') {
+      window.__atlasPresenceOwnId = msg.id; // test-observability, same convention as window.__atlasActive3D/__atlasScene
+      (msg.roster || []).forEach((m) => { active3D.upsertRemotePlayer(m.id, m); notePresenceRosterMeta(m.id, m.name, m.publicKey); });
+      if (socialFriendsTabActive()) refreshFriendsDisplay();
+    } else if (msg.type === 'joined') {
+      active3D.upsertRemotePlayer(msg.id, msg);
+      notePresenceRosterMeta(msg.id, msg.name, msg.publicKey);
+      if (socialFriendsTabActive()) refreshFriendsDisplay();
+    } else if (msg.type === 'moved') {
+      active3D.upsertRemotePlayer(msg.id, msg); // no name/publicKey on a move broadcast — roster meta from join/welcome stands
+    } else if (msg.type === 'left') {
+      active3D.removeRemotePlayer(msg.id);
+      presenceRosterMeta.delete(msg.id);
+      if (socialFriendsTabActive()) refreshFriendsDisplay();
+    } else if (msg.type === 'signal') {
+      handleIncomingSignal(msg); // friend requests etc (#67) — see relaySignal() in presence-server.js
+    }
+  });
+
+  socket.addEventListener('close', () => {
+    const wasCurrent = presenceSocket === socket;
+    if (wasCurrent) {
+      presenceSocket = null;
+      if (presenceMoveTimer) { clearInterval(presenceMoveTimer); presenceMoveTimer = null; }
+    }
+    // A close that arrives before the WebSocket ever opened (handshake
+    // rejected, connection refused) is exactly the "try polling instead"
+    // case — but only if this attempt was still the live one (wasCurrent)
+    // AND nothing has settled it yet. Without the wasCurrent check, a
+    // disconnectPresence() that closed this same socket on its way out
+    // (a fast world switch) would land here with settled still false and
+    // wrongly kick off polling for the world already left behind.
+    if (!settled) {
+      settled = true;
+      clearTimeout(fallbackTimer);
+      if (wasCurrent) pollPresence(domain, worldId, displayName, base, publicKey);
+    }
+  });
+
+  // presence-server unreachable/down, or the connection dropped mid-world.
+  // The 'close' listener above (which always fires after 'error' for a
+  // WebSocket) does the actual fallback decision and cleanup — this just
+  // has to exist so the failed connection doesn't surface as an unhandled
+  // error, per the top-of-section comment.
+  socket.addEventListener('error', () => {});
+}
+
 const walletBtn = document.getElementById('walletBtn');
 const walletBadge = document.getElementById('walletBadge');
 const walletPanel = document.getElementById('walletPanel');
+const quickLockWalletBtn = document.getElementById('quickLockWalletBtn');
+
+// Social tab (#61/#67): Mail, Friends, Favorites as three sub-screens of
+// one top-level tab — see showWalletScreen()/showSocialSubtab() below for
+// how the two levels of tabbing interact.
+const socialTabBtn = document.getElementById('socialTabBtn');
+const socialBadge = document.getElementById('socialBadge');
+const socialScreen = document.getElementById('socialScreen');
+const mailSubtabBtn = document.getElementById('mailSubtabBtn');
+const friendsSubtabBtn = document.getElementById('friendsSubtabBtn');
+const favoritesSubtabBtn = document.getElementById('favoritesSubtabBtn');
+const mailSubscreen = document.getElementById('mailSubscreen');
+const friendsSubscreen = document.getElementById('friendsSubscreen');
+const favoritesSubscreen = document.getElementById('favoritesSubscreen');
+const friendRequestsBadge = document.getElementById('friendRequestsBadge');
+
+const mailBadge = document.getElementById('mailBadge');
+const checkMailNowBtn = document.getElementById('checkMailNowBtn');
+const mailLastCheckedEl = document.getElementById('mailLastChecked');
+const mailIntervalInput = document.getElementById('mailIntervalInput');
+const saveMailIntervalBtn = document.getElementById('saveMailIntervalBtn');
+const mailIntervalStatusEl = document.getElementById('mailIntervalStatus');
+const mailListEl = document.getElementById('mailList');
+const markAllMailReadBtn = document.getElementById('markAllMailReadBtn');
+const clearAllMailBtn = document.getElementById('clearAllMailBtn');
+const subscribeSectionEl = document.getElementById('subscribeSection');
+const subscribeBtn = document.getElementById('subscribeBtn');
+const subscribeStatusEl = document.getElementById('subscribeStatus');
+
+const friendsHereListEl = document.getElementById('friendsHereList');
+const friendRequestsListEl = document.getElementById('friendRequestsList');
+const friendsListEl = document.getElementById('friendsList');
+
+const addCurrentFavoriteBtn = document.getElementById('addCurrentFavoriteBtn');
+const addCurrentFavoriteStatusEl = document.getElementById('addCurrentFavoriteStatus');
+const favoritesListEl = document.getElementById('favoritesList');
 
 // The wallet panel is one of several mutually-exclusive "screens" — see
 // showWalletScreen() / routeWalletScreen() below.
@@ -106,8 +550,7 @@ const exportBtn = document.getElementById('exportBtn');
 const importWalletBtn = document.getElementById('importWalletBtn');
 const importWalletFileInput = document.getElementById('importWalletFileInput');
 const importWalletStatusEl = document.getElementById('importWalletStatus');
-const hiddenItemsListEl = document.getElementById('hiddenItemsList');
-const hiddenResourcesListEl = document.getElementById('hiddenResourcesList');
+const hiddenAssetsListEl = document.getElementById('hiddenAssetsList');
 const recentWorldsListEl = document.getElementById('recentWorldsList');
 const cacheTotalLineEl = document.getElementById('cacheTotalLine');
 const cacheSitesListEl = document.getElementById('cacheSitesList');
@@ -116,14 +559,19 @@ const importCacheBtn = document.getElementById('importCacheBtn');
 const importCacheFileInput = document.getElementById('importCacheFileInput');
 const importCacheStatusEl = document.getElementById('importCacheStatus');
 const clearAllCacheBtn = document.getElementById('clearAllCacheBtn');
+const characterScaleInputEl = document.getElementById('characterScaleInput');
+const characterScaleValueEl = document.getElementById('characterScaleValue');
 const backFromSettingsBtn = document.getElementById('backFromSettingsBtn');
+const walletTabBar = document.getElementById('walletTabBar');
+const walletTabBtn = document.getElementById('walletTabBtn');
+const assetUpdatesBadge = document.getElementById('assetUpdatesBadge');
+const settingsTabBtn = document.getElementById('settingsTabBtn');
 
 const mainWalletScreen = document.getElementById('mainWalletScreen');
 const walletIdentityEl = document.getElementById('walletIdentity');
 const aliasInput = document.getElementById('aliasInput');
 const setAliasBtn = document.getElementById('setAliasBtn');
 const aliasStatusEl = document.getElementById('aliasStatus');
-const openSettingsBtn = document.getElementById('openSettingsBtn');
 const counterpartyIdentityEl = document.getElementById('counterpartyIdentity');
 const createCounterpartyBtn = document.getElementById('createCounterpartyBtn');
 
@@ -131,17 +579,26 @@ const requestItemBtn = document.getElementById('requestItemBtn');
 const presentBtn = document.getElementById('presentBtn');
 const reverifyBtn = document.getElementById('reverifyBtn');
 const loadoutNoteEl = document.getElementById('loadoutNote');
-const itemsSearchInput = document.getElementById('itemsSearchInput');
-const selfItemsListEl = document.getElementById('selfItemsList');
-const droppedItemsSectionEl = document.getElementById('droppedItemsSection');
-const droppedItemsListEl = document.getElementById('droppedItemsList');
-const counterpartyItemsSearchInput = document.getElementById('counterpartyItemsSearchInput');
-const counterpartyItemsListEl = document.getElementById('counterpartyItemsList');
+
+// Inventory (task #44): Collectibles/Documents sub-tabs of one merged
+// section — see showInventorySubtab() below for how the two levels of
+// tabbing (walletTabBar -> inventorySubtabBar) interact, same pattern as
+// Social's Mail/Friends/Favorites.
+const inventorySubtabBar = document.getElementById('inventorySubtabBar');
+const collectiblesSubtabBtn = document.getElementById('collectiblesSubtabBtn');
+const documentsSubtabBtn = document.getElementById('documentsSubtabBtn');
+const collectiblesSubscreen = document.getElementById('collectiblesSubscreen');
+const documentsSubscreen = document.getElementById('documentsSubscreen');
 const mintIronBtn = document.getElementById('mintIronBtn');
 const mintGoldBtn = document.getElementById('mintGoldBtn');
-const resourcesSearchInput = document.getElementById('resourcesSearchInput');
-const selfResourceListEl = document.getElementById('selfResourceList');
-const counterpartyResourceListEl = document.getElementById('counterpartyResourceList');
+const collectiblesSearchInput = document.getElementById('collectiblesSearchInput');
+const selfCollectiblesListEl = document.getElementById('selfCollectiblesList');
+const counterpartyCollectiblesListEl = document.getElementById('counterpartyCollectiblesList');
+const droppedItemsSectionEl = document.getElementById('droppedItemsSection');
+const droppedItemsListEl = document.getElementById('droppedItemsList');
+const documentsSearchInput = document.getElementById('documentsSearchInput');
+const selfDocumentsListEl = document.getElementById('selfDocumentsList');
+const counterpartyDocumentsListEl = document.getElementById('counterpartyDocumentsList');
 const tradeNoteEl = document.getElementById('tradeNote');
 const tradeBtn = document.getElementById('tradeBtn');
 const tradeStatusEl = document.getElementById('tradeStatus');
@@ -162,6 +619,58 @@ function resize() {
 }
 resize();
 window.addEventListener('resize', resize);
+
+// ---------- fullscreen cursor auto-hide ----------
+//
+// F11's native browser fullscreen — the only kind of fullscreen this app
+// has since #51 removed the in-page Fullscreen API integration (fighting a
+// cross-origin iframe's activation requirements wasn't worth it when the
+// browser's own shortcut already works) — never fires `fullscreenchange`
+// or sets `document.fullscreenElement`, because it's a browser-chrome
+// toggle, not a per-element Fullscreen API request. There is no direct "am
+// I in F11 fullscreen" signal to listen for.
+//
+// The practical workaround plenty of other web apps use for this same
+// gap: treat "the viewport now exactly fills the physical screen" as
+// "probably fullscreen" — a merely-maximized (non-fullscreen) window is
+// always a little smaller than the full screen (taskbar, window chrome),
+// while real fullscreen fills it exactly. This iframe is 100vw/100vh (see
+// content.js), so its own window.innerWidth/Height already track the host
+// page's real viewport size.
+//
+// The cursor hides after a couple of idle seconds — long enough to stay
+// out of the way while actually playing, short enough that it's never
+// truly unreachable — and reappears instantly on any mouse movement, on
+// leaving fullscreen, or on a window resize (covers both leaving
+// fullscreen and just resizing the still-fullscreen window).
+const CURSOR_IDLE_MS = 2000;
+let cursorIdleTimer = null;
+
+function looksFullscreen() {
+  return Math.abs(window.innerWidth - window.screen.width) <= 2 &&
+         Math.abs(window.innerHeight - window.screen.height) <= 2;
+}
+
+function scheduleCursorHide() {
+  // Drag-to-look fires continuous mousemove events while the user is
+  // actively turning the camera — that's the primary way you look around
+  // in this game, so treating it like "moving the mouse toward UI" would
+  // mean the cursor can never actually stay hidden while playing. Ignore
+  // mousemove-driven resets entirely while a look-drag is in progress; the
+  // cursor was already hidden (or on its way to being hidden) before the
+  // drag started, and this call is only reached again once the drag ends.
+  if (active3D && active3D.isLookDragging && active3D.isLookDragging()) return;
+  if (cursorIdleTimer) clearTimeout(cursorIdleTimer);
+  document.body.style.cursor = '';
+  if (!looksFullscreen()) return;
+  cursorIdleTimer = setTimeout(() => {
+    if (looksFullscreen()) document.body.style.cursor = 'none';
+  }, CURSOR_IDLE_MS);
+}
+
+window.addEventListener('mousemove', scheduleCursorHide);
+window.addEventListener('resize', scheduleCursorHide);
+scheduleCursorHide();
 
 closeBtn.addEventListener('click', () => window.parent.postMessage('domain-atlas-close', '*'));
 
@@ -193,6 +702,7 @@ async function enterWorld(worldId) {
   const world = manifest.worlds.find((w) => w.id === worldId) || manifest.worlds[0];
   currentWorld = world;
   await refreshRequestButton();
+  await refreshSubscribeButton();
   refreshWorldGates();
 
   placeLabel.innerHTML = world.name + ' <span class="domain">' + manifest.domain + ' · ' + world.id + '</span>';
@@ -204,18 +714,43 @@ async function enterWorld(worldId) {
     manifestUrl: currentManifestUrl
   });
 
+  // SPEC.md §5.1.1 — entering a world is the moment a stale item property
+  // actually matters to the visitor, so it triggers the same check-in
+  // checkAllMail() already runs periodically (see restartMailCheckLoop
+  // below), just immediately and scoped to only this domain instead of
+  // waiting up to mailIntervalMinutes for every domain. Deliberately not
+  // awaited — the world itself has already been recorded/labeled above,
+  // and a slow or unreachable domain shouldn't stall getting into it;
+  // checkAllMail already swallows a single domain's failure on its own.
+  checkItemUpdatesForDomain(manifest.domain);
+
   // Leaving whichever world was active before — if it was a 3D one, its
   // render loop and input listeners need tearing down before anything else
   // starts, same idea as window.__atlasScene just getting overwritten below
   // for the 2D path.
   if (active3D) { active3D.destroy(); active3D = null; }
+  window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
+  disconnectPresence(); // leaving whichever world was active before also means leaving its presence room, 3D or not
+  hideSceneLoadProgress(); // whichever world was active before might have left this showing (#36) — never carry it into the next one
 
   // A pending "click where you want to drop it" from whichever world was
   // active before doesn't carry over to a new one.
   pendingDropCredentialId = null;
   canvas.style.cursor = '';
 
-  const is3D = !!(world.entry.renderer && world.entry.renderer.includes('gltf-mini-v1'));
+  // Every renderer this wallet actually knows how to draw. A world that
+  // declares something outside this list isn't necessarily broken — it may
+  // just be written for a newer wallet than this one — so it gets a clear
+  // "can't render this" message instead of silently falling through to the
+  // 2D path and drawing something the world never intended.
+  const KNOWN_RENDERERS = ['gltf-mini-v1', 'procedural-v1'];
+  const declaredRenderers = (world.entry.renderer && world.entry.renderer.length) ? world.entry.renderer : ['procedural-v1'];
+  if (!declaredRenderers.some((r) => KNOWN_RENDERERS.includes(r))) {
+    show3DCanvas(false);
+    statusEl.textContent = 'This world needs a renderer this wallet doesn\'t support yet (' + declaredRenderers.join(', ') + ') — try updating the extension.';
+    return;
+  }
+  const is3D = declaredRenderers.includes('gltf-mini-v1');
   show3DCanvas(is3D);
 
   if (is3D) {
@@ -235,12 +770,39 @@ async function enterWorld(worldId) {
         sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
         isCrossDomainPortal: (portalIndex) => !!(world.portals[portalIndex] && world.portals[portalIndex].kind === 'domain'),
-        onPortalEnter: (portalIndex) => followPortal(world.portals[portalIndex])
+        onPortalEnter: (portalIndex) => followPortal(world.portals[portalIndex]),
+        characterScale: await AtlasWallet.getCharacterScale(),
+        // Scene asset download progress (#36) — see updateSceneLoadProgress()
+        // above and loadScene()'s own comment in gltf-mini.js for why this
+        // counts unique models, not placed instances.
+        onLoadProgress: updateSceneLoadProgress
       });
+      window.__atlasActive3D = active3D;
       await active3D.ready;
+      hideSceneLoadProgress(); // loading finished — the render loop is about to take over the canvas
       statusEl.textContent = 'In sync with ' + manifest.domain + ' · ' + world.id;
       history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
+
+      // Presence (#66) — join this domain+world's room so other current
+      // visitors show up as walking characters (see gltf-mini.js's
+      // remotePlayers) and this visitor shows up for them too. Uses
+      // whatever alias is set for the active identity if there is one
+      // (same alias a counterparty/trade partner would see), otherwise a
+      // short public-key fragment, otherwise a plain "Visitor" label for
+      // someone with no wallet identity at all — entering a world has
+      // never required one (see #63) and presence shouldn't start
+      // requiring one either.
+      const presenceIdentity = await AtlasWallet.getIdentity();
+      const presenceAlias = presenceIdentity ? await AtlasWallet.getAlias(presenceIdentity.publicKey) : null;
+      const presenceName = presenceAlias || (presenceIdentity ? short(presenceIdentity.publicKey, 10) : 'Visitor');
+      // publicKey is optional (#67) — an anonymous visitor with no
+      // unlocked identity announces none at all, same "presence never
+      // requires an identity" principle #63 established; they simply can't
+      // be friend-requested (nothing stable to add), but everything else
+      // about presence works exactly as before.
+      connectPresence(manifest.domain, world.id, presenceName, manifest.presence, presenceIdentity ? presenceIdentity.publicKey : null);
     } catch (err) {
+      hideSceneLoadProgress(); // a failed load shouldn't leave a stuck progress bar over the error message
       statusEl.textContent = 'Could not load world: ' + err.message;
     }
     return;
@@ -579,12 +1141,16 @@ canvas.addEventListener('click', (e) => {
 // anywhere — otherwise the very next canvas click, whenever it happens
 // (possibly long after the person closed the wallet panel and forgot),
 // would silently place the item instead of doing whatever they actually
-// clicked for.
+// clicked for. Registered ahead of the pause-menu-style Escape handler
+// below (which toggles the wallet panel closed) and stops the event right
+// here when it actually cancels a pending drop, so backing out of a drop
+// doesn't ALSO slam the wallet panel shut on the person mid-Inventory.
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && pendingDropCredentialId) {
     pendingDropCredentialId = null;
     canvas.style.cursor = '';
     statusEl.textContent = 'Drop cancelled.';
+    e.stopImmediatePropagation();
   }
 });
 
@@ -644,7 +1210,7 @@ function refreshWorldGates() {
   tradeBtn.disabled = !isStation;
   tradeNoteEl.style.display = isStation ? 'none' : '';
 
-  refreshItemsDisplay();
+  refreshInventoryDisplay();
 }
 
 async function refreshIdentityDisplay() {
@@ -664,6 +1230,7 @@ async function refreshIdentityDisplay() {
     : 'No counterparty yet — a second local keypair standing in for another visitor (see README).';
 
   await refreshIdentityModeControls();
+  await refreshQuickLockButtonVisibility();
 }
 
 // The active "self" mechanism can be either the local password identity or
@@ -703,16 +1270,60 @@ async function refreshIdentityModeControls() {
 function showWalletScreen(id) {
   walletScreens.forEach((el) => el.classList.toggle('active', el.id === id));
   seedRevealBox.classList.remove('show');
+  // Tabs only make sense between Wallet, Social, and Settings — everything
+  // else (onboarding, unlock, create) has nothing to tab between yet and
+  // keeps its own dedicated navigation.
+  const showTabs = id === 'mainWalletScreen' || id === 'socialScreen' || id === 'settingsScreen';
+  if (walletTabBar) walletTabBar.classList.toggle('visible', showTabs);
+  if (walletTabBtn) walletTabBtn.classList.toggle('active-tab', id === 'mainWalletScreen');
+  if (socialTabBtn) socialTabBtn.classList.toggle('active-tab', id === 'socialScreen');
+  if (settingsTabBtn) settingsTabBtn.classList.toggle('active-tab', id === 'settingsScreen');
+}
+
+// Social tab's own second level of tabbing (#61/#67): Mail / Friends /
+// Favorites, same show-one-hide-the-rest idea as showWalletScreen() one
+// level up, just scoped to .social-subscreen instead of .wallet-screen.
+function showSocialSubtab(id) {
+  [mailSubscreen, friendsSubscreen, favoritesSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  if (mailSubtabBtn) mailSubtabBtn.classList.toggle('active-subtab', id === 'mailSubscreen');
+  if (friendsSubtabBtn) friendsSubtabBtn.classList.toggle('active-subtab', id === 'friendsSubscreen');
+  if (favoritesSubtabBtn) favoritesSubtabBtn.classList.toggle('active-subtab', id === 'favoritesSubscreen');
+}
+
+function socialFriendsTabActive() {
+  return !!(friendsSubscreen && friendsSubscreen.classList.contains('active'));
+}
+
+// Inventory tab's own second level of tabbing (task #44): Collectibles /
+// Documents, same show-one-hide-the-rest idea as showSocialSubtab() right
+// above, just scoped to Inventory's two .subscreen elements.
+function showInventorySubtab(id) {
+  [collectiblesSubscreen, documentsSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  if (collectiblesSubtabBtn) collectiblesSubtabBtn.classList.toggle('active-subtab', id === 'collectiblesSubscreen');
+  if (documentsSubtabBtn) documentsSubtabBtn.classList.toggle('active-subtab', id === 'documentsSubscreen');
 }
 
 async function routeWalletScreen() {
   if (await AtlasWallet.isUnlocked()) {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
-    await refreshItemsDisplay();
-    await refreshResourcesDisplay();
+    await refreshInventoryDisplay();
+    // Opening the Wallet tab IS the "read" action for asset-update notices
+    // (SPEC.md §5.1.1) — the reissued asset is already shown front and
+    // center in the list just rendered above, so there's no separate
+    // per-notice click the way mail has. Mark seen, then refresh the badge
+    // so it clears immediately instead of on the next unrelated refresh.
+    const identity = await AtlasWallet.getIdentity();
+    if (identity) await AtlasWallet.markAssetUpdateNoticesSeen(identity.publicKey);
+    await refreshAssetUpdatesBadge();
   } else if (await AtlasWallet.hasIdentity()) {
     showWalletScreen('unlockScreen');
+    // Land the cursor straight in the password field — every caller of
+    // routeWalletScreen() (opening the wallet, Escape re-toggling it,
+    // switching identity mode back to a locked one) is a moment where
+    // typing the password is the very next thing the user does, so
+    // there's no case here where stealing focus is unwelcome.
+    unlockPasswordInput.focus();
   } else {
     showWalletScreen('onboardingChoiceScreen');
   }
@@ -726,8 +1337,7 @@ async function backToWalletHome() {
   if (await AtlasWallet.hasIdentity()) {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
-    await refreshItemsDisplay();
-    await refreshResourcesDisplay();
+    await refreshInventoryDisplay();
   } else {
     showWalletScreen('onboardingChoiceScreen');
   }
@@ -772,8 +1382,8 @@ function formatItemProperties(properties) {
 // in scope. Returns '' when there's nothing to show, so a card with no
 // properties gets no link at all, same as before this feature existed.
 // The toggle itself is a plain show/hide on the very next sibling element
-// (see the "toggle-properties" branch in itemActionHandler and
-// resourceActionHandler below) — no wallet call, no list refresh, so
+// (see the "toggle-properties" branch in assetActionHandler below) — no
+// wallet call, no list refresh, so
 // opening it doesn't disturb anything else on the card, and it resets
 // closed the next time the list re-renders, same as every other
 // per-card DOM detail in this file.
@@ -789,25 +1399,47 @@ function renderPropertiesToggle(properties) {
   );
 }
 
-function renderItemCard(entry, container, opts) {
+// Unified asset card (task #44) — replaces the former separate
+// renderItemCard/renderResourceCard pair. Every asset credential now
+// carries the same shape (asset.name/class/properties, top-level
+// quantity, asset.fungible), so one renderer covers both: a fungible
+// (stackable) entry shows its quantity in the name ("Iron Ingot ×47") and
+// offers Split instead of Load/PvP-loss; a non-fungible (unique) entry
+// shows no quantity at all and offers Load/PvP-loss instead of Split —
+// SPEC.md §5's "false moves whole via §5.2, true splits via §5.4" split,
+// reflected directly in which actions a card offers.
+function renderAssetCard(entry, container, opts) {
   const el = document.createElement('div');
   el.className = 'wallet-item';
-  const propsText = formatItemProperties(entry.credential.asset.properties);
+  const asset = entry.credential.asset;
+  const fungible = !!asset.fungible;
+  const propsText = formatItemProperties(asset.properties);
   el.dataset.search = (
-    entry.credential.asset.name + ' ' + entry.credential.asset.class + ' ' + entry.credential.issuer.domain + ' ' + propsText
+    asset.name + ' ' + asset.class + ' ' + entry.credential.issuer.domain + ' ' + propsText
   ).toLowerCase();
+  if (opts.groupKey) el.dataset.group = opts.groupKey;
   const v = entry.lastVerdict || { valid: false, reason: 'not yet verified' };
+  const supersedesNote = Array.isArray(entry.credential.supersedes)
+    ? ' · consolidated from ' + entry.credential.supersedes.length + ' balances'
+    : entry.credential.supersedes ? ' · supersedes prior' : '';
   let html =
-    '<div class="name">' + entry.credential.asset.name + '</div>' +
-    '<div class="meta">' + entry.credential.asset.class + ' · issued by ' + entry.credential.issuer.domain + '</div>' +
-    renderPropertiesToggle(entry.credential.asset.properties) +
+    '<div class="name">' + asset.name + (fungible ? ' ×' + entry.credential.quantity : '') + '</div>' +
+    '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + supersedesNote + '</div>' +
+    renderPropertiesToggle(asset.properties) +
     '<div class="verdict ' + (v.valid ? 'valid' : 'invalid') + '">' + (v.valid ? '✓ ' : '✗ ') + v.reason + '</div>';
 
-  // Asset-management actions: load/unload and PvP loss only make sense for
-  // self's own items in a risky world, but every item — self or
-  // counterparty's — can be removed from this wallet's local view.
   html += '<div class="item-actions">';
-  if (opts.loadable) {
+  if (fungible) {
+    // Splitting/consolidating (SPEC.md §5.4) only makes sense for a
+    // fungible balance — send half of what's here to the other side.
+    const half = Math.floor(entry.credential.quantity / 2);
+    if (half > 0 && opts.otherLabel) {
+      html += '<button data-action="split" data-id="' + entry.credential.id + '" data-amount="' + half + '">Send ' + half + ' to ' + opts.otherLabel + '</button>';
+    }
+  } else if (opts.loadable) {
+    // Loadout / PvP-loss (SPEC.md §5.2) only makes sense for a
+    // non-fungible asset — a fungible quantity moves via split, not by
+    // being "loaded" as a whole unit.
     const loaded = opts.loadout.includes(entry.credential.id);
     html += '<button data-action="toggle-load" data-id="' + entry.credential.id + '">' + (loaded ? 'Unload' : 'Load into this world') + '</button>';
     if (loaded && opts.risky) {
@@ -823,9 +1455,53 @@ function renderItemCard(entry, container, opts) {
   container.appendChild(el);
 }
 
+// Groups same-wallet FUNGIBLE entries by class + issuer — the two things
+// that have to match for balances to be mergeable at all (see
+// consolidateAsset in wallet.js). A non-fungible asset is one-of-a-kind by
+// definition, so it's never grouped even if another entry shares its
+// class — callers pass only the fungible subset in here (see
+// renderAssetList below). A group of 2+ gets a header offering to
+// consolidate the whole group into one balance; a lone balance renders
+// with no header, same as before this feature existed.
+function groupFungibleEntries(entries) {
+  const groups = new Map();
+  for (const entry of entries) {
+    const key = entry.credential.asset.class + '::' + entry.credential.issuer.domain;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(entry);
+  }
+  return [...groups.values()];
+}
+
+function renderAssetGroup(group, container, opts) {
+  const key = group[0].credential.asset.class + '::' + group[0].credential.issuer.domain;
+  if (group.length > 1) {
+    const total = group.reduce((sum, e) => sum + e.credential.quantity, 0);
+    const header = document.createElement('div');
+    header.className = 'resource-group-header';
+    header.dataset.group = key;
+    header.innerHTML =
+      '<span>' + group.length + ' balances of ' + group[0].credential.asset.name + ' (' + total + ' total)</span>' +
+      '<button data-action="consolidate-group" data-key="' + key + '">Consolidate</button>';
+    container.appendChild(header);
+  }
+  group.forEach((entry) => renderAssetCard(entry, container, { ...opts, groupKey: group.length > 1 ? key : null }));
+}
+
+// Renders one Inventory list (a Yours or Counterparty's column, within
+// either the Collectibles or Documents sub-tab): fungible entries grouped
+// and offered for consolidation, non-fungible entries rendered
+// individually right after.
+function renderAssetList(entries, container, opts) {
+  const fungible = entries.filter((e) => e.credential.asset.fungible);
+  const unique = entries.filter((e) => !e.credential.asset.fungible);
+  groupFungibleEntries(fungible).forEach((group) => renderAssetGroup(group, container, opts));
+  unique.forEach((entry) => renderAssetCard(entry, container, opts));
+}
+
 // The "Dropped in this world" management row — same info-card shape as
-// Hidden items / Recent worlds, and the same reasoning: a click on the
-// item's marker in the scene itself is the primary way to pick it back
+// Hidden assets / Recent worlds, and the same reasoning: a click on the
+// asset's marker in the scene itself is the primary way to pick it back
 // up, but this list is the always-works fallback that doesn't depend on
 // finding the marker, being in exactly the right spot, or (for the 2D
 // renderer) clicking precisely on a small icon.
@@ -841,35 +1517,54 @@ function renderDroppedItemCard(entry, container) {
   container.appendChild(el);
 }
 
-async function refreshItemsDisplay() {
+// Inventory (task #44): renders both sub-tabs (Collectibles, Documents —
+// split on asset.presentation) from the ONE unified wallet, replacing the
+// former separate refreshItemsDisplay()/refreshResourcesDisplay() pair.
+async function refreshInventoryDisplay() {
   const identity = await AtlasWallet.getIdentity();
   const counterparty = await AtlasWallet.getCounterparty();
   const loadout = await AtlasWallet.getLoadout();
   const risky = combatOf(currentWorld) !== 'none';
-  // refreshItemsDisplay() runs once, unawaited, at the bottom of this file
-  // as soon as the script parses — well before enterWorld() has resolved
-  // the manifest fetch and set currentManifest/currentWorld. An identity
-  // can already exist at that point (a returning user), so this needs its
-  // own guard rather than relying on identity alone, the way combatOf()
-  // above already guards on currentWorld being possibly null.
+  // refreshInventoryDisplay() runs once, unawaited, at the bottom of this
+  // file as soon as the script parses — well before enterWorld() has
+  // resolved the manifest fetch and set currentManifest/currentWorld. An
+  // identity can already exist at that point (a returning user), so this
+  // needs its own guard rather than relying on identity alone, the way
+  // combatOf() above already guards on currentWorld being possibly null.
   const droppedHere = (identity && currentManifest && currentWorld)
     ? await AtlasWallet.getDroppedItemsInWorld(identity.publicKey, manifestDomainOf(currentManifest), currentWorld.id)
     : [];
 
   const selfWalletAll = identity ? await AtlasWallet.getWallet(identity.publicKey) : [];
-  // Dropped items (any world, not just this one — see below) are filtered
-  // out here the same way hidden ones are: not in your hands right now,
-  // so they don't belong in the normal carrying list. They're not lost —
+  // Dropped assets (any world, not just this one — see below) are filtered
+  // out here the same way hidden ones are: not in your hands right now, so
+  // they don't belong in the normal carrying list. They're not lost —
   // still fully in this wallet's credential store — just visually "left
   // somewhere," surfaced instead via the scene marker and the "Dropped in
   // this world" list below (only for the world they're actually in).
   const allDroppedIds = identity ? new Set((await AtlasWallet.getDroppedItems(identity.publicKey)).map((d) => d.credentialId)) : new Set();
-  const selfWallet = selfWalletAll.filter((e) => !e.hidden && !allDroppedIds.has(e.credential.id));
-  selfItemsListEl.innerHTML = '';
-  if (selfWallet.length === 0) {
-    selfItemsListEl.innerHTML = '<div class="empty-note">' + (selfWalletAll.length ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'Wallet is empty.') + '</div>';
+  const selfVisible = selfWalletAll.filter((e) => !e.hidden && !allDroppedIds.has(e.credential.id));
+
+  const cpWalletAll = counterparty ? await AtlasWallet.getWallet(counterparty.publicKey) : [];
+  const cpVisible = cpWalletAll.filter((e) => !e.hidden);
+
+  const selfHasAny = (presentation) => selfWalletAll.some((e) => e.credential.asset.presentation === presentation);
+  const cpHasAny = (presentation) => cpWalletAll.some((e) => e.credential.asset.presentation === presentation);
+
+  // --- Collectibles ---
+  const selfCollectibles = selfVisible.filter((e) => e.credential.asset.presentation === 'collectible');
+  const cpCollectibles = cpVisible.filter((e) => e.credential.asset.presentation === 'collectible');
+  selfCollectiblesListEl.innerHTML = '';
+  if (selfCollectibles.length === 0) {
+    selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    selfWallet.forEach((entry) => renderItemCard(entry, selfItemsListEl, { loadable: risky, loadout, risky, droppable: true }));
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty' });
+  }
+  counterpartyCollectiblesListEl.innerHTML = '';
+  if (cpCollectibles.length === 0) {
+    counterpartyCollectiblesListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('collectible') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no collectibles yet.') + '</div>';
+  } else {
+    renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self' });
   }
 
   droppedItemsListEl.innerHTML = '';
@@ -882,16 +1577,23 @@ async function refreshItemsDisplay() {
     });
   }
 
-  const cpWalletAll = counterparty ? await AtlasWallet.getWallet(counterparty.publicKey) : [];
-  const cpWallet = cpWalletAll.filter((e) => !e.hidden);
-  counterpartyItemsListEl.innerHTML = '';
-  if (cpWallet.length === 0) {
-    counterpartyItemsListEl.innerHTML = '<div class="empty-note">' + (cpWalletAll.length ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds nothing yet.') + '</div>';
+  // --- Documents ---
+  const selfDocuments = selfVisible.filter((e) => e.credential.asset.presentation === 'document');
+  const cpDocuments = cpVisible.filter((e) => e.credential.asset.presentation === 'document');
+  selfDocumentsListEl.innerHTML = '';
+  if (selfDocuments.length === 0) {
+    selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    cpWallet.forEach((entry) => renderItemCard(entry, counterpartyItemsListEl, { loadable: false }));
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty' });
+  }
+  counterpartyDocumentsListEl.innerHTML = '';
+  if (cpDocuments.length === 0) {
+    counterpartyDocumentsListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no documents yet.') + '</div>';
+  } else {
+    renderAssetList(cpDocuments, counterpartyDocumentsListEl, { loadable: false, droppable: false, otherLabel: 'self' });
   }
 
-  const totalHeld = selfWallet.length + cpWallet.length;
+  const totalHeld = selfVisible.length + cpVisible.length;
   walletBadge.textContent = String(totalHeld);
   walletBadge.classList.toggle('show', totalHeld > 0);
 
@@ -899,11 +1601,31 @@ async function refreshItemsDisplay() {
   // any active search text has to be re-applied afterward — it isn't part
   // of the underlying data, just a view-layer filter over freshly-rendered
   // cards.
-  applyListFilter(selfItemsListEl, itemsSearchInput.value);
-  applyListFilter(counterpartyItemsListEl, counterpartyItemsSearchInput.value);
+  applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value);
+  applyListFilter(counterpartyCollectiblesListEl, collectiblesSearchInput.value);
+  applyListFilter(selfDocumentsListEl, documentsSearchInput.value);
+  applyListFilter(counterpartyDocumentsListEl, documentsSearchInput.value);
 
-  await refreshHiddenItemsDisplay();
+  await refreshHiddenAssetsDisplay();
   await refreshRecentWorldsDisplay();
+  await refreshAssetUpdatesBadge();
+}
+
+// The Wallet tab's own small notification (SPEC.md §5.1.1) — same
+// subtab-badge look as mail's unread count, just for "an asset you hold
+// was reissued and this wallet already adopted the replacement" instead
+// of "new mail arrived". Only ever DISPLAYS the current unseen count;
+// marking notices seen is routeWalletScreen()'s job (below), the moment
+// the owner actually opens the tab — never here, since
+// refreshInventoryDisplay() also runs on page load, well before anyone's
+// looked at anything.
+async function refreshAssetUpdatesBadge() {
+  if (!assetUpdatesBadge) return;
+  const identity = await AtlasWallet.getIdentity();
+  const notices = identity ? await AtlasWallet.getAssetUpdateNotices(identity.publicKey) : [];
+  const unseenCount = notices.filter((n) => !n.seen).length;
+  assetUpdatesBadge.textContent = String(unseenCount);
+  assetUpdatesBadge.classList.toggle('show', unseenCount > 0);
 }
 
 // Rebuilds window.__atlasScene.itemMarkers from whatever's currently
@@ -953,7 +1675,7 @@ async function finalizeDrop(id, position) {
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
   await AtlasWallet.dropItem(identity.publicKey, id, manifestDomainOf(currentManifest), currentWorld.id, position);
-  await refreshItemsDisplay();
+  await refreshInventoryDisplay();
   await refreshSceneItemMarkers();
   statusEl.textContent = 'Dropped. Pick it back up here whenever you like — nobody else can.';
 }
@@ -962,7 +1684,7 @@ async function pickUpDroppedItem(credentialId) {
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
   await AtlasWallet.pickUpItem(identity.publicKey, credentialId);
-  await refreshItemsDisplay();
+  await refreshInventoryDisplay();
   await refreshSceneItemMarkers();
   statusEl.textContent = 'Picked it back up.';
 }
@@ -1005,46 +1727,51 @@ function applyListFilter(listEl, rawQuery) {
   }
 }
 
-itemsSearchInput && itemsSearchInput.addEventListener('input', () => applyListFilter(selfItemsListEl, itemsSearchInput.value));
-counterpartyItemsSearchInput && counterpartyItemsSearchInput.addEventListener('input', () => applyListFilter(counterpartyItemsListEl, counterpartyItemsSearchInput.value));
-resourcesSearchInput && resourcesSearchInput.addEventListener('input', () => {
-  applyListFilter(selfResourceListEl, resourcesSearchInput.value);
-  applyListFilter(counterpartyResourceListEl, resourcesSearchInput.value);
+collectiblesSearchInput && collectiblesSearchInput.addEventListener('input', () => {
+  applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value);
+  applyListFilter(counterpartyCollectiblesListEl, collectiblesSearchInput.value);
+});
+documentsSearchInput && documentsSearchInput.addEventListener('input', () => {
+  applyListFilter(selfDocumentsListEl, documentsSearchInput.value);
+  applyListFilter(counterpartyDocumentsListEl, documentsSearchInput.value);
 });
 
 // The Settings-screen counterpart to the filtering above: lists every
-// hidden item (self and counterparty) with an Unhide button, so hiding is
-// never a one-way trip. Cheap to recompute on every refreshItemsDisplay —
+// hidden asset (self and counterparty) with an Unhide button, so hiding is
+// never a one-way trip. Cheap to recompute on every refreshInventoryDisplay —
 // this list is normally short, and Settings isn't open most of the time.
-function renderHiddenItemCard(entry, ownerLabel, container) {
+function renderHiddenAssetCard(entry, ownerLabel, container) {
   const el = document.createElement('div');
   el.className = 'info-card';
+  const asset = entry.credential.asset;
+  const fungible = !!asset.fungible;
   el.innerHTML =
-    '<div class="name">' + entry.credential.asset.name + '</div>' +
-    '<div class="meta">' + entry.credential.asset.class + ' · ' + ownerLabel + '</div>' +
-    renderPropertiesToggle(entry.credential.asset.properties) +
+    '<div class="name">' + asset.name + (fungible ? ' ×' + entry.credential.quantity : '') + '</div>' +
+    '<div class="meta">' + asset.class + ' · ' + ownerLabel + '</div>' +
+    renderPropertiesToggle(asset.properties) +
     '<div class="item-actions">' +
     '<button data-action="unhide" data-owner="' + ownerLabel + '" data-id="' + entry.credential.id + '">Unhide</button>' +
+    '<button data-action="delete" data-owner="' + ownerLabel + '" data-id="' + entry.credential.id + '" class="danger-btn">Delete</button>' +
     '</div>';
   container.appendChild(el);
 }
 
-async function refreshHiddenItemsDisplay() {
-  if (!hiddenItemsListEl) return;
+async function refreshHiddenAssetsDisplay() {
+  if (!hiddenAssetsListEl) return;
   const identity = await AtlasWallet.getIdentity();
   const counterparty = await AtlasWallet.getCounterparty();
   const selfHidden = identity ? (await AtlasWallet.getWallet(identity.publicKey)).filter((e) => e.hidden) : [];
   const cpHidden = counterparty ? (await AtlasWallet.getWallet(counterparty.publicKey)).filter((e) => e.hidden) : [];
-  hiddenItemsListEl.innerHTML = '';
+  hiddenAssetsListEl.innerHTML = '';
   if (selfHidden.length === 0 && cpHidden.length === 0) {
-    hiddenItemsListEl.innerHTML = '<div class="empty-note">No hidden items.</div>';
+    hiddenAssetsListEl.innerHTML = '<div class="empty-note">No hidden assets.</div>';
     return;
   }
-  selfHidden.forEach((entry) => renderHiddenItemCard(entry, 'self', hiddenItemsListEl));
-  cpHidden.forEach((entry) => renderHiddenItemCard(entry, 'counterparty', hiddenItemsListEl));
+  selfHidden.forEach((entry) => renderHiddenAssetCard(entry, 'self', hiddenAssetsListEl));
+  cpHidden.forEach((entry) => renderHiddenAssetCard(entry, 'counterparty', hiddenAssetsListEl));
 }
 
-hiddenItemsListEl && hiddenItemsListEl.addEventListener('click', async (e) => {
+hiddenAssetsListEl && hiddenAssetsListEl.addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
   if (btn.dataset.action === 'toggle-properties') {
@@ -1054,11 +1781,20 @@ hiddenItemsListEl && hiddenItemsListEl.addEventListener('click', async (e) => {
     btn.classList.toggle('open', !detail.hidden);
     return;
   }
-  if (btn.dataset.action !== 'unhide') return;
+  if (btn.dataset.action !== 'unhide' && btn.dataset.action !== 'delete') return;
   const owner = btn.dataset.owner === 'self' ? await AtlasWallet.getIdentity() : await AtlasWallet.getCounterparty();
   if (!owner) return;
-  await AtlasWallet.unhideItem(owner.publicKey, btn.dataset.id);
-  await refreshItemsDisplay();
+  if (btn.dataset.action === 'delete') {
+    // Delete only lives here, in the already-hidden view — a deliberate
+    // second step after hiding, not something reachable straight from the
+    // main Inventory list. Still irreversible, so still worth a confirm.
+    if (!confirm('This permanently removes it — if this was your only copy, it\'s gone for good.')) return;
+    await AtlasWallet.deleteAsset(owner.publicKey, btn.dataset.id);
+    await refreshHiddenAssetsDisplay();
+    return;
+  }
+  await AtlasWallet.unhideAsset(owner.publicKey, btn.dataset.id);
+  await refreshInventoryDisplay();
 });
 
 // ---------- recent worlds (Settings -> "Recent worlds") ----------
@@ -1108,146 +1844,6 @@ recentWorldsListEl && recentWorldsListEl.addEventListener('click', async (e) => 
   await travelToRecentWorld(btn.dataset.manifest, btn.dataset.world);
 });
 
-function renderResourceCard(entry, container, opts) {
-  const el = document.createElement('div');
-  el.className = 'wallet-item';
-  // Resource properties (SPEC.md §5.4) are attached per CLASS, not per
-  // individual balance — the issuer looks them up fresh from the class on
-  // every mint/split/consolidate/trade, so every balance of a class always
-  // carries identical properties. That's what makes auto-consolidation
-  // (which merges same-class balances purely by quantity) safe: it can
-  // never blend two different property sets, because there's only ever
-  // one set per class to begin with.
-  const propsText = formatItemProperties(entry.credential.properties);
-  el.dataset.search = (entry.credential.class + ' ' + entry.credential.issuer.domain + ' ' + propsText).toLowerCase();
-  if (opts.groupKey) el.dataset.group = opts.groupKey;
-  const v = entry.lastVerdict || { valid: false, reason: 'not yet verified' };
-  const half = Math.floor(entry.credential.quantity / 2);
-  const supersedesNote = Array.isArray(entry.credential.supersedes)
-    ? ' · consolidated from ' + entry.credential.supersedes.length + ' balances'
-    : entry.credential.supersedes ? ' · supersedes prior balance' : '';
-  let html =
-    '<div class="name">' + entry.credential.quantity + ' × ' + entry.credential.class + '</div>' +
-    '<div class="meta">issued by ' + entry.credential.issuer.domain + supersedesNote + '</div>' +
-    renderPropertiesToggle(entry.credential.properties) +
-    '<div class="verdict ' + (v.valid ? 'valid' : 'invalid') + '">' + (v.valid ? '✓ ' : '✗ ') + v.reason + '</div>';
-  html += '<div class="item-actions">';
-  if (half > 0) {
-    html += '<button data-action="split" data-id="' + entry.credential.id + '" data-amount="' + half + '">Send ' + half + ' to ' + opts.otherLabel + '</button>';
-  }
-  html += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
-  html += '<button data-action="delete" data-id="' + entry.credential.id + '" class="danger-btn">Delete</button>';
-  html += '</div>';
-  el.innerHTML = html;
-  container.appendChild(el);
-}
-
-// Groups same-wallet resource entries by class + issuer — the two things
-// that have to match for balances to be mergeable at all (see
-// consolidateResources in wallet.js). A group of 2+ gets a header offering
-// to consolidate the whole group into one balance; a lone balance renders
-// with no header, same as before this feature existed.
-function groupResourceEntries(entries) {
-  const groups = new Map();
-  for (const entry of entries) {
-    const key = entry.credential.class + '::' + entry.credential.issuer.domain;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(entry);
-  }
-  return [...groups.values()];
-}
-
-function renderResourceGroup(group, container, opts) {
-  const key = group[0].credential.class + '::' + group[0].credential.issuer.domain;
-  if (group.length > 1) {
-    const total = group.reduce((sum, e) => sum + e.credential.quantity, 0);
-    const header = document.createElement('div');
-    header.className = 'resource-group-header';
-    header.dataset.group = key;
-    header.innerHTML =
-      '<span>' + group.length + ' balances of ' + group[0].credential.class + ' (' + total + ' total)</span>' +
-      '<button data-action="consolidate-group" data-key="' + key + '">Consolidate</button>';
-    container.appendChild(header);
-  }
-  group.forEach((entry) => renderResourceCard(entry, container, { ...opts, groupKey: group.length > 1 ? key : null }));
-}
-
-async function refreshResourcesDisplay() {
-  const identity = await AtlasWallet.getIdentity();
-  const counterparty = await AtlasWallet.getCounterparty();
-
-  const selfResAll = identity ? await AtlasWallet.getResourceWallet(identity.publicKey) : [];
-  const selfRes = selfResAll.filter((e) => !e.hidden);
-  selfResourceListEl.innerHTML = '';
-  if (selfRes.length === 0) {
-    selfResourceListEl.innerHTML = '<div class="empty-note">' + (selfResAll.length ? 'Everything here is hidden — manage it in Settings.' : 'You hold no resources yet.') + '</div>';
-  } else {
-    groupResourceEntries(selfRes).forEach((group) => renderResourceGroup(group, selfResourceListEl, { otherLabel: 'counterparty', role: 'self' }));
-  }
-
-  const cpResAll = counterparty ? await AtlasWallet.getResourceWallet(counterparty.publicKey) : [];
-  const cpRes = cpResAll.filter((e) => !e.hidden);
-  counterpartyResourceListEl.innerHTML = '';
-  if (cpRes.length === 0) {
-    counterpartyResourceListEl.innerHTML = '<div class="empty-note">' + (cpResAll.length ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no resources yet.') + '</div>';
-  } else {
-    groupResourceEntries(cpRes).forEach((group) => renderResourceGroup(group, counterpartyResourceListEl, { otherLabel: 'self', role: 'counterparty' }));
-  }
-
-  applyListFilter(selfResourceListEl, resourcesSearchInput.value);
-  applyListFilter(counterpartyResourceListEl, resourcesSearchInput.value);
-
-  await refreshHiddenResourcesDisplay();
-}
-
-// Settings-screen counterpart to the filtering above, same shape and
-// reasoning as refreshHiddenItemsDisplay: lists every hidden resource
-// balance (self and counterparty) with an Unhide button, so hiding a
-// balance is never a one-way trip the way deleting one is.
-function renderHiddenResourceCard(entry, ownerLabel, container) {
-  const el = document.createElement('div');
-  el.className = 'info-card';
-  el.innerHTML =
-    '<div class="name">' + entry.credential.quantity + ' × ' + entry.credential.class + '</div>' +
-    '<div class="meta">issued by ' + entry.credential.issuer.domain + ' · ' + ownerLabel + '</div>' +
-    renderPropertiesToggle(entry.credential.properties) +
-    '<div class="item-actions">' +
-    '<button data-action="unhide" data-owner="' + ownerLabel + '" data-id="' + entry.credential.id + '">Unhide</button>' +
-    '</div>';
-  container.appendChild(el);
-}
-
-async function refreshHiddenResourcesDisplay() {
-  if (!hiddenResourcesListEl) return;
-  const identity = await AtlasWallet.getIdentity();
-  const counterparty = await AtlasWallet.getCounterparty();
-  const selfHidden = identity ? (await AtlasWallet.getResourceWallet(identity.publicKey)).filter((e) => e.hidden) : [];
-  const cpHidden = counterparty ? (await AtlasWallet.getResourceWallet(counterparty.publicKey)).filter((e) => e.hidden) : [];
-  hiddenResourcesListEl.innerHTML = '';
-  if (selfHidden.length === 0 && cpHidden.length === 0) {
-    hiddenResourcesListEl.innerHTML = '<div class="empty-note">No hidden resources.</div>';
-    return;
-  }
-  selfHidden.forEach((entry) => renderHiddenResourceCard(entry, 'self', hiddenResourcesListEl));
-  cpHidden.forEach((entry) => renderHiddenResourceCard(entry, 'counterparty', hiddenResourcesListEl));
-}
-
-hiddenResourcesListEl && hiddenResourcesListEl.addEventListener('click', async (e) => {
-  const btn = e.target.closest('button');
-  if (!btn) return;
-  if (btn.dataset.action === 'toggle-properties') {
-    const detail = btn.nextElementSibling;
-    if (!detail) return;
-    detail.hidden = !detail.hidden;
-    btn.classList.toggle('open', !detail.hidden);
-    return;
-  }
-  if (btn.dataset.action !== 'unhide') return;
-  const owner = btn.dataset.owner === 'self' ? await AtlasWallet.getIdentity() : await AtlasWallet.getCounterparty();
-  if (!owner) return;
-  await AtlasWallet.unhideResource(owner.publicKey, btn.dataset.id);
-  await refreshResourcesDisplay();
-});
 
 // ---------- wallet: onboarding / unlock / create / import / export ----------
 //
@@ -1264,6 +1860,31 @@ walletBtn.addEventListener('click', async () => {
   }
   walletPanel.classList.add('open');
   await routeWalletScreen();
+});
+
+// Escape acts like a pause-menu key: it toggles the wallet, same as
+// clicking the Wallet button.
+//
+// This used to also drive the browser's real Fullscreen API (a dedicated
+// button for entering it, Escape/exitFullscreen() for leaving) — removed
+// after real-browser testing turned up "API can only be initiated by a
+// user gesture" on requestFullscreen() even from a direct in-document
+// click in some cases, and activation from a keyboard event doesn't
+// reliably propagate into this cross-origin extension iframe at all — a
+// known rough edge for gesture-gated APIs in nested iframes, not
+// something fixable from this side. Replaced with a plain "F11 for
+// fullscreen" hint (see #scene3dHint in viewer.html) — the browser's own
+// native fullscreen shortcut works everywhere with zero iframe-activation
+// nonsense, so there's no reason to fight the API for something the user
+// can already do themselves in one keypress.
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Escape') return;
+  if (walletPanel.classList.contains('open')) {
+    walletPanel.classList.remove('open');
+  } else {
+    walletPanel.classList.add('open');
+    routeWalletScreen();
+  }
 });
 
 chrome.storage.onChanged.addListener(async (changes, areaName) => {
@@ -1288,8 +1909,7 @@ confirmWebAuthnCreateBtn.addEventListener('click', async () => {
     webauthnCreateScreenStatus.textContent = '';
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
-    await refreshItemsDisplay();
-    await refreshResourcesDisplay();
+    await refreshInventoryDisplay();
   } catch (err) {
     webauthnCreateScreenStatus.textContent = err.message;
   } finally {
@@ -1354,8 +1974,7 @@ seedConfirmBtn.addEventListener('click', async () => {
   seedPhraseTextEl.textContent = '';
   showWalletScreen('mainWalletScreen');
   await refreshIdentityDisplay();
-  await refreshItemsDisplay();
-  await refreshResourcesDisplay();
+  await refreshInventoryDisplay();
 });
 
 let pendingOnboardImportFile = null;
@@ -1384,8 +2003,7 @@ confirmImportBtn.addEventListener('click', async () => {
     onboardImportSeedInput.value = '';
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
-    await refreshItemsDisplay();
-    await refreshResourcesDisplay();
+    await refreshInventoryDisplay();
   } catch (err) {
     // Deliberately the same message whether the password, the seed
     // phrase, or both were wrong — see wallet.js's importIdentity.
@@ -1404,8 +2022,7 @@ unlockBtn.addEventListener('click', async () => {
     unlockScreenStatus.textContent = '';
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
-    await refreshItemsDisplay();
-    await refreshResourcesDisplay();
+    await refreshInventoryDisplay();
   } catch (err) {
     unlockScreenStatus.textContent = err.message;
   } finally {
@@ -1416,6 +2033,31 @@ unlockBtn.addEventListener('click', async () => {
 lockWalletBtn.addEventListener('click', async () => {
   await AtlasWallet.lockIdentity();
   walletPanel.classList.remove('open');
+  await refreshQuickLockButtonVisibility();
+});
+
+// Quick lock (#67 follow-up): the same lockIdentity() call as the Settings
+// button above, reachable straight from the top control bar without
+// opening the wallet panel first — for "I need to lock this RIGHT now"
+// rather than "I'm already in Settings anyway". Doesn't touch
+// walletPanel's open/closed state at all (unlike the Settings button,
+// which always closes it) — locking works the same whether the panel
+// happens to be open or not, and closing it as a side effect here would
+// be surprising if it was already open to something else, like Items.
+async function refreshQuickLockButtonVisibility() {
+  if (!quickLockWalletBtn) return;
+  quickLockWalletBtn.style.display = (await AtlasWallet.isUnlocked()) ? '' : 'none';
+}
+
+quickLockWalletBtn && quickLockWalletBtn.addEventListener('click', async () => {
+  await AtlasWallet.lockIdentity();
+  await refreshQuickLockButtonVisibility();
+  // If the wallet panel happens to be open to a screen that only makes
+  // sense unlocked (mainWalletScreen, say), route it to wherever locking
+  // now actually leads — same re-routing routeWalletScreen already does
+  // after the Settings lock button, just triggered from here too so the
+  // two lock buttons behave consistently no matter which one was used.
+  if (walletPanel.classList.contains('open')) await routeWalletScreen();
 });
 
 // Collapsible categories: a .settings-category has a heading (the
@@ -1434,24 +2076,490 @@ walletPanel.addEventListener('click', (e) => {
   toggle.closest('.settings-category').classList.toggle('open');
 });
 
-// Lives in a footer row at the bottom of #mainWalletScreen, outside every
-// accordion category, rather than as a small cog next to #walletBtn on the
-// scene overlay — #walletBtn already doubles as the onboarding entry point
-// when there's no identity yet, and making a cog icon there appear only
-// "when logged in" would mean teaching the always-visible scene chrome a
-// new async login-state check for a rarely-used action. Anchoring it here
-// instead needs no new visibility logic (the whole wallet panel already
-// only reaches this screen once unlocked) and reads like the familiar
-// "gear icon in the footer" pattern.
-openSettingsBtn.addEventListener('click', async () => {
+// Reached via the top tab bar's Settings tab (settingsTabBtn below) — used
+// to also be reachable via a redundant gear-icon button pinned to the
+// bottom of #mainWalletScreen, removed once the top tab bar made it a
+// second way to get to the exact same place.
+async function openSettings() {
   await refreshIdentityModeControls();
-  await refreshHiddenItemsDisplay();
-  await refreshHiddenResourcesDisplay();
+  await refreshHiddenAssetsDisplay();
   await refreshCacheDisplay();
+  if (characterScaleInputEl) {
+    const scale = await AtlasWallet.getCharacterScale();
+    characterScaleInputEl.value = String(scale);
+    if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
+  }
   showWalletScreen('settingsScreen');
+}
+
+// 'input' (not 'change') so it applies while dragging the slider, not just
+// on release — and takes effect immediately in whatever 3D world is
+// currently open (active3D.setCharacterScale), same "changes should be
+// felt right away" expectation as every other live wallet setting.
+characterScaleInputEl && characterScaleInputEl.addEventListener('input', async () => {
+  const scale = await AtlasWallet.setCharacterScale(characterScaleInputEl.value);
+  if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
+  if (active3D && active3D.setCharacterScale) active3D.setCharacterScale(scale);
 });
 
 backFromSettingsBtn.addEventListener('click', routeWalletScreen);
+
+// Top tab bar (Wallet / Social / Settings) — a direct jump between the
+// screens that already exist, wired to the exact same logic as the Back
+// button above, just reachable without the extra hop.
+walletTabBtn && walletTabBtn.addEventListener('click', routeWalletScreen);
+settingsTabBtn && settingsTabBtn.addEventListener('click', openSettings);
+
+// ---------- mail (Wallet -> Mail tab) ----------
+//
+// A message a domain sent about a credential you hold — see
+// AtlasWallet.checkAllMail() for the actual fetch-and-verify logic. This
+// section is just the tab: opening it, rendering what's stored, letting
+// the user trigger a check by hand, and the check-frequency setting. The
+// periodic background loop that runs this automatically lives further
+// below, right after the file finishes wiring up every button.
+
+function renderMailCard(entry, container) {
+  const el = document.createElement('div');
+  el.className = 'wallet-item mail-card' + (entry.read ? '' : ' unread');
+  el.dataset.id = entry.message.id;
+  const sentAt = new Date(entry.message.sentAt).toLocaleString();
+  el.innerHTML =
+    '<div class="mail-domain">' + entry.message.domain + '</div>' +
+    '<div class="mail-subject">' + entry.message.subject + '</div>' +
+    '<div class="mail-meta">' + sentAt + (entry.read ? '' : ' · unread') + '</div>' +
+    '<div class="mail-body">' + entry.message.body + '</div>' +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="delete" class="danger-btn">Delete</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshMailDisplay() {
+  const identity = await AtlasWallet.getIdentity();
+  const entries = identity ? await AtlasWallet.getMail(identity.publicKey) : [];
+  const unreadCount = entries.filter((e) => !e.read).length;
+
+  mailBadge.textContent = String(unreadCount);
+  mailBadge.classList.toggle('show', unreadCount > 0);
+
+  if (mailListEl) {
+    mailListEl.innerHTML = '';
+    if (entries.length === 0) {
+      mailListEl.innerHTML = '<div class="empty-note">No mail yet.</div>';
+    } else {
+      entries.forEach((entry) => renderMailCard(entry, mailListEl));
+    }
+  }
+
+  if (mailLastCheckedEl) {
+    const settings = await AtlasWallet.getMailSettings();
+    mailLastCheckedEl.textContent = settings.lastCheckedAt
+      ? 'Last checked ' + new Date(settings.lastCheckedAt).toLocaleString()
+      : 'Not checked yet.';
+    if (mailIntervalInput) mailIntervalInput.value = settings.intervalMinutes;
+  }
+  await updateSocialBadge();
+}
+
+// Combined badge on the top-level Social tab (#61/#67) — unread mail plus
+// pending incoming friend requests, so there's a single "something needs
+// your attention in here" signal even while the panel's closed and nobody
+// can see which sub-tab would show it. Each sub-tab ALSO carries its own
+// count (mailBadge, friendRequestsBadge) for once you're actually looking.
+async function updateSocialBadge() {
+  const identity = await AtlasWallet.getIdentity();
+  const entries = identity ? await AtlasWallet.getMail(identity.publicKey) : [];
+  const unreadMail = entries.filter((e) => !e.read).length;
+  if (friendRequestsBadge) {
+    friendRequestsBadge.textContent = String(presencePendingIncoming.length);
+    friendRequestsBadge.classList.toggle('show', presencePendingIncoming.length > 0);
+  }
+  if (socialBadge) {
+    const total = unreadMail + presencePendingIncoming.length;
+    socialBadge.textContent = String(total);
+    socialBadge.classList.toggle('show', total > 0);
+  }
+}
+
+mailListEl && mailListEl.addEventListener('click', async (e) => {
+  const card = e.target.closest('.mail-card');
+  if (!card) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+
+  const deleteBtn = e.target.closest('button[data-action="delete"]');
+  if (deleteBtn) {
+    // No hide-then-delete two-step here (unlike items/resources — see
+    // #43) — a mail message isn't an asset worth a recycle-bin state, so
+    // this is a direct delete, same confirm() guard as Clear all below.
+    if (!confirm('Delete this message? This cannot be undone.')) return;
+    await AtlasWallet.deleteMailMessage(identity.publicKey, card.dataset.id);
+    await refreshMailDisplay();
+    return;
+  }
+
+  if (!card.classList.contains('unread')) return;
+  await AtlasWallet.markMailRead(identity.publicKey, card.dataset.id);
+  await refreshMailDisplay();
+});
+
+markAllMailReadBtn && markAllMailReadBtn.addEventListener('click', async () => {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  await AtlasWallet.markAllMailRead(identity.publicKey);
+  await refreshMailDisplay();
+});
+
+clearAllMailBtn && clearAllMailBtn.addEventListener('click', async () => {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  if (!confirm('Delete ALL mail messages? This cannot be undone.')) return;
+  await AtlasWallet.clearAllMail(identity.publicKey);
+  await refreshMailDisplay();
+});
+
+// Opening the Social tab lands on the Mail sub-tab by default (where the
+// standalone Mail tab used to open directly) — Friends/Favorites are one
+// click further in via socialSubtabBar, not a second top-level tab.
+socialTabBtn && socialTabBtn.addEventListener('click', async () => {
+  showWalletScreen('socialScreen');
+  showSocialSubtab('mailSubscreen');
+  await refreshMailDisplay();
+  await refreshSubscribeButton();
+});
+
+mailSubtabBtn && mailSubtabBtn.addEventListener('click', async () => {
+  showSocialSubtab('mailSubscreen');
+  await refreshMailDisplay();
+  await refreshSubscribeButton();
+});
+
+friendsSubtabBtn && friendsSubtabBtn.addEventListener('click', async () => {
+  showSocialSubtab('friendsSubscreen');
+  await refreshFriendsDisplay();
+});
+
+favoritesSubtabBtn && favoritesSubtabBtn.addEventListener('click', async () => {
+  showSocialSubtab('favoritesSubscreen');
+  await refreshFavoritesDisplay();
+});
+
+// Inventory's own sub-tab bar (task #44) — Collectibles/Documents, same
+// click-to-switch idea as Social's sub-tabs right above. Data is already
+// current from whatever last called refreshInventoryDisplay() (opening
+// the Wallet tab, or any asset action), so switching sub-tabs is just a
+// visibility toggle — no extra fetch needed.
+collectiblesSubtabBtn && collectiblesSubtabBtn.addEventListener('click', () => showInventorySubtab('collectiblesSubscreen'));
+documentsSubtabBtn && documentsSubtabBtn.addEventListener('click', () => showInventorySubtab('documentsSubscreen'));
+
+// "Subscribing" is just requesting the current domain's atlas.membership
+// item directly (see AtlasWallet.checkAllMail's design note: holding the
+// credential IS the subscription) — deliberately independent of
+// requestItemBtn / any world's acceptedItemClasses, since this is
+// "subscribe to the domain you're in", not "pick up this world's
+// collectible". The whole #subscribeSection (heading, explainer text,
+// button, status line) is hidden entirely, not just the button, once you
+// already hold that domain's membership card — nothing further to do, and
+// no orphaned "Subscribe" heading left sitting over nothing.
+async function alreadyHasMembership(domain) {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return false;
+  const wallet = await AtlasWallet.getWallet(identity.publicKey);
+  return wallet.some((e) => e.credential.asset.class === 'atlas.membership' && e.credential.issuer.domain === domain);
+}
+
+async function refreshSubscribeButton() {
+  if (!subscribeSectionEl) return;
+  if (subscribeStatusEl) subscribeStatusEl.textContent = '';
+  if (!currentManifest) {
+    subscribeSectionEl.hidden = true;
+    return;
+  }
+  const domain = manifestDomainOf(currentManifest);
+  if (await alreadyHasMembership(domain)) {
+    subscribeSectionEl.hidden = true;
+    return;
+  }
+  subscribeSectionEl.hidden = false;
+  subscribeBtn.disabled = false;
+  subscribeBtn.textContent = 'Subscribe to ' + domain;
+}
+
+subscribeBtn && subscribeBtn.addEventListener('click', async () => {
+  const domain = manifestDomainOf(currentManifest);
+  subscribeBtn.disabled = true;
+  subscribeBtn.textContent = 'Subscribing…';
+  let errorMessage = '';
+  try {
+    await AtlasWallet.mintAsset('self', domain, 'atlas.membership');
+    await refreshInventoryDisplay();
+  } catch (err) {
+    errorMessage = 'Subscribe failed: ' + err.message;
+  } finally {
+    await refreshSubscribeButton();
+    if (subscribeStatusEl) subscribeStatusEl.textContent = errorMessage;
+  }
+});
+
+// ---------- friends (Social -> Friends tab, #67) ----------
+//
+// Three lists: who's actually standing in this world with you right now
+// (from the live presence roster, see presenceRosterMeta), any friend
+// requests aimed at you that are still live (presencePendingIncoming —
+// only exists while both sides remain in the same room, see its own
+// comment up near disconnectPresence), and the friends you've actually
+// saved (AtlasWallet.getFriends(), persists across sessions/worlds — see
+// wallet.js). Adding a friend, and answering a request, both go out as a
+// signal over the CURRENT presence connection (sendSignal) — there's no
+// other channel this can use, by design (see README.md's Friends section
+// for why mail can't do this).
+
+function renderPresentVisitorCard(id, meta, friendKeys, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  const isFriend = !!(meta.publicKey && friendKeys.has(meta.publicKey));
+  const requested = presencePendingSentRequests.has(id);
+  let actionHtml;
+  if (!meta.publicKey) {
+    actionHtml = '<span class="empty-note">No identity — can\'t be friended</span>';
+  } else if (isFriend) {
+    actionHtml = '<span class="empty-note">Already a friend</span>';
+  } else if (requested) {
+    actionHtml = '<span class="empty-note">Request sent</span>';
+  } else {
+    actionHtml = '<button type="button" data-action="add-friend" data-id="' + id + '">Add friend</button>';
+  }
+  el.innerHTML =
+    '<div class="name">' + meta.name + '</div>' +
+    '<div class="meta">' + (meta.publicKey ? short(meta.publicKey, 20) : 'No wallet identity') + '</div>' +
+    '<div class="item-actions">' + actionHtml + '</div>';
+  container.appendChild(el);
+}
+
+function renderIncomingRequestCard(req, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.innerHTML =
+    '<div class="name">' + req.name + '</div>' +
+    '<div class="meta">' + (req.publicKey ? short(req.publicKey, 20) : '') + '</div>' +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="accept-request" data-from="' + req.from + '">Accept</button>' +
+    '<button type="button" data-action="decline-request" data-from="' + req.from + '" class="danger-btn">Decline</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+function renderFriendCard(f, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.innerHTML =
+    '<div class="name">' + f.name + '</div>' +
+    '<div class="meta">' + short(f.publicKey, 20) + '</div>' +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="remove-friend" data-key="' + f.publicKey + '" class="danger-btn">Remove</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshFriendsDisplay() {
+  const friends = await AtlasWallet.getFriends();
+  const friendKeys = new Set(friends.map((f) => f.publicKey));
+
+  if (friendsHereListEl) {
+    friendsHereListEl.innerHTML = '';
+    if (!presenceIsConnected()) {
+      friendsHereListEl.innerHTML = '<div class="empty-note">Enter a 3D world to see who\'s here right now.</div>';
+    } else if (presenceRosterMeta.size === 0) {
+      friendsHereListEl.innerHTML = '<div class="empty-note">Nobody else here right now.</div>';
+    } else {
+      presenceRosterMeta.forEach((meta, id) => renderPresentVisitorCard(id, meta, friendKeys, friendsHereListEl));
+    }
+  }
+
+  if (friendRequestsListEl) {
+    friendRequestsListEl.innerHTML = '';
+    if (presencePendingIncoming.length === 0) {
+      friendRequestsListEl.innerHTML = '<div class="empty-note">No pending requests.</div>';
+    } else {
+      presencePendingIncoming.forEach((req) => renderIncomingRequestCard(req, friendRequestsListEl));
+    }
+  }
+
+  if (friendsListEl) {
+    friendsListEl.innerHTML = '';
+    if (friends.length === 0) {
+      friendsListEl.innerHTML = '<div class="empty-note">No friends saved yet.</div>';
+    } else {
+      friends.forEach((f) => renderFriendCard(f, friendsListEl));
+    }
+  }
+
+  await updateSocialBadge();
+}
+
+// One delegated listener covers all three Friends lists — same pattern as
+// recentWorldsListEl's own click handler.
+socialScreen && socialScreen.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const action = btn.dataset.action;
+
+  if (action === 'add-friend') {
+    const id = btn.dataset.id;
+    const meta = presenceRosterMeta.get(id);
+    if (!meta || !meta.publicKey) return;
+    presencePendingSentRequests.add(id);
+    sendSignal(id, 'friend-request', presenceOwnPublicKey, presenceOwnName || 'Visitor');
+    await refreshFriendsDisplay();
+    return;
+  }
+
+  if (action === 'accept-request') {
+    const from = btn.dataset.from;
+    const req = presencePendingIncoming.find((r) => r.from === from);
+    if (!req) return;
+    presencePendingIncoming = presencePendingIncoming.filter((r) => r.from !== from);
+    if (req.publicKey) {
+      try { await AtlasWallet.addFriend(req.publicKey, req.name || 'Friend'); } catch (err) {}
+    }
+    sendSignal(from, 'friend-request-accepted', presenceOwnPublicKey, presenceOwnName || 'Visitor');
+    await refreshFriendsDisplay();
+    return;
+  }
+
+  if (action === 'decline-request') {
+    const from = btn.dataset.from;
+    presencePendingIncoming = presencePendingIncoming.filter((r) => r.from !== from);
+    sendSignal(from, 'friend-request-declined', presenceOwnPublicKey, presenceOwnName || 'Visitor');
+    await refreshFriendsDisplay();
+    return;
+  }
+
+  if (action === 'remove-friend') {
+    await AtlasWallet.removeFriend(btn.dataset.key);
+    await refreshFriendsDisplay();
+    return;
+  }
+});
+
+// ---------- favorite domains (Social -> Favorites tab, #61) ----------
+//
+// A bookmarked domain+world, teleported to the same way Recent Worlds
+// does (travelToRecentWorld, unchanged, reused as-is below since the
+// action is identical: refetch the manifest, enter that world, close the
+// panel). What's new here is the live status line — "N here now, friends:
+// ..." — pulled fresh from that domain's OWN presence backend every time
+// this list renders (fetchPresenceStatus), then cross-referenced against
+// the local friends list ENTIRELY CLIENT-SIDE. See presence-server.js's
+// /presence/status route and presence-php's status.php for the privacy
+// reasoning: the server only ever hands back who's actually there, never
+// anyone's friends list.
+
+function renderFavoriteCard(entry, status, friendByKey, index, total, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  const isHere = !!(currentWorld && currentManifest && entry.domain === currentManifest.domain && entry.worldId === currentWorld.id);
+  const friendsHere = (status.roster || []).filter((m) => m.publicKey && friendByKey.has(m.publicKey));
+  const friendNames = friendsHere.map((m) => friendByKey.get(m.publicKey).name);
+  let statusLine = status.count > 0 ? status.count + ' here now' : 'Nobody here right now';
+  if (friendNames.length > 0) statusLine += ' · friends here: ' + friendNames.join(', ');
+  el.innerHTML =
+    '<div class="name">' + entry.worldName + '</div>' +
+    '<div class="meta">' + entry.domain + (entry.worldId ? ' · ' + entry.worldId : '') + '</div>' +
+    '<div class="meta">' + statusLine + '</div>' +
+    '<div class="item-actions">' +
+    (isHere
+      ? '<span class="empty-note">You are here</span>'
+      : '<button type="button" data-action="travel-favorite" data-manifest="' + entry.manifestUrl + '" data-world="' + (entry.worldId || '') + '">Go</button>') +
+    (index > 0 ? '<button type="button" data-action="move-favorite-up" data-domain="' + entry.domain + '">Move up</button>' : '') +
+    (index < total - 1 ? '<button type="button" data-action="move-favorite-down" data-domain="' + entry.domain + '">Move down</button>' : '') +
+    '<button type="button" data-action="remove-favorite" data-domain="' + entry.domain + '" class="danger-btn">Remove</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshFavoritesDisplay() {
+  if (!favoritesListEl) return;
+  const favorites = await AtlasWallet.getFavoriteDomains();
+  favoritesListEl.innerHTML = '';
+  if (favorites.length === 0) {
+    favoritesListEl.innerHTML = '<div class="empty-note">No favorites yet — while you\'re in a world, use "Favorite this domain" above.</div>';
+  } else {
+    const friends = await AtlasWallet.getFriends();
+    const friendByKey = new Map(friends.map((f) => [f.publicKey, f]));
+    const statuses = await Promise.all(favorites.map((entry) =>
+      entry.worldId ? fetchPresenceStatus(entry.domain, entry.worldId, entry.presenceBase) : Promise.resolve({ count: 0, roster: [] })
+    ));
+    favorites.forEach((entry, i) => renderFavoriteCard(entry, statuses[i], friendByKey, i, favorites.length, favoritesListEl));
+  }
+  await refreshFavoriteCurrentDomainButton();
+}
+
+async function refreshFavoriteCurrentDomainButton() {
+  if (!addCurrentFavoriteBtn) return;
+  if (!currentManifest || !currentWorld) {
+    addCurrentFavoriteBtn.style.display = 'none';
+    if (addCurrentFavoriteStatusEl) addCurrentFavoriteStatusEl.textContent = '';
+    return;
+  }
+  const already = await AtlasWallet.isFavoriteDomain(currentManifest.domain);
+  addCurrentFavoriteBtn.style.display = already ? 'none' : '';
+  if (addCurrentFavoriteStatusEl) addCurrentFavoriteStatusEl.textContent = already ? 'This domain is already a favorite.' : '';
+}
+
+addCurrentFavoriteBtn && addCurrentFavoriteBtn.addEventListener('click', async () => {
+  if (!currentManifest || !currentWorld) return;
+  await AtlasWallet.addFavoriteDomain({
+    domain: currentManifest.domain,
+    manifestUrl: currentManifestUrl,
+    worldId: currentWorld.id,
+    worldName: currentWorld.name,
+    presenceBase: currentManifest.presence || null
+  });
+  await refreshFavoritesDisplay();
+});
+
+favoritesListEl && favoritesListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  if (action === 'travel-favorite') { await travelToRecentWorld(btn.dataset.manifest, btn.dataset.world || undefined); return; }
+  if (action === 'remove-favorite') { await AtlasWallet.removeFavoriteDomain(btn.dataset.domain); await refreshFavoritesDisplay(); return; }
+  if (action === 'move-favorite-up') { await AtlasWallet.moveFavoriteDomain(btn.dataset.domain, 'up'); await refreshFavoritesDisplay(); return; }
+  if (action === 'move-favorite-down') { await AtlasWallet.moveFavoriteDomain(btn.dataset.domain, 'down'); await refreshFavoritesDisplay(); return; }
+});
+
+checkMailNowBtn && checkMailNowBtn.addEventListener('click', async () => {
+  checkMailNowBtn.disabled = true;
+  checkMailNowBtn.textContent = 'Checking…';
+  try {
+    await AtlasWallet.checkAllMail();
+  } catch (err) {
+    // checkAllMail already swallows per-domain failures; this would only
+    // be something more fundamental (no identity, storage error, etc).
+  } finally {
+    checkMailNowBtn.disabled = false;
+    checkMailNowBtn.textContent = 'Check now';
+    await refreshMailDisplay();
+    // checkAllMail (SPEC.md §5.1.1) may have just adopted a reissued item
+    // for every domain this wallet holds something from, not only mail —
+    // refresh the items list/badge too so a manual "Check now" surfaces
+    // that immediately, same as the periodic loop below already does.
+    await refreshInventoryDisplay();
+  }
+});
+
+saveMailIntervalBtn && saveMailIntervalBtn.addEventListener('click', async () => {
+  mailIntervalStatusEl.textContent = '';
+  try {
+    await AtlasWallet.setMailCheckInterval(mailIntervalInput.value);
+    mailIntervalStatusEl.textContent = 'Saved.';
+    restartMailCheckLoop();
+  } catch (err) {
+    mailIntervalStatusEl.textContent = err.message;
+  }
+});
 
 // Blank input + Save = clear the alias back to the raw key; anything else
 // = set/replace it (setAlias runs the profanity filter — see wallet.js).
@@ -1559,15 +2667,13 @@ importWalletFileInput.addEventListener('change', async () => {
     const fileData = JSON.parse(await file.text());
     const result = await AtlasWallet.importWallet(fileData);
     const parts = [];
-    if (result.itemsAdded) parts.push(result.itemsAdded + ' item(s) added');
-    if (result.resourcesAdded) parts.push(result.resourcesAdded + ' resource balance(s) added');
-    const skippedDup = result.itemsSkippedDuplicate + result.resourcesSkippedDuplicate;
-    const skippedOwner = result.itemsSkippedNotOwned + result.resourcesSkippedNotOwned;
+    if (result.assetsAdded) parts.push(result.assetsAdded + ' asset(s) added');
+    const skippedDup = result.assetsSkippedDuplicate;
+    const skippedOwner = result.assetsSkippedNotOwned;
     if (skippedDup) parts.push(skippedDup + ' already in this wallet');
     if (skippedOwner) parts.push(skippedOwner + ' skipped (belong to a different identity)');
     importWalletStatusEl.textContent = parts.length ? parts.join(', ') + '.' : 'Nothing new to import.';
-    await refreshItemsDisplay();
-    await refreshResourcesDisplay();
+    await refreshInventoryDisplay();
   } catch (err) {
     importWalletStatusEl.textContent = 'Import failed: ' + err.message;
   }
@@ -1669,8 +2775,8 @@ requestItemBtn.addEventListener('click', async () => {
   requestItemBtn.disabled = true;
   requestItemBtn.textContent = 'Requesting…';
   try {
-    await AtlasWallet.requestItem(manifestDomainOf(currentManifest), assetClass);
-    await refreshItemsDisplay();
+    await AtlasWallet.mintAsset('self', manifestDomainOf(currentManifest), assetClass);
+    await refreshInventoryDisplay();
   } catch (err) {
     statusEl.textContent = 'Issuance failed: ' + err.message;
   } finally {
@@ -1696,67 +2802,24 @@ reverifyBtn.addEventListener('click', async () => {
   reverifyBtn.disabled = true;
   reverifyBtn.textContent = 'Re-verifying…';
   await AtlasWallet.reverifyAll();
-  await refreshItemsDisplay();
-  await refreshResourcesDisplay();
+  await refreshInventoryDisplay();
   reverifyBtn.disabled = false;
   reverifyBtn.textContent = 'Re-verify wallet against current issuers';
 });
 
-// Event delegation for per-item buttons (load/unload, simulate loss,
-// delete) since the item cards are re-rendered from scratch on every
-// refresh. One handler covers both self's and the counterparty's item
-// list — self gets the extra loadout/PvP actions, delete is common to both.
-function itemActionHandler(listEl, role) {
-  listEl.addEventListener('click', async (e) => {
-    const btn = e.target.closest('button');
-    if (!btn) return;
-    const id = btn.dataset.id;
-    if (btn.dataset.action === 'toggle-properties') {
-      const detail = btn.nextElementSibling;
-      if (!detail) return;
-      detail.hidden = !detail.hidden;
-      btn.classList.toggle('open', !detail.hidden);
-    } else if (btn.dataset.action === 'toggle-load') {
-      const loadout = await AtlasWallet.getLoadout();
-      if (loadout.includes(id)) await AtlasWallet.unloadItem(id); else await AtlasWallet.loadItem(id);
-      await refreshItemsDisplay();
-    } else if (btn.dataset.action === 'lose') {
-      btn.disabled = true;
-      btn.textContent = 'Signing…';
-      try {
-        const identity = await AtlasWallet.getIdentity();
-        const selfWallet = await AtlasWallet.getWallet(identity.publicKey);
-        const entry = selfWallet.find((x) => x.credential.id === id);
-        await AtlasWallet.loseItemToCounterparty(entry.credential, { domain: manifestDomainOf(currentManifest), world: currentWorld.id });
-        await refreshItemsDisplay();
-      } catch (err) {
-        statusEl.textContent = 'Transfer failed: ' + err.message;
-      }
-    } else if (btn.dataset.action === 'hide') {
-      const who = role === 'self' ? await AtlasWallet.getIdentity() : await AtlasWallet.getCounterparty();
-      if (!who) return;
-      await AtlasWallet.hideItem(who.publicKey, id);
-      await refreshItemsDisplay();
-    } else if (btn.dataset.action === 'drop') {
-      beginDropPlacement(id);
-    }
-  });
-}
-itemActionHandler(selfItemsListEl, 'self');
-itemActionHandler(counterpartyItemsListEl, 'counterparty');
-
-droppedItemsListEl.addEventListener('click', (e) => {
-  const btn = e.target.closest('button');
-  if (!btn || btn.dataset.action !== 'pick-up') return;
-  pickUpDroppedItem(btn.dataset.id);
-});
-
-// Event delegation for resource cards: split, delete, and consolidating a
-// same-class-same-issuer group into one balance.
-function resourceActionHandler(listEl, role, toRole) {
+// Event delegation for per-asset-card buttons — load/unload, simulate
+// loss, split, consolidate, drop, hide — since cards are re-rendered from
+// scratch on every refresh. One handler covers both self's and the
+// counterparty's list, for both Collectibles and Documents (task #44
+// replaced the former separate itemActionHandler/resourceActionHandler
+// pair with this one): self gets the extra loadout/PvP/split/consolidate
+// actions where the card itself offers them (see renderAssetCard's own
+// fungible-vs-not branching), hide is common to both roles.
+function assetActionHandler(listEl, role, toRole) {
   listEl.addEventListener('click', async (e) => {
     const btn = e.target.closest('button');
     if (!btn || !btn.dataset.action) return;
+    const id = btn.dataset.id;
     if (btn.dataset.action === 'toggle-properties') {
       const detail = btn.nextElementSibling;
       if (!detail) return;
@@ -1767,24 +2830,37 @@ function resourceActionHandler(listEl, role, toRole) {
     const who = role === 'self' ? await AtlasWallet.getIdentity() : await AtlasWallet.getCounterparty();
     if (!who) return;
 
-    if (btn.dataset.action === 'split') {
+    if (btn.dataset.action === 'toggle-load') {
+      const loadout = await AtlasWallet.getLoadout();
+      if (loadout.includes(id)) await AtlasWallet.unloadItem(id); else await AtlasWallet.loadItem(id);
+      await refreshInventoryDisplay();
+    } else if (btn.dataset.action === 'lose') {
+      btn.disabled = true;
+      btn.textContent = 'Signing…';
+      try {
+        const wallet = await AtlasWallet.getWallet(who.publicKey);
+        const entry = wallet.find((x) => x.credential.id === id);
+        await AtlasWallet.loseItemToCounterparty(entry.credential, { domain: manifestDomainOf(currentManifest), world: currentWorld.id });
+        await refreshInventoryDisplay();
+      } catch (err) {
+        statusEl.textContent = 'Transfer failed: ' + err.message;
+      }
+    } else if (btn.dataset.action === 'drop') {
+      beginDropPlacement(id);
+    } else if (btn.dataset.action === 'hide') {
+      await AtlasWallet.hideAsset(who.publicKey, id);
+      await refreshInventoryDisplay();
+    } else if (btn.dataset.action === 'split') {
       btn.disabled = true;
       btn.textContent = 'Sending…';
       try {
-        const wallet = await AtlasWallet.getResourceWallet(who.publicKey);
-        const entry = wallet.find((x) => x.credential.id === btn.dataset.id);
-        await AtlasWallet.splitResource(role, entry.credential, Number(btn.dataset.amount), toRole);
-        await refreshResourcesDisplay();
+        const wallet = await AtlasWallet.getWallet(who.publicKey);
+        const entry = wallet.find((x) => x.credential.id === id);
+        await AtlasWallet.splitAsset(role, entry.credential, Number(btn.dataset.amount), toRole);
+        await refreshInventoryDisplay();
       } catch (err) {
         statusEl.textContent = 'Split failed: ' + err.message;
       }
-    } else if (btn.dataset.action === 'hide') {
-      await AtlasWallet.hideResource(who.publicKey, btn.dataset.id);
-      await refreshResourcesDisplay();
-    } else if (btn.dataset.action === 'delete') {
-      if (!confirm('Permanently remove this balance? Unlike Hide, this can\'t be undone — if this is your only local copy of an unspent balance, you lose the ability to present or split it. This only clears it locally; it does not revoke the credential.')) return;
-      await AtlasWallet.deleteResource(who.publicKey, btn.dataset.id);
-      await refreshResourcesDisplay();
     } else if (btn.dataset.action === 'consolidate-group') {
       const sepIndex = btn.dataset.key.indexOf('::');
       const cls = btn.dataset.key.slice(0, sepIndex);
@@ -1792,25 +2868,33 @@ function resourceActionHandler(listEl, role, toRole) {
       btn.disabled = true;
       btn.textContent = 'Consolidating…';
       try {
-        const wallet = await AtlasWallet.getResourceWallet(who.publicKey);
-        const group = wallet.filter((x) => x.credential.class === cls && x.credential.issuer.domain === issuerDomain);
-        await AtlasWallet.consolidateResources(role, group.map((entry) => entry.credential));
-        await refreshResourcesDisplay();
+        const wallet = await AtlasWallet.getWallet(who.publicKey);
+        const group = wallet.filter((x) => x.credential.asset.class === cls && x.credential.issuer.domain === issuerDomain && x.credential.asset.fungible);
+        await AtlasWallet.consolidateAsset(role, group.map((entry) => entry.credential));
+        await refreshInventoryDisplay();
       } catch (err) {
         statusEl.textContent = 'Consolidate failed: ' + err.message;
       }
     }
   });
 }
-resourceActionHandler(selfResourceListEl, 'self', 'counterparty');
-resourceActionHandler(counterpartyResourceListEl, 'counterparty', 'self');
+assetActionHandler(selfCollectiblesListEl, 'self', 'counterparty');
+assetActionHandler(counterpartyCollectiblesListEl, 'counterparty', 'self');
+assetActionHandler(selfDocumentsListEl, 'self', 'counterparty');
+assetActionHandler(counterpartyDocumentsListEl, 'counterparty', 'self');
+
+droppedItemsListEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn || btn.dataset.action !== 'pick-up') return;
+  pickUpDroppedItem(btn.dataset.id);
+});
 
 mintIronBtn.addEventListener('click', async () => {
   mintIronBtn.disabled = true;
   mintIronBtn.textContent = 'Mining…';
   try {
-    await AtlasWallet.mintResource('self', manifestDomainOf(currentManifest), 'atlas.element.iron', 20);
-    await refreshResourcesDisplay();
+    await AtlasWallet.mintAsset('self', manifestDomainOf(currentManifest), 'atlas.element.iron', 20);
+    await refreshInventoryDisplay();
   } catch (err) {
     statusEl.textContent = 'Mint failed: ' + err.message;
   } finally {
@@ -1823,8 +2907,8 @@ mintGoldBtn.addEventListener('click', async () => {
   mintGoldBtn.disabled = true;
   mintGoldBtn.textContent = 'Mining…';
   try {
-    await AtlasWallet.mintResource('counterparty', manifestDomainOf(currentManifest), 'atlas.element.gold', 10);
-    await refreshResourcesDisplay();
+    await AtlasWallet.mintAsset('counterparty', manifestDomainOf(currentManifest), 'atlas.element.gold', 10);
+    await refreshInventoryDisplay();
   } catch (err) {
     statusEl.textContent = 'Mint failed: ' + err.message;
   } finally {
@@ -1847,8 +2931,8 @@ async function handleInteractable(marker) {
   try {
     if (marker.action === 'mint') {
       statusEl.textContent = 'Mining ' + marker.class + '…';
-      await AtlasWallet.mintResource(marker.role || 'self', manifestDomainOf(currentManifest), marker.class, marker.quantity);
-      await refreshResourcesDisplay();
+      await AtlasWallet.mintAsset(marker.role || 'self', manifestDomainOf(currentManifest), marker.class, marker.quantity);
+      await refreshInventoryDisplay();
       statusEl.textContent = 'Collected ' + marker.quantity + ' × ' + marker.class + '.';
     } else if (marker.action === 'issue') {
       // Unlike a resource balance, an item credential isn't quantity-based
@@ -1874,8 +2958,8 @@ async function handleInteractable(marker) {
         }
       }
       statusEl.textContent = 'Collecting ' + (marker.label || marker.class) + '…';
-      await AtlasWallet.requestItem(manifestDomainOf(currentManifest), marker.class);
-      await refreshItemsDisplay();
+      await AtlasWallet.mintAsset('self', manifestDomainOf(currentManifest), marker.class);
+      await refreshInventoryDisplay();
       statusEl.textContent = 'Collected ' + (marker.label || marker.class) + '.';
     }
   } catch (err) {
@@ -1893,10 +2977,10 @@ tradeBtn.addEventListener('click', async () => {
     const counterparty = await AtlasWallet.getCounterparty();
     if (!identity || !counterparty) throw new Error('Create both identities first.');
 
-    const selfRes = await AtlasWallet.getResourceWallet(identity.publicKey);
-    const cpRes = await AtlasWallet.getResourceWallet(counterparty.publicKey);
-    const ironBalance = selfRes.map((e) => e.credential).find((c) => c.class === 'atlas.element.iron' && c.quantity >= 10);
-    const goldBalance = cpRes.map((e) => e.credential).find((c) => c.class === 'atlas.element.gold' && c.quantity >= 5);
+    const selfWallet = await AtlasWallet.getWallet(identity.publicKey);
+    const cpWallet = await AtlasWallet.getWallet(counterparty.publicKey);
+    const ironBalance = selfWallet.map((e) => e.credential).find((c) => c.asset.class === 'atlas.element.iron' && c.asset.fungible && c.quantity >= 10);
+    const goldBalance = cpWallet.map((e) => e.credential).find((c) => c.asset.class === 'atlas.element.gold' && c.asset.fungible && c.quantity >= 5);
     if (!ironBalance) throw new Error('Self needs at least 10 iron — mine some first.');
     if (!goldBalance) throw new Error('Counterparty needs at least 5 gold — mine some first.');
 
@@ -1910,7 +2994,7 @@ tradeBtn.addEventListener('click', async () => {
 
     tradeStatusEl.textContent = 'Settling…';
     await AtlasWallet.settleTrade(manifestDomainOf(currentManifest), intentSelf, intentCp, ironBalance, goldBalance);
-    await refreshResourcesDisplay();
+    await refreshInventoryDisplay();
     tradeStatusEl.textContent = '✓ Settled: self sent 10 iron and received 5 gold; counterparty mirrored it.';
   } catch (err) {
     tradeStatusEl.textContent = 'Trade failed: ' + err.message;
@@ -1941,9 +3025,59 @@ bindEnterToClick(changePasswordNewInput, changePasswordBtn);
 bindEnterToClick(changePasswordConfirmInput, changePasswordBtn);
 bindEnterToClick(aliasInput, setAliasBtn);
 
+// Runs the mail check on the user's configured interval for as long as
+// this overlay is open — this is the "even when you're not present in
+// that domain's world" part: it checks every domain across ANY currently
+// held credential, not just whichever world happens to be in front right
+// now. Deliberately scoped to "while a Domain Atlas tab is open" rather
+// than a real background service worker — see task notes discussed
+// alongside this feature for why (no new extension permissions, fits the
+// existing content-script-only architecture). setMailCheckInterval calls
+// restartMailCheckLoop() so a changed setting takes effect immediately
+// instead of waiting for the next natural fire.
+let mailCheckTimer = null;
+async function restartMailCheckLoop() {
+  if (mailCheckTimer) clearInterval(mailCheckTimer);
+  const settings = await AtlasWallet.getMailSettings();
+  const ms = Math.max(1, settings.intervalMinutes) * 60 * 1000;
+  mailCheckTimer = setInterval(async () => {
+    await AtlasWallet.checkAllMail();
+    // Cheap either way — this also keeps the tab's unread badge current
+    // even when the Mail tab itself isn't the one currently open. Also
+    // picks up any item reissue (SPEC.md §5.1.1) checkAllMail just
+    // adopted, across every domain this wallet holds something from —
+    // this is the "even when you're not standing in that domain's world"
+    // half of that feature; entering a world (see checkItemUpdatesForDomain
+    // below, called from enterWorld) is the immediate, single-domain half.
+    await refreshMailDisplay();
+    await refreshInventoryDisplay();
+  }, ms);
+}
+
+// The single-domain, fire-immediately counterpart to the periodic loop
+// above — same underlying AtlasWallet.checkAllMail(), just scoped via
+// opts.onlyDomain and triggered by entering a world (see enterWorld)
+// instead of waiting on the interval. Not awaited by its caller — see the
+// comment at that call site.
+function checkItemUpdatesForDomain(domain) {
+  AtlasWallet.checkAllMail({ onlyDomain: domain })
+    .then(async () => {
+      await refreshInventoryDisplay();
+      await refreshMailDisplay();
+    })
+    .catch(() => {
+      // AtlasWallet.checkAllMail already swallows a single unreachable
+      // domain's failure internally; this would only be something more
+      // fundamental (no identity, storage error) — same "don't let a
+      // background check disturb what's on screen" reasoning as the mail
+      // loop above.
+    });
+}
+restartMailCheckLoop();
+
 refreshIdentityDisplay();
-refreshItemsDisplay();
-refreshResourcesDisplay();
+refreshInventoryDisplay();
+refreshMailDisplay();
 
 const start = startParams();
 if (start.manifest) {

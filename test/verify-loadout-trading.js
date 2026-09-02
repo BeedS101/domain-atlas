@@ -107,7 +107,7 @@ async function clickPortalTo(frame, targetWorld) {
 
     await frame.waitForFunction(() => !document.getElementById('requestItemBtn').disabled, { timeout: 5000 });
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfItemsList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
     console.log('PASS: Bronze Compass issued to self');
     await page.screenshot({ path: shot('lt-01-plaza-item.png') });
 
@@ -120,20 +120,20 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('PASS: PvP warning shown for this world');
 
     console.log('STEP 2: loading the item into this world');
-    await frame.locator('#selfItemsList [data-action="toggle-load"]').click();
-    await frame.waitForFunction(() => !!document.querySelector('#selfItemsList [data-action="lose"]'), { timeout: 5000 });
+    await frame.locator('#selfCollectiblesList [data-action="toggle-load"]').click();
+    await frame.waitForFunction(() => !!document.querySelector('#selfCollectiblesList [data-action="lose"]'), { timeout: 5000 });
     console.log('PASS: item loaded, "Simulate PvP loss" now available');
     await page.screenshot({ path: shot('lt-02-loaded-in-arena.png') });
 
     console.log('STEP 3: simulating a PvP loss (real ECDSA-signed transfer to the counterparty key)');
-    await frame.locator('#selfItemsList [data-action="lose"]').click();
+    await frame.locator('#selfCollectiblesList [data-action="lose"]').click();
     await frame.waitForFunction(
-      () => document.querySelectorAll('#selfItemsList .wallet-item').length === 0 &&
-            document.querySelectorAll('#counterpartyItemsList .wallet-item').length > 0,
+      () => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0 &&
+            document.querySelectorAll('#counterpartyCollectiblesList .wallet-item').length > 0,
       { timeout: 15000 }
     );
-    const selfItemsAfterLoss = await frame.locator('#selfItemsList').textContent();
-    const cpItemsAfterLoss = await frame.locator('#counterpartyItemsList').textContent();
+    const selfItemsAfterLoss = await frame.locator('#selfCollectiblesList').textContent();
+    const cpItemsAfterLoss = await frame.locator('#counterpartyCollectiblesList').textContent();
     if (selfItemsAfterLoss.includes('Bronze Compass')) throw new Error('Item should be gone from self wallet after loss');
     if (!cpItemsAfterLoss.includes('Bronze Compass')) throw new Error('Item should now be in counterparty wallet');
     console.log('PASS: item moved to counterparty — real owner-signed transfer, not a server reassignment');
@@ -151,17 +151,17 @@ async function clickPortalTo(frame, targetWorld) {
 
     console.log('STEP 5: mining resources — 20 iron to self, 10 gold to counterparty');
     await frame.locator('#mintIronBtn').click();
-    await frame.waitForFunction(() => document.getElementById('selfResourceList').textContent.includes('20 × atlas.element.iron'), { timeout: 15000 });
+    await frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron Ingot ×20'), { timeout: 15000 });
     await frame.locator('#mintGoldBtn').click();
-    await frame.waitForFunction(() => document.getElementById('counterpartyResourceList').textContent.includes('10 × atlas.element.gold'), { timeout: 15000 });
+    await frame.waitForFunction(() => document.getElementById('counterpartyCollectiblesList').textContent.includes('Gold Ingot ×10'), { timeout: 15000 });
     console.log('PASS: both real resource balances minted and verified');
     await page.screenshot({ path: shot('lt-04-resources-minted.png') });
 
     console.log('STEP 6: splitting — sending 10 of self\'s iron to the counterparty');
-    await frame.locator('#selfResourceList [data-action="split"]').click();
+    await frame.locator('#selfCollectiblesList [data-action="split"]').click();
     await frame.waitForFunction(
-      () => document.getElementById('selfResourceList').textContent.includes('10 × atlas.element.iron') &&
-            document.getElementById('counterpartyResourceList').textContent.includes('10 × atlas.element.iron'),
+      () => document.getElementById('selfCollectiblesList').textContent.includes('Iron Ingot ×10') &&
+            document.getElementById('counterpartyCollectiblesList').textContent.includes('Iron Ingot ×10'),
       { timeout: 15000 }
     );
     console.log('PASS: split settled — self kept the remainder, counterparty received a fresh balance, old one revoked');
@@ -174,11 +174,11 @@ async function clickPortalTo(frame, targetWorld) {
     await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="trading"]').classList.contains('open'), { timeout: 5000 });
     await frame.locator('#tradeBtn').click();
     await frame.waitForFunction(() => document.getElementById('tradeStatus').textContent.startsWith('✓ Settled'), { timeout: 20000 });
-    const selfResAfterTrade = await frame.locator('#selfResourceList').textContent();
-    const cpResAfterTrade = await frame.locator('#counterpartyResourceList').textContent();
-    if (!selfResAfterTrade.includes('5 × atlas.element.gold')) throw new Error('Self should have received 5 gold');
+    const selfResAfterTrade = await frame.locator('#selfCollectiblesList').textContent();
+    const cpResAfterTrade = await frame.locator('#counterpartyCollectiblesList').textContent();
+    if (!selfResAfterTrade.includes('Gold Ingot ×5')) throw new Error('Self should have received 5 gold');
     if (selfResAfterTrade.includes('atlas.element.iron')) throw new Error('Self should have fully spent its 10-iron balance on the trade');
-    if (!cpResAfterTrade.includes('5 × atlas.element.gold')) throw new Error('Counterparty should have a 5-gold remainder');
+    if (!cpResAfterTrade.includes('Gold Ingot ×5')) throw new Error('Counterparty should have a 5-gold remainder');
     console.log('PASS: trade settled atomically — both sides\' balances updated correctly, both signatures were required');
     await page.screenshot({ path: shot('lt-05-trade-settled.png') });
 
