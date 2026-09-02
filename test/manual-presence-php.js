@@ -1,8 +1,8 @@
 // Manual check for presence-php's hand-written polling routes (task #68's
 // PHP port of presence-server/server.js's /presence/poll/* — see
 // presence-php/README.txt for what this is and why it exists: a
-// deployable backend for real domains on plain PHP/Apache shared hosting,
-// like evtec.co.za, that can't run a persistent WebSocket process at all).
+// deployable backend for real domains on plain PHP/Apache shared hosting
+// that can't run a persistent WebSocket process at all).
 //
 // Run in isolation from the extension, same reasoning as
 // manual-presence-server.js — proves the actual PHP request/response
@@ -71,7 +71,7 @@ function post(urlPath, body) {
 
   try {
     console.log('STEP 1: first visitor joins an empty room, gets an empty roster');
-    const joinA = await post('/presence/poll/join', { domain: 'evtec.co.za', world: 'lobby', name: 'Alice' });
+    const joinA = await post('/presence/poll/join', { domain: 'example.com', world: 'lobby', name: 'Alice' });
     if (joinA.status !== 200 || !joinA.body.id || joinA.body.roster.length !== 0) {
       throw new Error('Expected a 200 with an empty roster for the first joiner, got: ' + JSON.stringify(joinA));
     }
@@ -83,7 +83,7 @@ function post(urlPath, body) {
     if (preflight.status !== 204 || preflight.headers.get('access-control-allow-origin') !== '*') {
       throw new Error('Expected a 204 CORS preflight with Access-Control-Allow-Origin: *, got status ' + preflight.status + ', ACAO=' + preflight.headers.get('access-control-allow-origin'));
     }
-    const joinB = await post('/presence/poll/join', { domain: 'evtec.co.za', world: 'lobby', name: 'Bob' });
+    const joinB = await post('/presence/poll/join', { domain: 'example.com', world: 'lobby', name: 'Bob' });
     if (joinB.status !== 200 || joinB.body.roster.length !== 1 || joinB.body.roster[0].id !== idA || joinB.body.roster[0].name !== 'Alice') {
       throw new Error('Expected Bob\'s roster to contain exactly Alice, got: ' + JSON.stringify(joinB.body));
     }
@@ -107,7 +107,7 @@ function post(urlPath, body) {
     console.log('PASS: a position sent in one sync shows up in the other visitor\'s next sync roster');
 
     console.log('STEP 5: a visitor in a DIFFERENT room (different world) never sees Alice or Bob\'s roster — room isolation');
-    const joinC = await post('/presence/poll/join', { domain: 'evtec.co.za', world: 'plaza', name: 'Carol' });
+    const joinC = await post('/presence/poll/join', { domain: 'example.com', world: 'plaza', name: 'Carol' });
     if (joinC.status !== 200 || joinC.body.roster.length !== 0) {
       throw new Error('Expected Carol (different room) to see an empty roster, got: ' + JSON.stringify(joinC.body));
     }
@@ -126,7 +126,7 @@ function post(urlPath, body) {
     console.log('PASS: an unknown id gets a clean 404, matching what pollPresence() in viewer.js expects');
 
     console.log('STEP 8: a visitor that stops syncing entirely is swept out once the staleness timeout has passed');
-    const joinD = await post('/presence/poll/join', { domain: 'evtec.co.za', world: 'lobby', name: 'Dave' });
+    const joinD = await post('/presence/poll/join', { domain: 'example.com', world: 'lobby', name: 'Dave' });
     const idD = joinD.body.id;
     // Confirm Dave really is there first, before faking him stale.
     const syncBeforeSweep = await post('/presence/poll/sync', { id: idA });

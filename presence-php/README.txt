@@ -47,7 +47,7 @@ What's in this folder
                         matching what the extension calls
 
 
-How to install on evtec.co.za (cPanel File Manager)
+How to install on your domain (cPanel File Manager)
 -----------------------------------------------------
 1. Open File Manager, go to your site's document root (public_html, or
    wherever /.well-known/spatial.json already lives — same place you
@@ -73,8 +73,8 @@ visitors' extensions at them until your domain's manifest
 
   {
     "spec": "domain-atlas/1.0",
-    "domain": "evtec.co.za",
-    "presence": "https://evtec.co.za",
+    "domain": "example.com",
+    "presence": "https://example.com",
     "defaultWorld": "...",
     "worlds": [ ... ]
   }
@@ -87,10 +87,10 @@ this repo) just keeps using the Node dev default
 because of this bundle existing.
 
 With "presence" set to your own domain, extension/viewer.js derives:
-  - a WebSocket URL: wss://evtec.co.za/presence — nothing answers this on
+  - a WebSocket URL: wss://example.com/presence — nothing answers this on
     plain PHP hosting, so the connection attempt fails fast (or hangs
     briefly, then times out after ~2.5s)
-  - an HTTP polling base: https://evtec.co.za — which IS what this bundle
+  - an HTTP polling base: https://example.com — which IS what this bundle
     answers, at /presence/poll/join etc.
 
 The extension always tries WebSocket first and falls back to polling on

@@ -34,8 +34,8 @@
 //
 // Two transports, one room (task #68): WebSocket is the primary, real-time
 // transport (see above), but it needs a persistent process bound to a
-// port — something plain cPanel/Apache+PHP shared hosting (e.g. the real
-// evtec.co.za deployment, see issuer-php/README.txt for why the issuer
+// port — something plain cPanel/Apache+PHP shared hosting (e.g. a real
+// single-domain deployment, see issuer-php/README.txt for why the issuer
 // needed a PHP port in the first place) cannot run at all, in any
 // language. So this server ALSO exposes a plain HTTP polling fallback
 // (POST /presence/poll/join, /presence/poll/sync, /presence/poll/leave)

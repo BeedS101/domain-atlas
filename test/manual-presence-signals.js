@@ -106,12 +106,12 @@ function connect() {
   try {
     console.log('STEP 1: publicKey travels through to the roster, both transports');
     const a = await connect();
-    a.send({ type: 'join', domain: 'evtec.co.za', world: 'lobby', name: 'Alice', publicKey: 'pk-alice' });
+    a.send({ type: 'join', domain: 'example.com', world: 'lobby', name: 'Alice', publicKey: 'pk-alice' });
     const welcomeA = await a.next();
     const idA = welcomeA.id;
 
     const b = await connect();
-    b.send({ type: 'join', domain: 'evtec.co.za', world: 'lobby', name: 'Bob', publicKey: 'pk-bob' });
+    b.send({ type: 'join', domain: 'example.com', world: 'lobby', name: 'Bob', publicKey: 'pk-bob' });
     const welcomeB = await b.next();
     const idB = welcomeB.id;
     if (welcomeB.roster[0].publicKey !== 'pk-alice') throw new Error('Expected Bob\'s roster to show Alice\'s publicKey, got: ' + JSON.stringify(welcomeB.roster));
@@ -119,7 +119,7 @@ function connect() {
     if (joinedMsgForA.publicKey !== 'pk-bob') throw new Error('Expected the joined push to carry Bob\'s publicKey, got: ' + JSON.stringify(joinedMsgForA));
     console.log('PASS: publicKey shows up on both the welcome roster and the joined push (WS)');
 
-    const joinPoll = await pollJoin('evtec.co.za', 'lobby', 'Carol', 'pk-carol');
+    const joinPoll = await pollJoin('example.com', 'lobby', 'Carol', 'pk-carol');
     const idC = joinPoll.id;
     if (!joinPoll.roster.some((m) => m.publicKey === 'pk-alice') || !joinPoll.roster.some((m) => m.publicKey === 'pk-bob')) {
       throw new Error('Expected Carol\'s poll-join roster to show both WS members\' publicKeys, got: ' + JSON.stringify(joinPoll.roster));
@@ -153,7 +153,7 @@ function connect() {
     console.log('PASS: bogus kind produced no relay at all');
 
     console.log('STEP 5: a signal aimed at someone NOT in the sender\'s room is refused (rooms stay isolated)');
-    const joinD = await pollJoin('evtec.co.za', 'plaza', 'Dave', 'pk-dave'); // different world = different room
+    const joinD = await pollJoin('example.com', 'plaza', 'Dave', 'pk-dave'); // different world = different room
     const signalToWrongRoom = await pollSignal(idC, joinD.id, 'friend-request', 'pk-carol', 'Carol');
     if (signalToWrongRoom.ok !== false) throw new Error('Expected a signal aimed at a different room to be refused, got: ' + JSON.stringify(signalToWrongRoom));
     console.log('PASS: a target outside the sender\'s own room is refused, same as an unknown id');
@@ -170,14 +170,14 @@ function connect() {
     console.log('PASS: a signal aimed at a polling member queues and drains exactly once, WS -> poll');
 
     console.log('STEP 7: GET /presence/status reports the room without creating a member');
-    const statusBefore = await getStatus('evtec.co.za', 'lobby');
+    const statusBefore = await getStatus('example.com', 'lobby');
     if (statusBefore.count !== 3) throw new Error('Expected 3 in the lobby (Alice, Bob, Carol), got: ' + JSON.stringify(statusBefore));
     if (!statusBefore.roster.some((m) => m.publicKey === 'pk-alice') || !statusBefore.roster.some((m) => m.publicKey === 'pk-carol')) {
       throw new Error('Expected the status roster to include everyone\'s publicKey, got: ' + JSON.stringify(statusBefore.roster));
     }
-    const statusAgain = await getStatus('evtec.co.za', 'lobby');
+    const statusAgain = await getStatus('example.com', 'lobby');
     if (statusAgain.count !== statusBefore.count) throw new Error('Calling /presence/status twice changed the room\'s count — it must be read-only, got ' + statusBefore.count + ' then ' + statusAgain.count);
-    const statusEmpty = await getStatus('evtec.co.za', 'nonexistent-world');
+    const statusEmpty = await getStatus('example.com', 'nonexistent-world');
     if (statusEmpty.count !== 0 || statusEmpty.roster.length !== 0) throw new Error('Expected a room that has never existed to report {count:0, roster:[]}, got: ' + JSON.stringify(statusEmpty));
     console.log('PASS: /presence/status reports the live roster twice in a row without creating anything');
 

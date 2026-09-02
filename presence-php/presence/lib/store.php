@@ -2,7 +2,7 @@
 // Domain Atlas — PHP presence: room/roster storage. This is the PHP port of
 // presence-server/server.js's /presence/poll/* routes (task #68) — the
 // piece flagged as follow-up work when the polling fallback was first
-// built, now filled in for the real evtec.co.za deployment.
+// built, now filled in for a real shared-hosting deployment.
 //
 // This bundle ONLY EVER implements polling — there is no PHP equivalent of
 // presence-server.js's WebSocket half. That's not a missing feature to add
