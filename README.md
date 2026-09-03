@@ -88,7 +88,7 @@ curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real publi
    persisted, not thrown away when you close the panel.
 5. Open the **🎒 Wallet** panel and click **Request item from this world**.
    The extension POSTs to the issuer server, gets back a real signed
-   `domain-atlas-item/1.0` credential, and verifies it itself — fetching
+   `domain-atlas-asset/1.0` credential, and verifies it itself — fetching
    `atlas-key.json`, checking the signature with the browser's own Web
    Crypto, checking the revocation list — before showing it with a ✓.
 6. Click **Present identity** — a fresh WebAuthn assertion, verified
@@ -103,6 +103,70 @@ curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real publi
 To see revocation actually work: `curl -X POST http://localhost:8001/atlas/revoke -H "Content-Type: application/json" -d '{"id":"<the credential id from the export>"}'`,
 then click **Re-verify wallet** again — the item flips to ✗, reason
 "revoked by issuer."
+
+**Password identity — a real alternative to the passkey above.** Step 4's
+`Create Atlas Identity` isn't the only way to get a "self." At onboarding
+(or later, from Settings → Identity method → **Set up a password
+identity**), you can instead pick a password (8+ characters); the wallet
+generates the exact same kind of ECDSA P-256 keypair, but encrypts the
+private half at rest with a key derived from that password (PBKDF2,
+250,000 iterations) instead of storing it in hardware. It's real and
+independent — not a fallback demo mode — you can set up both mechanisms on
+one device and switch which one is "you" from Settings any time, instantly
+and non-destructively (nothing is deleted; switching back restores exactly
+where that identity's wallet was left). It's deliberately the *weaker*
+option, though: the decrypted key sits in memory while unlocked, and the
+whole thing is only as strong as your password against someone who gets a
+copy of the encrypted file — the wallet says as much on the setup screen.
+A 🔒 **Quick lock** button in the top control bar locks it without opening
+the wallet panel first.
+
+Creating a password identity shows you a **16-word seed phrase once** —
+write it down, it's never stored anywhere and never shown again. It isn't
+needed for everyday unlocking (password alone does that); it's needed
+alongside your password for **Export identity file** (Settings → Identity
+method), which wraps your real private key for safekeeping or moving to
+another device. **Import an identity file instead** appears right on the
+onboarding screen for bringing that backup onto a new install — feed it
+back the same password and seed phrase and it decrypts, then re-encrypts
+locally under your password for everyday use. Get either the password or
+the seed phrase wrong and you get one identical "incorrect" error either
+way, deliberately — the wallet won't tell an attacker which of the two
+secrets they've got right.
+
+**Wallet items, beyond the basics.** A few more actions live in the
+Wallet/Settings panels once you've got items to work with:
+
+- **Hide an item** (available from any item card) tucks it out of the main
+  Inventory list without deleting it — it still exports, still
+  re-verifies, and is always reachable again from **Settings → Hidden
+  assets → Unhide**. Unlike Delete, hiding can never lose an asset that
+  exists nowhere else.
+- **Drop and pick up items in-world.** Click **Drop** on a carried item to
+  place it at a clicked ground point (2D worlds) or your current position
+  (gltf-mini's 3D ones); it appears in that world's "Dropped in this
+  world" list with a **Pick up** button for anyone who finds it — including
+  you, later. This is client-side wallet state, not a new credential
+  transfer; ownership doesn't actually move until you deliberately give an
+  item to someone else the ways described elsewhere in this doc.
+- **Nicknames for other identities.** From a presence roster or a mail
+  card, set a private alias for any public key you interact with — purely
+  local, never sent anywhere, and profanity-filtered the same way
+  `handle#domain` registration is (§7 below).
+- **Search filters** on the Collectibles and Documents lists (type to
+  filter live) once a wallet has more than a handful of items.
+- **Character scale** — a 0.5×–2× avatar-size slider in Settings, purely
+  cosmetic (doesn't touch movement speed, collision, or camera distance).
+- **Asset cache management** (Settings → Cache) — browse what's cached
+  per-site from `gltf-mini`'s local GLB cache (§8's `verify-asset-cache.js`
+  proves the caching mechanism itself), clear one site or everything, or
+  export/import the whole cache as a portable JSON file.
+- **Fullscreen cursor auto-hide.** F11's native browser fullscreen gives no
+  direct "am I fullscreen" event to listen for, so the extension infers it
+  (viewport exactly matches the physical screen) and hides the cursor after
+  ~2s idle while in that state, reappearing instantly on movement, resize,
+  or leaving fullscreen — a small polish detail, not a behavior you need to
+  configure.
 
 ## 4. Try it — loadouts, transfer-on-loss, resources, and trading
 
@@ -259,6 +323,24 @@ The wallet's top tab bar is now Wallet / Social / Settings — the old
 standalone Mail tab moved inside Social, alongside two new sections:
 Friends (#67) and Favorites (#61). Open the Social tab and its own
 sub-tab-bar switches between the three.
+
+**Domain-to-subscriber mail (SPEC.md §11.1) — the original Mail tab.** A
+domain can message anyone holding one of its own credentials, addressed by
+`credentialId` rather than by public key. **Subscribe to `<domain>`**
+(shown while standing in a world you haven't already subscribed to) mints
+an `atlas.membership` credential the same way requesting any other item
+does — that credential is what a domain mails against. On the issuer side,
+`/atlas/mail/send` (the demo/admin surface standing in for whatever a real
+domain's own backend would do) sends against a `credentialId`; the wallet
+picks new mail up through its existing periodic `/atlas/mail/check` loop
+alongside asset-reissue notices (§5.1.1 above).
+
+A mail message can carry a **gift** — a fresh credential attached at send
+time, addressed to a specific visitor. A gift never joins the wallet
+automatically the way a reissue replacement does: the mail card shows a
+**Claim** button, and only clicking it verifies the attached credential and
+adds it — receiving property from someone, even a domain, is deliberately
+never a silent step (SPEC.md §11.2).
 
 **Friends work live, through presence — not through mail.** Adding a
 friend needs both people simultaneously in the same `domain::world` room:
@@ -536,12 +618,19 @@ simplifications are worth naming plainly rather than leaving implicit:
   separate party the way the spec allows. The settlement logic (verify
   both intents, verify both balances, atomic issue+revoke) doesn't change
   either way — this just avoids standing up a second server for the demo.
-- The issuer's endpoints (`/atlas/revoke`, `/atlas/resource/issue`, and
-  so on) have no auth by design, so the tests can exercise them freely.
-  The whole thing runs over plain HTTP on localhost. A real deployment
-  needs real HTTPS domains and a real access-controlled issuance flow —
-  the point here was proving the credential mechanisms themselves work,
-  not building a production issuer.
+- The issuer's endpoints — `/atlas/asset/issue`, `/atlas/asset/reissue`
+  (§5.1.1, replacing a non-fungible asset's state without changing its
+  `id`; the wallet auto-adopts the replacement and shows an unseen-count
+  badge on the Wallet tab, see `AtlasWallet.processAssetUpdates`),
+  `/atlas/asset/split` and `/atlas/asset/consolidate` (§5.4/§5.4.1),
+  `/atlas/asset/trade` (§7), `/atlas/revoke`, `/atlas/mail/send` and
+  `/atlas/mail/check` (§11.1), and the `/atlas/postoffice/*` family
+  (§7 below, SPEC.md §11.3) — have no auth by design (beyond Post Office's
+  own self-signed-envelope checks on its self-service endpoints), so the
+  tests can exercise them freely. The whole thing runs over plain HTTP on
+  localhost. A real deployment needs real HTTPS domains and a real
+  access-controlled issuance flow — the point here was proving the
+  credential mechanisms themselves work, not building a production issuer.
 - The renderer is still a dependency-free `<canvas>` stand-in for what a
   production client would do with WebXR and glTF, which real browsers
   already support well, so re-implementing that wasn't the point.

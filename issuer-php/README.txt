@@ -131,6 +131,25 @@ gets built. The message is signed with your issuer key the same way every
 credential is, so the wallet only ever shows something that actually came
 from you.
 
+A message can also carry a gift: add giftAssetClass (any class in
+ATLAS_ASSET_CATALOG), giftOwnerPublicKey (who it's for — not necessarily
+the same visitor holding credentialId), and giftQuantity for a fungible
+class. mail/send.php mints that credential fresh and attaches it to the
+message as `attachedAsset` before signing, so the gift is covered by the
+same signature as the message itself:
+
+  curl -X POST https://your-domain/atlas/mail/send \
+    -H 'Content-Type: application/json' \
+    -d '{"credentialId":"urn:atlas:asset:...","subject":"A little something","body":"...","giftAssetClass":"atlas.badge","giftOwnerPublicKey":"<recipient public key>"}'
+
+The wallet never adds a gift to the recipient's holdings automatically on
+arrival the way it does an asset-reissue replacement — the mail card shows
+a Claim button, and only clicking it verifies the attached credential and
+adds it (SPEC.md §11.2). This is deliberate: unlike a routine mail check,
+a gift is new property arriving from someone, which the spec treats as
+something a visitor's own client must make an explicit decision about,
+never a silent background step.
+
 Mail is stored in lib/atlas-mail-store.json — deliberately next to the
 private key file, not under .well-known, so it isn't a world-readable
 static file the way atlas-revocations.json legitimately needs to be.
