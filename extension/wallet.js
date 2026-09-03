@@ -1461,6 +1461,57 @@ const AtlasWallet = (() => {
     return { credential, verdict };
   }
 
+  // Post Office (task #75/#87/#94, SPEC.md §11.3): sends mail to another
+  // person's public key through a domain that has issued THIS wallet its
+  // own Global Mail membership card. Membership is symmetric — the domain
+  // only relays between two people who BOTH hold its card (see
+  // /atlas/postoffice/send's own comment, both server ports) — so
+  // toDomain has to be somewhere this wallet has already joined, same as
+  // the recipient. Holding the card is what makes that domain this
+  // wallet's sending relay: the sender doesn't need to be standing in
+  // that world to send through it, only to have joined it at some point.
+  // getPostOfficeMemberships() below is how a caller finds which domains
+  // that is without guessing.
+  //
+  // Composes the same {to, subject, body} shape the receiving domain's
+  // /atlas/postoffice/send expects, signs it with this wallet's own
+  // identity (signWithSelf — the exact self-authentication
+  // presentIdentity() already uses, same dual-mode webauthn/raw-ecdsa
+  // envelope verifyEnvelope checks server-side), and posts it. No local
+  // wallet state changes here — the message lives entirely on the
+  // recipient's domain until THEIR checkAllMail() picks it up, the same as
+  // any other mail this wallet doesn't itself hold the credential for.
+  async function sendUserMail(toDomain, toPublicKey, subject, body) {
+    if (!toDomain) throw new Error('toDomain is required — a Post Office this wallet already holds a Global Mail membership at.');
+    if (!toPublicKey) throw new Error('toPublicKey is required.');
+    if (!subject || !body) throw new Error('subject and body are required.');
+
+    const payload = { to: { publicKey: toPublicKey }, subject, body };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(toDomain) + '/atlas/postoffice/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload, proof })
+    });
+    if (!res.ok) throw new Error('Send failed: ' + (await res.text()));
+    return await res.json();
+  }
+
+  // Which domains this identity can currently send through — every
+  // atlas.postoffice.membership credential this wallet holds, one entry
+  // per domain that's issued one (in practice at most one per domain,
+  // since the stall's oncePerUser cap prevents duplicates). Used by the
+  // Compose UI to offer a "send via" choice drawn from Post Offices this
+  // wallet has actually joined, rather than a free-text domain field —
+  // since task #94, sending only works through a domain you're a member
+  // of, so guessing a domain name is no longer useful there.
+  async function getPostOfficeMemberships(ownerPublicKey) {
+    const wallet = await getWallet(ownerPublicKey);
+    return wallet
+      .filter((e) => e.credential && e.credential.asset && e.credential.asset.class === 'atlas.postoffice.membership')
+      .map((e) => ({ domain: e.credential.issuer.domain, credentialId: e.credential.id }));
+  }
+
   // A message you've deleted needs to STAY gone across future checks —
   // checkAllMail() below dedupes against ids it's already stored, but
   // deleting removes it from that same array, so without tracking deleted
@@ -1517,9 +1568,20 @@ const AtlasWallet = (() => {
       // every gift message fail verification, and a tampered-with gift
       // (swapped for a different one after signing) would fail it too,
       // which is the whole point.
+      //
+      // Task #75/#87 (SPEC.md §11.3): `from` (when present) is the same
+      // deal — a Post Office-relayed user-to-user message carries who it's
+      // actually from, signed by the RECEIVING domain the same as every
+      // other field here, so a domain can't relay a message and then quietly
+      // relabel who it came from. This is the one addition needed to trust
+      // relayed mail through the exact same check as domain-to-subscriber
+      // mail — nothing else about verification changes, because the
+      // signature being checked is still just this domain's own key, same
+      // as always.
       const payload = {
         id: message.id, credentialId: message.credentialId, subject: message.subject, body: message.body,
         ...(message.attachedAsset ? { attachedAsset: message.attachedAsset } : {}),
+        ...(message.from ? { from: message.from } : {}),
         sentAt: message.sentAt
       };
       const data = new TextEncoder().encode(canonicalize(payload));
@@ -1715,7 +1777,7 @@ const AtlasWallet = (() => {
     getCharacterScale, setCharacterScale,
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
-    markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift,
+    markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift, sendUserMail, getPostOfficeMemberships,
     getAssetUpdateNotices, markAssetUpdateNoticesSeen,
     getFriends, addFriend, removeFriend,
     getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain

@@ -49,18 +49,24 @@ to `demo-domain-a/.well-known/atlas-key.json`, and keeps the private half
 in `issuer-server/issuer-private-key.jwk.json` (git-ignored — never commit
 this file). Every run after that reuses the same key.
 
-Domain B stays a plain static server, unchanged:
+**Domain B is now a real issuer too**, not a plain static server — task
+#75/#87's Post Office needs it to actually mint credentials and sign mail.
+It's the exact same `issuer-server/server.js` file, just pointed at a
+different docroot/domain/port/state folder via environment variables (see
+that file's own comment on `ATLAS_STATE_DIR` for why a second instance
+needs its *own* state folder rather than sharing domain A's):
 
 ```bash
-python3 -m http.server 8002 --directory demo-domain-b
+PORT=8002 ATLAS_DOMAIN=localhost:8002 ATLAS_DOCROOT=demo-domain-b ATLAS_STATE_DIR=issuer-server/domain-b-state node issuer-server/server.js
 ```
 
 Confirm both are up:
 
 ```bash
 curl http://localhost:8001/.well-known/spatial.json      # four worlds: plaza, museum, arena, market
-curl http://localhost:8001/.well-known/atlas-key.json    # the issuer's real public key
+curl http://localhost:8001/.well-known/atlas-key.json    # domain A's real public key
 curl http://localhost:8002/.well-known/spatial.json      # one world: workshop
+curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real public key — a SEPARATE keypair from domain A's
 ```
 
 ## 2. Load the extension
@@ -307,6 +313,41 @@ Wallet, for locking without opening the wallet panel first — distinct
 from the existing Lock button buried in Settings → Identity method, which
 is still there for anyone who navigates in that way. It only shows up
 while there's actually an unlocked local-password identity to lock.
+
+**Post Office — user-to-user mail (task #75/#87/#94, SPEC.md §11.3).**
+Everything above this point in "Mail" is domain-to-subscriber only: a
+domain mails someone who holds one of ITS credentials. Post Office is the
+other half — two people mailing each other, addressed by public key,
+routed through a domain both of them have joined. Membership is symmetric:
+holding a Global Mail Membership Card at a domain is what makes that
+domain your sending relay AND your inbox there, not just one or the
+other — you don't have to be standing in that world to send through it,
+only to have joined it at some point, same as receiving. Try it with two
+identities:
+
+1. Walk into Domain B's Neighbor Workshop and click the blue **Post
+   Office** stall — "Claim Global Mail Membership" mints you a Domain B
+   Global Mail Membership Card, the same one-click "collect" pattern the
+   Workbench and market stalls already use. Do this for BOTH identities
+   you want to mail between (a second browser profile, or Domain A's own
+   counterparty key) — since task #94, sending only works between two
+   people who've both joined the same Post Office.
+2. Open Social → Mail on each identity. "Your address" shows a copyable
+   public key — hand identity B's to identity A (or vice versa).
+3. Under "Send mail," the dropdown lists every Post Office this wallet has
+   actually joined — pick `localhost:8002`, paste the recipient's public
+   key, write a subject and message, and hit Send.
+4. On the recipient's wallet, click "Check now" (or just wait for the next
+   periodic check) — the message shows up in Mail like anything else, but
+   headed "From `<their key>` via localhost:8002" instead of a bare domain
+   name, so it's visually distinct from mail the domain itself sent you.
+
+Both sides need membership because that's what makes "send through this
+Post Office" mean something — it isn't an open relay for anyone with a
+wallet, only for people the domain has already vouched for by handing them
+a card. A sender with no membership at the target domain gets rejected
+before the message goes anywhere; a recipient with no membership there
+gets a plain rejection back too, not a silently-dropped message.
 
 ## 8. Verify it yourself
 

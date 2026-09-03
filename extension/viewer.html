@@ -635,6 +635,37 @@
           <div id="subscribeStatus" class="empty-note" style="margin-top:6px;"></div>
         </div>
 
+        <!-- Post Office (task #75/#87/#94, SPEC.md §11.3): user-to-user
+             mail, distinct from Subscribe above (which is "hear FROM a
+             domain"). Membership is symmetric — a Post Office only relays
+             mail between two people who BOTH hold ITS OWN Global Mail
+             membership card, so "send via" is drawn from Post Offices this
+             wallet has actually joined, not typed in freehand. "Your
+             address" just surfaces this identity's own public key so it's
+             easy to copy and hand to whoever you want mail from. -->
+        <div id="postOfficeSection">
+          <h3>Your address</h3>
+          <div class="subhead">Share this together with the name of a domain that's given you a Global Mail membership card — that combination is how someone else reaches you.</div>
+          <div class="btn-row">
+            <input type="text" id="myPublicKeyDisplay" readonly style="flex:1;font-family:monospace;font-size:11px;">
+            <button id="copyMyPublicKeyBtn" type="button" class="btn-secondary">Copy</button>
+          </div>
+          <div id="copyMyPublicKeyStatus" class="empty-note" style="margin-top:6px;"></div>
+
+          <h3>Send mail</h3>
+          <div class="subhead">Only works between two people who both hold a Global Mail membership at the same Post Office — that domain relays the message for you even when you're not standing in it. Claim a membership card at a domain's Post Office stall to add it here as a sending relay.</div>
+          <select id="postOfficeToDomainInput" style="margin-top:8px;">
+            <option value="">No Post Office memberships yet</option>
+          </select>
+          <textarea id="postOfficeToPublicKeyInput" placeholder="Recipient's public key" style="margin-top:8px;min-height:48px;font-family:monospace;font-size:11px;"></textarea>
+          <input type="text" id="postOfficeSubjectInput" placeholder="Subject" style="margin-top:8px;">
+          <textarea id="postOfficeBodyInput" placeholder="Message" style="margin-top:8px;"></textarea>
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="postOfficeSendBtn" type="button" class="btn-secondary">Send</button>
+          </div>
+          <div id="postOfficeSendStatus" class="empty-note" style="margin-top:6px;"></div>
+        </div>
+
         <h3>Mail</h3>
         <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere.</div>
         <div class="btn-row">

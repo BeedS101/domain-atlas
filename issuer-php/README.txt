@@ -54,6 +54,7 @@ What's in this folder
     revoke.php              - POST /atlas/revoke            (revoke by id)
     mail/send.php            - POST /atlas/mail/send         (send mail about a held credential — demo/admin use)
     mail/check.php           - POST /atlas/mail/check        (wallet's periodic mail check)
+    postoffice/send.php      - POST /atlas/postoffice/send   (user-to-user mail — see "Post Office" below)
     .htaccess                - makes the URLs above work without a .php
                                 extension, matching what the extension calls
   lib/
@@ -150,6 +151,49 @@ open lib/atlas-subscribers-store.json directly via cPanel File Manager or
 SSH and loop the credential ids into /atlas/mail/send calls yourself. A
 real "broadcast to everyone" admin feature would need proper operator
 authentication first, which nothing in this bundle has yet.
+
+
+Post Office — user-to-user mail (task #75/#87/#94, SPEC.md §11.3)
+------------------------------------------------------------------
+Everything above is domain-to-subscriber: you (the operator) mailing
+someone who holds one of your credentials. Post Office is the other
+half — two visitors mailing EACH OTHER, addressed by public key, with no
+operator involvement per message.
+
+This bundle also issues an "atlas.postoffice.membership" asset
+(non-fungible, same "requesting the class is the whole registration step"
+shape as atlas.membership) — a visitor who holds one has registered their
+public key with this domain as a Global Mail address. That's the only
+thing membership does: it's the abuse gate that decides who this domain
+is willing to accept, store, and relay mail for. There's nothing further
+for you to configure — a visitor requests it through the extension's
+normal asset-request flow (or the demo world's "Claim Global Mail
+Membership" stall, if you're running the bundled demo content).
+
+Membership is symmetric (task #94): holding the card is what makes this
+domain that visitor's sending relay AND their inbox here, not just one or
+the other. Any wallet POSTs directly to /atlas/postoffice/send with a
+self-signed envelope proving who they are and a recipient public key; this
+endpoint checks that signature, checks the SENDER holds a membership here,
+then checks the RECIPIENT holds one too — and only if all three hold does
+it relay the message the same way /atlas/mail/send does (signed with your
+issuer key, addressed by the recipient's own membership credential id so
+their wallet's ordinary mail-check loop picks it up automatically). A
+sender with no membership here is rejected before anything is stored; a
+message for a recipient with no membership here is rejected too — neither
+case is silently dropped, the sender's wallet gets a clear error back
+either way. Two visitors can only mail each other through a Post Office
+they've BOTH joined, the same way two people need accounts on the same
+mail relay to send through it.
+
+The membership roster lives in lib/atlas-postoffice-members-store.json,
+same "next to the private key, not under .well-known" reasoning as every
+other store in this bundle, and same welcome-mail-on-join courtesy as
+atlas.membership above (edit atlas/asset/issue.php's second
+`$welcomePayload` if you want different wording). There's still no public
+"who's reachable here" endpoint, same reasoning as the subscriber roster —
+an address is meant to be shared out of band, like an email address, not
+crawled.
 
 
 Updating an already-issued asset

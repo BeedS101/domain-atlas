@@ -3,9 +3,19 @@
   "floor": { "size": [24, 24], "color": "#241b28" },
   "objects": [
     { "type": "box", "position": [0, 1, -5], "size": [3, 2, 0.3], "color": "#2f7a6b", "label": "Neighbor Workshop" },
-    { "type": "box", "position": [-3, 0.75, -2], "size": [1.5, 1.5, 1.5], "color": "#c05a1f", "label": "Workbench" }
+    { "type": "box", "position": [-3, 0.75, -2], "size": [1.5, 1.5, 1.5], "color": "#c05a1f", "label": "Workbench" },
+    { "type": "box", "position": [3, 0.75, -2], "size": [1.5, 1.5, 1.5], "color": "#3a5fa0", "label": "Post Office" }
   ],
   "portalMarkers": [
     { "position": [0, 0, 4], "portalIndex": 0 }
+  ],
+  "interactables": [
+    {
+      "position": [3, 0.75, -2],
+      "label": "Claim Global Mail Membership",
+      "action": "issue",
+      "class": "atlas.postoffice.membership",
+      "oncePerUser": true
+    }
   ]
 }

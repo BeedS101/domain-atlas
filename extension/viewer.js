@@ -483,6 +483,16 @@ const subscribeSectionEl = document.getElementById('subscribeSection');
 const subscribeBtn = document.getElementById('subscribeBtn');
 const subscribeStatusEl = document.getElementById('subscribeStatus');
 
+const myPublicKeyDisplayEl = document.getElementById('myPublicKeyDisplay');
+const copyMyPublicKeyBtn = document.getElementById('copyMyPublicKeyBtn');
+const copyMyPublicKeyStatusEl = document.getElementById('copyMyPublicKeyStatus');
+const postOfficeToDomainInput = document.getElementById('postOfficeToDomainInput');
+const postOfficeToPublicKeyInput = document.getElementById('postOfficeToPublicKeyInput');
+const postOfficeSubjectInput = document.getElementById('postOfficeSubjectInput');
+const postOfficeBodyInput = document.getElementById('postOfficeBodyInput');
+const postOfficeSendBtn = document.getElementById('postOfficeSendBtn');
+const postOfficeSendStatusEl = document.getElementById('postOfficeSendStatus');
+
 const friendsHereListEl = document.getElementById('friendsHereList');
 const friendRequestsListEl = document.getElementById('friendRequestsList');
 const friendsListEl = document.getElementById('friendsList');
@@ -703,6 +713,7 @@ async function enterWorld(worldId) {
   currentWorld = world;
   await refreshRequestButton();
   await refreshSubscribeButton();
+  await refreshMyPublicKeyDisplay();
   refreshWorldGates();
 
   placeLabel.innerHTML = world.name + ' <span class="domain">' + manifest.domain + ' · ' + world.id + '</span>';
@@ -2119,12 +2130,36 @@ settingsTabBtn && settingsTabBtn.addEventListener('click', openSettings);
 // periodic background loop that runs this automatically lives further
 // below, right after the file finishes wiring up every button.
 
+// Task #75/#87: Post Office mail means subject/body can now come from an
+// arbitrary stranger (anyone who knows a recipient's public key and Post
+// Office domain), not just a domain operator this demo already implicitly
+// trusted — every renderMailCard field that carries sender-supplied text
+// goes through this before hitting innerHTML, closing off the injection
+// this widened trust boundary would otherwise open (a crafted subject or
+// body running script in the extension's own privileged context the
+// moment the recipient opens Mail). Applied to domain-to-subscriber mail's
+// fields too, at zero cost, rather than leaving one call path escaped and
+// the other not.
+function escapeHtml(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function renderMailCard(entry, container) {
   const el = document.createElement('div');
   el.className = 'wallet-item mail-card' + (entry.read ? '' : ' unread');
   el.dataset.id = entry.message.id;
   const sentAt = new Date(entry.message.sentAt).toLocaleString();
   const gift = entry.message.attachedAsset;
+  // Task #75/#87: a Post Office-relayed message carries `from` — who it's
+  // actually from — distinct from `domain`, which for THIS kind of message
+  // names the relaying domain, not the sender. Ordinary domain-to-subscriber
+  // mail has no `from` at all (the domain itself is implicitly the sender),
+  // so this only ever shows up on relayed mail.
+  const fromLine = entry.message.from
+    ? 'From ' + escapeHtml(entry.message.from.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.message.domain)
+    : escapeHtml(entry.message.domain);
   // Task #59: a message can carry an attached gift, sitting inert until
   // claimed (see AtlasWallet.claimMailGift — deliberately never
   // auto-added, so this button is the only path a gift ever enters the
@@ -2133,16 +2168,16 @@ function renderMailCard(entry, container) {
   // asset.thumbnail either), so a gift notice doesn't stand out as a
   // special case visually, just in what it lets you do.
   const giftHtml = !gift ? '' :
-    '<div class="mail-gift">Gift: ' + gift.asset.name + (gift.quantity > 1 ? ' ×' + gift.quantity : '') +
+    '<div class="mail-gift">Gift: ' + escapeHtml(gift.asset.name) + (gift.quantity > 1 ? ' ×' + gift.quantity : '') +
     (entry.claimed
       ? ' <span class="mail-gift-claimed">(claimed)</span>'
       : ' <button type="button" data-action="claim-gift">Claim</button>') +
     '</div>';
   el.innerHTML =
-    '<div class="mail-domain">' + entry.message.domain + '</div>' +
-    '<div class="mail-subject">' + entry.message.subject + '</div>' +
+    '<div class="mail-domain">' + fromLine + '</div>' +
+    '<div class="mail-subject">' + escapeHtml(entry.message.subject) + '</div>' +
     '<div class="mail-meta">' + sentAt + (entry.read ? '' : ' · unread') + '</div>' +
-    '<div class="mail-body">' + entry.message.body + '</div>' +
+    '<div class="mail-body">' + escapeHtml(entry.message.body) + '</div>' +
     giftHtml +
     '<div class="item-actions">' +
     '<button type="button" data-action="delete" class="danger-btn">Delete</button>' +
@@ -2262,12 +2297,14 @@ socialTabBtn && socialTabBtn.addEventListener('click', async () => {
   showSocialSubtab('mailSubscreen');
   await refreshMailDisplay();
   await refreshSubscribeButton();
+  await refreshMyPublicKeyDisplay();
 });
 
 mailSubtabBtn && mailSubtabBtn.addEventListener('click', async () => {
   showSocialSubtab('mailSubscreen');
   await refreshMailDisplay();
   await refreshSubscribeButton();
+  await refreshMyPublicKeyDisplay();
 });
 
 friendsSubtabBtn && friendsSubtabBtn.addEventListener('click', async () => {
@@ -2321,6 +2358,105 @@ async function refreshSubscribeButton() {
   subscribeBtn.textContent = 'Subscribe to ' + domain;
 }
 
+// Post Office (task #75/#87): just surfaces this identity's own public key
+// so it's easy to copy and hand to whoever should be able to mail you —
+// no wallet state to check, unlike refreshSubscribeButton above, since
+// having an address doesn't depend on holding anything from any domain.
+// Also refreshes the "send via" options below it (task #94) since both
+// are driven by the same identity lookup and belong on the same screen.
+async function refreshMyPublicKeyDisplay() {
+  const identity = await AtlasWallet.getIdentity();
+  if (myPublicKeyDisplayEl) myPublicKeyDisplayEl.value = identity ? identity.publicKey : '';
+  await refreshPostOfficeSendOptions(identity);
+}
+
+// Post Office (task #94): membership is symmetric now — a domain only
+// relays mail between two people who BOTH hold ITS OWN Global Mail card —
+// so "send via" has to be one of the Post Offices this wallet has
+// actually joined, not a domain typed in freehand. Rebuilds the select
+// from AtlasWallet.getPostOfficeMemberships(), preserving the current
+// selection across refreshes where it's still valid (e.g. after sending).
+async function refreshPostOfficeSendOptions(identity) {
+  if (!postOfficeToDomainInput) return;
+  const previousValue = postOfficeToDomainInput.value;
+  const memberships = identity ? await AtlasWallet.getPostOfficeMemberships(identity.publicKey) : [];
+
+  postOfficeToDomainInput.innerHTML = '';
+  if (!memberships.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No Post Office memberships yet';
+    postOfficeToDomainInput.appendChild(opt);
+    postOfficeToDomainInput.disabled = true;
+    return;
+  }
+
+  postOfficeToDomainInput.disabled = false;
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select a Post Office you belong to…';
+  postOfficeToDomainInput.appendChild(placeholder);
+
+  const seen = new Set();
+  for (const m of memberships) {
+    if (seen.has(m.domain)) continue; // a wallet can hold at most one live membership per domain in practice, but dedupe defensively
+    seen.add(m.domain);
+    const opt = document.createElement('option');
+    opt.value = m.domain;
+    opt.textContent = m.domain;
+    postOfficeToDomainInput.appendChild(opt);
+  }
+  if (seen.has(previousValue)) postOfficeToDomainInput.value = previousValue;
+}
+
+copyMyPublicKeyBtn && copyMyPublicKeyBtn.addEventListener('click', async () => {
+  const value = myPublicKeyDisplayEl ? myPublicKeyDisplayEl.value : '';
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+    if (copyMyPublicKeyStatusEl) copyMyPublicKeyStatusEl.textContent = 'Copied.';
+  } catch (err) {
+    // Clipboard API can be unavailable/denied in this iframe context —
+    // fall back to select-and-copy-yourself rather than fail silently.
+    myPublicKeyDisplayEl.select();
+    if (copyMyPublicKeyStatusEl) copyMyPublicKeyStatusEl.textContent = "Couldn't auto-copy — selected for you, press Ctrl/Cmd+C.";
+  }
+  setTimeout(() => { if (copyMyPublicKeyStatusEl) copyMyPublicKeyStatusEl.textContent = ''; }, 3000);
+});
+
+// Post Office (task #75/#87/#94, SPEC.md §11.3): composes and sends a
+// message to another identity's public key through a Post Office this
+// wallet already belongs to — see AtlasWallet.sendUserMail's own comment
+// for the wire mechanics. Membership is symmetric: the recipient has to
+// hold a card at that SAME domain too, or the domain rejects the send —
+// this wallet only offers domains it's actually joined in the dropdown
+// above, so the common failure here is the recipient not being a member
+// yet, not this wallet.
+postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
+  const toDomain = (postOfficeToDomainInput.value || '').trim();
+  const toPublicKey = (postOfficeToPublicKeyInput.value || '').trim();
+  const subject = (postOfficeSubjectInput.value || '').trim();
+  const body = (postOfficeBodyInput.value || '').trim();
+  if (!toDomain || !toPublicKey || !subject || !body) {
+    postOfficeSendStatusEl.textContent = 'Choose a Post Office to send through, then fill in the recipient\'s public key, subject, and message.';
+    return;
+  }
+  postOfficeSendBtn.disabled = true;
+  postOfficeSendBtn.textContent = 'Sending…';
+  postOfficeSendStatusEl.textContent = '';
+  try {
+    await AtlasWallet.sendUserMail(toDomain, toPublicKey, subject, body);
+    postOfficeSendStatusEl.textContent = 'Sent.';
+    postOfficeSubjectInput.value = '';
+    postOfficeBodyInput.value = '';
+  } catch (err) {
+    postOfficeSendStatusEl.textContent = 'Send failed: ' + err.message;
+  } finally {
+    postOfficeSendBtn.disabled = false;
+    postOfficeSendBtn.textContent = 'Send';
+  }
+});
+
 subscribeBtn && subscribeBtn.addEventListener('click', async () => {
   const domain = manifestDomainOf(currentManifest);
   subscribeBtn.disabled = true;
@@ -2333,6 +2469,7 @@ subscribeBtn && subscribeBtn.addEventListener('click', async () => {
     errorMessage = 'Subscribe failed: ' + err.message;
   } finally {
     await refreshSubscribeButton();
+  await refreshMyPublicKeyDisplay();
     if (subscribeStatusEl) subscribeStatusEl.textContent = errorMessage;
   }
 });

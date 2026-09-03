@@ -74,7 +74,31 @@ const { subtle } = webcrypto;
 const DEMO_DOMAIN_A = process.env.ATLAS_DOCROOT
   ? path.resolve(process.env.ATLAS_DOCROOT)
   : path.resolve(__dirname, '..', 'demo-domain-a');
-const KEY_FILE = path.resolve(__dirname, 'issuer-private-key.jwk.json');
+// ATLAS_STATE_DIR — where the private key and every server-process-only
+// state file below (mail, subscribers, postoffice members, asset updates,
+// serial counters) actually live. Defaults to __dirname (this file's own
+// folder), preserving exactly what every one of these paths already
+// resolved to before this variable existed — a single Node process only
+// ever served one domain (domain-a) that way. It has to become overridable
+// because the Post Office feature (task #75) needs a SECOND real issuer
+// instance for demo-domain-b, and two instances of this same file sharing
+// one __dirname would silently read and overwrite each other's private
+// key and mail store — not a hypothetical, that's exactly what running
+// `ATLAS_DOCROOT=../demo-domain-b node issuer-server/server.js` a second
+// time against the unmodified code would do. Point each instance's
+// ATLAS_STATE_DIR at its own folder (see README.md's "Serve the two demo
+// domains") and they're fully isolated, same as two separate PHP
+// deployments already are for free (issuer-php has no shared __DIR__ to
+// collide on in the first place — see its store.php).
+const STATE_DIR = process.env.ATLAS_STATE_DIR
+  ? path.resolve(process.env.ATLAS_STATE_DIR)
+  : __dirname;
+// Unlike __dirname (this file's own folder, which obviously always
+// exists), an explicit ATLAS_STATE_DIR might be a folder nobody's created
+// yet — cheap and idempotent to make sure it's there before anything below
+// tries to write into it.
+fs.mkdirSync(STATE_DIR, { recursive: true });
+const KEY_FILE = path.join(STATE_DIR, 'issuer-private-key.jwk.json');
 const PUBLIC_KEY_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-key.json');
 const REVOCATIONS_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-revocations.json');
 // Deliberately NOT under .well-known (which is served as plain static
@@ -84,7 +108,7 @@ const REVOCATIONS_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-revocati
 // server-side state that isn't meant to be a public crawlable file. Lives
 // next to the private key file for the same "server-process-only state"
 // reason, not in the public docroot.
-const MAIL_FILE = path.resolve(__dirname, 'atlas-mail-store.json');
+const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // one entry per asset reissue (SPEC.md §5.1.1 — non-fungible only), keyed
 // by the SUPERSEDED credential's id so /atlas/mail/check can answer "what
@@ -94,7 +118,7 @@ const MAIL_FILE = path.resolve(__dirname, 'atlas-mail-store.json');
 // with reason "superseded" (§5.3) — this store is the extra, non-public
 // piece a wallet actually needs to act on that: the full replacement
 // credential, so adopting it doesn't need a second round trip.
-const ASSET_UPDATES_FILE = path.resolve(__dirname, 'atlas-asset-updates-store.json');
+const ASSET_UPDATES_FILE = path.join(STATE_DIR, 'atlas-asset-updates-store.json');
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // this is a roster of who subscribed (credential id + owner public key per
 // atlas.membership issuance), not something to expose at a URL anyone can
@@ -107,7 +131,18 @@ const ASSET_UPDATES_FILE = path.resolve(__dirname, 'atlas-asset-updates-store.js
 // /atlas/mail/send or /atlas/mail/check which at least require already
 // knowing a credential id — worth real operator authentication before ever
 // exposing this over HTTP.
-const SUBSCRIBERS_FILE = path.resolve(__dirname, 'atlas-subscribers-store.json');
+const SUBSCRIBERS_FILE = path.join(STATE_DIR, 'atlas-subscribers-store.json');
+// Post Office (task #75/#87): a roster of who holds a currently-valid
+// Global Mail membership from THIS domain — one entry per
+// atlas.postoffice.membership credential ever issued, same flat-array
+// shape as SUBSCRIBERS_FILE above. This is the abuse gate the design
+// discussion flagged as needed once addressing has no registration step
+// of its own: POST /atlas/postoffice/send only accepts a message for a
+// recipient this roster (checked against current revocation status too)
+// says actually holds membership here — anyone can attempt to send, but
+// this domain only agrees to store/relay mail for someone it issued a
+// card to.
+const POSTOFFICE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-postoffice-members-store.json');
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // task #42's serialized/limited-edition support. One running count per
 // class, incremented only by a genuinely NEW mint (mintAssetByClass()
@@ -118,7 +153,7 @@ const SUBSCRIBERS_FILE = path.resolve(__dirname, 'atlas-subscribers-store.json')
 // task #42 at once: compared against a class's maxSupply, it's the cap
 // enforcement; stamped onto the credential as atlas.serial, it's the
 // instance's serial number — "the Nth ever minted" answers both questions.
-const SERIAL_COUNTERS_FILE = path.resolve(__dirname, 'atlas-serial-counters.json');
+const SERIAL_COUNTERS_FILE = path.join(STATE_DIR, 'atlas-serial-counters.json');
 const PORT = process.env.PORT || 8001;
 const DOMAIN = process.env.ATLAS_DOMAIN || 'localhost:8001';
 
@@ -210,6 +245,28 @@ const ASSET_CATALOG = {
       'atlas.rarity': 'common',
       'com.example.tier': 'member',
       'com.example.issuedFor': 'domain subscription'
+    }
+  },
+  // Post Office (task #75/#87, SPEC.md §11.3): the credential that gates
+  // POST /atlas/postoffice/send — holding one is what makes THIS domain
+  // willing to accept and relay user-to-user mail addressed to your
+  // public key, the same "abuse needs its own rule once there's no
+  // registration step" gap §11.3 flagged. `presentation: 'document'`,
+  // same reasoning as atlas.membership just above: administrative, not a
+  // collectible. Name is templated with DOMAIN so it reads as "this
+  // domain's card" wherever it's issued from, not a fixed brand string —
+  // any domain running this same code and offering the role gets its own
+  // correctly-labeled version for free.
+  'atlas.postoffice.membership': {
+    name: `${DOMAIN} Global Mail Membership Card`,
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    thumbnail: `https://${DOMAIN}/assets/badge.png`,
+    fungible: false,
+    presentation: 'document',
+    properties: {
+      'atlas.rarity': 'common',
+      'com.example.tier': 'postoffice-member',
+      'com.example.issuedFor': 'global mail routing'
     }
   },
   // Fungible classes (SPEC.md §5.4/§5.4.1: splittable, consolidatable,
@@ -417,6 +474,34 @@ function appendSubscriber(entry) {
   fs.writeFileSync(SUBSCRIBERS_FILE, JSON.stringify(doc, null, 2));
 }
 
+// Post Office membership roster — same flat-array-in-a-JSON-file shape as
+// readSubscribers/appendSubscriber above, kept as its own file/function
+// pair rather than folded into it because the two rosters answer different
+// questions (who subscribed to hear FROM this domain, vs. who this domain
+// will accept mail addressed TO) and a Global Mail membership is a
+// different class than atlas.membership.
+function readPostOfficeMembers() {
+  if (!fs.existsSync(POSTOFFICE_MEMBERS_FILE)) return { members: [] };
+  return JSON.parse(fs.readFileSync(POSTOFFICE_MEMBERS_FILE, 'utf8'));
+}
+function appendPostOfficeMember(entry) {
+  const doc = readPostOfficeMembers();
+  doc.members.push(entry);
+  fs.writeFileSync(POSTOFFICE_MEMBERS_FILE, JSON.stringify(doc, null, 2));
+}
+// True if ownerPublicKey currently holds AT LEAST ONE valid (non-revoked)
+// atlas.postoffice.membership credential from this domain — the send
+// endpoint's whole abuse gate. Checks every membership entry for that
+// owner, not just the first, so a re-issued/replacement card (or simply a
+// second one) still counts — only actually mattering the day this domain
+// supports revoking one without silently cutting the owner off mail
+// entirely, which nothing here does yet, but the check is written to be
+// correct either way at no extra cost.
+function isValidPostOfficeMember(ownerPublicKey) {
+  const doc = readPostOfficeMembers();
+  return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId));
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -604,7 +689,7 @@ async function main() {
         if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
-          return sendJson(res, 400, { error: 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, or atlas.element.gold.' });
+          return sendJson(res, 400, { error: 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.element.iron, or atlas.element.gold.' });
         }
 
         // fungible: true — quantity is caller-chosen and must be a positive
@@ -646,6 +731,28 @@ async function main() {
           const welcomeSignature = await sign(welcomePayload);
           appendMail({ ...welcomePayload, signature: welcomeSignature });
           console.log('Subscriber logged + welcome mail queued for', credential.id);
+        }
+
+        // Post Office (task #75/#87): claiming this specific class IS
+        // registering for Global Mail here, same "requesting the class is
+        // the whole registration step" shape as atlas.membership above —
+        // logged to its own roster (see isValidPostOfficeMember, the gate
+        // POST /atlas/postoffice/send checks every send against) plus the
+        // same welcome-mail courtesy, addressed by THIS credential's id so
+        // it arrives through the ordinary /atlas/mail/check loop like
+        // anything else this wallet already holds a credential for.
+        if (assetClass === 'atlas.postoffice.membership') {
+          appendPostOfficeMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
+          const welcomePayload = {
+            id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
+            credentialId: credential.id,
+            subject: 'Your address is live',
+            body: 'Anyone who has your public key can now reach you through ' + DOMAIN + "'s Global Mail — share it the way you'd share an email address.",
+            sentAt: new Date().toISOString()
+          };
+          const welcomeSignature = await sign(welcomePayload);
+          appendMail({ ...welcomePayload, signature: welcomeSignature });
+          console.log('Post Office member logged + welcome mail queued for', credential.id);
         }
 
         return sendJson(res, 200, credential);
@@ -924,6 +1031,85 @@ async function main() {
         }
 
         return sendJson(res, 200, { messages, updates });
+      }
+
+      // --- Post Office (task #75/#87/#94, SPEC.md §11.3): user-to-user mail
+      // routed through THIS domain, distinct from /atlas/mail/send above in
+      // exactly the way that endpoint's own comment flags as the one
+      // genuinely new server surface the design needed: /atlas/mail/send
+      // trusts its own caller (the domain operator); this one has to
+      // authenticate an arbitrary stranger instead, since anyone with a
+      // wallet can attempt to send here.
+      //
+      // Membership is now symmetric (task #94, per direct feedback on the
+      // first cut of this feature): a domain only relays mail between two
+      // people who BOTH hold ITS OWN Global Mail membership card. Holding
+      // the card is what makes this domain that person's sending relay, not
+      // just their inbox — the sender doesn't need to be standing in this
+      // world to send through it, only to have joined it at some point, the
+      // same way the recipient doesn't need to be standing here to receive.
+      // Three checks, in order:
+      // 1. Sender authentication — verifyEnvelope(payload, proof), the same
+      //    self-signed-envelope check /atlas/asset/trade already uses for
+      //    intents. proof.publicKey, once verified, IS the sender's
+      //    identity — no separate "from" field in the signed payload is
+      //    needed for that, same reasoning trade's intentA/intentB already
+      //    rely on (see the comment there).
+      // 2. Sender membership — isValidPostOfficeMember(proof.publicKey)
+      //    against THIS domain's own roster. This is what makes "send
+      //    through this Post Office" mean something: it's not an open
+      //    relay for anyone with a wallet, only for people this domain has
+      //    already vouched for by handing them a membership card.
+      // 3. Recipient consent — same roster, same membership requirement,
+      //    now against payload.to.publicKey. Both sides have to belong to
+      //    the SAME Post Office for a message to move between them; a
+      //    stranger to this domain — sender or recipient — gets a plain
+      //    rejection, not a silently-dropped message, so the caller knows
+      //    delivery didn't happen rather than assuming it did.
+      //
+      // Once all three hold, this domain relays the message exactly the way
+      // it sends anything else: addressed by credentialId (the recipient's
+      // OWN membership credential id, found via the same roster lookup) so
+      // checkAllMail()'s existing "poll every domain I hold a credential
+      // from" loop picks it up with zero client-side changes, signed with
+      // this domain's own key so extension/wallet.js's verifyMailMessage()
+      // trusts it the exact same way it trusts domain-to-subscriber mail —
+      // the one addition there is the optional `from` field (see that
+      // function's comment) so the recipient's client can show who it's
+      // actually from rather than implying it came from the domain itself.
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/send') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        if (!payload.to || !payload.to.publicKey || !payload.subject || !payload.body) {
+          return sendJson(res, 400, { error: 'payload.to.publicKey, payload.subject, and payload.body are required' });
+        }
+
+        const senderOk = await verifyEnvelope(payload, proof);
+        if (!senderOk) return sendJson(res, 400, { error: 'sender signature does not check out' });
+
+        const doc = readPostOfficeMembers();
+        const senderMembership = doc.members.find((m) => m.ownerPublicKey === proof.publicKey && !isRevoked(m.credentialId));
+        if (!senderMembership) {
+          return sendJson(res, 400, { error: 'you do not hold a Global Mail membership at this domain — join its Post Office before sending through it' });
+        }
+        const membership = doc.members.find((m) => m.ownerPublicKey === payload.to.publicKey && !isRevoked(m.credentialId));
+        if (!membership) {
+          return sendJson(res, 400, { error: 'recipient does not hold a valid Global Mail membership at this domain — nothing was sent' });
+        }
+
+        const outPayload = {
+          id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
+          credentialId: membership.credentialId,
+          subject: payload.subject,
+          body: payload.body,
+          from: { publicKey: proof.publicKey },
+          sentAt: new Date().toISOString()
+        };
+        const signature = await sign(outPayload);
+        const message = { ...outPayload, signature };
+        appendMail(message);
+        console.log('Post Office relayed mail from', proof.publicKey.slice(0, 16) + '...', '->', payload.to.publicKey.slice(0, 16) + '...', ':', payload.subject);
+        return sendJson(res, 200, message);
       }
 
       if (req.method === 'GET') return serveStatic(req, res);

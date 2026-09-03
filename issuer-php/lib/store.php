@@ -83,6 +83,20 @@ function atlas_subscribers_file() {
   return __DIR__ . '/atlas-subscribers-store.json';
 }
 
+// Post Office (task #75/#87, SPEC.md §11.3): a roster of who holds a
+// currently-valid Global Mail membership from THIS domain — same
+// "not web-reachable" reasoning and shape as atlas_subscribers_file()
+// above, kept as its own file because it answers a different question
+// (who this domain will accept mail addressed TO, vs. who subscribed to
+// hear FROM it) for a different credential class. This is the abuse gate
+// atlas/postoffice/send.php checks every send against: anyone can attempt
+// to send, but this domain only agrees to store/relay mail for someone it
+// actually issued a Global Mail membership to. Mirrors issuer-server/
+// server.js's POSTOFFICE_MEMBERS_FILE.
+function atlas_postoffice_members_file() {
+  return __DIR__ . '/atlas-postoffice-members-store.json';
+}
+
 // Task #42: serialized/limited-edition support — one running total minted
 // per class, persisted the same "not web-reachable" way as everything
 // else in this file. Mirrors issuer-server/server.js's
@@ -185,6 +199,26 @@ const ATLAS_ASSET_CATALOG = [
   // these reuse two existing unique-item entries' model/thumbnail — badge
   // for iron (a common, everyday-icon feel), the signet ring for gold
   // (already flagged 'rare' above, a fitting look for the scarcer metal).
+  // Post Office (task #75/#87, SPEC.md §11.3): the credential that gates
+  // atlas/postoffice/send.php — holding one is what makes THIS domain
+  // willing to accept and relay user-to-user mail addressed to your public
+  // key, the same "abuse needs its own rule once there's no registration
+  // step" gap §11.3 flagged. 'presentation' => 'document', same reasoning
+  // as atlas.membership just above: administrative, not a collectible.
+  // 'name' carries a literal '{domain}' token, expanded by
+  // atlas_asset_catalog_entry() below at request time the same way
+  // modelPath/thumbnailPath already are — so it reads as "this domain's
+  // card" wherever it's issued from, not a fixed brand string. Mirrors
+  // issuer-server/server.js's ASSET_CATALOG entry of the same name.
+  'atlas.postoffice.membership' => [
+    'name' => '{domain} Global Mail Membership Card', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => false, 'presentation' => 'document',
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.tier' => 'postoffice-member',
+      'com.example.issuedFor' => 'global mail routing',
+    ],
+  ],
   'atlas.element.iron' => [
     'name' => 'Iron Ingot', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
     'fungible' => true, 'presentation' => 'collectible',
@@ -205,8 +239,14 @@ const ATLAS_ASSET_CATALOG = [
 function atlas_asset_catalog_entry($assetClass) {
   if (!isset(ATLAS_ASSET_CATALOG[$assetClass])) return null;
   $entry = ATLAS_ASSET_CATALOG[$assetClass];
+  // '{domain}' is a literal template token some catalog entries carry
+  // (currently just atlas.postoffice.membership) — expanded here at
+  // request time, same "resolved against the current request's domain"
+  // treatment modelPath/thumbnailPath already get just below. A name with
+  // no such token round-trips unchanged.
+  $name = str_replace('{domain}', atlas_domain(), $entry['name']);
   $result = [
-    'name' => $entry['name'], 'class' => $assetClass, 'model' => 'https://' . atlas_domain() . $entry['modelPath'],
+    'name' => $name, 'class' => $assetClass, 'model' => 'https://' . atlas_domain() . $entry['modelPath'],
   ];
   if (!empty($entry['thumbnailPath'])) $result['thumbnail'] = 'https://' . atlas_domain() . $entry['thumbnailPath'];
   $result['fungible'] = $entry['fungible'];
@@ -387,6 +427,64 @@ function append_subscriber($entry) {
   fflush($fh);
   flock($fh, LOCK_UN);
   fclose($fh);
+}
+
+// ---------- Post Office members (same flock-guarded shape as
+// subscribers above) ----------
+
+function read_postoffice_members() {
+  $fh = fopen(atlas_postoffice_members_file(), 'c+');
+  if ($fh === false) return ['members' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['members' => []];
+}
+
+function append_postoffice_member($entry) {
+  $file = atlas_postoffice_members_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+  $doc['members'][] = $entry;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// True if $ownerPublicKey currently holds at least one valid (non-revoked)
+// atlas.postoffice.membership credential from this domain — the send
+// endpoint's whole abuse gate. Mirrors issuer-server/server.js's
+// isValidPostOfficeMember().
+function is_valid_postoffice_member($ownerPublicKey) {
+  $doc = read_postoffice_members();
+  foreach ($doc['members'] as $m) {
+    if (isset($m['ownerPublicKey']) && $m['ownerPublicKey'] === $ownerPublicKey && !is_revoked($m['credentialId'])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Same lookup as is_valid_postoffice_member(), but returns the matching
+// roster entry (so the caller can pull its credentialId) instead of a
+// bare bool — atlas/postoffice/send.php needs the credentialId itself to
+// address the outgoing mail message by.
+function find_postoffice_membership($ownerPublicKey) {
+  $doc = read_postoffice_members();
+  foreach ($doc['members'] as $m) {
+    if (isset($m['ownerPublicKey']) && $m['ownerPublicKey'] === $ownerPublicKey && !is_revoked($m['credentialId'])) {
+      return $m;
+    }
+  }
+  return null;
 }
 
 // ---------- serial counters (task #42, flock-guarded like everything
