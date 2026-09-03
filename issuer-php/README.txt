@@ -153,7 +153,7 @@ real "broadcast to everyone" admin feature would need proper operator
 authentication first, which nothing in this bundle has yet.
 
 
-Post Office — user-to-user mail (task #75/#87/#95/#96, SPEC.md §11.3)
+Post Office — user-to-user mail (task #75/#87/#94/#95/#96, SPEC.md §11.3)
 ------------------------------------------------------------------
 Everything above is domain-to-subscriber: you (the operator) mailing
 someone who holds one of your credentials. Post Office is the other
@@ -169,6 +169,18 @@ is willing to accept, store, and relay mail for. There's nothing further
 for you to configure — a visitor requests it through the extension's
 normal asset-request flow (or the demo world's "Claim Global Mail
 Membership" stall, if you're running the bundled demo content).
+
+Advertising the role (task #94): add `"postOffice": true` to your
+manifest's top level (.well-known/spatial.json, right alongside
+`defaultWorld`) and the extension shows a "Join" button directly in the
+wallet's Mail screen for anyone visiting your domain — no stall or other
+in-world object required, though the demo stall pattern still works fine
+too, and both mint the exact same credential. This is a plain,
+optional, implementation-only field, same as `presence` — not part of
+SPEC.md, nothing this backend needs to serve dynamically, just a static
+JSON field you add to the manifest file you already publish. A domain
+that leaves the field out is simply never offered as a Post Office
+option in the wallet UI; nothing else changes.
 
 Membership is symmetric (task #95): holding the card is what makes this
 domain that visitor's sending relay AND their inbox here, not just one or

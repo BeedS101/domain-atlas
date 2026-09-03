@@ -635,6 +635,24 @@
           <div id="subscribeStatus" class="empty-note" style="margin-top:6px;"></div>
         </div>
 
+        <!-- Post Office manifest advertisement (task #94): the SAME
+             optional-field pattern the `presence` manifest field already
+             uses (see viewer.js's own comment on PRESENCE_DEFAULT_BASE) —
+             not part of SPEC.md, a plain implementation convenience that
+             lets a domain say "I offer Global Mail" so a visitor can join
+             directly from the wallet instead of having to already know to
+             go find a specific in-world stall. Hidden entirely (not just
+             disabled) once already a member, same "hide, don't just
+             disable" convention task #56 established for Subscribe. -->
+        <div id="postOfficeJoinSection">
+          <h3>Post Office</h3>
+          <div class="subhead">This domain offers Global Mail — join to send and receive user-to-user mail through it.</div>
+          <div class="btn-row">
+            <button id="postOfficeJoinBtn" type="button" class="btn-secondary">Join</button>
+          </div>
+          <div id="postOfficeJoinStatus" class="empty-note" style="margin-top:6px;"></div>
+        </div>
+
         <!-- Post Office (task #75/#87/#94, SPEC.md §11.3): user-to-user
              mail, distinct from Subscribe above (which is "hear FROM a
              domain"). Membership is symmetric — a Post Office only relays

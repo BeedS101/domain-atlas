@@ -6,6 +6,7 @@
     "contact": "demo@localhost"
   },
   "defaultWorld": "workshop",
+  "postOffice": true,
   "worlds": [
     {
       "id": "workshop",

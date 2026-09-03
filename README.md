@@ -314,7 +314,7 @@ from the existing Lock button buried in Settings → Identity method, which
 is still there for anyone who navigates in that way. It only shows up
 while there's actually an unlocked local-password identity to lock.
 
-**Post Office — user-to-user mail (task #75/#87/#95/#96, SPEC.md §11.3).**
+**Post Office — user-to-user mail (task #75/#87/#94/#95/#96, SPEC.md §11.3).**
 Everything above this point in "Mail" is domain-to-subscriber only: a
 domain mails someone who holds one of ITS credentials. Post Office is the
 other half — two people mailing each other, addressed by public key,
@@ -325,13 +325,19 @@ other — you don't have to be standing in that world to send through it,
 only to have joined it at some point, same as receiving. Try it with two
 identities:
 
-1. Walk into Domain B's Neighbor Workshop and click the blue **Post
-   Office** stall — "Claim Global Mail Membership" mints you a Domain B
-   Global Mail Membership Card, the same one-click "collect" pattern the
-   Workbench and market stalls already use. Do this for BOTH identities
-   you want to mail between (a second browser profile, or Domain A's own
-   counterparty key) — since task #95, sending only works between two
-   people who've both joined the same Post Office.
+1. Join Domain B's Post Office for BOTH identities you want to mail
+   between (a second browser profile, or Domain A's own counterparty
+   key) — since task #95, sending only works between two people who've
+   both joined the same Post Office. Two ways to do it: walk into Domain
+   B's Neighbor Workshop and click the blue **Post Office** stall
+   ("Claim Global Mail Membership", the same one-click "collect" pattern
+   the Workbench and market stalls already use), or — since task #94 —
+   just open Social → Mail while standing in Domain B and click **Join**
+   under the "Post Office" heading, no stall-finding required. That
+   button only appears at a domain whose manifest advertises
+   `"postOffice": true` (see demo-domain-b/.well-known/spatial.json) —
+   the same plain, optional, implementation-only field pattern `presence`
+   already uses, not part of SPEC.md.
 2. Open Social → Mail on each identity. "Your address" shows a copyable
    public key — hand identity B's to identity A (or vice versa).
 3. Under "Send mail," the dropdown lists every Post Office this wallet has

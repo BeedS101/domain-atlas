@@ -482,6 +482,9 @@ const clearAllMailBtn = document.getElementById('clearAllMailBtn');
 const subscribeSectionEl = document.getElementById('subscribeSection');
 const subscribeBtn = document.getElementById('subscribeBtn');
 const subscribeStatusEl = document.getElementById('subscribeStatus');
+const postOfficeJoinSectionEl = document.getElementById('postOfficeJoinSection');
+const postOfficeJoinBtn = document.getElementById('postOfficeJoinBtn');
+const postOfficeJoinStatusEl = document.getElementById('postOfficeJoinStatus');
 
 const myPublicKeyDisplayEl = document.getElementById('myPublicKeyDisplay');
 const copyMyPublicKeyBtn = document.getElementById('copyMyPublicKeyBtn');
@@ -713,6 +716,7 @@ async function enterWorld(worldId) {
   currentWorld = world;
   await refreshRequestButton();
   await refreshSubscribeButton();
+  await refreshPostOfficeJoinButton();
   await refreshMyPublicKeyDisplay();
   refreshWorldGates();
 
@@ -2297,6 +2301,7 @@ socialTabBtn && socialTabBtn.addEventListener('click', async () => {
   showSocialSubtab('mailSubscreen');
   await refreshMailDisplay();
   await refreshSubscribeButton();
+  await refreshPostOfficeJoinButton();
   await refreshMyPublicKeyDisplay();
 });
 
@@ -2304,6 +2309,7 @@ mailSubtabBtn && mailSubtabBtn.addEventListener('click', async () => {
   showSocialSubtab('mailSubscreen');
   await refreshMailDisplay();
   await refreshSubscribeButton();
+  await refreshPostOfficeJoinButton();
   await refreshMyPublicKeyDisplay();
 });
 
@@ -2356,6 +2362,38 @@ async function refreshSubscribeButton() {
   subscribeSectionEl.hidden = false;
   subscribeBtn.disabled = false;
   subscribeBtn.textContent = 'Subscribe to ' + domain;
+}
+
+async function alreadyHasPostOfficeMembership(domain) {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return false;
+  const wallet = await AtlasWallet.getWallet(identity.publicKey);
+  return wallet.some((e) => e.credential.asset.class === 'atlas.postoffice.membership' && e.credential.issuer.domain === domain);
+}
+
+// Task #94 — mirrors refreshSubscribeButton() above exactly, same
+// "hidden entirely once already true, not just disabled" convention.
+// Gated on manifest.postOffice (the new optional field, see the HTML
+// comment on #postOfficeJoinSection) in addition to not already being a
+// member, so this only ever appears where there's actually something to
+// join — a domain that hasn't opted in never shows it, same as a domain
+// with no presence field just falling back to the default rather than
+// something breaking.
+async function refreshPostOfficeJoinButton() {
+  if (!postOfficeJoinSectionEl) return;
+  if (postOfficeJoinStatusEl) postOfficeJoinStatusEl.textContent = '';
+  if (!currentManifest || !currentManifest.postOffice) {
+    postOfficeJoinSectionEl.hidden = true;
+    return;
+  }
+  const domain = manifestDomainOf(currentManifest);
+  if (await alreadyHasPostOfficeMembership(domain)) {
+    postOfficeJoinSectionEl.hidden = true;
+    return;
+  }
+  postOfficeJoinSectionEl.hidden = false;
+  postOfficeJoinBtn.disabled = false;
+  postOfficeJoinBtn.textContent = 'Join ' + domain + '\'s Post Office';
 }
 
 // Post Office (task #75/#87): just surfaces this identity's own public key
@@ -2469,8 +2507,33 @@ subscribeBtn && subscribeBtn.addEventListener('click', async () => {
     errorMessage = 'Subscribe failed: ' + err.message;
   } finally {
     await refreshSubscribeButton();
+  await refreshPostOfficeJoinButton();
   await refreshMyPublicKeyDisplay();
     if (subscribeStatusEl) subscribeStatusEl.textContent = errorMessage;
+  }
+});
+
+// Task #94 — mints the SAME atlas.postoffice.membership credential the
+// in-world stall's "issue" interactable does (see handleInteractable()),
+// just reachable directly from the wallet once the manifest says this
+// domain offers it, instead of requiring a visitor to already know to go
+// find the stall. Refreshes refreshPostOfficeSendOptions() too (via
+// refreshMyPublicKeyDisplay(), same as everywhere else this session) so
+// the new membership shows up in the "send via" dropdown immediately,
+// with no separate check needed.
+postOfficeJoinBtn && postOfficeJoinBtn.addEventListener('click', async () => {
+  const domain = manifestDomainOf(currentManifest);
+  postOfficeJoinBtn.disabled = true;
+  postOfficeJoinBtn.textContent = 'Joining…';
+  let errorMessage = '';
+  try {
+    await AtlasWallet.mintAsset('self', domain, 'atlas.postoffice.membership');
+  } catch (err) {
+    errorMessage = 'Join failed: ' + err.message;
+  } finally {
+    await refreshPostOfficeJoinButton();
+    await refreshMyPublicKeyDisplay();
+    if (postOfficeJoinStatusEl) postOfficeJoinStatusEl.textContent = errorMessage;
   }
 });
 
