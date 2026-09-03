@@ -1599,6 +1599,46 @@ const AtlasWallet = (() => {
     return await res.json();
   }
 
+  // Task #94 (handle addressing, the last remaining Post Office piece —
+  // "hide the raw public key from users", per direct instruction): claims,
+  // changes, or releases this wallet's OWN handle at `domain`. Same
+  // self-signed-envelope shape as setPostOfficeMailMode above. Pass '' or
+  // null/undefined to release the current handle instead of claiming one.
+  // Deliberately `handle#domain`, not `handle@domain` — the @ shape reads
+  // as a real email address and would mislead people about what this
+  // actually is (no inbox provider, no password recovery, nothing like
+  // SMTP underneath).
+  async function setPostOfficeHandle(domain, handle) {
+    if (!domain) throw new Error('domain is required.');
+    const payload = { handle: handle || null };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(domain) + '/atlas/postoffice/handle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload, proof })
+    });
+    if (!res.ok) throw new Error('Setting handle failed: ' + (await res.text()));
+    return await res.json();
+  }
+
+  // Turns a bare handle into the public key it currently belongs to at
+  // `domain` — the lookup step Compose runs before sendUserMail, so
+  // sending by handle is otherwise indistinguishable from sending by raw
+  // public key once this resolves. No signing needed (see server.js's own
+  // comment on /atlas/postoffice/resolve: looking up something you already
+  // know the name of doesn't require proving who's asking).
+  async function resolvePostOfficeHandle(domain, handle) {
+    if (!domain) throw new Error('domain is required.');
+    if (!handle) throw new Error('handle is required.');
+    const res = await fetch(baseUrl(domain) + '/atlas/postoffice/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ handle })
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => null))?.error || ('Could not find "' + handle + '" at ' + domain + '.'));
+    return await res.json();
+  }
+
   // A message you've deleted needs to STAY gone across future checks —
   // checkAllMail() below dedupes against ids it's already stored, but
   // deleting removes it from that same array, so without tracking deleted
@@ -1866,6 +1906,7 @@ const AtlasWallet = (() => {
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
     markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift, sendUserMail, getPostOfficeMemberships,
     setPostOfficeMailMode, blockPostOfficeSender, unblockPostOfficeSender, getPostOfficeSettings,
+    setPostOfficeHandle, resolvePostOfficeHandle,
     getAssetUpdateNotices, markAssetUpdateNoticesSeen,
     getFriends, addFriend, removeFriend,
     getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain

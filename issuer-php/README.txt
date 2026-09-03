@@ -59,6 +59,8 @@ What's in this folder
     postoffice/block.php     - POST /atlas/postoffice/block     (self-service: block a sender)
     postoffice/unblock.php   - POST /atlas/postoffice/unblock   (self-service: undo a block)
     postoffice/mysettings.php - POST /atlas/postoffice/mysettings (self-service: read your own mail mode/block list back)
+    postoffice/handle.php    - POST /atlas/postoffice/handle      (self-service: claim/change/clear your handle — see "Handle addressing" below)
+    postoffice/resolve.php   - POST /atlas/postoffice/resolve     (public: handle -> public key, single lookup, no auth needed)
     .htaccess                - makes the URLs above work without a .php
                                 extension, matching what the extension calls
   lib/
@@ -275,6 +277,51 @@ wallet's settings panel reads on open (and after every save) rather than
 trusting local state. Rejections from either rule read identically
 ("recipient is not accepting mail from you right now") so a sender can't
 tell a block from simply not being on a friends-only list.
+
+Handle addressing (task #94's last remaining piece — "hide the raw public
+key from users")
+------------------------------------------------------------------------
+A member can register a short handle at ONE Post Office instead of
+handing out their raw public key. Deliberately "handle#domain", NOT
+"handle@domain" -- the @ shape reads as a real email address and would
+mislead people about what this actually is (no inbox provider, no
+password recovery, nothing like SMTP underneath); the # separator reads
+more like a Discord-style tag, which is closer to what it actually is.
+Unique per DOMAIN, not globally -- same "one card, one Post Office" scope
+every other membership setting already has -- matched case-insensitively
+("Bob" and "bob" can't both be registered at the same domain, and a
+lookup tolerates whatever casing is typed), though the originally-
+submitted casing is what's stored and shown back.
+
+Two new endpoints:
+  - postoffice/handle.php: claim, change, or clear your OWN handle.
+    Self-signed the same way mailmode.php/block.php/unblock.php
+    authenticate their caller, via update_postoffice_member() -- so a
+    caller can only ever touch their own membership. Format (2-24 chars,
+    letters/numbers/underscore/hyphen) and the profanity blocklist are
+    both enforced here regardless of what a client's own same-shaped
+    check already caught, since a modified client could skip that one.
+    Re-submitting your own current handle succeeds as a no-op, not a
+    "taken" conflict -- the uniqueness check excludes your own live entry.
+  - postoffice/resolve.php: the single-lookup step Compose uses to turn a
+    handle into the public key send.php actually needs. No sender
+    authentication -- resolving a handle you already know doesn't require
+    proving who's asking, any more than already knowing someone's raw
+    public key would; the actual send is still gated by every check
+    above. Same "one exact answer, never a dump" shape as
+    find_postoffice_membership().
+
+The nice part: showing a RECIPIENT's handle instead of their raw key on an
+incoming message needs no reverse-lookup endpoint at all. send.php already
+stamps `from: {publicKey}` onto outgoing mail (see #95 above) -- it now
+also adds the sender's own registered handle, if they have one, to that
+same stamp, since it's sitting right there in $senderMembership already.
+A sender with no handle produces a `from` with no handle key at all (not
+a null one) -- extension/viewer.js's mail card falls back to the old
+raw-key fragment exactly as before this task.
+
+With this, task #94 is now fully built -- handle addressing was its last
+open piece.
 
 
 Updating an already-issued asset

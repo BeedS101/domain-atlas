@@ -163,6 +163,49 @@ const POSTOFFICE_SEND_LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
 // (that's #96's job); this is only about keeping one member's own roster
 // entry from growing unbounded.
 const POSTOFFICE_SETTINGS_MAX_LIST = 500;
+
+// Task #94 (handle addressing, the last remaining piece — "hide the raw
+// public key from users", per direct instruction): a member can register a
+// short, human-typeable handle at a domain's Post Office instead of
+// handing out their raw public key. Deliberately NOT `handle@domain` —
+// that shape reads as a real email address and would confuse people about
+// what this actually is (no inbox provider, no password recovery, nothing
+// like SMTP underneath) — so the display/parse separator is `#`, same
+// spirit as a Discord-style tag: `bruno#localhost:8002`.
+//
+// Unique per DOMAIN, not globally — same "one card, one Post Office" scope
+// every other membership setting already has; "bruno" can be taken at
+// Domain B and free at Domain C. Matching is case-INSENSITIVE (so "Bruno"
+// and "bruno" can't both be registered here, and a lookup tolerates the
+// caller's capitalization), but the originally-submitted casing is what's
+// stored and shown back.
+const POSTOFFICE_HANDLE_REGEX = /^[A-Za-z0-9_-]{2,24}$/;
+// Server-side port of wallet.js's alias profanity filter (ALIAS_BLOCKLIST/
+// normalizeForAliasFilter/aliasContainsBlockedWord) — deliberately
+// duplicated rather than shared, since a handle is presented to OTHER
+// people (mail cards, "Your address") the exact same way an alias is
+// presented over presence, and wallet.js's own comment on that already
+// flags why a client-only filter isn't enough for anything actually shown
+// to someone else: the check has to run again here, independently,
+// because the sender's own client-side check is trivially skippable by
+// anyone willing to edit their own extension.
+const HANDLE_BLOCKLIST = [
+  'fuck', 'shit', 'bitch', 'cunt', 'asshole', 'bastard', 'dick', 'piss',
+  'slut', 'whore', 'fag', 'nigger', 'nigga', 'retard', 'rape'
+];
+function normalizeForHandleFilter(text) {
+  return (text || '')
+    .toLowerCase()
+    .replace(/0/g, 'o').replace(/1/g, 'i').replace(/!/g, 'i')
+    .replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's')
+    .replace(/@/g, 'a').replace(/\$/g, 's')
+    .replace(/[^a-z0-9]/g, '');
+}
+function handleContainsBlockedWord(handle) {
+  const normalized = normalizeForHandleFilter(handle);
+  return HANDLE_BLOCKLIST.some((word) => normalized.includes(word));
+}
+
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // task #42's serialized/limited-edition support. One running count per
 // class, incremented only by a genuinely NEW mint (mintAssetByClass()
@@ -583,6 +626,16 @@ function updatePostOfficeMember(ownerPublicKey, mutate) {
   mutate(member);
   fs.writeFileSync(POSTOFFICE_MEMBERS_FILE, JSON.stringify(doc, null, 2));
   return member;
+}
+
+// One LIVE member's roster entry with a given handle, matched case-
+// insensitively — the whole point of POST /atlas/postoffice/resolve below,
+// and also what POST /atlas/postoffice/handle checks against before
+// letting a caller claim one, so both share this single lookup rather than
+// two subtly different string-compare implementations drifting apart.
+function findMemberByHandle(doc, handle) {
+  const target = handle.toLowerCase();
+  return doc.members.find((m) => m.handle && m.handle.toLowerCase() === target && !isRevoked(m.credentialId));
 }
 
 function readBody(req) {
@@ -1200,12 +1253,21 @@ async function main() {
           return sendJson(res, 400, { error: 'recipient is not accepting mail from you right now' });
         }
 
+        // Task #94 (handle addressing): if the sender has registered a
+        // handle at THIS domain, stamp it onto `from` alongside the public
+        // key — the domain already has it right here in senderMembership,
+        // so this is the whole mechanism for the recipient's mail card to
+        // show "From bruno#domain" instead of a raw key. No reverse-lookup
+        // endpoint needed, and no new privacy surface: it's exactly the
+        // same information senderMembership.handle already exposes to
+        // anyone who resolves that handle via POST /atlas/postoffice/
+        // resolve, just delivered proactively instead of on request.
         const outPayload = {
           id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
           credentialId: membership.credentialId,
           subject: payload.subject,
           body: payload.body,
-          from: { publicKey: proof.publicKey },
+          from: senderMembership.handle ? { publicKey: proof.publicKey, handle: senderMembership.handle } : { publicKey: proof.publicKey },
           sentAt: new Date().toISOString()
         };
         const signature = await sign(outPayload);
@@ -1307,8 +1369,68 @@ async function main() {
           ok: true,
           mailMode: member.mailMode || 'open',
           blockedSenders: member.blockedSenders || [],
-          friendsCount: (member.friends || []).length
+          friendsCount: (member.friends || []).length,
+          handle: member.handle || null
         });
+      }
+
+      // Task #94 (handle addressing): lets a member claim, change, or
+      // clear their own handle at this domain — self-signed the same way
+      // as mailmode/block/unblock above, so a caller can only ever touch
+      // their own membership. payload.handle is either a string to claim
+      // (validated for shape, profanity, and per-domain uniqueness) or an
+      // empty string/null to release whatever handle this member currently
+      // holds. Re-submitting your OWN current handle is a no-op success,
+      // not a "taken" conflict — the uniqueness check below excludes the
+      // caller's own live entry from the collision search.
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/handle') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        const wantsClear = payload.handle === null || payload.handle === '';
+        if (!wantsClear) {
+          if (typeof payload.handle !== 'string' || !POSTOFFICE_HANDLE_REGEX.test(payload.handle)) {
+            return sendJson(res, 400, { error: 'handle must be 2-24 characters, letters/numbers/underscore/hyphen only' });
+          }
+          if (handleContainsBlockedWord(payload.handle)) {
+            return sendJson(res, 400, { error: 'that handle isn\'t allowed here — try something else' });
+          }
+        }
+        const ok = await verifyEnvelope(payload, proof);
+        if (!ok) return sendJson(res, 400, { error: 'signature does not check out' });
+
+        if (!wantsClear) {
+          const doc = readPostOfficeMembers();
+          const existing = findMemberByHandle(doc, payload.handle);
+          if (existing && existing.ownerPublicKey !== proof.publicKey) {
+            return sendJson(res, 400, { error: 'that handle is already taken at this Post Office — try another' });
+          }
+        }
+
+        const member = updatePostOfficeMember(proof.publicKey, (m) => {
+          m.handle = wantsClear ? undefined : payload.handle;
+        });
+        if (!member) return sendJson(res, 400, { error: 'you do not hold a Global Mail membership at this domain' });
+        console.log('Post Office handle', wantsClear ? 'cleared for' : 'set for', proof.publicKey.slice(0, 16) + '...', wantsClear ? '' : '-> ' + member.handle);
+        return sendJson(res, 200, { ok: true, handle: member.handle || null });
+      }
+
+      // Task #94 (handle addressing): the single-lookup resolve step
+      // compose uses to turn "bruno" (plus whichever domain is already
+      // selected) into the public key sendUserMail actually needs — same
+      // "one exact answer if you already know what to ask for, never a
+      // dump" shape as every other narrow lookup in this file. No sender
+      // authentication here: resolving a handle you already know doesn't
+      // require proving who you are, any more than already knowing
+      // someone's raw public key would — the actual send is still gated
+      // by real membership/consent checks above, this step is purely
+      // address lookup.
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/resolve') {
+        const { handle } = JSON.parse((await readBody(req)) || '{}');
+        if (!handle || typeof handle !== 'string') return sendJson(res, 400, { error: 'handle is required' });
+        const doc = readPostOfficeMembers();
+        const member = findMemberByHandle(doc, handle);
+        if (!member) return sendJson(res, 404, { error: 'no one at this Post Office has registered that handle' });
+        return sendJson(res, 200, { ok: true, publicKey: member.ownerPublicKey, handle: member.handle });
       }
 
       if (req.method === 'GET') return serveStatic(req, res);

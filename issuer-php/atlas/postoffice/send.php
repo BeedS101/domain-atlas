@@ -96,12 +96,22 @@ if (($membership['mailMode'] ?? null) === 'friendsOnly' && !in_array($proof['pub
   send_json(400, ['error' => 'recipient is not accepting mail from you right now']);
 }
 
+// Task #94 (handle addressing): if the sender has registered a handle at
+// THIS domain, stamp it onto `from` alongside the public key — already
+// sitting right here in $senderMembership, so this is the whole mechanism
+// for the recipient's mail card to show "From bruno#domain" instead of a
+// raw key, with no reverse-lookup endpoint or new privacy surface needed.
+// Mirrors issuer-server/server.js's send handler.
+$from = ['publicKey' => $proof['publicKey']];
+if (!empty($senderMembership['handle'])) {
+  $from['handle'] = $senderMembership['handle'];
+}
 $outPayload = [
   'id' => 'urn:atlas:mail:' . atlas_uuid(),
   'credentialId' => $membership['credentialId'],
   'subject' => $payload['subject'],
   'body' => $payload['body'],
-  'from' => ['publicKey' => $proof['publicKey']],
+  'from' => $from,
   'sentAt' => iso_now(),
 ];
 $signature = atlas_sign($kp['privateKey'], $outPayload);

@@ -192,6 +192,11 @@
   .wallet-screen { display: none; }
   .wallet-screen.active { display: block; }
   .btn-secondary { border-color: #2c3c44; color: #a9b8bf; }
+  /* Task #94 (handle addressing): a plain-text toggle link rather than a
+     bordered button — for something like "paste a raw public key instead"
+     that shouldn't visually compete with the actual Send button. */
+  .link-btn { background: none; border: none; padding: 0; color: #6fa8c9; text-decoration: underline; cursor: pointer; font-size: 12px; }
+  .link-btn:hover { color: #8fc0dc; }
   /* Only shown on the two screens it makes sense to jump directly between
      (Wallet, Settings) — see showWalletScreen() in viewer.js. Onboarding,
      unlock, and identity-creation screens have nothing to tab between yet,
@@ -675,7 +680,19 @@
           <select id="postOfficeToDomainInput" style="margin-top:8px;">
             <option value="">No Post Office memberships yet</option>
           </select>
-          <textarea id="postOfficeToPublicKeyInput" placeholder="Recipient's public key" style="margin-top:8px;min-height:48px;font-family:monospace;font-size:11px;"></textarea>
+          <!-- Task #94 (handle addressing): handle-first by default — type
+               a recipient's handle (bare, since the domain above is already
+               picked; or paste a full "handle#domain" and it'll pick the
+               right domain for you) and it resolves to their public key
+               right before sending. The raw-key textarea stays available
+               as a fallback for someone who hasn't registered a handle
+               yet, revealed by the link below rather than shown by
+               default — see refreshPostOfficeSendMode() in viewer.js. -->
+          <input type="text" id="postOfficeToHandleInput" placeholder="Recipient's handle (e.g. bruno#localhost:8002, or just bruno for the Post Office above)" style="margin-top:8px;">
+          <textarea id="postOfficeToPublicKeyInput" placeholder="Recipient's public key" hidden style="margin-top:8px;min-height:48px;font-family:monospace;font-size:11px;"></textarea>
+          <div class="btn-row" style="margin-top:4px;">
+            <button id="postOfficeToggleRawKeyBtn" type="button" class="link-btn">Paste a raw public key instead</button>
+          </div>
           <input type="text" id="postOfficeSubjectInput" placeholder="Subject" style="margin-top:8px;">
           <textarea id="postOfficeBodyInput" placeholder="Message" style="margin-top:8px;"></textarea>
           <div class="btn-row" style="margin-top:8px;">
@@ -684,24 +701,44 @@
           <div id="postOfficeSendStatus" class="empty-note" style="margin-top:6px;"></div>
         </div>
 
-        <!-- Post Office consent/block model (task #94's remaining piece,
-             "both, recipient's choice" per direct instruction): per
-             membership, a member controls who's allowed to reach them
-             through it — the SAME "your card, your rules" idea the
-             membership itself already carries. Two independent knobs
-             (see AtlasWallet.setPostOfficeMailMode/blockPostOfficeSender
-             in wallet.js): a mail mode (open vs. friends-only) and a
-             block list, both scoped to whichever membership is selected
-             below since a wallet can belong to more than one Post
-             Office. Populated on demand (loadPostOfficeSettings) rather
-             than kept in local state, so it always reflects what the
-             domain actually has on file. -->
+        <!-- Post Office per-membership settings (task #94's two remaining
+             pieces, both now built): a handle to be reached by instead of
+             a raw public key, and consent/block controls over who's
+             allowed to reach you at all — the SAME "your card, your
+             rules" idea the membership itself already carries. All of it
+             (see AtlasWallet.setPostOfficeHandle/setPostOfficeMailMode/
+             blockPostOfficeSender in wallet.js) is scoped to whichever
+             membership is selected in the ONE domain picker at the top,
+             since a wallet can belong to more than one Post Office.
+             Populated on demand (loadPostOfficeSettings) rather than kept
+             in local state, so it always reflects what the domain
+             actually has on file. -->
         <div id="postOfficeSettingsSection">
-          <h3>Who can mail you</h3>
-          <div class="subhead">Applies to one Post Office membership at a time — pick which. "Friends only" sends your current Friends list's public keys to that domain as a one-time snapshot; it won't include anyone you add to Friends afterward until you save again.</div>
+          <h3>Your Post Office settings</h3>
+          <div class="subhead">Everything below applies to one Post Office membership at a time — pick which.</div>
           <select id="postOfficeSettingsDomainInput" style="margin-top:8px;">
             <option value="">No Post Office memberships yet</option>
           </select>
+
+          <!-- Task #94 (handle addressing, the last remaining Post Office
+               piece — "hide the raw public key from users", per direct
+               instruction): a short handle you register at the selected
+               Post Office, instead of handing out a raw public key. Uses
+               "#domain" as the separator, deliberately NOT "@domain" —
+               that shape reads as a real email address and would mislead
+               people about what this actually is. -->
+          <h3>Your handle</h3>
+          <div class="subhead">A short name others can mail you at here, instead of your raw public key — unique per Post Office.</div>
+          <div id="postOfficeYourHandleDisplay" class="empty-note" style="margin-top:6px;"></div>
+          <input type="text" id="postOfficeHandleInput" placeholder="e.g. bruno" style="margin-top:8px;" maxlength="24">
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="postOfficeSaveHandleBtn" type="button" class="btn-secondary">Save</button>
+            <button id="postOfficeClearHandleBtn" type="button" class="btn-secondary">Clear</button>
+          </div>
+          <div id="postOfficeHandleStatus" class="empty-note" style="margin-top:6px;"></div>
+
+          <h3>Who can mail you</h3>
+          <div class="subhead">"Friends only" sends your current Friends list's public keys to this domain as a one-time snapshot; it won't include anyone you add to Friends afterward until you save again.</div>
           <select id="postOfficeMailModeInput" style="margin-top:8px;">
             <option value="open">Accept mail from anyone at this Post Office</option>
             <option value="friendsOnly">Friends only</option>

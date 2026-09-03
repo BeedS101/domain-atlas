@@ -490,14 +490,21 @@ const myPublicKeyDisplayEl = document.getElementById('myPublicKeyDisplay');
 const copyMyPublicKeyBtn = document.getElementById('copyMyPublicKeyBtn');
 const copyMyPublicKeyStatusEl = document.getElementById('copyMyPublicKeyStatus');
 const postOfficeToDomainInput = document.getElementById('postOfficeToDomainInput');
+const postOfficeToHandleInput = document.getElementById('postOfficeToHandleInput');
 const postOfficeToPublicKeyInput = document.getElementById('postOfficeToPublicKeyInput');
+const postOfficeToggleRawKeyBtn = document.getElementById('postOfficeToggleRawKeyBtn');
 const postOfficeSubjectInput = document.getElementById('postOfficeSubjectInput');
 const postOfficeBodyInput = document.getElementById('postOfficeBodyInput');
 const postOfficeSendBtn = document.getElementById('postOfficeSendBtn');
 const postOfficeSendStatusEl = document.getElementById('postOfficeSendStatus');
 
-// Task #94 (consent/block model)
+// Task #94 (consent/block model + handle addressing)
 const postOfficeSettingsDomainInput = document.getElementById('postOfficeSettingsDomainInput');
+const postOfficeYourHandleDisplayEl = document.getElementById('postOfficeYourHandleDisplay');
+const postOfficeHandleInput = document.getElementById('postOfficeHandleInput');
+const postOfficeSaveHandleBtn = document.getElementById('postOfficeSaveHandleBtn');
+const postOfficeClearHandleBtn = document.getElementById('postOfficeClearHandleBtn');
+const postOfficeHandleStatusEl = document.getElementById('postOfficeHandleStatus');
 const postOfficeMailModeInput = document.getElementById('postOfficeMailModeInput');
 const postOfficeSaveMailModeBtn = document.getElementById('postOfficeSaveMailModeBtn');
 const postOfficeMailModeStatusEl = document.getElementById('postOfficeMailModeStatus');
@@ -2171,8 +2178,16 @@ function renderMailCard(entry, container) {
   // names the relaying domain, not the sender. Ordinary domain-to-subscriber
   // mail has no `from` at all (the domain itself is implicitly the sender),
   // so this only ever shows up on relayed mail.
+  //
+  // Task #94 (handle addressing): if the sender had a handle registered at
+  // send time, the relaying domain stamped it onto `from.handle` (see
+  // server.js's own comment on the send handler) — showing "From
+  // bruno#domain" instead of a raw key fragment is the whole payoff of
+  // that: nothing to resolve here, the domain already did it.
   const fromLine = entry.message.from
-    ? 'From ' + escapeHtml(entry.message.from.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.message.domain)
+    ? 'From ' + (entry.message.from.handle
+        ? escapeHtml(entry.message.from.handle) + '#' + escapeHtml(entry.message.domain)
+        : escapeHtml(entry.message.from.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.message.domain))
     : escapeHtml(entry.message.domain);
   // Task #59: a message can carry an attached gift, sitting inert until
   // claimed (see AtlasWallet.claimMailGift — deliberately never
@@ -2541,10 +2556,11 @@ async function refreshPostOfficeSettingsDomainOptions(identity) {
 
 // Fetches the currently-selected membership's settings from its domain
 // (AtlasWallet.getPostOfficeSettings — self-signed, so it only ever
-// returns THIS wallet's own entry) and renders them into the mode select
-// and blocked-senders list. Called whenever the domain picker changes, and
-// after every save/block/unblock so the panel always reflects what the
-// domain actually has on file rather than an optimistic local guess.
+// returns THIS wallet's own entry) and renders them into the handle
+// display, mode select, and blocked-senders list. Called whenever the
+// domain picker changes, and after every save/block/unblock so the panel
+// always reflects what the domain actually has on file rather than an
+// optimistic local guess.
 async function loadPostOfficeSettings() {
   const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
   if (!domain) { await renderPostOfficeSettings(null); return; }
@@ -2557,8 +2573,32 @@ async function loadPostOfficeSettings() {
   }
 }
 
+// Last settings actually loaded/saved for the currently-selected
+// membership — kept around so a block/unblock/handle-save response (which
+// only returns the ONE field it changed) can be merged back in for a
+// re-render without a whole extra round trip to mysettings, while still
+// staying in sync with what the domain has since a real response always
+// wins over any earlier guess.
+let currentPostOfficeSettings = null;
+
 function renderPostOfficeSettings(settings) {
+  currentPostOfficeSettings = settings;
   if (postOfficeMailModeInput) postOfficeMailModeInput.value = settings ? (settings.mailMode || 'open') : 'open';
+
+  const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
+  if (postOfficeYourHandleDisplayEl) {
+    if (!settings) {
+      postOfficeYourHandleDisplayEl.textContent = '';
+    } else if (settings.handle) {
+      postOfficeYourHandleDisplayEl.textContent = 'You\'re reachable as ' + settings.handle + '#' + domain;
+    } else {
+      postOfficeYourHandleDisplayEl.textContent = 'No handle set here yet — you\'re only reachable by raw public key.';
+    }
+  }
+  if (postOfficeHandleInput && document.activeElement !== postOfficeHandleInput) {
+    postOfficeHandleInput.value = settings && settings.handle ? settings.handle : '';
+  }
+
   if (!postOfficeBlockedListEl) return;
   if (!settings) {
     postOfficeBlockedListEl.innerHTML = '';
@@ -2584,6 +2624,59 @@ function renderPostOfficeSettings(settings) {
 
 postOfficeSettingsDomainInput && postOfficeSettingsDomainInput.addEventListener('change', loadPostOfficeSettings);
 
+// Task #94 (handle addressing): claims/changes this membership's handle.
+// Format/profanity is checked again server-side regardless (see server.js's
+// own comment on why a client-only check isn't enough for anything shown
+// to someone else) — this client-side pass is purely a faster "that won't
+// be accepted" than waiting on a round trip.
+postOfficeSaveHandleBtn && postOfficeSaveHandleBtn.addEventListener('click', async () => {
+  const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
+  const handle = (postOfficeHandleInput.value || '').trim();
+  if (!domain) {
+    if (postOfficeHandleStatusEl) postOfficeHandleStatusEl.textContent = 'Pick a Post Office membership first.';
+    return;
+  }
+  if (!handle) {
+    if (postOfficeHandleStatusEl) postOfficeHandleStatusEl.textContent = 'Enter a handle, or use Clear to remove your current one.';
+    return;
+  }
+  postOfficeSaveHandleBtn.disabled = true;
+  postOfficeSaveHandleBtn.textContent = 'Saving…';
+  if (postOfficeHandleStatusEl) postOfficeHandleStatusEl.textContent = '';
+  try {
+    const result = await AtlasWallet.setPostOfficeHandle(domain, handle);
+    renderPostOfficeSettings({ ...currentPostOfficeSettings, handle: result.handle });
+    postOfficeHandleStatusEl.textContent = 'Saved — you\'re now ' + result.handle + '#' + domain + '.';
+  } catch (err) {
+    postOfficeHandleStatusEl.textContent = 'Save failed: ' + err.message;
+  } finally {
+    postOfficeSaveHandleBtn.disabled = false;
+    postOfficeSaveHandleBtn.textContent = 'Save';
+  }
+});
+
+postOfficeClearHandleBtn && postOfficeClearHandleBtn.addEventListener('click', async () => {
+  const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
+  if (!domain) {
+    if (postOfficeHandleStatusEl) postOfficeHandleStatusEl.textContent = 'Pick a Post Office membership first.';
+    return;
+  }
+  postOfficeClearHandleBtn.disabled = true;
+  postOfficeClearHandleBtn.textContent = 'Clearing…';
+  if (postOfficeHandleStatusEl) postOfficeHandleStatusEl.textContent = '';
+  try {
+    await AtlasWallet.setPostOfficeHandle(domain, null);
+    postOfficeHandleInput.value = '';
+    renderPostOfficeSettings({ ...currentPostOfficeSettings, handle: null });
+    postOfficeHandleStatusEl.textContent = 'Cleared — you\'re only reachable by raw public key here now.';
+  } catch (err) {
+    postOfficeHandleStatusEl.textContent = 'Clear failed: ' + err.message;
+  } finally {
+    postOfficeClearHandleBtn.disabled = false;
+    postOfficeClearHandleBtn.textContent = 'Clear';
+  }
+});
+
 // Saves the mode select's current value against whichever membership is
 // selected — see AtlasWallet.setPostOfficeMailMode's own comment on what
 // switching to "friendsOnly" actually submits (a one-time snapshot of this
@@ -2600,6 +2693,7 @@ postOfficeSaveMailModeBtn && postOfficeSaveMailModeBtn.addEventListener('click',
   if (postOfficeMailModeStatusEl) postOfficeMailModeStatusEl.textContent = '';
   try {
     const result = await AtlasWallet.setPostOfficeMailMode(domain, mode);
+    currentPostOfficeSettings = { ...currentPostOfficeSettings, mailMode: result.mailMode, friendsCount: result.friendsCount };
     postOfficeMailModeStatusEl.textContent = mode === 'friendsOnly'
       ? 'Saved — friends only (' + result.friendsCount + ' friend' + (result.friendsCount === 1 ? '' : 's') + ' synced).'
       : 'Saved — open to anyone at this Post Office.';
@@ -2627,7 +2721,7 @@ postOfficeBlockBtn && postOfficeBlockBtn.addEventListener('click', async () => {
   if (postOfficeBlockStatusEl) postOfficeBlockStatusEl.textContent = '';
   try {
     const result = await AtlasWallet.blockPostOfficeSender(domain, key);
-    renderPostOfficeSettings({ mailMode: postOfficeMailModeInput.value, blockedSenders: result.blockedSenders });
+    renderPostOfficeSettings({ ...currentPostOfficeSettings, blockedSenders: result.blockedSenders });
     postOfficeBlockPublicKeyInput.value = '';
     postOfficeBlockStatusEl.textContent = 'Blocked.';
   } catch (err) {
@@ -2651,7 +2745,7 @@ postOfficeBlockedListEl && postOfficeBlockedListEl.addEventListener('click', asy
   btn.textContent = 'Unblocking…';
   try {
     const result = await AtlasWallet.unblockPostOfficeSender(domain, key);
-    renderPostOfficeSettings({ mailMode: postOfficeMailModeInput.value, blockedSenders: result.blockedSenders });
+    renderPostOfficeSettings({ ...currentPostOfficeSettings, blockedSenders: result.blockedSenders });
   } catch (err) {
     if (postOfficeBlockStatusEl) postOfficeBlockStatusEl.textContent = 'Unblock failed: ' + err.message;
     btn.disabled = false;
@@ -2674,6 +2768,21 @@ copyMyPublicKeyBtn && copyMyPublicKeyBtn.addEventListener('click', async () => {
   setTimeout(() => { if (copyMyPublicKeyStatusEl) copyMyPublicKeyStatusEl.textContent = ''; }, 3000);
 });
 
+// Task #94 (handle addressing): swaps Compose between its two recipient
+// input modes — handle-first (the default) and the raw-key fallback for
+// someone who hasn't registered a handle yet. Only one is ever visible (and
+// only the visible one's value is used on Send, below), so switching also
+// clears whichever field is being hidden — leftover text in a hidden field
+// would otherwise silently do nothing, which is worse than just not being
+// there.
+postOfficeToggleRawKeyBtn && postOfficeToggleRawKeyBtn.addEventListener('click', () => {
+  const showingRawKey = !postOfficeToPublicKeyInput.hidden;
+  postOfficeToPublicKeyInput.hidden = showingRawKey;
+  postOfficeToHandleInput.hidden = !showingRawKey;
+  postOfficeToggleRawKeyBtn.textContent = showingRawKey ? 'Paste a raw public key instead' : 'Use a handle instead';
+  (showingRawKey ? postOfficeToPublicKeyInput : postOfficeToHandleInput).value = '';
+});
+
 // Post Office (task #75/#87/#94, SPEC.md §11.3): composes and sends a
 // message to another identity's public key through a Post Office this
 // wallet already belongs to — see AtlasWallet.sendUserMail's own comment
@@ -2682,15 +2791,72 @@ copyMyPublicKeyBtn && copyMyPublicKeyBtn.addEventListener('click', async () => {
 // this wallet only offers domains it's actually joined in the dropdown
 // above, so the common failure here is the recipient not being a member
 // yet, not this wallet.
+//
+// Task #94 (handle addressing): when the handle field is the active one
+// (the default), the recipient input can be either a bare handle — resolved
+// against whichever Post Office is picked in the dropdown — or a full
+// "handle#domain" address, which overrides the dropdown to that domain
+// instead (as long as this wallet has actually joined it; if not, that's
+// reported directly rather than attempting a resolve that would only fail
+// at the membership check anyway). Either way it resolves to a public key
+// via AtlasWallet.resolvePostOfficeHandle BEFORE sending, so the actual
+// send call underneath is identical to the raw-key path — Post Office
+// addressing is purely a lookup layered in front of it.
 postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
-  const toDomain = (postOfficeToDomainInput.value || '').trim();
-  const toPublicKey = (postOfficeToPublicKeyInput.value || '').trim();
   const subject = (postOfficeSubjectInput.value || '').trim();
   const body = (postOfficeBodyInput.value || '').trim();
-  if (!toDomain || !toPublicKey || !subject || !body) {
-    postOfficeSendStatusEl.textContent = 'Choose a Post Office to send through, then fill in the recipient\'s public key, subject, and message.';
-    return;
+  const usingRawKey = !postOfficeToPublicKeyInput.hidden;
+
+  let toDomain = (postOfficeToDomainInput.value || '').trim();
+  let toPublicKey = '';
+
+  if (usingRawKey) {
+    toPublicKey = (postOfficeToPublicKeyInput.value || '').trim();
+    if (!toDomain || !toPublicKey || !subject || !body) {
+      postOfficeSendStatusEl.textContent = 'Choose a Post Office to send through, then fill in the recipient\'s public key, subject, and message.';
+      return;
+    }
+  } else {
+    const rawHandleInput = (postOfficeToHandleInput.value || '').trim();
+    if (!rawHandleInput || !subject || !body) {
+      postOfficeSendStatusEl.textContent = 'Fill in the recipient\'s handle, subject, and message.';
+      return;
+    }
+    let handle = rawHandleInput;
+    const hashIndex = rawHandleInput.indexOf('#');
+    if (hashIndex !== -1) {
+      handle = rawHandleInput.slice(0, hashIndex).trim();
+      const parsedDomain = rawHandleInput.slice(hashIndex + 1).trim();
+      const knownDomains = [...postOfficeToDomainInput.options].map((o) => o.value).filter(Boolean);
+      if (!knownDomains.includes(parsedDomain)) {
+        postOfficeSendStatusEl.textContent = 'You haven\'t joined ' + parsedDomain + '\'s Post Office yet — join it first (Post Office section above).';
+        return;
+      }
+      toDomain = parsedDomain;
+      postOfficeToDomainInput.value = parsedDomain;
+    }
+    if (!toDomain) {
+      postOfficeSendStatusEl.textContent = 'Choose a Post Office to send through first.';
+      return;
+    }
+    if (!handle) {
+      postOfficeSendStatusEl.textContent = 'Enter the recipient\'s handle.';
+      return;
+    }
+    postOfficeSendBtn.disabled = true;
+    postOfficeSendBtn.textContent = 'Looking up…';
+    postOfficeSendStatusEl.textContent = '';
+    try {
+      const resolved = await AtlasWallet.resolvePostOfficeHandle(toDomain, handle);
+      toPublicKey = resolved.publicKey;
+    } catch (err) {
+      postOfficeSendStatusEl.textContent = err.message;
+      postOfficeSendBtn.disabled = false;
+      postOfficeSendBtn.textContent = 'Send';
+      return;
+    }
   }
+
   postOfficeSendBtn.disabled = true;
   postOfficeSendBtn.textContent = 'Sending…';
   postOfficeSendStatusEl.textContent = '';

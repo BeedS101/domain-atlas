@@ -38,4 +38,5 @@ send_json(200, [
   'mailMode' => $member['mailMode'] ?? 'open',
   'blockedSenders' => $member['blockedSenders'] ?? [],
   'friendsCount' => count($member['friends'] ?? []),
+  'handle' => $member['handle'] ?? null,
 ]);

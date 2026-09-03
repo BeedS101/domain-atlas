@@ -415,6 +415,51 @@ admission and exclusion, block-beats-friends-only, mode-switch clearing
 the snapshot); `test/manual-postoffice-consent-ui.js` drives the real
 wallet panel.
 
+**Handle addressing (task #94's last remaining piece — "hide the raw
+public key from users").** A member can register a short handle at ONE
+Post Office instead of handing out their raw public key — from the same
+"Who can mail you" panel, now headed "Your Post Office settings," under
+"Your handle." Deliberately `handle#domain`, **not** `handle@domain` — the
+`@` shape reads as a real email address and would mislead people about
+what this actually is (no inbox provider, no password recovery, nothing
+like SMTP underneath); the `#` separator reads more like a Discord-style
+tag, which is closer to what it actually is. Compose's recipient field is
+handle-first by default: type a bare handle (the domain comes from the
+"Send mail" dropdown already picked above it) or paste a full
+`handle#domain` string and it selects the right domain for you; a
+**"Paste a raw public key instead"** link swaps in the old raw-key field
+for anyone who hasn't registered a handle yet.
+
+A handle is unique per DOMAIN, not globally — the same "one card, one Post
+Office" scope every other membership setting already has, matched
+case-insensitively (`Bob` and `bob` can't both be registered at the same
+domain, and a lookup tolerates whatever casing you type). Two new
+endpoints: `POST /atlas/postoffice/handle` (self-signed the same way as
+mailmode/block/unblock — claim, change, or clear your own) and
+`POST /atlas/postoffice/resolve` (a single lookup, handle in → public key
+out, no roster dump, no authentication needed — resolving a handle you
+already know doesn't require proving who's asking, any more than already
+knowing someone's raw public key would). Format and profanity are both
+enforced server-side, independently of whatever the wallet's own
+same-shaped check already caught, since a modified client could skip that
+one.
+
+The nice part: showing a *recipient's* handle instead of their raw key
+needs no reverse-lookup endpoint at all. The relaying domain already
+stamps `from: {publicKey}` onto outgoing mail (see #95) — it now also adds
+the sender's own registered handle, if they have one, to that same stamp,
+since it's already sitting right there in its roster. A mail card headed
+"From bruno#localhost:8002" is just that field rendered; a sender with no
+handle still falls back to the old raw-key fragment. `test/manual-
+postoffice-handle.js` covers the server side end to end (claim/uniqueness/
+case-insensitivity/format/profanity/resolve/auto-stamping/clearing, run
+clean against both issuers); `test/manual-postoffice-handle-ui.js` drives
+the real wallet panel and Compose, including a full round trip by bare
+handle, by a pasted `handle#domain` address, and via the raw-key fallback.
+
+With this, task #94 is now fully built — handle addressing was its last
+open piece.
+
 ## 8. Verify it yourself
 
 ```bash

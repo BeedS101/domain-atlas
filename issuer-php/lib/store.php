@@ -611,6 +611,53 @@ function update_postoffice_member($ownerPublicKey, callable $mutate) {
   return $found;
 }
 
+// Task #94 (handle addressing, the last remaining Post Office piece —
+// "hide the raw public key from users", per direct instruction): a member
+// can register a short handle at a domain's Post Office instead of handing
+// out their raw public key. Deliberately `handle#domain`, NOT
+// `handle@domain` — the @ shape reads as a real email address and would
+// mislead people about what this actually is. Unique per domain (not
+// globally), matched case-insensitively; the originally-submitted casing
+// is what's stored and shown back. Mirrors issuer-server/server.js's
+// POSTOFFICE_HANDLE_REGEX/HANDLE_BLOCKLIST.
+const ATLAS_POSTOFFICE_HANDLE_PATTERN = '/^[A-Za-z0-9_-]{2,24}$/';
+// Server-side port of wallet.js's alias profanity filter — deliberately
+// duplicated (not shared) because a handle is presented to OTHER people
+// the same way an alias is, and a client-only check is trivially skippable
+// by anyone willing to edit their own extension.
+const ATLAS_HANDLE_BLOCKLIST = [
+  'fuck', 'shit', 'bitch', 'cunt', 'asshole', 'bastard', 'dick', 'piss',
+  'slut', 'whore', 'fag', 'nigger', 'nigga', 'retard', 'rape',
+];
+function atlas_normalize_for_handle_filter($text) {
+  $text = strtolower((string) $text);
+  $text = strtr($text, ['0' => 'o', '1' => 'i', '!' => 'i', '3' => 'e', '4' => 'a', '5' => 's', '@' => 'a', '$' => 's']);
+  return preg_replace('/[^a-z0-9]/', '', $text);
+}
+function atlas_handle_contains_blocked_word($handle) {
+  $normalized = atlas_normalize_for_handle_filter($handle);
+  foreach (ATLAS_HANDLE_BLOCKLIST as $word) {
+    if (strpos($normalized, $word) !== false) return true;
+  }
+  return false;
+}
+
+// One LIVE member's roster entry with a given handle, matched case-
+// insensitively — used by both atlas/postoffice/resolve.php (the whole
+// point of that endpoint) and atlas/postoffice/handle.php (checking a
+// handle isn't already taken before letting a caller claim it). Mirrors
+// issuer-server/server.js's findMemberByHandle().
+function find_postoffice_member_by_handle($handle) {
+  $target = strtolower($handle);
+  $doc = read_postoffice_members();
+  foreach ($doc['members'] as $m) {
+    if (!empty($m['handle']) && strtolower($m['handle']) === $target && !is_revoked($m['credentialId'])) {
+      return $m;
+    }
+  }
+  return null;
+}
+
 // ---------- serial counters (task #42, flock-guarded like everything
 // else above — a real host can genuinely run two mint requests for the
 // same class concurrently, unlike the Node demo's single-threaded event

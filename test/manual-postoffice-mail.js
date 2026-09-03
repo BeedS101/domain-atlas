@@ -236,6 +236,12 @@ async function claimPostOfficeMembership(frame, label) {
     console.log('PASS: send-via dropdown offers exactly the Post Office A actually joined ->', sendViaOptions);
 
     console.log('STEP 4: Visitor A sends mail to B\'s public key via that dropdown');
+    // Task #94 (handle addressing): Compose is handle-first by default now
+    // (see manual-postoffice-handle-ui.js for that path) — this test is
+    // specifically exercising the raw-public-key path (arbitrary/stranger
+    // keys, XSS payloads, membership rejection), so it switches to the
+    // raw-key fallback field via the same toggle a real user would use.
+    await a.frame.locator('#postOfficeToggleRawKeyBtn').click();
     const XSS_SUBJECT = 'Hi <b>Bob</b>';
     const XSS_BODY = 'Careful: <img src=x onerror="window.__pwned = true">';
     await a.frame.locator('#postOfficeToDomainInput').selectOption('localhost:8002');
