@@ -432,6 +432,23 @@ function append_subscriber($entry) {
 // ---------- Post Office members (same flock-guarded shape as
 // subscribers above) ----------
 
+// Post Office abuse detection (task #96): how many sends within how large
+// a rolling window counts as "irregular" enough to auto-flag a membership
+// for the operator's attention — see record_postoffice_send() below.
+// Mirrors issuer-server/server.js's POSTOFFICE_SPAM_THRESHOLD/WINDOW_MS.
+// Plain constants rather than env vars — this bundle doesn't rely on env
+// vars anywhere else either (see atlas_domain()'s $forced pattern above),
+// since typical shared hosting doesn't make those easy to set; an
+// operator who wants different values just edits them here directly.
+const ATLAS_POSTOFFICE_SPAM_THRESHOLD = 5;
+const ATLAS_POSTOFFICE_SPAM_WINDOW_MS = 60000;
+// How long a send timestamp stays in a member's log before being pruned —
+// independent of the flagging window above, same reasoning as the Node
+// version: an operator reviewing the roster later might want to see
+// "N sends over the last day" even once the burst that triggered
+// flagging has scrolled out of the detection window.
+const ATLAS_POSTOFFICE_SEND_LOG_RETENTION_MS = 86400000; // 24 hours, in ms
+
 function read_postoffice_members() {
   $fh = fopen(atlas_postoffice_members_file(), 'c+');
   if ($fh === false) return ['members' => []];
@@ -485,6 +502,65 @@ function find_postoffice_membership($ownerPublicKey) {
     }
   }
   return null;
+}
+
+// Task #96 — records one successful send against the SENDER's own
+// membership, called from atlas/postoffice/send.php right after a message
+// actually goes out. Mirrors issuer-server/server.js's
+// recordPostOfficeSend() exactly, including why: tracking sends (not
+// received mail) because that's the half this domain actually controls
+// and can act on, and NOT exposing this as a new public endpoint — same
+// "would leak every member's public key + activity to anyone who asks"
+// reasoning this file already applies to the subscriber roster. The
+// operator reads flagged/recentSendCount straight off
+// atlas-postoffice-members-store.json instead.
+//
+// `flagged` is a LIVE view, recomputed from the current log on every
+// write, not a sticky bit — a membership quiet since its last burst
+// un-flags itself with no separate "clear the flag" step. Acting on a
+// flagged member is still a deliberate, separate step: the operator calls
+// the existing POST /atlas/revoke with that member's credentialId, which
+// (thanks to task #95's symmetric check) cuts off both sending AND
+// receiving through this domain in one call.
+function record_postoffice_send($credentialId) {
+  $file = atlas_postoffice_members_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return;
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+
+  // Reuse iso_now() (bootstrap.php) for the new entry rather than
+  // hand-rolling a timestamp format — keeps sendLog entries in exactly
+  // the same shape as every other timestamp this bundle writes. Old
+  // entries are kept as their original strings; strtotime() below parses
+  // ISO 8601 with fractional seconds fine for the second-precision
+  // comparisons this needs (nothing here cares about sub-second gaps).
+  $nowMs = (int) round(microtime(true) * 1000);
+  foreach ($doc['members'] as &$member) {
+    if (!isset($member['credentialId']) || $member['credentialId'] !== $credentialId) continue;
+    $log = $member['sendLog'] ?? [];
+    $log[] = iso_now();
+    $retained = array_values(array_filter($log, function ($iso) use ($nowMs) {
+      return ($nowMs - strtotime($iso) * 1000) <= ATLAS_POSTOFFICE_SEND_LOG_RETENTION_MS;
+    }));
+    $member['sendLog'] = $retained;
+    $recentCount = count(array_filter($retained, function ($iso) use ($nowMs) {
+      return ($nowMs - strtotime($iso) * 1000) <= ATLAS_POSTOFFICE_SPAM_WINDOW_MS;
+    }));
+    $member['recentSendCount'] = $recentCount; // convenience for the operator — avoids recomputing this by hand from sendLog
+    $member['flagged'] = $recentCount > ATLAS_POSTOFFICE_SPAM_THRESHOLD;
+    break;
+  }
+  unset($member);
+
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
 }
 
 // ---------- serial counters (task #42, flock-guarded like everything

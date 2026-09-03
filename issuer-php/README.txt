@@ -153,7 +153,7 @@ real "broadcast to everyone" admin feature would need proper operator
 authentication first, which nothing in this bundle has yet.
 
 
-Post Office — user-to-user mail (task #75/#87/#94, SPEC.md §11.3)
+Post Office — user-to-user mail (task #75/#87/#95/#96, SPEC.md §11.3)
 ------------------------------------------------------------------
 Everything above is domain-to-subscriber: you (the operator) mailing
 someone who holds one of your credentials. Post Office is the other
@@ -170,7 +170,7 @@ for you to configure — a visitor requests it through the extension's
 normal asset-request flow (or the demo world's "Claim Global Mail
 Membership" stall, if you're running the bundled demo content).
 
-Membership is symmetric (task #94): holding the card is what makes this
+Membership is symmetric (task #95): holding the card is what makes this
 domain that visitor's sending relay AND their inbox here, not just one or
 the other. Any wallet POSTs directly to /atlas/postoffice/send with a
 self-signed envelope proving who they are and a recipient public key; this
@@ -194,6 +194,34 @@ atlas.membership above (edit atlas/asset/issue.php's second
 "who's reachable here" endpoint, same reasoning as the subscriber roster —
 an address is meant to be shared out of band, like an email address, not
 crawled.
+
+Abuse detection (task #96)
+----------------------------
+Symmetric membership (#95) means every send is tied to a specific
+credential — which is what makes flagging possible at all, there's
+someone accountable to flag. Every successful send through
+atlas/postoffice/send.php is logged against the SENDER's own membership
+entry. More than ATLAS_POSTOFFICE_SPAM_THRESHOLD sends (constant in
+lib/store.php, default 5) within ATLAS_POSTOFFICE_SPAM_WINDOW_MS (default
+60000ms, a minute) auto-sets `flagged: true` on that member's roster
+entry — recomputed live on every send, so a burst that's since gone quiet
+un-flags itself with no manual "clear" step. Flagging never blocks a send
+by itself, it only marks the entry.
+
+Same reasoning as the roster itself having no public listing endpoint:
+seeing who's flagged means opening lib/atlas-postoffice-members-store.json
+directly (via cPanel File Manager or SSH, same as every other manual admin
+task in this bundle) and reading `flagged`/`recentSendCount` straight off
+each entry — not a new HTTP surface that would leak every member's public
+key and activity to anyone who asks. Both constants are plain values you
+edit directly if the demo defaults don't suit you — this bundle doesn't
+rely on env vars anywhere (see atlas_domain()'s $forced pattern), since
+typical shared hosting doesn't make those easy to set.
+
+Once you've decided a flagged member deserves it, cutting them off needs
+nothing new: call the existing revoke.php with that member's
+credentialId, and thanks to #95's symmetric check, one call blocks them
+from both sending AND receiving through this domain at once.
 
 
 Updating an already-issued asset

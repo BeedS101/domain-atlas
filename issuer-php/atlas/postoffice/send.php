@@ -89,4 +89,5 @@ $outPayload = [
 $signature = atlas_sign($kp['privateKey'], $outPayload);
 $message = array_merge($outPayload, ['signature' => $signature]);
 append_mail($message);
+record_postoffice_send($senderMembership['credentialId']); // task #96 — abuse-detection log, see its own comment in lib/store.php
 send_json(200, $message);

@@ -143,6 +143,19 @@ const SUBSCRIBERS_FILE = path.join(STATE_DIR, 'atlas-subscribers-store.json');
 // this domain only agrees to store/relay mail for someone it issued a
 // card to.
 const POSTOFFICE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-postoffice-members-store.json');
+// Post Office abuse detection (task #96): how many sends within how large
+// a rolling window counts as "irregular" enough to auto-flag a membership
+// for the operator's attention — see recordPostOfficeSend() below. Tunable
+// via env for a real deployment; the demo defaults are picked to be easy
+// to actually trigger and see, not tuned against any real spam pattern.
+const POSTOFFICE_SPAM_THRESHOLD = parseInt(process.env.ATLAS_POSTOFFICE_SPAM_THRESHOLD || '5', 10);
+const POSTOFFICE_SPAM_WINDOW_MS = parseInt(process.env.ATLAS_POSTOFFICE_SPAM_WINDOW_MS || '60000', 10);
+// How long a send timestamp stays in a member's log before being pruned —
+// independent of the flagging window above, since an operator reviewing
+// the roster later might want to see "N sends over the last day" even
+// once the burst that triggered flagging has scrolled out of the
+// detection window. Bounds the log's growth for an otherwise-unbounded list.
+const POSTOFFICE_SEND_LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // task #42's serialized/limited-edition support. One running count per
 // class, incremented only by a genuinely NEW mint (mintAssetByClass()
@@ -500,6 +513,44 @@ function appendPostOfficeMember(entry) {
 function isValidPostOfficeMember(ownerPublicKey) {
   const doc = readPostOfficeMembers();
   return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId));
+}
+
+// Task #96 — records one successful send against the SENDER's own
+// membership, called from POST /atlas/postoffice/send right after a
+// message actually goes out. Tracking sends (not received mail) because
+// that's the half this domain actually controls and can act on: it's the
+// domain's own relay being used, not just its inbox being filled.
+//
+// Deliberately NOT exposed as a new public HTTP endpoint — same "would
+// leak every member's public key + activity to anyone who asks, needs
+// real operator authentication first" reasoning already written above
+// SUBSCRIBERS_FILE. This follows that same established pattern instead:
+// the operator opens atlas-postoffice-members-store.json directly (same
+// file they'd already open to see who's a member at all) and reads
+// `flagged`/`recentSendCount` straight off each entry, plain to see
+// without having to eyeball raw timestamps by hand.
+//
+// `flagged` is a LIVE view, not a sticky bit — recomputed from the
+// current log on every write, so a membership that had a burst an hour
+// ago and has been quiet since un-flags itself naturally. No separate
+// "clear the flag" step exists or is needed. Actually cutting a flagged
+// member off is still a deliberate, separate step: the operator decides,
+// then calls the existing POST /atlas/revoke with that member's
+// credentialId — thanks to #95's symmetric check, that one call already
+// cuts off both sending AND receiving through this domain at once.
+function recordPostOfficeSend(credentialId) {
+  const doc = readPostOfficeMembers();
+  const member = doc.members.find((m) => m.credentialId === credentialId);
+  if (!member) return; // shouldn't happen — caller already verified this credentialId is a live member
+  const now = Date.now();
+  const log = (member.sendLog || []).map((iso) => new Date(iso).getTime());
+  log.push(now);
+  const retained = log.filter((t) => now - t <= POSTOFFICE_SEND_LOG_RETENTION_MS);
+  member.sendLog = retained.map((t) => new Date(t).toISOString());
+  const recentCount = retained.filter((t) => now - t <= POSTOFFICE_SPAM_WINDOW_MS).length;
+  member.recentSendCount = recentCount; // convenience for the operator — avoids recomputing this by hand from sendLog
+  member.flagged = recentCount > POSTOFFICE_SPAM_THRESHOLD;
+  fs.writeFileSync(POSTOFFICE_MEMBERS_FILE, JSON.stringify(doc, null, 2));
 }
 
 function readBody(req) {
@@ -1108,6 +1159,7 @@ async function main() {
         const signature = await sign(outPayload);
         const message = { ...outPayload, signature };
         appendMail(message);
+        recordPostOfficeSend(senderMembership.credentialId); // task #96 — abuse-detection log, see its own comment
         console.log('Post Office relayed mail from', proof.publicKey.slice(0, 16) + '...', '->', payload.to.publicKey.slice(0, 16) + '...', ':', payload.subject);
         return sendJson(res, 200, message);
       }

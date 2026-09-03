@@ -314,7 +314,7 @@ from the existing Lock button buried in Settings → Identity method, which
 is still there for anyone who navigates in that way. It only shows up
 while there's actually an unlocked local-password identity to lock.
 
-**Post Office — user-to-user mail (task #75/#87/#94, SPEC.md §11.3).**
+**Post Office — user-to-user mail (task #75/#87/#95/#96, SPEC.md §11.3).**
 Everything above this point in "Mail" is domain-to-subscriber only: a
 domain mails someone who holds one of ITS credentials. Post Office is the
 other half — two people mailing each other, addressed by public key,
@@ -330,7 +330,7 @@ identities:
    Global Mail Membership Card, the same one-click "collect" pattern the
    Workbench and market stalls already use. Do this for BOTH identities
    you want to mail between (a second browser profile, or Domain A's own
-   counterparty key) — since task #94, sending only works between two
+   counterparty key) — since task #95, sending only works between two
    people who've both joined the same Post Office.
 2. Open Social → Mail on each identity. "Your address" shows a copyable
    public key — hand identity B's to identity A (or vice versa).
@@ -348,6 +348,29 @@ wallet, only for people the domain has already vouched for by handing them
 a card. A sender with no membership at the target domain gets rejected
 before the message goes anywhere; a recipient with no membership there
 gets a plain rejection back too, not a silently-dropped message.
+
+**Abuse detection (task #96).** Symmetric membership (#95) means every
+send is now tied to a specific credential, which is what makes flagging
+possible at all — there's someone accountable to flag. Every successful
+send is logged against the SENDER's own membership; more than
+`ATLAS_POSTOFFICE_SPAM_THRESHOLD` sends (default 5) within
+`ATLAS_POSTOFFICE_SPAM_WINDOW_MS` (default 60000, i.e. a minute) auto-sets
+`flagged: true` on that member's entry, recomputed live on every send —
+a burst that's gone quiet un-flags itself, no manual "clear" step exists
+or is needed. Flagging never blocks a send by itself; it only marks the
+roster entry for a human to look at. There's deliberately no new public
+"list activity" endpoint for this — same "would leak every member's
+public key to anyone who asks" reasoning already applied to the
+subscriber roster elsewhere in this project — so seeing it means opening
+`issuer-server/atlas-postoffice-members-store.json` (or the equivalent
+PHP state file) directly, the same way an operator already would to see
+who's a member at all. Once you've decided a flagged member deserves it,
+cutting them off needs nothing new: call the existing
+`POST /atlas/revoke` with that member's `credentialId`, and thanks to
+#95's symmetric check, one call blocks them from both sending AND
+receiving through that domain at once. `test/manual-postoffice-abuse.js`
+walks the whole flow end to end — burst past the threshold, confirm the
+flag, revoke, confirm both directions are now blocked.
 
 ## 8. Verify it yourself
 
