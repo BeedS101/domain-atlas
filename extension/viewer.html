@@ -86,6 +86,11 @@
   .mail-card .mail-subject { font-weight: 600; margin-bottom: 4px; }
   .mail-card .mail-meta { font-size: 11px; color: #a9b8bf; margin-bottom: 6px; }
   .mail-card .mail-body { font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+  /* Task #59: the attached-gift line — same info density as .mail-meta,
+     just its own row so the Claim button doesn't crowd into the body text. */
+  .mail-card .mail-gift { font-size: 12px; margin-top: 6px; display: flex; align-items: center; gap: 8px; }
+  .mail-card .mail-gift button { font-size: 11px; padding: 4px 10px; }
+  .mail-card .mail-gift-claimed { color: #a9b8bf; }
 
   #walletPanel {
     display: none; position: fixed; top: 56px; right: 0; bottom: 0; width: 360px;

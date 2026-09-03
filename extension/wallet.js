@@ -1423,6 +1423,44 @@ const AtlasWallet = (() => {
     await saveMail(ownerPublicKey, entries);
   }
 
+  // Task #59: adds a mail message's attached gift to the wallet — the
+  // explicit-Claim counterpart to mintAsset() above, reusing its exact
+  // wallet-adding shape (verify, push {credential, lastVerdict}, save,
+  // autoConsolidate) but over a credential the message already carries
+  // rather than one fetched fresh from the issuer. Deliberately NOT
+  // called anywhere in checkAllMail()'s automatic path — a gift only
+  // ever enters the wallet from a person clicking Claim (see viewer.js's
+  // mail card), never silently on arrival, which is the entire design
+  // point the user picked over auto-add.
+  //
+  // `claimed` is a flag on the mail entry itself (alongside the existing
+  // `read` flag), not a separate id list — same reasoning as `read`:
+  // it's per-message local state, and there's nothing to "un-claim"
+  // later the way deleted mail needs a permanent suppression list.
+  async function claimMailGift(ownerPublicKey, messageId) {
+    const entries = await getMail(ownerPublicKey);
+    const entry = entries.find((e) => e.message.id === messageId);
+    if (!entry) throw new Error('mail message not found');
+    if (!entry.message.attachedAsset) throw new Error('this message has no attached gift');
+    if (entry.claimed) throw new Error('this gift has already been claimed');
+
+    const credential = entry.message.attachedAsset;
+    if (!credential.owner || credential.owner.publicKey !== ownerPublicKey) {
+      throw new Error('this gift was not addressed to this identity');
+    }
+    const verdict = await verifyCredential(credential);
+    if (!verdict.valid) throw new Error('gift credential does not check out: ' + verdict.reason);
+
+    const wallet = await getWallet(ownerPublicKey);
+    wallet.push({ credential, lastVerdict: verdict });
+    await saveWallet(ownerPublicKey, wallet);
+    await autoConsolidateAssetWallet(ownerPublicKey);
+
+    entry.claimed = true;
+    await saveMail(ownerPublicKey, entries);
+    return { credential, verdict };
+  }
+
   // A message you've deleted needs to STAY gone across future checks —
   // checkAllMail() below dedupes against ids it's already stored, but
   // deleting removes it from that same array, so without tracking deleted
@@ -1473,7 +1511,17 @@ const AtlasWallet = (() => {
         return sentAt >= from && sentAt <= until;
       });
       if (!activeKey) return false;
-      const payload = { id: message.id, credentialId: message.credentialId, subject: message.subject, body: message.body, sentAt: message.sentAt };
+      // Task #59: attachedAsset (when present) rides inside the signed
+      // payload, exactly as issuer-server/server.js's /atlas/mail/send
+      // signs it — omitting it here when it's actually present would make
+      // every gift message fail verification, and a tampered-with gift
+      // (swapped for a different one after signing) would fail it too,
+      // which is the whole point.
+      const payload = {
+        id: message.id, credentialId: message.credentialId, subject: message.subject, body: message.body,
+        ...(message.attachedAsset ? { attachedAsset: message.attachedAsset } : {}),
+        sentAt: message.sentAt
+      };
       const data = new TextEncoder().encode(canonicalize(payload));
       const publicKey = await crypto.subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
       return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(message.signature), data);
@@ -1667,7 +1715,7 @@ const AtlasWallet = (() => {
     getCharacterScale, setCharacterScale,
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
-    markAllMailRead, deleteMailMessage, clearAllMail,
+    markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift,
     getAssetUpdateNotices, markAssetUpdateNoticesSeen,
     getFriends, addFriend, removeFriend,
     getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain

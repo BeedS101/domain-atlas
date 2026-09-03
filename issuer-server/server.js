@@ -824,22 +824,63 @@ async function main() {
       // endpoint fills in for it). It doesn't check that credentialId was
       // really issued by this server — same demo-simplification level as
       // the rest of this file, which trusts its own caller.
+      //
+      // Task #59: a message can optionally carry an attached asset gift —
+      // giftAssetClass/giftOwnerPublicKey/(giftQuantity for a fungible
+      // class). When present, the gift is minted right here (same
+      // ASSET_CATALOG lookup and fungible/quantity validation
+      // /atlas/asset/issue uses, same mintAssetByClass(..., null) — a
+      // gift is always fresh NEW supply, never a reissue) and the
+      // resulting credential is embedded as `attachedAsset` in the mail
+      // payload BEFORE signing, so the mail signature covers it too —
+      // nobody, including this server later, can swap in a different
+      // gift after the fact without invalidating the message's signature.
+      // The wallet does NOT auto-add attachedAsset to the recipient's
+      // wallet on mail check the way /atlas/asset/issue does — the whole
+      // point of task #59 is an explicit Claim action (see
+      // extension/wallet.js's claimMailGift() and viewer.js's mail card),
+      // so a gift just sits attached to the message, inert, until claimed.
       if (req.method === 'POST' && req.url === '/atlas/mail/send') {
-        const { credentialId, subject, body } = JSON.parse((await readBody(req)) || '{}');
+        const { credentialId, subject, body, giftAssetClass, giftOwnerPublicKey, giftQuantity } = JSON.parse((await readBody(req)) || '{}');
         if (!credentialId || !subject || !body) {
           return sendJson(res, 400, { error: 'credentialId, subject, and body are required' });
         }
+
+        let attachedAsset;
+        if (giftAssetClass) {
+          if (!giftOwnerPublicKey) return sendJson(res, 400, { error: 'giftOwnerPublicKey is required when giftAssetClass is set' });
+          const catalogEntry = ASSET_CATALOG[giftAssetClass];
+          if (!catalogEntry) {
+            return sendJson(res, 400, { error: 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, or atlas.element.gold.' });
+          }
+          // Same fungible/quantity validation as /atlas/asset/issue above.
+          let mintQuantity;
+          if (catalogEntry.fungible) {
+            if (!Number.isInteger(giftQuantity) || giftQuantity <= 0) {
+              return sendJson(res, 400, { error: 'giftQuantity must be a positive integer for a fungible giftAssetClass' });
+            }
+            mintQuantity = giftQuantity;
+          } else {
+            if (giftQuantity !== undefined && giftQuantity !== null && giftQuantity !== 1) {
+              return sendJson(res, 400, { error: 'giftQuantity must be 1 (or omitted) for a non-fungible giftAssetClass' });
+            }
+            mintQuantity = 1;
+          }
+          attachedAsset = await mintAssetByClass(giftOwnerPublicKey, giftAssetClass, mintQuantity, null);
+        }
+
         const payload = {
           id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
           credentialId,
           subject,
           body,
+          ...(attachedAsset ? { attachedAsset } : {}),
           sentAt: new Date().toISOString()
         };
         const signature = await sign(payload);
         const message = { ...payload, signature };
         appendMail(message);
-        console.log('Mail sent for', credentialId, '->', subject);
+        console.log('Mail sent for', credentialId, '->', subject, attachedAsset ? '(with gift: ' + attachedAsset.asset.name + ')' : '');
         return sendJson(res, 200, message);
       }
 

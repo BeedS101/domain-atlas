@@ -2124,11 +2124,26 @@ function renderMailCard(entry, container) {
   el.className = 'wallet-item mail-card' + (entry.read ? '' : ' unread');
   el.dataset.id = entry.message.id;
   const sentAt = new Date(entry.message.sentAt).toLocaleString();
+  const gift = entry.message.attachedAsset;
+  // Task #59: a message can carry an attached gift, sitting inert until
+  // claimed (see AtlasWallet.claimMailGift — deliberately never
+  // auto-added, so this button is the only path a gift ever enters the
+  // wallet). Plain text, no thumbnail — same style every other wallet
+  // item card in this file already uses (renderAssetCard never renders
+  // asset.thumbnail either), so a gift notice doesn't stand out as a
+  // special case visually, just in what it lets you do.
+  const giftHtml = !gift ? '' :
+    '<div class="mail-gift">Gift: ' + gift.asset.name + (gift.quantity > 1 ? ' ×' + gift.quantity : '') +
+    (entry.claimed
+      ? ' <span class="mail-gift-claimed">(claimed)</span>'
+      : ' <button type="button" data-action="claim-gift">Claim</button>') +
+    '</div>';
   el.innerHTML =
     '<div class="mail-domain">' + entry.message.domain + '</div>' +
     '<div class="mail-subject">' + entry.message.subject + '</div>' +
     '<div class="mail-meta">' + sentAt + (entry.read ? '' : ' · unread') + '</div>' +
     '<div class="mail-body">' + entry.message.body + '</div>' +
+    giftHtml +
     '<div class="item-actions">' +
     '<button type="button" data-action="delete" class="danger-btn">Delete</button>' +
     '</div>';
@@ -2196,6 +2211,26 @@ mailListEl && mailListEl.addEventListener('click', async (e) => {
     if (!confirm('Delete this message? This cannot be undone.')) return;
     await AtlasWallet.deleteMailMessage(identity.publicKey, card.dataset.id);
     await refreshMailDisplay();
+    return;
+  }
+
+  // Task #59: the explicit Claim action — the only path a message's
+  // attached gift ever enters the wallet (see AtlasWallet.claimMailGift's
+  // own header note on why this is deliberately never automatic).
+  // refreshInventoryDisplay() picks up the newly-added credential the
+  // same way every other mint/collect action on this screen already
+  // does; refreshMailDisplay() re-renders this card showing "(claimed)"
+  // in place of the button.
+  const claimBtn = e.target.closest('button[data-action="claim-gift"]');
+  if (claimBtn) {
+    try {
+      const { credential } = await AtlasWallet.claimMailGift(identity.publicKey, card.dataset.id);
+      await refreshInventoryDisplay();
+      await refreshMailDisplay();
+      statusEl.textContent = 'Claimed ' + credential.asset.name + '.';
+    } catch (err) {
+      statusEl.textContent = 'Claim failed: ' + err.message;
+    }
     return;
   }
 
