@@ -156,6 +156,13 @@ const POSTOFFICE_SPAM_WINDOW_MS = parseInt(process.env.ATLAS_POSTOFFICE_SPAM_WIN
 // once the burst that triggered flagging has scrolled out of the
 // detection window. Bounds the log's growth for an otherwise-unbounded list.
 const POSTOFFICE_SEND_LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
+// Post Office consent/block model (task #94): a sanity cap on how many
+// entries a single member's block list or friends-only snapshot can hold —
+// generous for a demo, just a bound against one wallet growing its own
+// settings entry without limit. Not a spam-prevention measure in itself
+// (that's #96's job); this is only about keeping one member's own roster
+// entry from growing unbounded.
+const POSTOFFICE_SETTINGS_MAX_LIST = 500;
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // task #42's serialized/limited-edition support. One running count per
 // class, incremented only by a genuinely NEW mint (mintAssetByClass()
@@ -551,6 +558,31 @@ function recordPostOfficeSend(credentialId) {
   member.recentSendCount = recentCount; // convenience for the operator — avoids recomputing this by hand from sendLog
   member.flagged = recentCount > POSTOFFICE_SPAM_THRESHOLD;
   fs.writeFileSync(POSTOFFICE_MEMBERS_FILE, JSON.stringify(doc, null, 2));
+}
+
+// One member's currently-live (non-revoked) roster entry for a given
+// owner, from an already-loaded doc — the same lookup senderMembership/
+// membership in POST /atlas/postoffice/send do inline, factored out once
+// the settings endpoints below needed it a third and fourth time.
+function findLiveMember(doc, ownerPublicKey) {
+  return doc.members.find((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId));
+}
+
+// Task #94 (consent/block model, "both, recipient's choice" per direct
+// instruction): shared read-modify-write for the self-service settings
+// endpoints below (mailmode/block/unblock) — finds the CALLER's own live
+// membership (never anyone else's — proof.publicKey, once verified by
+// verifyEnvelope, IS the caller, so there's no way to name a different
+// owner here) and lets it be mutated in place before saving. Returns null
+// if the caller isn't a member here at all, same "join first" gate the
+// send endpoint's sender-membership check already enforces.
+function updatePostOfficeMember(ownerPublicKey, mutate) {
+  const doc = readPostOfficeMembers();
+  const member = findLiveMember(doc, ownerPublicKey);
+  if (!member) return null;
+  mutate(member);
+  fs.writeFileSync(POSTOFFICE_MEMBERS_FILE, JSON.stringify(doc, null, 2));
+  return member;
 }
 
 function readBody(req) {
@@ -1148,6 +1180,26 @@ async function main() {
           return sendJson(res, 400, { error: 'recipient does not hold a valid Global Mail membership at this domain — nothing was sent' });
         }
 
+        // Task #94 (consent/block model): the recipient's own settings on
+        // THIS membership can narrow who's allowed to reach them beyond
+        // "any fellow member" — checked here, after membership, since it's
+        // a courtesy the recipient controls on top of the baseline gate
+        // above, not a replacement for it. Block list first (an explicit
+        // "not this person, regardless of anything else"), then
+        // friends-only mode (a snapshot of the recipient's own Friends
+        // list, submitted via POST /atlas/postoffice/mailmode — Friends
+        // itself otherwise never leaves the wallet, see wallet.js's own
+        // comment on getFriends()). Same rejection wording either way, so
+        // a sender can't tell from the error whether they were blocked
+        // outright or just never added as a friend.
+        const blockedSenders = membership.blockedSenders || [];
+        if (blockedSenders.includes(proof.publicKey)) {
+          return sendJson(res, 400, { error: 'recipient is not accepting mail from you right now' });
+        }
+        if (membership.mailMode === 'friendsOnly' && !(membership.friends || []).includes(proof.publicKey)) {
+          return sendJson(res, 400, { error: 'recipient is not accepting mail from you right now' });
+        }
+
         const outPayload = {
           id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
           credentialId: membership.credentialId,
@@ -1162,6 +1214,101 @@ async function main() {
         recordPostOfficeSend(senderMembership.credentialId); // task #96 — abuse-detection log, see its own comment
         console.log('Post Office relayed mail from', proof.publicKey.slice(0, 16) + '...', '->', payload.to.publicKey.slice(0, 16) + '...', ':', payload.subject);
         return sendJson(res, 200, message);
+      }
+
+      // Task #94 (consent/block model, "both, recipient's choice" per direct
+      // instruction): three self-service settings endpoints below, all
+      // sharing the same self-signed-envelope authentication
+      // /atlas/postoffice/send already uses for the sender half —
+      // proof.publicKey, once verified, IS the caller, and
+      // updatePostOfficeMember() above means a caller can only ever touch
+      // THEIR OWN membership here, never someone else's roster entry.
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/mailmode') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        if (payload.mode !== 'open' && payload.mode !== 'friendsOnly') {
+          return sendJson(res, 400, { error: 'payload.mode must be "open" or "friendsOnly"' });
+        }
+        if (payload.mode === 'friendsOnly' && !Array.isArray(payload.friends)) {
+          return sendJson(res, 400, { error: 'payload.friends (an array of public keys) is required when switching to friendsOnly' });
+        }
+        if (payload.friends && payload.friends.length > POSTOFFICE_SETTINGS_MAX_LIST) {
+          return sendJson(res, 400, { error: `friends list too large (max ${POSTOFFICE_SETTINGS_MAX_LIST})` });
+        }
+        const ok = await verifyEnvelope(payload, proof);
+        if (!ok) return sendJson(res, 400, { error: 'signature does not check out' });
+
+        const member = updatePostOfficeMember(proof.publicKey, (m) => {
+          m.mailMode = payload.mode;
+          // Friends only means anything in friendsOnly mode — clearing it
+          // on the way back to open is a small privacy courtesy (no reason
+          // to keep a snapshot around once nothing checks it), not a
+          // functional requirement.
+          m.friends = payload.mode === 'friendsOnly'
+            ? Array.from(new Set(payload.friends.filter((k) => typeof k === 'string'))).slice(0, POSTOFFICE_SETTINGS_MAX_LIST)
+            : [];
+        });
+        if (!member) return sendJson(res, 400, { error: 'you do not hold a Global Mail membership at this domain' });
+        console.log('Post Office mail mode set for', proof.publicKey.slice(0, 16) + '...', '->', member.mailMode, member.mailMode === 'friendsOnly' ? `(${member.friends.length} friends)` : '');
+        return sendJson(res, 200, { ok: true, mailMode: member.mailMode, friendsCount: (member.friends || []).length });
+      }
+
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/block') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        if (!payload.blockedPublicKey || typeof payload.blockedPublicKey !== 'string') {
+          return sendJson(res, 400, { error: 'payload.blockedPublicKey is required' });
+        }
+        const ok = await verifyEnvelope(payload, proof);
+        if (!ok) return sendJson(res, 400, { error: 'signature does not check out' });
+
+        const member = updatePostOfficeMember(proof.publicKey, (m) => {
+          const set = new Set(m.blockedSenders || []);
+          if (set.size < POSTOFFICE_SETTINGS_MAX_LIST) set.add(payload.blockedPublicKey);
+          m.blockedSenders = Array.from(set);
+        });
+        if (!member) return sendJson(res, 400, { error: 'you do not hold a Global Mail membership at this domain' });
+        console.log('Post Office block added for', proof.publicKey.slice(0, 16) + '...', '->', payload.blockedPublicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { ok: true, blockedSenders: member.blockedSenders });
+      }
+
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/unblock') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        if (!payload.blockedPublicKey || typeof payload.blockedPublicKey !== 'string') {
+          return sendJson(res, 400, { error: 'payload.blockedPublicKey is required' });
+        }
+        const ok = await verifyEnvelope(payload, proof);
+        if (!ok) return sendJson(res, 400, { error: 'signature does not check out' });
+
+        const member = updatePostOfficeMember(proof.publicKey, (m) => {
+          m.blockedSenders = (m.blockedSenders || []).filter((k) => k !== payload.blockedPublicKey);
+        });
+        if (!member) return sendJson(res, 400, { error: 'you do not hold a Global Mail membership at this domain' });
+        return sendJson(res, 200, { ok: true, blockedSenders: member.blockedSenders });
+      }
+
+      // Read-your-own-settings — the one Post Office roster lookup that IS
+      // safe to expose over HTTP despite the no-public-listing reasoning
+      // written above SUBSCRIBERS_FILE and recordPostOfficeSend: it's
+      // gated by the exact same self-signed envelope as the write
+      // endpoints above, so it only ever hands a caller back THEIR OWN
+      // entry — never anyone else's public key, activity, or settings.
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/mysettings') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        const ok = await verifyEnvelope(payload, proof);
+        if (!ok) return sendJson(res, 400, { error: 'signature does not check out' });
+
+        const doc = readPostOfficeMembers();
+        const member = findLiveMember(doc, proof.publicKey);
+        if (!member) return sendJson(res, 400, { error: 'you do not hold a Global Mail membership at this domain' });
+        return sendJson(res, 200, {
+          ok: true,
+          mailMode: member.mailMode || 'open',
+          blockedSenders: member.blockedSenders || [],
+          friendsCount: (member.friends || []).length
+        });
       }
 
       if (req.method === 'GET') return serveStatic(req, res);

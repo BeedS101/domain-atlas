@@ -78,6 +78,24 @@ if ($membership === null) {
   send_json(400, ['error' => 'recipient does not hold a valid Global Mail membership at this domain — nothing was sent']);
 }
 
+// Task #94 (consent/block model): the recipient's own settings on THIS
+// membership can narrow who's allowed to reach them beyond "any fellow
+// member" — checked here, after membership, since it's a courtesy the
+// recipient controls on top of the baseline gate above, not a replacement
+// for it. Block list first, then friends-only mode (a snapshot of the
+// recipient's own Friends list, submitted via atlas/postoffice/mailmode.php
+// — Friends itself otherwise never leaves the wallet). Same rejection
+// wording either way, so a sender can't tell from the error whether they
+// were blocked outright or just never added as a friend. Mirrors
+// issuer-server/server.js's send handler.
+$blockedSenders = $membership['blockedSenders'] ?? [];
+if (in_array($proof['publicKey'], $blockedSenders, true)) {
+  send_json(400, ['error' => 'recipient is not accepting mail from you right now']);
+}
+if (($membership['mailMode'] ?? null) === 'friendsOnly' && !in_array($proof['publicKey'], $membership['friends'] ?? [], true)) {
+  send_json(400, ['error' => 'recipient is not accepting mail from you right now']);
+}
+
 $outPayload = [
   'id' => 'urn:atlas:mail:' . atlas_uuid(),
   'credentialId' => $membership['credentialId'],

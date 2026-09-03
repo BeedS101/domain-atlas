@@ -55,6 +55,10 @@ What's in this folder
     mail/send.php            - POST /atlas/mail/send         (send mail about a held credential — demo/admin use)
     mail/check.php           - POST /atlas/mail/check        (wallet's periodic mail check)
     postoffice/send.php      - POST /atlas/postoffice/send   (user-to-user mail — see "Post Office" below)
+    postoffice/mailmode.php  - POST /atlas/postoffice/mailmode  (self-service: open vs. friends-only — see "Post Office" below)
+    postoffice/block.php     - POST /atlas/postoffice/block     (self-service: block a sender)
+    postoffice/unblock.php   - POST /atlas/postoffice/unblock   (self-service: undo a block)
+    postoffice/mysettings.php - POST /atlas/postoffice/mysettings (self-service: read your own mail mode/block list back)
     .htaccess                - makes the URLs above work without a .php
                                 extension, matching what the extension calls
   lib/
@@ -234,6 +238,43 @@ Once you've decided a flagged member deserves it, cutting them off needs
 nothing new: call the existing revoke.php with that member's
 credentialId, and thanks to #95's symmetric check, one call blocks them
 from both sending AND receiving through this domain at once.
+
+Consent/block model (task #94's remaining piece — "both, recipient's
+choice")
+------------------------------------------------------------------------
+Membership (#95) is the baseline gate — both people have to have joined
+this Post Office — but a member can narrow who reaches them further, on
+top of that, from the wallet's Social -> Mail -> "Who can mail you"
+panel:
+  - Block list. Name a specific public key and this domain stops relaying
+    mail from it to that member, full stop — a block always wins over
+    everything below. Also reachable straight from a relayed message
+    itself: every mail card from a real sender carries an inline "Block
+    sender" button next to Delete.
+  - Friends only. A member can switch their membership to friends-only,
+    and postoffice/send.php will only relay mail from public keys in a
+    snapshot they submitted — pulled from their own wallet's local
+    Friends list, which otherwise never leaves the wallet at all; turning
+    this on is an explicit, one-time disclosure of that snapshot to this
+    one domain. It's a snapshot, not a live sync — someone added to
+    Friends later isn't covered until the panel is saved again.
+
+Both settings live on the same roster entry as everything else above
+(mailMode, blockedSenders, friends — added lazily, so an entry from
+before this task simply has none of them and behaves as "open" with an
+empty block list) and are self-service: postoffice/mailmode.php,
+postoffice/block.php, and postoffice/unblock.php all authenticate the
+caller the same self-signed-envelope way postoffice/send.php already
+authenticates a sender (verify_envelope(), $proof['publicKey'] IS the
+caller), via update_postoffice_member() in lib/store.php — so nobody can
+touch a membership that isn't their own. postoffice/mysettings.php is the
+one Post Office roster lookup that IS safe to expose over HTTP despite the
+"no public listing" reasoning above: it's gated by that same envelope, so
+it only ever hands a caller back their own entry — exactly what the
+wallet's settings panel reads on open (and after every save) rather than
+trusting local state. Rejections from either rule read identically
+("recipient is not accepting mail from you right now") so a sender can't
+tell a block from simply not being on a friends-only list.
 
 
 Updating an already-issued asset

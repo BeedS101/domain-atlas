@@ -378,6 +378,43 @@ receiving through that domain at once. `test/manual-postoffice-abuse.js`
 walks the whole flow end to end — burst past the threshold, confirm the
 flag, revoke, confirm both directions are now blocked.
 
+**Consent/block model (task #94's remaining piece — "both, recipient's
+choice").** Membership (#95) is the baseline gate — both people have to
+have joined the same Post Office — but a member can narrow who reaches
+them further, on top of that, from the wallet's Social → Mail → "Who can
+mail you" panel:
+- **Block list.** Name a specific public key and that domain stops
+  relaying mail from it to you, full stop — a block always wins over
+  everything else below. Also reachable straight from a relayed message
+  itself: every mail card from a real sender (not domain-to-subscriber
+  mail) carries an inline **Block sender** button next to Delete.
+- **Friends only.** Switch a membership to friends-only and the domain
+  will only relay mail from public keys in a snapshot you submit — pulled
+  from this wallet's own local Friends list (Social → Friends), which
+  otherwise never leaves the wallet at all; turning this on is an explicit,
+  one-time disclosure of that snapshot to that one domain. It's a snapshot,
+  not a live sync — add someone to Friends later and they're not covered
+  until you save the panel again.
+
+Both settings are per membership (a wallet belonging to several Post
+Offices sets them separately for each) and self-service — three new
+domain endpoints (`POST /atlas/postoffice/mailmode`, `/block`, `/unblock`)
+authenticate the caller the same self-signed-envelope way
+`/atlas/postoffice/send` already authenticates a sender, so nobody can
+touch a membership that isn't their own. A fourth,
+`POST /atlas/postoffice/mysettings`, is the one Post Office roster lookup
+that IS safe to expose over HTTP despite #96's "no public listing"
+reasoning: it's gated by that same envelope, so it only ever hands a
+caller back their own entry, which is exactly what the settings panel
+reads on open (and after every save) rather than trusting local state.
+Rejections from either rule read identically ("recipient is not accepting
+mail from you right now") so a sender can't distinguish an outright block
+from simply not being on a friends-only list. `test/manual-postoffice-
+consent.js` covers the server side end to end (block/unblock, friends-only
+admission and exclusion, block-beats-friends-only, mode-switch clearing
+the snapshot); `test/manual-postoffice-consent-ui.js` drives the real
+wallet panel.
+
 ## 8. Verify it yourself
 
 ```bash

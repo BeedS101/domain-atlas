@@ -1512,6 +1512,93 @@ const AtlasWallet = (() => {
       .map((e) => ({ domain: e.credential.issuer.domain, credentialId: e.credential.id }));
   }
 
+  // Task #94 (consent/block model, "both, recipient's choice" per direct
+  // instruction): four thin wrappers around the settings endpoints
+  // POST /atlas/postoffice/mailmode, /block, /unblock, /mysettings add
+  // (see server.js's own comment on those) — same self-signed-envelope
+  // shape sendUserMail above already uses (signWithSelf over the payload,
+  // proof.publicKey IS the caller server-side), just against a different
+  // route each. All four operate on THIS wallet's OWN membership at
+  // `domain` — there's no way to name someone else's.
+
+  // Switches this wallet's mail mode at `domain` between "open" (accept
+  // from any fellow member, the long-standing default) and "friendsOnly".
+  // Turning friendsOnly ON submits the CURRENT contents of this wallet's
+  // local Friends list (getFriends() — otherwise entirely client-side, see
+  // that function's own comment) to `domain` as an explicit one-time
+  // snapshot; it is not kept in sync automatically afterward — call this
+  // again later to update it, same as any other "sync" action elsewhere in
+  // this file. Turning it back to "open" clears that snapshot server-side.
+  async function setPostOfficeMailMode(domain, mode) {
+    if (!domain) throw new Error('domain is required.');
+    if (mode !== 'open' && mode !== 'friendsOnly') throw new Error('mode must be "open" or "friendsOnly".');
+    const friends = mode === 'friendsOnly' ? (await getFriends()).map((f) => f.publicKey) : undefined;
+    const payload = mode === 'friendsOnly' ? { mode, friends } : { mode };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(domain) + '/atlas/postoffice/mailmode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload, proof })
+    });
+    if (!res.ok) throw new Error('Setting mail mode failed: ' + (await res.text()));
+    return await res.json();
+  }
+
+  async function blockPostOfficeSender(domain, blockedPublicKey) {
+    if (!domain) throw new Error('domain is required.');
+    if (!blockedPublicKey) throw new Error('blockedPublicKey is required.');
+    const payload = { blockedPublicKey };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(domain) + '/atlas/postoffice/block', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload, proof })
+    });
+    if (!res.ok) throw new Error('Block failed: ' + (await res.text()));
+    return await res.json();
+  }
+
+  async function unblockPostOfficeSender(domain, blockedPublicKey) {
+    if (!domain) throw new Error('domain is required.');
+    if (!blockedPublicKey) throw new Error('blockedPublicKey is required.');
+    const payload = { blockedPublicKey };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(domain) + '/atlas/postoffice/unblock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload, proof })
+    });
+    if (!res.ok) throw new Error('Unblock failed: ' + (await res.text()));
+    return await res.json();
+  }
+
+  // Reads this wallet's OWN current settings back from `domain` — the one
+  // Post Office roster lookup that's safe to expose over HTTP despite the
+  // no-public-listing reasoning behind #96's send-activity tracking never
+  // getting an endpoint: it's gated the same self-signed way as the writes
+  // above, so it only ever returns the caller's own entry. Used to
+  // populate the Mail settings panel without the wallet having to keep its
+  // own separate copy of what it last told each domain.
+  async function getPostOfficeSettings(domain) {
+    if (!domain) throw new Error('domain is required.');
+    // A non-empty payload, deliberately — an empty object round-trips
+    // through JSON fine in JS but the PHP issuer's json_decode() turns
+    // `{}` into an empty PHP array, which PHP's canonicalize() then
+    // serializes as `[]` instead of `{}`, breaking the signature check
+    // cross-language. Any real field sidesteps the ambiguity; `purpose`
+    // is unused server-side beyond being part of what's signed, same as
+    // presentIdentity()'s own challenge object above.
+    const payload = { purpose: 'postoffice-mysettings' };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(domain) + '/atlas/postoffice/mysettings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload, proof })
+    });
+    if (!res.ok) throw new Error('Loading settings failed: ' + (await res.text()));
+    return await res.json();
+  }
+
   // A message you've deleted needs to STAY gone across future checks —
   // checkAllMail() below dedupes against ids it's already stored, but
   // deleting removes it from that same array, so without tracking deleted
@@ -1778,6 +1865,7 @@ const AtlasWallet = (() => {
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
     markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift, sendUserMail, getPostOfficeMemberships,
+    setPostOfficeMailMode, blockPostOfficeSender, unblockPostOfficeSender, getPostOfficeSettings,
     getAssetUpdateNotices, markAssetUpdateNoticesSeen,
     getFriends, addFriend, removeFriend,
     getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain

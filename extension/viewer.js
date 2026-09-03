@@ -496,6 +496,16 @@ const postOfficeBodyInput = document.getElementById('postOfficeBodyInput');
 const postOfficeSendBtn = document.getElementById('postOfficeSendBtn');
 const postOfficeSendStatusEl = document.getElementById('postOfficeSendStatus');
 
+// Task #94 (consent/block model)
+const postOfficeSettingsDomainInput = document.getElementById('postOfficeSettingsDomainInput');
+const postOfficeMailModeInput = document.getElementById('postOfficeMailModeInput');
+const postOfficeSaveMailModeBtn = document.getElementById('postOfficeSaveMailModeBtn');
+const postOfficeMailModeStatusEl = document.getElementById('postOfficeMailModeStatus');
+const postOfficeBlockedListEl = document.getElementById('postOfficeBlockedList');
+const postOfficeBlockPublicKeyInput = document.getElementById('postOfficeBlockPublicKeyInput');
+const postOfficeBlockBtn = document.getElementById('postOfficeBlockBtn');
+const postOfficeBlockStatusEl = document.getElementById('postOfficeBlockStatus');
+
 const friendsHereListEl = document.getElementById('friendsHereList');
 const friendRequestsListEl = document.getElementById('friendRequestsList');
 const friendsListEl = document.getElementById('friendsList');
@@ -2177,6 +2187,13 @@ function renderMailCard(entry, container) {
       ? ' <span class="mail-gift-claimed">(claimed)</span>'
       : ' <button type="button" data-action="claim-gift">Claim</button>') +
     '</div>';
+  // Task #94 (consent/block model): only relayed mail (has `from`) has a
+  // sender worth blocking — ordinary domain-to-subscriber mail's "sender"
+  // IS the domain, and blocking that would just be a confusing way to spell
+  // deleting/unsubscribing, so this button only ever shows up on the same
+  // kind of card fromLine above already treats specially.
+  const blockHtml = !entry.message.from ? '' :
+    '<button type="button" data-action="block-sender" data-domain="' + escapeHtml(entry.message.domain) + '" data-key="' + escapeHtml(entry.message.from.publicKey) + '">Block sender</button>';
   el.innerHTML =
     '<div class="mail-domain">' + fromLine + '</div>' +
     '<div class="mail-subject">' + escapeHtml(entry.message.subject) + '</div>' +
@@ -2185,6 +2202,7 @@ function renderMailCard(entry, container) {
     giftHtml +
     '<div class="item-actions">' +
     '<button type="button" data-action="delete" class="danger-btn">Delete</button>' +
+    blockHtml +
     '</div>';
   container.appendChild(el);
 }
@@ -2269,6 +2287,33 @@ mailListEl && mailListEl.addEventListener('click', async (e) => {
       statusEl.textContent = 'Claimed ' + credential.asset.name + '.';
     } catch (err) {
       statusEl.textContent = 'Claim failed: ' + err.message;
+    }
+    return;
+  }
+
+  // Task #94 (consent/block model): the fast path straight from a message
+  // you're already looking at — same block underneath as the "Who can
+  // mail you" panel's own Block field, just pre-filled from this card
+  // instead of asking you to go copy the sender's key over there by hand.
+  const blockBtn = e.target.closest('button[data-action="block-sender"]');
+  if (blockBtn) {
+    const domain = blockBtn.dataset.domain;
+    const key = blockBtn.dataset.key;
+    if (!confirm('Block this sender at ' + domain + '? They won\'t be able to mail you through that Post Office anymore.')) return;
+    blockBtn.disabled = true;
+    blockBtn.textContent = 'Blocking…';
+    try {
+      await AtlasWallet.blockPostOfficeSender(domain, key);
+      blockBtn.textContent = 'Blocked';
+      // Keep the settings panel in sync if it's currently showing the same
+      // membership this block just landed on.
+      if (postOfficeSettingsDomainInput && postOfficeSettingsDomainInput.value === domain) {
+        await loadPostOfficeSettings();
+      }
+    } catch (err) {
+      blockBtn.disabled = false;
+      blockBtn.textContent = 'Block sender';
+      statusEl.textContent = 'Block failed: ' + err.message;
     }
     return;
   }
@@ -2406,6 +2451,7 @@ async function refreshMyPublicKeyDisplay() {
   const identity = await AtlasWallet.getIdentity();
   if (myPublicKeyDisplayEl) myPublicKeyDisplayEl.value = identity ? identity.publicKey : '';
   await refreshPostOfficeSendOptions(identity);
+  await refreshPostOfficeSettingsDomainOptions(identity);
 }
 
 // Post Office (task #94): membership is symmetric now — a domain only
@@ -2446,6 +2492,172 @@ async function refreshPostOfficeSendOptions(identity) {
   }
   if (seen.has(previousValue)) postOfficeToDomainInput.value = previousValue;
 }
+
+// Task #94 (consent/block model): the domain picker for the "Who can mail
+// you" panel — same "only Post Offices this wallet has actually joined"
+// source as refreshPostOfficeSendOptions right above, since settings only
+// mean anything against a membership that actually exists. A separate
+// select from the "send via" one above rather than reusing it: they answer
+// different questions (who to send THROUGH vs. whose inbox to configure)
+// and can reasonably end up pointed at different domains at the same time.
+async function refreshPostOfficeSettingsDomainOptions(identity) {
+  if (!postOfficeSettingsDomainInput) return;
+  const previousValue = postOfficeSettingsDomainInput.value;
+  const memberships = identity ? await AtlasWallet.getPostOfficeMemberships(identity.publicKey) : [];
+
+  postOfficeSettingsDomainInput.innerHTML = '';
+  if (!memberships.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No Post Office memberships yet';
+    postOfficeSettingsDomainInput.appendChild(opt);
+    postOfficeSettingsDomainInput.disabled = true;
+    await renderPostOfficeSettings(null);
+    return;
+  }
+
+  postOfficeSettingsDomainInput.disabled = false;
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select a Post Office you belong to…';
+  postOfficeSettingsDomainInput.appendChild(placeholder);
+
+  const seen = new Set();
+  for (const m of memberships) {
+    if (seen.has(m.domain)) continue;
+    seen.add(m.domain);
+    const opt = document.createElement('option');
+    opt.value = m.domain;
+    opt.textContent = m.domain;
+    postOfficeSettingsDomainInput.appendChild(opt);
+  }
+  if (seen.has(previousValue)) {
+    postOfficeSettingsDomainInput.value = previousValue;
+    await loadPostOfficeSettings();
+  } else {
+    await renderPostOfficeSettings(null);
+  }
+}
+
+// Fetches the currently-selected membership's settings from its domain
+// (AtlasWallet.getPostOfficeSettings — self-signed, so it only ever
+// returns THIS wallet's own entry) and renders them into the mode select
+// and blocked-senders list. Called whenever the domain picker changes, and
+// after every save/block/unblock so the panel always reflects what the
+// domain actually has on file rather than an optimistic local guess.
+async function loadPostOfficeSettings() {
+  const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
+  if (!domain) { await renderPostOfficeSettings(null); return; }
+  if (postOfficeBlockedListEl) postOfficeBlockedListEl.textContent = 'Loading…';
+  try {
+    const settings = await AtlasWallet.getPostOfficeSettings(domain);
+    await renderPostOfficeSettings(settings);
+  } catch (err) {
+    if (postOfficeBlockedListEl) postOfficeBlockedListEl.textContent = "Couldn't load settings: " + err.message;
+  }
+}
+
+function renderPostOfficeSettings(settings) {
+  if (postOfficeMailModeInput) postOfficeMailModeInput.value = settings ? (settings.mailMode || 'open') : 'open';
+  if (!postOfficeBlockedListEl) return;
+  if (!settings) {
+    postOfficeBlockedListEl.innerHTML = '';
+    postOfficeBlockedListEl.className = 'empty-note';
+    postOfficeBlockedListEl.textContent = 'Pick a Post Office membership above.';
+    return;
+  }
+  const blocked = settings.blockedSenders || [];
+  if (!blocked.length) {
+    postOfficeBlockedListEl.innerHTML = '';
+    postOfficeBlockedListEl.className = 'empty-note';
+    postOfficeBlockedListEl.textContent = 'No one blocked here.';
+    return;
+  }
+  postOfficeBlockedListEl.className = '';
+  postOfficeBlockedListEl.innerHTML = blocked.map((key) =>
+    '<div class="item-actions" style="justify-content:space-between;align-items:center;margin-top:4px;">' +
+    '<span style="font-family:monospace;font-size:11px;">' + escapeHtml(key.slice(0, 24)) + '…</span>' +
+    '<button type="button" data-action="unblock" data-key="' + escapeHtml(key) + '" class="danger-btn">Unblock</button>' +
+    '</div>'
+  ).join('');
+}
+
+postOfficeSettingsDomainInput && postOfficeSettingsDomainInput.addEventListener('change', loadPostOfficeSettings);
+
+// Saves the mode select's current value against whichever membership is
+// selected — see AtlasWallet.setPostOfficeMailMode's own comment on what
+// switching to "friendsOnly" actually submits (a one-time snapshot of this
+// wallet's local Friends list, not an ongoing sync).
+postOfficeSaveMailModeBtn && postOfficeSaveMailModeBtn.addEventListener('click', async () => {
+  const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
+  const mode = postOfficeMailModeInput ? postOfficeMailModeInput.value : 'open';
+  if (!domain) {
+    if (postOfficeMailModeStatusEl) postOfficeMailModeStatusEl.textContent = 'Pick a Post Office membership first.';
+    return;
+  }
+  postOfficeSaveMailModeBtn.disabled = true;
+  postOfficeSaveMailModeBtn.textContent = 'Saving…';
+  if (postOfficeMailModeStatusEl) postOfficeMailModeStatusEl.textContent = '';
+  try {
+    const result = await AtlasWallet.setPostOfficeMailMode(domain, mode);
+    postOfficeMailModeStatusEl.textContent = mode === 'friendsOnly'
+      ? 'Saved — friends only (' + result.friendsCount + ' friend' + (result.friendsCount === 1 ? '' : 's') + ' synced).'
+      : 'Saved — open to anyone at this Post Office.';
+  } catch (err) {
+    postOfficeMailModeStatusEl.textContent = 'Save failed: ' + err.message;
+  } finally {
+    postOfficeSaveMailModeBtn.disabled = false;
+    postOfficeSaveMailModeBtn.textContent = 'Save';
+  }
+});
+
+postOfficeBlockBtn && postOfficeBlockBtn.addEventListener('click', async () => {
+  const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
+  const key = (postOfficeBlockPublicKeyInput.value || '').trim();
+  if (!domain) {
+    if (postOfficeBlockStatusEl) postOfficeBlockStatusEl.textContent = 'Pick a Post Office membership first.';
+    return;
+  }
+  if (!key) {
+    if (postOfficeBlockStatusEl) postOfficeBlockStatusEl.textContent = 'Enter the public key to block.';
+    return;
+  }
+  postOfficeBlockBtn.disabled = true;
+  postOfficeBlockBtn.textContent = 'Blocking…';
+  if (postOfficeBlockStatusEl) postOfficeBlockStatusEl.textContent = '';
+  try {
+    const result = await AtlasWallet.blockPostOfficeSender(domain, key);
+    renderPostOfficeSettings({ mailMode: postOfficeMailModeInput.value, blockedSenders: result.blockedSenders });
+    postOfficeBlockPublicKeyInput.value = '';
+    postOfficeBlockStatusEl.textContent = 'Blocked.';
+  } catch (err) {
+    postOfficeBlockStatusEl.textContent = 'Block failed: ' + err.message;
+  } finally {
+    postOfficeBlockBtn.disabled = false;
+    postOfficeBlockBtn.textContent = 'Block';
+  }
+});
+
+// Delegated — the blocked-senders list is rebuilt wholesale on every
+// render, same "one listener on the container" approach mailListEl's own
+// click handler already uses for its per-card buttons.
+postOfficeBlockedListEl && postOfficeBlockedListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action="unblock"]');
+  if (!btn) return;
+  const domain = postOfficeSettingsDomainInput ? postOfficeSettingsDomainInput.value : '';
+  const key = btn.dataset.key;
+  if (!domain || !key) return;
+  btn.disabled = true;
+  btn.textContent = 'Unblocking…';
+  try {
+    const result = await AtlasWallet.unblockPostOfficeSender(domain, key);
+    renderPostOfficeSettings({ mailMode: postOfficeMailModeInput.value, blockedSenders: result.blockedSenders });
+  } catch (err) {
+    if (postOfficeBlockStatusEl) postOfficeBlockStatusEl.textContent = 'Unblock failed: ' + err.message;
+    btn.disabled = false;
+    btn.textContent = 'Unblock';
+  }
+});
 
 copyMyPublicKeyBtn && copyMyPublicKeyBtn.addEventListener('click', async () => {
   const value = myPublicKeyDisplayEl ? myPublicKeyDisplayEl.value : '';

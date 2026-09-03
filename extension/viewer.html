@@ -684,6 +684,43 @@
           <div id="postOfficeSendStatus" class="empty-note" style="margin-top:6px;"></div>
         </div>
 
+        <!-- Post Office consent/block model (task #94's remaining piece,
+             "both, recipient's choice" per direct instruction): per
+             membership, a member controls who's allowed to reach them
+             through it — the SAME "your card, your rules" idea the
+             membership itself already carries. Two independent knobs
+             (see AtlasWallet.setPostOfficeMailMode/blockPostOfficeSender
+             in wallet.js): a mail mode (open vs. friends-only) and a
+             block list, both scoped to whichever membership is selected
+             below since a wallet can belong to more than one Post
+             Office. Populated on demand (loadPostOfficeSettings) rather
+             than kept in local state, so it always reflects what the
+             domain actually has on file. -->
+        <div id="postOfficeSettingsSection">
+          <h3>Who can mail you</h3>
+          <div class="subhead">Applies to one Post Office membership at a time — pick which. "Friends only" sends your current Friends list's public keys to that domain as a one-time snapshot; it won't include anyone you add to Friends afterward until you save again.</div>
+          <select id="postOfficeSettingsDomainInput" style="margin-top:8px;">
+            <option value="">No Post Office memberships yet</option>
+          </select>
+          <select id="postOfficeMailModeInput" style="margin-top:8px;">
+            <option value="open">Accept mail from anyone at this Post Office</option>
+            <option value="friendsOnly">Friends only</option>
+          </select>
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="postOfficeSaveMailModeBtn" type="button" class="btn-secondary">Save</button>
+          </div>
+          <div id="postOfficeMailModeStatus" class="empty-note" style="margin-top:6px;"></div>
+
+          <h3>Blocked senders</h3>
+          <div class="subhead">Blocked at whichever membership is selected above, regardless of mail mode — a block always wins.</div>
+          <div id="postOfficeBlockedList" class="empty-note">Pick a Post Office membership above.</div>
+          <textarea id="postOfficeBlockPublicKeyInput" placeholder="Public key to block" style="margin-top:8px;min-height:40px;font-family:monospace;font-size:11px;"></textarea>
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="postOfficeBlockBtn" type="button" class="btn-secondary">Block</button>
+          </div>
+          <div id="postOfficeBlockStatus" class="empty-note" style="margin-top:6px;"></div>
+        </div>
+
         <h3>Mail</h3>
         <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere.</div>
         <div class="btn-row">

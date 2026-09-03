@@ -563,6 +563,54 @@ function record_postoffice_send($credentialId) {
   fclose($fh);
 }
 
+// Task #94 (consent/block model, "both, recipient's choice" per direct
+// instruction): a sanity cap on how many entries a single member's block
+// list or friends-only snapshot can hold — generous for a demo, just a
+// bound against one wallet growing its own settings entry without limit,
+// not a spam-prevention measure itself (that's #96's job). Mirrors
+// issuer-server/server.js's POSTOFFICE_SETTINGS_MAX_LIST.
+const ATLAS_POSTOFFICE_SETTINGS_MAX_LIST = 500;
+
+// Shared read-modify-write for the self-service settings endpoints
+// (atlas/postoffice/mailmode.php, block.php, unblock.php) — finds the
+// CALLER's own live (non-revoked) membership by owner public key, under
+// the same exclusive lock the whole operation runs under, and hands it to
+// $mutate to change in place before saving. Same flock-guarded
+// c+/ftruncate/rewind/fwrite pattern record_postoffice_send() above
+// already uses. Returns the updated member, or null if the caller isn't a
+// member here at all — same "join first" gate send.php's sender-
+// membership check already enforces. Mirrors issuer-server/server.js's
+// updatePostOfficeMember().
+function update_postoffice_member($ownerPublicKey, callable $mutate) {
+  $file = atlas_postoffice_members_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return null;
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+
+  $found = null;
+  foreach ($doc['members'] as &$member) {
+    if (isset($member['ownerPublicKey']) && $member['ownerPublicKey'] === $ownerPublicKey && !is_revoked($member['credentialId'])) {
+      $mutate($member);
+      $found = $member;
+      break;
+    }
+  }
+  unset($member);
+
+  if ($found !== null) {
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
+}
+
 // ---------- serial counters (task #42, flock-guarded like everything
 // else above — a real host can genuinely run two mint requests for the
 // same class concurrently, unlike the Node demo's single-threaded event
