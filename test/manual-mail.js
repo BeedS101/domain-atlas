@@ -85,19 +85,15 @@ function postJson(port, urlPath, body) {
     if (!sent.id) throw new Error('Expected /atlas/mail/send to return a signed message, got: ' + JSON.stringify(sent));
     console.log('PASS: message sent and signed ->', sent.subject);
 
-    console.log('STEP 2: Mail tab starts with nothing (mail has not been checked yet)');
+    console.log('STEP 2: opening the Mail tab checks automatically — no need to click Check now first, verifies the signature, and shows it unread (alongside the auto-sent welcome message from subscribing — see /atlas/asset/issue)');
     await frame.locator('#socialTabBtn').click();
     await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('mailList').textContent.includes('No mail yet'), { timeout: 5000 });
-    console.log('PASS: Mail tab empty before the first check');
-
-    console.log('STEP 3: clicking Check now fetches it, verifies the signature, and shows it — unread (alongside the auto-sent welcome message from subscribing — see /atlas/asset/issue)');
-    await frame.locator('#checkMailNowBtn').click();
     // 2, not 1: requesting atlas.membership in SETUP now also triggers a
     // server-side auto-welcome message (issue.php / server.js's
-    // /atlas/asset/issue), so Check now picks up both that and STEP 1's message.
-    // Sorted newest-first, so this test's own message (sent after SETUP's
-    // welcome message) is first().
+    // /atlas/asset/issue), so opening the tab picks up both that and STEP
+    // 1's message via the tab's own automatic check (no #checkMailNowBtn
+    // click needed here at all). Sorted newest-first, so this test's own
+    // message (sent after SETUP's welcome message) is first().
     await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, { timeout: 10000 });
     const cardText = await frame.locator('#mailList .mail-card').first().textContent();
     if (!cardText.includes('Welcome to the Plaza')) throw new Error('Expected the message subject to render: ' + cardText);
@@ -109,7 +105,14 @@ function postJson(port, urlPath, body) {
     if (!listText.includes('Welcome to localhost:8001')) throw new Error('Expected the auto-sent welcome message to also render: ' + listText);
     const badgeText = await frame.locator('#mailBadge').textContent();
     if (badgeText !== '2') throw new Error('Expected the Mail tab badge to show 2 unread, got: ' + badgeText);
-    console.log('PASS: both messages verified and shown, unread, badge shows 2');
+    console.log('PASS: both messages verified and shown, unread, badge shows 2 — from opening the tab alone');
+
+    console.log('STEP 3: clicking Check now again does not duplicate either message');
+    await frame.locator('#checkMailNowBtn').click();
+    await frame.waitForTimeout(500);
+    const cardCountAfterManualCheck = await frame.locator('#mailList .mail-card').count();
+    if (cardCountAfterManualCheck !== 2) throw new Error('Expected still exactly two messages after re-checking, got: ' + cardCountAfterManualCheck);
+    console.log('PASS: no duplicate on re-check');
 
     console.log('STEP 4: clicking the unread card marks it read — badge drops to 1 (the auto-welcome message is still unread)');
     await frame.locator('#mailList .mail-card').first().click();
@@ -117,28 +120,18 @@ function postJson(port, urlPath, body) {
     await frame.waitForFunction(() => document.getElementById('mailBadge').textContent === '1', { timeout: 5000 });
     console.log('PASS: message marked read, badge shows 1 remaining');
 
-    console.log('STEP 5: checking again does not duplicate either message');
-    await frame.locator('#checkMailNowBtn').click();
-    await frame.waitForTimeout(500);
-    const cardCount = await frame.locator('#mailList .mail-card').count();
-    if (cardCount !== 2) throw new Error('Expected still exactly two messages after re-checking, got: ' + cardCount);
-    console.log('PASS: no duplicate on re-check');
-
-    console.log('STEP 6: an UNVERIFIED message (wrong signature/tampered) never shows up at all');
-    // Directly forge an entry with a bogus signature via the same shape
-    // /atlas/mail/send would produce, bypassing signing — checkAllMail
-    // must reject it client-side and never display it.
-    const fakeId = 'urn:atlas:mail:' + Math.random().toString(36).slice(2);
-    // There's no server-side endpoint that will sign garbage, which is
-    // the point — so this step instead confirms the count STAYS at 2
-    // after another real check, i.e. nothing spurious ever appeared.
-    await frame.locator('#checkMailNowBtn').click();
+    console.log('STEP 5: checking again (including a re-visit of the Mail sub-tab, which now also auto-checks) does not duplicate either message');
+    await frame.locator('#friendsSubtabBtn').click();
+    await frame.locator('#mailSubtabBtn').click();
     await frame.waitForTimeout(500);
     const stillTwo = await frame.locator('#mailList .mail-card').count();
     if (stillTwo !== 2) throw new Error('Expected exactly two messages still, got: ' + stillTwo);
-    console.log('PASS: still exactly two messages — verification gate holding');
+    console.log('PASS: still exactly two messages — verification gate holding, no duplication from repeated auto-checks');
 
-    console.log('STEP 7: check-frequency setting persists');
+    console.log('STEP 6: check-frequency setting persists');
+    // Check frequency now lives under Mail's "Mail Settings" inner sub-tab.
+    await frame.locator('#mailSettingsSubtabBtn').click();
+    await frame.waitForFunction(() => document.getElementById('mailSettingsSubscreen').classList.contains('active'), { timeout: 5000 });
     await frame.locator('#mailIntervalInput').fill('5');
     await frame.locator('#saveMailIntervalBtn').click();
     await frame.waitForFunction(() => document.getElementById('mailIntervalStatus').textContent === 'Saved.', { timeout: 5000 });

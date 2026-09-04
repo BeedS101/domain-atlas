@@ -104,6 +104,10 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('PASS: joined Domain B\'s Post Office');
 
     console.log('STEP 2: the "Who can mail you" domain picker offers Domain B too, not just "Send mail"');
+    // "Who can mail you" / blocked senders now live under Mail's own
+    // "Mail Settings" inner sub-tab, not the top-level Mail screen itself.
+    await frame.locator('#mailSettingsSubtabBtn').click();
+    await frame.waitForFunction(() => document.getElementById('mailSettingsSubscreen').classList.contains('active'), { timeout: 5000 });
     await frame.waitForFunction(() => {
       const opts = [...document.getElementById('postOfficeSettingsDomainInput').options].map((o) => o.value).filter(Boolean);
       return opts.includes('localhost:8002');

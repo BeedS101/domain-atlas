@@ -127,6 +127,22 @@ async function openMailScreen(frame) {
   await frame.waitForFunction(() => document.getElementById('myPublicKeyDisplay').value.length > 0, { timeout: 5000 });
 }
 
+// Mail now has its own inner "Mail" / "Mail Settings" sub-tab bar — "Your
+// address"/handle/who-can-mail-you/blocked-senders live under Mail
+// Settings, everything else (compose, check now) stays under Mail. Both
+// idempotent, same pattern as openIdentityMethodCategory in the other
+// manual tests: check the target sub-screen's own 'active' class (not the
+// button's, since the default-active Mail sub-screen never gets its
+// button's 'active-subtab' class until the first click) before clicking.
+async function openMailSettingsSubtab(frame) {
+  const alreadyOpen = await frame.locator('#mailSettingsSubscreen').evaluate((el) => el.classList.contains('active'));
+  if (!alreadyOpen) await frame.locator('#mailSettingsSubtabBtn').click();
+}
+async function openMailInboxSubtab(frame) {
+  const alreadyOpen = await frame.locator('#mailInboxSubscreen').evaluate((el) => el.classList.contains('active'));
+  if (!alreadyOpen) await frame.locator('#mailInboxSubtabBtn').click();
+}
+
 (async () => {
   const dirA = path.resolve(__dirname, '.chrome-profile-postoffice-handle-a');
   const dirB = path.resolve(__dirname, '.chrome-profile-postoffice-handle-b');
@@ -147,6 +163,7 @@ async function openMailScreen(frame) {
 
     console.log('STEP 1: B registers the handle "bob" from the "Your handle" panel');
     await openMailScreen(b.frame);
+    await openMailSettingsSubtab(b.frame);
     await b.frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
     await b.frame.waitForFunction(() => document.getElementById('postOfficeYourHandleDisplay').textContent.includes('No handle set'), { timeout: 5000 });
     await b.frame.locator('#postOfficeHandleInput').fill('bob');
@@ -158,6 +175,7 @@ async function openMailScreen(frame) {
 
     console.log('STEP 2: A sends to B using JUST the bare handle "bob" — no raw public key typed');
     await openMailScreen(a.frame);
+    await openMailInboxSubtab(a.frame);
     await a.frame.waitForFunction(() => {
       const opts = [...document.getElementById('postOfficeToDomainInput').options].map((o) => o.value).filter(Boolean);
       return opts.includes('localhost:8002');
@@ -174,6 +192,7 @@ async function openMailScreen(frame) {
 
     console.log('STEP 3: B\'s mail card shows it, falling back to A\'s raw key (A has no handle registered yet)');
     await openMailScreen(b.frame);
+    await openMailInboxSubtab(b.frame);
     await b.frame.locator('#checkMailNowBtn').click();
     await b.frame.waitForFunction(() => [...document.querySelectorAll('#mailList .mail-card')].some((el) => el.textContent.includes('Hello via handle')), { timeout: 10000 });
     const card1 = b.frame.locator('#mailList .mail-card', { hasText: 'Hello via handle' });
@@ -183,10 +202,12 @@ async function openMailScreen(frame) {
     console.log('PASS: falls back to raw key correctly when the sender has no handle');
 
     console.log('STEP 4: A registers "alice", then sends addressed as the FULL "bob#localhost:8002" string');
+    await openMailSettingsSubtab(a.frame);
     await a.frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
     await a.frame.locator('#postOfficeHandleInput').fill('alice');
     await a.frame.locator('#postOfficeSaveHandleBtn').click();
     await a.frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), { timeout: 5000 });
+    await openMailInboxSubtab(a.frame);
     await a.frame.locator('#postOfficeToDomainInput').selectOption(''); // clear the dropdown to prove the full address alone drives it
     await a.frame.locator('#postOfficeToHandleInput').fill('bob#localhost:8002');
     await a.frame.locator('#postOfficeSubjectInput').fill('Hello via full address');

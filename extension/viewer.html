@@ -660,163 +660,202 @@
            what "hearing from it" actually means here — there's no
            separate subscribe step. -->
       <div id="mailSubscreen" class="subscreen">
-        <!-- Subscribing IS requesting an atlas.membership credential from
-             whichever domain you're currently in — see AtlasWallet.mintAsset
-             and checkAllMail's "holding the credential is the subscription"
-             design. Deliberately independent of #requestItemBtn / any world's
-             acceptedItemClasses list (see refreshSubscribeButton in viewer.js):
-             this is "subscribe to the domain", not "pick up this world's
-             collectible". Hidden entirely (not just disabled) once you already
-             hold that domain's membership card, per explicit request. -->
-        <div id="subscribeSection">
-          <h3>Subscribe</h3>
-          <div class="subhead">Get a membership card from the domain you're currently in — holding it is what lets that domain send you mail.</div>
+
+        <!-- Mail's own third level of tabbing: "Mail" (check-now + the
+             inbox — what you actually came here for, so it's the default
+             and sits first) vs. "Mail Settings" (addressing, who can
+             reach you, how often it checks — configured occasionally, not
+             read every visit). Same .subtab-bar/.subscreen pattern as
+             Social's Mail/Friends/Favorites and Inventory's Collectibles/
+             Documents, just one level deeper. -->
+        <div id="mailInnerSubtabBar" class="subtab-bar">
+          <button id="mailInboxSubtabBtn" type="button">Mail</button>
+          <button id="mailSettingsSubtabBtn" type="button">Mail Settings</button>
+        </div>
+
+        <div id="mailInboxSubscreen" class="subscreen active">
+          <!-- Checking for new mail also now happens automatically whenever
+               this tab is opened (see the mailSubtabBtn/socialTabBtn click
+               handlers in viewer.js), not just from this button or the
+               periodic background loop — "Check now" stays for whenever you
+               want a check without leaving/re-entering the tab. -->
+          <h3>Mail</h3>
+          <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere. Also checks automatically every time you open this tab.</div>
           <div class="btn-row">
-            <button id="subscribeBtn" type="button" class="btn-secondary">Subscribe</button>
+            <button id="checkMailNowBtn" type="button" class="btn-secondary">Check now</button>
           </div>
-          <div id="subscribeStatus" class="empty-note" style="margin-top:6px;"></div>
-        </div>
+          <div id="mailLastChecked" class="empty-note" style="margin-top:8px;"></div>
 
-        <!-- Post Office manifest advertisement (task #94): the SAME
-             optional-field pattern the `presence` manifest field already
-             uses (see viewer.js's own comment on PRESENCE_DEFAULT_BASE) —
-             not part of SPEC.md, a plain implementation convenience that
-             lets a domain say "I offer Global Mail" so a visitor can join
-             directly from the wallet instead of having to already know to
-             go find a specific in-world stall. Hidden entirely (not just
-             disabled) once already a member, same "hide, don't just
-             disable" convention task #56 established for Subscribe. -->
-        <div id="postOfficeJoinSection">
-          <h3>Post Office</h3>
-          <div class="subhead">This domain offers Global Mail — join to send and receive user-to-user mail through it.</div>
+          <h3>Messages</h3>
           <div class="btn-row">
-            <button id="postOfficeJoinBtn" type="button" class="btn-secondary">Join</button>
+            <button id="markAllMailReadBtn" type="button" class="btn-secondary">Mark all read</button>
+            <button id="clearAllMailBtn" type="button" class="btn-secondary">Clear all</button>
           </div>
-          <div id="postOfficeJoinStatus" class="empty-note" style="margin-top:6px;"></div>
+          <div id="mailList" class="item-list"></div>
+
+          <!-- Subscribing IS requesting an atlas.membership credential from
+               whichever domain you're currently in — see AtlasWallet.mintAsset
+               and checkAllMail's "holding the credential is the subscription"
+               design. Deliberately independent of #requestItemBtn / any world's
+               acceptedItemClasses list (see refreshSubscribeButton in viewer.js):
+               this is "subscribe to the domain", not "pick up this world's
+               collectible". Hidden entirely (not just disabled) once you already
+               hold that domain's membership card, per explicit request. -->
+          <div id="subscribeSection">
+            <h3>Subscribe</h3>
+            <div class="subhead">Get a membership card from the domain you're currently in — holding it is what lets that domain send you mail.</div>
+            <div class="btn-row">
+              <button id="subscribeBtn" type="button" class="btn-secondary">Subscribe</button>
+            </div>
+            <div id="subscribeStatus" class="empty-note" style="margin-top:6px;"></div>
+          </div>
+
+          <!-- Post Office manifest advertisement (task #94): the SAME
+               optional-field pattern the `presence` manifest field already
+               uses (see viewer.js's own comment on PRESENCE_DEFAULT_BASE) —
+               not part of SPEC.md, a plain implementation convenience that
+               lets a domain say "I offer Global Mail" so a visitor can join
+               directly from the wallet instead of having to already know to
+               go find a specific in-world stall. Hidden entirely (not just
+               disabled) once already a member, same "hide, don't just
+               disable" convention task #56 established for Subscribe. -->
+          <div id="postOfficeJoinSection">
+            <h3>Post Office</h3>
+            <div class="subhead">This domain offers Global Mail — join to send and receive user-to-user mail through it.</div>
+            <div class="btn-row">
+              <button id="postOfficeJoinBtn" type="button" class="btn-secondary">Join</button>
+            </div>
+            <div id="postOfficeJoinStatus" class="empty-note" style="margin-top:6px;"></div>
+          </div>
+
+          <!-- Post Office (task #75/#87/#94, SPEC.md §11.3): user-to-user
+               mail, distinct from Subscribe above (which is "hear FROM a
+               domain"). Membership is symmetric — a Post Office only relays
+               mail between two people who BOTH hold ITS OWN Global Mail
+               membership card, so "send via" is drawn from Post Offices this
+               wallet has actually joined, not typed in freehand. Your own
+               address (for handing to someone else) now lives under Mail
+               Settings, alongside the rest of "how people reach you". -->
+          <div id="postOfficeSendSection">
+            <h3>Send mail</h3>
+            <div class="subhead">Only works between two people who both hold a Global Mail membership at the same Post Office — that domain relays the message for you even when you're not standing in it. Claim a membership card at a domain's Post Office stall to add it here as a sending relay.</div>
+            <select id="postOfficeToDomainInput" style="margin-top:8px;">
+              <option value="">No Post Office memberships yet</option>
+            </select>
+            <!-- Task #94 (handle addressing): handle-first by default — type
+                 a recipient's handle (bare, since the domain above is already
+                 picked; or paste a full "handle#domain" and it'll pick the
+                 right domain for you) and it resolves to their public key
+                 right before sending. The raw-key textarea stays available
+                 as a fallback for someone who hasn't registered a handle
+                 yet, revealed by the link below rather than shown by
+                 default — see refreshPostOfficeSendMode() in viewer.js. -->
+            <input type="text" id="postOfficeToHandleInput" placeholder="Recipient's handle (e.g. bruno#localhost:8002, or just bruno for the Post Office above)" style="margin-top:8px;">
+            <textarea id="postOfficeToPublicKeyInput" placeholder="Recipient's public key" hidden style="margin-top:8px;min-height:48px;font-family:monospace;font-size:11px;"></textarea>
+            <div class="btn-row" style="margin-top:4px;">
+              <button id="postOfficeToggleRawKeyBtn" type="button" class="link-btn">Paste a raw public key instead</button>
+            </div>
+            <input type="text" id="postOfficeSubjectInput" placeholder="Subject" style="margin-top:8px;">
+            <textarea id="postOfficeBodyInput" placeholder="Message" style="margin-top:8px;"></textarea>
+            <div class="btn-row" style="margin-top:8px;">
+              <button id="postOfficeSendBtn" type="button" class="btn-secondary">Send</button>
+            </div>
+            <div id="postOfficeSendStatus" class="empty-note" style="margin-top:6px;"></div>
+          </div>
         </div>
 
-        <!-- Post Office (task #75/#87/#94, SPEC.md §11.3): user-to-user
-             mail, distinct from Subscribe above (which is "hear FROM a
-             domain"). Membership is symmetric — a Post Office only relays
-             mail between two people who BOTH hold ITS OWN Global Mail
-             membership card, so "send via" is drawn from Post Offices this
-             wallet has actually joined, not typed in freehand. "Your
-             address" just surfaces this identity's own public key so it's
-             easy to copy and hand to whoever you want mail from. -->
-        <div id="postOfficeSection">
-          <h3>Your address</h3>
-          <div class="subhead">Share this together with the name of a domain that's given you a Global Mail membership card — that combination is how someone else reaches you.</div>
+        <!-- Sub-screen: Mail Settings — everything about how people reach
+             you (address, handle, who's allowed, who's blocked) plus how
+             often the wallet checks on its own, grouped together since
+             none of it is "mail" you read, just configuration behind it.
+             All of it is genuinely persistent: the check-frequency number
+             lives in chrome.storage (AtlasWallet.getMailSettings, restored
+             into mailIntervalInput by refreshMailDisplay); the handle/mail
+             mode/blocked-senders list live server-side per Post Office
+             membership and are reloaded from there (loadPostOfficeSettings,
+             driven by refreshPostOfficeSettingsDomainOptions) every time the
+             wallet opens, not just when this sub-tab happens to be visible —
+             so switching sub-tabs never loses or stales anything shown here. -->
+        <div id="mailSettingsSubscreen" class="subscreen">
+          <!-- Post Office (task #75/#87/#94, SPEC.md §11.3): just surfaces
+               this identity's own public key so it's easy to copy and hand
+               to whoever you want mail from. -->
+          <div id="postOfficeAddressSection">
+            <h3>Your address</h3>
+            <div class="subhead">Share this together with the name of a domain that's given you a Global Mail membership card — that combination is how someone else reaches you.</div>
+            <div class="btn-row">
+              <input type="text" id="myPublicKeyDisplay" readonly style="flex:1;font-family:monospace;font-size:11px;">
+              <button id="copyMyPublicKeyBtn" type="button" class="btn-secondary">Copy</button>
+            </div>
+            <div id="copyMyPublicKeyStatus" class="empty-note" style="margin-top:6px;"></div>
+          </div>
+
+          <!-- Post Office per-membership settings (task #94's two remaining
+               pieces, both now built): a handle to be reached by instead of
+               a raw public key, and consent/block controls over who's
+               allowed to reach you at all — the SAME "your card, your
+               rules" idea the membership itself already carries. All of it
+               (see AtlasWallet.setPostOfficeHandle/setPostOfficeMailMode/
+               blockPostOfficeSender in wallet.js) is scoped to whichever
+               membership is selected in the ONE domain picker at the top,
+               since a wallet can belong to more than one Post Office.
+               Populated on demand (loadPostOfficeSettings) rather than kept
+               in local state, so it always reflects what the domain
+               actually has on file. -->
+          <div id="postOfficeSettingsSection">
+            <h3>Your Post Office settings</h3>
+            <div class="subhead">Everything below applies to one Post Office membership at a time — pick which.</div>
+            <select id="postOfficeSettingsDomainInput" style="margin-top:8px;">
+              <option value="">No Post Office memberships yet</option>
+            </select>
+
+            <!-- Task #94 (handle addressing, the last remaining Post Office
+                 piece — "hide the raw public key from users", per direct
+                 instruction): a short handle you register at the selected
+                 Post Office, instead of handing out a raw public key. Uses
+                 "#domain" as the separator, deliberately NOT "@domain" —
+                 that shape reads as a real email address and would mislead
+                 people about what this actually is. -->
+            <h3>Your handle</h3>
+            <div class="subhead">A short name others can mail you at here, instead of your raw public key — unique per Post Office.</div>
+            <div id="postOfficeYourHandleDisplay" class="empty-note" style="margin-top:6px;"></div>
+            <input type="text" id="postOfficeHandleInput" placeholder="e.g. bruno" style="margin-top:8px;" maxlength="24">
+            <div class="btn-row" style="margin-top:8px;">
+              <button id="postOfficeSaveHandleBtn" type="button" class="btn-secondary">Save</button>
+              <button id="postOfficeClearHandleBtn" type="button" class="btn-secondary">Clear</button>
+            </div>
+            <div id="postOfficeHandleStatus" class="empty-note" style="margin-top:6px;"></div>
+
+            <h3>Who can mail you</h3>
+            <div class="subhead">"Friends only" sends your current Friends list's public keys to this domain as a one-time snapshot; it won't include anyone you add to Friends afterward until you save again.</div>
+            <select id="postOfficeMailModeInput" style="margin-top:8px;">
+              <option value="open">Accept mail from anyone at this Post Office</option>
+              <option value="friendsOnly">Friends only</option>
+            </select>
+            <div class="btn-row" style="margin-top:8px;">
+              <button id="postOfficeSaveMailModeBtn" type="button" class="btn-secondary">Save</button>
+            </div>
+            <div id="postOfficeMailModeStatus" class="empty-note" style="margin-top:6px;"></div>
+
+            <h3>Blocked senders</h3>
+            <div class="subhead">Blocked at whichever membership is selected above, regardless of mail mode — a block always wins.</div>
+            <div id="postOfficeBlockedList" class="empty-note">Pick a Post Office membership above.</div>
+            <textarea id="postOfficeBlockPublicKeyInput" placeholder="Public key to block" style="margin-top:8px;min-height:40px;font-family:monospace;font-size:11px;"></textarea>
+            <div class="btn-row" style="margin-top:8px;">
+              <button id="postOfficeBlockBtn" type="button" class="btn-secondary">Block</button>
+            </div>
+            <div id="postOfficeBlockStatus" class="empty-note" style="margin-top:6px;"></div>
+          </div>
+
+          <h3>Check frequency</h3>
+          <div class="subhead">How often the wallet checks for new mail on its own, while it's open.</div>
           <div class="btn-row">
-            <input type="text" id="myPublicKeyDisplay" readonly style="flex:1;font-family:monospace;font-size:11px;">
-            <button id="copyMyPublicKeyBtn" type="button" class="btn-secondary">Copy</button>
+            <input id="mailIntervalInput" type="number" min="1" step="1" style="width:70px;" aria-label="Mail check interval in minutes" />
+            <span>minutes</span>
+            <button id="saveMailIntervalBtn" type="button" class="btn-secondary">Save</button>
           </div>
-          <div id="copyMyPublicKeyStatus" class="empty-note" style="margin-top:6px;"></div>
-
-          <h3>Send mail</h3>
-          <div class="subhead">Only works between two people who both hold a Global Mail membership at the same Post Office — that domain relays the message for you even when you're not standing in it. Claim a membership card at a domain's Post Office stall to add it here as a sending relay.</div>
-          <select id="postOfficeToDomainInput" style="margin-top:8px;">
-            <option value="">No Post Office memberships yet</option>
-          </select>
-          <!-- Task #94 (handle addressing): handle-first by default — type
-               a recipient's handle (bare, since the domain above is already
-               picked; or paste a full "handle#domain" and it'll pick the
-               right domain for you) and it resolves to their public key
-               right before sending. The raw-key textarea stays available
-               as a fallback for someone who hasn't registered a handle
-               yet, revealed by the link below rather than shown by
-               default — see refreshPostOfficeSendMode() in viewer.js. -->
-          <input type="text" id="postOfficeToHandleInput" placeholder="Recipient's handle (e.g. bruno#localhost:8002, or just bruno for the Post Office above)" style="margin-top:8px;">
-          <textarea id="postOfficeToPublicKeyInput" placeholder="Recipient's public key" hidden style="margin-top:8px;min-height:48px;font-family:monospace;font-size:11px;"></textarea>
-          <div class="btn-row" style="margin-top:4px;">
-            <button id="postOfficeToggleRawKeyBtn" type="button" class="link-btn">Paste a raw public key instead</button>
-          </div>
-          <input type="text" id="postOfficeSubjectInput" placeholder="Subject" style="margin-top:8px;">
-          <textarea id="postOfficeBodyInput" placeholder="Message" style="margin-top:8px;"></textarea>
-          <div class="btn-row" style="margin-top:8px;">
-            <button id="postOfficeSendBtn" type="button" class="btn-secondary">Send</button>
-          </div>
-          <div id="postOfficeSendStatus" class="empty-note" style="margin-top:6px;"></div>
+          <div id="mailIntervalStatus" class="empty-note" style="margin-top:6px;"></div>
         </div>
-
-        <!-- Post Office per-membership settings (task #94's two remaining
-             pieces, both now built): a handle to be reached by instead of
-             a raw public key, and consent/block controls over who's
-             allowed to reach you at all — the SAME "your card, your
-             rules" idea the membership itself already carries. All of it
-             (see AtlasWallet.setPostOfficeHandle/setPostOfficeMailMode/
-             blockPostOfficeSender in wallet.js) is scoped to whichever
-             membership is selected in the ONE domain picker at the top,
-             since a wallet can belong to more than one Post Office.
-             Populated on demand (loadPostOfficeSettings) rather than kept
-             in local state, so it always reflects what the domain
-             actually has on file. -->
-        <div id="postOfficeSettingsSection">
-          <h3>Your Post Office settings</h3>
-          <div class="subhead">Everything below applies to one Post Office membership at a time — pick which.</div>
-          <select id="postOfficeSettingsDomainInput" style="margin-top:8px;">
-            <option value="">No Post Office memberships yet</option>
-          </select>
-
-          <!-- Task #94 (handle addressing, the last remaining Post Office
-               piece — "hide the raw public key from users", per direct
-               instruction): a short handle you register at the selected
-               Post Office, instead of handing out a raw public key. Uses
-               "#domain" as the separator, deliberately NOT "@domain" —
-               that shape reads as a real email address and would mislead
-               people about what this actually is. -->
-          <h3>Your handle</h3>
-          <div class="subhead">A short name others can mail you at here, instead of your raw public key — unique per Post Office.</div>
-          <div id="postOfficeYourHandleDisplay" class="empty-note" style="margin-top:6px;"></div>
-          <input type="text" id="postOfficeHandleInput" placeholder="e.g. bruno" style="margin-top:8px;" maxlength="24">
-          <div class="btn-row" style="margin-top:8px;">
-            <button id="postOfficeSaveHandleBtn" type="button" class="btn-secondary">Save</button>
-            <button id="postOfficeClearHandleBtn" type="button" class="btn-secondary">Clear</button>
-          </div>
-          <div id="postOfficeHandleStatus" class="empty-note" style="margin-top:6px;"></div>
-
-          <h3>Who can mail you</h3>
-          <div class="subhead">"Friends only" sends your current Friends list's public keys to this domain as a one-time snapshot; it won't include anyone you add to Friends afterward until you save again.</div>
-          <select id="postOfficeMailModeInput" style="margin-top:8px;">
-            <option value="open">Accept mail from anyone at this Post Office</option>
-            <option value="friendsOnly">Friends only</option>
-          </select>
-          <div class="btn-row" style="margin-top:8px;">
-            <button id="postOfficeSaveMailModeBtn" type="button" class="btn-secondary">Save</button>
-          </div>
-          <div id="postOfficeMailModeStatus" class="empty-note" style="margin-top:6px;"></div>
-
-          <h3>Blocked senders</h3>
-          <div class="subhead">Blocked at whichever membership is selected above, regardless of mail mode — a block always wins.</div>
-          <div id="postOfficeBlockedList" class="empty-note">Pick a Post Office membership above.</div>
-          <textarea id="postOfficeBlockPublicKeyInput" placeholder="Public key to block" style="margin-top:8px;min-height:40px;font-family:monospace;font-size:11px;"></textarea>
-          <div class="btn-row" style="margin-top:8px;">
-            <button id="postOfficeBlockBtn" type="button" class="btn-secondary">Block</button>
-          </div>
-          <div id="postOfficeBlockStatus" class="empty-note" style="margin-top:6px;"></div>
-        </div>
-
-        <h3>Mail</h3>
-        <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere.</div>
-        <div class="btn-row">
-          <button id="checkMailNowBtn" type="button" class="btn-secondary">Check now</button>
-        </div>
-        <div id="mailLastChecked" class="empty-note" style="margin-top:8px;"></div>
-
-        <h3>Check frequency</h3>
-        <div class="subhead">How often the wallet checks for new mail on its own, while it's open.</div>
-        <div class="btn-row">
-          <input id="mailIntervalInput" type="number" min="1" step="1" style="width:70px;" aria-label="Mail check interval in minutes" />
-          <span>minutes</span>
-          <button id="saveMailIntervalBtn" type="button" class="btn-secondary">Save</button>
-        </div>
-        <div id="mailIntervalStatus" class="empty-note" style="margin-top:6px;"></div>
-
-        <h3>Messages</h3>
-        <div class="btn-row">
-          <button id="markAllMailReadBtn" type="button" class="btn-secondary">Mark all read</button>
-          <button id="clearAllMailBtn" type="button" class="btn-secondary">Clear all</button>
-        </div>
-        <div id="mailList" class="item-list"></div>
       </div>
 
       <!-- Sub-screen: Friends (#67) — friend requests happen LIVE, over the

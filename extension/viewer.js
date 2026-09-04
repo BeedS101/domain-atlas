@@ -500,6 +500,13 @@ const friendsSubscreen = document.getElementById('friendsSubscreen');
 const favoritesSubscreen = document.getElementById('favoritesSubscreen');
 const friendRequestsBadge = document.getElementById('friendRequestsBadge');
 
+// Mail's own inner sub-tab bar: Mail (inbox, default) vs. Mail Settings —
+// see showMailInnerSubtab() below.
+const mailInboxSubtabBtn = document.getElementById('mailInboxSubtabBtn');
+const mailSettingsSubtabBtn = document.getElementById('mailSettingsSubtabBtn');
+const mailInboxSubscreen = document.getElementById('mailInboxSubscreen');
+const mailSettingsSubscreen = document.getElementById('mailSettingsSubscreen');
+
 const mailBadge = document.getElementById('mailBadge');
 const checkMailNowBtn = document.getElementById('checkMailNowBtn');
 const mailLastCheckedEl = document.getElementById('mailLastChecked');
@@ -1357,6 +1364,16 @@ function showSocialSubtab(id) {
 
 function socialFriendsTabActive() {
   return !!(friendsSubscreen && friendsSubscreen.classList.contains('active'));
+}
+
+// Mail's own third level of tabbing: Mail (inbox — check-now + Messages,
+// the default) vs. Mail Settings (address, handle, who can mail you,
+// blocked senders, check frequency). Same show-one-hide-the-rest pattern
+// as showSocialSubtab() above, just one level deeper.
+function showMailInnerSubtab(id) {
+  [mailInboxSubscreen, mailSettingsSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  if (mailInboxSubtabBtn) mailInboxSubtabBtn.classList.toggle('active-subtab', id === 'mailInboxSubscreen');
+  if (mailSettingsSubtabBtn) mailSettingsSubtabBtn.classList.toggle('active-subtab', id === 'mailSettingsSubscreen');
 }
 
 // Inventory tab's own second level of tabbing (task #44): Collectibles /
@@ -2390,21 +2407,41 @@ clearAllMailBtn && clearAllMailBtn.addEventListener('click', async () => {
 // Opening the Social tab lands on the Mail sub-tab by default (where the
 // standalone Mail tab used to open directly) — Friends/Favorites are one
 // click further in via socialSubtabBar, not a second top-level tab.
+// Opening the Mail tab (either directly, or by landing on it as Social's
+// default sub-tab) now also triggers a real mail check — same underlying
+// AtlasWallet.checkAllMail() the "Check now" button and the periodic
+// background loop already use. Errors are swallowed the same way
+// checkMailNowBtn's own handler swallows them below: checkAllMail already
+// handles a single unreachable domain internally, so anything that gets
+// here would be something more fundamental (no identity yet, etc.) that
+// silently not-checking is the right response to.
+async function checkMailOnTabOpen() {
+  try {
+    await AtlasWallet.checkAllMail();
+  } catch (err) {
+    // nothing to show for this — see comment above
+  }
+}
+
 socialTabBtn && socialTabBtn.addEventListener('click', async () => {
   showWalletScreen('socialScreen');
   showSocialSubtab('mailSubscreen');
+  await checkMailOnTabOpen();
   await refreshMailDisplay();
   await refreshSubscribeButton();
   await refreshPostOfficeJoinButton();
   await refreshMyPublicKeyDisplay();
+  await refreshInventoryDisplay();
 });
 
 mailSubtabBtn && mailSubtabBtn.addEventListener('click', async () => {
   showSocialSubtab('mailSubscreen');
+  await checkMailOnTabOpen();
   await refreshMailDisplay();
   await refreshSubscribeButton();
   await refreshPostOfficeJoinButton();
   await refreshMyPublicKeyDisplay();
+  await refreshInventoryDisplay();
 });
 
 friendsSubtabBtn && friendsSubtabBtn.addEventListener('click', async () => {
@@ -2416,6 +2453,14 @@ favoritesSubtabBtn && favoritesSubtabBtn.addEventListener('click', async () => {
   showSocialSubtab('favoritesSubscreen');
   await refreshFavoritesDisplay();
 });
+
+// Mail's own inner sub-tab bar (Mail / Mail Settings) — data underneath is
+// already current from whatever last refreshed it (checkMailOnTabOpen +
+// refreshMailDisplay/refreshMyPublicKeyDisplay above, both of which run
+// regardless of which inner sub-tab happens to be showing), so switching
+// is just a visibility toggle, same as Inventory's Collectibles/Documents.
+mailInboxSubtabBtn && mailInboxSubtabBtn.addEventListener('click', () => showMailInnerSubtab('mailInboxSubscreen'));
+mailSettingsSubtabBtn && mailSettingsSubtabBtn.addEventListener('click', () => showMailInnerSubtab('mailSettingsSubscreen'));
 
 // Inventory's own sub-tab bar (task #44) — Collectibles/Documents, same
 // click-to-switch idea as Social's sub-tabs right above. Data is already
