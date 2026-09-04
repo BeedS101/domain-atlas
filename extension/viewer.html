@@ -733,6 +733,19 @@
             <select id="postOfficeToDomainInput" style="margin-top:8px;">
               <option value="">No Post Office memberships yet</option>
             </select>
+            <!-- Friend quick-pick: saved friends (Social -> Friends) are added
+                 over a live presence connection and only ever carry a public
+                 key + display name — no Post Office/domain info, since
+                 friending isn't domain-scoped the way mail membership is (see
+                 AtlasWallet.getFriends's own comment). So picking one here
+                 can only fill the recipient's public key and drops Compose
+                 into the raw-key path for you — the Post Office domain above
+                 still has to be chosen separately either way. Populated lazily
+                 on Compose-tab open, see refreshComposeFriendPicker() in
+                 viewer.js. -->
+            <select id="composeFriendPickerInput" style="margin-top:8px;">
+              <option value="">Quick-pick a friend as recipient…</option>
+            </select>
             <!-- Task #94 (handle addressing): handle-first by default — type
                  a recipient's handle (bare, since the domain above is already
                  picked; or paste a full "handle#domain" and it'll pick the

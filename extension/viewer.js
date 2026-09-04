@@ -544,6 +544,7 @@ const myPublicKeyDisplayEl = document.getElementById('myPublicKeyDisplay');
 const copyMyPublicKeyBtn = document.getElementById('copyMyPublicKeyBtn');
 const copyMyPublicKeyStatusEl = document.getElementById('copyMyPublicKeyStatus');
 const postOfficeToDomainInput = document.getElementById('postOfficeToDomainInput');
+const composeFriendPickerInput = document.getElementById('composeFriendPickerInput');
 const postOfficeToHandleInput = document.getElementById('postOfficeToHandleInput');
 const postOfficeToPublicKeyInput = document.getElementById('postOfficeToPublicKeyInput');
 const postOfficeToggleRawKeyBtn = document.getElementById('postOfficeToggleRawKeyBtn');
@@ -2561,7 +2562,10 @@ mailBoxSentSubtabBtn && mailBoxSentSubtabBtn.addEventListener('click', async () 
   showMailBoxSubtab('mailBoxSentSubscreen');
   await refreshSentMailDisplay();
 });
-mailBoxComposeSubtabBtn && mailBoxComposeSubtabBtn.addEventListener('click', () => showMailBoxSubtab('mailBoxComposeSubscreen'));
+mailBoxComposeSubtabBtn && mailBoxComposeSubtabBtn.addEventListener('click', async () => {
+  showMailBoxSubtab('mailBoxComposeSubscreen');
+  await refreshComposeFriendPicker();
+});
 
 // Inventory's own sub-tab bar (task #44) — Collectibles/Documents, same
 // click-to-switch idea as Social's sub-tabs right above. Data is already
@@ -2696,6 +2700,38 @@ async function refreshPostOfficeSendOptions(identity) {
     const lastUsed = await AtlasWallet.getLastPostOfficeSendDomain(identity.publicKey);
     if (lastUsed && seen.has(lastUsed)) postOfficeToDomainInput.value = lastUsed;
   }
+}
+
+// Friend quick-pick: lets Compose fill the recipient's public key from a
+// saved friend instead of typing/pasting it by hand. Rebuilt from
+// AtlasWallet.getFriends() every time Compose is opened (mailBoxComposeSubtabBtn
+// below) — cheap, and keeps it current with anything added/removed over on
+// the Friends sub-tab without needing a shared refresh path between the two.
+// Preserves the current selection across a refresh the same way
+// refreshPostOfficeSendOptions() does above, in case a friend's display name
+// changed underneath an already-open Compose tab.
+async function refreshComposeFriendPicker() {
+  if (!composeFriendPickerInput) return;
+  const previousValue = composeFriendPickerInput.value;
+  const friends = await AtlasWallet.getFriends();
+
+  composeFriendPickerInput.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = friends.length ? 'Quick-pick a friend as recipient…' : 'No saved friends yet';
+  composeFriendPickerInput.appendChild(placeholder);
+  composeFriendPickerInput.disabled = friends.length === 0;
+
+  const seen = new Set();
+  for (const f of friends) {
+    if (seen.has(f.publicKey)) continue;
+    seen.add(f.publicKey);
+    const opt = document.createElement('option');
+    opt.value = f.publicKey;
+    opt.textContent = f.name;
+    composeFriendPickerInput.appendChild(opt);
+  }
+  if (seen.has(previousValue)) composeFriendPickerInput.value = previousValue;
 }
 
 // Task #94 (consent/block model): the domain picker for the "Who can mail
@@ -2990,6 +3026,27 @@ postOfficeToggleRawKeyBtn && postOfficeToggleRawKeyBtn.addEventListener('click',
   postOfficeToHandleInput.hidden = !showingRawKey;
   postOfficeToggleRawKeyBtn.textContent = showingRawKey ? 'Paste a raw public key instead' : 'Use a handle instead';
   (showingRawKey ? postOfficeToPublicKeyInput : postOfficeToHandleInput).value = '';
+  // A friend pick only ever means anything on the raw-key side (see
+  // refreshComposeFriendPicker's own comment) — clear it either way so it
+  // doesn't look selected against a field it no longer filled.
+  if (composeFriendPickerInput) composeFriendPickerInput.value = '';
+});
+
+// Friend quick-pick (see refreshComposeFriendPicker above): a friend is only
+// ever addressed by public key, never a handle, so picking one always drops
+// Compose into the raw-key path (switching directly rather than going
+// through postOfficeToggleRawKeyBtn's own click handler, which would just
+// clear the selection this handler is reacting to) and fills the key in.
+composeFriendPickerInput && composeFriendPickerInput.addEventListener('change', () => {
+  const publicKey = composeFriendPickerInput.value;
+  if (!publicKey) return;
+  if (postOfficeToPublicKeyInput.hidden) {
+    postOfficeToPublicKeyInput.hidden = false;
+    postOfficeToHandleInput.hidden = true;
+    postOfficeToHandleInput.value = '';
+    postOfficeToggleRawKeyBtn.textContent = 'Use a handle instead';
+  }
+  postOfficeToPublicKeyInput.value = publicKey;
 });
 
 // Post Office (task #75/#87/#94, SPEC.md §11.3): composes and sends a
@@ -3080,6 +3137,7 @@ postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
     postOfficeSendStatusEl.textContent = 'Sent.';
     postOfficeSubjectInput.value = '';
     postOfficeBodyInput.value = '';
+    if (composeFriendPickerInput) composeFriendPickerInput.value = '';
     // Keep Sent current in case it's visited right after — cheap either
     // way, and refreshSentMailDisplay() itself no-ops gracefully without
     // an identity.
