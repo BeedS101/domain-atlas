@@ -111,6 +111,11 @@ async function projectPortals(frame) {
     await page.screenshot({ path: shot('wallet-02-item-issued.png') });
 
     console.log('STEP 4: presenting identity (fresh raw-ECDSA signature, verified client-side)');
+    // Task #73 moved Present identity into the Identity accordion, closed
+    // by default (it used to sit in Inventory, open by default) — open it
+    // first, same as a real user would need to.
+    const identityCategoryOpen = await frame.locator('.settings-category[data-category="identity"]').evaluate((el) => el.classList.contains('open'));
+    if (!identityCategoryOpen) await frame.locator('.settings-category[data-category="identity"] .settings-category-toggle').click();
     await frame.locator('#presentBtn').click();
     await frame.waitForFunction(
       () => document.getElementById('presentBtn').textContent.includes('verified'),

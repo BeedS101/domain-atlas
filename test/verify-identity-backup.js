@@ -194,6 +194,11 @@ function shot(name) {
     await page.screenshot({ path: shot('idb-04-restored.png') });
 
     console.log('STEP 13: proving the restored identity can actually sign — present identity');
+    // Task #73 moved Present identity into the Identity accordion, closed
+    // by default (it used to sit in Inventory, open by default) — open it
+    // first, same as a real user would need to.
+    const identityCategoryOpen = await frame.locator('.settings-category[data-category="identity"]').evaluate((el) => el.classList.contains('open'));
+    if (!identityCategoryOpen) await frame.locator('.settings-category[data-category="identity"] .settings-category-toggle').click();
     await frame.locator('#presentBtn').click();
     await frame.waitForFunction(
       () => document.getElementById('presentBtn').textContent.includes('verified'),

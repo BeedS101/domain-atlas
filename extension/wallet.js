@@ -1310,6 +1310,39 @@ const AtlasWallet = (() => {
     return clamped;
   }
 
+  // ---------- auto-lock on inactivity (#71) ----------
+  //
+  // Only local-password identity (§6 step 5 of SPEC.md) has any "locked"
+  // state to auto-lock in the first place — WebAuthn has no session key to
+  // discard, every signature is its own fresh hardware ceremony (see
+  // isUnlocked() above), so viewer.js only ever runs this timer while
+  // getIdentityMode() === 'local'. Same "client display/behavior
+  // preference, not identity data" reasoning as character scale just
+  // above: this lives outside any per-identity wallet, one value per
+  // device, untouched by locking/identity-switch/import-export — auto-lock
+  // 10 minutes is a choice about THIS DEVICE's own idle behavior, not
+  // something that should reset or need re-choosing every time someone
+  // switches which identity is active on it.
+  //
+  // 0 is a valid, explicit "never auto-lock" — not a missing/unset value —
+  // and is the default, so nobody who never opens this setting gets a
+  // surprise lock mid-session that wasn't there before this feature
+  // shipped.
+  const DEFAULT_AUTO_LOCK_MINUTES = 0;
+
+  async function getAutoLockMinutes() {
+    const { atlasAutoLockMinutes } = await chrome.storage.local.get('atlasAutoLockMinutes');
+    const n = Number(atlasAutoLockMinutes);
+    return Number.isFinite(n) && n >= 0 ? n : DEFAULT_AUTO_LOCK_MINUTES;
+  }
+
+  async function setAutoLockMinutes(minutes) {
+    const n = Number(minutes);
+    if (!Number.isFinite(n) || n < 0) throw new Error('Auto-lock must be 0 (never) or a positive number of minutes.');
+    await chrome.storage.local.set({ atlasAutoLockMinutes: Math.round(n) });
+    return Math.round(n);
+  }
+
   // ---------- misc ----------
 
   async function reverifyAll() {
@@ -1902,6 +1935,7 @@ const AtlasWallet = (() => {
     proposeIntent, settleTrade, verifySignedPayload,
     recordWorldVisit, getRecentWorlds,
     getCharacterScale, setCharacterScale,
+    getAutoLockMinutes, setAutoLockMinutes,
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
     markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift, sendUserMail, getPostOfficeMemberships,

@@ -233,7 +233,18 @@
     }
   }
 
-  async function fetchModelBuffer(url) {
+  // onBytes (task #74, optional — every existing caller still works
+  // unchanged without it) reports this one URL's download progress as a
+  // sequence of events: {status:'cached'} for a 304 or offline-fallback hit
+  // (nothing to download, so it never becomes part of a speed/ETA
+  // calculation); {status:'downloading', totalBytes} once headers arrive,
+  // totalBytes null if the server didn't send Content-Length (a real
+  // possibility with compressed responses — callers must treat that as
+  // "unknown," not zero); {status:'progress', bytes} per chunk as the body
+  // streams in; and {status:'done', bytes} with the exact final byte count
+  // once the download completes — the one moment a caller can always learn
+  // this URL's true size, even if totalBytes was never known ahead of time.
+  async function fetchModelBuffer(url, onBytes) {
     const cached = await getCachedAsset(url);
     const headers = cached && cached.lastModified ? { 'If-Modified-Since': cached.lastModified } : {};
     let res;
@@ -243,12 +254,43 @@
       // second, invisible caching layer second-guessing it.
       res = await fetch(url, { cache: 'no-store', headers });
     } catch (networkErr) {
-      if (cached) return cached.buffer; // offline/unreachable — stale beats broken
+      if (cached) { if (onBytes) onBytes({ status: 'cached' }); return cached.buffer; } // offline/unreachable — stale beats broken
       throw networkErr;
     }
-    if (res.status === 304 && cached) return cached.buffer;
+    if (res.status === 304 && cached) { if (onBytes) onBytes({ status: 'cached' }); return cached.buffer; }
     if (!res.ok) throw new Error('Could not fetch model: ' + url);
-    const buffer = await res.arrayBuffer();
+
+    const contentLengthHeader = res.headers.get('Content-Length');
+    const totalBytes = contentLengthHeader ? Number(contentLengthHeader) : null;
+    if (onBytes) onBytes({ status: 'downloading', totalBytes: Number.isFinite(totalBytes) ? totalBytes : null });
+
+    let buffer;
+    if (res.body && res.body.getReader) {
+      // Streamed read, not a single res.arrayBuffer() — the whole point is
+      // visibility into progress partway through, which a one-shot read
+      // can never give.
+      const reader = res.body.getReader();
+      const chunks = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+        if (onBytes) onBytes({ status: 'progress', bytes: value.byteLength });
+      }
+      const merged = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.byteLength; }
+      buffer = merged.buffer;
+      if (onBytes) onBytes({ status: 'done', bytes: received });
+    } else {
+      // No streaming reader available in this environment — the download
+      // still counts, just reported as one lump at the end instead of live.
+      buffer = await res.arrayBuffer();
+      if (onBytes) onBytes({ status: 'progress', bytes: buffer.byteLength });
+      if (onBytes) onBytes({ status: 'done', bytes: buffer.byteLength });
+    }
     const lastModified = res.headers.get('Last-Modified');
     if (lastModified) putCachedAsset(url, buffer, lastModified); // fire-and-forget
     return buffer;
@@ -258,9 +300,9 @@
 
   const modelCache = new Map(); // url -> Promise<parsedModel>
 
-  function loadModel(gl, url) {
+  function loadModel(gl, url, onBytes) {
     if (modelCache.has(url)) return modelCache.get(url);
-    const promise = fetchModelBuffer(url)
+    const promise = fetchModelBuffer(url, onBytes)
       .then((buffer) => {
         const { json: gltf, bin } = parseGLB(buffer);
         const primitives = [];
@@ -767,9 +809,79 @@
       const uniqueUrls = Array.from(new Set(urls));
       let loadedCount = 0;
       if (opts.onLoadProgress) opts.onLoadProgress(0, uniqueUrls.length);
+
+      // ---------- byte-level speed/ETA (task #74), additive to the count
+      // above — the count-based fill/percentage keeps working exactly as
+      // before for the common case (cache hits, small local assets) where
+      // byte tracking wouldn't add much. `perUrlContribution` holds each
+      // URL's contribution to the total download, in bytes: 0 for a cache
+      // hit (nothing to download), a number once known (from
+      // Content-Length at response time, or — if that header was ever
+      // missing — from the exact count once that one download finishes),
+      // or left unset while still unknown. The total is only trustworthy,
+      // and only then is an ETA shown, once every URL has a contribution —
+      // otherwise callers get a live speed figure with no ETA rather than
+      // an estimate built on a total that's silently still growing.
+      const perUrlContribution = new Map();
+      let bytesDownloadedSoFar = 0;
+      let lastSpeedSampleTime = null;
+      let lastSpeedSampleBytes = 0;
+      let smoothedSpeedBps = null;
+      let lastEmitTime = 0;
+
+      function emitByteProgress(force) {
+        if (!opts.onLoadProgress) return;
+        const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        if (!force && now - lastEmitTime < 150) return; // throttle — a fast local server shouldn't spam one callback per chunk
+        lastEmitTime = now;
+
+        if (lastSpeedSampleTime !== null) {
+          const dt = (now - lastSpeedSampleTime) / 1000;
+          if (dt > 0.05) {
+            const instBps = (bytesDownloadedSoFar - lastSpeedSampleBytes) / dt;
+            smoothedSpeedBps = smoothedSpeedBps === null ? instBps : (smoothedSpeedBps * 0.6 + instBps * 0.4);
+            lastSpeedSampleTime = now;
+            lastSpeedSampleBytes = bytesDownloadedSoFar;
+          }
+        } else {
+          lastSpeedSampleTime = now;
+          lastSpeedSampleBytes = bytesDownloadedSoFar;
+        }
+
+        const totalKnown = perUrlContribution.size === uniqueUrls.length
+          && Array.from(perUrlContribution.values()).every((v) => v !== null);
+        let totalBytes = null;
+        let etaSeconds = null;
+        if (totalKnown) {
+          totalBytes = Array.from(perUrlContribution.values()).reduce((a, b) => a + b, 0);
+          const remaining = Math.max(0, totalBytes - bytesDownloadedSoFar);
+          if (smoothedSpeedBps && smoothedSpeedBps > 1) etaSeconds = remaining / smoothedSpeedBps;
+        }
+        opts.onLoadProgress(loadedCount, uniqueUrls.length, {
+          loadedBytes: bytesDownloadedSoFar,
+          totalBytes,
+          speedBps: smoothedSpeedBps,
+          etaSeconds
+        });
+      }
+
       const modelByUrl = new Map();
       await Promise.all(uniqueUrls.map((url) =>
-        loadModel(gl, url).then((model) => {
+        loadModel(gl, url, (info) => {
+          if (info.status === 'cached') {
+            perUrlContribution.set(url, 0);
+            emitByteProgress(true);
+          } else if (info.status === 'downloading') {
+            perUrlContribution.set(url, info.totalBytes); // may be null — resolved for real at 'done' below if so
+            emitByteProgress(true);
+          } else if (info.status === 'progress') {
+            bytesDownloadedSoFar += info.bytes;
+            emitByteProgress(false);
+          } else if (info.status === 'done') {
+            if (perUrlContribution.get(url) == null) perUrlContribution.set(url, info.bytes); // Content-Length was missing — now we know the real size anyway
+            emitByteProgress(true);
+          }
+        }).then((model) => {
           modelByUrl.set(url, model);
           loadedCount++;
           // Whether this particular url resolved instantly (a 304 cache

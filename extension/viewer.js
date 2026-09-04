@@ -18,6 +18,7 @@ const closeBtn = document.getElementById('closeBtn');
 const sceneLoadProgressEl = document.getElementById('sceneLoadProgress');
 const sceneLoadProgressCountEl = document.getElementById('sceneLoadProgressCount');
 const sceneLoadProgressFillEl = document.getElementById('sceneLoadProgressFill');
+const sceneLoadProgressSpeedEl = document.getElementById('sceneLoadProgressSpeed');
 
 // Scene asset download progress (#36) — driven by gltf-mini.js's
 // loadScene() via the onLoadProgress option passed into MiniGLTF.init
@@ -27,15 +28,44 @@ const sceneLoadProgressFillEl = document.getElementById('sceneLoadProgressFill')
 // bare procedural room) or the progress hook simply wasn't used — either
 // way there's nothing meaningful to show, so the bar stays hidden rather
 // than flashing a 0/0.
-function updateSceneLoadProgress(loaded, total) {
+//
+// Task #74 adds a third, optional argument: {loadedBytes, totalBytes,
+// speedBps, etaSeconds}, sent alongside (not instead of) the existing
+// count — gltf-mini.js also still calls this with just (loaded, total)
+// once a model finishes, so byteInfo can be undefined on any given call.
+// formatBytes() (below, already used by the cache management panel) and
+// formatDuration() turn the raw numbers into the "1.4 MB/s · ~6s left"
+// line; either half is omitted on its own when its input is null —
+// totalBytes/etaSeconds legitimately go unknown when a server didn't send
+// Content-Length (see gltf-mini.js's fetchModelBuffer), and that's shown
+// honestly as "speed only," never a frozen or fabricated estimate.
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  if (seconds < 1) return '<1s';
+  if (seconds < 60) return Math.ceil(seconds) + 's';
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return m + 'm ' + s + 's';
+}
+function updateSceneLoadProgress(loaded, total, byteInfo) {
   if (!sceneLoadProgressEl) return;
   if (!total) { sceneLoadProgressEl.classList.remove('active'); return; }
   sceneLoadProgressEl.classList.add('active');
   if (sceneLoadProgressCountEl) sceneLoadProgressCountEl.textContent = loaded + ' / ' + total;
   if (sceneLoadProgressFillEl) sceneLoadProgressFillEl.style.width = Math.round((loaded / total) * 100) + '%';
+  if (sceneLoadProgressSpeedEl && byteInfo) {
+    const parts = [];
+    if (byteInfo.speedBps && byteInfo.speedBps > 1) {
+      parts.push(formatBytes(byteInfo.speedBps) + '/s');
+      const etaText = byteInfo.totalBytes != null ? formatDuration(byteInfo.etaSeconds) : null;
+      parts.push(etaText ? '~' + etaText + ' left' : 'size unknown');
+    }
+    sceneLoadProgressSpeedEl.textContent = parts.join(' · ');
+  }
 }
 function hideSceneLoadProgress() {
   if (sceneLoadProgressEl) sceneLoadProgressEl.classList.remove('active');
+  if (sceneLoadProgressSpeedEl) sceneLoadProgressSpeedEl.textContent = '';
 }
 
 // ---------- stale extension context ----------
@@ -476,6 +506,9 @@ const mailLastCheckedEl = document.getElementById('mailLastChecked');
 const mailIntervalInput = document.getElementById('mailIntervalInput');
 const saveMailIntervalBtn = document.getElementById('saveMailIntervalBtn');
 const mailIntervalStatusEl = document.getElementById('mailIntervalStatus');
+const autoLockMinutesInput = document.getElementById('autoLockMinutesInput');
+const saveAutoLockMinutesBtn = document.getElementById('saveAutoLockMinutesBtn');
+const autoLockMinutesStatusEl = document.getElementById('autoLockMinutesStatus');
 const mailListEl = document.getElementById('mailList');
 const markAllMailReadBtn = document.getElementById('markAllMailReadBtn');
 const clearAllMailBtn = document.getElementById('clearAllMailBtn');
@@ -2121,6 +2154,7 @@ async function openSettings() {
     characterScaleInputEl.value = String(scale);
     if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
   }
+  if (autoLockMinutesInput) autoLockMinutesInput.value = String(await AtlasWallet.getAutoLockMinutes());
   showWalletScreen('settingsScreen');
 }
 
@@ -3174,6 +3208,22 @@ saveMailIntervalBtn && saveMailIntervalBtn.addEventListener('click', async () =>
   }
 });
 
+// Task #71 — no restart-the-loop step needed the way mail check has: the
+// auto-lock checker (further below, alongside the other periodic timers)
+// re-reads AtlasWallet.getAutoLockMinutes() fresh on every tick rather than
+// caching it, so a save here just takes effect on the checker's next pass.
+saveAutoLockMinutesBtn && saveAutoLockMinutesBtn.addEventListener('click', async () => {
+  autoLockMinutesStatusEl.textContent = '';
+  try {
+    const saved = await AtlasWallet.setAutoLockMinutes(autoLockMinutesInput.value);
+    autoLockMinutesInput.value = String(saved);
+    autoLockMinutesStatusEl.textContent = saved === 0 ? 'Saved — auto-lock is off.' : 'Saved.';
+    markActivity(); // saving this setting shouldn't itself count as the idle clock already having run out
+  } catch (err) {
+    autoLockMinutesStatusEl.textContent = err.message;
+  }
+});
+
 // Blank input + Save = clear the alias back to the raw key; anything else
 // = set/replace it (setAlias runs the profanity filter — see wallet.js).
 setAliasBtn.addEventListener('click', async () => {
@@ -3687,6 +3737,47 @@ function checkItemUpdatesForDomain(domain) {
     });
 }
 restartMailCheckLoop();
+
+// ---------- auto-lock on inactivity (#71) ----------
+//
+// "Activity" is any mouse/keyboard/wheel/touch input anywhere in this
+// overlay — the wallet panel and the 3D/2D view alike — a small, broad set
+// of window-level listeners rather than threading a markActivity() call
+// into every existing feature-specific one (movement keydowns, cursor-hide's
+// own mousemove listener at the top of this file, every wallet button).
+// Passive and cheap: each one just stamps a timestamp, nothing else. A
+// click on any wallet button fires its own mousedown first, so ordinary
+// wallet use already counts as activity with no extra wiring at each
+// button.
+let lastActivityTime = Date.now();
+function markActivity() { lastActivityTime = Date.now(); }
+['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart'].forEach((type) => {
+  window.addEventListener(type, markActivity, { passive: true });
+});
+
+// Checked periodically rather than with one setTimeout per configured
+// timeout, so a changed setting (saveAutoLockMinutesBtn above) just takes
+// effect on this loop's next pass — same reasoning restartMailCheckLoop
+// documents for wanting an immediate restart, just satisfied here by
+// re-reading the setting fresh each tick instead. 0 minutes (never) and a
+// non-local identity mode (WebAuthn has no locked state at all — see
+// wallet.js's isUnlocked()) both mean "nothing to do," checked fresh each
+// time since either can change while this loop is running.
+const AUTO_LOCK_CHECK_INTERVAL_MS = 15000;
+setInterval(async () => {
+  const minutes = await AtlasWallet.getAutoLockMinutes();
+  if (!minutes) return;
+  if ((await AtlasWallet.getIdentityMode()) !== 'local') return;
+  if (!(await AtlasWallet.isUnlocked())) return;
+  if (Date.now() - lastActivityTime < minutes * 60 * 1000) return;
+  await AtlasWallet.lockIdentity();
+  await refreshQuickLockButtonVisibility();
+  // Same re-routing the two manual lock buttons already trigger (Settings'
+  // Lock wallet, and the top-bar Quick lock) — if the panel's open to a
+  // screen that only makes sense unlocked, route it to wherever locking
+  // now actually leads, so all three ways of locking behave consistently.
+  if (walletPanel.classList.contains('open')) await routeWalletScreen();
+}, AUTO_LOCK_CHECK_INTERVAL_MS);
 
 refreshIdentityDisplay();
 refreshInventoryDisplay();

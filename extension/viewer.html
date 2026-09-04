@@ -223,6 +223,10 @@
   #sceneLoadProgress .scene-load-progress-label { font-size: 12px; color: #a9b8bf; margin-bottom: 8px; }
   #sceneLoadProgress .scene-load-progress-track { height: 6px; border-radius: 999px; background: #1b2830; overflow: hidden; }
   #sceneLoadProgress .scene-load-progress-fill { height: 100%; width: 0%; background: #57a593; transition: width 120ms linear; }
+  /* Task #74 — speed/ETA line, additive below the existing count/bar.
+     Empty (and so takes no visible space) until gltf-mini.js has actual
+     byte-level progress to report; see updateSceneLoadProgress(). */
+  #sceneLoadProgressSpeed { font-size: 11px; color: #6f838c; margin-top: 6px; min-height: 14px; }
 </style>
 </head>
 <body>
@@ -249,6 +253,7 @@
   <div id="sceneLoadProgress">
     <div class="scene-load-progress-label">Loading world assets… <span id="sceneLoadProgressCount">0 / 0</span></div>
     <div class="scene-load-progress-track"><div id="sceneLoadProgressFill" class="scene-load-progress-fill"></div></div>
+    <div id="sceneLoadProgressSpeed"></div>
   </div>
   <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain</div>
   <div id="scene3dHint">WASD to walk · drag to look · scroll to zoom out · walk into a glowing ring to take that portal · F11 for fullscreen</div>
@@ -389,6 +394,27 @@
         </div>
       </div>
 
+      <!-- Task #71: auto-lock after inactivity. Only meaningful for a
+           password identity (WebAuthn has no locked state to auto-lock at
+           all — see wallet.js's isUnlocked()), but the setting itself is a
+           per-device preference, not identity data, same reasoning as
+           Player character's size slider below — so it's its own category
+           rather than nested under Identity method, and stays put across a
+           lock/unlock or an identity switch. -->
+      <div class="settings-category" data-category="profile">
+        <button type="button" class="settings-category-toggle"><span>Profile</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <h3 style="margin-top:0;">Auto-lock</h3>
+          <div class="subhead">Automatically lock a password identity after this many minutes with no activity in the wallet or the 3D view. 0 turns it off. Passkey identities are unaffected — there's nothing to lock (see Identity method above).</div>
+          <div class="btn-row">
+            <input id="autoLockMinutesInput" type="number" min="0" step="1" style="width:70px;" aria-label="Auto-lock timeout in minutes" />
+            <span>minutes (0 = never)</span>
+            <button id="saveAutoLockMinutesBtn" type="button" class="btn-secondary">Save</button>
+          </div>
+          <div id="autoLockMinutesStatus" class="empty-note" style="margin-top:6px;"></div>
+        </div>
+      </div>
+
       <div class="settings-category" data-category="identity-backup">
         <button type="button" class="settings-category-toggle"><span>Identity backup</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
@@ -509,6 +535,18 @@
           <div class="btn-col" style="margin-top:8px;">
             <button id="createCounterpartyBtn" type="button">Create counterparty identity</button>
           </div>
+
+          <!-- Task #73: moved here from Inventory, where it sat left over
+               from before Inventory became its own section (#44). A pure
+               WebAuthn possession proof over the owner's own keypair — it
+               doesn't touch any specific held credential, so it belongs
+               with identity operations, not inventory ones. (Contrast
+               "Re-verify wallet against current issuers", which stays in
+               Inventory below — that one's entirely about the validity of
+               what's held, not the wallet's own identity.) -->
+          <div class="btn-col" style="margin-top:8px;">
+            <button id="presentBtn" type="button">Present identity (verify possession)</button>
+          </div>
         </div>
       </div>
 
@@ -537,7 +575,6 @@
         <div class="settings-category-body">
           <div class="btn-col">
             <button id="requestItemBtn" type="button">Request item from this world</button>
-            <button id="presentBtn" type="button">Present identity (verify possession)</button>
             <button id="reverifyBtn" type="button">Re-verify wallet against current issuers</button>
           </div>
           <div id="loadoutNote"></div>

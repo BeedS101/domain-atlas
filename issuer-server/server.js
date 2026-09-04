@@ -657,6 +657,16 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// Handles both GET (task #74 wants real byte progress while a scene loads,
+// which needs a working Content-Length; #65's size-estimate tooltip probe
+// wants HEAD specifically, to learn a file's size without paying for its
+// body) and HEAD (added alongside #65/#74 — previously unsupported, so a
+// HEAD request fell through to the 405 in the request handler below,
+// which is the actually-standard-but-previously-missing case a tooltip
+// probing several asset sizes at once needs; GET's own behavior is
+// unchanged). HEAD responds with the exact headers a GET for the same URL
+// would send, body omitted, per HTTP's own definition of the method — a
+// client can rely on its Content-Length without downloading anything.
 function serveStatic(req, res) {
   let urlPath = decodeURIComponent(req.url.split('?')[0]);
   if (urlPath === '/') urlPath = '/index.html';
@@ -674,11 +684,23 @@ function serveStatic(req, res) {
       res.writeHead(304, { 'Last-Modified': lastModified, 'Access-Control-Allow-Origin': '*' });
       return res.end();
     }
-    fs.readFile(filePath, (err, data) => {
-      if (err) { res.writeHead(404); return res.end('Not found'); }
-      const ext = path.extname(filePath);
+    const ext = path.extname(filePath);
+    if (req.method === 'HEAD') {
+      // Content-Length straight from the stat already in hand — no need to
+      // actually read the file just to learn its size.
       res.writeHead(200, {
         'Content-Type': (MIME[ext] || 'application/octet-stream'),
+        'Content-Length': String(stat.size),
+        'Last-Modified': lastModified,
+        'Access-Control-Allow-Origin': '*'
+      });
+      return res.end();
+    }
+    fs.readFile(filePath, (err, data) => {
+      if (err) { res.writeHead(404); return res.end('Not found'); }
+      res.writeHead(200, {
+        'Content-Type': (MIME[ext] || 'application/octet-stream'),
+        'Content-Length': String(data.length),
         'Last-Modified': lastModified,
         'Access-Control-Allow-Origin': '*'
       });
@@ -1433,7 +1455,7 @@ async function main() {
         return sendJson(res, 200, { ok: true, publicKey: member.ownerPublicKey, handle: member.handle });
       }
 
-      if (req.method === 'GET') return serveStatic(req, res);
+      if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
       res.writeHead(405);
       res.end('Method not allowed');
     } catch (err) {
