@@ -508,6 +508,20 @@ const mailInboxSubscreen = document.getElementById('mailInboxSubscreen');
 const mailSettingsSubscreen = document.getElementById('mailSettingsSubscreen');
 
 const mailBadge = document.getElementById('mailBadge');
+
+// The "Mail" heading's own inner Inbox/Sent/Compose split — one level
+// deeper than the Mail/Mail Settings split above. See showMailBoxSubtab()
+// below.
+const mailBoxInboxSubtabBtn = document.getElementById('mailBoxInboxSubtabBtn');
+const mailBoxSentSubtabBtn = document.getElementById('mailBoxSentSubtabBtn');
+const mailBoxComposeSubtabBtn = document.getElementById('mailBoxComposeSubtabBtn');
+const mailBoxInboxSubscreen = document.getElementById('mailBoxInboxSubscreen');
+const mailBoxSentSubscreen = document.getElementById('mailBoxSentSubscreen');
+const mailBoxComposeSubscreen = document.getElementById('mailBoxComposeSubscreen');
+const mailBoxInboxBadge = document.getElementById('mailBoxInboxBadge');
+const sentMailListEl = document.getElementById('sentMailList');
+const clearSentMailBtn = document.getElementById('clearSentMailBtn');
+
 const checkMailNowBtn = document.getElementById('checkMailNowBtn');
 const mailLastCheckedEl = document.getElementById('mailLastChecked');
 const mailIntervalInput = document.getElementById('mailIntervalInput');
@@ -1374,6 +1388,16 @@ function showMailInnerSubtab(id) {
   [mailInboxSubscreen, mailSettingsSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
   if (mailInboxSubtabBtn) mailInboxSubtabBtn.classList.toggle('active-subtab', id === 'mailInboxSubscreen');
   if (mailSettingsSubtabBtn) mailSettingsSubtabBtn.classList.toggle('active-subtab', id === 'mailSettingsSubscreen');
+}
+
+// The "Mail" heading's own fourth level of tabbing: Inbox / Sent /
+// Compose. Same show-one-hide-the-rest pattern as showMailInnerSubtab()
+// right above, one level deeper still.
+function showMailBoxSubtab(id) {
+  [mailBoxInboxSubscreen, mailBoxSentSubscreen, mailBoxComposeSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  if (mailBoxInboxSubtabBtn) mailBoxInboxSubtabBtn.classList.toggle('active-subtab', id === 'mailBoxInboxSubscreen');
+  if (mailBoxSentSubtabBtn) mailBoxSentSubtabBtn.classList.toggle('active-subtab', id === 'mailBoxSentSubscreen');
+  if (mailBoxComposeSubtabBtn) mailBoxComposeSubtabBtn.classList.toggle('active-subtab', id === 'mailBoxComposeSubscreen');
 }
 
 // Inventory tab's own second level of tabbing (task #44): Collectibles /
@@ -2280,6 +2304,14 @@ async function refreshMailDisplay() {
 
   mailBadge.textContent = String(unreadCount);
   mailBadge.classList.toggle('show', unreadCount > 0);
+  // Same count, mirrored one level deeper onto the Inbox sub-tab itself —
+  // the outer badge above says "something needs attention in Mail" before
+  // you've even opened it; this one says so again right where the actual
+  // Inbox tab is, now that Inbox/Sent/Compose are separate tabs.
+  if (mailBoxInboxBadge) {
+    mailBoxInboxBadge.textContent = String(unreadCount);
+    mailBoxInboxBadge.classList.toggle('show', unreadCount > 0);
+  }
 
   if (mailListEl) {
     mailListEl.innerHTML = '';
@@ -2299,6 +2331,62 @@ async function refreshMailDisplay() {
   }
   await updateSocialBadge();
 }
+
+// Sent tab: a purely local record (AtlasWallet.getSentMail — see its own
+// comment on why this exists at all, and sendUserMail's on how entries get
+// added) of what this wallet has sent through a Post Office. Same card
+// shape/styling as renderMailCard above (.mail-card), just a "To" line
+// instead of "From" and no unread/gift/block affordances — none of those
+// concepts apply to a message you sent yourself.
+function renderSentMailCard(entry, container) {
+  const el = document.createElement('div');
+  el.className = 'wallet-item mail-card';
+  el.dataset.id = entry.id;
+  const sentAt = new Date(entry.sentAt).toLocaleString();
+  const toLine = entry.to.handle
+    ? 'To ' + escapeHtml(entry.to.handle) + '#' + escapeHtml(entry.domain)
+    : 'To ' + escapeHtml(entry.to.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.domain);
+  el.innerHTML =
+    '<div class="mail-domain">' + toLine + '</div>' +
+    '<div class="mail-subject">' + escapeHtml(entry.subject) + '</div>' +
+    '<div class="mail-meta">' + sentAt + '</div>' +
+    '<div class="mail-body">' + escapeHtml(entry.body) + '</div>' +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="delete-sent" class="danger-btn">Delete</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshSentMailDisplay() {
+  if (!sentMailListEl) return;
+  const identity = await AtlasWallet.getIdentity();
+  const entries = identity ? await AtlasWallet.getSentMail(identity.publicKey) : [];
+  sentMailListEl.innerHTML = '';
+  if (entries.length === 0) {
+    sentMailListEl.innerHTML = '<div class="empty-note">No sent mail yet.</div>';
+  } else {
+    entries.forEach((entry) => renderSentMailCard(entry, sentMailListEl));
+  }
+}
+
+sentMailListEl && sentMailListEl.addEventListener('click', async (e) => {
+  const deleteBtn = e.target.closest('button[data-action="delete-sent"]');
+  if (!deleteBtn) return;
+  const card = e.target.closest('.mail-card');
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity || !card) return;
+  if (!confirm('Delete this sent message from your local history? This cannot be undone.')) return;
+  await AtlasWallet.deleteSentMailMessage(identity.publicKey, card.dataset.id);
+  await refreshSentMailDisplay();
+});
+
+clearSentMailBtn && clearSentMailBtn.addEventListener('click', async () => {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  if (!confirm('Clear your ENTIRE sent-mail history? This only removes your local record — it cannot be undone.')) return;
+  await AtlasWallet.clearAllSentMail(identity.publicKey);
+  await refreshSentMailDisplay();
+});
 
 // Combined badge on the top-level Social tab (#61/#67) — unread mail plus
 // pending incoming friend requests, so there's a single "something needs
@@ -2462,6 +2550,19 @@ favoritesSubtabBtn && favoritesSubtabBtn.addEventListener('click', async () => {
 mailInboxSubtabBtn && mailInboxSubtabBtn.addEventListener('click', () => showMailInnerSubtab('mailInboxSubscreen'));
 mailSettingsSubtabBtn && mailSettingsSubtabBtn.addEventListener('click', () => showMailInnerSubtab('mailSettingsSubscreen'));
 
+// The "Mail" heading's own Inbox/Sent/Compose tabs. Inbox and Compose need
+// no refresh on click — both are kept current by whatever last called
+// refreshMailDisplay()/refreshMyPublicKeyDisplay() (checkMailOnTabOpen
+// above, or any send/mark-read/delete action), same lazy convention as
+// Collectibles/Documents. Sent is the one sub-tab nothing else keeps
+// current, so it refreshes itself on the way in.
+mailBoxInboxSubtabBtn && mailBoxInboxSubtabBtn.addEventListener('click', () => showMailBoxSubtab('mailBoxInboxSubscreen'));
+mailBoxSentSubtabBtn && mailBoxSentSubtabBtn.addEventListener('click', async () => {
+  showMailBoxSubtab('mailBoxSentSubscreen');
+  await refreshSentMailDisplay();
+});
+mailBoxComposeSubtabBtn && mailBoxComposeSubtabBtn.addEventListener('click', () => showMailBoxSubtab('mailBoxComposeSubscreen'));
+
 // Inventory's own sub-tab bar (task #44) — Collectibles/Documents, same
 // click-to-switch idea as Social's sub-tabs right above. Data is already
 // current from whatever last called refreshInventoryDisplay() (opening
@@ -2554,6 +2655,11 @@ async function refreshMyPublicKeyDisplay() {
 // actually joined, not a domain typed in freehand. Rebuilds the select
 // from AtlasWallet.getPostOfficeMemberships(), preserving the current
 // selection across refreshes where it's still valid (e.g. after sending).
+// Failing that, falls back to whichever domain this wallet last actually
+// sent through (AtlasWallet.getLastPostOfficeSendDomain — set by
+// sendUserMail itself on a confirmed send, not on every dropdown nudge),
+// so a wallet with one regular Post Office doesn't have to reselect it
+// on every visit to Compose.
 async function refreshPostOfficeSendOptions(identity) {
   if (!postOfficeToDomainInput) return;
   const previousValue = postOfficeToDomainInput.value;
@@ -2584,7 +2690,12 @@ async function refreshPostOfficeSendOptions(identity) {
     opt.textContent = m.domain;
     postOfficeToDomainInput.appendChild(opt);
   }
-  if (seen.has(previousValue)) postOfficeToDomainInput.value = previousValue;
+  if (seen.has(previousValue)) {
+    postOfficeToDomainInput.value = previousValue;
+  } else if (identity) {
+    const lastUsed = await AtlasWallet.getLastPostOfficeSendDomain(identity.publicKey);
+    if (lastUsed && seen.has(lastUsed)) postOfficeToDomainInput.value = lastUsed;
+  }
 }
 
 // Task #94 (consent/block model): the domain picker for the "Who can mail
@@ -2627,6 +2738,17 @@ async function refreshPostOfficeSettingsDomainOptions(identity) {
   }
   if (seen.has(previousValue)) {
     postOfficeSettingsDomainInput.value = previousValue;
+    await loadPostOfficeSettings();
+    return;
+  }
+  // Falls back to whichever domain this wallet last picked here
+  // (AtlasWallet.getLastPostOfficeSettingsDomain — persisted by the
+  // picker's own 'change' handler below), same UI convenience as
+  // refreshPostOfficeSendOptions above, so a wallet with one regular Post
+  // Office doesn't have to reselect it on every visit to Mail Settings.
+  const lastUsed = identity ? await AtlasWallet.getLastPostOfficeSettingsDomain(identity.publicKey) : null;
+  if (lastUsed && seen.has(lastUsed)) {
+    postOfficeSettingsDomainInput.value = lastUsed;
     await loadPostOfficeSettings();
   } else {
     await renderPostOfficeSettings(null);
@@ -2701,7 +2823,15 @@ function renderPostOfficeSettings(settings) {
   ).join('');
 }
 
-postOfficeSettingsDomainInput && postOfficeSettingsDomainInput.addEventListener('change', loadPostOfficeSettings);
+postOfficeSettingsDomainInput && postOfficeSettingsDomainInput.addEventListener('change', async () => {
+  await loadPostOfficeSettings();
+  // Remember this as "last used" for next time (UI convenience only — see
+  // refreshPostOfficeSettingsDomainOptions' own comment). A deliberate
+  // pick here IS the action, unlike Compose's picker which is recorded at
+  // send time instead, so this is recorded right on change.
+  const identity = await AtlasWallet.getIdentity();
+  if (identity) await AtlasWallet.setLastPostOfficeSettingsDomain(identity.publicKey, postOfficeSettingsDomainInput.value || null);
+});
 
 // Task #94 (handle addressing): claims/changes this membership's handle.
 // Format/profanity is checked again server-side regardless (see server.js's
@@ -2888,6 +3018,11 @@ postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
 
   let toDomain = (postOfficeToDomainInput.value || '').trim();
   let toPublicKey = '';
+  // Purely a display hint for this wallet's own Sent record (see
+  // AtlasWallet.sendUserMail's own comment) — set only on the handle path
+  // below, where a handle was actually resolved; the raw-key path leaves
+  // it undefined and the Sent card falls back to showing the raw key.
+  let toHandleForRecord;
 
   if (usingRawKey) {
     toPublicKey = (postOfficeToPublicKeyInput.value || '').trim();
@@ -2928,6 +3063,7 @@ postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
     try {
       const resolved = await AtlasWallet.resolvePostOfficeHandle(toDomain, handle);
       toPublicKey = resolved.publicKey;
+      toHandleForRecord = handle;
     } catch (err) {
       postOfficeSendStatusEl.textContent = err.message;
       postOfficeSendBtn.disabled = false;
@@ -2940,10 +3076,14 @@ postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
   postOfficeSendBtn.textContent = 'Sending…';
   postOfficeSendStatusEl.textContent = '';
   try {
-    await AtlasWallet.sendUserMail(toDomain, toPublicKey, subject, body);
+    await AtlasWallet.sendUserMail(toDomain, toPublicKey, subject, body, toHandleForRecord);
     postOfficeSendStatusEl.textContent = 'Sent.';
     postOfficeSubjectInput.value = '';
     postOfficeBodyInput.value = '';
+    // Keep Sent current in case it's visited right after — cheap either
+    // way, and refreshSentMailDisplay() itself no-ops gracefully without
+    // an identity.
+    await refreshSentMailDisplay();
   } catch (err) {
     postOfficeSendStatusEl.textContent = 'Send failed: ' + err.message;
   } finally {

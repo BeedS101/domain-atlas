@@ -143,6 +143,21 @@ async function openMailInboxSubtab(frame) {
   if (!alreadyOpen) await frame.locator('#mailInboxSubtabBtn').click();
 }
 
+// The "Mail" heading has its own further Inbox/Sent/Compose split now —
+// Compose is where the recipient/subject/body/send fields live (formerly
+// "Send mail"), Inbox is check-now + the message list. Both nested INSIDE
+// mailInboxSubscreen, so the outer "Mail" tab must already be open (see
+// openMailInboxSubtab above) before either of these can click anything —
+// their target buttons are display:none otherwise.
+async function openMailBoxInboxSubtab(frame) {
+  const alreadyOpen = await frame.locator('#mailBoxInboxSubscreen').evaluate((el) => el.classList.contains('active'));
+  if (!alreadyOpen) await frame.locator('#mailBoxInboxSubtabBtn').click();
+}
+async function openMailBoxComposeSubtab(frame) {
+  const alreadyOpen = await frame.locator('#mailBoxComposeSubscreen').evaluate((el) => el.classList.contains('active'));
+  if (!alreadyOpen) await frame.locator('#mailBoxComposeSubtabBtn').click();
+}
+
 (async () => {
   const dirA = path.resolve(__dirname, '.chrome-profile-postoffice-handle-a');
   const dirB = path.resolve(__dirname, '.chrome-profile-postoffice-handle-b');
@@ -176,6 +191,7 @@ async function openMailInboxSubtab(frame) {
     console.log('STEP 2: A sends to B using JUST the bare handle "bob" — no raw public key typed');
     await openMailScreen(a.frame);
     await openMailInboxSubtab(a.frame);
+    await openMailBoxComposeSubtab(a.frame);
     await a.frame.waitForFunction(() => {
       const opts = [...document.getElementById('postOfficeToDomainInput').options].map((o) => o.value).filter(Boolean);
       return opts.includes('localhost:8002');
@@ -193,6 +209,7 @@ async function openMailInboxSubtab(frame) {
     console.log('STEP 3: B\'s mail card shows it, falling back to A\'s raw key (A has no handle registered yet)');
     await openMailScreen(b.frame);
     await openMailInboxSubtab(b.frame);
+    await openMailBoxInboxSubtab(b.frame);
     await b.frame.locator('#checkMailNowBtn').click();
     await b.frame.waitForFunction(() => [...document.querySelectorAll('#mailList .mail-card')].some((el) => el.textContent.includes('Hello via handle')), { timeout: 10000 });
     const card1 = b.frame.locator('#mailList .mail-card', { hasText: 'Hello via handle' });
@@ -208,6 +225,7 @@ async function openMailInboxSubtab(frame) {
     await a.frame.locator('#postOfficeSaveHandleBtn').click();
     await a.frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), { timeout: 5000 });
     await openMailInboxSubtab(a.frame);
+    await openMailBoxComposeSubtab(a.frame);
     await a.frame.locator('#postOfficeToDomainInput').selectOption(''); // clear the dropdown to prove the full address alone drives it
     await a.frame.locator('#postOfficeToHandleInput').fill('bob#localhost:8002');
     await a.frame.locator('#postOfficeSubjectInput').fill('Hello via full address');

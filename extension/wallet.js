@@ -1514,7 +1514,13 @@ const AtlasWallet = (() => {
   // wallet state changes here — the message lives entirely on the
   // recipient's domain until THEIR checkAllMail() picks it up, the same as
   // any other mail this wallet doesn't itself hold the credential for.
-  async function sendUserMail(toDomain, toPublicKey, subject, body) {
+  //
+  // `toHandle` (optional) is purely a display hint for this wallet's OWN
+  // Sent record below — the recipient's registered handle, if the caller
+  // already resolved one (Compose's handle-first path does; the raw-key
+  // path has none). It plays no role in the actual send: the server call
+  // is identical either way, keyed only on toPublicKey.
+  async function sendUserMail(toDomain, toPublicKey, subject, body, toHandle) {
     if (!toDomain) throw new Error('toDomain is required — a Post Office this wallet already holds a Global Mail membership at.');
     if (!toPublicKey) throw new Error('toPublicKey is required.');
     if (!subject || !body) throw new Error('subject and body are required.');
@@ -1527,7 +1533,99 @@ const AtlasWallet = (() => {
       body: JSON.stringify({ payload, proof })
     });
     if (!res.ok) throw new Error('Send failed: ' + (await res.text()));
-    return await res.json();
+    const result = await res.json();
+
+    // Record this locally for the wallet's own Sent tab — the relaying
+    // domain never hands the message back to the sender afterward (it
+    // only ever reaches the recipient's checkAllMail()), so without this
+    // the sender would have no record of what they'd sent at all. Uses
+    // the server's own id/sentAt from `result` rather than minting new
+    // ones, since that IS the canonical envelope the recipient will see.
+    const identity = await getIdentity();
+    if (identity && result && result.id) {
+      const entries = await getSentMail(identity.publicKey);
+      entries.unshift({
+        id: result.id,
+        to: { publicKey: toPublicKey, handle: toHandle || null },
+        domain: toDomain,
+        subject: result.subject || subject,
+        body: result.body || body,
+        sentAt: result.sentAt || new Date().toISOString()
+      });
+      await saveSentMail(identity.publicKey, entries);
+      // Last-used "send via" domain (UI convenience only) — recorded here,
+      // at the point of an actual confirmed send, rather than on every
+      // dropdown change, so it reflects a domain this wallet really sent
+      // through rather than just briefly hovered in the picker.
+      await setLastPostOfficeSendDomain(identity.publicKey, toDomain);
+    }
+
+    return result;
+  }
+
+  // ---------- sent mail (this wallet's own outgoing Post Office history) ----------
+  //
+  // sendUserMail() above never touched local storage before this — the
+  // message lived entirely on the recipient's domain. This is purely a
+  // local record of what THIS wallet has sent, for its own Sent tab;
+  // nothing here is read by the protocol side, and (same as the received
+  // side's mail) there's no way to un-send or edit what a domain already
+  // relayed — Delete/Clear below only remove the local record of it.
+  async function getSentMail(ownerPublicKey) {
+    const { atlasSentMail } = await chrome.storage.local.get('atlasSentMail');
+    return (atlasSentMail || {})[ownerPublicKey] || [];
+  }
+
+  async function saveSentMail(ownerPublicKey, entries) {
+    const { atlasSentMail } = await chrome.storage.local.get('atlasSentMail');
+    const all = atlasSentMail || {};
+    all[ownerPublicKey] = entries;
+    await chrome.storage.local.set({ atlasSentMail: all });
+  }
+
+  async function deleteSentMailMessage(ownerPublicKey, messageId) {
+    const entries = await getSentMail(ownerPublicKey);
+    const remaining = entries.filter((e) => e.id !== messageId);
+    await saveSentMail(ownerPublicKey, remaining);
+  }
+
+  async function clearAllSentMail(ownerPublicKey) {
+    await saveSentMail(ownerPublicKey, []);
+  }
+
+  // ---------- mail-tab dropdown UI convenience: remember the last domain picked ----------
+  //
+  // Purely a UI nicety, not protocol state: both Post Office domain
+  // pickers in the Mail tab (Compose's "send via", and Mail Settings'
+  // "which membership to configure") used to always reopen on a blank
+  // placeholder, even when this wallet only ever uses one Post Office.
+  // Two separate keys, both scoped per identity like the rest of this
+  // section, since "send via" and "which membership to configure" are
+  // different questions that can reasonably land on different domains —
+  // and different identities in the same wallet can belong to different
+  // Post Offices entirely.
+  async function getLastPostOfficeSendDomain(ownerPublicKey) {
+    const { atlasLastPostOfficeSendDomain } = await chrome.storage.local.get('atlasLastPostOfficeSendDomain');
+    return (atlasLastPostOfficeSendDomain || {})[ownerPublicKey] || null;
+  }
+
+  async function setLastPostOfficeSendDomain(ownerPublicKey, domain) {
+    const { atlasLastPostOfficeSendDomain } = await chrome.storage.local.get('atlasLastPostOfficeSendDomain');
+    const all = atlasLastPostOfficeSendDomain || {};
+    all[ownerPublicKey] = domain || null;
+    await chrome.storage.local.set({ atlasLastPostOfficeSendDomain: all });
+  }
+
+  async function getLastPostOfficeSettingsDomain(ownerPublicKey) {
+    const { atlasLastPostOfficeSettingsDomain } = await chrome.storage.local.get('atlasLastPostOfficeSettingsDomain');
+    return (atlasLastPostOfficeSettingsDomain || {})[ownerPublicKey] || null;
+  }
+
+  async function setLastPostOfficeSettingsDomain(ownerPublicKey, domain) {
+    const { atlasLastPostOfficeSettingsDomain } = await chrome.storage.local.get('atlasLastPostOfficeSettingsDomain');
+    const all = atlasLastPostOfficeSettingsDomain || {};
+    all[ownerPublicKey] = domain || null;
+    await chrome.storage.local.set({ atlasLastPostOfficeSettingsDomain: all });
   }
 
   // Which domains this identity can currently send through — every
@@ -1939,6 +2037,9 @@ const AtlasWallet = (() => {
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
     markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift, sendUserMail, getPostOfficeMemberships,
+    getSentMail, deleteSentMailMessage, clearAllSentMail,
+    getLastPostOfficeSendDomain, setLastPostOfficeSendDomain,
+    getLastPostOfficeSettingsDomain, setLastPostOfficeSettingsDomain,
     setPostOfficeMailMode, blockPostOfficeSender, unblockPostOfficeSender, getPostOfficeSettings,
     setPostOfficeHandle, resolvePostOfficeHandle,
     getAssetUpdateNotices, markAssetUpdateNoticesSeen,

@@ -236,6 +236,11 @@ async function claimPostOfficeMembership(frame, label) {
     console.log('PASS: send-via dropdown offers exactly the Post Office A actually joined ->', sendViaOptions);
 
     console.log('STEP 4: Visitor A sends mail to B\'s public key via that dropdown');
+    // The recipient/subject/body/send fields now live under the "Mail"
+    // heading's own Compose tab (formerly "Send mail", directly on the
+    // outer Mail screen) — switch to it before touching any of them.
+    const composeAlreadyActive = await a.frame.locator('#mailBoxComposeSubscreen').evaluate((el) => el.classList.contains('active'));
+    if (!composeAlreadyActive) await a.frame.locator('#mailBoxComposeSubtabBtn').click();
     // Task #94 (handle addressing): Compose is handle-first by default now
     // (see manual-postoffice-handle-ui.js for that path) — this test is
     // specifically exercising the raw-public-key path (arbitrary/stranger

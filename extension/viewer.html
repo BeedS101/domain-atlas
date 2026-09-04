@@ -674,24 +674,85 @@
         </div>
 
         <div id="mailInboxSubscreen" class="subscreen active">
-          <!-- Checking for new mail also now happens automatically whenever
-               this tab is opened (see the mailSubtabBtn/socialTabBtn click
-               handlers in viewer.js), not just from this button or the
-               periodic background loop — "Check now" stays for whenever you
-               want a check without leaving/re-entering the tab. -->
+          <!-- The "Mail" heading (renamed from "Messages") now carries its
+               own three-way split — Inbox / Sent / Compose — instead of
+               being one long scroll of check-now, message list, and a
+               compose form back to back. Same nested .subtab-bar/.subscreen
+               pattern as the "Mail" vs "Mail Settings" split one level up.
+               Checking for new mail still happens automatically whenever
+               the Mail sub-tab is opened (see the mailSubtabBtn/socialTabBtn
+               click handlers in viewer.js), not just from the Check now
+               button below or the periodic background loop. -->
           <h3>Mail</h3>
-          <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere. Also checks automatically every time you open this tab.</div>
-          <div class="btn-row">
-            <button id="checkMailNowBtn" type="button" class="btn-secondary">Check now</button>
-          </div>
-          <div id="mailLastChecked" class="empty-note" style="margin-top:8px;"></div>
 
-          <h3>Messages</h3>
-          <div class="btn-row">
-            <button id="markAllMailReadBtn" type="button" class="btn-secondary">Mark all read</button>
-            <button id="clearAllMailBtn" type="button" class="btn-secondary">Clear all</button>
+          <div id="mailBoxSubtabBar" class="subtab-bar">
+            <button id="mailBoxInboxSubtabBtn" type="button">Inbox<span id="mailBoxInboxBadge" class="subtab-badge"></span></button>
+            <button id="mailBoxSentSubtabBtn" type="button">Sent</button>
+            <button id="mailBoxComposeSubtabBtn" type="button">Compose</button>
           </div>
-          <div id="mailList" class="item-list"></div>
+
+          <!-- Sub-screen: Inbox — what "Messages" used to be, plus the
+               check-now control that used to sit in its own separate "Mail"
+               heading right above it (folded in here since a second,
+               redundant "Mail" heading no longer makes sense once this
+               whole block is itself titled "Mail"). -->
+          <div id="mailBoxInboxSubscreen" class="subscreen active">
+            <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere. Also checks automatically every time you open the Mail tab.</div>
+            <div class="btn-row">
+              <button id="checkMailNowBtn" type="button" class="btn-secondary">Check now</button>
+            </div>
+            <div id="mailLastChecked" class="empty-note" style="margin-top:8px;"></div>
+
+            <div class="btn-row" style="margin-top:14px;">
+              <button id="markAllMailReadBtn" type="button" class="btn-secondary">Mark all read</button>
+              <button id="clearAllMailBtn" type="button" class="btn-secondary">Clear all</button>
+            </div>
+            <div id="mailList" class="item-list"></div>
+          </div>
+
+          <!-- Sub-screen: Sent — a purely local record of what THIS wallet
+               has sent through a Post Office (see AtlasWallet.sendUserMail's
+               own comment on why: the relaying domain never hands the
+               message back to the sender afterward, only to the
+               recipient). Populated on demand when this sub-tab is opened
+               (refreshSentMailDisplay in viewer.js), same lazy-refresh
+               convention as Inventory's Collectibles/Documents. -->
+          <div id="mailBoxSentSubscreen" class="subscreen">
+            <div class="subhead">Messages you've sent through a Post Office, kept locally on this device — the domain doesn't hand these back to you afterward, so this is this wallet's own record, not a live view of anything server-side.</div>
+            <div class="btn-row">
+              <button id="clearSentMailBtn" type="button" class="btn-secondary">Clear sent history</button>
+            </div>
+            <div id="sentMailList" class="item-list"></div>
+          </div>
+
+          <!-- Sub-screen: Compose — what the "Send mail" section used to
+               be. Its own h3 is dropped since the tab itself is already
+               labeled "Compose". -->
+          <div id="mailBoxComposeSubscreen" class="subscreen">
+            <div class="subhead">Only works between two people who both hold a Global Mail membership at the same Post Office — that domain relays the message for you even when you're not standing in it. Claim a membership card at a domain's Post Office stall to add it here as a sending relay.</div>
+            <select id="postOfficeToDomainInput" style="margin-top:8px;">
+              <option value="">No Post Office memberships yet</option>
+            </select>
+            <!-- Task #94 (handle addressing): handle-first by default — type
+                 a recipient's handle (bare, since the domain above is already
+                 picked; or paste a full "handle#domain" and it'll pick the
+                 right domain for you) and it resolves to their public key
+                 right before sending. The raw-key textarea stays available
+                 as a fallback for someone who hasn't registered a handle
+                 yet, revealed by the link below rather than shown by
+                 default — see refreshPostOfficeSendMode() in viewer.js. -->
+            <input type="text" id="postOfficeToHandleInput" placeholder="Recipient's handle (e.g. bruno#localhost:8002, or just bruno for the Post Office above)" style="margin-top:8px;">
+            <textarea id="postOfficeToPublicKeyInput" placeholder="Recipient's public key" hidden style="margin-top:8px;min-height:48px;font-family:monospace;font-size:11px;"></textarea>
+            <div class="btn-row" style="margin-top:4px;">
+              <button id="postOfficeToggleRawKeyBtn" type="button" class="link-btn">Paste a raw public key instead</button>
+            </div>
+            <input type="text" id="postOfficeSubjectInput" placeholder="Subject" style="margin-top:8px;">
+            <textarea id="postOfficeBodyInput" placeholder="Message" style="margin-top:8px;"></textarea>
+            <div class="btn-row" style="margin-top:8px;">
+              <button id="postOfficeSendBtn" type="button" class="btn-secondary">Send</button>
+            </div>
+            <div id="postOfficeSendStatus" class="empty-note" style="margin-top:6px;"></div>
+          </div>
 
           <!-- Subscribing IS requesting an atlas.membership credential from
                whichever domain you're currently in — see AtlasWallet.mintAsset
@@ -728,40 +789,6 @@
             <div id="postOfficeJoinStatus" class="empty-note" style="margin-top:6px;"></div>
           </div>
 
-          <!-- Post Office (task #75/#87/#94, SPEC.md §11.3): user-to-user
-               mail, distinct from Subscribe above (which is "hear FROM a
-               domain"). Membership is symmetric — a Post Office only relays
-               mail between two people who BOTH hold ITS OWN Global Mail
-               membership card, so "send via" is drawn from Post Offices this
-               wallet has actually joined, not typed in freehand. Your own
-               address (for handing to someone else) now lives under Mail
-               Settings, alongside the rest of "how people reach you". -->
-          <div id="postOfficeSendSection">
-            <h3>Send mail</h3>
-            <div class="subhead">Only works between two people who both hold a Global Mail membership at the same Post Office — that domain relays the message for you even when you're not standing in it. Claim a membership card at a domain's Post Office stall to add it here as a sending relay.</div>
-            <select id="postOfficeToDomainInput" style="margin-top:8px;">
-              <option value="">No Post Office memberships yet</option>
-            </select>
-            <!-- Task #94 (handle addressing): handle-first by default — type
-                 a recipient's handle (bare, since the domain above is already
-                 picked; or paste a full "handle#domain" and it'll pick the
-                 right domain for you) and it resolves to their public key
-                 right before sending. The raw-key textarea stays available
-                 as a fallback for someone who hasn't registered a handle
-                 yet, revealed by the link below rather than shown by
-                 default — see refreshPostOfficeSendMode() in viewer.js. -->
-            <input type="text" id="postOfficeToHandleInput" placeholder="Recipient's handle (e.g. bruno#localhost:8002, or just bruno for the Post Office above)" style="margin-top:8px;">
-            <textarea id="postOfficeToPublicKeyInput" placeholder="Recipient's public key" hidden style="margin-top:8px;min-height:48px;font-family:monospace;font-size:11px;"></textarea>
-            <div class="btn-row" style="margin-top:4px;">
-              <button id="postOfficeToggleRawKeyBtn" type="button" class="link-btn">Paste a raw public key instead</button>
-            </div>
-            <input type="text" id="postOfficeSubjectInput" placeholder="Subject" style="margin-top:8px;">
-            <textarea id="postOfficeBodyInput" placeholder="Message" style="margin-top:8px;"></textarea>
-            <div class="btn-row" style="margin-top:8px;">
-              <button id="postOfficeSendBtn" type="button" class="btn-secondary">Send</button>
-            </div>
-            <div id="postOfficeSendStatus" class="empty-note" style="margin-top:6px;"></div>
-          </div>
         </div>
 
         <!-- Sub-screen: Mail Settings — everything about how people reach
