@@ -372,8 +372,17 @@ function moveMember(connId, x, y, z, yaw) {
 // itself: a server restart loses it, exactly like a restart already drops
 // every live roster. Not a chat log service, just enough backlog that
 // arriving mid-conversation doesn't mean starting from a blank box.
-const chatRooms = new Map(); // domain -> Map<connId, {name, publicKey, world, socket}>
-const chatHistory = new Map(); // domain -> array of recent {id, world, name, publicKey, text, sentAt}, oldest first
+// member.transport is 'ws' (has a live `socket`, gets chat-message pushed
+// immediately) or 'poll' (has `lastSeen`+`cursor` instead — task #68's
+// polling fallback for chat, same 'ws'-vs-'poll' unification presence's
+// own `rooms` Map already uses above). `cursor` is the seq number of the
+// newest message this poll member has already received — see
+// chatSeqCounters/pollChatSync() below for how a poll member gets exactly
+// the messages it's missing on each sync, instead of the whole history
+// every time.
+const chatRooms = new Map(); // domain -> Map<connId, {name, publicKey, world, transport, socket?, lastSeen?, cursor?}>
+const chatHistory = new Map(); // domain -> array of recent {seq, id, world, name, publicKey, text, sentAt}, oldest first
+const chatSeqCounters = new Map(); // domain -> next seq number to assign (monotonic per domain, survives history trimming so a poll member's cursor stays meaningful even after old entries are dropped)
 const chatConnIndex = new Map(); // connId -> {domain, room} — this connection's OWN chat membership, separate from connIndex (presence's own connId->room index) since a connId can be a chat member, a presence member, both, or neither
 const CHAT_HISTORY_LIMIT = 50;
 const MAX_CHAT_TEXT_LEN = 500;
@@ -426,25 +435,42 @@ function getOrCreateChatRoom(domain) {
   return room;
 }
 
+// Only 'ws' members can be pushed to, same split as presence's own
+// broadcast() above — a 'poll' member finds out about a new message on
+// its next /presence/poll/chat-sync instead (see pollChatSync()).
 function broadcastChat(room, obj) {
-  room.forEach((member) => sendText(member.socket, obj));
+  room.forEach((member) => { if (member.transport === 'ws') sendText(member.socket, obj); });
+}
+
+function currentChatSeq(domain) {
+  const history = chatHistory.get(domain) || [];
+  return history.length ? history[history.length - 1].seq : 0;
 }
 
 // Joins connId into domain's chat room (creating it if this is the first
 // member) and returns the domain's current history backlog — publicKey is
 // optional (task #63/#67's same "presence never requires an identity"
 // principle: reading chat needs no login, only SENDING does, enforced in
-// sendChatMessage below, not here).
-function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, publicKeyRaw, socket) {
+// sendChatMessage below, not here). `extra` merges in transport-specific
+// fields, same shared-join-path shape as presence's own addMember():
+// {transport:'ws', socket} for a live connection, or {transport:'poll',
+// lastSeen} for the HTTP polling fallback (task #68's chat counterpart).
+// A poll member's `cursor` is seeded to "already seen everything in the
+// history handed back right now" so their first sync only returns
+// messages that arrive AFTER this join, never a duplicate of what they
+// just got here.
+function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, publicKeyRaw, extra) {
   const domain = String(domainRaw || '').slice(0, MAX_ID_LEN);
   const world = String(worldRaw || '').slice(0, MAX_ID_LEN);
   if (!domain || !world) return null;
   const name = String(nameRaw || 'Visitor').slice(0, MAX_NAME_LEN);
   const publicKey = publicKeyRaw ? String(publicKeyRaw).slice(0, MAX_PUBLIC_KEY_LEN) : null;
   const room = getOrCreateChatRoom(domain);
-  room.set(connId, { name, publicKey, world, socket });
+  const history = chatHistory.get(domain) || [];
+  const member = Object.assign({ name, publicKey, world, cursor: currentChatSeq(domain) }, extra);
+  room.set(connId, member);
   chatConnIndex.set(connId, { domain, room });
-  return chatHistory.get(domain) || [];
+  return history;
 }
 
 function leaveChatRoom(connId) {
@@ -475,7 +501,10 @@ function sendChatMessage(connId, textRaw) {
   if (!text) return { ok: false, reason: 'empty' };
   if (chatTextContainsBlockedWord(text)) return { ok: false, reason: 'blocked' };
 
+  const seq = (chatSeqCounters.get(loc.domain) || 0) + 1;
+  chatSeqCounters.set(loc.domain, seq);
   const message = {
+    seq,
     id: crypto.randomBytes(8).toString('hex'),
     world: member.world,
     name: member.name,
@@ -487,9 +516,38 @@ function sendChatMessage(connId, textRaw) {
   history.push(message);
   if (history.length > CHAT_HISTORY_LIMIT) history.shift();
   chatHistory.set(loc.domain, history);
+  // The sender's own cursor moves to this message too — a 'poll' member
+  // sending its own message would otherwise see it a second time (as a
+  // "new" delta entry) on its very next sync, and the seq-based cursor is
+  // transport-agnostic so setting it unconditionally here is harmless for
+  // a 'ws' member (which never reads .cursor at all).
+  member.cursor = seq;
 
   broadcastChat(loc.room, { type: 'chat-message', message });
   return { ok: true, message };
+}
+
+// Polling counterpart of the 'chat-message' push above (task #68) — a
+// 'poll' member has no persistent connection to receive that push, so it
+// asks instead: "what's new since the last thing I saw?" Bumps lastSeen
+// (counts as activity, keeping this member alive past the staleness
+// sweep below) and returns every history entry newer than this member's
+// cursor, advancing the cursor to match so the same message never comes
+// back on a later sync. Returns null for an unknown/expired id (caller
+// turns that into a 404 — see the /presence/poll/chat-sync route) or a
+// connId that IS chat-joined but over the 'ws' transport (shouldn't
+// happen in practice — a WS client has no reason to call this route —
+// but treated the same as unknown rather than silently no-op'd).
+function pollChatSync(connId) {
+  const loc = chatConnIndex.get(connId);
+  if (!loc) return null;
+  const member = loc.room.get(connId);
+  if (!member || member.transport !== 'poll') return null;
+  member.lastSeen = Date.now();
+  const history = chatHistory.get(loc.domain) || [];
+  const delta = history.filter((m) => m.seq > member.cursor);
+  if (delta.length) member.cursor = delta[delta.length - 1].seq;
+  return delta;
 }
 
 // ---------- connection lifecycle ----------
@@ -562,7 +620,7 @@ function handleConnection(socket) {
       // nothing transport-specific about it worth a second code path.
       if (msg.type === 'chat-join') {
         if (chatJoined) return; // one chat-join per connection, same rule as presence's join
-        const history = joinChatRoom(connId, msg.domain, msg.world, msg.name, msg.publicKey, socket);
+        const history = joinChatRoom(connId, msg.domain, msg.world, msg.name, msg.publicKey, { transport: 'ws', socket });
         if (history === null) return;
         chatJoined = true;
         sendText(socket, { type: 'chat-history', messages: history });
@@ -611,6 +669,19 @@ setInterval(() => {
     const member = loc.room.get(connId);
     if (member && member.transport === 'poll' && now - member.lastSeen > POLL_TIMEOUT_MS) {
       removeMember(connId);
+    }
+  });
+  // Same sweep, same timers, for chat's poll members (task #68's chat
+  // counterpart) — an abandoned chat-only poll session (a visitor who
+  // closed the tab without a clean chat-leave) has no roster-visibility
+  // consequence the way a stale presence member would, but would
+  // otherwise sit in chatConnIndex/chatRooms forever; reusing the exact
+  // same POLL_TIMEOUT_MS/POLL_SWEEP_INTERVAL_MS keeps this one tick doing
+  // both jobs instead of running a second timer for no real benefit.
+  chatConnIndex.forEach((loc, connId) => {
+    const member = loc.room.get(connId);
+    if (member && member.transport === 'poll' && now - member.lastSeen > POLL_TIMEOUT_MS) {
+      leaveChatRoom(connId);
     }
   });
 }, POLL_SWEEP_INTERVAL_MS);
@@ -695,6 +766,47 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/presence/poll/leave') {
       const body = JSON.parse((await readBody(req)) || '{}');
       removeMember(String(body.id || ''));
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // In-world chat's own polling fallback (task #68's chat counterpart) —
+    // same four-verb shape as presence's poll routes above (join/sync/
+    // send/leave here vs join/sync/signal/leave there), answering the
+    // exact same {domain, world, name, publicKey} / {id, messages} shapes
+    // extension/viewer.js's pollChat() expects, so a chat-php deployment
+    // (see presence-php/presence/poll/chat-*.php) or this Node fallback are
+    // interchangeable from the client's point of view — it only ever
+    // knows "WebSocket failed, try polling this same base instead."
+    if (req.method === 'POST' && req.url === '/presence/poll/chat-join') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const connId = crypto.randomBytes(8).toString('hex');
+      const history = joinChatRoom(connId, body.domain, body.world, body.name, body.publicKey, { transport: 'poll', lastSeen: Date.now() });
+      if (history === null) return sendJson(res, 400, { error: 'domain and world are required' });
+      return sendJson(res, 200, { id: connId, messages: history });
+    }
+
+    if (req.method === 'POST' && req.url === '/presence/poll/chat-sync') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const connId = String(body.id || '');
+      const delta = pollChatSync(connId);
+      if (delta === null) return sendJson(res, 404, { error: 'unknown or expired chat id — rejoin' });
+      return sendJson(res, 200, { messages: delta });
+    }
+
+    if (req.method === 'POST' && req.url === '/presence/poll/chat-send') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const connId = String(body.id || '');
+      const loc = chatConnIndex.get(connId);
+      if (!loc) return sendJson(res, 404, { error: 'unknown or expired chat id — rejoin' });
+      const member = loc.room.get(connId);
+      if (member) member.lastSeen = Date.now(); // sending counts as activity, same as presence's poll/signal route
+      const result = sendChatMessage(connId, body.text);
+      return sendJson(res, 200, result);
+    }
+
+    if (req.method === 'POST' && req.url === '/presence/poll/chat-leave') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      leaveChatRoom(String(body.id || ''));
       return sendJson(res, 200, { ok: true });
     }
 

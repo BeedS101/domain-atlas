@@ -503,7 +503,7 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
   socket.addEventListener('error', () => {});
 }
 
-// ---------- in-world chat (#105-109) ----------
+// ---------- in-world chat (#105-109, polling fallback #110) ----------
 // A read-by-anyone, send-when-unlocked text chat, riding the SAME
 // presence-server process (see server.js's own "chat" section) but as a
 // fully INDEPENDENT WebSocket connection from presence's — presence's own
@@ -515,22 +515,29 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
 // "Domain" is purely a client-side filter over the same chatMessages
 // array — see renderChatMessages().
 //
-// Deliberately WS-only for this build (unlike presence, which falls back
-// to HTTP polling for #68's plain-PHP-hosting case) — a domain that can't
-// run a persistent WebSocket process simply has no chat yet. Matching
-// polling-fallback parity for chat is a straightforward follow-up (same
-// shape as presence's own pollPresence()), just not built in this pass.
+// Same WS-then-poll fallback shape as presence (#68): connectChat() tries
+// a WebSocket first, and falls back to HTTP polling (pollChat(), the
+// chat-join/-sync/-send/-leave routes) the moment that attempt fails or
+// hangs past CHAT_WS_CONNECT_TIMEOUT_MS — a plain cPanel/PHP host that
+// can't run a persistent WebSocket process (see presence-php/README.txt,
+// and presence-php/presence/poll/chat-*.php for the deployable PHP side of
+// this) simply never completes the WS handshake, and this falls back the
+// same way presence already does. sendSignal() above is the template for
+// "one call site, branch on which transport is actually live" — the
+// Enter-key send handler below does the same thing for chat-send.
 //
 // Read access needs no identity at all (matches #63's "entering a world
-// never requires a wallet" principle) — connectChat() joins with
-// publicKey: null for an anonymous visitor, and the server's chat-history
-// reply and chat-message broadcasts go to every member of the room
-// regardless. Sending is gated purely on chatOwnPublicKey being set (see
-// refreshChatSendability()); the server enforces the same gate
-// authoritatively (reason: 'login-required'), since the client-side gate
-// alone is just UX, never trusted as the real check.
+// never requires a wallet" principle) — connectChat()/pollChat() join
+// with publicKey: null for an anonymous visitor, and history/broadcasts
+// go to every member of the room regardless. Sending is gated purely on
+// chatOwnPublicKey being set (see refreshChatSendability()); the server
+// enforces the same gate authoritatively (reason: 'login-required') on
+// BOTH transports, since the client-side gate alone is just UX, never
+// trusted as the real check.
 const CHAT_DEFAULT_BASE = PRESENCE_DEFAULT_BASE; // same server, same base resolution as presence (manifest.presence, falling back to localhost:8004)
 const CHAT_MESSAGES_CAP = 200; // client-side cap across both tabs — the server's own chatHistory buffer (CHAT_HISTORY_LIMIT) is what a late joiner actually receives
+const CHAT_WS_CONNECT_TIMEOUT_MS = 2500; // matches PRESENCE_WS_CONNECT_TIMEOUT_MS — how long to let a WS attempt hang before giving up and trying polling instead
+const CHAT_POLL_INTERVAL_MS = 2000; // matches PRESENCE_POLL_INTERVAL_MS — one "what's new since my cursor?" sync per tick
 // Mirrors wallet.js's own CHAT_MIN_WIDTH/CHAT_MAX_WIDTH/CHAT_MIN_HEIGHT/
 // CHAT_MAX_HEIGHT exactly — duplicated rather than exported so a live
 // resize drag can clamp responsively before the persisted value round-
@@ -550,8 +557,22 @@ let chatOwnPublicKey = null; // this chat connection's own announced identity �
 let chatActiveTab = 'world'; // 'world' | 'domain' — matches viewer.html's default active tab/hidden state
 let chatSendStatusTimer = null;
 
+// Polling-fallback state (#68's chat counterpart) — parallels
+// presencePollToken/presencePollId/presencePollTimer/presencePollHttpBase
+// above exactly, including the "token" trick: a join fetch has no
+// server-assigned id to compare identity against until it resolves, so
+// chatPollToken is set synchronously the moment pollChat() is called and
+// checked when that fetch comes back, so a superseded attempt (a fast
+// world switch, or a WS attempt that succeeded in the meantime) can
+// recognize it's stale and back out instead of resurrecting chat for a
+// world already left behind.
+let chatPollToken = null;
+let chatPollId = null; // server-assigned id, set once join resolves and this attempt is still current
+let chatPollTimer = null;
+let chatPollHttpBase = null; // the base this poll session's id belongs to — needed by disconnectChat()'s leave beacon
+
 function chatIsConnected() {
-  return !!(chatSocket && chatSocket.readyState === WebSocket.OPEN);
+  return !!(chatSocket && chatSocket.readyState === WebSocket.OPEN) || !!chatPollId;
 }
 
 // Preserves "was scrolled near the bottom" across a full innerHTML
@@ -619,12 +640,76 @@ function disconnectChat() {
     try { socket.send(JSON.stringify({ type: 'chat-leave' })); } catch (err) {}
     try { socket.close(); } catch (err) {}
   }
+  chatPollToken = null; // invalidates any in-flight join or running poll interval from this point on, see pollChat()
+  if (chatPollTimer) { clearInterval(chatPollTimer); chatPollTimer = null; }
+  if (chatPollId) {
+    const id = chatPollId;
+    const base = chatPollHttpBase;
+    chatPollId = null;
+    chatPollHttpBase = null;
+    // Best-effort, same as disconnectPresence()'s own leave beacon — a
+    // closed tab won't reach this, that's what the server's staleness
+    // sweep is for.
+    fetch(base + '/presence/poll/chat-leave', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
+    }).catch(() => {});
+  }
   chatDomain = null;
   chatWorldId = null;
   chatOwnPublicKey = null;
   chatMessages = [];
   renderChatMessages();
   refreshChatSendability();
+}
+
+// Polling counterpart of connectChat()'s WebSocket path — same shape as
+// pollPresence() above, including the "superseded before this resolved"
+// guard (chatPollToken) and immediately leaving a room this attempt just
+// joined if a newer attempt has already taken over by the time the join
+// fetch actually comes back.
+function pollChat(domain, worldId, displayName, publicKey, httpBase) {
+  const base = httpBase || CHAT_DEFAULT_BASE;
+  const token = {};
+  chatPollToken = token;
+
+  fetch(base + '/presence/poll/chat-join', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ domain, world: worldId, name: displayName, publicKey })
+  })
+    .then((r) => r.json())
+    .then((welcome) => {
+      if (chatPollToken !== token || chatDomain !== domain || chatWorldId !== worldId) {
+        fetch(base + '/presence/poll/chat-leave', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: welcome.id })
+        }).catch(() => {});
+        return;
+      }
+      chatPollId = welcome.id;
+      chatPollHttpBase = base;
+      chatOwnPublicKey = publicKey;
+      refreshChatSendability();
+      chatMessages = (welcome.messages || []).slice(-CHAT_MESSAGES_CAP);
+      renderChatMessages();
+
+      chatPollTimer = setInterval(() => {
+        if (chatPollToken !== token) return; // disconnectChat() already clears this timer too — just a defensive guard
+        fetch(base + '/presence/poll/chat-sync', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: welcome.id })
+        })
+          .then((r) => r.json())
+          .then((res) => {
+            if (chatPollToken !== token) return;
+            const delta = res.messages || [];
+            if (!delta.length) return;
+            chatMessages = chatMessages.concat(delta);
+            if (chatMessages.length > CHAT_MESSAGES_CAP) chatMessages = chatMessages.slice(-CHAT_MESSAGES_CAP);
+            renderChatMessages();
+          })
+          .catch(() => {}); // a dropped tick just tries again next interval — no need to escalate
+      }, CHAT_POLL_INTERVAL_MS);
+    })
+    .catch(() => {}); // chat is a pure enhancement, including its fallback — never surfaced as an error
 }
 
 function connectChat(domain, worldId, presenceBase) {
@@ -648,9 +733,25 @@ function connectChat(domain, worldId, presenceBase) {
     try {
       socket = new WebSocket(presenceWsUrlFor(base));
     } catch (err) {
-      return; // chat is a pure enhancement, same posture as presence — never surfaced as an error
+      pollChat(domain, worldId, displayName, publicKey, base); // WebSocket unsupported/blocked outright — go straight to polling
+      return;
     }
     if (chatDomain !== domain || chatWorldId !== worldId) { try { socket.close(); } catch (err) {} return; }
+
+    // Same fallback-timer shape as connectPresence() above: if the WS
+    // attempt hasn't opened OR failed within this window (a server that
+    // exists but never completes the handshake — the exact plain-PHP-
+    // hosting case this fallback is for, see presence-php/presence/poll/
+    // chat-*.php), stop waiting on it and fall back to polling anyway.
+    let settled = false;
+    const fallbackTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (chatSocket !== socket) return; // superseded — nothing to fall back FOR
+      chatSocket = null;
+      try { socket.close(); } catch (err) {}
+      pollChat(domain, worldId, displayName, publicKey, base);
+    }, CHAT_WS_CONNECT_TIMEOUT_MS);
 
     chatSocket = socket;
     chatOwnPublicKey = publicKey;
@@ -658,6 +759,8 @@ function connectChat(domain, worldId, presenceBase) {
 
     socket.addEventListener('open', () => {
       if (chatSocket !== socket) { try { socket.close(); } catch (err) {} return; }
+      settled = true;
+      clearTimeout(fallbackTimer);
       socket.send(JSON.stringify({ type: 'chat-join', domain, world: worldId, name: displayName, publicKey }));
     });
 
@@ -679,8 +782,27 @@ function connectChat(domain, worldId, presenceBase) {
     });
 
     socket.addEventListener('close', () => {
-      if (chatSocket === socket) chatSocket = null;
+      const wasCurrent = chatSocket === socket;
+      if (wasCurrent) chatSocket = null;
+      // A close that arrives before the WS ever opened (handshake
+      // rejected, connection refused) is exactly the "try polling
+      // instead" case — but only if this attempt was still the live one
+      // AND nothing has settled it yet, same wasCurrent guard
+      // connectPresence()'s own close listener uses and for the same
+      // reason (a disconnectChat() that closed this socket on its way
+      // out must not then resurrect chat for a world already left).
+      if (!settled) {
+        settled = true;
+        clearTimeout(fallbackTimer);
+        if (wasCurrent) pollChat(domain, worldId, displayName, publicKey, base);
+      }
     });
+
+    // presence-server unreachable/down, or the connection dropped mid-
+    // world. The 'close' listener above (which always fires after
+    // 'error' for a WebSocket) does the actual fallback decision — this
+    // just has to exist so the failed connection doesn't surface as an
+    // unhandled error.
     socket.addEventListener('error', () => {});
   }).catch(() => {});
 }
@@ -700,6 +822,15 @@ function refreshChatIdentity() {
   connectChat(domain, worldId, presenceBase);
 }
 
+// Sends over whichever transport is actually live right now, same
+// WS-first-else-poll-relay branch sendSignal() above uses for presence's
+// friend requests. The poll path posts straight to chat-send and handles
+// the response inline (no separate "on next sync" round trip needed for
+// the sender's own message) rather than waiting for it to come back
+// through a later chat-sync poll — that would mean seeing your own
+// message appear up to CHAT_POLL_INTERVAL_MS after sending it, and the
+// server's sendChatMessage() already advances the sender's own cursor so
+// it never arrives a second time via chat-sync either.
 chatTextInput && chatTextInput.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   const text = chatTextInput.value.trim();
@@ -707,8 +838,32 @@ chatTextInput && chatTextInput.addEventListener('keydown', (e) => {
   if (!chatOwnPublicKey) { showChatSendStatus(chatErrorText('login-required')); return; }
   if (!chatIsConnected()) { showChatSendStatus('Not connected — try again in a moment.'); return; }
   if (AtlasWallet.chatMessageContainsBlockedWord(text)) { showChatSendStatus(chatErrorText('blocked')); return; }
-  chatSocket.send(JSON.stringify({ type: 'chat-send', text }));
-  chatTextInput.value = '';
+
+  if (chatSocket && chatSocket.readyState === WebSocket.OPEN) {
+    chatSocket.send(JSON.stringify({ type: 'chat-send', text }));
+    chatTextInput.value = '';
+    return;
+  }
+  if (chatPollId && chatPollHttpBase) {
+    const requestId = chatPollId;
+    fetch(chatPollHttpBase + '/presence/poll/chat-send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: requestId, text })
+    })
+      .then((r) => r.json())
+      .then((result) => {
+        if (chatPollId !== requestId) return; // superseded (a world switch, or a lock/unlock reconnect) mid-request — don't touch state a newer attempt now owns
+        if (result.ok) {
+          chatMessages.push(result.message);
+          if (chatMessages.length > CHAT_MESSAGES_CAP) chatMessages.shift();
+          renderChatMessages();
+        } else {
+          showChatSendStatus(chatErrorText(result.reason));
+        }
+      })
+      .catch(() => showChatSendStatus('Not connected — try again in a moment.'));
+    chatTextInput.value = '';
+  }
 });
 
 // ---------- chat panel settings: opacity, text size, resize, minimize ----------

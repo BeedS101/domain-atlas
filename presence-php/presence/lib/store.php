@@ -134,3 +134,204 @@ function with_presence_store_locked($mutator) {
   fclose($fh);
   return $result;
 }
+
+// ---------- in-world chat (task #110's PHP port of presence-server.js's
+// own "chat" section) ----------
+//
+// A SEPARATE store file (atlas-chat-store.json, same lib/ folder, same
+// deny-all .htaccess) rather than reusing atlas-presence-store.json —
+// chat is keyed by domain alone (every visitor anywhere in a domain
+// shares one chat room, tagged per-message with `world` so a client can
+// offer both a "This World" and a "Domain" tab from the same stream, see
+// extension/viewer.js's renderChatMessages()), not by domain+world the
+// way presence's rooms are, and giving it its own file keeps a busy chat
+// domain's read-modify-write cost from also locking out presence's own
+// move/sync traffic in that same domain, and vice versa.
+//
+// This bundle is polling-only, exactly like the presence half above —
+// there is no WebSocket here, and never will be (see this file's own
+// header note and presence-php/README.txt's "Why there's no WebSocket
+// version of this" section; the same hosting constraint applies to chat
+// for the identical reason). A member here has no live connection to push
+// to at all, so instead of presence-server.js's node "chat-message" push,
+// a chat poll member carries a `cursor` — the seq number of the newest
+// message it has already received — and /presence/chat/sync hands back
+// only the history entries newer than that, advancing the cursor to
+// match. See chat_sync_member() below.
+function atlas_chat_store_file() {
+  return __DIR__ . '/atlas-chat-store.json';
+}
+
+const CHAT_HISTORY_LIMIT = 50; // matches presence-server.js's CHAT_HISTORY_LIMIT
+const MAX_CHAT_TEXT_LEN = 500; // matches presence-server.js's MAX_CHAT_TEXT_LEN
+
+// Same blocklist/leetspeak-normalization/space-preserving-substring-match
+// idea as presence-server.js's own chatTextContainsBlockedWord (and
+// wallet.js's client-side chatMessageContainsBlockedWord) — duplicated
+// rather than shared, same "each deployable bundle is self-contained"
+// reasoning as everything else in this file. See the Node version's own
+// comment for the full reasoning on why this is substring (not
+// whole-word-only) matching against punctuation-normalized-to-SPACES
+// text: whole-word-only would let inflections like "fucking"/"shitty"
+// dodge a blocklist entry for "fuck"/"shit", and preserving word
+// boundaries (spaces, not stripped-to-nothing) stops two innocent
+// adjacent words from concatenating into a false hit the way the alias
+// filter's own stricter normalizer would risk on a multi-word sentence.
+const CHAT_BLOCKLIST = [
+  'fuck', 'shit', 'bitch', 'cunt', 'asshole', 'bastard', 'dick', 'piss',
+  'slut', 'whore', 'fag', 'nigger', 'nigga', 'retard', 'rape'
+];
+function chat_normalize_for_filter($text) {
+  $s = strtolower((string) $text);
+  $s = strtr($s, ['0' => 'o', '1' => 'i', '!' => 'i', '3' => 'e', '4' => 'a', '5' => 's', '@' => 'a', '$' => 's']);
+  $s = preg_replace('/[^a-z0-9]+/', ' ', $s);
+  return trim($s);
+}
+function chat_text_contains_blocked_word($text) {
+  $normalized = chat_normalize_for_filter($text);
+  if ($normalized === '') return false;
+  foreach (CHAT_BLOCKLIST as $word) {
+    if (strpos($normalized, $word) !== false) return true;
+  }
+  return false;
+}
+
+// Opens atlas-chat-store.json under an exclusive lock, same
+// read-modify-write shape as with_presence_store_locked() above, just
+// against the top-level 'domains' key instead of 'rooms' — one entry per
+// domain: {nextSeq, history: [...], members: {connId: {...}}}.
+function with_chat_store_locked($mutator) {
+  $fh = fopen(atlas_chat_store_file(), 'c+');
+  if ($fh === false) throw new Exception('could not open the chat store file');
+  flock($fh, LOCK_EX);
+  $raw = stream_get_contents($fh);
+  $doc = json_decode($raw, true);
+  if (!is_array($doc)) $doc = [];
+  if (!isset($doc['domains']) || !is_array($doc['domains'])) $doc['domains'] = [];
+  $result = $mutator($doc);
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $result;
+}
+
+function chat_domain_entry(&$doc, $domain) {
+  if (!isset($doc['domains'][$domain]) || !is_array($doc['domains'][$domain])) {
+    $doc['domains'][$domain] = ['nextSeq' => 0, 'history' => [], 'members' => []];
+  }
+  return $doc['domains'][$domain];
+}
+
+// Removes any chat member that hasn't synced/sent in
+// PRESENCE_POLL_TIMEOUT_MS — the chat counterpart of
+// presence_sweep_room() above, reusing the exact same timeout constant
+// (no separate CHAT_POLL_TIMEOUT_MS — one number to reason about, and a
+// visitor's staleness threshold shouldn't differ just because they were
+// chatting instead of moving). An abandoned member here has no
+// roster-visibility consequence the way a stale presence member would
+// (nobody's roster reads from this), it would just sit in 'members'
+// forever otherwise.
+function chat_sweep_domain(&$entry) {
+  $now = presence_now_ms();
+  foreach ($entry['members'] as $connId => $member) {
+    if (($now - $member['lastSeen']) > PRESENCE_POLL_TIMEOUT_MS) unset($entry['members'][$connId]);
+  }
+}
+
+// Joins $connId into $domain's chat room, returns the current history
+// backlog (same shape sendChatMessage()'s messages have) — publicKey is
+// optional, same "reading chat needs no login, only sending does"
+// principle as the rest of this app; enforced in chat_send_message()
+// below, not here. The new member's cursor is seeded to "already seen
+// everything in the history just handed back," so their first sync only
+// returns messages that arrive AFTER this join.
+function chat_join_room($domain, $world, $name, $publicKey) {
+  if ($domain === '' || $world === '') return null;
+  return with_chat_store_locked(function (&$doc) use ($domain, $world, $name, $publicKey) {
+    $entry = chat_domain_entry($doc, $domain);
+    chat_sweep_domain($entry);
+    $connId = presence_new_id();
+    $lastSeq = count($entry['history']) ? $entry['history'][count($entry['history']) - 1]['seq'] : 0;
+    $entry['members'][$connId] = [
+      'name' => $name, 'publicKey' => $publicKey, 'world' => $world,
+      'lastSeen' => presence_now_ms(), 'cursor' => $lastSeq
+    ];
+    $doc['domains'][$domain] = $entry;
+    return ['id' => $connId, 'messages' => $entry['history']];
+  });
+}
+
+// Polling sync: bumps lastSeen (counts as activity) and returns every
+// history entry newer than this member's cursor, advancing the cursor to
+// match — same "what's new since I last looked?" shape as
+// pollChatSync() in presence-server.js. Returns null for an unknown/
+// expired connId (the route turns that into a 404).
+function chat_sync_member($connId) {
+  return with_chat_store_locked(function (&$doc) use ($connId) {
+    foreach ($doc['domains'] as $domain => &$entry) {
+      chat_sweep_domain($entry);
+      if (!isset($entry['members'][$connId])) continue;
+      $entry['members'][$connId]['lastSeen'] = presence_now_ms();
+      $cursor = $entry['members'][$connId]['cursor'];
+      $delta = array_values(array_filter($entry['history'], function ($m) use ($cursor) { return $m['seq'] > $cursor; }));
+      if (count($delta)) $entry['members'][$connId]['cursor'] = $delta[count($delta) - 1]['seq'];
+      unset($entry);
+      return ['found' => true, 'messages' => $delta];
+    }
+    unset($entry);
+    return ['found' => false];
+  });
+}
+
+// Validates and appends a chat send from an already-joined $connId —
+// same {ok:true, message} / {ok:false, reason} shape as
+// presence-server.js's sendChatMessage(), same fixed short reasons
+// ('not-joined' | 'login-required' | 'empty' | 'blocked') the client's
+// chatErrorText() in viewer.js already knows how to turn into a message.
+// Advances the sender's OWN cursor to the new message's seq too, so a
+// poll member sending its own message never sees it a second time as a
+// "new" delta entry on its very next sync.
+function chat_send_message($connId, $textRaw) {
+  return with_chat_store_locked(function (&$doc) use ($connId, $textRaw) {
+    foreach ($doc['domains'] as $domain => &$entry) {
+      if (!isset($entry['members'][$connId])) continue;
+      $member = &$entry['members'][$connId];
+      if (empty($member['publicKey'])) { unset($member, $entry); return ['found' => true, 'ok' => false, 'reason' => 'login-required']; }
+      $text = trim(substr((string) $textRaw, 0, MAX_CHAT_TEXT_LEN));
+      if ($text === '') { unset($member, $entry); return ['found' => true, 'ok' => false, 'reason' => 'empty']; }
+      if (chat_text_contains_blocked_word($text)) { unset($member, $entry); return ['found' => true, 'ok' => false, 'reason' => 'blocked']; }
+
+      $seq = $entry['nextSeq'] + 1;
+      $entry['nextSeq'] = $seq;
+      $message = [
+        'seq' => $seq, 'id' => presence_new_id(), 'world' => $member['world'],
+        'name' => $member['name'], 'publicKey' => $member['publicKey'],
+        'text' => $text, 'sentAt' => gmdate('Y-m-d\TH:i:s\Z')
+      ];
+      $entry['history'][] = $message;
+      if (count($entry['history']) > CHAT_HISTORY_LIMIT) array_shift($entry['history']);
+      $member['cursor'] = $seq;
+      unset($member, $entry);
+      return ['found' => true, 'ok' => true, 'message' => $message];
+    }
+    unset($entry);
+    return ['found' => false];
+  });
+}
+
+// Best-effort explicit leave — removes $connId from whichever domain's
+// members it's in, if any. Safe to call on an id that isn't actually
+// joined (silent no-op), same as presence's own leave route.
+function chat_leave_room($connId) {
+  if ($connId === '') return;
+  with_chat_store_locked(function (&$doc) use ($connId) {
+    foreach ($doc['domains'] as $domain => &$entry) {
+      if (isset($entry['members'][$connId])) { unset($entry['members'][$connId]); break; }
+    }
+    unset($entry);
+    return null;
+  });
+}
