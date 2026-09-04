@@ -91,6 +91,21 @@
   .mail-card .mail-gift { font-size: 12px; margin-top: 6px; display: flex; align-items: center; gap: 8px; }
   .mail-card .mail-gift button { font-size: 11px; padding: 4px 10px; }
   .mail-card .mail-gift-claimed { color: #a9b8bf; }
+  /* Block sender's own menu — tucked behind a small "⋯" toggle instead of
+     sitting directly in .item-actions (see renderMailCard's own comment on
+     why: it used to, and was too easy to hit by accident right next to
+     Delete/Reply). .mail-card-menu-items only shows once .show is toggled
+     on it (delegated click handler in viewer.js), same show/hide-by-class
+     convention as .subscreen and .subtab-badge elsewhere in this file. */
+  .mail-card-menu { position: relative; flex: 0 0 auto !important; }
+  .mail-card-menu-toggle { padding: 6px 10px !important; font-size: 15px !important; line-height: 1; }
+  .mail-card-menu-items {
+    display: none; position: absolute; right: 0; top: 100%; margin-top: 4px;
+    background: #16232a; border: 1px solid #2c3c44; border-radius: 8px;
+    padding: 6px; z-index: 5; min-width: 130px;
+  }
+  .mail-card-menu-items.show { display: block; }
+  .mail-card-menu-items button { width: 100%; }
 
   #walletPanel {
     display: none; position: fixed; top: 56px; right: 0; bottom: 0; width: 360px;
@@ -227,6 +242,21 @@
      Empty (and so takes no visible space) until gltf-mini.js has actual
      byte-level progress to report; see updateSceneLoadProgress(). */
   #sceneLoadProgressSpeed { font-size: 11px; color: #6f838c; margin-top: 6px; min-height: 14px; }
+
+  /* Portal hover tooltip — scene details for whichever portal the mouse is
+     currently over (see the canvas 'mousemove' listener in viewer.js), same
+     visual language as #hint above. Positioned per-hover in JS (tracking
+     the hovered portal's own screen spot) rather than pinned like #hint,
+     since a scene can have several portals scattered around it.
+     pointer-events: none so the tooltip itself never becomes the mouse
+     target of the very hover it's reacting to. */
+  #portalHoverTooltip {
+    position: fixed; z-index: 6; max-width: 240px;
+    background: rgba(20,31,38,0.94); color: #f2ece4;
+    border: 1px solid #2c3c44; border-radius: 8px;
+    padding: 8px 10px; font-size: 11.5px; line-height: 1.5;
+    pointer-events: none; display: none;
+  }
 </style>
 </head>
 <body>
@@ -257,6 +287,7 @@
   </div>
   <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain</div>
   <div id="scene3dHint">WASD to walk · drag to look · scroll to zoom out · walk into a glowing ring to take that portal · F11 for fullscreen</div>
+  <div id="portalHoverTooltip"></div>
 
   <div id="walletPanel">
 
@@ -707,6 +738,14 @@
               <button id="markAllMailReadBtn" type="button" class="btn-secondary">Mark all read</button>
               <button id="clearAllMailBtn" type="button" class="btn-secondary">Clear all</button>
             </div>
+            <!-- Filters which cards render below (see refreshMailDisplay in
+                 viewer.js) — rebuilt from whatever's actually in the inbox
+                 each refresh, so it only ever lists senders you've actually
+                 heard from. Unread counts/badges stay based on the FULL
+                 inbox regardless of this filter, not just what's shown. -->
+            <select id="mailSenderFilterInput" style="margin-top:8px;">
+              <option value="">No mail yet</option>
+            </select>
             <div id="mailList" class="item-list"></div>
           </div>
 

@@ -12,6 +12,7 @@ const ctx = canvas.getContext('2d');
 const scene3dCanvas = document.getElementById('scene3d');
 const scene3dHint = document.getElementById('scene3dHint');
 const hintEl = document.getElementById('hint');
+const portalTooltipEl = document.getElementById('portalHoverTooltip');
 const placeLabel = document.getElementById('placeLabel');
 const statusEl = document.getElementById('status');
 const closeBtn = document.getElementById('closeBtn');
@@ -530,6 +531,7 @@ const mailIntervalStatusEl = document.getElementById('mailIntervalStatus');
 const autoLockMinutesInput = document.getElementById('autoLockMinutesInput');
 const saveAutoLockMinutesBtn = document.getElementById('saveAutoLockMinutesBtn');
 const autoLockMinutesStatusEl = document.getElementById('autoLockMinutesStatus');
+const mailSenderFilterInput = document.getElementById('mailSenderFilterInput');
 const mailListEl = document.getElementById('mailList');
 const markAllMailReadBtn = document.getElementById('markAllMailReadBtn');
 const clearAllMailBtn = document.getElementById('clearAllMailBtn');
@@ -1222,6 +1224,134 @@ canvas.addEventListener('click', (e) => {
       return;
     }
   }
+});
+
+// ---------- portal hover tooltip ----------
+//
+// Same idea as content.js's Enter-Space hover tooltip (task #65) — richer
+// scene detail than the small name/kind label drawPortal() already draws
+// permanently under a portal, surfaced only on hover instead of cluttering
+// the scene at all times. Only for THIS 2D/procedural-v1 renderer: portals
+// here are canvas-drawn shapes with no individual DOM element to attach a
+// native hover listener to, so hit-testing rides on the exact same
+// portalHitboxes distance check the click handler above already does.
+// (The gltf-mini-v1/3D renderer's portals are walk-into proximity
+// triggers — see gltf-mini.js's portalTriggers — with no mouse-hover
+// interaction model to hang a tooltip off of, so this doesn't apply there.)
+//
+// A "world" portal's destination is already fully known — same cached
+// manifest, just a different entry in currentManifest.worlds — so that
+// case never needs a fetch. A "domain" portal's destination lives on a
+// different origin entirely, so its detail arrives async (one fetch per
+// distinct target manifest, cached in domainPortalInfoCache so re-hovering
+// the same portal, or several portals to the same domain, doesn't repeat
+// it); the tooltip shows what it already knows (the portal's own label)
+// immediately and fills in genre/scale/capabilities once that resolves —
+// same "show a placeholder, then fill it in" shape as content.js's tooltip.
+let hoveredPortalMarker = null;
+const domainPortalInfoCache = new Map(); // manifest URL -> Promise<world|null>
+
+function portalCapabilitySummary(world) {
+  const cap = (world.profile && world.profile.capabilities) || {};
+  const bits = [];
+  if (cap.combat && cap.combat !== 'none') bits.push('combat: ' + cap.combat);
+  if (cap.building && cap.building !== 'none') bits.push('building: ' + cap.building);
+  if (cap.vehicles) bits.push('vehicles');
+  if (cap.landOwnership) bits.push('land ownership');
+  return bits.length ? bits.join(' · ') : 'no special capabilities declared';
+}
+
+async function fetchDomainPortalWorld(portal) {
+  if (!portal.manifest) return null;
+  if (domainPortalInfoCache.has(portal.manifest)) return domainPortalInfoCache.get(portal.manifest);
+  const promise = (async () => {
+    try {
+      const res = await fetch(portal.manifest, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const manifest = await res.json();
+      return manifest.worlds.find((w) => w.id === manifest.defaultWorld) || manifest.worlds[0] || null;
+    } catch (err) {
+      return null; // unreachable domain — tooltip just stays label-only, not an error worth surfacing here
+    }
+  })();
+  domainPortalInfoCache.set(portal.manifest, promise);
+  return promise;
+}
+
+// `world` is undefined while a domain portal's detail is still loading
+// (shows "…"), null once it's known to be unavailable (fetch failed, or a
+// same-domain portal pointing at an id this manifest doesn't actually
+// have), or the resolved world object otherwise.
+function renderPortalTooltip(portal, world) {
+  if (!portalTooltipEl) return;
+  const isCrossDomain = portal.kind === 'domain';
+  const lines = [
+    '<div style="font-weight:600;margin-bottom:2px;">' + escapeHtml(portal.label || (isCrossDomain ? 'Cross-domain portal' : 'Portal')) + '</div>'
+  ];
+  if (isCrossDomain) lines.push('<div style="color:#a9b8bf;">⇢ ' + escapeHtml(portal.to) + '</div>');
+  if (world === undefined) {
+    lines.push('<div>…</div>');
+  } else if (world === null) {
+    lines.push('<div>Scene details unavailable</div>');
+  } else {
+    const genre = (world.profile && world.profile.genre) || 'unspecified';
+    const scale = (world.profile && world.profile.scale) || 'unspecified';
+    lines.push('<div>' + escapeHtml(world.name) + ' · Genre: ' + escapeHtml(genre) + ' · Scale: ' + escapeHtml(scale) + '</div>');
+    lines.push('<div>' + escapeHtml(portalCapabilitySummary(world)) + '</div>');
+  }
+  portalTooltipEl.innerHTML = lines.join('');
+}
+
+canvas.addEventListener('mousemove', (e) => {
+  if (pendingDropCredentialId) return; // mid-drop crosshair takes priority — see the click handler's own comment above
+
+  const rect = canvas.getBoundingClientRect();
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
+
+  let hit = null;
+  for (const hb of portalHitboxes) {
+    const dist = Math.hypot(cx - hb.sx, cy - hb.sy);
+    if (dist < hb.radius && hb.marker.portal) { hit = hb; break; }
+  }
+
+  if (!hit) {
+    hoveredPortalMarker = null;
+    canvas.style.cursor = '';
+    portalTooltipEl.style.display = 'none';
+    return;
+  }
+
+  canvas.style.cursor = 'pointer';
+  portalTooltipEl.style.left = (rect.left + hit.sx + 18) + 'px';
+  portalTooltipEl.style.top = (rect.top + hit.sy - 10) + 'px';
+  portalTooltipEl.style.display = 'block';
+
+  // hb.marker is stable across animation frames (rebuilt only on
+  // enterWorld — see window.__atlasScene above), unlike hb itself, which
+  // render() reconstructs every frame; comparing the marker rather than hb
+  // is what keeps this to one lookup/fetch per genuinely NEW portal
+  // hovered, not once per mousemove event.
+  if (hoveredPortalMarker === hit.marker) return;
+  hoveredPortalMarker = hit.marker;
+  const portal = hit.marker.portal;
+
+  if (portal.kind === 'world') {
+    const world = (currentManifest && currentManifest.worlds.find((w) => w.id === portal.to)) || null;
+    renderPortalTooltip(portal, world);
+  } else if (portal.kind === 'domain') {
+    renderPortalTooltip(portal, undefined);
+    fetchDomainPortalWorld(portal).then((world) => {
+      if (hoveredPortalMarker === hit.marker) renderPortalTooltip(portal, world);
+    });
+  } else {
+    renderPortalTooltip(portal, null);
+  }
+});
+
+canvas.addEventListener('mouseleave', () => {
+  hoveredPortalMarker = null;
+  portalTooltipEl.style.display = 'none';
 });
 
 // Escape backs out of "click where you want to drop it" without dropping
@@ -2243,7 +2373,10 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function renderMailCard(entry, container) {
+// friendNameByKey: publicKey -> saved friend name (see refreshMailDisplay),
+// used below so a message from someone already saved as a friend reads as
+// their name instead of a bare key fragment.
+function renderMailCard(entry, container, friendNameByKey) {
   const el = document.createElement('div');
   el.className = 'wallet-item mail-card' + (entry.read ? '' : ' unread');
   el.dataset.id = entry.message.id;
@@ -2260,10 +2393,19 @@ function renderMailCard(entry, container) {
   // server.js's own comment on the send handler) — showing "From
   // bruno#domain" instead of a raw key fragment is the whole payoff of
   // that: nothing to resolve here, the domain already did it.
+  //
+  // A registered handle still wins over a saved friend name when both are
+  // available — the handle came from the domain itself at send time, a
+  // friend name is just a local label this wallet chose, so the more
+  // authoritative one takes the front line. Friend name is the fallback
+  // for the raw-key case specifically, not a replacement for handles.
+  const friendName = entry.message.from && friendNameByKey && friendNameByKey.get(entry.message.from.publicKey);
   const fromLine = entry.message.from
     ? 'From ' + (entry.message.from.handle
         ? escapeHtml(entry.message.from.handle) + '#' + escapeHtml(entry.message.domain)
-        : escapeHtml(entry.message.from.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.message.domain))
+        : friendName
+          ? escapeHtml(friendName) + ' (friend) via ' + escapeHtml(entry.message.domain)
+          : escapeHtml(entry.message.from.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.message.domain))
     : escapeHtml(entry.message.domain);
   // Task #59: a message can carry an attached gift, sitting inert until
   // claimed (see AtlasWallet.claimMailGift — deliberately never
@@ -2278,13 +2420,32 @@ function renderMailCard(entry, container) {
       ? ' <span class="mail-gift-claimed">(claimed)</span>'
       : ' <button type="button" data-action="claim-gift">Claim</button>') +
     '</div>';
+  // Quick reply: only relayed mail (has `from`) has an addressable sender
+  // to reply to — ordinary domain-to-subscriber mail's "sender" IS the
+  // domain, and there's no user-to-user Compose path back to a domain.
+  // Carries everything openComposeReply() needs in data-* rather than
+  // looking entry back up from a click handler — same "the button already
+  // has what it needs" approach block-sender below already used.
+  const replyHtml = !entry.message.from ? '' :
+    '<button type="button" data-action="reply" data-domain="' + escapeHtml(entry.message.domain) + '" data-key="' + escapeHtml(entry.message.from.publicKey) + '" data-handle="' + escapeHtml(entry.message.from.handle || '') + '" data-subject="' + escapeHtml(entry.message.subject) + '">Reply</button>';
   // Task #94 (consent/block model): only relayed mail (has `from`) has a
   // sender worth blocking — ordinary domain-to-subscriber mail's "sender"
   // IS the domain, and blocking that would just be a confusing way to spell
   // deleting/unsubscribing, so this button only ever shows up on the same
   // kind of card fromLine above already treats specially.
+  //
+  // Tucked behind a small "⋯" menu (mail-card-menu) rather than sitting
+  // directly in the action row — it used to, but sitting right next to
+  // Delete/Reply made it too easy to hit by accident on a click meant for
+  // one of those. See the delegated toggle-mail-menu handler below for how
+  // it opens/closes, and the outside-click listener that closes it again.
   const blockHtml = !entry.message.from ? '' :
-    '<button type="button" data-action="block-sender" data-domain="' + escapeHtml(entry.message.domain) + '" data-key="' + escapeHtml(entry.message.from.publicKey) + '">Block sender</button>';
+    '<div class="mail-card-menu">' +
+    '<button type="button" class="link-btn mail-card-menu-toggle" data-action="toggle-mail-menu" title="More actions">⋯</button>' +
+    '<div class="mail-card-menu-items">' +
+    '<button type="button" data-action="block-sender" data-domain="' + escapeHtml(entry.message.domain) + '" data-key="' + escapeHtml(entry.message.from.publicKey) + '" class="danger-btn">Block sender</button>' +
+    '</div>' +
+    '</div>';
   el.innerHTML =
     '<div class="mail-domain">' + fromLine + '</div>' +
     '<div class="mail-subject">' + escapeHtml(entry.message.subject) + '</div>' +
@@ -2293,15 +2454,65 @@ function renderMailCard(entry, container) {
     giftHtml +
     '<div class="item-actions">' +
     '<button type="button" data-action="delete" class="danger-btn">Delete</button>' +
+    replyHtml +
     blockHtml +
     '</div>';
   container.appendChild(el);
+}
+
+// Inbox sender filter: one synthetic key per distinct sender, so ordinary
+// domain-to-subscriber mail (no `from`) can still be filtered on even
+// though it has no public key of its own — grouped by relaying domain
+// instead, prefixed so it can never collide with an actual public key.
+function mailFilterKeyFor(entry) {
+  return entry.message.from ? entry.message.from.publicKey : 'domain:' + entry.message.domain;
+}
+
+function mailFilterLabelFor(entry, friendNameByKey) {
+  if (!entry.message.from) return entry.message.domain;
+  if (entry.message.from.handle) return entry.message.from.handle + '#' + entry.message.domain;
+  const friendName = friendNameByKey && friendNameByKey.get(entry.message.from.publicKey);
+  return friendName || (entry.message.from.publicKey.slice(0, 16) + '…');
+}
+
+// Rebuilt from the current mail list every refreshMailDisplay() call —
+// cheap (a handful of entries at most in this demo), and keeps it in sync
+// with mail arriving/leaving without a separate change-tracking path.
+// Preserves the current selection across a refresh the same way Compose's
+// dropdowns already do, in case a sender's handle/friend name changed
+// underneath an already-open Inbox.
+function refreshMailSenderFilterOptions(entries, friendNameByKey) {
+  if (!mailSenderFilterInput) return;
+  const previousValue = mailSenderFilterInput.value;
+  const seen = new Map();
+  entries.forEach((entry) => {
+    const key = mailFilterKeyFor(entry);
+    if (!seen.has(key)) seen.set(key, mailFilterLabelFor(entry, friendNameByKey));
+  });
+
+  mailSenderFilterInput.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = seen.size ? 'All senders' : 'No mail yet';
+  mailSenderFilterInput.appendChild(placeholder);
+  seen.forEach((label, key) => {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = label;
+    mailSenderFilterInput.appendChild(opt);
+  });
+  mailSenderFilterInput.disabled = seen.size === 0;
+  if (seen.has(previousValue)) mailSenderFilterInput.value = previousValue;
 }
 
 async function refreshMailDisplay() {
   const identity = await AtlasWallet.getIdentity();
   const entries = identity ? await AtlasWallet.getMail(identity.publicKey) : [];
   const unreadCount = entries.filter((e) => !e.read).length;
+  // Friend quick-pick's own map (see refreshComposeFriendPicker) reused
+  // here for display, not addressing — a saved friend's name standing in
+  // for their raw key on a card, same underlying AtlasWallet.getFriends().
+  const friendNameByKey = new Map((await AtlasWallet.getFriends()).map((f) => [f.publicKey, f.name]));
 
   mailBadge.textContent = String(unreadCount);
   mailBadge.classList.toggle('show', unreadCount > 0);
@@ -2314,12 +2525,22 @@ async function refreshMailDisplay() {
     mailBoxInboxBadge.classList.toggle('show', unreadCount > 0);
   }
 
+  refreshMailSenderFilterOptions(entries, friendNameByKey);
+  // Filtering only changes what's RENDERED — unread counts/badges above
+  // stay based on the full inbox, so switching the filter never makes
+  // "something needs attention" quietly disappear just because that
+  // message happens to be from someone else right now.
+  const activeFilter = mailSenderFilterInput ? mailSenderFilterInput.value : '';
+  const visibleEntries = activeFilter ? entries.filter((e) => mailFilterKeyFor(e) === activeFilter) : entries;
+
   if (mailListEl) {
     mailListEl.innerHTML = '';
     if (entries.length === 0) {
       mailListEl.innerHTML = '<div class="empty-note">No mail yet.</div>';
+    } else if (visibleEntries.length === 0) {
+      mailListEl.innerHTML = '<div class="empty-note">No mail from this sender.</div>';
     } else {
-      entries.forEach((entry) => renderMailCard(entry, mailListEl));
+      visibleEntries.forEach((entry) => renderMailCard(entry, mailListEl, friendNameByKey));
     }
   }
 
@@ -2333,20 +2554,27 @@ async function refreshMailDisplay() {
   await updateSocialBadge();
 }
 
+mailSenderFilterInput && mailSenderFilterInput.addEventListener('change', async () => {
+  await refreshMailDisplay();
+});
+
 // Sent tab: a purely local record (AtlasWallet.getSentMail — see its own
 // comment on why this exists at all, and sendUserMail's on how entries get
 // added) of what this wallet has sent through a Post Office. Same card
 // shape/styling as renderMailCard above (.mail-card), just a "To" line
 // instead of "From" and no unread/gift/block affordances — none of those
 // concepts apply to a message you sent yourself.
-function renderSentMailCard(entry, container) {
+function renderSentMailCard(entry, container, friendNameByKey) {
   const el = document.createElement('div');
   el.className = 'wallet-item mail-card';
   el.dataset.id = entry.id;
   const sentAt = new Date(entry.sentAt).toLocaleString();
+  const friendName = friendNameByKey && friendNameByKey.get(entry.to.publicKey);
   const toLine = entry.to.handle
     ? 'To ' + escapeHtml(entry.to.handle) + '#' + escapeHtml(entry.domain)
-    : 'To ' + escapeHtml(entry.to.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.domain);
+    : friendName
+      ? 'To ' + escapeHtml(friendName) + ' (friend) via ' + escapeHtml(entry.domain)
+      : 'To ' + escapeHtml(entry.to.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.domain);
   el.innerHTML =
     '<div class="mail-domain">' + toLine + '</div>' +
     '<div class="mail-subject">' + escapeHtml(entry.subject) + '</div>' +
@@ -2362,11 +2590,12 @@ async function refreshSentMailDisplay() {
   if (!sentMailListEl) return;
   const identity = await AtlasWallet.getIdentity();
   const entries = identity ? await AtlasWallet.getSentMail(identity.publicKey) : [];
+  const friendNameByKey = new Map((await AtlasWallet.getFriends()).map((f) => [f.publicKey, f.name]));
   sentMailListEl.innerHTML = '';
   if (entries.length === 0) {
     sentMailListEl.innerHTML = '<div class="empty-note">No sent mail yet.</div>';
   } else {
-    entries.forEach((entry) => renderSentMailCard(entry, sentMailListEl));
+    entries.forEach((entry) => renderSentMailCard(entry, sentMailListEl, friendNameByKey));
   }
 }
 
@@ -2409,11 +2638,39 @@ async function updateSocialBadge() {
   }
 }
 
+// Closes every open block-sender menu (there's realistically at most one
+// at a time, but this is cheap either way) — used both when opening a
+// different card's menu (so two never sit open together) and on any click
+// outside a menu entirely, below.
+function closeAllMailCardMenus() {
+  mailListEl && mailListEl.querySelectorAll('.mail-card-menu-items.show').forEach((el) => el.classList.remove('show'));
+}
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('.mail-card-menu')) return;
+  closeAllMailCardMenus();
+});
+
 mailListEl && mailListEl.addEventListener('click', async (e) => {
   const card = e.target.closest('.mail-card');
   if (!card) return;
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
+
+  // The block-sender menu's own "⋯" toggle — opens/closes the popover
+  // beside it without touching anything else on the card (in particular,
+  // returns before the unread/markMailRead fallthrough at the bottom would
+  // otherwise fire, so opening the menu on an unread card doesn't ALSO
+  // require a second click to actually read it). See the document-level
+  // listener below for closing it again on an outside click.
+  const menuToggleBtn = e.target.closest('button[data-action="toggle-mail-menu"]');
+  if (menuToggleBtn) {
+    const menu = menuToggleBtn.parentElement.querySelector('.mail-card-menu-items');
+    const opening = menu && !menu.classList.contains('show');
+    closeAllMailCardMenus();
+    if (opening && menu) menu.classList.add('show');
+    return;
+  }
 
   const deleteBtn = e.target.closest('button[data-action="delete"]');
   if (deleteBtn) {
@@ -2423,6 +2680,20 @@ mailListEl && mailListEl.addEventListener('click', async (e) => {
     if (!confirm('Delete this message? This cannot be undone.')) return;
     await AtlasWallet.deleteMailMessage(identity.publicKey, card.dataset.id);
     await refreshMailDisplay();
+    return;
+  }
+
+  // Quick reply: jumps straight to Compose, pre-addressed back to whoever
+  // this message is from — see openComposeReply() below for what it fills
+  // in and why.
+  const replyBtn = e.target.closest('button[data-action="reply"]');
+  if (replyBtn) {
+    await openComposeReply({
+      domain: replyBtn.dataset.domain,
+      key: replyBtn.dataset.key,
+      handle: replyBtn.dataset.handle,
+      subject: replyBtn.dataset.subject
+    });
     return;
   }
 
@@ -2551,13 +2822,24 @@ favoritesSubtabBtn && favoritesSubtabBtn.addEventListener('click', async () => {
 mailInboxSubtabBtn && mailInboxSubtabBtn.addEventListener('click', () => showMailInnerSubtab('mailInboxSubscreen'));
 mailSettingsSubtabBtn && mailSettingsSubtabBtn.addEventListener('click', () => showMailInnerSubtab('mailSettingsSubscreen'));
 
-// The "Mail" heading's own Inbox/Sent/Compose tabs. Inbox and Compose need
-// no refresh on click — both are kept current by whatever last called
-// refreshMailDisplay()/refreshMyPublicKeyDisplay() (checkMailOnTabOpen
-// above, or any send/mark-read/delete action), same lazy convention as
-// Collectibles/Documents. Sent is the one sub-tab nothing else keeps
-// current, so it refreshes itself on the way in.
-mailBoxInboxSubtabBtn && mailBoxInboxSubtabBtn.addEventListener('click', () => showMailBoxSubtab('mailBoxInboxSubscreen'));
+// The "Mail" heading's own Inbox/Sent/Compose tabs. Compose needs no
+// refresh on click — kept current by whatever last called
+// refreshMyPublicKeyDisplay() (any send action, or opening Social>Mail).
+// Sent is the one sub-tab nothing else keeps current, so it refreshes
+// itself on the way in.
+//
+// Inbox ALSO triggers its own check-now, same as the outer Social/Mail
+// tab-open handlers above (socialTabBtn/mailSubtabBtn) already do — added
+// here specifically because those only fire once, on the way INTO Social>
+// Mail; clicking away to Sent/Compose/Mail Settings and back to Inbox
+// without ever leaving Social>Mail entirely used to leave Inbox showing
+// whatever it last had, with no way to refresh it short of the manual
+// Check now button. This makes returning to Inbox itself a check, too.
+mailBoxInboxSubtabBtn && mailBoxInboxSubtabBtn.addEventListener('click', async () => {
+  showMailBoxSubtab('mailBoxInboxSubscreen');
+  await checkMailOnTabOpen();
+  await refreshMailDisplay();
+});
 mailBoxSentSubtabBtn && mailBoxSentSubtabBtn.addEventListener('click', async () => {
   showMailBoxSubtab('mailBoxSentSubscreen');
   await refreshSentMailDisplay();
@@ -3048,6 +3330,51 @@ composeFriendPickerInput && composeFriendPickerInput.addEventListener('change', 
   }
   postOfficeToPublicKeyInput.value = publicKey;
 });
+
+// Quick reply: jumps straight from an Inbox card to Compose, pre-addressed
+// back to whoever it's from (see renderMailCard's replyHtml for what's
+// carried over). Drives through the exact same show*Subtab() functions a
+// person clicking through by hand would trigger, so it lands in a fully
+// consistent state — active classes, badge refreshes, everything — rather
+// than just flipping .active directly here and risking the two ever
+// drifting apart.
+//
+// A handle survives a reply as-is (handle-first is Compose's own default,
+// nothing to switch). A raw key always needs the raw-key mode switch,
+// mirroring composeFriendPickerInput's own change handler right above —
+// and if that key also happens to belong to a saved friend, the friend
+// picker is set to match too, purely so the picker doesn't look wrong
+// sitting there blank; sending doesn't depend on it either way.
+async function openComposeReply({ domain, key, handle, subject }) {
+  showWalletScreen('socialScreen');
+  showSocialSubtab('mailSubscreen');
+  showMailInnerSubtab('mailInboxSubscreen');
+  showMailBoxSubtab('mailBoxComposeSubscreen');
+  await refreshComposeFriendPicker();
+
+  if (postOfficeToDomainInput) postOfficeToDomainInput.value = domain;
+
+  if (handle) {
+    postOfficeToHandleInput.hidden = false;
+    postOfficeToPublicKeyInput.hidden = true;
+    postOfficeToggleRawKeyBtn.textContent = 'Paste a raw public key instead';
+    postOfficeToHandleInput.value = handle;
+    if (composeFriendPickerInput) composeFriendPickerInput.value = '';
+  } else {
+    postOfficeToPublicKeyInput.hidden = false;
+    postOfficeToHandleInput.hidden = true;
+    postOfficeToggleRawKeyBtn.textContent = 'Use a handle instead';
+    postOfficeToPublicKeyInput.value = key;
+    if (composeFriendPickerInput) {
+      const isSavedFriend = [...composeFriendPickerInput.options].some((o) => o.value === key);
+      composeFriendPickerInput.value = isSavedFriend ? key : '';
+    }
+  }
+
+  if (postOfficeSubjectInput) postOfficeSubjectInput.value = subject ? 'Re: ' + subject : '';
+  if (postOfficeBodyInput) postOfficeBodyInput.value = '';
+  if (postOfficeSendStatusEl) postOfficeSendStatusEl.textContent = '';
+}
 
 // Post Office (task #75/#87/#94, SPEC.md §11.3): composes and sends a
 // message to another identity's public key through a Post Office this
