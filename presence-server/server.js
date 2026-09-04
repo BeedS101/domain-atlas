@@ -343,6 +343,155 @@ function moveMember(connId, x, y, z, yaw) {
   return true;
 }
 
+// ---------- chat (in-world text chat, riding the same connection) ----------
+//
+// Deliberately a SEPARATE room concept from `rooms` above, not a reuse of
+// it: `rooms` is keyed by domain+world (one roster per world, task #66),
+// but chat is keyed by domain ONLY — every visitor anywhere in a domain is
+// in the same chat room, tagged with whichever world they're currently in,
+// so a client can offer both a "This World" view (filtered by that tag)
+// and a "Domain" view (everyone) from the exact same live stream, without
+// this server needing to track two separate broadcast lists. See
+// extension/viewer.js's connectChat() for why this rides its OWN
+// dedicated WebSocket connection rather than reusing the presence one —
+// short version: presence only ever connects in a gltf-mini-v1 (3D) world
+// (gated on active3D throughout this file's client counterpart), but chat
+// is meant to work in every world, including the 2D isometric ones, so it
+// can't piggyback on a connection that sometimes doesn't exist.
+//
+// A visitor rejoins chat's domain room on every enterWorld() the same way
+// they rejoin presence's world room (viewer.js's disconnectChat() / then
+// connectChat() runs unconditionally on every world change, same as
+// disconnect/connectPresence already do) — so `world` on a chat member is
+// always simply "whichever world this CURRENT connection joined with",
+// no separate retagging message needed for a same-domain portal hop.
+//
+// History is a small in-memory rolling buffer per domain (last
+// CHAT_HISTORY_LIMIT messages, oldest dropped first) — enough to satisfy
+// "a new joiner sees recent chat," but it's memory only, same as `rooms`
+// itself: a server restart loses it, exactly like a restart already drops
+// every live roster. Not a chat log service, just enough backlog that
+// arriving mid-conversation doesn't mean starting from a blank box.
+const chatRooms = new Map(); // domain -> Map<connId, {name, publicKey, world, socket}>
+const chatHistory = new Map(); // domain -> array of recent {id, world, name, publicKey, text, sentAt}, oldest first
+const chatConnIndex = new Map(); // connId -> {domain, room} — this connection's OWN chat membership, separate from connIndex (presence's own connId->room index) since a connId can be a chat member, a presence member, both, or neither
+const CHAT_HISTORY_LIMIT = 50;
+const MAX_CHAT_TEXT_LEN = 500;
+
+// Same blocklist/leetspeak-normalization idea as extension/wallet.js's
+// aliasContainsBlockedWord — duplicated rather than shared, same as every
+// other small helper across this project's separate zero-dependency
+// servers (see this file's own header note on why each one is
+// self-contained), and duplicated AGAIN identically in wallet.js's own
+// chatMessageContainsBlockedWord (client-side immediate feedback) — this
+// copy here is the authoritative one, since a client could always be
+// modified to skip its own check and talk raw WebSocket. Deliberately NOT
+// identical to the alias version, though: aliasContainsBlockedWord strips
+// ALL non-alphanumeric characters (spaces included) before matching,
+// which is fine for a short single handle but actively dangerous for a
+// multi-word sentence — "ass" + "hole" sitting in adjacent words
+// ("...my ass holds...") would concatenate into a false "asshole" hit
+// with spaces stripped. This version normalizes punctuation to SPACES
+// (not nothing), preserving every original word boundary, so two
+// innocent adjacent words can never concatenate into a blocked one.
+// Matching is still plain substring (not whole-word-only) against that
+// space-preserved text — a whole-word-only match would let common
+// inflections straight through ("fucking", "shitty", "asses" would all
+// dodge a blocklist entry for "fuck"/"shit"/"ass"), and this project's
+// stated policy for the alias filter is the same: erring toward
+// over-blocking is the safer trade-off, a false rejection just means
+// rephrasing.
+const CHAT_BLOCKLIST = [
+  'fuck', 'shit', 'bitch', 'cunt', 'asshole', 'bastard', 'dick', 'piss',
+  'slut', 'whore', 'fag', 'nigger', 'nigga', 'retard', 'rape'
+];
+function normalizeForChatFilter(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/0/g, 'o').replace(/1/g, 'i').replace(/!/g, 'i')
+    .replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's')
+    .replace(/@/g, 'a').replace(/\$/g, 's')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+function chatTextContainsBlockedWord(text) {
+  const normalized = normalizeForChatFilter(text);
+  if (!normalized) return false;
+  return CHAT_BLOCKLIST.some((word) => normalized.includes(word));
+}
+
+function getOrCreateChatRoom(domain) {
+  let room = chatRooms.get(domain);
+  if (!room) { room = new Map(); chatRooms.set(domain, room); }
+  return room;
+}
+
+function broadcastChat(room, obj) {
+  room.forEach((member) => sendText(member.socket, obj));
+}
+
+// Joins connId into domain's chat room (creating it if this is the first
+// member) and returns the domain's current history backlog — publicKey is
+// optional (task #63/#67's same "presence never requires an identity"
+// principle: reading chat needs no login, only SENDING does, enforced in
+// sendChatMessage below, not here).
+function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, publicKeyRaw, socket) {
+  const domain = String(domainRaw || '').slice(0, MAX_ID_LEN);
+  const world = String(worldRaw || '').slice(0, MAX_ID_LEN);
+  if (!domain || !world) return null;
+  const name = String(nameRaw || 'Visitor').slice(0, MAX_NAME_LEN);
+  const publicKey = publicKeyRaw ? String(publicKeyRaw).slice(0, MAX_PUBLIC_KEY_LEN) : null;
+  const room = getOrCreateChatRoom(domain);
+  room.set(connId, { name, publicKey, world, socket });
+  chatConnIndex.set(connId, { domain, room });
+  return chatHistory.get(domain) || [];
+}
+
+function leaveChatRoom(connId) {
+  const loc = chatConnIndex.get(connId);
+  if (!loc) return;
+  chatConnIndex.delete(connId);
+  loc.room.delete(connId);
+  if (loc.room.size === 0) chatRooms.delete(loc.domain);
+}
+
+// Validates and broadcasts a chat send from an already-chat-joined connId.
+// Returns {ok:true} or {ok:false, reason} — reason is a short machine-ish
+// string (see the client's own chat-error handling in viewer.js) rather
+// than free text, since every rejection here is one of a fixed few cases,
+// not something worth composing a sentence for server-side.
+function sendChatMessage(connId, textRaw) {
+  const loc = chatConnIndex.get(connId);
+  if (!loc) return { ok: false, reason: 'not-joined' };
+  const member = loc.room.get(connId);
+  if (!member) return { ok: false, reason: 'not-joined' };
+  // Login-gated (per the user's own spec): reading never requires an
+  // identity, but a member with no publicKey announced none at connect
+  // time (anonymous/locked wallet) and can't send — same enforcement
+  // point relaySignal-adjacent code never bothered with, since presence
+  // signals are still fine anonymously; chat explicitly is not.
+  if (!member.publicKey) return { ok: false, reason: 'login-required' };
+  const text = String(textRaw || '').trim().slice(0, MAX_CHAT_TEXT_LEN);
+  if (!text) return { ok: false, reason: 'empty' };
+  if (chatTextContainsBlockedWord(text)) return { ok: false, reason: 'blocked' };
+
+  const message = {
+    id: crypto.randomBytes(8).toString('hex'),
+    world: member.world,
+    name: member.name,
+    publicKey: member.publicKey,
+    text,
+    sentAt: new Date().toISOString()
+  };
+  const history = chatHistory.get(loc.domain) || [];
+  history.push(message);
+  if (history.length > CHAT_HISTORY_LIMIT) history.shift();
+  chatHistory.set(loc.domain, history);
+
+  broadcastChat(loc.room, { type: 'chat-message', message });
+  return { ok: true, message };
+}
+
 // ---------- connection lifecycle ----------
 
 const HEARTBEAT_MS = 20000; // how often this server pings each connection
@@ -354,16 +503,24 @@ function handleConnection(socket) {
   let alive = true;
   let lastMoveAt = 0;
 
+  let chatJoined = false; // separate from `joined` above — a connection can be chat-joined without ever being presence-joined (a 2D world), or vice versa
+
   function leaveRoom() {
     if (!joined) return;
     joined = false;
     removeMember(connId);
   }
 
+  function leaveChat() {
+    if (!chatJoined) return;
+    chatJoined = false;
+    leaveChatRoom(connId);
+  }
+
   attachFrameReader(socket, {
     onPing: (payload) => writeFrame(socket, OP_PONG, payload),
     onPong: () => { alive = true; },
-    onClose: () => { leaveRoom(); sendClose(socket); },
+    onClose: () => { leaveRoom(); leaveChat(); sendClose(socket); },
     onMessage: (text) => {
       let msg;
       try { msg = JSON.parse(text); } catch (err) { return; } // malformed JSON — ignore, don't drop the connection over it
@@ -398,11 +555,33 @@ function handleConnection(socket) {
       }
 
       if (msg.type === 'leave') { leaveRoom(); return; }
+
+      // In-world chat — see the "chat" section above for the room model.
+      // A dedicated connection (extension/viewer.js's connectChat()), but
+      // handled by this SAME dispatcher/socket-lifecycle since there's
+      // nothing transport-specific about it worth a second code path.
+      if (msg.type === 'chat-join') {
+        if (chatJoined) return; // one chat-join per connection, same rule as presence's join
+        const history = joinChatRoom(connId, msg.domain, msg.world, msg.name, msg.publicKey, socket);
+        if (history === null) return;
+        chatJoined = true;
+        sendText(socket, { type: 'chat-history', messages: history });
+        return;
+      }
+
+      if (msg.type === 'chat-send') {
+        if (!chatJoined) return;
+        const result = sendChatMessage(connId, msg.text);
+        if (!result.ok) sendText(socket, { type: 'chat-error', reason: result.reason });
+        return;
+      }
+
+      if (msg.type === 'chat-leave') { leaveChat(); return; }
     }
   });
 
-  socket.on('close', () => leaveRoom());
-  socket.on('error', () => leaveRoom());
+  socket.on('close', () => { leaveRoom(); leaveChat(); });
+  socket.on('error', () => { leaveRoom(); leaveChat(); });
 
   // Heartbeat: catches connections that went dead without a clean TCP
   // close (a laptop put to sleep with the tab open is the common real

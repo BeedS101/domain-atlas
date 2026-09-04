@@ -13,6 +13,27 @@ const scene3dCanvas = document.getElementById('scene3d');
 const scene3dHint = document.getElementById('scene3dHint');
 const hintEl = document.getElementById('hint');
 const portalTooltipEl = document.getElementById('portalHoverTooltip');
+
+// In-world chat (#105-109) — anchored bottom-left of the canvas, see the
+// "in-world chat" section further below (right after presence) for the
+// connection logic these elements are driven by.
+const chatWidgetEl = document.getElementById('chatWidget');
+const chatPanelEl = document.getElementById('chatPanel');
+const chatTabWorldBtn = document.getElementById('chatTabWorldBtn');
+const chatTabDomainBtn = document.getElementById('chatTabDomainBtn');
+const chatSettingsBtn = document.getElementById('chatSettingsBtn');
+const chatResizeHandleEl = document.getElementById('chatResizeHandle');
+const chatSettingsPopoverEl = document.getElementById('chatSettingsPopover');
+const chatOpacityInput = document.getElementById('chatOpacityInput');
+const chatTextSizeInput = document.getElementById('chatTextSizeInput');
+const chatMinimizeToggleBtn = document.getElementById('chatMinimizeToggleBtn');
+const chatLoginNoteEl = document.getElementById('chatLoginNote');
+const chatMessagesWorldEl = document.getElementById('chatMessagesWorld');
+const chatMessagesDomainEl = document.getElementById('chatMessagesDomain');
+const chatInputRowEl = document.getElementById('chatInputRow');
+const chatTextInput = document.getElementById('chatTextInput');
+const chatSendStatusEl = document.getElementById('chatSendStatus');
+
 const placeLabel = document.getElementById('placeLabel');
 const statusEl = document.getElementById('status');
 const closeBtn = document.getElementById('closeBtn');
@@ -482,6 +503,290 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
   socket.addEventListener('error', () => {});
 }
 
+// ---------- in-world chat (#105-109) ----------
+// A read-by-anyone, send-when-unlocked text chat, riding the SAME
+// presence-server process (see server.js's own "chat" section) but as a
+// fully INDEPENDENT WebSocket connection from presence's — presence's own
+// 'message' listener bails out whenever !active3D (see connectPresence
+// above), which would silently break chat for every 2D (procedural-v1)
+// world if chat piggybacked on that connection instead of getting its
+// own. Two tabs, one live stream: the server scopes its room+history by
+// DOMAIN alone and tags every message with `world`, so "This World" vs
+// "Domain" is purely a client-side filter over the same chatMessages
+// array — see renderChatMessages().
+//
+// Deliberately WS-only for this build (unlike presence, which falls back
+// to HTTP polling for #68's plain-PHP-hosting case) — a domain that can't
+// run a persistent WebSocket process simply has no chat yet. Matching
+// polling-fallback parity for chat is a straightforward follow-up (same
+// shape as presence's own pollPresence()), just not built in this pass.
+//
+// Read access needs no identity at all (matches #63's "entering a world
+// never requires a wallet" principle) — connectChat() joins with
+// publicKey: null for an anonymous visitor, and the server's chat-history
+// reply and chat-message broadcasts go to every member of the room
+// regardless. Sending is gated purely on chatOwnPublicKey being set (see
+// refreshChatSendability()); the server enforces the same gate
+// authoritatively (reason: 'login-required'), since the client-side gate
+// alone is just UX, never trusted as the real check.
+const CHAT_DEFAULT_BASE = PRESENCE_DEFAULT_BASE; // same server, same base resolution as presence (manifest.presence, falling back to localhost:8004)
+const CHAT_MESSAGES_CAP = 200; // client-side cap across both tabs — the server's own chatHistory buffer (CHAT_HISTORY_LIMIT) is what a late joiner actually receives
+// Mirrors wallet.js's own CHAT_MIN_WIDTH/CHAT_MAX_WIDTH/CHAT_MIN_HEIGHT/
+// CHAT_MAX_HEIGHT exactly — duplicated rather than exported so a live
+// resize drag can clamp responsively before the persisted value round-
+// trips through AtlasWallet.setChatPanelSettings() (which clamps again,
+// authoritatively, same "never trust one layer alone" posture as the
+// profanity filter's client+server duplication).
+const CHAT_MIN_WIDTH = 220;
+const CHAT_MAX_WIDTH = 640;
+const CHAT_MIN_HEIGHT = 120;
+const CHAT_MAX_HEIGHT = 480;
+
+let chatSocket = null;
+let chatMessages = []; // flat list, each tagged with `world` — see renderChatMessages() for how the two tabs filter this same array
+let chatDomain = null;
+let chatWorldId = null;
+let chatOwnPublicKey = null; // this chat connection's own announced identity — independent of presenceOwnPublicKey, since chat can be live in a 2D world where presence never connects at all
+let chatActiveTab = 'world'; // 'world' | 'domain' — matches viewer.html's default active tab/hidden state
+let chatSendStatusTimer = null;
+
+function chatIsConnected() {
+  return !!(chatSocket && chatSocket.readyState === WebSocket.OPEN);
+}
+
+// Preserves "was scrolled near the bottom" across a full innerHTML
+// replace, so an already-open chat keeps auto-scrolling to new messages
+// while someone who's scrolled up to read history isn't yanked back down.
+function renderChatList(container, msgs, emptyText) {
+  if (!container) return;
+  const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 24;
+  if (!msgs.length) {
+    container.innerHTML = '<div class="empty-note">' + escapeHtml(emptyText) + '</div>';
+    return;
+  }
+  container.innerHTML = msgs.map((m) =>
+    '<div class="chat-line"><span class="chat-name">' + escapeHtml(m.name || 'Visitor') + ':</span> ' + escapeHtml(m.text) + '</div>'
+  ).join('');
+  if (wasNearBottom) container.scrollTop = container.scrollHeight;
+}
+
+function renderChatMessages() {
+  renderChatList(chatMessagesWorldEl, chatMessages.filter((m) => m.world === chatWorldId), 'No messages in this world yet.');
+  renderChatList(chatMessagesDomainEl, chatMessages, 'No messages in this domain yet.');
+}
+
+function showChatTab(tab) {
+  chatActiveTab = tab;
+  if (chatTabWorldBtn) chatTabWorldBtn.classList.toggle('active-subtab', tab === 'world');
+  if (chatTabDomainBtn) chatTabDomainBtn.classList.toggle('active-subtab', tab === 'domain');
+  if (chatMessagesWorldEl) chatMessagesWorldEl.hidden = tab !== 'world';
+  if (chatMessagesDomainEl) chatMessagesDomainEl.hidden = tab !== 'domain';
+}
+chatTabWorldBtn && chatTabWorldBtn.addEventListener('click', () => showChatTab('world'));
+chatTabDomainBtn && chatTabDomainBtn.addEventListener('click', () => showChatTab('domain'));
+
+function chatErrorText(reason) {
+  if (reason === 'login-required') return 'Unlock your wallet to send chat messages.';
+  if (reason === 'blocked') return 'Message blocked — please rephrase.';
+  if (reason === 'empty') return 'Type a message first.';
+  return 'Message not sent.';
+}
+
+function showChatSendStatus(text) {
+  if (!chatSendStatusEl) return;
+  chatSendStatusEl.textContent = text || '';
+  if (chatSendStatusTimer) clearTimeout(chatSendStatusTimer);
+  if (text) chatSendStatusTimer = setTimeout(() => { chatSendStatusEl.textContent = ''; }, 4000);
+}
+
+// Send eligibility depends only on whether an identity is currently
+// announced to this connection, not on the socket's live open/closed
+// state (checked separately, at send time in the Enter-key handler) — a
+// momentary reconnect shouldn't visibly flicker the input disabled/
+// enabled on every world switch.
+function refreshChatSendability() {
+  if (!chatTextInput) return;
+  const canSend = !!chatOwnPublicKey;
+  chatTextInput.disabled = !canSend;
+  chatTextInput.placeholder = canSend ? 'Message this domain…' : 'Sign in to chat…';
+  if (chatLoginNoteEl) chatLoginNoteEl.textContent = canSend ? '' : 'Unlock your wallet to send messages. Anyone can still read chat.';
+}
+
+function disconnectChat() {
+  if (chatSocket) {
+    const socket = chatSocket;
+    chatSocket = null;
+    try { socket.send(JSON.stringify({ type: 'chat-leave' })); } catch (err) {}
+    try { socket.close(); } catch (err) {}
+  }
+  chatDomain = null;
+  chatWorldId = null;
+  chatOwnPublicKey = null;
+  chatMessages = [];
+  renderChatMessages();
+  refreshChatSendability();
+}
+
+function connectChat(domain, worldId, presenceBase) {
+  chatDomain = domain;
+  chatWorldId = worldId;
+  chatMessages = [];
+  renderChatMessages();
+
+  const base = presenceBase || CHAT_DEFAULT_BASE;
+  AtlasWallet.getIdentity().then(async (identity) => {
+    const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
+    const displayName = alias || (identity ? short(identity.publicKey, 10) : 'Visitor');
+    const publicKey = identity ? identity.publicKey : null;
+
+    // Superseded before the identity lookup even resolved (a fast world
+    // switch, or refreshChatIdentity() firing again before this settled)
+    // — never let a stale attempt clobber a newer one's state.
+    if (chatDomain !== domain || chatWorldId !== worldId) return;
+
+    let socket;
+    try {
+      socket = new WebSocket(presenceWsUrlFor(base));
+    } catch (err) {
+      return; // chat is a pure enhancement, same posture as presence — never surfaced as an error
+    }
+    if (chatDomain !== domain || chatWorldId !== worldId) { try { socket.close(); } catch (err) {} return; }
+
+    chatSocket = socket;
+    chatOwnPublicKey = publicKey;
+    refreshChatSendability();
+
+    socket.addEventListener('open', () => {
+      if (chatSocket !== socket) { try { socket.close(); } catch (err) {} return; }
+      socket.send(JSON.stringify({ type: 'chat-join', domain, world: worldId, name: displayName, publicKey }));
+    });
+
+    socket.addEventListener('message', (ev) => {
+      if (chatSocket !== socket) return;
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch (err) { return; }
+      if (!msg || typeof msg.type !== 'string') return;
+      if (msg.type === 'chat-history') {
+        chatMessages = (msg.messages || []).slice(-CHAT_MESSAGES_CAP);
+        renderChatMessages();
+      } else if (msg.type === 'chat-message') {
+        chatMessages.push(msg.message);
+        if (chatMessages.length > CHAT_MESSAGES_CAP) chatMessages.shift();
+        renderChatMessages();
+      } else if (msg.type === 'chat-error') {
+        showChatSendStatus(chatErrorText(msg.reason));
+      }
+    });
+
+    socket.addEventListener('close', () => {
+      if (chatSocket === socket) chatSocket = null;
+    });
+    socket.addEventListener('error', () => {});
+  }).catch(() => {});
+}
+
+// Re-announces this chat connection's identity the moment the wallet locks
+// or unlocks, without waiting for the visitor to leave and re-enter the
+// world — wired into the unlock/lock button handlers below. Captures the
+// current domain/world into locals BEFORE calling disconnectChat() (which
+// clears chatDomain/chatWorldId to null), otherwise there'd be nothing
+// left to reconnect to.
+function refreshChatIdentity() {
+  if (!chatDomain || !chatWorldId) { refreshChatSendability(); return; }
+  const domain = chatDomain;
+  const worldId = chatWorldId;
+  const presenceBase = (currentManifest && currentManifest.domain === domain) ? currentManifest.presence : null;
+  disconnectChat();
+  connectChat(domain, worldId, presenceBase);
+}
+
+chatTextInput && chatTextInput.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const text = chatTextInput.value.trim();
+  if (!text) return;
+  if (!chatOwnPublicKey) { showChatSendStatus(chatErrorText('login-required')); return; }
+  if (!chatIsConnected()) { showChatSendStatus('Not connected — try again in a moment.'); return; }
+  if (AtlasWallet.chatMessageContainsBlockedWord(text)) { showChatSendStatus(chatErrorText('blocked')); return; }
+  chatSocket.send(JSON.stringify({ type: 'chat-send', text }));
+  chatTextInput.value = '';
+});
+
+// ---------- chat panel settings: opacity, text size, resize, minimize ----------
+// Persisted via AtlasWallet.get/setChatPanelSettings() (wallet.js,
+// chrome.storage.local, global scope — a display preference usable even
+// without an unlocked identity, same convention as atlasCharacterScale).
+
+function applyChatPanelSize(settings) {
+  if (!chatPanelEl) return;
+  chatPanelEl.style.width = settings.width + 'px';
+  if (chatInputRowEl) chatInputRowEl.style.width = settings.width + 'px';
+  if (chatWidgetEl) chatWidgetEl.style.opacity = String(settings.opacity);
+  if (chatMessagesWorldEl) chatMessagesWorldEl.style.fontSize = settings.textSize + 'px';
+  if (chatMessagesDomainEl) chatMessagesDomainEl.style.fontSize = settings.textSize + 'px';
+  if (chatTextInput) chatTextInput.style.fontSize = settings.textSize + 'px';
+  if (chatOpacityInput) chatOpacityInput.value = String(settings.opacity);
+  if (chatTextSizeInput) chatTextSizeInput.value = String(settings.textSize);
+  if (chatWidgetEl) chatWidgetEl.classList.toggle('minimized', !!settings.minimized);
+  if (chatMinimizeToggleBtn) chatMinimizeToggleBtn.textContent = settings.minimized ? 'Show' : 'Minimize';
+  if (!settings.minimized) chatPanelEl.style.height = settings.height + 'px';
+}
+
+chatSettingsBtn && chatSettingsBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  chatSettingsPopoverEl.hidden = !chatSettingsPopoverEl.hidden;
+});
+// Outside-click closes the popover — same pattern as the mail card's "⋯"
+// menu (#101): a single delegated document listener rather than one per
+// popover.
+document.addEventListener('click', (e) => {
+  if (chatSettingsPopoverEl && !chatSettingsPopoverEl.hidden && !chatSettingsPopoverEl.contains(e.target) && e.target !== chatSettingsBtn) {
+    chatSettingsPopoverEl.hidden = true;
+  }
+});
+
+chatOpacityInput && chatOpacityInput.addEventListener('input', async () => {
+  applyChatPanelSize(await AtlasWallet.setChatPanelSettings({ opacity: parseFloat(chatOpacityInput.value) }));
+});
+chatTextSizeInput && chatTextSizeInput.addEventListener('input', async () => {
+  applyChatPanelSize(await AtlasWallet.setChatPanelSettings({ textSize: parseInt(chatTextSizeInput.value, 10) }));
+});
+
+chatMinimizeToggleBtn && chatMinimizeToggleBtn.addEventListener('click', async () => {
+  const current = await AtlasWallet.getChatPanelSettings();
+  const settings = current.minimized
+    // Restoring — bring back the size captured right before minimizing.
+    ? await AtlasWallet.setChatPanelSettings({ minimized: false, width: current.lastSize.width, height: current.lastSize.height })
+    : await AtlasWallet.setChatPanelSettings({ minimized: true, lastSize: { width: current.width, height: current.height } });
+  applyChatPanelSize(settings);
+});
+
+// Drag-resize: the handle sits at the panel header's top-right corner
+// (its "far corner" from the bottom-left anchor, see viewer.html) —
+// dragging right grows width normally, but dragging UP grows height,
+// since the panel's BOTTOM edge is what stays anchored in place, not its
+// top (see #chatWidget's bottom-anchored CSS).
+let chatResizeDrag = null;
+chatResizeHandleEl && chatResizeHandleEl.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  const rect = chatPanelEl.getBoundingClientRect();
+  chatResizeDrag = { startX: e.clientX, startY: e.clientY, startWidth: rect.width, startHeight: rect.height };
+});
+document.addEventListener('mousemove', (e) => {
+  if (!chatResizeDrag) return;
+  const width = Math.max(CHAT_MIN_WIDTH, Math.min(CHAT_MAX_WIDTH, chatResizeDrag.startWidth + (e.clientX - chatResizeDrag.startX)));
+  const height = Math.max(CHAT_MIN_HEIGHT, Math.min(CHAT_MAX_HEIGHT, chatResizeDrag.startHeight + (chatResizeDrag.startY - e.clientY)));
+  chatPanelEl.style.width = width + 'px';
+  if (chatInputRowEl) chatInputRowEl.style.width = width + 'px';
+  chatPanelEl.style.height = height + 'px';
+});
+document.addEventListener('mouseup', async () => {
+  if (!chatResizeDrag) return;
+  chatResizeDrag = null;
+  const rect = chatPanelEl.getBoundingClientRect();
+  // Snaps back to the clamped/persisted value if anything drifted mid-drag.
+  applyChatPanelSize(await AtlasWallet.setChatPanelSettings({ width: Math.round(rect.width), height: Math.round(rect.height) }));
+});
+
 const walletBtn = document.getElementById('walletBtn');
 const walletBadge = document.getElementById('walletBadge');
 const walletPanel = document.getElementById('walletPanel');
@@ -820,6 +1125,7 @@ async function enterWorld(worldId) {
   if (active3D) { active3D.destroy(); active3D = null; }
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
   disconnectPresence(); // leaving whichever world was active before also means leaving its presence room, 3D or not
+  disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), unlike presence which is 3D-only
   hideSceneLoadProgress(); // whichever world was active before might have left this showing (#36) — never carry it into the next one
 
   // A pending "click where you want to drop it" from whichever world was
@@ -890,6 +1196,7 @@ async function enterWorld(worldId) {
       // be friend-requested (nothing stable to add), but everything else
       // about presence works exactly as before.
       connectPresence(manifest.domain, world.id, presenceName, manifest.presence, presenceIdentity ? presenceIdentity.publicKey : null);
+      connectChat(manifest.domain, world.id, manifest.presence);
     } catch (err) {
       hideSceneLoadProgress(); // a failed load shouldn't leave a stuck progress bar over the error message
       statusEl.textContent = 'Could not load world: ' + err.message;
@@ -922,6 +1229,10 @@ async function enterWorld(worldId) {
 
     statusEl.textContent = 'In sync with ' + manifest.domain + ' · ' + world.id;
     history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
+    // Chat has no visible character to attach to (unlike presence, #66),
+    // so unlike connectPresence() it isn't gated on the 3D renderer at
+    // all — a 2D (procedural-v1) world gets a live chat room too.
+    connectChat(manifest.domain, world.id, manifest.presence);
   } catch (err) {
     statusEl.textContent = 'Could not load world: ' + err.message;
     window.__atlasScene = { floor: { size: [10, 10], color: '#2a1a1a' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
@@ -2212,6 +2523,7 @@ seedConfirmBtn.addEventListener('click', async () => {
   showWalletScreen('mainWalletScreen');
   await refreshIdentityDisplay();
   await refreshInventoryDisplay();
+  refreshChatIdentity(); // a freshly-created identity is unlocked immediately — chat should recognize it right away, same as the unlock/lock paths
 });
 
 let pendingOnboardImportFile = null;
@@ -2241,6 +2553,7 @@ confirmImportBtn.addEventListener('click', async () => {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
     await refreshInventoryDisplay();
+    refreshChatIdentity(); // imported identity is unlocked immediately too — same reasoning as seedConfirmBtn above
   } catch (err) {
     // Deliberately the same message whether the password, the seed
     // phrase, or both were wrong — see wallet.js's importIdentity.
@@ -2260,6 +2573,7 @@ unlockBtn.addEventListener('click', async () => {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
     await refreshInventoryDisplay();
+    refreshChatIdentity(); // an in-progress chat session should reflect the newly-unlocked identity immediately, without requiring leaving the world
   } catch (err) {
     unlockScreenStatus.textContent = err.message;
   } finally {
@@ -2271,6 +2585,7 @@ lockWalletBtn.addEventListener('click', async () => {
   await AtlasWallet.lockIdentity();
   walletPanel.classList.remove('open');
   await refreshQuickLockButtonVisibility();
+  refreshChatIdentity(); // same immediate reflection as the unlock path above — locking should drop back to anonymous chat right away
 });
 
 // Quick lock (#67 follow-up): the same lockIdentity() call as the Settings
@@ -2289,6 +2604,7 @@ async function refreshQuickLockButtonVisibility() {
 quickLockWalletBtn && quickLockWalletBtn.addEventListener('click', async () => {
   await AtlasWallet.lockIdentity();
   await refreshQuickLockButtonVisibility();
+  refreshChatIdentity(); // same immediate reflection the other two lock/unlock paths get
   // If the wallet panel happens to be open to a screen that only makes
   // sense unlocked (mainWalletScreen, say), route it to wherever locking
   // now actually leads — same re-routing routeWalletScreen already does
@@ -4342,6 +4658,7 @@ setInterval(async () => {
   if (Date.now() - lastActivityTime < minutes * 60 * 1000) return;
   await AtlasWallet.lockIdentity();
   await refreshQuickLockButtonVisibility();
+  refreshChatIdentity(); // an auto-lock should drop chat back to anonymous immediately too, same as the manual lock paths
   // Same re-routing the two manual lock buttons already trigger (Settings'
   // Lock wallet, and the top-bar Quick lock) — if the panel's open to a
   // screen that only makes sense unlocked, route it to wherever locking
@@ -4352,6 +4669,8 @@ setInterval(async () => {
 refreshIdentityDisplay();
 refreshInventoryDisplay();
 refreshMailDisplay();
+AtlasWallet.getChatPanelSettings().then(applyChatPanelSize); // restore the chat panel's persisted size/opacity/text-size/minimized state before any world is entered
+refreshChatSendability();
 
 const start = startParams();
 if (start.manifest) {

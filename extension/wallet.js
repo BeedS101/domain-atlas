@@ -1107,6 +1107,41 @@ const AtlasWallet = (() => {
     return ALIAS_BLOCKLIST.some((word) => normalized.includes(word));
   }
 
+  // In-world chat's own profanity check — same blocklist and leetspeak
+  // substitutions as the alias filter above, but NOT the same normalizer:
+  // normalizeForAliasFilter strips every non-alphanumeric character
+  // (spaces included), which is fine for a short single handle but
+  // actively dangerous for a multi-word sentence — "...my ass holds..."
+  // would concatenate into a false "asshole" hit once the space between
+  // the two words disappears. This version normalizes punctuation to
+  // SPACES instead of nothing, preserving every original word boundary,
+  // so two innocent adjacent words can never concatenate into a blocked
+  // one. Matching is still plain substring (not whole-word-only) against
+  // that space-preserved text — a whole-word-only match would let common
+  // inflections straight through ("fucking", "shitty", "asses" would all
+  // dodge a blocklist entry for "fuck"/"shit"/"ass"), and this project's
+  // own stated policy for the alias filter above is the same: erring
+  // toward over-blocking is the safer trade-off, a false rejection just
+  // means rephrasing. This is the CLIENT-SIDE check (immediate feedback
+  // before a send even goes out) — presence-server's own copy of this
+  // same logic is the authoritative one, since a client could always be
+  // modified to skip this and talk raw WebSocket.
+  function normalizeForChatFilter(text) {
+    return (text || '')
+      .toLowerCase()
+      .replace(/0/g, 'o').replace(/1/g, 'i').replace(/!/g, 'i')
+      .replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's')
+      .replace(/@/g, 'a').replace(/\$/g, 's')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  function chatMessageContainsBlockedWord(text) {
+    const normalized = normalizeForChatFilter(text);
+    if (!normalized) return false;
+    return ALIAS_BLOCKLIST.some((word) => normalized.includes(word));
+  }
+
   async function setAlias(publicKey, alias) {
     if (!publicKey) throw new Error('No identity to set an alias for.');
     const trimmed = (alias || '').trim();
@@ -1308,6 +1343,67 @@ const AtlasWallet = (() => {
     const clamped = clampCharacterScale(Number(scale));
     await chrome.storage.local.set({ atlasCharacterScale: clamped });
     return clamped;
+  }
+
+  // ---------- in-world chat panel settings ----------
+  //
+  // Same reasoning as character scale right above: a client display
+  // preference (box size, opacity, text size, minimized state), not
+  // anything owned by an identity, so it lives outside any per-identity
+  // wallet scope — untouched by locking, identity-switch, or import/
+  // export, and readable/settable even by a visitor with no unlocked
+  // identity at all (chat is readable while logged out; its panel
+  // settings should be too).
+  //
+  // lastSize is what minimize restores TO — captured at the moment
+  // minimize is pressed (see viewer.js's minimize handler), not a second
+  // independent width/height pair to keep in sync by hand.
+  const CHAT_MIN_WIDTH = 220;
+  const CHAT_MAX_WIDTH = 640;
+  const CHAT_MIN_HEIGHT = 120;
+  const CHAT_MAX_HEIGHT = 480;
+  const DEFAULT_CHAT_PANEL_SETTINGS = {
+    width: 320,
+    height: 200,
+    opacity: 0.9,
+    textSize: 12,
+    minimized: false,
+    lastSize: { width: 320, height: 200 }
+  };
+
+  function clampChatPanelSettings(raw) {
+    const s = raw && typeof raw === 'object' ? raw : {};
+    const lastSizeRaw = s.lastSize && typeof s.lastSize === 'object' ? s.lastSize : {};
+    return {
+      width: Number.isFinite(Number(s.width)) ? Math.max(CHAT_MIN_WIDTH, Math.min(CHAT_MAX_WIDTH, Number(s.width))) : DEFAULT_CHAT_PANEL_SETTINGS.width,
+      height: Number.isFinite(Number(s.height)) ? Math.max(CHAT_MIN_HEIGHT, Math.min(CHAT_MAX_HEIGHT, Number(s.height))) : DEFAULT_CHAT_PANEL_SETTINGS.height,
+      opacity: Number.isFinite(Number(s.opacity)) ? Math.max(0.2, Math.min(1, Number(s.opacity))) : DEFAULT_CHAT_PANEL_SETTINGS.opacity,
+      textSize: Number.isFinite(Number(s.textSize)) ? Math.max(10, Math.min(20, Number(s.textSize))) : DEFAULT_CHAT_PANEL_SETTINGS.textSize,
+      minimized: !!s.minimized,
+      lastSize: {
+        width: Number.isFinite(Number(lastSizeRaw.width)) ? Math.max(CHAT_MIN_WIDTH, Math.min(CHAT_MAX_WIDTH, Number(lastSizeRaw.width))) : DEFAULT_CHAT_PANEL_SETTINGS.lastSize.width,
+        height: Number.isFinite(Number(lastSizeRaw.height)) ? Math.max(CHAT_MIN_HEIGHT, Math.min(CHAT_MAX_HEIGHT, Number(lastSizeRaw.height))) : DEFAULT_CHAT_PANEL_SETTINGS.lastSize.height
+      }
+    };
+  }
+
+  async function getChatPanelSettings() {
+    const { atlasChatPanelSettings } = await chrome.storage.local.get('atlasChatPanelSettings');
+    return clampChatPanelSettings(atlasChatPanelSettings);
+  }
+
+  // Merges rather than replaces — every caller (the drag handle, the cog
+  // popover's opacity/text-size controls, the minimize button) only ever
+  // touches one or two fields at a time, same "patch, don't clobber"
+  // convention as everything else in this file that stores a settings
+  // object (see e.g. setMailSettings elsewhere).
+  async function setChatPanelSettings(patch) {
+    const current = await getChatPanelSettings();
+    const merged = clampChatPanelSettings(Object.assign({}, current, patch, {
+      lastSize: Object.assign({}, current.lastSize, patch && patch.lastSize)
+    }));
+    await chrome.storage.local.set({ atlasChatPanelSettings: merged });
+    return merged;
   }
 
   // ---------- auto-lock on inactivity (#71) ----------
@@ -2033,6 +2129,7 @@ const AtlasWallet = (() => {
     proposeIntent, settleTrade, verifySignedPayload,
     recordWorldVisit, getRecentWorlds,
     getCharacterScale, setCharacterScale,
+    getChatPanelSettings, setChatPanelSettings, chatMessageContainsBlockedWord,
     getAutoLockMinutes, setAutoLockMinutes,
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,

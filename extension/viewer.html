@@ -257,6 +257,96 @@
     padding: 8px 10px; font-size: 11.5px; line-height: 1.5;
     pointer-events: none; display: none;
   }
+
+  /* In-world chat — anchored bottom-left of the canvas (the canvas itself
+     already starts below #bar, so "fixed, left/bottom" IS the canvas's own
+     bottom-left corner). #chatWidget is the ONE positioned element (fixed,
+     left+bottom, height:auto); #chatPanel (message list) and #chatInputRow
+     (the textbox) stack inside it as plain flex children in normal flow —
+     that's what keeps the input row glued directly under the message box
+     at every size with no manual vertical-offset math: growing #chatPanel
+     taller (the resize handle) pushes #chatWidget's own top edge up while
+     its CSS `bottom` keeps the whole stack's bottom edge — and so the
+     input row — pinned in place, exactly the "resize away from the
+     anchor" behavior a bottom-docked panel needs. Width IS written by JS
+     (viewer.js's applyChatPanelSize(), the one place both #chatPanel and
+     #chatInputRow's width get set from a single value) — see that
+     function's own comment for why "single entity width-wise, not
+     height-wise" needs to be a property of the code, not just a CSS
+     default that could drift apart after a drag-resize.
+     z-index sits above the portal tooltip (6) and #hint (default) but
+     below the wallet panel overlay, same layering logic as everything
+     else anchored directly to the canvas. */
+  #chatWidget {
+    position: fixed; left: 12px; bottom: 14px; z-index: 7;
+    display: flex; flex-direction: column; gap: 6px;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  #chatPanel {
+    display: flex; flex-direction: column;
+    background: rgba(20,31,38,0.85); border: 1px solid #2c3c44; border-radius: 10px;
+    overflow: hidden;
+  }
+  #chatWidget.minimized #chatPanel { height: auto !important; }
+  #chatWidget.minimized #chatMessagesWorld,
+  #chatWidget.minimized #chatMessagesDomain,
+  #chatWidget.minimized #chatInputRow { display: none !important; }
+  #chatPanelHeader {
+    position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
+    padding: 4px 6px; border-bottom: 1px solid #2c3c44; background: rgba(14,22,27,0.6);
+    cursor: default;
+  }
+  .chat-tab {
+    background: none; border: none; color: #a9b8bf; font-size: 11px; padding: 3px 8px;
+    border-radius: 999px; cursor: pointer;
+  }
+  .chat-tab.active-subtab { background: #2c3c44; color: #f2ece4; }
+  .chat-header-spacer { flex: 1 1 auto; }
+  .chat-icon-btn {
+    background: none; border: none; color: #a9b8bf; font-size: 13px; line-height: 1;
+    padding: 3px 6px; cursor: pointer; border-radius: 6px;
+  }
+  .chat-icon-btn:hover { background: #2c3c44; color: #f2ece4; }
+  /* Grab target at the header's top-right corner (the far corner from the
+     panel's bottom-left anchor) — dragging it up/right grows height/width
+     while the anchored bottom-left corner stays put, same "resize away
+     from the anchor" behavior any bottom-left-docked panel needs. See
+     viewer.js's chat resize-handle listener for the actual drag math. */
+  #chatResizeHandle {
+    position: absolute; top: -3px; right: -3px; width: 14px; height: 14px;
+    cursor: nwse-resize; border-radius: 3px; background: #3a4d56;
+    border: 1px solid #57a593;
+  }
+  .chat-messages {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 8px;
+    color: #d7e0e4; line-height: 1.45; word-break: break-word;
+  }
+  .chat-messages .chat-line { margin-bottom: 2px; }
+  .chat-messages .chat-line .chat-name { color: #57a593; font-weight: 600; }
+  .chat-messages .empty-note { color: #6f838c; font-size: 11px; }
+  /* A sibling of #chatPanel now (see the HTML comment there for why), so
+     its containing block for position:absolute is #chatWidget itself
+     (fixed-positioned) rather than #chatPanelHeader — bottom:100% still
+     lands its bottom edge right at #chatPanel's top edge (the header is
+     #chatPanel's first child with no offset above it), and right:4px
+     still tracks #chatPanel/#chatInputRow's shared width since #chatWidget
+     stretches to match its widest child. */
+  #chatSettingsPopover {
+    position: absolute; bottom: 100%; right: 4px; margin-bottom: 6px;
+    background: #16232a; border: 1px solid #2c3c44; border-radius: 8px;
+    padding: 10px; width: 190px; font-size: 11px; color: #d7e0e4; z-index: 8;
+  }
+  #chatSettingsPopover label { display: block; margin-bottom: 8px; }
+  #chatSettingsPopover input[type="range"] { width: 100%; margin-top: 4px; }
+  #chatSettingsPopover .chat-settings-note { color: #a9b8bf; margin-top: 4px; }
+  #chatMinimizeToggleBtn { width: 100%; margin-top: 2px; }
+  #chatTextInput {
+    width: 100%; box-sizing: border-box; background: rgba(20,31,38,0.85);
+    border: 1px solid #2c3c44; border-radius: 8px; color: #f2ece4;
+    font-size: 12px; padding: 7px 10px; font-family: inherit;
+  }
+  #chatTextInput::placeholder { color: #6f838c; }
+  #chatTextInput:disabled { opacity: 0.55; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -288,6 +378,52 @@
   <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain</div>
   <div id="scene3dHint">WASD to walk · drag to look · scroll to zoom out · walk into a glowing ring to take that portal · F11 for fullscreen</div>
   <div id="portalHoverTooltip"></div>
+
+  <!-- In-world chat — read-only for everyone, sendable only while the
+       wallet is unlocked (see viewer.js's connectChat()/chat-send
+       handling). "This World" is the current domain+world only; "Domain"
+       is every world in the current domain — both tabs render from the
+       SAME received message stream (see renderChatMessages() in
+       viewer.js), just filtered differently, since the server already
+       tags every message with which world it was sent from. -->
+  <div id="chatWidget">
+    <div id="chatPanel" style="width:320px;height:200px;">
+      <div id="chatPanelHeader">
+        <button id="chatTabWorldBtn" type="button" class="chat-tab active-subtab">This World</button>
+        <button id="chatTabDomainBtn" type="button" class="chat-tab">Domain</button>
+        <div class="chat-header-spacer"></div>
+        <button id="chatSettingsBtn" type="button" class="chat-icon-btn" title="Chat settings">⚙</button>
+        <div id="chatResizeHandle" title="Drag to resize"></div>
+      </div>
+      <div id="chatMessagesWorld" class="chat-messages"></div>
+      <div id="chatMessagesDomain" class="chat-messages" hidden></div>
+    </div>
+    <!-- A sibling of #chatPanel, NOT nested inside it, even though it
+         visually pops up right above the header — #chatPanel has
+         overflow:hidden (to clip the message list's rounded corners), and
+         an absolutely-positioned descendant doesn't escape an ancestor's
+         overflow clip just because it's position:absolute; it would be
+         clipped to invisible-but-still-there (real geometry, but nothing
+         painted, and no longer hit-testable) the moment it's asked to
+         render outside #chatPanel's own box. Living here instead, it uses
+         #chatWidget itself (position:fixed) as its containing block —
+         see its CSS for why bottom:100%/right:4px still land in
+         essentially the same spot. -->
+    <div id="chatSettingsPopover" hidden>
+      <label>Opacity
+        <input id="chatOpacityInput" type="range" min="0.2" max="1" step="0.05">
+      </label>
+      <label>Text size
+        <input id="chatTextSizeInput" type="range" min="10" max="20" step="1">
+      </label>
+      <button id="chatMinimizeToggleBtn" type="button" class="btn-secondary">Minimize</button>
+      <div id="chatLoginNote" class="chat-settings-note"></div>
+    </div>
+    <div id="chatInputRow" style="width:320px;">
+      <input id="chatTextInput" type="text" maxlength="500" placeholder="Sign in to chat…" disabled>
+      <div id="chatSendStatus" class="empty-note" style="margin-top:4px;"></div>
+    </div>
+  </div>
 
   <div id="walletPanel">
 
