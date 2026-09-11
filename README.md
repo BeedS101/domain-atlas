@@ -1,4 +1,4 @@
-# Domain Atlas — prototype (v1.2)
+# Domain Atlas — prototype (v1.15)
 
 A working proof that the mechanisms in `SPEC.md` are real. A browser
 extension reads a domain's manifest, renders whichever worlds it declares,
@@ -19,10 +19,13 @@ domain-atlas/
 │   └── wallet.js                  identity + credential verification (§5, §6)
 ├── issuer-server/                a real credential issuer for demo-domain-a
 │                                    (also plays the "trading station" role — see §4 below)
+├── issuer-php/                    plain-PHP port of the issuer, for shared cPanel hosting
 ├── directory-server/              crawler/index/search over other domains' manifests (§3.3)
-├── presence-server/                hand-rolled WebSocket server for multiplayer presence
+├── presence-server/                hand-rolled WebSocket server for multiplayer presence + chat
+├── presence-php/                  plain-PHP polling port of presence + chat, same hosting reason
 ├── demo-domain-a/                 "Example Plaza" — FOUR worlds: plaza, museum, arena, market
 ├── demo-domain-b/                 "Neighbor Workshop" — one world, plain static server
+├── tools/                         scene-editor.html — a standalone editor for gltf-mini scenes
 └── test/
     ├── verify.js                  proves the manifest/portal mechanism
     ├── verify-wallet.js           proves the item wallet end to end
@@ -110,8 +113,14 @@ then click **Re-verify wallet** again — the item flips to ✗, reason
 identity**), you can instead pick a password (8+ characters); the wallet
 generates the exact same kind of ECDSA P-256 keypair, but encrypts the
 private half at rest with a key derived from that password (PBKDF2,
-250,000 iterations) instead of storing it in hardware. It's real and
-independent — not a fallback demo mode — you can set up both mechanisms on
+600,000 iterations — raised from an original 250,000 by task #118, since
+that's a reasonable minimum for PBKDF2-HMAC-SHA256 today) instead of
+storing it in hardware. A password identity created before #118 keeps
+decrypting fine at its original 250,000 count and silently re-encrypts
+itself at 600,000 the next time it's correctly unlocked — no re-prompt,
+no separate migration step, and never treated as a wrong password just
+for predating the change. It's real and independent — not a fallback
+demo mode — you can set up both mechanisms on
 one device and switch which one is "you" from Settings any time, instantly
 and non-destructively (nothing is deleted; switching back restores exactly
 where that identity's wallet was left). It's deliberately the *weaker*
@@ -152,7 +161,7 @@ Wallet/Settings panels once you've got items to work with:
 - **Nicknames for other identities.** From a presence roster or a mail
   card, set a private alias for any public key you interact with — purely
   local, never sent anywhere, and profanity-filtered the same way
-  `handle#domain` registration is (§7 below).
+  `handle#domain` registration is (§8 below).
 - **Search filters** on the Collectibles and Documents lists (type to
   filter live) once a wallet has more than a handful of items.
 - **Character scale** — a 0.5×–2× avatar-size slider in Settings, purely
@@ -320,12 +329,89 @@ field at a host running just this PHP bundle and the extension's own
 WS-then-poll fallback logic does the rest — there's no separate
 "polling-only" flag to set anywhere.
 
-## 7. Friends, Favorites, and the Social tab
+**Duplicate-identity join guard and self-eviction fix (tasks #137, #139).**
+Two visitors sharing the same key pair — the counterparty identity from
+section 4, or the same wallet open in two tabs — used to both end up in
+the roster under conflicting entries. Joining now checks for an existing,
+still-active member with the same public key first: if one's found, the
+newcomer gets a short **challenge countdown** instead of an instant join,
+giving the original tab a chance to prove it's still there before either
+side is admitted, mirrored identically across the WebSocket server, the
+polling routes, and `presence-php`. A related bug (#139) meant a
+backgrounded or throttled browser tab could get silently swept from the
+roster by its own poll timer and then auto-rejoin mid-challenge, fighting
+whoever actually won it; polling clients now distinguish plain staleness
+(safe to silently self-heal from) from a lost duplicate-identity challenge
+(left alone on purpose) and also resync immediately on tab refocus rather
+than waiting out the next poll tick.
+
+## 7. Try in-world chat
+
+A standalone `#chatWidget` overlay, bottom-left of the 3D canvas — separate
+from the Wallet/Social/Settings tab bar entirely, so it stays up and usable
+while you've got the wallet panel open on top of it. It's read-only for
+everyone by default and only ever sendable while you're actually standing
+in a world that's opted in.
+
+**Which tabs show up is manifest-declared, not hardcoded.** A domain adds
+chat the same optional way it adds presence and Post Office: a top-level
+`manifest.chat: true` opts the whole domain in and adds a leftmost
+**Domain** tab (everyone in any of that domain's worlds shares it), and
+each individual world can separately set its own `world.chat: true` to get
+its own tab too. Example Plaza has both, so Domain A shows three tabs —
+**Domain**, **Example Plaza**, **Example Arena** — while Neighbor Workshop
+(Domain B) only sets the domain-wide flag and so shows just the one
+**Domain** tab. Whichever tab matches where you're physically standing
+right now carries a live **"(current)"** suffix that moves the moment you
+walk through a portal — Market and Museum have no chat flag of their own,
+so standing there still shows the full tab set (tabs are declared once per
+manifest, not scoped to your current world) but with no dedicated tab to
+put a suffix on. Sending is disabled — input greyed out, with a
+placeholder explaining why — while you're viewing a tab for somewhere
+you're not currently standing (someone else's world tab, or Domain from a
+one-tab-only world), and re-enables the instant you switch to a sendable
+tab, no need to leave and re-enter. Which tab opens by default on a fresh
+world entry is controlled by **Settings → Chat → default tab**: `auto`
+(the default — currently behaves like `world`), `domain`, or `world`, and
+it genuinely drives the choice, not just availability, when both a
+Domain tab and a world tab are on offer.
+
+**History on join** is on by default — joining a chat-enabled world hands
+you a batch of recent messages so a conversation already in progress isn't
+a blank screen. Turn it off from the chat settings popover (⚙) and a fresh
+join instead starts empty, even though the server's own history buffer
+still has everything; live messages sent after you join show up either
+way; the toggle only ever affects that one join-time batch.
+
+**Usernames are interactive.** Hovering any sender's name shows a
+tooltip with a human-readable timestamp and online status; right-clicking
+one opens a small context menu — **Private message**, **Mute user**,
+**Block user** — the same visual language as Mail's block-sender menu.
+Muting or blocking is purely local and per-viewer (the muted/blocked
+person's own view is unaffected): their messages simply stop rendering for
+you, and both lists are reviewable and reversible from **Settings → Chat
+Admin → Muted users / Blocked users** (Unmute/Unblock). **Private message**
+jumps straight to Mail → Compose with the recipient field pre-filled with
+that sender's raw public key — chat has no handle system of its own, so
+this is the fastest way to actually reach someone you only know from a
+chat message.
+
+Chat rides the exact same dual-transport design presence does: the
+WebSocket side lives in `presence-server/server.js` alongside presence
+itself (`chat-join`/`chat-message`/etc. over the same socket), and
+`presence-php` mirrors just the polling half (`/presence/poll/chat-join`,
+`chat-sync`, `chat-send`, `chat-leave`) for shared cPanel-style hosting
+that can't run a persistent WebSocket process — no separate service to run
+or manifest field to add beyond the `chat`/`presence` flags already
+described above.
+
+## 8. Friends, Favorites, and the Social tab
 
 The wallet's top tab bar is now Wallet / Social / Settings — the old
-standalone Mail tab moved inside Social, alongside two new sections:
-Friends (#67) and Favorites (#61). Open the Social tab and its own
-sub-tab-bar switches between the three.
+standalone Mail tab moved inside Social, alongside three newer sections:
+**Contacts** (#67, despite the name a friends list, not an address book —
+see below), **Favorites** (#61), and **Calendar**. Open the Social tab and
+its own sub-tab-bar switches between all four.
 
 **Domain-to-subscriber mail (SPEC.md §11.1) — the original Mail tab.** A
 domain can message anyone holding one of its own credentials, addressed by
@@ -362,6 +448,19 @@ needed. This only works while both of you are still in the room: a
 request or its reply can't be relayed to someone who's already left, same
 as the roster itself only ever shows who's actually there.
 
+**The Contacts sub-tab has three inner tabs of its own** — Contacts / Add
+Contact / Groups. Live presence isn't the only way in: Add Contact also
+takes a contact **manually**, either by pasting a raw public key or by
+typing a `handle#domain` address (resolved through that domain's Post
+Office the same way Compose's recipient field resolves one — see handle
+addressing below), with no presence connection to the other person needed
+either way. Every saved contact gets a free-text **notes** field (saves on
+blur, persists in the wallet) and the Contacts list itself has a **search
+box** that filters live by name AND notes as you type. **Groups** is a
+separate, purely local, personal-organization layer on top of the same
+saved-contacts list — for sorting people into your own categories, nothing
+that's ever sent anywhere.
+
 This deliberately does NOT go through the existing mail system. Mail
 (`AtlasWallet.checkAllMail`) is domain-issuer-to-subscriber only —
 messages are addressed by `credentialId` and fetched per-domain from
@@ -392,6 +491,21 @@ own device**: the status endpoint only ever returns who's actually
 present (id, name, publicKey), and your friends list is matched against
 it locally. No server, including presence-server itself, ever sees your
 friends list.
+
+**Calendar is local-only** — manually-added personal reminders, nothing
+synced from anywhere and nothing any domain can see or write to (unlike
+Mail, no domain or other visitor can ever add an event to it). A persistent
+phone-widget-style **month grid** sits pinned above the add/edit form and
+event list; clicking a day opens a **day viewer** showing that day's events
+by hour, with an "other month" section when the clicked day falls outside
+the currently-viewed month. Each event has a title, a required start time,
+an optional end time (an event with a duration gets a distinct visual
+treatment in both the list and the day viewer), and free-text notes. An
+event that's overdue is flagged distinctly wherever it appears — the list,
+the day viewer, and a badge on the Calendar sub-tab itself — and every
+mail card carries an **"Add to calendar"** button that pre-fills the
+event form from that message's subject and body, a quick bridge from
+"someone told me about this" to "it's on my calendar."
 
 **Quick lock.** A 🔒 button now sits in the top control bar next to
 Wallet, for locking without opening the wallet panel first — distinct
@@ -545,7 +659,7 @@ handle, by a pasted `handle#domain` address, and via the raw-key fallback.
 With this, task #94 is now fully built — handle addressing was its last
 open piece.
 
-## 8. Verify it yourself
+## 9. Verify it yourself
 
 ```bash
 node test/verify.js                    # manifest + portal mechanism
@@ -601,15 +715,27 @@ main instance's 60-second interval.
 ## What this does and doesn't prove
 
 It proves the `worlds[]` manifest shape end to end, and a real working
-slice of §5, §5.2, §5.4, §6, and §7: an issuer signing real credentials, a
-wallet verifying them with no shared account system, that verification
-holding up unchanged on a domain that was never involved in issuing it, an
-owner-signed transfer that moves an item between two independent keys, a
-fungible balance that splits and settles by issuing fresh signed
-credentials rather than mutating anything in place, and a two-intent trade
-that either settles atomically or not at all. That's the actual claim
+slice of §3.3, §5, §5.2, §5.4, §6, §7, and §11: an issuer signing real
+credentials, a wallet verifying them with no shared account system, that
+verification holding up unchanged on a domain that was never involved in
+issuing it, an owner-signed transfer that moves an item between two
+independent keys, a fungible balance that splits and settles by issuing
+fresh signed credentials rather than mutating anything in place, a
+two-intent trade that either settles atomically or not at all, a directory
+that indexes and ranks other domains' manifests without issuing anything
+itself, and both domain-to-subscriber mail and peer-to-peer Post Office
+mail with real consent/block controls. That's the actual claim
 ownership-without-a-blockchain rests on, and none of it is just written
 down anymore — it runs.
+
+On top of that, and deliberately outside `SPEC.md`'s own scope (§10 and
+its closing note are explicit that in-world chat, presence, and anything
+else that only matters inside one domain aren't the protocol's business):
+real-time multiplayer presence and in-world chat, each with a genuine
+plain-PHP polling fallback for shared cPanel-style hosting that can't run
+a persistent WebSocket process, and a duplicate-identity join guard that
+keeps two visitors sharing one key pair from corrupting each other's
+roster entry.
 
 It's still not hardened for anything beyond a demo, and a few
 simplifications are worth naming plainly rather than leaving implicit:
@@ -631,7 +757,7 @@ simplifications are worth naming plainly rather than leaving implicit:
   the `/atlas/trade/*` family — submit, listings, claim, cancel (§7),
   `/atlas/revoke`, `/atlas/mail/send` and
   `/atlas/mail/check` (§11.1), and the `/atlas/postoffice/*` family
-  (§7 below, SPEC.md §11.3) — have no auth by design (beyond Post Office's
+  (§8 above, SPEC.md §11.3) — have no auth by design (beyond Post Office's
   own self-signed-envelope checks on its self-service endpoints), so the
   tests can exercise them freely. The whole thing runs over plain HTTP on
   localhost. A real deployment needs real HTTPS domains and a real
@@ -642,6 +768,7 @@ simplifications are worth naming plainly rather than leaving implicit:
   already support well, so re-implementing that wasn't the point.
 
 Nothing in `SPEC.md` remains entirely unimplemented as of this build —
-§5.2, §5.4, and §7 have all moved from spec-only into working code,
-alongside §3 (manifest/portals), §5/§5.1/§5.3 (items, classes,
-revocation), and §6/§6.1 (identity, wallet export) from v1.1.
+§5.2, §5.4, §7, and §11 (Mail, including Post Office) have all moved from
+spec-only into working code, alongside §3/§3.3 (manifest/portals,
+directory), §5/§5.1/§5.3 (items, classes, revocation), and §6/§6.1
+(identity, wallet export) from v1.1.
