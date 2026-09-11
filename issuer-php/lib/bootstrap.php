@@ -76,6 +76,18 @@ function require_post() {
   }
 }
 
+// v1.14 (SPEC.md §7) — GET /atlas/trade/listings is this bundle's first
+// read-only endpoint; no preflight needed ahead of it (a plain GET never
+// triggers a CORS preflight the way a JSON POST does), just this guard.
+function require_get() {
+  if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+    http_response_code(405);
+    cors_headers();
+    echo 'Method not allowed';
+    exit;
+  }
+}
+
 function read_json_body() {
   $raw = file_get_contents('php://input');
   if ($raw === '' || $raw === false) return [];
@@ -283,6 +295,15 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
     return 'asset is the wrong class';
   }
+  // Task #160: checked ahead of the fungible rejection below so a bound
+  // credential gets its own, clearer message rather than the generic
+  // "not fungible" one — true for every bound class today anyway (they're
+  // all fungible: false), but this is the real, deliberate reason they're
+  // excluded, not a side effect of that other check. Mirrors
+  // issuer-server/server.js's checkPresentedAsset().
+  if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
+    return 'asset is bound to its owner and cannot be split, consolidated, or traded';
+  }
   if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== true) {
     return 'asset class is not fungible — cannot split, consolidate, or trade a unique asset';
   }
@@ -290,5 +311,30 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   if (is_revoked($credential['id'])) return 'asset already revoked';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
+  return null;
+}
+
+// Task #144 Phase 1: a lighter check for a held MEMBERSHIP credential
+// presented alongside a request (same shape POST /atlas/trade/submit needs
+// for its "do you actually hold this domain's Trading Station card" gate)
+// — deliberately NOT check_presented_asset() above, since that function's
+// fungible/minQuantity checks would reject every membership class outright
+// (they're all fungible: false, quantity 1). Everything else is the same
+// discipline: right shape, right owner, right class, not revoked,
+// signature checks out against this issuer's own key. Mirrors
+// issuer-server/server.js's checkPresentedMembership().
+function check_presented_membership($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
+    return 'not an asset credential';
+  }
+  if (!isset($credential['owner']['publicKey']) || $credential['owner']['publicKey'] !== $expectedOwner) {
+    return 'membership does not belong to this signer';
+  }
+  if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
+    return 'membership is the wrong class';
+  }
+  if (is_revoked($credential['id'])) return 'membership already revoked';
+  $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+  if (!$ok) return 'membership signature does not check out';
   return null;
 }

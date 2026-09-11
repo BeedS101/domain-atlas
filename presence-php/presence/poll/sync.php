@@ -36,7 +36,15 @@ $result = with_presence_store_locked(function (&$doc) use ($id, $body) {
       $inBounds = $x !== null && $y !== null && $z !== null && $yaw !== null
         && abs($x) <= PRESENCE_MAX_COORD && abs($y) <= PRESENCE_MAX_COORD && abs($z) <= PRESENCE_MAX_COORD;
       if ($inBounds) {
+        // Task #137's activity clock only counts a REAL change — a poll
+        // member's sync tick reports its current pose every ~2s
+        // regardless of whether it moved at all, and that repetition
+        // shouldn't look like activity (see presence_is_member_active()/
+        // PRESENCE_ACTIVITY_IDLE_MS in lib/store.php), same reasoning as
+        // presence-server.js's own moveMember().
+        $actuallyMoved = $room[$id]['x'] !== $x || $room[$id]['y'] !== $y || $room[$id]['z'] !== $z || $room[$id]['yaw'] !== $yaw;
         $room[$id]['x'] = $x; $room[$id]['y'] = $y; $room[$id]['z'] = $z; $room[$id]['yaw'] = $yaw;
+        if ($actuallyMoved) $room[$id]['lastActivityAt'] = presence_now_ms();
       }
     }
     $roster = presence_roster_of($room, $id);
@@ -50,8 +58,15 @@ $result = with_presence_store_locked(function (&$doc) use ($id, $body) {
     return ['found' => true, 'roster' => $roster, 'signals' => $signals];
   }
   unset($room);
-  return ['found' => false];
+  // Task #139 — tells the client WHY, if this id turns out to be gone:
+  // 'duplicate-join-lost' means auto-rejoining would just fight whoever
+  // won the challenge; anything else (plain staleness, most often a
+  // backgrounded tab's poll timer throttled past PRESENCE_POLL_TIMEOUT_MS)
+  // is safe to silently self-heal from. See presence_resolve_challenge()'s
+  // own comment on duplicateJoinLosses.
+  $reason = isset($doc['duplicateJoinLosses'][$id]) ? 'duplicate-join-lost' : 'stale';
+  return ['found' => false, 'reason' => $reason];
 });
 
-if (!$result['found']) send_json(404, ['error' => 'unknown or expired presence id — rejoin']);
+if (!$result['found']) send_json(404, ['error' => 'unknown or expired presence id — rejoin', 'reason' => $result['reason']]);
 send_json(200, ['roster' => $result['roster'], 'signals' => $result['signals']]);

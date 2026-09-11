@@ -14,25 +14,42 @@ const scene3dHint = document.getElementById('scene3dHint');
 const hintEl = document.getElementById('hint');
 const portalTooltipEl = document.getElementById('portalHoverTooltip');
 
+// Task #137 — duplicate-identity join guard UI (see the presence section
+// further below for the actual logic these are driven by).
+const presenceJoinWaitingHintEl = document.getElementById('presenceJoinWaitingHint');
+const presenceTransientHintEl = document.getElementById('presenceTransientHint');
+const duplicateJoinModalEl = document.getElementById('duplicateJoinModal');
+const duplicateJoinCountdownEl = document.getElementById('duplicateJoinCountdown');
+const duplicateJoinLeaveBtn = document.getElementById('duplicateJoinLeaveBtn');
+const duplicateJoinKeepBtn = document.getElementById('duplicateJoinKeepBtn');
+
 // In-world chat (#105-109) — anchored bottom-left of the canvas, see the
 // "in-world chat" section further below (right after presence) for the
 // connection logic these elements are driven by.
 const chatWidgetEl = document.getElementById('chatWidget');
 const chatPanelEl = document.getElementById('chatPanel');
-const chatTabWorldBtn = document.getElementById('chatTabWorldBtn');
-const chatTabDomainBtn = document.getElementById('chatTabDomainBtn');
+const chatTabBarEl = document.getElementById('chatTabBar');
 const chatSettingsBtn = document.getElementById('chatSettingsBtn');
 const chatResizeHandleEl = document.getElementById('chatResizeHandle');
 const chatSettingsPopoverEl = document.getElementById('chatSettingsPopover');
 const chatOpacityInput = document.getElementById('chatOpacityInput');
 const chatTextSizeInput = document.getElementById('chatTextSizeInput');
+const chatDefaultTabInput = document.getElementById('chatDefaultTabInput');
+const chatHistoryOnJoinInput = document.getElementById('chatHistoryOnJoinInput');
 const chatMinimizeToggleBtn = document.getElementById('chatMinimizeToggleBtn');
 const chatLoginNoteEl = document.getElementById('chatLoginNote');
-const chatMessagesWorldEl = document.getElementById('chatMessagesWorld');
-const chatMessagesDomainEl = document.getElementById('chatMessagesDomain');
+const chatMessagesEl = document.getElementById('chatMessages');
 const chatInputRowEl = document.getElementById('chatInputRow');
 const chatTextInput = document.getElementById('chatTextInput');
 const chatSendStatusEl = document.getElementById('chatSendStatus');
+// #115/#116 — hover tooltip and right-click menu for chat sender names.
+// Declared here (not down by hiddenAssetsListEl/etc., where the OTHER
+// Settings-screen list elements live) because the mouseover/contextmenu
+// listeners wired further below run at script-init time and need these
+// already initialized — a `const` declared later in the file would still
+// be in its temporal dead zone at that point.
+const chatUserTooltipEl = document.getElementById('chatUserTooltip');
+const chatUserContextMenuEl = document.getElementById('chatUserContextMenu');
 
 const placeLabel = document.getElementById('placeLabel');
 const statusEl = document.getElementById('status');
@@ -184,6 +201,12 @@ let presencePollToken = null;
 let presencePollId = null; // server-assigned id, set once join resolves and this attempt is still current
 let presencePollTimer = null;
 let presencePollHttpBase = null; // the base this poll session's id belongs to — needed by disconnectPresence()'s leave beacon
+// Task #139 — the currently-attached visibilitychange listener for
+// whichever poll attempt is live right now, so disconnectPresence() can
+// remove it explicitly instead of leaking a new one on every reconnect
+// (world switch, or the auto-rejoin pollPresence() itself now performs —
+// see its own comment). Exactly one of these is ever attached at a time.
+let presencePollVisibilityHandler = null;
 
 // This visitor's own identity as announced to the current presence room
 // (Friends, #67) — null/null for an anonymous visitor with no unlocked
@@ -194,6 +217,26 @@ let presencePollHttpBase = null; // the base this poll session's id belongs to �
 // this keeps the signal consistent with whatever was actually announced).
 let presenceOwnPublicKey = null;
 let presenceOwnName = null;
+
+// Task #137 — duplicate-identity join guard, client-side state.
+//
+// presenceJoinPendingChallengeId: set when THIS connection's own join
+// came back "pending" (requestJoin() on the server found this identity
+// already active elsewhere in the room) — drives the waiting-hint pill
+// and, for the polling transport only, the join-status poll loop below
+// (a WS connection instead gets the eventual 'welcome'/'join-denied'
+// pushed straight down the same socket it's already holding open, so it
+// needs no separate poll of its own).
+let presenceJoinPendingChallengeId = null;
+let presenceJoinStatusPollTimer = null;
+
+// duplicateJoinActiveChallengeId: set when THIS connection is the
+// EXISTING half of a challenge someone else just triggered — i.e. the
+// Leave-now/Keep-this-session-active modal is currently open and these
+// are which challenge its buttons should answer.
+let duplicateJoinActiveChallengeId = null;
+let duplicateJoinCountdownTimer = null;
+let presenceTransientHintTimer = null;
 
 // Live roster metadata (Friends, #67): id -> {name, publicKey}, separate
 // from gltf-mini.js's remotePlayers (render-only — position/yaw for
@@ -228,8 +271,31 @@ function presenceIsConnected() {
 // ALLOWED_SIGNAL_KINDS in presence-server.js/store.php for the closed
 // vocabulary this handles; anything else is simply not sent by either
 // backend, so there's nothing else to branch on here.
+//
+// Task #137's two kinds ('duplicate-join-request'/'duplicate-join-lost')
+// are a server-initiated notice about THIS connection's own membership,
+// not a relay from another member — they carry no `from` at all, so
+// they're checked before the friend-request family's `from`-requiring
+// guard below, not folded into the same branch chain.
 function handleIncomingSignal(msg) {
-  if (!msg || typeof msg.from !== 'string') return;
+  if (!msg) return;
+  if (msg.kind === 'duplicate-join-request') {
+    openDuplicateJoinModal(msg.challengeId, msg.countdownMs);
+    return;
+  }
+  if (msg.kind === 'duplicate-join-lost') {
+    closeDuplicateJoinModal();
+    // Task #137 — this session just lost the identity race: the server
+    // already evicted its presence membership (see resolveChallenge()'s
+    // own 'yield' branch), so tearing this connection down locally too
+    // is just catching up to what already happened server-side, whether
+    // this arrived because of this session's own "Leave now" click or
+    // because the countdown lapsed unanswered.
+    disconnectPresence();
+    showPresenceTransientHint('You left this world — another session using your identity connected.');
+    return;
+  }
+  if (typeof msg.from !== 'string') return;
   if (msg.kind === 'friend-request') {
     if (presencePendingIncoming.some((r) => r.from === msg.from)) return; // already have one from them, don't duplicate
     presencePendingIncoming.push({ from: msg.from, publicKey: msg.publicKey || null, name: msg.name || 'Visitor', receivedAt: Date.now() });
@@ -264,6 +330,118 @@ function sendSignal(toId, kind, publicKey, name) {
     }).catch(() => {});
   }
 }
+
+// Task #137 — a one-off "shows itself, clears itself a few seconds
+// later" pill notice, reused both for a duplicate-join eviction notice
+// and for the silent-404-on-poll-sync fix (see pollPresence() further
+// below). Calling it again while one is already showing just replaces
+// the message and restarts the timer rather than stacking or racing.
+function showPresenceTransientHint(text, durationMs = 6000) {
+  if (!presenceTransientHintEl) return;
+  if (presenceTransientHintTimer) clearTimeout(presenceTransientHintTimer);
+  presenceTransientHintEl.textContent = text;
+  presenceTransientHintEl.classList.add('active');
+  presenceTransientHintTimer = setTimeout(() => {
+    presenceTransientHintEl.classList.remove('active');
+    presenceTransientHintTimer = null;
+  }, durationMs);
+}
+
+function showPresenceJoinWaitingHint() {
+  if (presenceJoinWaitingHintEl) presenceJoinWaitingHintEl.classList.add('active');
+}
+function hidePresenceJoinWaitingHint() {
+  if (presenceJoinWaitingHintEl) presenceJoinWaitingHintEl.classList.remove('active');
+}
+
+// Sends this connection's own activity ping — see noteActivity()'s own
+// comment in presence-server.js/store.php for what this is for. Wired
+// to AtlasWallet.onWalletChanged further below; a no-op if presence
+// isn't even connected right now (nothing to ping).
+function sendPresenceActivityPing() {
+  if (presenceSocket && presenceSocket.readyState === WebSocket.OPEN) {
+    presenceSocket.send(JSON.stringify({ type: 'activity' }));
+    return;
+  }
+  if (presencePollId && presencePollHttpBase) {
+    fetch(presencePollHttpBase + '/presence/poll/activity', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: presencePollId })
+    }).catch(() => {});
+  }
+}
+
+// This connection's own explicit answer (Leave now / Keep this session
+// active) to a duplicate-join-request notice it's the EXISTING half of.
+function sendDuplicateJoinResponse(challengeId, decision) {
+  if (presenceSocket && presenceSocket.readyState === WebSocket.OPEN) {
+    presenceSocket.send(JSON.stringify({ type: 'duplicate-join-response', challengeId, decision }));
+    return;
+  }
+  if (presencePollId && presencePollHttpBase) {
+    fetch(presencePollHttpBase + '/presence/poll/duplicate-response', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: presencePollId, challengeId, decision })
+    }).catch(() => {});
+  }
+}
+
+function closeDuplicateJoinModal() {
+  duplicateJoinActiveChallengeId = null;
+  if (duplicateJoinCountdownTimer) { clearInterval(duplicateJoinCountdownTimer); duplicateJoinCountdownTimer = null; }
+  if (duplicateJoinModalEl) duplicateJoinModalEl.classList.remove('active');
+}
+
+// Opens the modal and starts its visible countdown — purely cosmetic,
+// the SERVER'S OWN timer is what actually decides the default outcome;
+// this one just ticks a number down so the visitor can see roughly how
+// long they have, and stops cleanly at 0 rather than going negative if
+// the server's own resolution message is a beat late to arrive.
+function openDuplicateJoinModal(challengeId, countdownMs) {
+  duplicateJoinActiveChallengeId = challengeId;
+  const endsAt = Date.now() + (countdownMs || 60000);
+  const tick = () => {
+    const secondsLeft = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+    if (duplicateJoinCountdownEl) duplicateJoinCountdownEl.textContent = String(secondsLeft);
+    if (secondsLeft <= 0 && duplicateJoinCountdownTimer) { clearInterval(duplicateJoinCountdownTimer); duplicateJoinCountdownTimer = null; }
+  };
+  if (duplicateJoinCountdownTimer) clearInterval(duplicateJoinCountdownTimer);
+  tick();
+  duplicateJoinCountdownTimer = setInterval(tick, 1000);
+  if (duplicateJoinModalEl) duplicateJoinModalEl.classList.add('active');
+}
+
+duplicateJoinLeaveBtn && duplicateJoinLeaveBtn.addEventListener('click', () => {
+  if (!duplicateJoinActiveChallengeId) return;
+  sendDuplicateJoinResponse(duplicateJoinActiveChallengeId, 'yield');
+  closeDuplicateJoinModal();
+  // The server's own 'duplicate-join-lost' push (sent to this exact
+  // connection right before it evicts it) is what actually tears this
+  // session's presence down — see handleIncomingSignal()'s own branch —
+  // so nothing more needs to happen here than closing the dialog.
+});
+
+duplicateJoinKeepBtn && duplicateJoinKeepBtn.addEventListener('click', () => {
+  if (!duplicateJoinActiveChallengeId) return;
+  sendDuplicateJoinResponse(duplicateJoinActiveChallengeId, 'keep');
+  closeDuplicateJoinModal();
+});
+
+// Task #137 — wallet activity (minting, trading, splitting, PvP-loss,
+// mail-gift claims, etc.) has no presence connection of its own to ping
+// through; wallet.js has no idea presence even exists. This is the one
+// subscription point that bridges the two: AtlasWallet.onWalletChanged()
+// fires for every saveWallet() call regardless of which action triggered
+// it (see that function's own comment in wallet.js for why one hook
+// there covers effectively everything), and this only actually pings the
+// presence server when the change was for the SAME identity presence is
+// currently announcing as — a save for the local "counterparty" stand-in
+// (PvP-loss, split's "send to") should never count as activity for a
+// wholly different identity's own presence session.
+AtlasWallet.onWalletChanged((ownerPublicKey) => {
+  if (presenceIsConnected() && presenceOwnPublicKey && ownerPublicKey === presenceOwnPublicKey) {
+    sendPresenceActivityPing();
+  }
+});
 
 // Read-only "who's in this world right now" for a domain+world the caller
 // ISN'T necessarily present in (Favorites, #61) — a favorited domain the
@@ -319,6 +497,7 @@ function disconnectPresence() {
   }
   presencePollToken = null; // invalidates any in-flight join or running interval from this point on, see pollPresence()
   if (presencePollTimer) { clearInterval(presencePollTimer); presencePollTimer = null; }
+  if (presencePollVisibilityHandler) { document.removeEventListener('visibilitychange', presencePollVisibilityHandler); presencePollVisibilityHandler = null; }
   if (presencePollId) {
     const id = presencePollId;
     const base = presencePollHttpBase;
@@ -343,6 +522,15 @@ function disconnectPresence() {
   clearPresenceRosterMeta();
   presencePendingIncoming = [];
   presencePendingSentRequests = new Set();
+  // Task #137 — a pending join of THIS visitor's own, or a challenge THIS
+  // visitor was the existing half of, is equally moot the moment presence
+  // disconnects for any reason (a fast world switch, an explicit leave,
+  // or the eviction handled in handleIncomingSignal's own
+  // 'duplicate-join-lost' branch, which calls this function too).
+  presenceJoinPendingChallengeId = null;
+  if (presenceJoinStatusPollTimer) { clearInterval(presenceJoinStatusPollTimer); presenceJoinStatusPollTimer = null; }
+  hidePresenceJoinWaitingHint();
+  closeDuplicateJoinModal();
   if (socialFriendsTabActive()) refreshFriendsDisplay();
   updateSocialBadge();
 }
@@ -354,46 +542,143 @@ function pollPresence(domain, worldId, displayName, httpBase, publicKey) {
   presenceOwnPublicKey = publicKey || null;
   presenceOwnName = displayName;
 
+  // Finalizes this attempt once it actually has a real room membership —
+  // called either immediately below (the common case) or later, once a
+  // task #137 duplicate-join challenge this attempt was waiting on
+  // resolves in its favor (see the 'pending' branch further down).
+  function finishJoin(id, roster) {
+    // Superseded by a later enterWorld() call (or a WS attempt that
+    // succeeded in the meantime) before this join actually resolved —
+    // leave the room we just joined rather than let a visitor "linger"
+    // server-side in a world they've already left, and don't touch any
+    // state a newer attempt now owns.
+    if (presencePollToken !== token || !active3D) {
+      fetch(base + '/presence/poll/leave', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
+      }).catch(() => {});
+      return;
+    }
+    presencePollId = id;
+    presencePollHttpBase = base;
+    window.__atlasPresenceOwnId = id;
+    (roster || []).forEach((m) => notePresenceRosterMeta(m.id, m.name, m.publicKey));
+    reconcilePollRoster(roster);
+    if (socialFriendsTabActive()) refreshFriendsDisplay();
+
+    // One heartbeat + move + roster-fetch tick. Named (not just the
+    // interval's own inline callback) so a task #139 visibilitychange
+    // wake-up, below, can also trigger one immediately rather than only
+    // on the regular PRESENCE_POLL_INTERVAL_MS cadence.
+    function syncTick() {
+      if (presencePollToken !== token) return; // disconnectPresence() already clears this timer too — just a defensive guard
+      const pose = currentLocalPose() || {};
+      fetch(base + '/presence/poll/sync', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ id }, pose))
+      })
+        .then((r) => r.json().then((body) => ({ status: r.status, body })).catch(() => ({ status: r.status, body: {} })))
+        .then(({ status, body }) => {
+          if (status === 404) {
+            // This poll session no longer exists server-side. Two very
+            // different reasons, told apart by `body.reason` (task #139):
+            //   'duplicate-join-lost' — evicted after losing a task #137
+            //     duplicate-join challenge elsewhere, with no separate push
+            //     notice the way the WS side's 'duplicate-join-lost' signal
+            //     gives. Auto-rejoining here would just immediately
+            //     re-trigger a fresh challenge against whichever session
+            //     actually won, fighting it forever — so this case is
+            //     surfaced and left for the visitor to re-enter manually,
+            //     same as before.
+            //   anything else (the common case: plain staleness — most
+            //     often this very tab having been backgrounded long enough
+            //     for the browser to throttle this interval well past the
+            //     server's staleness timeout) — nothing else is contesting
+            //     this identity, so it's safe to silently self-heal:
+            //     rejoin fresh with the same identity and carry on. This
+            //     used to render an empty roster forever with no recovery
+            //     at all; now it recovers within one tick.
+            if (presencePollToken === token) {
+              disconnectPresence();
+              if (body.reason === 'duplicate-join-lost') {
+                showPresenceTransientHint('Your presence in this world was lost — re-enter to reconnect.');
+              } else {
+                showPresenceTransientHint('Reconnected after a pause — your position was reset.');
+                pollPresence(domain, worldId, displayName, base, publicKey);
+              }
+            }
+            return Promise.reject(new Error('presence id expired'));
+          }
+          return body;
+        })
+        .then((res) => {
+          if (presencePollToken !== token) return;
+          (res.roster || []).forEach((m) => notePresenceRosterMeta(m.id, m.name, m.publicKey));
+          presencePollKnownIds.forEach((pid) => { if (!(res.roster || []).some((m) => m.id === pid)) presenceRosterMeta.delete(pid); });
+          reconcilePollRoster(res.roster);
+          if (socialFriendsTabActive()) refreshFriendsDisplay();
+          (res.signals || []).forEach((sig) => handleIncomingSignal(sig)); // friend requests etc (#67) — see poll/sync.php and its Node twin
+        })
+        .catch(() => {}); // a dropped tick (network hiccup, or the 404 handling above) just tries again next interval — no need to escalate
+    }
+
+    presencePollTimer = setInterval(syncTick, PRESENCE_POLL_INTERVAL_MS);
+    // Task #139 — a backgrounded tab's setInterval can be throttled by the
+    // browser to well beyond the server's staleness timeout, so the
+    // roster can go stale long before the next tick would naturally fire.
+    // Sync immediately the moment this tab becomes visible again instead
+    // of waiting out however much of the throttled interval is left —
+    // shrinks the "stale and about to be swept" window as much as
+    // possible, on top of the self-heal above that recovers from it
+    // cleanly even if it does happen.
+    presencePollVisibilityHandler = () => { if (presencePollToken === token && document.visibilityState === 'visible') syncTick(); };
+    document.addEventListener('visibilitychange', presencePollVisibilityHandler);
+  }
+
   fetch(base + '/presence/poll/join', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ domain, world: worldId, name: displayName, publicKey })
   })
     .then((r) => r.json())
     .then((welcome) => {
-      // Superseded by a later enterWorld() call (or a WS attempt that
-      // succeeded in the meantime) before this join actually resolved —
-      // leave the room we just joined rather than let a visitor "linger"
-      // server-side in a world they've already left, and don't touch any
-      // state a newer attempt now owns.
       if (presencePollToken !== token || !active3D) {
         fetch(base + '/presence/poll/leave', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: welcome.id })
         }).catch(() => {});
         return;
       }
-      presencePollId = welcome.id;
-      presencePollHttpBase = base;
-      window.__atlasPresenceOwnId = welcome.id;
-      (welcome.roster || []).forEach((m) => notePresenceRosterMeta(m.id, m.name, m.publicKey));
-      reconcilePollRoster(welcome.roster);
-      if (socialFriendsTabActive()) refreshFriendsDisplay();
-      presencePollTimer = setInterval(() => {
-        if (presencePollToken !== token) return; // disconnectPresence() already clears this timer too — just a defensive guard
-        const pose = currentLocalPose() || {};
-        fetch(base + '/presence/poll/sync', {
+      if (welcome.status !== 'pending') {
+        finishJoin(welcome.id, welcome.roster);
+        return;
+      }
+
+      // Task #137 — this identity is already active elsewhere in the
+      // room; the join is held pending until that other session responds
+      // or its countdown lapses. Polling has no push channel of its own,
+      // so this attempt has to ask /presence/poll/join-status instead of
+      // just waiting on a message the way the WS side does.
+      presenceJoinPendingChallengeId = welcome.challengeId;
+      showPresenceJoinWaitingHint();
+      presenceJoinStatusPollTimer = setInterval(() => {
+        if (presencePollToken !== token) { clearInterval(presenceJoinStatusPollTimer); presenceJoinStatusPollTimer = null; return; }
+        fetch(base + '/presence/poll/join-status', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(Object.assign({ id: welcome.id }, pose))
+          body: JSON.stringify({ challengeId: welcome.challengeId })
         })
-          .then((r) => r.json())
-          .then((res) => {
+          .then((r) => (r.ok ? r.json() : { status: 'denied' })) // a 404 here (challenge already swept away) is functionally the same as an explicit denial — nothing left to join
+          .then((status) => {
             if (presencePollToken !== token) return;
-            (res.roster || []).forEach((m) => notePresenceRosterMeta(m.id, m.name, m.publicKey));
-            presencePollKnownIds.forEach((id) => { if (!(res.roster || []).some((m) => m.id === id)) presenceRosterMeta.delete(id); });
-            reconcilePollRoster(res.roster);
-            if (socialFriendsTabActive()) refreshFriendsDisplay();
-            (res.signals || []).forEach((sig) => handleIncomingSignal(sig)); // friend requests etc (#67) — see poll/sync.php and its Node twin
+            if (status.status === 'pending') return; // still waiting — nothing to do yet
+            clearInterval(presenceJoinStatusPollTimer);
+            presenceJoinStatusPollTimer = null;
+            presenceJoinPendingChallengeId = null;
+            hidePresenceJoinWaitingHint();
+            if (status.status === 'joined') {
+              finishJoin(status.id, status.roster);
+            } else {
+              showPresenceTransientHint('The other session chose to stay — join declined.');
+            }
           })
-          .catch(() => {}); // a dropped tick just tries again next interval — no need to escalate
+          .catch(() => {}); // a dropped tick just tries again next interval
       }, PRESENCE_POLL_INTERVAL_MS);
     })
     .catch(() => {}); // presence, including its fallback, stays a pure enhancement — never surfaced as an error
@@ -457,9 +742,29 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
     try { msg = JSON.parse(ev.data); } catch (err) { return; }
     if (!msg || typeof msg.type !== 'string') return;
     if (msg.type === 'welcome') {
+      // Task #137 — a 'welcome' here can arrive either immediately (the
+      // common case) or later, pushed down this SAME still-open socket
+      // once a pending duplicate-join challenge this connection was
+      // waiting on resolves in its favor — clearing the pending state is
+      // a harmless no-op in the immediate case.
+      presenceJoinPendingChallengeId = null;
+      hidePresenceJoinWaitingHint();
       window.__atlasPresenceOwnId = msg.id; // test-observability, same convention as window.__atlasActive3D/__atlasScene
       (msg.roster || []).forEach((m) => { active3D.upsertRemotePlayer(m.id, m); notePresenceRosterMeta(m.id, m.name, m.publicKey); });
       if (socialFriendsTabActive()) refreshFriendsDisplay();
+    } else if (msg.type === 'join-pending') {
+      // Task #137 — this identity is already active elsewhere in the
+      // room; held pending until that other session responds or its
+      // countdown lapses. The eventual outcome arrives as a further
+      // 'welcome' (see above) or 'join-denied' (below) pushed down this
+      // same socket — no separate status polling needed on this
+      // transport, unlike the polling fallback's own equivalent.
+      presenceJoinPendingChallengeId = msg.challengeId;
+      showPresenceJoinWaitingHint();
+    } else if (msg.type === 'join-denied') {
+      presenceJoinPendingChallengeId = null;
+      hidePresenceJoinWaitingHint();
+      showPresenceTransientHint('The other session chose to stay — join declined.');
     } else if (msg.type === 'joined') {
       active3D.upsertRemotePlayer(msg.id, msg);
       notePresenceRosterMeta(msg.id, msg.name, msg.publicKey);
@@ -550,11 +855,20 @@ const CHAT_MIN_HEIGHT = 120;
 const CHAT_MAX_HEIGHT = 480;
 
 let chatSocket = null;
-let chatMessages = []; // flat list, each tagged with `world` — see renderChatMessages() for how the two tabs filter this same array
+let chatMessages = []; // flat list, each tagged with `world` — see renderChatMessages() for how the active tab filters this same array
 let chatDomain = null;
 let chatWorldId = null;
 let chatOwnPublicKey = null; // this chat connection's own announced identity — independent of presenceOwnPublicKey, since chat can be live in a 2D world where presence never connects at all
-let chatActiveTab = 'world'; // 'world' | 'domain' — matches viewer.html's default active tab/hidden state
+// chatTabs/chatActiveTab (dynamic tab list, replacing the old fixed
+// This-World/Domain pair — see computeChatTabs()/refreshChatAvailability()
+// below): chatTabs is the ordered list of {id, label} entries currently
+// available for wherever the visitor is right now — 'domain' at most once,
+// leftmost, plus 'world:<id>' for every world.chat-opted-in world in the
+// CURRENT manifest, in manifest.worlds order. chatActiveTab is just one of
+// those ids (or null before the very first refreshChatAvailability() call
+// has ever run, briefly, at extension load).
+let chatTabs = [];
+let chatActiveTab = null;
 let chatSendStatusTimer = null;
 
 // Polling-fallback state (#68's chat counterpart) — parallels
@@ -578,6 +892,11 @@ function chatIsConnected() {
 // Preserves "was scrolled near the bottom" across a full innerHTML
 // replace, so an already-open chat keeps auto-scrolling to new messages
 // while someone who's scrolled up to read history isn't yanked back down.
+//
+// Each sender name carries data-key/data-name/data-sentat (#115/#116) —
+// everything the hover tooltip and right-click context menu below need,
+// read straight back off the element the event fired on rather than
+// re-looking the message up in chatMessages by index.
 function renderChatList(container, msgs, emptyText) {
   if (!container) return;
   const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 24;
@@ -586,25 +905,315 @@ function renderChatList(container, msgs, emptyText) {
     return;
   }
   container.innerHTML = msgs.map((m) =>
-    '<div class="chat-line"><span class="chat-name">' + escapeHtml(m.name || 'Visitor') + ':</span> ' + escapeHtml(m.text) + '</div>'
+    '<div class="chat-line"><span class="chat-name" data-key="' + escapeHtml(m.publicKey || '') + '" data-name="' + escapeHtml(m.name || 'Visitor') + '" data-sentat="' + escapeHtml(m.sentAt || '') + '">' + escapeHtml(m.name || 'Visitor') + ':</span> ' + escapeHtml(m.text) + '</div>'
   ).join('');
   if (wasNearBottom) container.scrollTop = container.scrollHeight;
 }
 
+// chatMutedKeys/chatBlockedKeys (#116) filter muted/blocked senders out of
+// whichever tab is active before it ever reaches renderChatList — see
+// refreshChatModerationCache() below for how this stays in sync with
+// AtlasWallet's own lists.
+//
+// Single shared container now (was two, #chatMessagesWorld/#chatMessagesDomain,
+// one per fixed tab, both always rendered and one just hidden via CSS) —
+// only the CURRENTLY ACTIVE tab's filtered view is ever rendered into it,
+// same "domain" = unfiltered / "world:<id>" = tagged-to-that-world-only
+// split as before, just picked by chatActiveTab instead of by which of two
+// containers a given render call happened to target.
 function renderChatMessages() {
-  renderChatList(chatMessagesWorldEl, chatMessages.filter((m) => m.world === chatWorldId), 'No messages in this world yet.');
-  renderChatList(chatMessagesDomainEl, chatMessages, 'No messages in this domain yet.');
+  const visible = chatMessages.filter((m) => !chatMutedKeys.has(m.publicKey) && !chatBlockedKeys.has(m.publicKey));
+  if (chatActiveTab === 'domain') {
+    renderChatList(chatMessagesEl, visible, 'No messages in this domain yet.');
+  } else {
+    const worldId = chatActiveTab && chatActiveTab.indexOf('world:') === 0 ? chatActiveTab.slice('world:'.length) : chatWorldId;
+    renderChatList(chatMessagesEl, visible.filter((m) => m.world === worldId), 'No messages in this world yet.');
+  }
 }
 
-function showChatTab(tab) {
-  chatActiveTab = tab;
-  if (chatTabWorldBtn) chatTabWorldBtn.classList.toggle('active-subtab', tab === 'world');
-  if (chatTabDomainBtn) chatTabDomainBtn.classList.toggle('active-subtab', tab === 'domain');
-  if (chatMessagesWorldEl) chatMessagesWorldEl.hidden = tab !== 'world';
-  if (chatMessagesDomainEl) chatMessagesDomainEl.hidden = tab !== 'domain';
+// chatTabForWorld() is the one place the 'world:' + id convention is
+// spelled out — every other call site goes through this (or compares
+// against chatActiveTab directly) rather than concatenating the prefix
+// itself, so the convention only has to be right once.
+function chatTabForWorld(worldId) {
+  return 'world:' + worldId;
 }
-chatTabWorldBtn && chatTabWorldBtn.addEventListener('click', () => showChatTab('world'));
-chatTabDomainBtn && chatTabDomainBtn.addEventListener('click', () => showChatTab('domain'));
+
+// Recomputes the ordered tab list for a given manifest — 'domain' at most
+// once, always leftmost, when manifest.chat === true; then one
+// 'world:<id>' entry per manifest.worlds[] entry (in that array's declared
+// order) with its own world.chat === true. Called fresh on every world
+// entry (see refreshChatAvailability()) rather than cached, so a domain
+// that changes its manifest between visits is picked up automatically,
+// same as every other manifest-derived bit of UI in this file.
+function computeChatTabs(manifest) {
+  const tabs = [];
+  if (manifest && manifest.chat === true) tabs.push({ id: 'domain', label: 'Domain' });
+  if (manifest && Array.isArray(manifest.worlds)) {
+    for (const w of manifest.worlds) {
+      if (w && w.chat === true) tabs.push({ id: chatTabForWorld(w.id), label: w.name });
+    }
+  }
+  return tabs;
+}
+
+// Renders the tab bar from chatTabs/chatActiveTab — a "(current)" suffix
+// (no space, e.g. "Lobby(current)") is appended to whichever tab is the
+// world the visitor is PHYSICALLY standing in right now, i.e. currentWorld
+// — never the "Domain" tab, which by construction never matches a
+// 'world:<id>' id. Re-run on every refreshChatAvailability() (a fresh
+// tab list, so the suffix naturally moves off a world you've left) and
+// after every manual tab click (so the active-tab highlight follows).
+function renderChatTabBar() {
+  if (!chatTabBarEl) return;
+  const currentWorldTabId = currentWorld ? chatTabForWorld(currentWorld.id) : null;
+  chatTabBarEl.innerHTML = chatTabs.map((tab) => {
+    const suffix = tab.id === currentWorldTabId ? '(current)' : '';
+    const activeClass = tab.id === chatActiveTab ? ' active-subtab' : '';
+    return '<button type="button" class="chat-tab' + activeClass + '" data-tab-id="' + escapeHtml(tab.id) + '">' + escapeHtml(tab.label + suffix) + '</button>';
+  }).join('');
+}
+
+// Manual tab click (delegated — the tab list is rebuilt wholesale on every
+// world entry, so a per-button listener would need constant re-attaching,
+// same reasoning as every other delegated list handler in this file).
+chatTabBarEl && chatTabBarEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-tab-id]');
+  if (!btn) return;
+  showChatTab(btn.dataset.tabId);
+});
+
+function showChatTab(tabId) {
+  chatActiveTab = tabId;
+  if (chatTabBarEl) {
+    chatTabBarEl.querySelectorAll('[data-tab-id]').forEach((btn) => {
+      btn.classList.toggle('active-subtab', btn.dataset.tabId === tabId);
+    });
+  }
+  renderChatMessages();
+  refreshChatSendability(); // which tab is active is now part of whether sending is currently allowed — see refreshChatSendability()'s own comment
+}
+
+// ---------- chat moderation: mute/block local cache (#116) ----------
+// renderChatMessages() needs a synchronous yes/no per message (it's called
+// from a WebSocket 'message' handler, among other non-async call sites), so
+// the two AtlasWallet-backed lists are mirrored here as plain Sets, kept
+// current by refreshChatModerationCache() — called once at load and again
+// after every mute/unmute/block/unblock action anywhere in this file.
+let chatMutedKeys = new Set();
+let chatBlockedKeys = new Set();
+async function refreshChatModerationCache() {
+  const [muted, blocked] = await Promise.all([AtlasWallet.getMutedChatUsers(), AtlasWallet.getBlockedChatUsers()]);
+  chatMutedKeys = new Set(muted.map((m) => m.publicKey));
+  chatBlockedKeys = new Set(blocked.map((b) => b.publicKey));
+}
+refreshChatModerationCache();
+
+// ---------- chat username hover tooltip (#115) ----------
+// Same floating-singleton-div approach as renderPortalTooltip/
+// #portalHoverTooltip above: one element, moved and filled in per-hover
+// rather than one per message. "Online" is checked against
+// presenceRosterMeta, the SAME live roster the Friends screen already uses
+// for "people here now" — not a new presence mechanism. That roster is
+// presence's own (3D-world-only, see connectPresence()), so a 2D world (or
+// a sender who was never a 3D presence member, e.g. they've since left)
+// simply won't show up in it; the tooltip words this as "not currently
+// shown as present" rather than a flat "offline" it can't actually prove.
+function isChatSenderOnline(publicKey) {
+  if (!publicKey) return false;
+  if (publicKey === chatOwnPublicKey || publicKey === presenceOwnPublicKey) return true; // this viewer's own identity is obviously online right now
+  for (const meta of presenceRosterMeta.values()) {
+    if (meta.publicKey === publicKey) return true;
+  }
+  return false;
+}
+
+function renderChatUserTooltip(name, sentAt, online) {
+  if (!chatUserTooltipEl) return;
+  const when = sentAt ? new Date(sentAt).toLocaleString() : 'unknown time';
+  chatUserTooltipEl.innerHTML =
+    '<div style="font-weight:600;margin-bottom:2px;">' + escapeHtml(name) + '</div>' +
+    '<div>Sent ' + escapeHtml(when) + '</div>' +
+    '<div>' + (online ? '🟢 Online now' : '⚪ Not currently shown as present') + '</div>';
+}
+
+function hideChatUserTooltip() {
+  if (chatUserTooltipEl) chatUserTooltipEl.style.display = 'none';
+}
+
+// Delegated on #chatPanel (the shared ancestor of #chatMessages, the
+// single message-list container) rather than per-span, same reasoning as
+// every other delegated list handler in this file — messages come and go
+// with every render, a per-element listener would need constant re-attaching.
+// 'mouseover'/'mouseout' (not 'mouseenter'/'mouseleave', which don't
+// bubble) is what makes delegation possible at all here.
+chatPanelEl && chatPanelEl.addEventListener('mouseover', (e) => {
+  const nameEl = e.target.closest('.chat-name');
+  if (!nameEl) return;
+  const rect = nameEl.getBoundingClientRect();
+  renderChatUserTooltip(nameEl.dataset.name, nameEl.dataset.sentat, isChatSenderOnline(nameEl.dataset.key || null));
+  chatUserTooltipEl.style.left = rect.left + 'px';
+  chatUserTooltipEl.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+  chatUserTooltipEl.style.display = 'block';
+});
+chatPanelEl && chatPanelEl.addEventListener('mouseout', (e) => {
+  const nameEl = e.target.closest('.chat-name');
+  if (!nameEl) return;
+  // Only hide if the pointer actually left the name span, not just moved
+  // to a child of it (it has none today, but this is the correct general
+  // check, same as e.g. the mail-card-menu's own outside-click guard).
+  if (nameEl.contains(e.relatedTarget)) return;
+  hideChatUserTooltip();
+});
+
+// ---------- chat username right-click menu (#116): private message / mute / block ----------
+// Visual/interaction pattern reused from mail's own "⋯" block-sender menu
+// (renderMailCard's blockHtml, .mail-card-menu-items in viewer.html) — dark
+// card, thin border, full-width stacked buttons — via #chatUserContextMenu's
+// own CSS, just a standalone singleton positioned at the click point
+// (there's no one fixed toggle button to anchor a right-click menu under)
+// instead of `position:absolute` under a per-card toggle.
+let chatContextMenuTarget = null; // {key, name} for whichever name this menu is currently open for
+
+function closeChatUserContextMenu() {
+  if (chatUserContextMenuEl) chatUserContextMenuEl.classList.remove('show');
+  chatContextMenuTarget = null;
+}
+
+chatPanelEl && chatPanelEl.addEventListener('contextmenu', (e) => {
+  const nameEl = e.target.closest('.chat-name');
+  if (!nameEl || !chatUserContextMenuEl) return;
+  e.preventDefault();
+  chatContextMenuTarget = { key: nameEl.dataset.key || null, name: nameEl.dataset.name || 'Visitor' };
+  hideChatUserTooltip(); // don't leave the hover tooltip floating over an open menu
+  // Clamped so a name near the right/bottom edge of the viewport doesn't
+  // open a menu that spills off-screen — same rough idea as any other
+  // viewport-aware popover, just done by hand since this one isn't CSS-
+  // anchored to anything.
+  const menuWidth = 170;
+  const menuHeight = 110;
+  const left = Math.min(e.clientX, window.innerWidth - menuWidth - 8);
+  const top = Math.min(e.clientY, window.innerHeight - menuHeight - 8);
+  chatUserContextMenuEl.style.left = Math.max(8, left) + 'px';
+  chatUserContextMenuEl.style.top = Math.max(8, top) + 'px';
+  chatUserContextMenuEl.classList.add('show');
+});
+
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#chatUserContextMenu')) return;
+  closeChatUserContextMenu();
+});
+
+// Private message: no live/real-time private-chat feature exists yet (a
+// separate, not-in-scope backlog item) — instead this jumps straight to
+// Mail's Compose tab, pre-addressed to this chat user's public key, reusing
+// openComposeReply() exactly as Quick Reply on a mail card already does
+// (including its own friend-picker resolution — a public key that happens
+// to match a saved friend shows that friend's name instead of the raw key,
+// with no separate recipient-resolution logic written for chat at all).
+async function openChatPrivateMessage(key, name) {
+  if (!key) { showChatSendStatus('This visitor has no identity to message.'); return; }
+  walletPanel.classList.add('open');
+  if (!(await AtlasWallet.isUnlocked())) {
+    await routeWalletScreen();
+    showChatSendStatus('Unlock your wallet, then try Private message again.');
+    return;
+  }
+  await openComposeReply({ domain: chatDomain || (currentManifest && currentManifest.domain), key, handle: null, subject: '' });
+}
+
+chatUserContextMenuEl && chatUserContextMenuEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn || !chatContextMenuTarget) return;
+  const { key, name } = chatContextMenuTarget;
+  closeChatUserContextMenu();
+
+  if (btn.dataset.action === 'chat-pm') {
+    await openChatPrivateMessage(key, name);
+  } else if (btn.dataset.action === 'chat-mute') {
+    if (!key) { showChatSendStatus('This visitor has no identity to mute.'); return; }
+    await AtlasWallet.muteChatUser(key, name);
+    await refreshChatModerationCache();
+    renderChatMessages();
+  } else if (btn.dataset.action === 'chat-block') {
+    if (!key) { showChatSendStatus('This visitor has no identity to block.'); return; }
+    await AtlasWallet.blockChatUser(key, name);
+    await refreshChatModerationCache();
+    renderChatMessages();
+  }
+});
+
+// ---------- chat capability opt-in (#111/#112) ----------
+// Chat used to activate unconditionally for every world on any domain with
+// a working presence backend. Now a domain has to actually ask for it, via
+// two new implementation-only manifest fields (same category as the
+// existing `presence`/`postOffice` fields — not part of SPEC.md, just
+// client+demo-content convenience): manifest.chat === true turns chat on
+// for every world in the domain, and an individual world.chat === true
+// turns it on for just that one world regardless of the domain-wide flag.
+// Effective-enabled is simply "either one says yes" — see enterWorld()
+// below for where this actually gates connectChat()/disconnectChat() and
+// the widget's own visibility.
+//
+// Deliberately a client-side-only gate — a UX/product opt-in layer, not a
+// security boundary. There's no server-side check on either presence-
+// server or presence-php enforcing it (and there couldn't meaningfully be
+// one yet): same as presence itself, a "domain" here is just whatever the
+// client claims when it joins a room, so this only ever controls whether
+// the CLIENT bothers to connect and show the widget at all, never whether
+// the server would accept the connection.
+function chatEnabledForWorld(manifest, world) {
+  return !!(manifest && manifest.chat === true) || !!(world && world.chat === true);
+}
+
+// Called every time enterWorld() lands on a (possibly new) world — shows or
+// hides the whole chat widget, recomputes the dynamic tab list (see
+// computeChatTabs()) to match what THIS domain+world actually declared,
+// and picks the initially-active tab per the defaultTabPreference setting
+// (#113, revised below for a tab list that's no longer a fixed pair).
+// #chatWidget sets its own `display: flex` in CSS (needed for its flex
+// column layout), which beats the `[hidden]` attribute's UA-stylesheet
+// `display: none` regardless of specificity — author rules always win
+// over user-agent ones — so this uses .style.display for the widget
+// itself, same convention as canvas/hintEl/portalTooltipEl elsewhere in
+// this file for elements with an explicit CSS display.
+async function refreshChatAvailability(manifest, world) {
+  const enabled = chatEnabledForWorld(manifest, world);
+  if (chatWidgetEl) chatWidgetEl.style.display = enabled ? '' : 'none';
+  if (!enabled) { chatTabs = []; chatActiveTab = null; return; }
+
+  chatTabs = computeChatTabs(manifest);
+  const currentWorldTabId = world ? chatTabForWorld(world.id) : null;
+  const hasOwnWorldTab = !!currentWorldTabId && chatTabs.some((t) => t.id === currentWorldTabId);
+  const hasDomainTab = chatTabs.some((t) => t.id === 'domain');
+
+  // defaultTabPreference (#113) decides which tab a freshly-entered world
+  // opens on. The old fixed This-World/Domain pair had a real "whichever
+  // tab is already selected" concept for 'auto' to preserve — every tab
+  // is now a distinct named world (or Domain), so that concept doesn't
+  // carry over. 'auto' is a deliberate, permanent alias for 'world' from
+  // here on, not merely "not implemented yet" — see the setting's own
+  // comment in viewer.html for the same note facing the settings UI.
+  const { defaultTabPreference } = await AtlasWallet.getChatPanelSettings();
+  const preference = defaultTabPreference === 'auto' ? 'world' : defaultTabPreference;
+
+  let nextTab;
+  if (preference === 'domain') {
+    nextTab = hasDomainTab ? 'domain' : (hasOwnWorldTab ? currentWorldTabId : null);
+  } else { // 'world'
+    nextTab = hasOwnWorldTab ? currentWorldTabId : (hasDomainTab ? 'domain' : null);
+  }
+  // Edge-case fallback — should only ever matter if the computed
+  // preference somehow names a tab that isn't actually in the list;
+  // there's always at least one tab here, since the widget is only shown
+  // at all once `enabled` above has already confirmed something is.
+  if (!nextTab || !chatTabs.some((t) => t.id === nextTab)) nextTab = chatTabs.length ? chatTabs[0].id : null;
+
+  chatActiveTab = nextTab;
+  renderChatTabBar();
+  renderChatMessages();
+  refreshChatSendability();
+}
 
 function chatErrorText(reason) {
   if (reason === 'login-required') return 'Unlock your wallet to send chat messages.';
@@ -620,17 +1229,38 @@ function showChatSendStatus(text) {
   if (text) chatSendStatusTimer = setTimeout(() => { chatSendStatusEl.textContent = ''; }, 4000);
 }
 
-// Send eligibility depends only on whether an identity is currently
-// announced to this connection, not on the socket's live open/closed
-// state (checked separately, at send time in the Enter-key handler) — a
-// momentary reconnect shouldn't visibly flicker the input disabled/
-// enabled on every world switch.
+// Send eligibility depends on two independent things now: whether an
+// identity is currently announced to this connection (as before — not the
+// socket's live open/closed state, checked separately at send time in the
+// Enter-key handler, so a momentary reconnect shouldn't visibly flicker
+// the input disabled/enabled on every world switch), AND whether the
+// ACTIVE tab is one sending is even allowed from. All of the tabs feed off
+// the same domain-scoped stream (that's what makes browsing another
+// world's tab possible at all — see chatEnabledForWorld()/connectChat()),
+// but a message is only ever allowed to go out while the visitor is
+// looking at "Domain" or their own current-location tab — not while
+// they're merely BROWSING some other world's tab they happen to also have
+// access to. Sent messages are still tagged with chatWorldId (the world
+// you're actually connected to chat FOR) exactly as before regardless —
+// this only ever gates whether sending is currently allowed, never what a
+// sent message ends up tagged with.
 function refreshChatSendability() {
   if (!chatTextInput) return;
-  const canSend = !!chatOwnPublicKey;
+  const onSendableTab = chatActiveTab === 'domain' || chatActiveTab === chatTabForWorld(chatWorldId);
+  const canSend = !!chatOwnPublicKey && onSendableTab;
   chatTextInput.disabled = !canSend;
-  chatTextInput.placeholder = canSend ? 'Message this domain…' : 'Sign in to chat…';
-  if (chatLoginNoteEl) chatLoginNoteEl.textContent = canSend ? '' : 'Unlock your wallet to send messages. Anyone can still read chat.';
+  if (!chatOwnPublicKey) {
+    chatTextInput.placeholder = 'Sign in to chat…';
+  } else if (!onSendableTab) {
+    chatTextInput.placeholder = 'Switch here or to Domain to send a message';
+  } else {
+    chatTextInput.placeholder = 'Message this domain…';
+  }
+  if (chatLoginNoteEl) {
+    chatLoginNoteEl.textContent = !chatOwnPublicKey
+      ? 'Unlock your wallet to send messages. Anyone can still read chat.'
+      : (!onSendableTab ? 'You can read every tab, but only send from Domain or your current world.' : '');
+  }
 }
 
 function disconnectChat() {
@@ -667,7 +1297,7 @@ function disconnectChat() {
 // guard (chatPollToken) and immediately leaving a room this attempt just
 // joined if a newer attempt has already taken over by the time the join
 // fetch actually comes back.
-function pollChat(domain, worldId, displayName, publicKey, httpBase) {
+function pollChat(domain, worldId, displayName, publicKey, httpBase, historyOnJoin) {
   const base = httpBase || CHAT_DEFAULT_BASE;
   const token = {};
   chatPollToken = token;
@@ -688,7 +1318,11 @@ function pollChat(domain, worldId, displayName, publicKey, httpBase) {
       chatPollHttpBase = base;
       chatOwnPublicKey = publicKey;
       refreshChatSendability();
-      chatMessages = (welcome.messages || []).slice(-CHAT_MESSAGES_CAP);
+      // historyOnJoin off (purely local — see wallet.js's comment):
+      // discard the join response's history batch instead of asking the
+      // server to withhold it; the list starts empty and only grows from
+      // whatever a later chat-sync delta actually delivers.
+      chatMessages = historyOnJoin ? (welcome.messages || []).slice(-CHAT_MESSAGES_CAP) : [];
       renderChatMessages();
 
       chatPollTimer = setInterval(() => {
@@ -723,6 +1357,12 @@ function connectChat(domain, worldId, presenceBase) {
     const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
     const displayName = alias || (identity ? short(identity.publicKey, 10) : 'Visitor');
     const publicKey = identity ? identity.publicKey : null;
+    // historyOnJoin (purely local — see wallet.js's own comment on this
+    // setting): read once per connectChat() attempt, used below to decide
+    // whether the history batch this join is about to receive gets shown
+    // or discarded. Neither transport is asked to change what IT sends —
+    // this only ever affects what the client does with it after the fact.
+    const { historyOnJoin } = await AtlasWallet.getChatPanelSettings();
 
     // Superseded before the identity lookup even resolved (a fast world
     // switch, or refreshChatIdentity() firing again before this settled)
@@ -733,7 +1373,7 @@ function connectChat(domain, worldId, presenceBase) {
     try {
       socket = new WebSocket(presenceWsUrlFor(base));
     } catch (err) {
-      pollChat(domain, worldId, displayName, publicKey, base); // WebSocket unsupported/blocked outright — go straight to polling
+      pollChat(domain, worldId, displayName, publicKey, base, historyOnJoin); // WebSocket unsupported/blocked outright — go straight to polling
       return;
     }
     if (chatDomain !== domain || chatWorldId !== worldId) { try { socket.close(); } catch (err) {} return; }
@@ -750,7 +1390,7 @@ function connectChat(domain, worldId, presenceBase) {
       if (chatSocket !== socket) return; // superseded — nothing to fall back FOR
       chatSocket = null;
       try { socket.close(); } catch (err) {}
-      pollChat(domain, worldId, displayName, publicKey, base);
+      pollChat(domain, worldId, displayName, publicKey, base, historyOnJoin);
     }, CHAT_WS_CONNECT_TIMEOUT_MS);
 
     chatSocket = socket;
@@ -770,7 +1410,11 @@ function connectChat(domain, worldId, presenceBase) {
       try { msg = JSON.parse(ev.data); } catch (err) { return; }
       if (!msg || typeof msg.type !== 'string') return;
       if (msg.type === 'chat-history') {
-        chatMessages = (msg.messages || []).slice(-CHAT_MESSAGES_CAP);
+        // historyOnJoin off (purely local — see wallet.js's comment):
+        // discard the batch the server just sent instead of asking it to
+        // withhold anything — the list simply starts empty and only grows
+        // from whatever 'chat-message' pushes arrive from here on.
+        chatMessages = historyOnJoin ? (msg.messages || []).slice(-CHAT_MESSAGES_CAP) : [];
         renderChatMessages();
       } else if (msg.type === 'chat-message') {
         chatMessages.push(msg.message);
@@ -794,7 +1438,7 @@ function connectChat(domain, worldId, presenceBase) {
       if (!settled) {
         settled = true;
         clearTimeout(fallbackTimer);
-        if (wasCurrent) pollChat(domain, worldId, displayName, publicKey, base);
+        if (wasCurrent) pollChat(domain, worldId, displayName, publicKey, base, historyOnJoin);
       }
     });
 
@@ -815,6 +1459,16 @@ function connectChat(domain, worldId, presenceBase) {
 // left to reconnect to.
 function refreshChatIdentity() {
   if (!chatDomain || !chatWorldId) { refreshChatSendability(); return; }
+  // Defensive gate (#111) — chatDomain/chatWorldId are only ever set by a
+  // connectChat() call that already passed this same check in enterWorld(),
+  // so this should never actually trip in practice, but a call site that
+  // reconnects chat has to honor the opt-in gate too, not just the two that
+  // establish the connection in the first place.
+  if (!chatEnabledForWorld(currentManifest, currentWorld)) {
+    disconnectChat();
+    refreshChatAvailability(currentManifest, currentWorld);
+    return;
+  }
   const domain = chatDomain;
   const worldId = chatWorldId;
   const presenceBase = (currentManifest && currentManifest.domain === domain) ? currentManifest.presence : null;
@@ -836,6 +1490,15 @@ chatTextInput && chatTextInput.addEventListener('keydown', (e) => {
   const text = chatTextInput.value.trim();
   if (!text) return;
   if (!chatOwnPublicKey) { showChatSendStatus(chatErrorText('login-required')); return; }
+  // Defensive — the input is already .disabled while browsing a
+  // non-sendable tab (see refreshChatSendability()), so Enter shouldn't
+  // normally even reach here in that state, but a tab switch racing this
+  // keydown (or any other path that bypasses the disabled attribute) must
+  // not be able to send tagged-elsewhere despite what the UI shows.
+  if (chatActiveTab !== 'domain' && chatActiveTab !== chatTabForWorld(chatWorldId)) {
+    showChatSendStatus('Switch here or to Domain to send a message');
+    return;
+  }
   if (!chatIsConnected()) { showChatSendStatus('Not connected — try again in a moment.'); return; }
   if (AtlasWallet.chatMessageContainsBlockedWord(text)) { showChatSendStatus(chatErrorText('blocked')); return; }
 
@@ -876,11 +1539,12 @@ function applyChatPanelSize(settings) {
   chatPanelEl.style.width = settings.width + 'px';
   if (chatInputRowEl) chatInputRowEl.style.width = settings.width + 'px';
   if (chatWidgetEl) chatWidgetEl.style.opacity = String(settings.opacity);
-  if (chatMessagesWorldEl) chatMessagesWorldEl.style.fontSize = settings.textSize + 'px';
-  if (chatMessagesDomainEl) chatMessagesDomainEl.style.fontSize = settings.textSize + 'px';
+  if (chatMessagesEl) chatMessagesEl.style.fontSize = settings.textSize + 'px';
   if (chatTextInput) chatTextInput.style.fontSize = settings.textSize + 'px';
   if (chatOpacityInput) chatOpacityInput.value = String(settings.opacity);
   if (chatTextSizeInput) chatTextSizeInput.value = String(settings.textSize);
+  if (chatDefaultTabInput) chatDefaultTabInput.value = settings.defaultTabPreference;
+  if (chatHistoryOnJoinInput) chatHistoryOnJoinInput.checked = !!settings.historyOnJoin;
   if (chatWidgetEl) chatWidgetEl.classList.toggle('minimized', !!settings.minimized);
   if (chatMinimizeToggleBtn) chatMinimizeToggleBtn.textContent = settings.minimized ? 'Show' : 'Minimize';
   if (!settings.minimized) chatPanelEl.style.height = settings.height + 'px';
@@ -904,6 +1568,12 @@ chatOpacityInput && chatOpacityInput.addEventListener('input', async () => {
 });
 chatTextSizeInput && chatTextSizeInput.addEventListener('input', async () => {
   applyChatPanelSize(await AtlasWallet.setChatPanelSettings({ textSize: parseInt(chatTextSizeInput.value, 10) }));
+});
+chatDefaultTabInput && chatDefaultTabInput.addEventListener('change', async () => {
+  applyChatPanelSize(await AtlasWallet.setChatPanelSettings({ defaultTabPreference: chatDefaultTabInput.value }));
+});
+chatHistoryOnJoinInput && chatHistoryOnJoinInput.addEventListener('change', async () => {
+  applyChatPanelSize(await AtlasWallet.setChatPanelSettings({ historyOnJoin: chatHistoryOnJoinInput.checked }));
 });
 
 chatMinimizeToggleBtn && chatMinimizeToggleBtn.addEventListener('click', async () => {
@@ -947,19 +1617,30 @@ const walletBadge = document.getElementById('walletBadge');
 const walletPanel = document.getElementById('walletPanel');
 const quickLockWalletBtn = document.getElementById('quickLockWalletBtn');
 
-// Social tab (#61/#67): Mail, Friends, Favorites as three sub-screens of
+// Social tab (#61/#67): Mail, Contacts, Favorites as three sub-screens of
 // one top-level tab — see showWalletScreen()/showSocialSubtab() below for
 // how the two levels of tabbing interact.
 const socialTabBtn = document.getElementById('socialTabBtn');
 const socialBadge = document.getElementById('socialBadge');
 const socialScreen = document.getElementById('socialScreen');
 const mailSubtabBtn = document.getElementById('mailSubtabBtn');
-const friendsSubtabBtn = document.getElementById('friendsSubtabBtn');
+const contactsSubtabBtn = document.getElementById('contactsSubtabBtn');
 const favoritesSubtabBtn = document.getElementById('favoritesSubtabBtn');
 const mailSubscreen = document.getElementById('mailSubscreen');
-const friendsSubscreen = document.getElementById('friendsSubscreen');
+const contactsSubscreen = document.getElementById('contactsSubscreen');
 const favoritesSubscreen = document.getElementById('favoritesSubscreen');
 const friendRequestsBadge = document.getElementById('friendRequestsBadge');
+
+// Contacts' own inner sub-tab bar (Contacts / Add Contact / Groups) — see
+// showContactsSubtab() below. Same nested pattern as Mail's own inner
+// sub-tab bar right below.
+const contactsListSubtabBtn = document.getElementById('contactsListSubtabBtn');
+const addContactSubtabBtn = document.getElementById('addContactSubtabBtn');
+const contactGroupsSubtabBtn = document.getElementById('contactGroupsSubtabBtn');
+const contactsListSubscreen = document.getElementById('contactsListSubscreen');
+const addContactSubscreen = document.getElementById('addContactSubscreen');
+const contactGroupsSubscreen = document.getElementById('contactGroupsSubscreen');
+const addContactBadge = document.getElementById('addContactBadge');
 
 // Mail's own inner sub-tab bar: Mail (inbox, default) vs. Mail Settings —
 // see showMailInnerSubtab() below.
@@ -1032,11 +1713,49 @@ const postOfficeBlockStatusEl = document.getElementById('postOfficeBlockStatus')
 
 const friendsHereListEl = document.getElementById('friendsHereList');
 const friendRequestsListEl = document.getElementById('friendRequestsList');
-const friendsListEl = document.getElementById('friendsList');
+const contactsListEl = document.getElementById('contactsList');
+const contactsSearchInput = document.getElementById('contactsSearchInput');
+
+// Manual add-by-address form (Add Contact sub-tab) — same handle-vs-raw-key
+// toggle pattern as Compose's recipient field, see postOfficeToggleRawKeyBtn.
+const manualAddNameInput = document.getElementById('manualAddNameInput');
+const manualAddHandleInput = document.getElementById('manualAddHandleInput');
+const manualAddPublicKeyInput = document.getElementById('manualAddPublicKeyInput');
+const manualAddToggleRawKeyBtn = document.getElementById('manualAddToggleRawKeyBtn');
+const manualAddContactBtn = document.getElementById('manualAddContactBtn');
+const manualAddContactStatusEl = document.getElementById('manualAddContactStatus');
+
+// Groups sub-tab (new, local-only — see AtlasWallet.getContactGroups et al.
+// in wallet.js).
+const newGroupNameInput = document.getElementById('newGroupNameInput');
+const createGroupBtn = document.getElementById('createGroupBtn');
+const groupsStatusEl = document.getElementById('groupsStatus');
+const contactGroupsListEl = document.getElementById('contactGroupsList');
 
 const addCurrentFavoriteBtn = document.getElementById('addCurrentFavoriteBtn');
 const addCurrentFavoriteStatusEl = document.getElementById('addCurrentFavoriteStatus');
 const favoritesListEl = document.getElementById('favoritesList');
+
+// Calendar (Social's fourth sub-tab) — see AtlasWallet.getCalendarEvents
+// and refreshCalendarDisplay() below.
+const calendarSubtabBtn = document.getElementById('calendarSubtabBtn');
+const calendarSubscreen = document.getElementById('calendarSubscreen');
+const calendarBadge = document.getElementById('calendarBadge');
+const calendarEventTitleInput = document.getElementById('calendarEventTitleInput');
+const calendarEventDateTimeInput = document.getElementById('calendarEventDateTimeInput');
+const calendarEventEndDateTimeInput = document.getElementById('calendarEventEndDateTimeInput');
+const calendarEventNotesInput = document.getElementById('calendarEventNotesInput');
+const calendarSaveEventBtn = document.getElementById('calendarSaveEventBtn');
+const calendarCancelEditBtn = document.getElementById('calendarCancelEditBtn');
+const calendarEventStatusEl = document.getElementById('calendarEventStatus');
+const calendarEventsListEl = document.getElementById('calendarEventsList');
+const calendarMonthLabelEl = document.getElementById('calendarMonthLabel');
+const calendarMonthGridEl = document.getElementById('calendarMonthGrid');
+const calendarPrevMonthBtn = document.getElementById('calendarPrevMonthBtn');
+const calendarNextMonthBtn = document.getElementById('calendarNextMonthBtn');
+const calendarDayViewerEl = document.getElementById('calendarDayViewer');
+const calendarDayViewerHeaderEl = document.getElementById('calendarDayViewerHeader');
+const calendarDayViewerBodyEl = document.getElementById('calendarDayViewerBody');
 
 // The wallet panel is one of several mutually-exclusive "screens" — see
 // showWalletScreen() / routeWalletScreen() below.
@@ -1098,6 +1817,8 @@ const importWalletBtn = document.getElementById('importWalletBtn');
 const importWalletFileInput = document.getElementById('importWalletFileInput');
 const importWalletStatusEl = document.getElementById('importWalletStatus');
 const hiddenAssetsListEl = document.getElementById('hiddenAssetsList');
+const chatMutedUsersListEl = document.getElementById('chatMutedUsersList');
+const chatBlockedUsersListEl = document.getElementById('chatBlockedUsersList');
 const recentWorldsListEl = document.getElementById('recentWorldsList');
 const cacheTotalLineEl = document.getElementById('cacheTotalLine');
 const cacheSitesListEl = document.getElementById('cacheSitesList');
@@ -1112,6 +1833,8 @@ const backFromSettingsBtn = document.getElementById('backFromSettingsBtn');
 const walletTabBar = document.getElementById('walletTabBar');
 const walletTabBtn = document.getElementById('walletTabBtn');
 const assetUpdatesBadge = document.getElementById('assetUpdatesBadge');
+const tradeTabBtn = document.getElementById('tradeTabBtn');
+const tradeScreen = document.getElementById('tradeScreen');
 const settingsTabBtn = document.getElementById('settingsTabBtn');
 
 const mainWalletScreen = document.getElementById('mainWalletScreen');
@@ -1139,16 +1862,54 @@ const documentsSubscreen = document.getElementById('documentsSubscreen');
 const mintIronBtn = document.getElementById('mintIronBtn');
 const mintGoldBtn = document.getElementById('mintGoldBtn');
 const collectiblesSearchInput = document.getElementById('collectiblesSearchInput');
+const collectiblesCompatOnlyCheckbox = document.getElementById('collectiblesCompatOnlyCheckbox');
 const selfCollectiblesListEl = document.getElementById('selfCollectiblesList');
 const counterpartyCollectiblesListEl = document.getElementById('counterpartyCollectiblesList');
 const droppedItemsSectionEl = document.getElementById('droppedItemsSection');
 const droppedItemsListEl = document.getElementById('droppedItemsList');
 const documentsSearchInput = document.getElementById('documentsSearchInput');
+const documentsCompatOnlyCheckbox = document.getElementById('documentsCompatOnlyCheckbox');
 const selfDocumentsListEl = document.getElementById('selfDocumentsList');
 const counterpartyDocumentsListEl = document.getElementById('counterpartyDocumentsList');
-const tradeNoteEl = document.getElementById('tradeNote');
-const tradeBtn = document.getElementById('tradeBtn');
-const tradeStatusEl = document.getElementById('tradeStatus');
+// Task #144 Phase 1 — Remote trade sub-tab of the Trading station category.
+const tradingBuySubtabBtn = document.getElementById('tradingBuySubtabBtn');
+const tradingSellSubtabBtn = document.getElementById('tradingSellSubtabBtn');
+const tradingListingsSubtabBtn = document.getElementById('tradingListingsSubtabBtn');
+const tradingBuySubscreen = document.getElementById('tradingBuySubscreen');
+const tradingSellSubscreen = document.getElementById('tradingSellSubscreen');
+const tradingListingsSubscreen = document.getElementById('tradingListingsSubscreen');
+const tradingStationBarEl = document.getElementById('tradingStationBar');
+const tradingStationJoinSectionEl = document.getElementById('tradingStationJoinSection');
+const tradingStationJoinBtn = document.getElementById('tradingStationJoinBtn');
+const tradingStationJoinStatusEl = document.getElementById('tradingStationJoinStatus');
+const remoteTradeStationDomainSelect = document.getElementById('remoteTradeStationDomainSelect');
+const tradingBuyRefreshBtn = document.getElementById('tradingBuyRefreshBtn');
+const tradingBuyListEl = document.getElementById('tradingBuyList');
+const tradingBuyStatusEl = document.getElementById('tradingBuyStatus');
+const tradingSellOfferClassSelect = document.getElementById('tradingSellOfferClassSelect');
+const tradingSellOfferQtyInput = document.getElementById('tradingSellOfferQtyInput');
+const tradingSellWantClassSelect = document.getElementById('tradingSellWantClassSelect');
+const tradingSellWantQtyInput = document.getElementById('tradingSellWantQtyInput');
+const tradingSellExpiresHoursInput = document.getElementById('tradingSellExpiresHoursInput');
+const tradingSellSubmitBtn = document.getElementById('tradingSellSubmitBtn');
+const tradingSellStatusEl = document.getElementById('tradingSellStatus');
+const tradingListingsListEl = document.getElementById('tradingListingsList');
+const tradingListingsStatusEl = document.getElementById('tradingListingsStatus');
+
+// Asset Viewer (task #150) — see the big comment block above
+// openAssetViewer() (further below, near renderAssetCard) for the whole
+// hover/sticky-bridge/resize/settings design; these are just its DOM refs,
+// declared alongside the other Inventory-screen elements above since
+// renderAssetCard() (which wires the hover) lives right next to them.
+const assetViewerWidgetEl = document.getElementById('assetViewerWidget');
+const assetViewerPanelEl = document.getElementById('assetViewerPanel');
+const assetViewerHeaderEl = document.getElementById('assetViewerHeader');
+const assetViewerBodyEl = document.getElementById('assetViewerBody');
+const assetViewerSettingsBtn = document.getElementById('assetViewerSettingsBtn');
+const assetViewerResizeHandleEl = document.getElementById('assetViewerResizeHandle');
+const assetViewerSettingsPopoverEl = document.getElementById('assetViewerSettingsPopover');
+const assetViewerOpacityInput = document.getElementById('assetViewerOpacityInput');
+const assetViewerTextSizeInput = document.getElementById('assetViewerTextSizeInput');
 
 let portalHitboxes = []; // [{sx, sy, radius, portal}]
 let itemMarkerHitboxes = []; // [{sx, sy, radius, marker}] — dropped items, 2D renderer only for now
@@ -1230,10 +1991,18 @@ async function loadManifest(manifestUrl, worldId) {
   statusEl.textContent = 'Fetching manifest…';
   const res = await fetch(manifestUrl, { cache: 'no-store' });
   const manifest = await res.json();
+  const targetWorldId = worldId || manifest.defaultWorld;
+  const targetWorld = manifest.worlds.find((w) => w.id === targetWorldId) || manifest.worlds[0];
+  // Task #63: checked BEFORE any currentManifest/currentManifestUrl/
+  // currentOrigin assignment below — this is what makes "stay exactly
+  // where you are" on cancel actually true. Covers every loadManifest()
+  // caller in one place: a domain portal (followPortal), Favorites/Recent
+  // Worlds (travelToRecentWorld), and the very first landing on a domain.
+  if (!(await ensureIdentityForEntry(manifest, targetWorld))) return;
   currentManifest = manifest;
   currentManifestUrl = manifestUrl;
   currentOrigin = new URL(manifestUrl).origin;
-  await enterWorld(worldId || manifest.defaultWorld);
+  await enterWorld(targetWorldId);
 }
 
 function show3DCanvas(active) {
@@ -1251,11 +2020,26 @@ async function enterWorld(worldId) {
   await refreshRequestButton();
   await refreshSubscribeButton();
   await refreshPostOfficeJoinButton();
+  await refreshTradingStationJoinButton();
+  await refreshRemoteTradeStationOptions();
   await refreshMyPublicKeyDisplay();
   refreshWorldGates();
 
   placeLabel.innerHTML = world.name + ' <span class="domain">' + manifest.domain + ' · ' + world.id + '</span>';
+  // document.title here is a no-op for anything actually visible — this
+  // document is an extension-origin IFRAME, cross-origin from the host page,
+  // and an iframe doesn't own the top-level browser tab title no matter what
+  // it sets its own .title to. The real tab title lives in the host page's
+  // document, reachable only via postMessage — content.js's message
+  // listener is the other half of this, mirroring the existing
+  // 'domain-atlas-close' pattern. Sent on every enterWorld() landing (both
+  // the 3D and 2D branches below reach this same line, and so does the very
+  // first world on initial page load via loadManifest()), independent of
+  // whether chat happens to be enabled for this world — the tab title isn't
+  // a chat feature and shouldn't silently stop updating just because a
+  // world hasn't opted into chat.
   document.title = 'Domain Atlas — ' + world.name;
+  window.parent.postMessage({ type: 'domain-atlas-title', title: manifest.domain + ': ' + world.name }, '*');
   await AtlasWallet.recordWorldVisit({
     domain: manifest.domain,
     world: world.id,
@@ -1280,7 +2064,8 @@ async function enterWorld(worldId) {
   if (active3D) { active3D.destroy(); active3D = null; }
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
   disconnectPresence(); // leaving whichever world was active before also means leaving its presence room, 3D or not
-  disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), unlike presence which is 3D-only
+  disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), unlike presence which is 3D-only, but ONLY if the new world actually opted in (#111) — see refreshChatAvailability() just below
+  await refreshChatAvailability(manifest, world); // shows/hides the widget + Domain tab for wherever we just landed, whether or not a scene ends up loading successfully below
   hideSceneLoadProgress(); // whichever world was active before might have left this showing (#36) — never carry it into the next one
 
   // A pending "click where you want to drop it" from whichever world was
@@ -1351,7 +2136,7 @@ async function enterWorld(worldId) {
       // be friend-requested (nothing stable to add), but everything else
       // about presence works exactly as before.
       connectPresence(manifest.domain, world.id, presenceName, manifest.presence, presenceIdentity ? presenceIdentity.publicKey : null);
-      connectChat(manifest.domain, world.id, manifest.presence);
+      if (chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence); // #111 — only if this world (or the whole domain) actually opted in
     } catch (err) {
       hideSceneLoadProgress(); // a failed load shouldn't leave a stuck progress bar over the error message
       statusEl.textContent = 'Could not load world: ' + err.message;
@@ -1386,8 +2171,10 @@ async function enterWorld(worldId) {
     history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
     // Chat has no visible character to attach to (unlike presence, #66),
     // so unlike connectPresence() it isn't gated on the 3D renderer at
-    // all — a 2D (procedural-v1) world gets a live chat room too.
-    connectChat(manifest.domain, world.id, manifest.presence);
+    // all — a 2D (procedural-v1) world gets a live chat room too. Still
+    // gated on the world/domain actually opting in (#111) same as the 3D
+    // branch above.
+    if (chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence);
   } catch (err) {
     statusEl.textContent = 'Could not load world: ' + err.message;
     window.__atlasScene = { floor: { size: [10, 10], color: '#2a1a1a' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
@@ -1398,6 +2185,11 @@ async function followPortal(portal) {
   if (!portal) return;
   if (portal.kind === 'world') {
     // Same-origin scene swap: reuse the already-cached manifest, no re-fetch.
+    // Task #63: gate checked here, before enterWorld() touches anything —
+    // loadManifest() below covers its own callers, but a same-world portal
+    // never goes through loadManifest() at all, so it needs its own check.
+    const targetWorld = currentManifest.worlds.find((w) => w.id === portal.to);
+    if (!(await ensureIdentityForEntry(currentManifest, targetWorld))) return;
     await enterWorld(portal.to);
   } else if (portal.kind === 'domain') {
     // Crossing a real trust boundary: fetch the other domain's own manifest.
@@ -1717,13 +2509,103 @@ canvas.addEventListener('click', (e) => {
 let hoveredPortalMarker = null;
 const domainPortalInfoCache = new Map(); // manifest URL -> Promise<world|null>
 
-function portalCapabilitySummary(world) {
+// Task #152 (follow-up to #151, prompted by Bruno hitting both gaps live
+// while writing his own evtec.co.za manifest):
+//
+// 1. A domain-level DEFAULT for acceptedItemClasses. Same two-level shape
+//    as manifest.chat/world.chat (see chatEnabledForWorld() above), except
+//    "world wins outright if it declares anything at all" rather than an
+//    OR — a world's own array, even an empty one, is a deliberate
+//    "recognizes nothing via this mechanism" statement (per SPEC.md line
+//    334 and task #151's own notes) and must never be silently merged with
+//    or overridden by the domain default. Only a world that omits the
+//    field entirely falls back to manifest.acceptedItemClasses. This is
+//    what lets a domain with many worlds declare its shared class list
+//    ONCE instead of copy-pasting the identical array into every world's
+//    policy block.
+// 2. Trailing-".*" CATEGORY matching — "atlas.element.*" matches
+//    "atlas.element.iron", "atlas.element.gold", etc. without hand-listing
+//    every element, the exact friction Bruno hit trying "atlas.element" and
+//    "atlas.wearable" expecting them to cover their whole families. Plain
+//    prefix-of-the-dotted-string matching, not a general glob: the "*" only
+//    ever appears as the trailing segment after a literal ".", so
+//    "atlas.element.*" won't accidentally also match an unrelated
+//    "atlas.elementary.thing". An entry with no trailing ".*" still means
+//    exactly that one class, same as before either of these existed.
+function effectiveAcceptedItemClasses(manifest, world) {
+  const policy = (world && world.policy) || {};
+  if (Array.isArray(policy.acceptedItemClasses)) return policy.acceptedItemClasses;
+  if (manifest && Array.isArray(manifest.acceptedItemClasses)) return manifest.acceptedItemClasses;
+  return [];
+}
+function classMatchesPattern(cls, pattern) {
+  return pattern.endsWith('.*') ? cls.startsWith(pattern.slice(0, -1)) : cls === pattern;
+}
+function classMatchesAny(cls, patterns) {
+  return patterns.some((p) => classMatchesPattern(cls, p));
+}
+
+// Task #63, SPEC.md §3.4.1: same two-tier shape as effectiveAcceptedItemClasses
+// just above — a world's own policy.identityRequired wins outright when
+// present (including an explicit `false` under a domain-wide `true`
+// default), the manifest's top-level identityRequired is only a fallback
+// for a world that omits the field entirely. Both demo domains already
+// declare it explicitly on every world today (nothing currently relies on
+// the domain-level fallback branch), so this is here mainly for a future
+// manifest that wants to set the default once instead of repeating it.
+function effectiveIdentityRequired(manifest, world) {
+  const policy = (world && world.policy) || {};
+  if (policy.identityRequired !== undefined) return !!policy.identityRequired;
+  if (manifest && manifest.identityRequired !== undefined) return !!manifest.identityRequired;
+  return false;
+}
+
+// Task #63: the one check that has to pass before a visitor actually lands
+// in a world, no matter which of the three ways they got there (a portal,
+// a direct Favorites/Recent-Worlds jump, or the very first landing on a
+// domain) — see loadManifest()/followPortal() below, both of which call
+// this BEFORE touching any currentManifest/currentWorld state. Returns
+// true immediately if the world doesn't require an identity, or already
+// has one; otherwise hands off to waitForIdentityViaWallet() and returns
+// whatever that resolves to. A false result means the visitor should stay
+// exactly where they were — safe by construction here, since neither
+// caller has mutated anything yet by the time this runs.
+async function ensureIdentityForEntry(manifest, world) {
+  if (!effectiveIdentityRequired(manifest, world)) return true;
+  if (await AtlasWallet.getIdentity()) return true;
+  return waitForIdentityViaWallet();
+}
+
+// `manifest` is the world's OWNING manifest — needed alongside `world`
+// itself because manifest.chat (domain-wide chat opt-in, see
+// chatEnabledForWorld() above) and now manifest.acceptedItemClasses (task
+// #152, just above) both live one level up from their per-world
+// counterparts. Also surfaces (task #151): a "trading" bit for a world a
+// client can recognize as a trading venue by its declared genre (SPEC.md
+// §7 — "profile.genre as a venue for live exchange"; "trading-station" is
+// this reference implementation's own convention, same as the demo domains
+// use), and an "accepts drops"/"issuers" bit built from the exact same
+// policy.acceptedItemClasses/policy.trustedIssuers fields
+// isAssetCompatibleWithWorld() reads for the Inventory checkbox — nothing
+// new to declare, just the same already-existing manifest data finally
+// surfaced somewhere a visitor sees it BEFORE stepping through the portal.
+function portalCapabilitySummary(world, manifest) {
   const cap = (world.profile && world.profile.capabilities) || {};
   const bits = [];
   if (cap.combat && cap.combat !== 'none') bits.push('combat: ' + cap.combat);
   if (cap.building && cap.building !== 'none') bits.push('building: ' + cap.building);
   if (cap.vehicles) bits.push('vehicles');
   if (cap.landOwnership) bits.push('land ownership');
+  if (chatEnabledForWorld(manifest, world)) bits.push('chat');
+  if (world.profile && world.profile.genre === 'trading-station') bits.push('trading');
+  const policy = world.policy || {};
+  if (policy.itemDropsAllowed) {
+    const classes = effectiveAcceptedItemClasses(manifest, world);
+    bits.push('accepts drops' + (classes.length ? ': ' + classes.join(', ') : ''));
+    if (policy.trustedIssuers && policy.trustedIssuers !== 'any') {
+      bits.push('issuers: ' + (Array.isArray(policy.trustedIssuers) ? policy.trustedIssuers.join(', ') : policy.trustedIssuers));
+    }
+  }
   return bits.length ? bits.join(' · ') : 'no special capabilities declared';
 }
 
@@ -1735,7 +2617,8 @@ async function fetchDomainPortalWorld(portal) {
       const res = await fetch(portal.manifest, { cache: 'no-store' });
       if (!res.ok) return null;
       const manifest = await res.json();
-      return manifest.worlds.find((w) => w.id === manifest.defaultWorld) || manifest.worlds[0] || null;
+      const world = manifest.worlds.find((w) => w.id === manifest.defaultWorld) || manifest.worlds[0] || null;
+      return world ? { manifest, world } : null;
     } catch (err) {
       return null; // unreachable domain — tooltip just stays label-only, not an error worth surfacing here
     }
@@ -1747,8 +2630,11 @@ async function fetchDomainPortalWorld(portal) {
 // `world` is undefined while a domain portal's detail is still loading
 // (shows "…"), null once it's known to be unavailable (fetch failed, or a
 // same-domain portal pointing at an id this manifest doesn't actually
-// have), or the resolved world object otherwise.
-function renderPortalTooltip(portal, world) {
+// have), or the resolved world object otherwise. `manifest` is that world's
+// own owning manifest (currentManifest for a same-domain "world" portal,
+// the fetched cross-domain manifest for a "domain" one) — needed only for
+// the chat bit in portalCapabilitySummary above.
+function renderPortalTooltip(portal, world, manifest) {
   if (!portalTooltipEl) return;
   const isCrossDomain = portal.kind === 'domain';
   const lines = [
@@ -1763,7 +2649,7 @@ function renderPortalTooltip(portal, world) {
     const genre = (world.profile && world.profile.genre) || 'unspecified';
     const scale = (world.profile && world.profile.scale) || 'unspecified';
     lines.push('<div>' + escapeHtml(world.name) + ' · Genre: ' + escapeHtml(genre) + ' · Scale: ' + escapeHtml(scale) + '</div>');
-    lines.push('<div>' + escapeHtml(portalCapabilitySummary(world)) + '</div>');
+    lines.push('<div>' + escapeHtml(portalCapabilitySummary(world, manifest)) + '</div>');
   }
   portalTooltipEl.innerHTML = lines.join('');
 }
@@ -1804,14 +2690,14 @@ canvas.addEventListener('mousemove', (e) => {
 
   if (portal.kind === 'world') {
     const world = (currentManifest && currentManifest.worlds.find((w) => w.id === portal.to)) || null;
-    renderPortalTooltip(portal, world);
+    renderPortalTooltip(portal, world, currentManifest);
   } else if (portal.kind === 'domain') {
-    renderPortalTooltip(portal, undefined);
-    fetchDomainPortalWorld(portal).then((world) => {
-      if (hoveredPortalMarker === hit.marker) renderPortalTooltip(portal, world);
+    renderPortalTooltip(portal, undefined, null);
+    fetchDomainPortalWorld(portal).then((result) => {
+      if (hoveredPortalMarker === hit.marker) renderPortalTooltip(portal, result ? result.world : null, result ? result.manifest : null);
     });
   } else {
-    renderPortalTooltip(portal, null);
+    renderPortalTooltip(portal, null, null);
   }
 });
 
@@ -1851,35 +2737,52 @@ function combatOf(world) {
   return (world && world.profile && world.profile.capabilities && world.profile.capabilities.combat) || 'none';
 }
 
+// The give-away button hands out ONE specific, concrete class — unlike the
+// Inventory compatibility check (which matches an ownership set against a
+// declared list), this has to pick a single mintable class name out of the
+// world's (or domain's, task #152) effective accepted list. A trailing-".*"
+// category entry like "atlas.element.*" isn't itself a real class (nothing
+// in any ASSET_CATALOG is literally named that), so this skips over any
+// wildcard entries and returns the first concrete one. A world/domain that
+// declares only wildcard categories — nothing concrete at all — behaves
+// the same as declaring no accepted classes: null here, same as before
+// this feature existed, and refreshRequestButton()'s existing "This world
+// issues nothing" message covers it with no extra casing needed.
+function giveawayClassFor(world) {
+  if (!world || !world.policy || !world.policy.itemDropsAllowed) return null;
+  const classes = effectiveAcceptedItemClasses(currentManifest, world);
+  return classes.find((c) => !c.endsWith('.*')) || null;
+}
+
 // Same oncePerUser courtesy check handleInteractable() uses for an in-scene
 // "issue" stall (see the note there) — extended here so the generic
 // "Request item from this world" button behaves the same way instead of
 // letting repeated clicks quietly fill the wallet with duplicates. Still
 // just a per-device courtesy, not real protocol-level scarcity (SPEC.md).
 async function alreadyHasRequestableItem(world) {
-  const classes = world && world.policy && world.policy.itemDropsAllowed ? (world.policy.acceptedItemClasses || []) : [];
-  if (classes.length === 0) return false;
+  const cls = giveawayClassFor(world);
+  if (!cls) return false;
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return false;
   const wallet = await AtlasWallet.getWallet(identity.publicKey);
-  return wallet.some((e) => e.credential.asset.class === classes[0] && e.credential.issuer.domain === manifestDomainOf(currentManifest));
+  return wallet.some((e) => e.credential.asset.class === cls && e.credential.issuer.domain === manifestDomainOf(currentManifest));
 }
 
 async function refreshRequestButton() {
   const world = currentWorld;
-  const classes = world && world.policy && world.policy.itemDropsAllowed ? (world.policy.acceptedItemClasses || []) : [];
-  if (classes.length === 0) {
+  const cls = giveawayClassFor(world);
+  if (!cls) {
     requestItemBtn.disabled = true;
     requestItemBtn.textContent = 'This world issues nothing';
     return;
   }
   if (await alreadyHasRequestableItem(world)) {
     requestItemBtn.disabled = true;
-    requestItemBtn.textContent = 'Already collected ' + classes[0] + ' from ' + world.name;
+    requestItemBtn.textContent = 'Already collected ' + cls + ' from ' + world.name;
     return;
   }
   requestItemBtn.disabled = false;
-  requestItemBtn.textContent = 'Request ' + classes[0] + ' from ' + world.name;
+  requestItemBtn.textContent = 'Request ' + cls + ' from ' + world.name;
 }
 
 function refreshWorldGates() {
@@ -1888,10 +2791,6 @@ function refreshWorldGates() {
   loadoutNoteEl.textContent = risky
     ? '⚠ This world is flagged "' + combatOf(world) + '" — items you load here can be lost under its rules. Anything left in your wallet stays safe.'
     : '';
-
-  const isStation = world && world.profile && world.profile.genre === 'trading-station';
-  tradeBtn.disabled = !isStation;
-  tradeNoteEl.style.display = isStation ? 'none' : '';
 
   refreshInventoryDisplay();
 }
@@ -1953,28 +2852,42 @@ async function refreshIdentityModeControls() {
 function showWalletScreen(id) {
   walletScreens.forEach((el) => el.classList.toggle('active', el.id === id));
   seedRevealBox.classList.remove('show');
-  // Tabs only make sense between Wallet, Social, and Settings — everything
-  // else (onboarding, unlock, create) has nothing to tab between yet and
-  // keeps its own dedicated navigation.
-  const showTabs = id === 'mainWalletScreen' || id === 'socialScreen' || id === 'settingsScreen';
+  // Tabs only make sense between Wallet, Social, Trade, and Settings —
+  // everything else (onboarding, unlock, create) has nothing to tab
+  // between yet and keeps its own dedicated navigation.
+  const showTabs = id === 'mainWalletScreen' || id === 'socialScreen' || id === 'tradeScreen' || id === 'settingsScreen';
   if (walletTabBar) walletTabBar.classList.toggle('visible', showTabs);
   if (walletTabBtn) walletTabBtn.classList.toggle('active-tab', id === 'mainWalletScreen');
   if (socialTabBtn) socialTabBtn.classList.toggle('active-tab', id === 'socialScreen');
+  if (tradeTabBtn) tradeTabBtn.classList.toggle('active-tab', id === 'tradeScreen');
   if (settingsTabBtn) settingsTabBtn.classList.toggle('active-tab', id === 'settingsScreen');
 }
 
-// Social tab's own second level of tabbing (#61/#67): Mail / Friends /
-// Favorites, same show-one-hide-the-rest idea as showWalletScreen() one
-// level up, just scoped to .social-subscreen instead of .wallet-screen.
+// Social tab's own second level of tabbing (#61/#67): Mail / Contacts /
+// Favorites / Calendar, same show-one-hide-the-rest idea as
+// showWalletScreen() one level up, just scoped to .social-subscreen instead
+// of .wallet-screen.
 function showSocialSubtab(id) {
-  [mailSubscreen, friendsSubscreen, favoritesSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  [mailSubscreen, contactsSubscreen, favoritesSubscreen, calendarSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
   if (mailSubtabBtn) mailSubtabBtn.classList.toggle('active-subtab', id === 'mailSubscreen');
-  if (friendsSubtabBtn) friendsSubtabBtn.classList.toggle('active-subtab', id === 'friendsSubscreen');
+  if (contactsSubtabBtn) contactsSubtabBtn.classList.toggle('active-subtab', id === 'contactsSubscreen');
   if (favoritesSubtabBtn) favoritesSubtabBtn.classList.toggle('active-subtab', id === 'favoritesSubscreen');
+  if (calendarSubtabBtn) calendarSubtabBtn.classList.toggle('active-subtab', id === 'calendarSubscreen');
 }
 
 function socialFriendsTabActive() {
-  return !!(friendsSubscreen && friendsSubscreen.classList.contains('active'));
+  return !!(contactsSubscreen && contactsSubscreen.classList.contains('active'));
+}
+
+// Contacts' own third level of tabbing: Contacts (the saved list, default)
+// / Add Contact (People here now, Friend requests, manual add-by-address)
+// / Groups. Same show-one-hide-the-rest pattern as showMailInnerSubtab()
+// below, just scoped to Contacts' three .subscreen elements.
+function showContactsSubtab(id) {
+  [contactsListSubscreen, addContactSubscreen, contactGroupsSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  if (contactsListSubtabBtn) contactsListSubtabBtn.classList.toggle('active-subtab', id === 'contactsListSubscreen');
+  if (addContactSubtabBtn) addContactSubtabBtn.classList.toggle('active-subtab', id === 'addContactSubscreen');
+  if (contactGroupsSubtabBtn) contactGroupsSubtabBtn.classList.toggle('active-subtab', id === 'contactGroupsSubscreen');
 }
 
 // Mail's own third level of tabbing: Mail (inbox — check-now + Messages,
@@ -2006,6 +2919,36 @@ function showInventorySubtab(id) {
   if (documentsSubtabBtn) documentsSubtabBtn.classList.toggle('active-subtab', id === 'documentsSubscreen');
 }
 
+// Trading station category's own In-person / Buy / Sell / Listings split
+// (task #144 Phase 1, reshaped to open listings in v1.14) — same
+// show-one-hide-the-rest idea as showInventorySubtab just above.
+// tradingStationBarEl is shared across Buy/Sell/Listings (see its own
+// comment in viewer.html) rather than being one of the four .subscreen
+// elements, so it's toggled separately here instead of via the forEach.
+// Refreshes whatever the newly-shown screen displays on the way in, same
+// "refresh whatever a tab shows the moment it's opened" convention as
+// refreshComposeFriendPicker on Compose-tab open.
+function showTradingSubtab(id) {
+  [tradingBuySubscreen, tradingSellSubscreen, tradingListingsSubscreen]
+    .forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  if (tradingBuySubtabBtn) tradingBuySubtabBtn.classList.toggle('active-subtab', id === 'tradingBuySubscreen');
+  if (tradingSellSubtabBtn) tradingSellSubtabBtn.classList.toggle('active-subtab', id === 'tradingSellSubscreen');
+  if (tradingListingsSubtabBtn) tradingListingsSubtabBtn.classList.toggle('active-subtab', id === 'tradingListingsSubscreen');
+
+  if (id === 'tradingBuySubscreen') {
+    refreshTradingStationJoinButton();
+    refreshRemoteTradeStationOptions();
+    if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '';
+    refreshTradingBuyList();
+  } else if (id === 'tradingSellSubscreen') {
+    refreshTradingStationJoinButton();
+    refreshRemoteTradeStationOptions();
+    refreshTradingSellOfferOptions();
+  } else if (id === 'tradingListingsSubscreen') {
+    refreshTradingListingsList();
+  }
+}
+
 async function routeWalletScreen() {
   if (await AtlasWallet.isUnlocked()) {
     showWalletScreen('mainWalletScreen');
@@ -2019,6 +2962,13 @@ async function routeWalletScreen() {
     const identity = await AtlasWallet.getIdentity();
     if (identity) await AtlasWallet.markAssetUpdateNoticesSeen(identity.publicKey);
     await refreshAssetUpdatesBadge();
+    // Mail/friend-request badges already refresh themselves off their own
+    // triggers (a mail check tick, a live presence signal, visiting Social)
+    // — Calendar has neither of those, it's pure local storage, so opening
+    // the wallet panel at all is this feature's own refresh trigger (see
+    // calendarSubscreen's comment in viewer.html on why nothing fires while
+    // the panel is closed).
+    await updateSocialBadge();
   } else if (await AtlasWallet.hasIdentity()) {
     showWalletScreen('unlockScreen');
     // Land the cursor straight in the password field — every caller of
@@ -2030,6 +2980,54 @@ async function routeWalletScreen() {
   } else {
     showWalletScreen('onboardingChoiceScreen');
   }
+}
+
+// Task #63: opens the wallet panel to whichever screen actually fits
+// (routeWalletScreen already resolves onboarding vs. unlock vs.
+// already-unlocked) and waits for either an identity to become available
+// or the panel to be closed without one. Deliberately doesn't care HOW the
+// visitor got there — a password unlock, a fresh local identity, or a
+// fresh WebAuthn one all end the same way, AtlasWallet.getIdentity()
+// turning truthy — so this polls that rather than hooking every
+// onboarding/unlock/import code path individually (there are several, and
+// they'd all need to remember to call back into whatever was waiting).
+// Closes the panel again on success so whatever was waiting on this —
+// entering a world, an in-world action — is immediately visible with no
+// second click; leaves everything untouched on cancel, since "the panel
+// is closed" is literally the condition that resolves this false.
+function waitForIdentityViaWallet() {
+  walletPanel.classList.add('open');
+  routeWalletScreen();
+  statusEl.textContent = 'This requires an unlocked wallet identity — finish that in the panel to continue.';
+  return new Promise((resolve) => {
+    const POLL_MS = 300;
+    const check = async () => {
+      // Deliberately NOT just "does an identity exist" — createIdentity()
+      // (confirmCreateBtn) unlocks the identity immediately, well before
+      // the user has actually confirmed they saved their seed phrase on
+      // the screen shown right after it (seedRevealBox, outside the normal
+      // screen system — see showWalletScreen(null) there). Resolving on
+      // raw identity-existence would yank the wallet panel closed out from
+      // under that still-visible confirmation step. mainWalletScreen only
+      // ever becomes active once every onboarding/unlock path has actually
+      // finished end to end (confirmCreateBtn's own seedConfirmBtn, the
+      // unlock button, import, WebAuthn create all land there explicitly)
+      // — that, plus a real identity existing, is the right "actually
+      // done" signal.
+      if (mainWalletScreen.classList.contains('active') && (await AtlasWallet.getIdentity())) {
+        walletPanel.classList.remove('open');
+        resolve(true);
+        return;
+      }
+      if (!walletPanel.classList.contains('open')) {
+        statusEl.textContent = 'Cancelled — the wallet was closed before unlocking.';
+        resolve(false);
+        return;
+      }
+      setTimeout(check, POLL_MS);
+    };
+    check();
+  });
 }
 
 // "Back" from create/import/webauthn-create screens: those screens are
@@ -2090,6 +3088,296 @@ function formatItemProperties(properties) {
 // opening it doesn't disturb anything else on the card, and it resets
 // closed the next time the list re-renders, same as every other
 // per-card DOM detail in this file.
+// ---------- Asset Viewer hover panel (task #150) ----------
+//
+// Hovering an asset card in either Inventory list (Collectibles or
+// Documents — both rendered by renderAssetCard() below, whichever
+// side/owner they belong to) opens this floating panel near the card: full
+// name/class/issuer/properties (no click-to-expand toggle here — unlike
+// the card itself, this panel has room to just show everything), the
+// asset's thumbnail if its credential has one, and a "Show model" button
+// if it also has a model (SPEC.md §5's optional `asset.thumbnail`/
+// `asset.model` fields — an issuer may set neither, either, or both; see
+// renderAssetViewerContent() below for the "neither" fallback).
+//
+// The tricky part isn't showing it — it's NOT closing it the instant the
+// mouse leaves the card, or "Show model" (which only exists once the
+// panel is already open) could never actually be reached: the panel would
+// close before the mouse finishes traveling from the card onto it. So this
+// is a sticky hover bridge, same idea as a CSS-only dropdown menu's own
+// "bridge" trick, done in JS because this panel's positioning already is:
+// leaving the CARD starts a short close timer (ASSET_VIEWER_CLOSE_GRACE_MS)
+// rather than closing immediately; entering the PANEL before that timer
+// fires cancels it outright; leaving the panel with no re-entry into
+// either the card or the panel within the same grace window is what
+// actually closes it. See scheduleAssetViewerClose()/
+// cancelAssetViewerCloseTimer() below, and the mouseenter/mouseleave
+// wiring at the bottom of renderAssetCard() plus on assetViewerPanelEl
+// itself just below this block.
+//
+// Settings (opacity/text size) and the resize handle are this panel's own
+// equivalents of the chat panel's #chatSettingsBtn/#chatSettingsPopover and
+// #chatResizeHandle (see viewer.js's "chat panel settings" section above),
+// backed by AtlasWallet.get/setAssetViewerSettings() (wallet.js) instead of
+// get/setChatPanelSettings() — same shape, same clamp-on-read-and-write
+// discipline, just this panel's own fields.
+
+const ASSET_VIEWER_CLOSE_GRACE_MS = 200;
+
+let assetViewerSettingsCache = null; // last-applied settings, used for position math (see positionAssetViewer) without a synchronous storage read
+let assetViewerCurrentEntry = null; // the wallet entry the panel is currently showing, or null while closed
+let assetViewerCloseTimer = null;
+let assetViewerModelPreview = null; // {dispose()} from window.MiniGLTF.previewModel(), or null while no model canvas is live
+let assetViewerModelLoadToken = 0; // bumped on every dispose/re-open so a slow in-flight fetch can tell it's stale and drop its result silently
+let assetViewerDragActive = false; // true for the duration of a resize drag — suspends the close timer entirely (see its own comment below)
+
+function applyAssetViewerSettings(settings) {
+  assetViewerSettingsCache = settings;
+  if (!assetViewerPanelEl) return;
+  assetViewerPanelEl.style.width = settings.width + 'px';
+  assetViewerPanelEl.style.height = settings.height + 'px';
+  assetViewerPanelEl.style.opacity = String(settings.opacity);
+  if (assetViewerBodyEl) assetViewerBodyEl.style.fontSize = settings.textSize + 'px';
+  if (assetViewerOpacityInput) assetViewerOpacityInput.value = String(settings.opacity);
+  if (assetViewerTextSizeInput) assetViewerTextSizeInput.value = String(settings.textSize);
+}
+
+// Positions the widget near the hovered card, same "float close enough for
+// the hover bridge to feel continuous, clamp to the viewport" approach as
+// renderPortalTooltip/renderChatUserTooltip above. #walletPanel docks along
+// the screen's right edge (see its own CSS), so every asset card lives
+// near that edge too — this opens to the card's LEFT by default (toward
+// the middle of the screen, where there's actually room), falling back to
+// the right only if the viewport is too narrow for that.
+function positionAssetViewer(cardEl) {
+  const rect = cardEl.getBoundingClientRect();
+  const width = assetViewerSettingsCache ? assetViewerSettingsCache.width : 280;
+  const height = assetViewerSettingsCache ? assetViewerSettingsCache.height : 240;
+  const gap = 10;
+  let left = rect.left - gap - width;
+  if (left < 8) left = rect.right + gap; // not enough room to the left — try the right instead
+  left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+  const top = Math.max(8, Math.min(rect.top, window.innerHeight - height - 8));
+  assetViewerWidgetEl.style.left = left + 'px';
+  assetViewerWidgetEl.style.top = top + 'px';
+}
+
+// Full, non-toggled properties list — deliberately NOT renderPropertiesToggle()
+// (below): the card's own inline version is a click-to-expand toggle to
+// save space on a small card; this panel has the room to just show
+// everything directly, per task #150.
+function renderAssetViewerProperties(properties) {
+  if (!properties || typeof properties !== 'object') return '';
+  const entries = Object.entries(properties);
+  if (entries.length === 0) return '';
+  return '<div class="asset-viewer-properties">' +
+    entries.map(([key, value]) => '<div>' + key + ': ' + formatPropertyValue(value) + '</div>').join('') +
+    '</div>';
+}
+
+function renderAssetViewerContent(entry) {
+  const asset = entry.credential.asset;
+  const fungible = !!asset.fungible;
+  let html =
+    '<div class="name">' + asset.name + (fungible ? ' ×' + entry.credential.quantity : '') + '</div>' +
+    '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + '</div>';
+  // Graceful fallback (task #150 point 6): both fields are optional per
+  // SPEC.md §5 — an issuer may set neither, so a class minted without them
+  // just skips straight to properties with no image area and no button,
+  // never a broken-image icon or a thrown error.
+  if (asset.thumbnail) {
+    html += '<img class="asset-viewer-thumbnail" src="' + asset.thumbnail + '" alt="">';
+  }
+  html += renderAssetViewerProperties(asset.properties);
+  if (asset.model) {
+    html += '<button type="button" id="assetViewerShowModelBtn" data-model="' + asset.model + '">Show model</button>';
+  }
+  html += '<div id="assetViewerModelArea"></div>';
+  assetViewerBodyEl.innerHTML = html;
+  // The broken-image fallback above used to be an inline onerror="..."
+  // attribute in the HTML string — Chrome's built-in extension-page CSP
+  // (script-src with no 'unsafe-inline') blocks ALL inline event handler
+  // attributes outright, so that never actually ran; it just logged a CSP
+  // violation to the console every time a thumbnail was shown. Wiring the
+  // same behavior as a real property assignment after the element exists
+  // isn't "inline execution" under CSP, so it works — and does the exact
+  // same thing (remove the element if its image 404s or otherwise fails).
+  if (asset.thumbnail) {
+    const thumbnailEl = assetViewerBodyEl.querySelector('.asset-viewer-thumbnail');
+    if (thumbnailEl) thumbnailEl.onerror = () => thumbnailEl.remove();
+  }
+}
+
+// Only ever one live preview context at a time (task #150 point 2's
+// WebGL-lifecycle requirement) — called before starting a new one AND on
+// every path that ends the panel's current one (switching to a different
+// asset, or closing the panel outright).
+function disposeAssetViewerModelPreview() {
+  assetViewerModelLoadToken++; // invalidates any fetch/parse still in flight for whatever this was previewing
+  if (assetViewerModelPreview) {
+    assetViewerModelPreview.dispose();
+    assetViewerModelPreview = null;
+  }
+}
+
+// Lazy, click-triggered only (task #150 point 2 — never automatic): fetches
+// the .glb via plain fetch()+arrayBuffer(), same `cache: 'no-store'`
+// convention every other binary/JSON fetch in this file already uses (see
+// e.g. the manifest/scene fetches above), then hands the raw bytes to
+// window.MiniGLTF.previewModel() (gltf-mini.js) to parse and render — NOT
+// window.MiniGLTF.init(), which is the full first-person world renderer and
+// would drag in camera controls, a floor, a character, and input handling
+// this small preview has no use for.
+async function showAssetViewerModel(url, areaEl) {
+  disposeAssetViewerModelPreview();
+  const token = assetViewerModelLoadToken;
+  areaEl.innerHTML = '<div class="asset-viewer-model-status">Loading model…</div>';
+  let buffer;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('Could not fetch model: ' + url);
+    buffer = await res.arrayBuffer();
+  } catch (err) {
+    if (token !== assetViewerModelLoadToken) return; // the panel moved on (closed/switched asset) while this was in flight — drop it silently
+    areaEl.innerHTML = '<div class="asset-viewer-model-status">Could not load this model.</div>';
+    return;
+  }
+  if (token !== assetViewerModelLoadToken) return; // same race, the success path
+  const canvas = document.createElement('canvas');
+  canvas.className = 'asset-viewer-model-canvas';
+  canvas.width = 240;
+  canvas.height = 160;
+  areaEl.innerHTML = '';
+  areaEl.appendChild(canvas);
+  try {
+    assetViewerModelPreview = window.MiniGLTF.previewModel(canvas, buffer, {});
+  } catch (err) {
+    areaEl.innerHTML = '<div class="asset-viewer-model-status">Could not render this model.</div>';
+  }
+}
+
+assetViewerBodyEl && assetViewerBodyEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('#assetViewerShowModelBtn');
+  if (!btn) return;
+  const area = document.getElementById('assetViewerModelArea');
+  if (area) showAssetViewerModel(btn.dataset.model, area);
+});
+
+function cancelAssetViewerCloseTimer() {
+  if (assetViewerCloseTimer) { clearTimeout(assetViewerCloseTimer); assetViewerCloseTimer = null; }
+}
+
+function closeAssetViewer() {
+  cancelAssetViewerCloseTimer();
+  assetViewerCurrentEntry = null;
+  disposeAssetViewerModelPreview();
+  if (assetViewerBodyEl) assetViewerBodyEl.innerHTML = '';
+  if (assetViewerWidgetEl) assetViewerWidgetEl.hidden = true;
+  if (assetViewerSettingsPopoverEl) assetViewerSettingsPopoverEl.hidden = true;
+}
+
+// Starts (or restarts) the short close-timer the sticky hover bridge relies
+// on — called on the card's mouseleave AND the panel's own mouseleave.
+// Task #150 point 5's real edge case: while a resize drag is in progress,
+// this is suspended ENTIRELY (never started, and any already-pending timer
+// stays cancelled) — a drag naturally carries the cursor outside the
+// panel's current bounds, and that must never read as "the user is done
+// with this panel." See the resize-drag mouseup handler below for how
+// normal hover tracking resumes the moment the drag actually ends.
+function scheduleAssetViewerClose() {
+  if (assetViewerDragActive) return;
+  cancelAssetViewerCloseTimer();
+  assetViewerCloseTimer = setTimeout(() => {
+    assetViewerCloseTimer = null;
+    closeAssetViewer();
+  }, ASSET_VIEWER_CLOSE_GRACE_MS);
+}
+
+// Opens (or, if already open for a different card, switches) the viewer.
+// Cancels any pending close first — re-entering a card (or the panel) mid-
+// grace-window is exactly what the sticky bridge is for.
+function openAssetViewer(entry, cardEl) {
+  cancelAssetViewerCloseTimer();
+  if (assetViewerCurrentEntry === entry) return; // already showing this exact card — leave its (possibly live) model preview alone
+  disposeAssetViewerModelPreview(); // switching assets — never leave the PREVIOUS card's preview context running
+  assetViewerCurrentEntry = entry;
+  renderAssetViewerContent(entry);
+  assetViewerWidgetEl.hidden = false;
+  positionAssetViewer(cardEl);
+}
+
+// Wired on the WIDGET (the fixed-positioned wrapper), not just the visible
+// #assetViewerPanel card — #assetViewerSettingsPopover is a DOM sibling of
+// the panel but still a descendant of the widget (see viewer.html's own
+// comment on why the popover lives outside the panel's overflow-clipped
+// box), so hovering the opacity/text-size sliders would otherwise register
+// as having left the panel and start the close timer mid-adjustment.
+// mouseenter/mouseleave (unlike mouseover/mouseout) don't fire for moves
+// between an element and its descendants, so this one listener correctly
+// treats "still somewhere inside the widget" — panel OR popover — as
+// "still hovering," with no separate popover-specific listener needed.
+assetViewerWidgetEl && assetViewerWidgetEl.addEventListener('mouseenter', cancelAssetViewerCloseTimer);
+assetViewerWidgetEl && assetViewerWidgetEl.addEventListener('mouseleave', scheduleAssetViewerClose);
+
+// ---------- Asset Viewer settings popover (opacity / text size) ----------
+// Exact same pattern as chatSettingsBtn/chatSettingsPopoverEl above, just
+// this panel's own settings storage (AtlasWallet.get/setAssetViewerSettings).
+assetViewerSettingsBtn && assetViewerSettingsBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  assetViewerSettingsPopoverEl.hidden = !assetViewerSettingsPopoverEl.hidden;
+});
+document.addEventListener('click', (e) => {
+  if (assetViewerSettingsPopoverEl && !assetViewerSettingsPopoverEl.hidden && !assetViewerSettingsPopoverEl.contains(e.target) && e.target !== assetViewerSettingsBtn) {
+    assetViewerSettingsPopoverEl.hidden = true;
+  }
+});
+assetViewerOpacityInput && assetViewerOpacityInput.addEventListener('input', async () => {
+  applyAssetViewerSettings(await AtlasWallet.setAssetViewerSettings({ opacity: parseFloat(assetViewerOpacityInput.value) }));
+});
+assetViewerTextSizeInput && assetViewerTextSizeInput.addEventListener('input', async () => {
+  applyAssetViewerSettings(await AtlasWallet.setAssetViewerSettings({ textSize: parseInt(assetViewerTextSizeInput.value, 10) }));
+});
+
+// ---------- Asset Viewer resize handle ----------
+// Same document-level mousemove/mouseup drag-tracking as chatResizeHandleEl
+// above (see that block's own comment for why document-level, not the
+// handle's own element: a fast drag can momentarily carry the cursor
+// outside the panel's current bounds mid-resize, and tracking on the
+// document rather than the shrinking/growing panel itself is what keeps
+// the drag from "losing" the mouse when that happens). Grows from the
+// bottom-right corner since this panel is positioned by its top-left (see
+// positionAssetViewer), the mirror image of chat's own top-right handle
+// growing away from ITS bottom-left anchor.
+let assetViewerResizeDrag = null;
+assetViewerResizeHandleEl && assetViewerResizeHandleEl.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  cancelAssetViewerCloseTimer();
+  assetViewerDragActive = true; // suspends the close timer for the whole drag — see scheduleAssetViewerClose()'s own comment
+  const rect = assetViewerPanelEl.getBoundingClientRect();
+  assetViewerResizeDrag = { startX: e.clientX, startY: e.clientY, startWidth: rect.width, startHeight: rect.height };
+});
+document.addEventListener('mousemove', (e) => {
+  if (!assetViewerResizeDrag) return;
+  const width = Math.max(220, Math.min(480, assetViewerResizeDrag.startWidth + (e.clientX - assetViewerResizeDrag.startX)));
+  const height = Math.max(180, Math.min(560, assetViewerResizeDrag.startHeight + (e.clientY - assetViewerResizeDrag.startY)));
+  assetViewerPanelEl.style.width = width + 'px';
+  assetViewerPanelEl.style.height = height + 'px';
+});
+document.addEventListener('mouseup', async () => {
+  if (!assetViewerResizeDrag) return;
+  assetViewerResizeDrag = null;
+  const rect = assetViewerPanelEl.getBoundingClientRect();
+  applyAssetViewerSettings(await AtlasWallet.setAssetViewerSettings({ width: Math.round(rect.width), height: Math.round(rect.height) }));
+  assetViewerDragActive = false;
+  // Resume normal hover tracking the instant the drag ends (task #150
+  // point 5): if the cursor ended up outside the panel (the overwhelmingly
+  // common case for a resize-by-dragging-outward), schedule the close
+  // timer now rather than leaving the panel open with nothing left to ever
+  // trigger its mouseleave again — no further mouse movement is guaranteed
+  // once the button is already up.
+  if (assetViewerPanelEl && !assetViewerPanelEl.matches(':hover')) scheduleAssetViewerClose();
+});
+
 function renderPropertiesToggle(properties) {
   if (!properties || typeof properties !== 'object') return '';
   const entries = Object.entries(properties);
@@ -2111,6 +3399,39 @@ function renderPropertiesToggle(properties) {
 // shows no quantity at all and offers Load/PvP-loss instead of Split —
 // SPEC.md §5's "false moves whole via §5.2, true splits via §5.4" split,
 // reflected directly in which actions a card offers.
+// Task #151 — "compatible with this world" needs no new manifest field:
+// SPEC.md line 334 already defines policy.acceptedItemClasses as which
+// classes a world recognizes, and policy.trustedIssuers (line 172,
+// orthogonal to class) as whose issuers it trusts at all ("any" | "self" |
+// an explicit domain array). An asset is compatible iff BOTH pass. A world
+// that declares an empty/absent acceptedItemClasses recognizes nothing via
+// this mechanism — SPEC.md's own "an asset outside that list has no
+// defined behavior" wording already implies that default, so this
+// deliberately returns false rather than treating "declares nothing" as
+// "accepts everything". `manifest` (task #152) is needed only for the
+// domain-level acceptedItemClasses default — see effectiveAcceptedItemClasses()
+// and classMatchesAny() above, which is also what makes a trailing-".*"
+// category entry (e.g. "atlas.element.*") match here.
+function isAssetCompatibleWithWorld(entry, world, manifest) {
+  if (!world || !world.policy) return false;
+  const classes = effectiveAcceptedItemClasses(manifest, world);
+  if (!classMatchesAny(entry.credential.asset.class, classes)) return false;
+  const trusted = world.policy.trustedIssuers;
+  const issuerDomain = entry.credential.issuer && entry.credential.issuer.domain;
+  if (trusted === 'any') return true;
+  // "self" means self relative to THIS world's own owning manifest — the
+  // one passed in, never the module-global currentManifest, even though in
+  // every call site today they happen to be the same object (renderAssetCard
+  // only ever checks compatibility against the world you're currently in).
+  // Caught by test/manual-item-category-defaults.js exercising this against
+  // a synthetic manifest/world pair that ISN'T the live currentManifest —
+  // using the global here silently passed for the real call sites but was
+  // still the wrong thing to read now that manifest is an explicit argument.
+  if (trusted === 'self') return issuerDomain === manifestDomainOf(manifest);
+  if (Array.isArray(trusted)) return trusted.includes(issuerDomain);
+  return false; // no recognized trustedIssuers value declared — safest default is nothing passes
+}
+
 function renderAssetCard(entry, container, opts) {
   const el = document.createElement('div');
   el.className = 'wallet-item';
@@ -2121,6 +3442,13 @@ function renderAssetCard(entry, container, opts) {
     asset.name + ' ' + asset.class + ' ' + entry.credential.issuer.domain + ' ' + propsText
   ).toLowerCase();
   if (opts.groupKey) el.dataset.group = opts.groupKey;
+  // opts.checkCompat is the CURRENT world, passed only for the self
+  // ("Yours") lists — see refreshInventoryDisplay() below. Counterparty
+  // cards never get a dataset.compatible at all, which is fine since the
+  // compatibility checkbox is only ever wired to the self lists.
+  // opts.checkCompatManifest (task #152) is that world's owning manifest,
+  // needed only for the domain-level acceptedItemClasses default.
+  if (opts.checkCompat) el.dataset.compatible = isAssetCompatibleWithWorld(entry, opts.checkCompat, opts.checkCompatManifest) ? '1' : '0';
   const v = entry.lastVerdict || { valid: false, reason: 'not yet verified' };
   const supersedesNote = Array.isArray(entry.credential.supersedes)
     ? ' · consolidated from ' + entry.credential.supersedes.length + ' balances'
@@ -2156,6 +3484,15 @@ function renderAssetCard(entry, container, opts) {
   html += '</div>';
   el.innerHTML = html;
   container.appendChild(el);
+
+  // Asset Viewer (task #150) — wired once, here, so every place
+  // renderAssetCard() is used (both Collectibles and Documents, both the
+  // self and counterparty column of each — see refreshInventoryDisplay()
+  // above) gets the hover panel generically, with no per-call-site
+  // special-casing. See the big comment block above openAssetViewer() for
+  // the full hover/sticky-bridge design.
+  el.addEventListener('mouseenter', () => openAssetViewer(entry, el));
+  el.addEventListener('mouseleave', scheduleAssetViewerClose);
 }
 
 // Groups same-wallet FUNGIBLE entries by class + issuer — the two things
@@ -2261,7 +3598,7 @@ async function refreshInventoryDisplay() {
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty' });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest });
   }
   counterpartyCollectiblesListEl.innerHTML = '';
   if (cpCollectibles.length === 0) {
@@ -2287,7 +3624,7 @@ async function refreshInventoryDisplay() {
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty' });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest });
   }
   counterpartyDocumentsListEl.innerHTML = '';
   if (cpDocuments.length === 0) {
@@ -2304,9 +3641,9 @@ async function refreshInventoryDisplay() {
   // any active search text has to be re-applied afterward — it isn't part
   // of the underlying data, just a view-layer filter over freshly-rendered
   // cards.
-  applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value);
+  applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
   applyListFilter(counterpartyCollectiblesListEl, collectiblesSearchInput.value);
-  applyListFilter(selfDocumentsListEl, documentsSearchInput.value);
+  applyListFilter(selfDocumentsListEl, documentsSearchInput.value, documentsCompatMatch());
   applyListFilter(counterpartyDocumentsListEl, documentsSearchInput.value);
 
   await refreshHiddenAssetsDisplay();
@@ -2400,43 +3737,75 @@ async function pickUpDroppedItem(credentialId) {
 // filtering to one balance inside a multi-balance group doesn't also hide
 // that group's "Consolidate" header. Re-run this after every list refresh
 // (the lists are fully rebuilt each time) and on every search input event.
-function applyListFilter(listEl, rawQuery) {
+// extraMatch (task #151) is an optional (card) => boolean predicate ANDed
+// in alongside the text search — used to layer the "only show items
+// compatible with this world" checkbox on top of whatever's already typed
+// into the search box, without the two filters stepping on each other's
+// toes (both ultimately just set `card.hidden`, so they have to be combined
+// in one pass rather than applied as two independent overwrites).
+function applyListFilter(listEl, rawQuery, extraMatch) {
   if (!listEl) return;
   const query = (rawQuery || '').trim().toLowerCase();
+  const filtering = !!query || !!extraMatch;
   const cards = listEl.querySelectorAll('.wallet-item, .info-card');
   const groupHasVisible = new Map();
   cards.forEach((card) => {
-    const match = !query || (card.dataset.search || '').includes(query);
+    const searchMatch = !query || (card.dataset.search || '').includes(query);
+    const match = searchMatch && (!extraMatch || extraMatch(card));
     card.hidden = !match;
     if (card.dataset.group) {
       groupHasVisible.set(card.dataset.group, groupHasVisible.get(card.dataset.group) || match);
     }
   });
   listEl.querySelectorAll('.resource-group-header').forEach((header) => {
-    header.hidden = query && !groupHasVisible.get(header.dataset.group);
+    header.hidden = filtering && !groupHasVisible.get(header.dataset.group);
   });
 
   let noMatchEl = listEl.querySelector('.filter-empty-note');
   const anyVisible = Array.from(cards).some((card) => !card.hidden);
-  if (query && cards.length > 0 && !anyVisible) {
+  if (filtering && cards.length > 0 && !anyVisible) {
     if (!noMatchEl) {
       noMatchEl = document.createElement('div');
       noMatchEl.className = 'empty-note filter-empty-note';
       listEl.appendChild(noMatchEl);
     }
-    noMatchEl.textContent = 'No matches for "' + rawQuery.trim() + '".';
+    noMatchEl.textContent = query ? ('No matches for "' + rawQuery.trim() + '".') : 'No items compatible with this world.';
   } else if (noMatchEl) {
     noMatchEl.remove();
   }
 }
 
+// Task #151 — the (card) => boolean predicate for each subtab's "only show
+// items compatible with this world" checkbox, or null when it's unchecked
+// (meaning applyListFilter falls back to text-search-only). Kept as
+// functions rather than inline at every call site since both the search
+// input's own 'input' listener and the checkbox's 'change' listener below
+// need to re-derive the same predicate.
+function collectiblesCompatMatch() {
+  return (collectiblesCompatOnlyCheckbox && collectiblesCompatOnlyCheckbox.checked)
+    ? (card) => card.dataset.compatible === '1' : null;
+}
+function documentsCompatMatch() {
+  return (documentsCompatOnlyCheckbox && documentsCompatOnlyCheckbox.checked)
+    ? (card) => card.dataset.compatible === '1' : null;
+}
+
 collectiblesSearchInput && collectiblesSearchInput.addEventListener('input', () => {
-  applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value);
+  applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
   applyListFilter(counterpartyCollectiblesListEl, collectiblesSearchInput.value);
 });
 documentsSearchInput && documentsSearchInput.addEventListener('input', () => {
-  applyListFilter(selfDocumentsListEl, documentsSearchInput.value);
+  applyListFilter(selfDocumentsListEl, documentsSearchInput.value, documentsCompatMatch());
   applyListFilter(counterpartyDocumentsListEl, documentsSearchInput.value);
+});
+// Only the "Yours" list re-filters here — the checkbox never applies to
+// Counterparty's, since "compatible with this world" is about what YOU
+// could meaningfully load/drop here, not what they're holding.
+collectiblesCompatOnlyCheckbox && collectiblesCompatOnlyCheckbox.addEventListener('change', () => {
+  applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
+});
+documentsCompatOnlyCheckbox && documentsCompatOnlyCheckbox.addEventListener('change', () => {
+  applyListFilter(selfDocumentsListEl, documentsSearchInput.value, documentsCompatMatch());
 });
 
 // The Settings-screen counterpart to the filtering above: lists every
@@ -2499,6 +3868,59 @@ hiddenAssetsListEl && hiddenAssetsListEl.addEventListener('click', async (e) => 
   await AtlasWallet.unhideAsset(owner.publicKey, btn.dataset.id);
   await refreshInventoryDisplay();
 });
+
+// ---------- chat admin: muted/blocked chat users (Settings -> "Chat Admin", #116) ----------
+// Same "info-card with an undo button" shape as renderHiddenAssetCard above,
+// just listing the two local moderation lists AtlasWallet.getMutedChatUsers()/
+// getBlockedChatUsers() maintain rather than wallet assets.
+
+function renderChatModerationCard(entry, container, action) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.innerHTML =
+    '<div class="name">' + escapeHtml(entry.name || 'Visitor') + '</div>' +
+    '<div class="meta mono">' + escapeHtml(entry.publicKey.slice(0, 24)) + '…</div>' +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="' + action + '" data-key="' + escapeHtml(entry.publicKey) + '" class="danger-btn">' + (action === 'unmute-chat-user' ? 'Unmute' : 'Unblock') + '</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshChatAdminDisplay() {
+  if (chatMutedUsersListEl) {
+    const muted = await AtlasWallet.getMutedChatUsers();
+    chatMutedUsersListEl.innerHTML = '';
+    if (muted.length === 0) {
+      chatMutedUsersListEl.innerHTML = '<div class="empty-note">No muted users.</div>';
+    } else {
+      muted.forEach((entry) => renderChatModerationCard(entry, chatMutedUsersListEl, 'unmute-chat-user'));
+    }
+  }
+  if (chatBlockedUsersListEl) {
+    const blocked = await AtlasWallet.getBlockedChatUsers();
+    chatBlockedUsersListEl.innerHTML = '';
+    if (blocked.length === 0) {
+      chatBlockedUsersListEl.innerHTML = '<div class="empty-note">No blocked users.</div>';
+    } else {
+      blocked.forEach((entry) => renderChatModerationCard(entry, chatBlockedUsersListEl, 'unblock-chat-user'));
+    }
+  }
+}
+
+async function handleChatAdminListClick(e) {
+  const btn = e.target.closest('button[data-action="unmute-chat-user"], button[data-action="unblock-chat-user"]');
+  if (!btn) return;
+  if (btn.dataset.action === 'unmute-chat-user') {
+    await AtlasWallet.unmuteChatUser(btn.dataset.key);
+  } else {
+    await AtlasWallet.unblockChatUser(btn.dataset.key);
+  }
+  await refreshChatModerationCache();
+  renderChatMessages();
+  await refreshChatAdminDisplay();
+}
+chatMutedUsersListEl && chatMutedUsersListEl.addEventListener('click', handleChatAdminListClick);
+chatBlockedUsersListEl && chatBlockedUsersListEl.addEventListener('click', handleChatAdminListClick);
 
 // ---------- recent worlds (Settings -> "Recent worlds") ----------
 
@@ -2792,6 +4214,7 @@ async function openSettings() {
   await refreshIdentityModeControls();
   await refreshHiddenAssetsDisplay();
   await refreshCacheDisplay();
+  await refreshChatAdminDisplay();
   if (characterScaleInputEl) {
     const scale = await AtlasWallet.getCharacterScale();
     characterScaleInputEl.value = String(scale);
@@ -2906,15 +4329,45 @@ function renderMailCard(entry, container, friendNameByKey) {
   // kind of card fromLine above already treats specially.
   //
   // Tucked behind a small "⋯" menu (mail-card-menu) rather than sitting
-  // directly in the action row — it used to, but sitting right next to
-  // Delete/Reply made it too easy to hit by accident on a click meant for
-  // one of those. See the delegated toggle-mail-menu handler below for how
-  // it opens/closes, and the outside-click listener that closes it again.
-  const blockHtml = !entry.message.from ? '' :
+  // directly in the action row — it used to (for Block sender), but sitting
+  // right next to Delete/Reply made it too easy to hit by accident on a
+  // click meant for one of those. "Add to calendar" (a bridge to the
+  // Calendar sub-tab, see prefillCalendarEventFromMail) joined it here for
+  // the same reason: a per-message action that isn't the everyday
+  // Delete/Reply pair. See the delegated toggle-mail-menu handler below for
+  // how it opens/closes, and the outside-click listener that closes it
+  // again. Always has at least "Add to calendar" — Block sender only joins
+  // it on relayed mail (has `from`), same condition as replyHtml above.
+  const addToCalendarHtml =
+    '<button type="button" data-action="add-mail-to-calendar" data-subject="' + escapeHtml(entry.message.subject) + '" data-body="' + escapeHtml(entry.message.body) + '">Add to calendar</button>';
+  // Task #154: turn a message's sender into a saved Contact without
+  // retyping their key into the Contacts tab's manual-add form. Same
+  // condition as Reply/Block above (only relayed mail has an addressable
+  // sender), PLUS gated on the sender not ALREADY being a saved friend —
+  // friendName is computed above from the same friendNameByKey lookup the
+  // From line already uses, so this reuses that instead of re-deriving it.
+  // addFriend() is purely local (see wallet.js's own header comment on
+  // it — no signal ever reaches the other person), same reasoning already
+  // vetted for the analogous chat-menu version in task #148, so there's no
+  // "unsolicited request" concern here to design around.
+  const addContactHtml = (!entry.message.from || friendName) ? '' :
+    '<button type="button" data-action="add-contact-from-mail" data-key="' + escapeHtml(entry.message.from.publicKey) + '" data-handle="' + escapeHtml(entry.message.from.handle || '') + '">Add Contact</button>';
+  const blockSenderHtml = !entry.message.from ? '' :
+    '<button type="button" data-action="block-sender" data-domain="' + escapeHtml(entry.message.domain) + '" data-key="' + escapeHtml(entry.message.from.publicKey) + '" class="danger-btn">Block sender</button>';
+  // An unclaimed gift is the only copy of that credential anywhere —
+  // claimMailGift() is the sole path it ever enters the wallet (see its
+  // own comment in wallet.js) — so deleting the message before claiming
+  // would destroy it with no way to get it back. Disabling the button
+  // (rather than a confirm()-time check) keeps this consistent with how
+  // disabled controls read elsewhere in this file, e.g. requestItemBtn.
+  const deleteBlockedByGift = gift && !entry.claimed;
+  const menuHtml =
     '<div class="mail-card-menu">' +
     '<button type="button" class="link-btn mail-card-menu-toggle" data-action="toggle-mail-menu" title="More actions">⋯</button>' +
     '<div class="mail-card-menu-items">' +
-    '<button type="button" data-action="block-sender" data-domain="' + escapeHtml(entry.message.domain) + '" data-key="' + escapeHtml(entry.message.from.publicKey) + '" class="danger-btn">Block sender</button>' +
+    addToCalendarHtml +
+    addContactHtml +
+    blockSenderHtml +
     '</div>' +
     '</div>';
   el.innerHTML =
@@ -2924,9 +4377,11 @@ function renderMailCard(entry, container, friendNameByKey) {
     '<div class="mail-body">' + escapeHtml(entry.message.body) + '</div>' +
     giftHtml +
     '<div class="item-actions">' +
-    '<button type="button" data-action="delete" class="danger-btn">Delete</button>' +
+    '<button type="button" data-action="delete" class="danger-btn"' +
+      (deleteBlockedByGift ? ' disabled title="Claim the attached gift before deleting this message"' : '') +
+      '>Delete</button>' +
     replyHtml +
-    blockHtml +
+    menuHtml +
     '</div>';
   container.appendChild(el);
 }
@@ -3089,21 +4544,67 @@ clearSentMailBtn && clearSentMailBtn.addEventListener('click', async () => {
   await refreshSentMailDisplay();
 });
 
-// Combined badge on the top-level Social tab (#61/#67) — unread mail plus
-// pending incoming friend requests, so there's a single "something needs
-// your attention in here" signal even while the panel's closed and nobody
-// can see which sub-tab would show it. Each sub-tab ALSO carries its own
-// count (mailBadge, friendRequestsBadge) for once you're actually looking.
+// "Due soon" window for the Calendar badge below: an event counts as
+// needing attention once it's within this many milliseconds of now (or
+// already past). 24 hours is a reasonable "don't let me forget about
+// tomorrow" default for a demo with no background alerts — see
+// calendarSubscreen's own comment in viewer.html for why there's nothing
+// stronger than this badge in this pass.
+const CALENDAR_DUE_SOON_MS = 24 * 60 * 60 * 1000;
+
+// The single moment an event's urgency (overdue-ness, and "due soon"
+// below) is judged against: its END time when it has one, its start time
+// otherwise. An event with a set duration isn't "overdue" the instant it
+// BEGINS — a 2pm-3:30pm meeting is still current at 2:15, not overdue —
+// so once endDateTime exists, everything that used to read dateTime alone
+// for urgency reads this instead. Shared by the event-list card, the
+// day-viewer's event chips, and the due-soon count right below.
+function calendarEventUrgencyMs(entry) {
+  return new Date(entry.endDateTime || entry.dateTime).getTime();
+}
+
+// Shared by the Calendar sub-tab's badge and updateSocialBadge()'s combined
+// total below — counts events that are overdue OR due within
+// CALENDAR_DUE_SOON_MS (per calendarEventUrgencyMs above — an event's END
+// time once it has one), from an already-fetched events array so callers
+// that already have the list (refreshCalendarDisplay) don't re-fetch it.
+function countCalendarEventsDueSoon(events) {
+  const cutoff = Date.now() + CALENDAR_DUE_SOON_MS;
+  return (events || []).filter((e) => calendarEventUrgencyMs(e) <= cutoff).length;
+}
+
+// Combined badge on the top-level Social tab (#61/#67) — unread mail, plus
+// pending incoming friend requests, plus calendar events overdue/due soon,
+// so there's a single "something needs your attention in here" signal even
+// while the panel's closed and nobody can see which sub-tab would show it.
+// Each sub-tab ALSO carries its own count (mailBadge, calendarBadge) for
+// once you're actually looking. Friend requests now live under Contacts ->
+// Add Contact specifically (the Contacts restructuring, #67 follow-up) —
+// friendRequestsBadge (the outer Contacts sub-tab button) and
+// addContactBadge (the Add Contact inner sub-tab button, where the
+// requests themselves actually render) both show the SAME count, same
+// two-levels-deep aggregation Mail already does with mailBadge/
+// mailBoxInboxBadge above.
 async function updateSocialBadge() {
   const identity = await AtlasWallet.getIdentity();
   const entries = identity ? await AtlasWallet.getMail(identity.publicKey) : [];
   const unreadMail = entries.filter((e) => !e.read).length;
+  const calendarEvents = await AtlasWallet.getCalendarEvents();
+  const calendarDueSoon = countCalendarEventsDueSoon(calendarEvents);
   if (friendRequestsBadge) {
     friendRequestsBadge.textContent = String(presencePendingIncoming.length);
     friendRequestsBadge.classList.toggle('show', presencePendingIncoming.length > 0);
   }
+  if (addContactBadge) {
+    addContactBadge.textContent = String(presencePendingIncoming.length);
+    addContactBadge.classList.toggle('show', presencePendingIncoming.length > 0);
+  }
+  if (calendarBadge) {
+    calendarBadge.textContent = String(calendarDueSoon);
+    calendarBadge.classList.toggle('show', calendarDueSoon > 0);
+  }
   if (socialBadge) {
-    const total = unreadMail + presencePendingIncoming.length;
+    const total = unreadMail + presencePendingIncoming.length + calendarDueSoon;
     socialBadge.textContent = String(total);
     socialBadge.classList.toggle('show', total > 0);
   }
@@ -3140,6 +4641,46 @@ mailListEl && mailListEl.addEventListener('click', async (e) => {
     const opening = menu && !menu.classList.contains('show');
     closeAllMailCardMenus();
     if (opening && menu) menu.classList.add('show');
+    return;
+  }
+
+  // "Add to calendar" bridge (see prefillCalendarEventFromMail's own
+  // comment on why this only pre-fills a form rather than creating an
+  // event outright): jumps straight to Social's Calendar sub-tab with the
+  // add-event form pre-filled from this message.
+  const addToCalendarBtn = e.target.closest('button[data-action="add-mail-to-calendar"]');
+  if (addToCalendarBtn) {
+    closeAllMailCardMenus();
+    showSocialSubtab('calendarSubscreen');
+    resetCalendarGridToToday();
+    await refreshCalendarDisplay();
+    prefillCalendarEventFromMail(addToCalendarBtn.dataset.subject, addToCalendarBtn.dataset.body);
+    return;
+  }
+
+  // Task #154: the mail-menu counterpart to the Contacts tab's manual
+  // "add by public key" form, pre-filled from this message instead of
+  // retyped by hand. addContactHtml above already keeps this hidden once
+  // the sender is a saved contact, so no re-check is needed here — just
+  // save and refresh. Re-rendering the mail list afterward (not just
+  // Friends) matters: it's this same card's own friendName lookup that
+  // makes the button disappear and, for a from without a handle, flips
+  // the From line to "(friend)" — waiting for some other, unrelated
+  // refresh to catch up would leave stale state on screen.
+  const addContactBtn = e.target.closest('button[data-action="add-contact-from-mail"]');
+  if (addContactBtn) {
+    closeAllMailCardMenus();
+    const key = addContactBtn.dataset.key;
+    const handle = addContactBtn.dataset.handle;
+    const name = handle || 'Friend';
+    try {
+      await AtlasWallet.addFriend(key, name);
+      if (socialFriendsTabActive()) await refreshFriendsDisplay();
+      await refreshMailDisplay();
+      statusEl.textContent = 'Added ' + name + ' to Contacts.';
+    } catch (err) {
+      statusEl.textContent = 'Add contact failed: ' + err.message;
+    }
     return;
   }
 
@@ -3254,9 +4795,22 @@ async function checkMailOnTabOpen() {
   }
 }
 
+// #128: the very first time Mail is reached via a plain click on Social or
+// Mail (as opposed to a deliberate deep-link like openComposeReply's quick
+// reply/private-message bridge, which already sets this itself — see
+// there), land on Inbox specifically rather than whatever inner sub-tab
+// happened to be the DOM's default. checkMailOnTabOpen() already fires here
+// either way (it doesn't care which inner sub-tab is showing), so this is
+// purely about where you visually land on that first visit. Every visit
+// after the first respects wherever the user last was (Sent/Compose/Mail
+// Settings), exactly like today — this flag is a one-shot, not a reset.
+let mailEverOpened = false;
+
 socialTabBtn && socialTabBtn.addEventListener('click', async () => {
   showWalletScreen('socialScreen');
   showSocialSubtab('mailSubscreen');
+  if (!mailEverOpened) showMailBoxSubtab('mailBoxInboxSubscreen');
+  mailEverOpened = true;
   await checkMailOnTabOpen();
   await refreshMailDisplay();
   await refreshSubscribeButton();
@@ -3267,6 +4821,8 @@ socialTabBtn && socialTabBtn.addEventListener('click', async () => {
 
 mailSubtabBtn && mailSubtabBtn.addEventListener('click', async () => {
   showSocialSubtab('mailSubscreen');
+  if (!mailEverOpened) showMailBoxSubtab('mailBoxInboxSubscreen');
+  mailEverOpened = true;
   await checkMailOnTabOpen();
   await refreshMailDisplay();
   await refreshSubscribeButton();
@@ -3275,14 +4831,51 @@ mailSubtabBtn && mailSubtabBtn.addEventListener('click', async () => {
   await refreshInventoryDisplay();
 });
 
-friendsSubtabBtn && friendsSubtabBtn.addEventListener('click', async () => {
-  showSocialSubtab('friendsSubscreen');
+// Trade tab (promoted from Wallet's own "Trading station" category once
+// #144 Phase 1 grew it into a real two-part screen) — refreshes every
+// sub-tab's state unconditionally on open, same "cheap enough to just do
+// all of them, don't bother tracking which one's currently showing"
+// approach refreshPostOfficeJoinButton already takes in several places.
+tradeTabBtn && tradeTabBtn.addEventListener('click', async () => {
+  showWalletScreen('tradeScreen');
+  refreshWorldGates();
+  await refreshTradingStationJoinButton();
+  await refreshRemoteTradeStationOptions();
+  if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '';
+  await refreshTradingBuyList();
+  await refreshTradingSellOfferOptions();
+  await refreshTradingListingsList();
+});
+
+contactsSubtabBtn && contactsSubtabBtn.addEventListener('click', async () => {
+  showSocialSubtab('contactsSubscreen');
   await refreshFriendsDisplay();
+});
+
+// Contacts' own inner sub-tab bar (Contacts / Add Contact / Groups) — same
+// idea as Mail's Mail/Mail Settings split right below: the data underneath
+// all three is already kept current by refreshFriendsDisplay() (called
+// whenever the outer Contacts sub-tab opens or a live signal arrives, see
+// socialFriendsTabActive() above), so switching between these three is
+// just a visibility toggle, EXCEPT Groups, which is populated lazily on
+// its own tab-open since nothing else keeps it current (same lazy-refresh
+// convention as Inventory's Collectibles/Documents and Mail's own Sent).
+contactsListSubtabBtn && contactsListSubtabBtn.addEventListener('click', () => showContactsSubtab('contactsListSubscreen'));
+addContactSubtabBtn && addContactSubtabBtn.addEventListener('click', () => showContactsSubtab('addContactSubscreen'));
+contactGroupsSubtabBtn && contactGroupsSubtabBtn.addEventListener('click', async () => {
+  showContactsSubtab('contactGroupsSubscreen');
+  await refreshContactGroupsDisplay();
 });
 
 favoritesSubtabBtn && favoritesSubtabBtn.addEventListener('click', async () => {
   showSocialSubtab('favoritesSubscreen');
   await refreshFavoritesDisplay();
+});
+
+calendarSubtabBtn && calendarSubtabBtn.addEventListener('click', async () => {
+  showSocialSubtab('calendarSubscreen');
+  resetCalendarGridToToday();
+  await refreshCalendarDisplay();
 });
 
 // Mail's own inner sub-tab bar (Mail / Mail Settings) — data underneath is
@@ -3327,6 +4920,9 @@ mailBoxComposeSubtabBtn && mailBoxComposeSubtabBtn.addEventListener('click', asy
 // visibility toggle — no extra fetch needed.
 collectiblesSubtabBtn && collectiblesSubtabBtn.addEventListener('click', () => showInventorySubtab('collectiblesSubscreen'));
 documentsSubtabBtn && documentsSubtabBtn.addEventListener('click', () => showInventorySubtab('documentsSubscreen'));
+tradingBuySubtabBtn && tradingBuySubtabBtn.addEventListener('click', () => showTradingSubtab('tradingBuySubscreen'));
+tradingSellSubtabBtn && tradingSellSubtabBtn.addEventListener('click', () => showTradingSubtab('tradingSellSubscreen'));
+tradingListingsSubtabBtn && tradingListingsSubtabBtn.addEventListener('click', () => showTradingSubtab('tradingListingsSubscreen'));
 
 // "Subscribing" is just requesting the current domain's atlas.membership
 // item directly (see AtlasWallet.checkAllMail's design note: holding the
@@ -3817,6 +5413,7 @@ composeFriendPickerInput && composeFriendPickerInput.addEventListener('change', 
 // picker is set to match too, purely so the picker doesn't look wrong
 // sitting there blank; sending doesn't depend on it either way.
 async function openComposeReply({ domain, key, handle, subject }) {
+  mailEverOpened = true; // #128 — a deliberate deep-link to Compose counts as Mail having been "opened"; a later plain Mail-tab click should respect this, not force back to Inbox
   showWalletScreen('socialScreen');
   showSocialSubtab('mailSubscreen');
   showMailInnerSubtab('mailInboxSubscreen');
@@ -3990,18 +5587,403 @@ postOfficeJoinBtn && postOfficeJoinBtn.addEventListener('click', async () => {
   }
 });
 
-// ---------- friends (Social -> Friends tab, #67) ----------
+// ---------- Trading Station, remote (task #144 Phase 1) ----------
 //
-// Three lists: who's actually standing in this world with you right now
-// (from the live presence roster, see presenceRosterMeta), any friend
-// requests aimed at you that are still live (presencePendingIncoming —
-// only exists while both sides remain in the same room, see its own
-// comment up near disconnectPresence), and the friends you've actually
-// saved (AtlasWallet.getFriends(), persists across sessions/worlds — see
-// wallet.js). Adding a friend, and answering a request, both go out as a
-// signal over the CURRENT presence connection (sendSignal) — there's no
-// other channel this can use, by design (see README.md's Friends section
-// for why mail can't do this).
+// Always this browser's own "self" identity — trading settles between two
+// genuinely separate wallets/installs (see the claimant intent's plain
+// counterparty public-key string), so there's no in-profile role to pick
+// here the way the removed in-person mechanism once had (that flow's
+// self/counterparty toggle was a same-room stand-in, gone since v1.15).
+
+// Mirrors alreadyHasPostOfficeMembership exactly.
+async function alreadyHasTradingStationMembership(domain) {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return false;
+  const wallet = await AtlasWallet.getWallet(identity.publicKey);
+  return wallet.some((e) => e.credential.asset.class === 'atlas.tradingstation.membership' && e.credential.issuer.domain === domain);
+}
+
+// Mirrors refreshPostOfficeJoinButton exactly — same "gated on the
+// manifest's own opt-in field, hidden entirely once already a member"
+// shape.
+async function refreshTradingStationJoinButton() {
+  if (!tradingStationJoinSectionEl) return;
+  if (tradingStationJoinStatusEl) tradingStationJoinStatusEl.textContent = '';
+  if (!currentManifest || !currentManifest.tradingStation) {
+    tradingStationJoinSectionEl.hidden = true;
+    return;
+  }
+  const domain = manifestDomainOf(currentManifest);
+  if (await alreadyHasTradingStationMembership(domain)) {
+    tradingStationJoinSectionEl.hidden = true;
+    return;
+  }
+  tradingStationJoinSectionEl.hidden = false;
+  tradingStationJoinBtn.disabled = false;
+  tradingStationJoinBtn.textContent = 'Join ' + domain + '\'s Trading Station';
+}
+
+// Rebuilds the Trading Station select. Mostly this wallet's own
+// AtlasWallet.getTradingStationMemberships() — same "only ever offer
+// stations this wallet has actually joined" reasoning as Post Office's
+// "send via" dropdown (refreshPostOfficeSendOptions) — but v1.14 also adds
+// the CURRENT world's own station domain even without a membership yet,
+// since browsing Buy is deliberately ungated (SPEC.md §7.1): a visitor
+// standing at a Trading Station should be able to window-shop before
+// deciding to join. Preserves the current selection across refreshes
+// where it's still valid.
+async function refreshRemoteTradeStationOptions() {
+  if (!remoteTradeStationDomainSelect) return;
+  const identity = await AtlasWallet.getIdentity();
+  const previous = remoteTradeStationDomainSelect.value;
+  const domains = new Set();
+  if (identity) {
+    const memberships = await AtlasWallet.getTradingStationMemberships(identity.publicKey);
+    memberships.forEach((m) => domains.add(m.domain));
+  }
+  if (currentManifest && currentManifest.tradingStation) domains.add(manifestDomainOf(currentManifest));
+
+  remoteTradeStationDomainSelect.innerHTML = '';
+  if (domains.size === 0) {
+    remoteTradeStationDomainSelect.appendChild(new Option('No Trading Station available', ''));
+    return;
+  }
+  domains.forEach((d) => remoteTradeStationDomainSelect.appendChild(new Option(d, d)));
+  if (domains.has(previous)) remoteTradeStationDomainSelect.value = previous;
+}
+
+// Sell tab's "You offer" dropdown — this wallet's own held fungible asset
+// classes, grouped and summed across every credential of that class (a
+// wallet can hold several separate balances of the same class, same
+// "totals, not individual credentials" idea autoConsolidateAssetWallet
+// already works toward). Free text here just invited typos ("atlas.elment.
+// iron") that would silently fail the submit-time balance lookup with a
+// confusing "not enough" error — a dropdown can only ever name something
+// actually held. Preserves the current selection across refreshes where
+// it's still valid, same convention as refreshRemoteTradeStationOptions.
+//
+// There's no equivalent dynamic list for "You want" (see the static
+// <option>s in viewer.html) — unlike what you already hold, what you
+// might WANT has nothing to enumerate from client state, and this demo's
+// entire protocol only defines three fungible classes to begin with
+// (atlas.element.iron/gold/silver, see issuer-server/server.js's
+// ASSET_CATALOG). A real deployment with more fungible classes would need
+// the issuer to expose a catalog-listing endpoint for this to grow beyond a
+// hardcoded list; nothing like that exists yet.
+async function refreshTradingSellOfferOptions() {
+  if (!tradingSellOfferClassSelect) return;
+  const identity = await AtlasWallet.getIdentity();
+  const previous = tradingSellOfferClassSelect.value;
+  const totals = new Map(); // class -> { quantity, name }
+  if (identity) {
+    const wallet = await AtlasWallet.getWallet(identity.publicKey);
+    wallet.forEach((e) => {
+      const c = e.credential;
+      if (!c.asset.fungible) return;
+      const existing = totals.get(c.asset.class);
+      if (existing) existing.quantity += c.quantity;
+      else totals.set(c.asset.class, { quantity: c.quantity, name: c.asset.name });
+    });
+  }
+
+  tradingSellOfferClassSelect.innerHTML = '';
+  if (totals.size === 0) {
+    tradingSellOfferClassSelect.appendChild(new Option('No fungible assets to offer', ''));
+    tradingSellOfferClassSelect.disabled = true;
+    return;
+  }
+  tradingSellOfferClassSelect.disabled = false;
+  Array.from(totals.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .forEach(([cls, info]) => {
+      tradingSellOfferClassSelect.appendChild(new Option(info.name + ' ×' + info.quantity + ' (' + cls + ')', cls));
+    });
+  if (totals.has(previous)) tradingSellOfferClassSelect.value = previous;
+}
+
+// Browse (Buy tab, v1.14) — the selected station's own open, unexpired
+// listings (AtlasWallet.fetchTradeListings, ungated GET). Filters out this
+// wallet's own posted listings (nothing stops self-claim server-side, but
+// it can never actually settle — the poster's own balance was already
+// staked into the listing, so there's nothing left to mirror-claim with —
+// and surfacing it as claimable would just be confusing). Each remaining
+// row gets its own Trade button (labeled "Trade" rather than "Claim" —
+// this is a barter, nothing is bought with currency) carrying the
+// listing's pendingId in a data attribute for the delegated click handler
+// below.
+// Deliberately does NOT clear tradingBuyStatusEl itself — the claim
+// handler below calls this from its own `finally` block AFTER already
+// setting a "✓ Traded"/"Trade failed" message, and clearing it here would
+// wipe that message out from under the user the instant the list
+// refreshes. Callers that want a clean status area (the Refresh button,
+// the claim handler's own start) clear it themselves.
+// Renders a listing's expiresAt as a short human countdown ("expires in
+// 3h 20m") for the Buy/Listings cards below. Purely a display helper —
+// the authoritative expired/not-expired call is still made by comparing
+// expiresAt to Date.now() wherever that already happens (readPendingTrades
+// server-side, and the `status` computation in refreshTradingListingsList
+// below); this only formats time that's already known to still be left.
+// Now that Sell's own expiry input (v1.15) can run into days, this shows
+// a day component too, not just hours/minutes.
+function formatExpiryCountdown(expiresAtIso) {
+  const msLeft = new Date(expiresAtIso).getTime() - Date.now();
+  if (msLeft <= 0) return 'expires any moment';
+  const totalMinutes = Math.floor(msLeft / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `expires in ${days}d ${hours}h`;
+  if (hours > 0) return `expires in ${hours}h ${minutes}m`;
+  return `expires in ${minutes}m`;
+}
+
+async function refreshTradingBuyList() {
+  if (!tradingBuyListEl) return;
+  const domain = remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.value;
+  if (!domain) {
+    tradingBuyListEl.innerHTML = '<div class="empty-note">No Trading Station selected.</div>';
+    return;
+  }
+  const identity = await AtlasWallet.getIdentity();
+  let listings;
+  try {
+    listings = await AtlasWallet.fetchTradeListings(domain);
+  } catch (err) {
+    tradingBuyListEl.innerHTML = '';
+    if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = 'Could not load listings: ' + err.message;
+    return;
+  }
+  if (identity) listings = listings.filter((l) => l.posterPublicKey !== identity.publicKey);
+  if (listings.length === 0) {
+    tradingBuyListEl.innerHTML = '<div class="empty-note">Nothing listed right now.</div>';
+    return;
+  }
+  tradingBuyListEl.innerHTML = listings.map((l) => `
+    <div class="wallet-item">
+      ${l.offer.quantity} ${l.offer.class} → ${l.want.quantity} ${l.want.class}
+      <span class="empty-note">from ${l.posterPublicKey.slice(0, 16)}… — ${formatExpiryCountdown(l.expiresAt)}</span>
+      <button type="button" class="btn-secondary trading-claim-btn" data-pending-id="${l.pendingId}">Trade</button>
+    </div>
+  `).join('');
+}
+
+// This wallet's own posted listings (Listings tab, v1.14) — same local
+// record Sell's submitTradeIntent call writes, same "pending/settled from
+// the stored record, expired computed at render time" shape
+// refreshRemoteTradeList had before this reshape. Adds a Cancel button
+// (POST /atlas/trade/cancel) for anything still actually withdrawable, and
+// a local-only Delete button for a settled or expired card — there's
+// nothing left to withdraw from either (settled already paid out,
+// expired never will), so this just clears the record out of the list;
+// unlike Cancel it never talks to the server, purely
+// AtlasWallet.deleteSubmittedTrade() removing this wallet's own local
+// bookkeeping entry. Deliberately NOT offered on 'pending' (still live —
+// Cancel is the right action) or 'canceled' (not asked for; easy to add
+// later if wanted).
+async function refreshTradingListingsList() {
+  if (!tradingListingsListEl) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) {
+    tradingListingsListEl.innerHTML = '<div class="empty-note">No identity yet.</div>';
+    return;
+  }
+  const records = await AtlasWallet.getSubmittedTrades(identity.publicKey);
+  if (records.length === 0) {
+    tradingListingsListEl.innerHTML = '<div class="empty-note">Nothing posted yet.</div>';
+    return;
+  }
+  const now = Date.now();
+  tradingListingsListEl.innerHTML = records.slice().reverse().map((r) => {
+    const status = r.status === 'pending' && new Date(r.expiresAt).getTime() < now ? 'expired' : r.status;
+    // Only a still-pending listing has a countdown worth showing —
+    // settled/expired/canceled are all already-final states.
+    const countdown = status === 'pending' ? ` <span class="empty-note">(${formatExpiryCountdown(r.expiresAt)})</span>` : '';
+    const actionBtn = status === 'pending'
+      ? `<button type="button" class="btn-secondary trading-cancel-btn" data-pending-id="${r.pendingId}" data-domain="${r.domain}">Cancel</button>`
+      : (status === 'settled' || status === 'expired' || status === 'canceled')
+        ? `<button type="button" class="danger-btn trading-delete-listing-btn" data-pending-id="${r.pendingId}">Delete</button>`
+        : '';
+    return `<div class="wallet-item">${r.offer.quantity} ${r.offer.class} → ${r.want.quantity} ${r.want.class} @ ${r.domain} — <strong>${status}</strong>${countdown} ${actionBtn}</div>`;
+  }).join('');
+}
+
+tradingStationJoinBtn && tradingStationJoinBtn.addEventListener('click', async () => {
+  const domain = manifestDomainOf(currentManifest);
+  tradingStationJoinBtn.disabled = true;
+  tradingStationJoinBtn.textContent = 'Joining…';
+  let errorMessage = '';
+  try {
+    await AtlasWallet.mintAsset('self', domain, 'atlas.tradingstation.membership');
+  } catch (err) {
+    errorMessage = 'Join failed: ' + err.message;
+  } finally {
+    await refreshTradingStationJoinButton();
+    await refreshRemoteTradeStationOptions();
+    if (tradingStationJoinStatusEl) tradingStationJoinStatusEl.textContent = errorMessage;
+  }
+});
+
+remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.addEventListener('change', () => {
+  if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '';
+  refreshTradingBuyList();
+});
+
+tradingBuyRefreshBtn && tradingBuyRefreshBtn.addEventListener('click', () => {
+  if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '';
+  refreshTradingBuyList();
+});
+
+// Delegated click handler (Buy tab) — one listener on the list container
+// rather than one per rendered row, same reasoning the Mail/Contacts cards
+// elsewhere in this file already use for their own per-row action buttons,
+// since refreshTradingBuyList() rebuilds this container's innerHTML wholesale
+// on every refresh.
+tradingBuyListEl && tradingBuyListEl.addEventListener('click', async (evt) => {
+  const btn = evt.target.closest('.trading-claim-btn');
+  if (!btn) return;
+  const pendingId = btn.dataset.pendingId;
+  const domain = remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.value;
+  btn.disabled = true;
+  btn.textContent = 'Trading…';
+  if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '';
+  try {
+    const identity = await AtlasWallet.getIdentity();
+    if (!identity) throw new Error('Create your identity first.');
+    const memberships = await AtlasWallet.getTradingStationMemberships(identity.publicKey);
+    const membership = memberships.find((m) => m.domain === domain);
+    if (!membership) throw new Error('No Trading Station membership held for ' + domain + ' — join it first.');
+
+    const listings = await AtlasWallet.fetchTradeListings(domain);
+    const listing = listings.find((l) => l.pendingId === pendingId);
+    if (!listing) throw new Error('That listing is no longer available.');
+
+    const wallet = await AtlasWallet.getWallet(identity.publicKey);
+    const balance = wallet.map((e) => e.credential).find((c) => c.asset.class === listing.want.class && c.asset.fungible && c.quantity >= listing.want.quantity);
+    if (!balance) throw new Error('Not enough ' + listing.want.class + ' to claim this listing.');
+
+    // This 10-minute figure is NOT a listing lifetime the way Sell's
+    // expiry input is — the claimant is always live for this call (see
+    // claimTradeListing's own comment), so the server checks and settles
+    // this intent within the same request; it just needs a signed
+    // expiresAt that hasn't already passed by the time the request lands.
+    // Left as a fixed short value on purpose, unlike Sell's now-configurable
+    // per-listing expiry above.
+    const result = await AtlasWallet.claimTradeListing(domain, membership.credential, listing, balance, 10);
+    await refreshInventoryDisplay();
+    if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '✓ Traded: sent ' + listing.want.quantity + ' ' + listing.want.class + ', received ' + listing.offer.quantity + ' ' + listing.offer.class + '.';
+  } catch (err) {
+    if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = 'Trade failed: ' + err.message;
+  } finally {
+    await refreshTradingBuyList();
+  }
+});
+
+tradingSellSubmitBtn && tradingSellSubmitBtn.addEventListener('click', async () => {
+  tradingSellSubmitBtn.disabled = true;
+  tradingSellStatusEl.textContent = 'Posting…';
+  try {
+    const domain = remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.value;
+    if (!domain) throw new Error('Join a Trading Station first.');
+    const identity = await AtlasWallet.getIdentity();
+    if (!identity) throw new Error('Create your identity first.');
+
+    const offerClass = tradingSellOfferClassSelect.value;
+    const offerQty = parseInt(tradingSellOfferQtyInput.value, 10);
+    const wantClass = tradingSellWantClassSelect.value;
+    const wantQty = parseInt(tradingSellWantQtyInput.value, 10);
+    const expiresHours = parseFloat(tradingSellExpiresHoursInput.value);
+    if (!offerClass || !Number.isInteger(offerQty) || offerQty <= 0) throw new Error('A valid offer class + quantity is required.');
+    if (!wantClass || !Number.isInteger(wantQty) || wantQty <= 0) throw new Error('A valid want class + quantity is required.');
+    if (!(expiresHours > 0)) throw new Error('Expiry must be a positive number of hours.');
+
+    const memberships = await AtlasWallet.getTradingStationMemberships(identity.publicKey);
+    const membership = memberships.find((m) => m.domain === domain);
+    if (!membership) throw new Error('No Trading Station membership held for ' + domain + '.');
+
+    const wallet = await AtlasWallet.getWallet(identity.publicKey);
+    const balance = wallet.map((e) => e.credential).find((c) => c.asset.class === offerClass && c.asset.fungible && c.quantity >= offerQty);
+    if (!balance) throw new Error('Not enough ' + offerClass + ' to offer ' + offerQty + '.');
+
+    // wallet.js's proposeIntent still takes expiresMinutes (v1.14 shape,
+    // unchanged) — this per-listing hours input (v1.15) is purely a
+    // viewer-side convenience converted at the one call site that reads it.
+    await AtlasWallet.submitTradeIntent(
+      domain, membership.credential,
+      { class: offerClass, quantity: offerQty }, { class: wantClass, quantity: wantQty },
+      balance, expiresHours * 60
+    );
+    tradingSellStatusEl.textContent = '✓ Posted — visible to anyone browsing Buy at ' + domain + '.';
+    await refreshTradingSellOfferOptions(); // the offered balance is now staked into the listing — the dropdown's held-quantity totals should reflect that immediately
+  } catch (err) {
+    tradingSellStatusEl.textContent = 'Post failed: ' + err.message;
+  } finally {
+    tradingSellSubmitBtn.disabled = false;
+  }
+});
+
+// Delegated click handler (Listings tab) — same "one listener on the
+// container, rebuilt wholesale on refresh" shape as the Buy tab's claim
+// handler above. Handles both actions refreshTradingListingsList() can
+// render: Cancel (still-pending, talks to the server) and Delete
+// (settled/expired/canceled, purely local).
+tradingListingsListEl && tradingListingsListEl.addEventListener('click', async (evt) => {
+  const cancelBtn = evt.target.closest('.trading-cancel-btn');
+  if (cancelBtn) {
+    const pendingId = cancelBtn.dataset.pendingId;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = 'Canceling…';
+    if (tradingListingsStatusEl) tradingListingsStatusEl.textContent = '';
+    try {
+      await AtlasWallet.cancelTradeListing(cancelBtn.dataset.domain, pendingId);
+    } catch (err) {
+      if (tradingListingsStatusEl) tradingListingsStatusEl.textContent = 'Cancel failed: ' + err.message;
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = 'Cancel';
+      return;
+    }
+    await refreshTradingListingsList();
+    return;
+  }
+
+  const deleteBtn = evt.target.closest('.trading-delete-listing-btn');
+  if (deleteBtn) {
+    const identity = await AtlasWallet.getIdentity();
+    if (!identity) return;
+    await AtlasWallet.deleteSubmittedTrade(identity.publicKey, deleteBtn.dataset.pendingId);
+    await refreshTradingListingsList();
+  }
+});
+
+// ---------- contacts (Social -> Contacts tab, #67, restructured) ----------
+//
+// Three ways in, one saved list:
+//  - Add Contact: who's actually standing in this world with you right now
+//    (from the live presence roster, see presenceRosterMeta), any friend
+//    requests aimed at you that are still live (presencePendingIncoming —
+//    only exists while both sides remain in the same room, see its own
+//    comment up near disconnectPresence), and a manual add-by-address form
+//    (below, near manualAddContactBtn) for when you already know someone's
+//    handle or public key. Adding a friend live, and answering a request,
+//    both go out as a signal over the CURRENT presence connection
+//    (sendSignal) — there's no other channel this can use, by design (see
+//    README.md's Friends section for why mail can't do this). The manual
+//    form is the one path that doesn't need that live connection at all.
+//  - Contacts: the actual saved list (AtlasWallet.getFriends(), persists
+//    across sessions/worlds — see wallet.js), now searchable and carrying
+//    a free-text notes field per entry.
+//  - Groups: local-only personal organization over that same saved list —
+//    see refreshContactGroupsDisplay further below.
+//
+// The underlying data model is still "friends" throughout wallet.js
+// (getFriends/addFriend/removeFriend/updateFriendNotes, the atlasFriends
+// storage key) — only this tab's own chrome renamed to "Contacts". See
+// this restructuring's own commit message for why that line was drawn
+// there: getFriends() alone is called from half a dozen OTHER features
+// (mail's friend-name lookups and quick-pick, Favorites' live
+// cross-reference, the friends-only mail mode) that have nothing to do
+// with tab navigation — renaming the data model would ripple into all of
+// those for no user-visible benefit, where renaming just the tab/screen
+// ids and labels here is fully contained to this file.
 
 function renderPresentVisitorCard(id, meta, friendKeys, container) {
   const el = document.createElement('div');
@@ -4038,14 +6020,34 @@ function renderIncomingRequestCard(req, container) {
   container.appendChild(el);
 }
 
+// Contacts sub-tab's own card (task #67 follow-up): now carries a search
+// index (dataset.search, matched by applyListFilter below — same
+// mechanism Inventory's Collectibles/Documents search already uses) built
+// from name AND notes, an inline notes textarea (saves on blur, see the
+// focusout listener below), and a two-click remove — a bare "Remove"
+// link-btn reveals an inline "Remove this contact?" confirm row rather
+// than removing immediately, since the old direct danger-btn Remove had
+// no confirmation at all (see the remove-contact-ask/-confirm/-cancel
+// actions below). Confirm itself is briefly disabled after the row
+// appears — see REMOVE_CONTACT_CONFIRM_GRACE_MS at the remove-contact-ask
+// handler below for why (a misclick guard, not a cosmetic delay).
+const REMOVE_CONTACT_CONFIRM_GRACE_MS = 400;
+
 function renderFriendCard(f, container) {
   const el = document.createElement('div');
   el.className = 'info-card';
+  el.dataset.search = (f.name + ' ' + (f.notes || '')).toLowerCase();
   el.innerHTML =
-    '<div class="name">' + f.name + '</div>' +
+    '<div class="name">' + escapeHtml(f.name) + '</div>' +
     '<div class="meta">' + short(f.publicKey, 20) + '</div>' +
+    '<textarea class="contact-notes-input" data-key="' + f.publicKey + '" placeholder="Notes (just for you)…" rows="2" style="margin-top:6px;width:100%;box-sizing:border-box;font-family:inherit;font-size:12px;">' + escapeHtml(f.notes || '') + '</textarea>' +
     '<div class="item-actions">' +
-    '<button type="button" data-action="remove-friend" data-key="' + f.publicKey + '" class="danger-btn">Remove</button>' +
+    '<button type="button" data-action="remove-contact-ask" data-key="' + f.publicKey + '" class="link-btn">Remove</button>' +
+    '</div>' +
+    '<div class="remove-confirm-row empty-note" data-key="' + f.publicKey + '" hidden style="margin-top:6px;">' +
+    'Remove this contact? ' +
+    '<button type="button" data-action="remove-contact-confirm" data-key="' + f.publicKey + '" class="danger-btn">Confirm</button> ' +
+    '<button type="button" data-action="remove-contact-cancel" data-key="' + f.publicKey + '" class="btn-secondary">Cancel</button>' +
     '</div>';
   container.appendChild(el);
 }
@@ -4074,20 +6076,59 @@ async function refreshFriendsDisplay() {
     }
   }
 
-  if (friendsListEl) {
-    friendsListEl.innerHTML = '';
+  if (contactsListEl) {
+    contactsListEl.innerHTML = '';
     if (friends.length === 0) {
-      friendsListEl.innerHTML = '<div class="empty-note">No friends saved yet.</div>';
+      contactsListEl.innerHTML = '<div class="empty-note">No contacts saved yet — add one from the Add Contact tab.</div>';
     } else {
-      friends.forEach((f) => renderFriendCard(f, friendsListEl));
+      friends.forEach((f) => renderFriendCard(f, contactsListEl));
+      // Every refresh rebuilds the list from scratch, so any active search
+      // text has to be re-applied — same convention as
+      // refreshInventoryDisplay's own applyListFilter calls.
+      applyListFilter(contactsListEl, contactsSearchInput ? contactsSearchInput.value : '');
     }
   }
 
   await updateSocialBadge();
 }
 
-// One delegated listener covers all three Friends lists — same pattern as
-// recentWorldsListEl's own click handler.
+// Notes save on blur (task #67 follow-up) — a textarea's own 'blur' event
+// doesn't bubble, so this listens for 'focusout' instead (which does),
+// delegated on the list container same as every other Contacts action.
+// Deliberately not a Save button: this is a private per-contact scratch
+// field, not something that needs its own explicit commit step the way an
+// address book entry with real consequences (Save Handle, Save mail mode)
+// does elsewhere in this file.
+contactsListEl && contactsListEl.addEventListener('focusout', async (e) => {
+  const textarea = e.target.closest('.contact-notes-input');
+  if (!textarea) return;
+  try {
+    await AtlasWallet.updateFriendNotes(textarea.dataset.key, textarea.value);
+    // Keep the card's own search index (see renderFriendCard's
+    // dataset.search) in sync with the note just saved — a full
+    // refreshFriendsDisplay() would also work but would rebuild every
+    // card from scratch (losing whatever's mid-edit in any OTHER
+    // contact's notes textarea at the same moment); patching this one
+    // card's dataset directly avoids that.
+    const card = textarea.closest('.info-card');
+    const nameEl = card && card.querySelector('.name');
+    if (card && nameEl) card.dataset.search = (nameEl.textContent + ' ' + textarea.value).toLowerCase();
+  } catch (err) {
+    // Nothing to show for this — the card doesn't have its own status
+    // line, and a lost keystroke here isn't worth a disruptive alert. The
+    // note is just left in the textarea as typed; the next successful
+    // blur (e.g. after fixing whatever went wrong) saves it.
+  }
+});
+
+contactsSearchInput && contactsSearchInput.addEventListener('input', () => {
+  applyListFilter(contactsListEl, contactsSearchInput.value);
+});
+
+// One delegated listener covers Add Contact's two live lists AND the
+// Contacts list's own per-card actions (notes textarea aside, handled
+// separately above) — same pattern as recentWorldsListEl's own click
+// handler.
 socialScreen && socialScreen.addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
@@ -4124,10 +6165,236 @@ socialScreen && socialScreen.addEventListener('click', async (e) => {
     return;
   }
 
-  if (action === 'remove-friend') {
+  // Remove-contact safety fix: a bare danger-btn used to remove
+  // immediately on one click. Now "Remove" just reveals an inline confirm
+  // row (see renderFriendCard above) — removing itself only happens on
+  // remove-contact-confirm, a genuinely separate, deliberate click.
+  //
+  // Reported issue: the Confirm button appears in EXACTLY the screen spot
+  // the Remove link just was (row swaps in in place, same layout position)
+  // — so a double-click, or a mouse with a twitchy/sticky button firing two
+  // click events close together, can land its second click squarely on
+  // Confirm before anyone consciously decided to click it, defeating the
+  // whole point of the two-click safety. REMOVE_CONTACT_CONFIRM_GRACE_MS
+  // fixes this directly rather than trying to reposition Confirm somewhere
+  // less natural: the button starts disabled the instant the row appears
+  // and only becomes clickable after a short pause, so the fastest an
+  // accidental double-click/twitch can manage still can't reach it. Reset
+  // fresh every time the row is (re)opened — cancelling and asking again
+  // requires living through the same grace window again, not just once.
+  if (action === 'remove-contact-ask') {
+    const card = btn.closest('.info-card');
+    const row = card && card.querySelector('.remove-confirm-row');
+    if (row) {
+      btn.hidden = true;
+      row.hidden = false;
+      const confirmBtn = row.querySelector('button[data-action="remove-contact-confirm"]');
+      if (confirmBtn) {
+        confirmBtn.disabled = true;
+        setTimeout(() => {
+          if (!row.hidden) confirmBtn.disabled = false; // still open — a cancel in the meantime leaves it disabled, harmlessly, since the row's hidden anyway
+        }, REMOVE_CONTACT_CONFIRM_GRACE_MS);
+      }
+    }
+    return;
+  }
+
+  if (action === 'remove-contact-cancel') {
+    const card = btn.closest('.info-card');
+    const row = btn.closest('.remove-confirm-row');
+    const askBtn = card && card.querySelector('button[data-action="remove-contact-ask"]');
+    if (row) row.hidden = true;
+    if (askBtn) askBtn.hidden = false;
+    return;
+  }
+
+  if (action === 'remove-contact-confirm') {
     await AtlasWallet.removeFriend(btn.dataset.key);
     await refreshFriendsDisplay();
     return;
+  }
+
+  // ---- Groups (Contacts -> Groups sub-tab) ----
+
+  if (action === 'rename-group') {
+    const card = btn.closest('.info-card');
+    const input = card && card.querySelector('.group-name-input');
+    if (!input) return;
+    try {
+      await AtlasWallet.renameContactGroup(btn.dataset.id, input.value);
+      await refreshContactGroupsDisplay();
+    } catch (err) {
+      if (groupsStatusEl) groupsStatusEl.textContent = 'Rename failed: ' + err.message;
+    }
+    return;
+  }
+
+  if (action === 'delete-group') {
+    if (!confirm('Delete this group? The contacts in it are not removed, just the group itself.')) return;
+    await AtlasWallet.removeContactGroup(btn.dataset.id);
+    await refreshContactGroupsDisplay();
+    return;
+  }
+});
+
+// Group membership checkboxes (task #67 follow-up, Groups v1): a plain
+// change listener rather than the button-click delegation above, since
+// these are checkboxes, not buttons. Re-renders the whole Groups list
+// afterward — cheap given how small this data realistically is, and
+// keeps the member count in each card's .meta line honest without a
+// second, separate "just patch this one number" code path.
+contactGroupsListEl && contactGroupsListEl.addEventListener('change', async (e) => {
+  const checkbox = e.target.closest('input[data-action="toggle-group-member"]');
+  if (!checkbox) return;
+  try {
+    if (checkbox.checked) {
+      await AtlasWallet.addContactToGroup(checkbox.dataset.group, checkbox.dataset.key);
+    } else {
+      await AtlasWallet.removeContactFromGroup(checkbox.dataset.group, checkbox.dataset.key);
+    }
+  } catch (err) {
+    if (groupsStatusEl) groupsStatusEl.textContent = 'Could not update group membership: ' + err.message;
+  }
+  await refreshContactGroupsDisplay();
+});
+
+function renderContactGroupCard(group, friends, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  const memberCount = group.memberPublicKeys.length;
+  let membersHtml;
+  if (friends.length === 0) {
+    membersHtml = '<div class="empty-note">No contacts saved yet — add some from the Add Contact tab, then come back here to group them.</div>';
+  } else {
+    membersHtml = friends.map((f) => {
+      const checked = group.memberPublicKeys.includes(f.publicKey) ? ' checked' : '';
+      return '<label style="display:block;margin-top:4px;font-size:12px;">' +
+        '<input type="checkbox" data-action="toggle-group-member" data-group="' + group.id + '" data-key="' + f.publicKey + '"' + checked + '> ' +
+        escapeHtml(f.name) + '</label>';
+    }).join('');
+  }
+  el.innerHTML =
+    '<div class="btn-row">' +
+    '<input type="text" class="group-name-input" value="' + escapeHtml(group.name) + '" maxlength="40" style="flex:1;">' +
+    '<button type="button" data-action="rename-group" data-id="' + group.id + '" class="btn-secondary">Save name</button>' +
+    '<button type="button" data-action="delete-group" data-id="' + group.id + '" class="danger-btn">Delete</button>' +
+    '</div>' +
+    '<div class="meta" style="margin-top:6px;">' + memberCount + ' member' + (memberCount === 1 ? '' : 's') + '</div>' +
+    '<div class="subhead" style="margin-top:8px;">Members</div>' +
+    '<div class="group-members-list">' + membersHtml + '</div>';
+  container.appendChild(el);
+}
+
+// Groups (task #67 follow-up): populated lazily on its own inner sub-tab
+// open (contactGroupsSubtabBtn's click handler) and after every mutation
+// below — nothing else keeps this current, same lazy-refresh convention
+// as Mail's own Sent sub-tab.
+async function refreshContactGroupsDisplay() {
+  if (!contactGroupsListEl) return;
+  const groups = await AtlasWallet.getContactGroups();
+  const friends = await AtlasWallet.getFriends();
+  contactGroupsListEl.innerHTML = '';
+  if (groups.length === 0) {
+    contactGroupsListEl.innerHTML = '<div class="empty-note">No groups yet — create one above.</div>';
+  } else {
+    groups.forEach((g) => renderContactGroupCard(g, friends, contactGroupsListEl));
+  }
+}
+
+createGroupBtn && createGroupBtn.addEventListener('click', async () => {
+  const name = (newGroupNameInput.value || '').trim();
+  if (!name) {
+    if (groupsStatusEl) groupsStatusEl.textContent = 'Enter a name for the group.';
+    return;
+  }
+  try {
+    await AtlasWallet.addContactGroup(name);
+    newGroupNameInput.value = '';
+    if (groupsStatusEl) groupsStatusEl.textContent = '';
+    await refreshContactGroupsDisplay();
+  } catch (err) {
+    if (groupsStatusEl) groupsStatusEl.textContent = 'Could not create group: ' + err.message;
+  }
+});
+
+// Manual add-by-address (new, Add Contact sub-tab): the one way to add a
+// contact that needs neither person to be standing in the same world at
+// the same moment. Same handle-vs-raw-key toggle pattern as Compose's
+// recipient field — see postOfficeToggleRawKeyBtn's own comment above for
+// the original.
+manualAddToggleRawKeyBtn && manualAddToggleRawKeyBtn.addEventListener('click', () => {
+  const showingRawKey = !manualAddPublicKeyInput.hidden;
+  manualAddPublicKeyInput.hidden = showingRawKey;
+  manualAddHandleInput.hidden = !showingRawKey;
+  manualAddToggleRawKeyBtn.textContent = showingRawKey ? 'Paste a raw public key instead' : 'Use a handle instead';
+  (showingRawKey ? manualAddPublicKeyInput : manualAddHandleInput).value = '';
+});
+
+// Unlike Compose (which has its own Post Office domain dropdown to fall
+// back on for a bare handle), this form has no domain picker at all — so
+// the handle path here only ever accepts a FULL "handle#domain" address,
+// not a bare handle. Same domain-already-joined check and error copy as
+// Compose's own handle parsing (postOfficeSendBtn above), reusing that
+// same postOfficeToDomainInput select as the source of truth for "domains
+// this wallet has actually joined" — populated by refreshMyPublicKeyDisplay
+// on every world entry, so it's already current by the time anyone reaches
+// this tab.
+manualAddContactBtn && manualAddContactBtn.addEventListener('click', async () => {
+  const name = (manualAddNameInput.value || '').trim();
+  if (!name) {
+    manualAddContactStatusEl.textContent = 'Enter a name for this contact.';
+    return;
+  }
+  const usingRawKey = !manualAddPublicKeyInput.hidden;
+  manualAddContactStatusEl.textContent = '';
+
+  if (usingRawKey) {
+    const key = (manualAddPublicKeyInput.value || '').trim();
+    if (!key) {
+      manualAddContactStatusEl.textContent = "Enter the contact's public key.";
+      return;
+    }
+    manualAddContactBtn.disabled = true;
+    try {
+      await AtlasWallet.addFriend(key, name);
+      manualAddContactStatusEl.textContent = 'Added.';
+      manualAddNameInput.value = '';
+      manualAddPublicKeyInput.value = '';
+      await refreshFriendsDisplay();
+    } catch (err) {
+      manualAddContactStatusEl.textContent = 'Add failed: ' + err.message;
+    } finally {
+      manualAddContactBtn.disabled = false;
+    }
+    return;
+  }
+
+  const rawHandleInput = (manualAddHandleInput.value || '').trim();
+  const hashIndex = rawHandleInput.indexOf('#');
+  if (!rawHandleInput || hashIndex <= 0 || hashIndex === rawHandleInput.length - 1) {
+    manualAddContactStatusEl.textContent = 'Enter a full address like bruno#localhost:8002 — there\'s no separate domain picker here.';
+    return;
+  }
+  const handle = rawHandleInput.slice(0, hashIndex).trim();
+  const domain = rawHandleInput.slice(hashIndex + 1).trim();
+  const knownDomains = postOfficeToDomainInput ? [...postOfficeToDomainInput.options].map((o) => o.value).filter(Boolean) : [];
+  if (!knownDomains.includes(domain)) {
+    manualAddContactStatusEl.textContent = 'You haven\'t joined ' + domain + '\'s Post Office yet — join it first (Mail\'s Post Office section), then try again.';
+    return;
+  }
+  manualAddContactBtn.disabled = true;
+  manualAddContactStatusEl.textContent = 'Looking up…';
+  try {
+    const resolved = await AtlasWallet.resolvePostOfficeHandle(domain, handle);
+    await AtlasWallet.addFriend(resolved.publicKey, name);
+    manualAddContactStatusEl.textContent = 'Added.';
+    manualAddNameInput.value = '';
+    manualAddHandleInput.value = '';
+    await refreshFriendsDisplay();
+  } catch (err) {
+    manualAddContactStatusEl.textContent = err.message;
+  } finally {
+    manualAddContactBtn.disabled = false;
   }
 });
 
@@ -4217,6 +6484,621 @@ favoritesListEl && favoritesListEl.addEventListener('click', async (e) => {
   if (action === 'move-favorite-up') { await AtlasWallet.moveFavoriteDomain(btn.dataset.domain, 'up'); await refreshFavoritesDisplay(); return; }
   if (action === 'move-favorite-down') { await AtlasWallet.moveFavoriteDomain(btn.dataset.domain, 'down'); await refreshFavoritesDisplay(); return; }
 });
+
+// ---------- calendar events (Social -> Calendar) ----------
+//
+// Purely local reminders (AtlasWallet.getCalendarEvents/addCalendarEvent/
+// updateCalendarEvent/removeCalendarEvent in wallet.js) — no domain, no
+// credential, no counterparty involved. An event's end time (endDateTime,
+// see wallet.js) is optional — everywhere below that used to read
+// entry.dateTime alone for display or urgency now accounts for it too:
+// formatCalendarWhen (a "start–end" range on the list card),
+// calendarEventUrgencyMs (overdue/due-soon judged by the END once one
+// exists), renderCalendarMonthGrid (a multi-day event's dot appears on
+// EVERY day it spans), and calendarDayRoleForEntry/renderCalendarDayEventChip
+// (the day-viewer widget showing the right portion of a multi-day event on
+// each day it touches). `calendarEditingEventId` is this
+// screen's own bit of transient UI state (which existing event, if any,
+// the form below is currently editing) — null means the form is in
+// "add a new event" mode, same "plain module-level let for transient panel
+// state" convention as e.g. chatResizeDrag elsewhere in this file.
+let calendarEditingEventId = null;
+
+// The persistent month-grid widget's own bit of transient, session-only
+// state — neither is ever persisted (a fresh session, or just reopening
+// the Calendar sub-tab, always starts back on the real current month, see
+// resetCalendarGridToToday()):
+//   calendarGridViewDate — a Date standing in for "the month currently
+//     shown" (only its year/month are read; day is pinned to 1 to avoid
+//     any end-of-month rollover surprises when stepping months).
+//   calendarSelectedDate — the 'YYYY-MM-DD' (local) of the last day
+//     clicked in the grid, or null once the form's been reset/submitted
+//     and nothing is selected.
+let calendarGridViewDate = null;
+let calendarSelectedDate = null;
+
+// Sanity cap on how many days a multi-day event's month-grid dot walk
+// (renderCalendarMonthGrid below) will ever mark — comfortably more than
+// any real event (a year-long conference isn't a thing), just a guard
+// against a bogus or fat-fingered endDateTime years in the future turning
+// one event into thousands of dots / a slow render.
+const CALENDAR_GRID_DOT_SPAN_CAP_DAYS = 366;
+
+// Local-calendar-day key ('YYYY-MM-DD' in THIS device's timezone, not
+// UTC) — used to match a Date against both "is this today" and "does this
+// day have an event", the same local-time reasoning toDatetimeLocalValue
+// below already uses for the add/edit form's own date field.
+function toLocalDateKey(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+
+// Snaps the month-grid widget back to the real current month and clears
+// any day selection — called every time the Calendar sub-tab is actually
+// opened (its own subtab button, and the "Add to calendar" mail bridge),
+// per the widget's own "always start on the real current month" rule.
+// Stepping months with the ‹/› buttons afterward is deliberately NOT
+// undone by re-rendering the event list (refreshCalendarDisplay), only by
+// leaving and reopening the sub-tab — see refreshCalendarMonthGrid below.
+function resetCalendarGridToToday() {
+  calendarGridViewDate = new Date();
+  calendarSelectedDate = null;
+}
+
+// Renders the month-grid widget for whatever month calendarGridViewDate
+// currently points at, from an already-fetched `events` list (callers
+// that already have one — refreshCalendarDisplay — pass it straight
+// through rather than this function re-fetching it itself, same
+// "don't re-fetch if a caller already has it" convention
+// countCalendarEventsDueSoon's own comment mentions). Always renders a
+// clean 7-column rectangle: leading/trailing days from the adjacent
+// months fill out the first/last week rather than leaving it ragged.
+function renderCalendarMonthGrid(events) {
+  if (!calendarMonthGridEl) return;
+  if (!calendarGridViewDate) calendarGridViewDate = new Date();
+
+  const viewYear = calendarGridViewDate.getFullYear();
+  const viewMonth = calendarGridViewDate.getMonth(); // 0-11
+
+  if (calendarMonthLabelEl) {
+    calendarMonthLabelEl.textContent = calendarGridViewDate.toLocaleString(undefined, { month: 'long', year: 'numeric' });
+  }
+
+  const startWeekday = new Date(viewYear, viewMonth, 1).getDay(); // 0=Sun, whatever Date's own default week-start is
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const daysInPrevMonth = new Date(viewYear, viewMonth, 0).getDate();
+  const totalCells = Math.ceil((startWeekday + daysInMonth) / 7) * 7;
+
+  const todayKey = toLocalDateKey(new Date());
+  // Matched by local calendar day, not exact timestamp — an event at
+  // 11pm and one at 1am on the same wall-clock day both mark that one day.
+  // For a multi-day event (endDateTime on a later local day than
+  // dateTime), EVERY day it spans gets a dot, not just its start day —
+  // this grid is meant as a quick "what's happening" glance, and an event
+  // that's still ongoing three days after it started is still very much
+  // "happening" on day three, not just on day one. A capped walk (see
+  // CALENDAR_GRID_DOT_SPAN_CAP_DAYS) guards against a bogus/absurdly
+  // far-future endDateTime turning this into a slow, pointless loop.
+  const eventDateKeys = new Set();
+  events.forEach((entry) => {
+    const start = new Date(entry.dateTime);
+    if (isNaN(start.getTime())) return;
+    const end = entry.endDateTime ? new Date(entry.endDateTime) : null;
+    if (!end || isNaN(end.getTime())) { eventDateKeys.add(toLocalDateKey(start)); return; }
+    let cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+    for (let i = 0; cursor <= endDay && i < CALENDAR_GRID_DOT_SPAN_CAP_DAYS; i++) {
+      eventDateKeys.add(toLocalDateKey(cursor));
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + 1);
+    }
+  });
+
+  calendarMonthGridEl.innerHTML = '';
+  for (let i = 0; i < totalCells; i++) {
+    const dayOffset = i - startWeekday;
+    let cellDate, otherMonth;
+    if (dayOffset < 0) {
+      cellDate = new Date(viewYear, viewMonth - 1, daysInPrevMonth + dayOffset + 1);
+      otherMonth = true;
+    } else if (dayOffset >= daysInMonth) {
+      cellDate = new Date(viewYear, viewMonth + 1, dayOffset - daysInMonth + 1);
+      otherMonth = true;
+    } else {
+      cellDate = new Date(viewYear, viewMonth, dayOffset + 1);
+      otherMonth = false;
+    }
+    const key = toLocalDateKey(cellDate);
+    const cell = document.createElement('div');
+    // The "today" marker only ever lands on a real (non-leaked) day of the
+    // month actually being viewed — a leaked day from an adjacent month
+    // that happens to equal the real today (e.g. viewing next month while
+    // today is the last day of this one) stays a plain dimmed other-month
+    // cell, matching "whenever the currently-displayed month includes
+    // today" rather than "whenever today happens to appear anywhere".
+    cell.className = 'calendar-grid-day' +
+      (otherMonth ? ' other-month' : '') +
+      (!otherMonth && key === todayKey ? ' today' : '') +
+      (key === calendarSelectedDate ? ' selected' : '');
+    cell.dataset.date = key;
+    cell.innerHTML = '<span>' + cellDate.getDate() + '</span>' +
+      (eventDateKeys.has(key) ? '<span class="calendar-grid-dot"></span>' : '');
+    calendarMonthGridEl.appendChild(cell);
+  }
+}
+
+// Re-fetches events and re-renders just the month-grid widget — used by
+// the ‹/› month-step buttons, which don't touch the event list below and
+// so don't need refreshCalendarDisplay's fuller re-render. Also re-renders
+// the day-viewer widget below it (cheap even when nothing changed there —
+// stepping months doesn't itself change or clear calendarSelectedDate, so
+// a day selected before stepping months stays selected and showing after).
+async function refreshCalendarMonthGrid() {
+  const events = await AtlasWallet.getCalendarEvents();
+  renderCalendarMonthGrid(events);
+  renderCalendarDayViewer(events);
+}
+
+// The day-viewer widget's own hour range. A full midnight-to-midnight list
+// of 24 slots is visually excessive for the wallet panel's fixed ~360px
+// width (mostly-empty rows pushing the add/edit form far down the panel),
+// so this picks the more commonly-relevant 6am-11pm window instead. An
+// event whose local hour falls outside it (rare — before 6am) still shows,
+// just up in the "Other times" bucket rather than in an hour row.
+const CALENDAR_DAY_VIEW_START_HOUR = 6; // 6am
+const CALENDAR_DAY_VIEW_END_HOUR = 23; // 11pm
+
+// "6" -> "6 AM", "13" -> "1 PM", "0"/"24"-never-passed edge cases aside.
+function formatCalendarHourLabel(hour) {
+  const suffix = hour < 12 ? 'AM' : 'PM';
+  let h = hour % 12;
+  if (h === 0) h = 12;
+  return h + ' ' + suffix;
+}
+
+const CALENDAR_HOUR_MINUTE_OPTS = { hour: 'numeric', minute: '2-digit' };
+const CALENDAR_SHORT_DATE_OPTS = { month: 'short', day: 'numeric' };
+
+// What a given local day ('YYYY-MM-DD') is TO an event, for the day-viewer
+// widget's purposes — null if the event doesn't touch that day at all:
+//   'point'  — an instant event (no end), or a same-day start/end pair —
+//              on its one and only day.
+//   'start'  — the FIRST day of a multi-day (different local start/end
+//              day) event.
+//   'end'    — the LAST day of a multi-day event (not also its first).
+//   'through'— a day strictly BETWEEN a multi-day event's start and end
+//              days — the event is running all day, with nothing of its
+//              own happening at any particular hour on this day.
+// Kept separate from renderCalendarDayEventChip below so the "which day
+// role is this" decision and the "how do I draw that role" decision each
+// live in exactly one place.
+function calendarDayRoleForEntry(entry, dayKey) {
+  const start = new Date(entry.dateTime);
+  if (isNaN(start.getTime())) return null;
+  const startKey = toLocalDateKey(start);
+  if (!entry.endDateTime) return startKey === dayKey ? 'point' : null;
+  const end = new Date(entry.endDateTime);
+  if (isNaN(end.getTime())) return startKey === dayKey ? 'point' : null;
+  const endKey = toLocalDateKey(end);
+  if (startKey === endKey) return startKey === dayKey ? 'point' : null;
+  if (dayKey === startKey) return 'start';
+  if (dayKey === endKey) return 'end';
+  // Strictly-between check done via real Date comparisons (not string
+  // comparison on the 'YYYY-MM-DD' keys, which WOULD happen to sort
+  // correctly here but only by accident of that format being zero-padded
+  // and lexicographic) — same local-y/m/d parsing renderCalendarDayViewer
+  // itself already uses for calendarSelectedDate below.
+  const [sy, sm, sd] = startKey.split('-').map(Number);
+  const [ey, em, ed] = endKey.split('-').map(Number);
+  const [dy, dm, dd] = dayKey.split('-').map(Number);
+  const startMs = new Date(sy, sm - 1, sd).getTime();
+  const endMs = new Date(ey, em - 1, ed).getTime();
+  const dayMs = new Date(dy, dm - 1, dd).getTime();
+  return (dayMs > startMs && dayMs < endMs) ? 'through' : null;
+}
+
+// One clickable event chip inside the day-viewer widget — clicking it
+// opens the SAME edit flow the event-list's own "Edit" button uses (see
+// openCalendarEventForEdit below and the click handler on
+// calendarDayViewerEl), not a separate copy of it. `role` (see
+// calendarDayRoleForEntry above) decides what the chip's time label says
+// and whether it gets the .has-duration accent — a multi-day event never
+// renders identically to a plain instant event, on any of the days it
+// touches.
+function renderCalendarDayEventChip(entry, role) {
+  role = role || 'point';
+  const overdue = calendarEventUrgencyMs(entry) < Date.now();
+  const startTime = new Date(entry.dateTime).toLocaleTimeString(undefined, CALENDAR_HOUR_MINUTE_OPTS);
+  let timeLabel;
+  let hasDuration = false;
+  if (role === 'point' && entry.endDateTime) {
+    const endTime = new Date(entry.endDateTime).toLocaleTimeString(undefined, CALENDAR_HOUR_MINUTE_OPTS);
+    timeLabel = startTime + '–' + endTime;
+    hasDuration = true;
+  } else if (role === 'point') {
+    timeLabel = startTime;
+  } else if (role === 'start') {
+    timeLabel = startTime + ' – (continues)';
+    hasDuration = true;
+  } else if (role === 'end') {
+    const endTime = new Date(entry.endDateTime).toLocaleTimeString(undefined, CALENDAR_HOUR_MINUTE_OPTS);
+    const startDateLabel = new Date(entry.dateTime).toLocaleDateString(undefined, CALENDAR_SHORT_DATE_OPTS);
+    timeLabel = '(from ' + startDateLabel + ') – ' + endTime;
+    hasDuration = true;
+  } else { // 'through'
+    timeLabel = 'All day (continues)';
+    hasDuration = true;
+  }
+  const chip = document.createElement('div');
+  chip.className = 'calendar-day-event' + (overdue ? ' overdue' : '') + (hasDuration ? ' has-duration' : '');
+  chip.dataset.id = entry.id;
+  chip.innerHTML = '<span class="calendar-day-event-time">' + escapeHtml(timeLabel) + '</span>' + escapeHtml(entry.title);
+  return chip;
+}
+
+// Renders the day-viewer widget for whatever day calendarSelectedDate
+// currently names, from an already-fetched `events` list (same
+// don't-refetch-if-a-caller-already-has-one convention renderCalendarMonthGrid
+// above follows). This is the ONE place that reads calendarSelectedDate
+// back into "does the widget show at all" — hides itself the moment that's
+// null, which is exactly the state resetCalendarGridToToday/resetCalendarForm
+// leave it in, so a fresh sub-tab open or a form reset/submit clears this
+// widget for free as long as something eventually calls this again (both
+// of those are always immediately followed by either a refreshCalendarDisplay/
+// refreshCalendarMonthGrid call, or resetCalendarForm's own direct hide
+// below, in every call site in this file).
+function renderCalendarDayViewer(events) {
+  if (!calendarDayViewerEl) return;
+  if (!calendarSelectedDate) {
+    calendarDayViewerEl.hidden = true;
+    return;
+  }
+  calendarDayViewerEl.hidden = false;
+
+  // Parsed as local y/m/d (not `new Date(calendarSelectedDate)`, which
+  // Date treats as UTC midnight and can print as the PREVIOUS day in a
+  // negative-UTC-offset timezone) — same local-date reasoning toLocalDateKey
+  // itself relies on.
+  const [y, m, d] = calendarSelectedDate.split('-').map(Number);
+  const dayDate = new Date(y, m - 1, d);
+  if (calendarDayViewerHeaderEl) {
+    calendarDayViewerHeaderEl.textContent = dayDate.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  if (!calendarDayViewerBodyEl) return;
+  calendarDayViewerBodyEl.innerHTML = '';
+
+  // Includes not just events that START on this day, but any multi-day
+  // event that's still running through it or ends on it (calendarDayRoleForEntry
+  // returning anything other than null) — a 3-day trip shows up in the day
+  // viewer on all 3 of its days, each showing only the portion relevant to
+  // that day (see renderCalendarDayEventChip's per-role time labels).
+  const dayEvents = events
+    .map((entry) => ({ entry, role: calendarDayRoleForEntry(entry, calendarSelectedDate) }))
+    .filter((x) => x.role !== null)
+    .sort((a, b) => new Date(a.entry.dateTime) - new Date(b.entry.dateTime));
+
+  if (dayEvents.length === 0) {
+    // Same empty-state wording/visual style refreshCalendarDisplay's own
+    // event-list empty state uses ("No events yet — add one above."),
+    // adapted to name the specific day instead of the list as a whole.
+    calendarDayViewerBodyEl.innerHTML = '<div class="empty-note">No events on this day.</div>';
+    return;
+  }
+
+  const throughEvents = []; // 'through' role — running all day, no hour of its own on THIS day
+  const otherEvents = []; // this day's relevant hour (start hour, or end hour for an 'end' row) falls outside the 6am-11pm range
+  const hourBuckets = new Map(); // hour (0-23) -> {entry, role}[]
+  dayEvents.forEach(({ entry, role }) => {
+    if (role === 'through') { throughEvents.push({ entry, role }); return; }
+    // 'end' rows are keyed by the END time's hour (that's what's actually
+    // happening on this day) — 'point' and 'start' rows both key off the
+    // start time, which for 'point' is the only time and for 'start' is
+    // the only part of the event that occurs on this particular day.
+    const relevant = role === 'end' ? new Date(entry.endDateTime) : new Date(entry.dateTime);
+    const hour = relevant.getHours();
+    if (hour < CALENDAR_DAY_VIEW_START_HOUR || hour > CALENDAR_DAY_VIEW_END_HOUR) {
+      otherEvents.push({ entry, role });
+    } else {
+      if (!hourBuckets.has(hour)) hourBuckets.set(hour, []);
+      hourBuckets.get(hour).push({ entry, role });
+    }
+  });
+
+  if (throughEvents.length > 0) {
+    const throughSection = document.createElement('div');
+    throughSection.className = 'calendar-day-viewer-other';
+    throughSection.innerHTML = '<div class="calendar-day-viewer-other-label">All day</div>';
+    throughEvents.forEach(({ entry, role }) => throughSection.appendChild(renderCalendarDayEventChip(entry, role)));
+    calendarDayViewerBodyEl.appendChild(throughSection);
+  }
+
+  if (otherEvents.length > 0) {
+    const otherSection = document.createElement('div');
+    otherSection.className = 'calendar-day-viewer-other';
+    otherSection.innerHTML = '<div class="calendar-day-viewer-other-label">Other times</div>';
+    otherEvents.forEach(({ entry, role }) => otherSection.appendChild(renderCalendarDayEventChip(entry, role)));
+    calendarDayViewerBodyEl.appendChild(otherSection);
+  }
+
+  const hoursEl = document.createElement('div');
+  hoursEl.className = 'calendar-day-viewer-hours';
+  for (let hour = CALENDAR_DAY_VIEW_START_HOUR; hour <= CALENDAR_DAY_VIEW_END_HOUR; hour++) {
+    const row = document.createElement('div');
+    row.className = 'calendar-day-hour-row';
+    const label = document.createElement('div');
+    label.className = 'calendar-day-hour-label';
+    label.textContent = formatCalendarHourLabel(hour);
+    row.appendChild(label);
+    const slot = document.createElement('div');
+    slot.className = 'calendar-day-hour-events';
+    (hourBuckets.get(hour) || []).forEach(({ entry, role }) => slot.appendChild(renderCalendarDayEventChip(entry, role)));
+    row.appendChild(slot);
+    hoursEl.appendChild(row);
+  }
+  calendarDayViewerBodyEl.appendChild(hoursEl);
+}
+
+// Shared by both the event-list's own "Edit" button and a click on an
+// event chip inside the day-viewer widget above, so the actual
+// enter-edit-mode setup lives in exactly one place. Also jumps the
+// month-grid AND day-viewer widgets to this event's month/day (same as
+// before this function existed, when only the month grid did) so neither
+// widget sits showing something stale while the form below edits it.
+function openCalendarEventForEdit(entry, events) {
+  calendarEditingEventId = entry.id;
+  if (calendarEventTitleInput) calendarEventTitleInput.value = entry.title;
+  if (calendarEventDateTimeInput) calendarEventDateTimeInput.value = toDatetimeLocalValue(entry.dateTime);
+  // toDatetimeLocalValue('' falsy input) already round-trips to '' — same
+  // call handles both "this event has an end time" and "it doesn't" here.
+  if (calendarEventEndDateTimeInput) calendarEventEndDateTimeInput.value = toDatetimeLocalValue(entry.endDateTime);
+  if (calendarEventNotesInput) calendarEventNotesInput.value = entry.notes || '';
+  if (calendarSaveEventBtn) calendarSaveEventBtn.textContent = 'Save changes';
+  if (calendarCancelEditBtn) calendarCancelEditBtn.hidden = false;
+  if (calendarEventStatusEl) calendarEventStatusEl.textContent = 'Editing "' + entry.title + '".';
+  calendarEventTitleInput && calendarEventTitleInput.focus();
+  const entryDate = new Date(entry.dateTime);
+  if (!isNaN(entryDate.getTime())) {
+    calendarGridViewDate = new Date(entryDate.getFullYear(), entryDate.getMonth(), 1);
+    calendarSelectedDate = toLocalDateKey(entryDate);
+    renderCalendarMonthGrid(events);
+    renderCalendarDayViewer(events);
+  }
+}
+
+calendarPrevMonthBtn && calendarPrevMonthBtn.addEventListener('click', async () => {
+  if (!calendarGridViewDate) calendarGridViewDate = new Date();
+  calendarGridViewDate = new Date(calendarGridViewDate.getFullYear(), calendarGridViewDate.getMonth() - 1, 1);
+  await refreshCalendarMonthGrid();
+});
+
+calendarNextMonthBtn && calendarNextMonthBtn.addEventListener('click', async () => {
+  if (!calendarGridViewDate) calendarGridViewDate = new Date();
+  calendarGridViewDate = new Date(calendarGridViewDate.getFullYear(), calendarGridViewDate.getMonth() + 1, 1);
+  await refreshCalendarMonthGrid();
+});
+
+// Click-to-select: sets the DATE portion only of the add/edit form's
+// datetime-local field to the clicked day, leaving whatever time portion
+// was already typed (defaulting to a sensible 09:00 if the field was
+// empty) — the widget only ever picks a day, never a time. Also (re)renders
+// the day-viewer widget below for the newly-clicked day, live, whether or
+// not one was already showing for some other day.
+calendarMonthGridEl && calendarMonthGridEl.addEventListener('click', async (e) => {
+  const cell = e.target.closest('.calendar-grid-day');
+  if (!cell) return;
+  const key = cell.dataset.date;
+  calendarSelectedDate = key;
+  calendarMonthGridEl.querySelectorAll('.calendar-grid-day.selected').forEach((el) => el.classList.remove('selected'));
+  cell.classList.add('selected');
+  if (calendarEventDateTimeInput) {
+    const existing = calendarEventDateTimeInput.value;
+    const timePart = (existing && existing.includes('T')) ? existing.split('T')[1] : '09:00';
+    calendarEventDateTimeInput.value = key + 'T' + timePart;
+  }
+  const events = await AtlasWallet.getCalendarEvents();
+  renderCalendarDayViewer(events);
+});
+
+// Delegated click on the day-viewer widget's event chips (see
+// renderCalendarDayEventChip) — opens the SAME edit flow the event-list's
+// "Edit" button uses below, via the shared openCalendarEventForEdit.
+calendarDayViewerEl && calendarDayViewerEl.addEventListener('click', async (e) => {
+  const chip = e.target.closest('.calendar-day-event');
+  if (!chip) return;
+  const events = await AtlasWallet.getCalendarEvents();
+  const entry = events.find((ev) => ev.id === chip.dataset.id);
+  if (!entry) return;
+  openCalendarEventForEdit(entry, events);
+});
+
+// Renders an event's "when" line. With no end time, exactly the same plain
+// `toLocaleString()` this always rendered. With one, shows a "start–end"
+// range instead — same-day range collapses to one date plus two times
+// ("Sep 5, 2026, 2:00 PM – 3:30 PM"); a multi-day range shows the date
+// alongside BOTH times ("Sep 8, 2026, 2:00 PM – Sep 9, 2026, 10:00 AM") so
+// which end is which day is never ambiguous. The date is always shown
+// (unlike the day-viewer widget's chips, which can omit it because their
+// own header already names the day) since this flat list has no other
+// per-entry date context — it's sorted chronologically, but nothing else
+// on the card says what day a given entry falls on.
+function formatCalendarWhen(entry) {
+  const start = new Date(entry.dateTime);
+  if (isNaN(start.getTime())) return 'No date set';
+  if (!entry.endDateTime) return start.toLocaleString();
+  const end = new Date(entry.endDateTime);
+  if (isNaN(end.getTime())) return start.toLocaleString();
+  const startTime = start.toLocaleTimeString(undefined, CALENDAR_HOUR_MINUTE_OPTS);
+  const endTime = end.toLocaleTimeString(undefined, CALENDAR_HOUR_MINUTE_OPTS);
+  if (toLocalDateKey(start) === toLocalDateKey(end)) {
+    const dateLabel = start.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    return dateLabel + ', ' + startTime + ' – ' + endTime;
+  }
+  const startDateLabel = start.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  const endDateLabel = end.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return startDateLabel + ', ' + startTime + ' – ' + endDateLabel + ', ' + endTime;
+}
+
+function renderCalendarEventCard(entry, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card calendar-event';
+  // Overdue now means the event's END has passed when it has one, not
+  // just its start — see calendarEventUrgencyMs's own comment above.
+  const overdue = calendarEventUrgencyMs(entry) < Date.now();
+  el.classList.toggle('overdue', overdue);
+  el.innerHTML =
+    '<div class="name">' + escapeHtml(entry.title) + '</div>' +
+    '<div class="calendar-event-when">' + escapeHtml(formatCalendarWhen(entry)) + (overdue ? ' · overdue' : '') + '</div>' +
+    (entry.notes ? '<div class="calendar-event-notes">' + escapeHtml(entry.notes) + '</div>' : '') +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="edit-calendar-event" data-id="' + escapeHtml(entry.id) + '">Edit</button>' +
+    '<button type="button" data-action="delete-calendar-event" data-id="' + escapeHtml(entry.id) + '" class="danger-btn">Delete</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshCalendarDisplay() {
+  // getCalendarEvents() already returns soonest-first (see its own comment
+  // in wallet.js) — nothing to sort here, just render in the order given.
+  // Fetched once and shared with the month-grid widget below rather than
+  // each re-fetching its own copy.
+  const events = await AtlasWallet.getCalendarEvents();
+  renderCalendarMonthGrid(events);
+  renderCalendarDayViewer(events);
+  if (calendarEventsListEl) {
+    calendarEventsListEl.innerHTML = '';
+    if (events.length === 0) {
+      calendarEventsListEl.innerHTML = '<div class="empty-note">No events yet — add one above.</div>';
+    } else {
+      events.forEach((entry) => renderCalendarEventCard(entry, calendarEventsListEl));
+    }
+  }
+  await updateSocialBadge();
+}
+
+// Converts a stored ISO string into the "YYYY-MM-DDTHH:mm" shape
+// <input type="datetime-local"> needs for its value, in LOCAL time (not
+// UTC) so an edited event reopens showing the same wall-clock time it was
+// saved with. Empty/invalid input round-trips to '' rather than throwing —
+// used both to populate an edit and (indirectly, via '') to clear the field.
+function toDatetimeLocalValue(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+// Resets the Add-event form back to "add a new event" mode — used after a
+// successful save, after Cancel edit, and before pre-filling from a mail
+// message (so filling one in never leaves a stray edit-in-progress on some
+// other event).
+function resetCalendarForm() {
+  calendarEditingEventId = null;
+  // Clears the month-grid widget's own "selected day" highlight (a plain
+  // class toggle on whatever cell currently has it — no need to re-fetch
+  // events and re-render the whole grid just for this).
+  calendarSelectedDate = null;
+  if (calendarMonthGridEl) {
+    calendarMonthGridEl.querySelectorAll('.calendar-grid-day.selected').forEach((el) => el.classList.remove('selected'));
+  }
+  // Same "just clear the DOM directly, no re-fetch needed" reasoning as the
+  // month-grid's .selected class right above — calendarSelectedDate is now
+  // null, and that's the only thing renderCalendarDayViewer needs to decide
+  // to hide, so there's no need to await a fresh events fetch just for this.
+  if (calendarDayViewerEl) calendarDayViewerEl.hidden = true;
+  if (calendarEventTitleInput) calendarEventTitleInput.value = '';
+  if (calendarEventDateTimeInput) calendarEventDateTimeInput.value = '';
+  if (calendarEventEndDateTimeInput) calendarEventEndDateTimeInput.value = '';
+  if (calendarEventNotesInput) calendarEventNotesInput.value = '';
+  if (calendarSaveEventBtn) calendarSaveEventBtn.textContent = 'Add event';
+  if (calendarCancelEditBtn) calendarCancelEditBtn.hidden = true;
+  if (calendarEventStatusEl) calendarEventStatusEl.textContent = '';
+}
+
+calendarSaveEventBtn && calendarSaveEventBtn.addEventListener('click', async () => {
+  const title = calendarEventTitleInput ? calendarEventTitleInput.value.trim() : '';
+  const rawDateTime = calendarEventDateTimeInput ? calendarEventDateTimeInput.value : '';
+  const rawEndDateTime = calendarEventEndDateTimeInput ? calendarEventEndDateTimeInput.value : '';
+  const notes = calendarEventNotesInput ? calendarEventNotesInput.value.trim() : '';
+  if (!title) { calendarEventStatusEl.textContent = 'A title is required.'; return; }
+  if (!rawDateTime) { calendarEventStatusEl.textContent = 'A date/time is required.'; return; }
+  // <input type="datetime-local">'s value has no timezone of its own (it's
+  // "wall clock" local time) — `new Date(rawDateTime)` parses that as THIS
+  // device's local time, same zone toDatetimeLocalValue() above renders
+  // back into, so round-tripping through storage as an ISO string never
+  // shifts what the user actually typed.
+  const dateTime = new Date(rawDateTime).toISOString();
+  // The end field is optional — leaving it blank keeps the event a plain
+  // instant with no duration, exactly as it always behaved before this
+  // field existed. Validated here (same inline calendarEventStatusEl
+  // pattern the two checks above already use, rather than only relying on
+  // AtlasWallet's own defensive check) so the message actually names
+  // what's wrong instead of falling through to the generic "Could not
+  // save:" catch-all below.
+  let endDateTime = null;
+  if (rawEndDateTime) {
+    endDateTime = new Date(rawEndDateTime).toISOString();
+    if (new Date(endDateTime).getTime() <= new Date(dateTime).getTime()) {
+      calendarEventStatusEl.textContent = 'The end time must be after the start time.';
+      return;
+    }
+  }
+  try {
+    if (calendarEditingEventId) {
+      await AtlasWallet.updateCalendarEvent(calendarEditingEventId, { title, dateTime, endDateTime, notes });
+    } else {
+      await AtlasWallet.addCalendarEvent({ title, dateTime, endDateTime, notes });
+    }
+    resetCalendarForm();
+    await refreshCalendarDisplay();
+  } catch (err) {
+    calendarEventStatusEl.textContent = 'Could not save: ' + err.message;
+  }
+});
+
+calendarCancelEditBtn && calendarCancelEditBtn.addEventListener('click', () => {
+  resetCalendarForm();
+});
+
+calendarEventsListEl && calendarEventsListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const id = btn.dataset.id;
+
+  if (action === 'edit-calendar-event') {
+    const events = await AtlasWallet.getCalendarEvents();
+    const entry = events.find((ev) => ev.id === id);
+    if (!entry) return;
+    openCalendarEventForEdit(entry, events);
+    return;
+  }
+
+  if (action === 'delete-calendar-event') {
+    if (!confirm('Delete this event? This cannot be undone.')) return;
+    await AtlasWallet.removeCalendarEvent(id);
+    if (calendarEditingEventId === id) resetCalendarForm(); // was mid-edit on the thing just deleted
+    await refreshCalendarDisplay();
+    return;
+  }
+});
+
+// "Add to calendar" bridge from a mail card's "⋯" menu (see renderMailCard)
+// — jumps to Calendar and pre-fills the add-event form from that message,
+// but does NOT create the event itself: mail body text can't be reliably
+// parsed for a real event date, so the date/time field is left blank for
+// the user to actually set before saving. A lightweight bridge, not
+// automatic event extraction.
+function prefillCalendarEventFromMail(subject, body) {
+  resetCalendarForm();
+  const EXCERPT_LEN = 200;
+  const trimmedBody = (body || '').trim();
+  const excerpt = trimmedBody.length > EXCERPT_LEN ? trimmedBody.slice(0, EXCERPT_LEN) + '…' : trimmedBody;
+  if (calendarEventTitleInput) calendarEventTitleInput.value = subject || '';
+  if (calendarEventNotesInput) calendarEventNotesInput.value = excerpt ? 'From mail: ' + excerpt : '';
+  if (calendarEventStatusEl) calendarEventStatusEl.textContent = 'Pre-filled from a mail message — pick a date/time, then Add event.';
+  calendarEventDateTimeInput && calendarEventDateTimeInput.focus();
+}
 
 checkMailNowBtn && checkMailNowBtn.addEventListener('click', async () => {
   checkMailNowBtn.disabled = true;
@@ -4466,11 +7348,28 @@ importCacheFileInput && importCacheFileInput.addEventListener('change', async ()
 
 requestItemBtn.addEventListener('click', async () => {
   const world = currentWorld;
-  const assetClass = world.policy.acceptedItemClasses[0];
+  const assetClass = giveawayClassFor(world);
   // Defensive re-check: the button's disabled state already reflects this
   // (see refreshRequestButton), but a click event queued right before a
   // refresh could still slip through, same double-click concern
-  // handleInteractable() guards against for stalls.
+  // handleInteractable() guards against for stalls. A null assetClass here
+  // (nothing concrete left to give away — task #152's wildcard categories
+  // made this newly possible) is the same defensive shape: the button
+  // should already be disabled/relabeled by refreshRequestButton, so this
+  // is a courtesy no-op, not a new failure mode.
+  if (!assetClass) {
+    statusEl.textContent = 'This world issues nothing.';
+    await refreshRequestButton();
+    return;
+  }
+  // Task #63, scoped: same identity-wait pattern as handleInteractable()
+  // above, checked before alreadyHasRequestableItem() below — that check
+  // already treats "no identity" as "haven't collected it yet" (see its
+  // own comment), which would otherwise let a locked visitor race straight
+  // into a failed mint attempt instead of being prompted first.
+  if (effectiveIdentityRequired(currentManifest, world) && !(await AtlasWallet.getIdentity())) {
+    if (!(await waitForIdentityViaWallet())) return;
+  }
   if (await alreadyHasRequestableItem(world)) {
     statusEl.textContent = 'Already collected ' + assetClass + ' — check your wallet.';
     await refreshRequestButton();
@@ -4633,6 +7532,17 @@ async function handleInteractable(marker) {
   if (interactableBusy) return;
   interactableBusy = true;
   try {
+    // Task #63, scoped: inside a world that requires identity, a locked
+    // wallet shouldn't just fail this click with an error message the way
+    // it would in any ordinary world (see the 'issue' branch's own
+    // pre-existing "Create an identity first." throw below) — open the
+    // wallet and wait, then carry on with the actual action once one
+    // exists, no second click needed. An ordinary (non-identityRequired)
+    // world is untouched — this only ever fires when the world itself
+    // demands it.
+    if (effectiveIdentityRequired(currentManifest, currentWorld) && !(await AtlasWallet.getIdentity())) {
+      if (!(await waitForIdentityViaWallet())) return; // cancelled — leave the stall exactly as it was
+    }
     if (marker.action === 'mint') {
       statusEl.textContent = 'Mining ' + marker.class + '…';
       await AtlasWallet.mintAsset(marker.role || 'self', manifestDomainOf(currentManifest), marker.class, marker.quantity);
@@ -4672,40 +7582,6 @@ async function handleInteractable(marker) {
     interactableBusy = false;
   }
 }
-
-tradeBtn.addEventListener('click', async () => {
-  tradeBtn.disabled = true;
-  tradeStatusEl.textContent = 'Proposing intents…';
-  try {
-    const identity = await AtlasWallet.getIdentity();
-    const counterparty = await AtlasWallet.getCounterparty();
-    if (!identity || !counterparty) throw new Error('Create both identities first.');
-
-    const selfWallet = await AtlasWallet.getWallet(identity.publicKey);
-    const cpWallet = await AtlasWallet.getWallet(counterparty.publicKey);
-    const ironBalance = selfWallet.map((e) => e.credential).find((c) => c.asset.class === 'atlas.element.iron' && c.asset.fungible && c.quantity >= 10);
-    const goldBalance = cpWallet.map((e) => e.credential).find((c) => c.asset.class === 'atlas.element.gold' && c.asset.fungible && c.quantity >= 5);
-    if (!ironBalance) throw new Error('Self needs at least 10 iron — mine some first.');
-    if (!goldBalance) throw new Error('Counterparty needs at least 5 gold — mine some first.');
-
-    const offerSelf = { class: 'atlas.element.iron', quantity: 10 };
-    const wantSelf = { class: 'atlas.element.gold', quantity: 5 };
-    const intentSelf = await AtlasWallet.proposeIntent('self', offerSelf, wantSelf, counterparty.publicKey, 10);
-
-    const offerCp = { class: 'atlas.element.gold', quantity: 5 };
-    const wantCp = { class: 'atlas.element.iron', quantity: 10 };
-    const intentCp = await AtlasWallet.proposeIntent('counterparty', offerCp, wantCp, identity.publicKey, 10);
-
-    tradeStatusEl.textContent = 'Settling…';
-    await AtlasWallet.settleTrade(manifestDomainOf(currentManifest), intentSelf, intentCp, ironBalance, goldBalance);
-    await refreshInventoryDisplay();
-    tradeStatusEl.textContent = '✓ Settled: self sent 10 iron and received 5 gold; counterparty mirrored it.';
-  } catch (err) {
-    tradeStatusEl.textContent = 'Trade failed: ' + err.message;
-  } finally {
-    tradeBtn.disabled = !(currentWorld && currentWorld.profile && currentWorld.profile.genre === 'trading-station');
-  }
-});
 
 // Enter-to-submit on the password fields that each drive exactly one
 // primary action — unlocking, creating an identity, and changing a
@@ -4825,6 +7701,7 @@ refreshIdentityDisplay();
 refreshInventoryDisplay();
 refreshMailDisplay();
 AtlasWallet.getChatPanelSettings().then(applyChatPanelSize); // restore the chat panel's persisted size/opacity/text-size/minimized state before any world is entered
+AtlasWallet.getAssetViewerSettings().then(applyAssetViewerSettings); // restore the Asset Viewer panel's persisted size/opacity/text-size, same reasoning
 refreshChatSendability();
 
 const start = startParams();

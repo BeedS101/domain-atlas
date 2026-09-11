@@ -121,7 +121,10 @@ function postJson(port, urlPath, body) {
     console.log('PASS: message marked read, badge shows 1 remaining');
 
     console.log('STEP 5: checking again (including a re-visit of the Mail sub-tab, which now also auto-checks) does not duplicate either message');
-    await frame.locator('#friendsSubtabBtn').click();
+    // #friendsSubtabBtn was renamed to #contactsSubtabBtn when Friends
+    // became Contacts (commit 6ae2ac7) — this stray reference just never
+    // got updated; unrelated to today's change, fixed in passing.
+    await frame.locator('#contactsSubtabBtn').click();
     await frame.locator('#mailSubtabBtn').click();
     await frame.waitForTimeout(500);
     const stillTwo = await frame.locator('#mailList .mail-card').count();

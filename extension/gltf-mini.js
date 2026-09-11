@@ -298,6 +298,81 @@
 
   // ---------- model loading (cached by URL) ----------
 
+  // Walks a parsed GLB's node graph into a flat list of world-space
+  // primitives (positions/normals/indices/color/nodeMatrix) plus the
+  // overall bounding box — the CPU-side half of what loadModel() below used
+  // to do inline, pulled out on its own so the Asset Viewer's previewModel()
+  // (bottom of this file) can reuse it too without dragging in loadModel's
+  // GPU-upload step, which ties buffers to the specific `gl` context passed
+  // to loadModel and is cached by URL alone (see modelCache below) — fine
+  // for the one long-lived world-renderer context this file always used to
+  // serve, wrong for previewModel's short-lived, created-and-destroyed-per-
+  // hover contexts, where reusing a cached buffer from a since-lost context
+  // would either draw nothing or throw. previewModel does its own, simpler
+  // GPU upload instead (see below).
+  function extractPrimitives(gltf, bin) {
+    const primitives = [];
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+
+    function materialColor(materialIndex) {
+      if (materialIndex === undefined) return [0.7, 0.7, 0.7, 1];
+      const mat = gltf.materials[materialIndex];
+      return (mat.pbrMetallicRoughness && mat.pbrMetallicRoughness.baseColorFactor) || [0.7, 0.7, 0.7, 1];
+    }
+
+    function walkNode(nodeIndex, parentMatrix) {
+      const node = gltf.nodes[nodeIndex];
+      const t = node.translation || [0, 0, 0];
+      const q = node.rotation || [0, 0, 0, 1];
+      const s = node.scale || [1, 1, 1];
+      const local = mat4FromTRS(t, q, s);
+      const world = mat4Multiply(parentMatrix, local);
+
+      if (node.mesh !== undefined) {
+        const mesh = gltf.meshes[node.mesh];
+        mesh.primitives.forEach((prim) => {
+          const positions = readAccessor(gltf, bin, prim.attributes.POSITION);
+          const normals = prim.attributes.NORMAL !== undefined ? readAccessor(gltf, bin, prim.attributes.NORMAL) : null;
+          const indices = prim.indices !== undefined ? readAccessor(gltf, bin, prim.indices) : null;
+          const posAccessor = gltf.accessors[prim.attributes.POSITION];
+          if (posAccessor.min && posAccessor.max) {
+            // Bounding box in model space, transformed by this node's
+            // world matrix — approximate by transforming all 8 corners.
+            for (let cx = 0; cx < 2; cx++) for (let cy = 0; cy < 2; cy++) for (let cz = 0; cz < 2; cz++) {
+              const corner = [
+                cx ? posAccessor.max[0] : posAccessor.min[0],
+                cy ? posAccessor.max[1] : posAccessor.min[1],
+                cz ? posAccessor.max[2] : posAccessor.min[2]
+              ];
+              const wx = world[0]*corner[0] + world[4]*corner[1] + world[8]*corner[2] + world[12];
+              const wy = world[1]*corner[0] + world[5]*corner[1] + world[9]*corner[2] + world[13];
+              const wz = world[2]*corner[0] + world[6]*corner[1] + world[10]*corner[2] + world[14];
+              min[0] = Math.min(min[0], wx); max[0] = Math.max(max[0], wx);
+              min[1] = Math.min(min[1], wy); max[1] = Math.max(max[1], wy);
+              min[2] = Math.min(min[2], wz); max[2] = Math.max(max[2], wz);
+            }
+          }
+          primitives.push({
+            positions, normals, indices,
+            color: materialColor(prim.material),
+            nodeMatrix: world
+          });
+        });
+      }
+      (node.children || []).forEach((childIndex) => walkNode(childIndex, world));
+    }
+
+    const sceneIndex = gltf.scene || 0;
+    const rootNodes = (gltf.scenes && gltf.scenes[sceneIndex] && gltf.scenes[sceneIndex].nodes) || [];
+    rootNodes.forEach((n) => walkNode(n, mat4Identity()));
+
+    return {
+      primitives,
+      bounds: { min, max, size: [max[0]-min[0], max[1]-min[1], max[2]-min[2]] }
+    };
+  }
+
   const modelCache = new Map(); // url -> Promise<parsedModel>
 
   function loadModel(gl, url, onBytes) {
@@ -305,61 +380,7 @@
     const promise = fetchModelBuffer(url, onBytes)
       .then((buffer) => {
         const { json: gltf, bin } = parseGLB(buffer);
-        const primitives = [];
-        const min = [Infinity, Infinity, Infinity];
-        const max = [-Infinity, -Infinity, -Infinity];
-
-        function materialColor(materialIndex) {
-          if (materialIndex === undefined) return [0.7, 0.7, 0.7, 1];
-          const mat = gltf.materials[materialIndex];
-          return (mat.pbrMetallicRoughness && mat.pbrMetallicRoughness.baseColorFactor) || [0.7, 0.7, 0.7, 1];
-        }
-
-        function walkNode(nodeIndex, parentMatrix) {
-          const node = gltf.nodes[nodeIndex];
-          const t = node.translation || [0, 0, 0];
-          const q = node.rotation || [0, 0, 0, 1];
-          const s = node.scale || [1, 1, 1];
-          const local = mat4FromTRS(t, q, s);
-          const world = mat4Multiply(parentMatrix, local);
-
-          if (node.mesh !== undefined) {
-            const mesh = gltf.meshes[node.mesh];
-            mesh.primitives.forEach((prim) => {
-              const positions = readAccessor(gltf, bin, prim.attributes.POSITION);
-              const normals = prim.attributes.NORMAL !== undefined ? readAccessor(gltf, bin, prim.attributes.NORMAL) : null;
-              const indices = prim.indices !== undefined ? readAccessor(gltf, bin, prim.indices) : null;
-              const posAccessor = gltf.accessors[prim.attributes.POSITION];
-              if (posAccessor.min && posAccessor.max) {
-                // Bounding box in model space, transformed by this node's
-                // world matrix — approximate by transforming all 8 corners.
-                for (let cx = 0; cx < 2; cx++) for (let cy = 0; cy < 2; cy++) for (let cz = 0; cz < 2; cz++) {
-                  const corner = [
-                    cx ? posAccessor.max[0] : posAccessor.min[0],
-                    cy ? posAccessor.max[1] : posAccessor.min[1],
-                    cz ? posAccessor.max[2] : posAccessor.min[2]
-                  ];
-                  const wx = world[0]*corner[0] + world[4]*corner[1] + world[8]*corner[2] + world[12];
-                  const wy = world[1]*corner[0] + world[5]*corner[1] + world[9]*corner[2] + world[13];
-                  const wz = world[2]*corner[0] + world[6]*corner[1] + world[10]*corner[2] + world[14];
-                  min[0] = Math.min(min[0], wx); max[0] = Math.max(max[0], wx);
-                  min[1] = Math.min(min[1], wy); max[1] = Math.max(max[1], wy);
-                  min[2] = Math.min(min[2], wz); max[2] = Math.max(max[2], wz);
-                }
-              }
-              primitives.push({
-                positions, normals, indices,
-                color: materialColor(prim.material),
-                nodeMatrix: world
-              });
-            });
-          }
-          (node.children || []).forEach((childIndex) => walkNode(childIndex, world));
-        }
-
-        const sceneIndex = gltf.scene || 0;
-        const rootNodes = (gltf.scenes && gltf.scenes[sceneIndex] && gltf.scenes[sceneIndex].nodes) || [];
-        rootNodes.forEach((n) => walkNode(n, mat4Identity()));
+        const { primitives, bounds } = extractPrimitives(gltf, bin);
 
         // Upload each primitive's geometry to the GPU once; instances at
         // different placements in the scene reuse these same buffers.
@@ -373,10 +394,7 @@
           };
         });
 
-        return {
-          primitives,
-          bounds: { min, max, size: [max[0]-min[0], max[1]-min[1], max[2]-min[2]] }
-        };
+        return { primitives, bounds };
       });
     modelCache.set(url, promise);
     return promise;
@@ -755,7 +773,34 @@
     let jumpOffset = 0, jumpVelocity = 0, airborne = false;
     const JUMP_SPEED = 3.2, GRAVITY = 9.0, CROUCH_AMOUNT = 0.6;
 
+    // Bug #138: typing a space (or any WASD/arrow/Shift/Ctrl key) into ANY
+    // text field — the chat box, a contact's notes, an alias input, a
+    // search box, Compose, Calendar, anywhere — was leaking straight
+    // through into movement, because this listener is on `window` and
+    // never checked what actually had focus. `isTypingTarget()` covers
+    // every text-entry control generically (not just the chat input by
+    // ID) so this stays correct as new text fields get added elsewhere in
+    // the wallet without anyone having to remember to update this list.
+    function isTypingTarget(el) {
+      if (!el) return false;
+      if (el.isContentEditable) return true;
+      const tag = el.tagName;
+      if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (tag !== 'INPUT') return false;
+      // Only the input TYPES that actually accept typed/keyed input while
+      // focused — a checkbox/radio/range/color/file/button et al. don't
+      // consume WASD or Space as text, so movement should keep working
+      // if one of those happens to be focused (e.g. tabbing through a
+      // settings form shouldn't freeze the character).
+      const type = (el.type || 'text').toLowerCase();
+      return !['button', 'checkbox', 'radio', 'submit', 'reset', 'range', 'color', 'file', 'image'].includes(type);
+    }
+
     function onKeyDown(e) {
+      // Currently typing somewhere — let the field handle the keystroke
+      // completely normally (including Space) and don't register it as a
+      // movement key at all.
+      if (isTypingTarget(document.activeElement)) return;
       // Space scrolling the host page would be a strange side effect of
       // jumping — nothing here is meant to scroll, so stop that specific
       // default without touching any other key's normal behavior.
@@ -763,6 +808,17 @@
       keys[e.code] = true;
     }
     function onKeyUp(e) { keys[e.code] = false; }
+    // Covers the case where a movement key was already held down and THEN
+    // the player clicks/tabs into a text field without releasing it first
+    // (onKeyDown's own guard above only stops a NEW key from registering —
+    // it can't retroactively un-stick one already held). The moment focus
+    // lands on a typing target, every currently-held key is released, so
+    // the character can never keep walking/jumping while someone's mid-
+    // sentence in a text box.
+    function onFocusIn(e) {
+      if (!isTypingTarget(e.target)) return;
+      for (const code in keys) keys[code] = false;
+    }
     function onPointerDown(e) { dragging = true; lastX = e.clientX; lastY = e.clientY; canvas.setPointerCapture(e.pointerId); }
     function onPointerUp(e) { dragging = false; try { canvas.releasePointerCapture(e.pointerId); } catch (err) {} }
     function onPointerMove(e) {
@@ -782,6 +838,11 @@
 
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    // 'focusin' (not 'focus') because it bubbles — a single listener on
+    // window/document sees every element gaining focus anywhere in the
+    // document, same reasoning as the delegated click handlers elsewhere
+    // in this codebase, rather than needing one listener per text field.
+    window.addEventListener('focusin', onFocusIn);
     canvas.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointermove', onPointerMove);
@@ -1186,6 +1247,7 @@
       remotePlayers.clear();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('focusin', onFocusIn);
       canvas.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointermove', onPointerMove);
@@ -1391,8 +1453,150 @@
     return { imported };
   }
 
+  // ---------- single-model preview (task #150, Asset Viewer) ----------
+  //
+  // A SEPARATE, deliberately tiny entry point from init() above. init() is
+  // the full first-person world renderer — camera fly-around, keyboard/
+  // pointer input, floor, character, portals, collision — none of which an
+  // asset-viewer hover panel showing one held item's model wants any part
+  // of. previewModel() instead reuses only parseGLB() and extractPrimitives()
+  // (both still private to this closure — this function is the one thing
+  // that crosses the window.MiniGLTF boundary to call them from outside)
+  // and writes its own minimal render loop: no camera controls, no floor,
+  // no character, no input handling — just center the model, upload it,
+  // spin it slowly, done.
+  //
+  // Deliberately does NOT go through loadModel()/modelCache — that cache is
+  // keyed by URL alone and its uploaded buffers are tied to whichever `gl`
+  // context first loaded that URL. A world's canvas/context lives for the
+  // whole time a world is open, so that's safe there; this preview's canvas
+  // and WebGL context are created fresh per hover-and-click and explicitly
+  // torn down on dispose() (see viewer.js's asset-viewer wiring), so caching
+  // by URL alone would risk handing a second preview a buffer that belongs
+  // to a context already lost. Small enough (a held item, not a scene) that
+  // re-fetching and re-uploading per preview is a non-issue.
+  //
+  // opts is currently unused (reserved for a future rotation-speed/
+  // background-color knob) — callers pass {} today.
+  function previewModel(canvas, glbArrayBuffer, opts) {
+    opts = opts || {};
+    const gl = canvas.getContext('webgl', { alpha: true, antialias: true }) || canvas.getContext('experimental-webgl', { alpha: true });
+    if (!gl) throw new Error('WebGL is not available in this browser.');
+    // Best-effort only, unlike init()'s hard failure on this same extension
+    // — a preview missing 32-bit indices on some exotic model just draws
+    // nothing useful rather than the whole viewer panel needing to handle a
+    // thrown error for what's a minor, small-scale preview.
+    gl.getExtension('OES_element_index_uint');
+
+    const { json: gltf, bin } = parseGLB(glbArrayBuffer);
+    const { primitives, bounds } = extractPrimitives(gltf, bin);
+    const prog = createProgram(gl);
+
+    const gpuPrimitives = primitives.map((prim) => ({
+      color: prim.color,
+      nodeMatrix: prim.nodeMatrix,
+      positionBuffer: createBuffer(gl, gl.ARRAY_BUFFER, prim.positions),
+      normalBuffer: prim.normals ? createBuffer(gl, gl.ARRAY_BUFFER, prim.normals) : null,
+      indexBuffer: prim.indices ? createBuffer(gl, gl.ELEMENT_ARRAY_BUFFER, prim.indices) : null,
+      indexCount: prim.indices ? prim.indices.length : (prim.positions.length / 3),
+      indexType: prim.indices ? (prim.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT) : null
+    }));
+
+    // Frame the model regardless of whatever scale/units its own author
+    // used — center on its bounding-box middle, and pick a camera distance
+    // from its bounding radius, the same "fit to view" idea a real asset
+    // browser's thumbnail camera would use.
+    const center = [
+      (bounds.min[0] + bounds.max[0]) / 2,
+      (bounds.min[1] + bounds.max[1]) / 2,
+      (bounds.min[2] + bounds.max[2]) / 2
+    ];
+    const radius = Math.max(0.05, Math.hypot(bounds.size[0], bounds.size[1], bounds.size[2]) / 2) || 1;
+    const cameraDistance = radius * 2.4;
+    const view = mat4View([0, radius * 0.4, cameraDistance], 0, -0.15);
+
+    gl.enable(gl.DEPTH_TEST);
+    // Transparent clear — the canvas sits inside the Asset Viewer panel's
+    // own dark card, so an opaque clear color would paint a visible seam
+    // around the model instead of it just sitting on the panel's background.
+    gl.clearColor(0, 0, 0, 0);
+
+    let rotation = 0;
+    let rafId = null;
+    let lost = false;
+
+    function frame() {
+      rafId = null; // cleared before any early return so dispose() never double-cancels a stale id
+      if (lost) return;
+      const w = canvas.width, h = canvas.height;
+      if (w === 0 || h === 0) { rafId = requestAnimationFrame(frame); return; } // panel mid-resize/not yet laid out — skip this frame rather than divide by zero in the projection
+      gl.viewport(0, 0, w, h);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      rotation += 0.006; // slow auto-rotate — a preview, not a game
+
+      const projection = mat4Perspective(45 * Math.PI / 180, w / h, 0.02, cameraDistance * 20);
+      const spin = mat4RotateY(rotation);
+      const centered = mat4Multiply(spin, mat4Translate(-center[0], -center[1], -center[2]));
+
+      gl.useProgram(prog.program);
+      gl.uniformMatrix4fv(prog.uniforms.view, false, view);
+      gl.uniformMatrix4fv(prog.uniforms.projection, false, projection);
+      gl.uniform3fv(prog.uniforms.lightDir, [0.4, -0.7, -0.5]);
+      gl.uniform1f(prog.uniforms.ambient, 0.55); // flat-ish lighting is fine for a small preview
+
+      gpuPrimitives.forEach((prim) => {
+        const model = mat4Multiply(centered, prim.nodeMatrix);
+        gl.bindBuffer(gl.ARRAY_BUFFER, prim.positionBuffer);
+        gl.enableVertexAttribArray(prog.attribs.position);
+        gl.vertexAttribPointer(prog.attribs.position, 3, gl.FLOAT, false, 0, 0);
+
+        if (prim.normalBuffer) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, prim.normalBuffer);
+          gl.enableVertexAttribArray(prog.attribs.normal);
+          gl.vertexAttribPointer(prog.attribs.normal, 3, gl.FLOAT, false, 0, 0);
+        } else {
+          gl.disableVertexAttribArray(prog.attribs.normal);
+          gl.vertexAttrib3f(prog.attribs.normal, 0, 1, 0);
+        }
+
+        gl.uniformMatrix4fv(prog.uniforms.model, false, model);
+        gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, mat3NormalFromMat4(model));
+        gl.uniform4fv(prog.uniforms.color, prim.color);
+
+        if (prim.indexBuffer) {
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, prim.indexBuffer);
+          gl.drawElements(gl.TRIANGLES, prim.indexCount, prim.indexType, 0);
+        } else {
+          gl.drawArrays(gl.TRIANGLES, 0, prim.indexCount);
+        }
+      });
+
+      rafId = requestAnimationFrame(frame);
+    }
+    rafId = requestAnimationFrame(frame);
+
+    // The caller (viewer.js) owns exactly when this preview's lifetime
+    // ends — hover-away, "Show model" clicked on a different asset, or the
+    // whole Asset Viewer panel closing all call dispose() exactly once.
+    // Cancels the render loop AND explicitly loses the GL context (not just
+    // stopping the rAF loop) — a small panel like this can otherwise leak a
+    // real context per hover, and browsers cap how many a page may hold
+    // live at once.
+    return {
+      dispose() {
+        if (lost) return;
+        lost = true;
+        if (rafId !== null) cancelAnimationFrame(rafId);
+        const loseCtx = gl.getExtension('WEBGL_lose_context');
+        if (loseCtx) loseCtx.loseContext();
+      }
+    };
+  }
+
   window.MiniGLTF = {
     init,
+    previewModel,
     cache: {
       listBySite: listCacheBySite,
       totalBytes: cacheTotalBytes,

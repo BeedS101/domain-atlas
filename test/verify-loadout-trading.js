@@ -1,9 +1,13 @@
-// Verifies §5.2 (loadouts + transfer-on-loss) and §5.4/§7 (resources +
-// trading stations) end to end: a real second signer (the "counterparty"
+// Verifies §5.2 (loadouts + transfer-on-loss) and §5.4 (fungible resources
+// + splitting) end to end: a real second signer (the "counterparty"
 // keypair — a second local ECDSA identity standing in for another
 // visitor), a real PvP loss with the loser's own key co-signing the
-// transfer, a real resource split, and a real two-intent atomic trade
-// settled by the issuer acting as the trading station.
+// transfer, and a real resource split settled by the issuer. Trading
+// station coverage (§7) lives in test/manual-remote-trade.js instead —
+// v1.15 removed the in-person mechanism this file used to exercise here
+// (both sides' signed intents arriving in the same call, settled via the
+// now-removed #tradeBtn), and open-listing trading no longer needs this
+// file's counterparty stand-in at all.
 
 const { chromium } = require('playwright');
 const path = require('path');
@@ -139,17 +143,23 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('PASS: item moved to counterparty — real owner-signed transfer, not a server reassignment');
     await page.screenshot({ path: shot('lt-03-item-transferred.png') });
 
-    // ---------- §5.4 resources + §7 trading station ----------
+    // ---------- §5.4 resources + split ----------
 
     console.log('STEP 4: back to Plaza, then into the Trading Post');
     await clickPortalTo(frame, 'plaza');
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
     await clickPortalTo(frame, 'market');
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), { timeout: 10000 });
-    await frame.waitForFunction(() => !document.getElementById('tradeBtn').disabled, { timeout: 5000 });
-    console.log('PASS: in the Trading Post, trade button enabled by profile.genre');
+    console.log('PASS: in the Trading Post');
 
     console.log('STEP 5: mining resources — 20 iron to self, 10 gold to counterparty');
+    // mintIronBtn/mintGoldBtn are the wallet panel's own always-available
+    // mint shortcuts (Inventory category), independent of the market
+    // scene's in-world stalls — mintGoldBtn deliberately still mints to
+    // 'counterparty' here (unchanged by v1.15's market-stall fix, which
+    // only touched the market scene's own "Mine Gold" interactable): this
+    // file, and test/manual-wallet-search.js, both rely on it to seed the
+    // counterparty's own list with a distinct fungible class.
     await frame.locator('#mintIronBtn').click();
     await frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron Ingot ×20'), { timeout: 15000 });
     await frame.locator('#mintGoldBtn').click();
@@ -165,24 +175,9 @@ async function clickPortalTo(frame, targetWorld) {
       { timeout: 15000 }
     );
     console.log('PASS: split settled — self kept the remainder, counterparty received a fresh balance, old one revoked');
+    await page.screenshot({ path: shot('lt-05-split-settled.png') });
 
-    console.log('STEP 7: settling a trade — self\'s 10 iron for counterparty\'s 5 gold, two independently signed intents');
-    // "Trading station" is a collapsible category on the main wallet screen
-    // (closed by default — only some worlds have a trading genre) — open it
-    // before using its button.
-    await frame.locator('.settings-category[data-category="trading"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="trading"]').classList.contains('open'), { timeout: 5000 });
-    await frame.locator('#tradeBtn').click();
-    await frame.waitForFunction(() => document.getElementById('tradeStatus').textContent.startsWith('✓ Settled'), { timeout: 20000 });
-    const selfResAfterTrade = await frame.locator('#selfCollectiblesList').textContent();
-    const cpResAfterTrade = await frame.locator('#counterpartyCollectiblesList').textContent();
-    if (!selfResAfterTrade.includes('Gold Ingot ×5')) throw new Error('Self should have received 5 gold');
-    if (selfResAfterTrade.includes('atlas.element.iron')) throw new Error('Self should have fully spent its 10-iron balance on the trade');
-    if (!cpResAfterTrade.includes('Gold Ingot ×5')) throw new Error('Counterparty should have a 5-gold remainder');
-    console.log('PASS: trade settled atomically — both sides\' balances updated correctly, both signatures were required');
-    await page.screenshot({ path: shot('lt-05-trade-settled.png') });
-
-    console.log('\nALL LOADOUT + TRADING CHECKS PASSED');
+    console.log('\nALL LOADOUT + RESOURCE CHECKS PASSED');
   } catch (err) {
     console.error('FAILURE:', err);
     process.exitCode = 1;

@@ -16,8 +16,8 @@
 // showed up: `false` means `quantity` is always 1 and the whole thing
 // moves as a unit (§5.2's transfer-on-loss); `true` means `quantity` is
 // splittable/consolidatable (§5.4/§5.4.1) and tradeable (§7). Every
-// /atlas/asset/split, /consolidate, and /trade endpoint below rejects a
-// fungible:false credential outright — there's nothing for that arithmetic
+// /atlas/asset/split, /consolidate, and /atlas/trade/* endpoint below rejects
+// a fungible:false credential outright — there's nothing for that arithmetic
 // to do to a quantity that's definitionally 1 — and /atlas/asset/reissue
 // rejects the opposite direction, since a fungible class's `properties`
 // has to stay identical across every balance of it for consolidation to
@@ -33,13 +33,17 @@
 // station server called this same issuer's endpoints instead of running
 // them in-process.
 //
-// Also collapsed for the demo: a second visitor. §5.2 and §7 both need two
-// distinct signers to mean anything. The extension represents the primary
-// visitor with a real WebAuthn passkey (as it already did for the basic
-// wallet) and a second, purely local ECDSA keypair standing in for "the
-// other visitor" — see extension/wallet.js's counterparty functions and
-// the README for why that's an honest way to demo a two-party protocol
-// without needing two physical devices.
+// Also collapsed for the demo: a second visitor for §5.2's PvP-loss demo,
+// which genuinely needs two distinct signers in one browser tab to show at
+// all. The extension represents the primary visitor with a real WebAuthn
+// passkey (as it already did for the basic wallet) and a second, purely
+// local ECDSA keypair standing in for "the other visitor" — see
+// extension/wallet.js's counterparty functions and the README for why
+// that's an honest way to demo a two-party protocol without needing two
+// physical devices. §7's own two-party need is met differently since v1.15
+// removed in-person trading: a listing's poster and its claimant are just
+// two ordinary wallets, normally demoed with two separate browser profiles
+// (see test/manual-remote-trade.js) rather than this counterparty stand-in.
 //
 // Zero npm dependencies — Node's built-in http/crypto only.
 //
@@ -143,6 +147,31 @@ const SUBSCRIBERS_FILE = path.join(STATE_DIR, 'atlas-subscribers-store.json');
 // this domain only agrees to store/relay mail for someone it issued a
 // card to.
 const POSTOFFICE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-postoffice-members-store.json');
+// Trading Station membership roster (task #144 Phase 1) — same flat-array
+// shape as POSTOFFICE_MEMBERS_FILE above, kept as its own file for the same
+// reason Post Office's is separate from the plain subscriber roster: a
+// Trading Station membership is a different class, gating a different
+// endpoint (POST /atlas/trade/submit instead of /atlas/postoffice/send).
+// Not actually consulted as an abuse gate the way Post Office's roster is
+// today — /atlas/trade/submit instead validates the membership credential
+// presented WITH the request (same "prove you hold it, right now, signed"
+// shape checkPresentedAsset already uses for a trade balance) — this
+// roster exists for the same future-facing reason task #144's own notes
+// flag for directory federation: a self-contained, appendable record of
+// who's joined, ready for a "list this station's members" or federation
+// step later without needing a schema change then.
+const TRADINGSTATION_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-tradingstation-members-store.json');
+// Pending remote trade intents (task #144 Phase 1) — one entry per
+// submitted-but-not-yet-matched intent, holding both the signed intent
+// envelope and the presented balance credential exactly as submitted, so a
+// later matching call has everything it needs to settle without asking the
+// original submitter to resend anything. Same plain-read-write shape as
+// every other store in this file (POSTOFFICE_MEMBERS_FILE etc.) — safe
+// without a lock for the same single-threaded-Node reason documented
+// there. Removed once matched (removePendingTrade) or once found expired
+// (pruned lazily wherever this store is read for matching, not on a
+// timer — same "no background sweep" simplicity as the rest of this demo).
+const PENDING_TRADES_FILE = path.join(STATE_DIR, 'atlas-pending-trades-store.json');
 // Post Office abuse detection (task #96): how many sends within how large
 // a rolling window counts as "irregular" enough to auto-flag a membership
 // for the operator's attention — see recordPostOfficeSend() below. Tunable
@@ -240,6 +269,14 @@ const ASSET_CATALOG = {
     thumbnail: `https://${DOMAIN}/assets/compass.png`,
     fungible: false,
     presentation: 'collectible',
+    // Task #160: tradeScope is the third asset-level flag, a peer to
+    // fungible/presentation (SPEC.md's "two flags, one discipline" grows a
+    // third). 'local' is the default for anything not explicitly set below
+    // (see mintAssetByClass's `catalogEntry.tradeScope || 'local'`) — it's
+    // the status quo for everything already tradeable today, since a trade
+    // can only ever settle at the asset's own issuing domain regardless of
+    // any flag (only that domain holds the signing key to re-mint it). Only
+    // spelled out explicitly here for classes where it isn't the default.
     properties: {
       'atlas.rarity': 'common',
       'com.example.era': 'Victorian',
@@ -304,6 +341,12 @@ const ASSET_CATALOG = {
     thumbnail: `https://${DOMAIN}/assets/badge.png`,
     fungible: false,
     presentation: 'document',
+    // Task #160: user-bound — a relationship credential, not a tradeable
+    // good. Blocked outright by checkPresentedAsset() below regardless of
+    // the fungible check that already excludes it today; this makes the
+    // exclusion an explicit, protocol-visible declaration rather than an
+    // accident of it not being fungible.
+    tradeScope: 'bound',
     properties: {
       'atlas.rarity': 'common',
       'com.example.tier': 'member',
@@ -326,10 +369,36 @@ const ASSET_CATALOG = {
     thumbnail: `https://${DOMAIN}/assets/badge.png`,
     fungible: false,
     presentation: 'document',
+    tradeScope: 'bound', // task #160 — same reasoning as atlas.membership above
     properties: {
       'atlas.rarity': 'common',
       'com.example.tier': 'postoffice-member',
       'com.example.issuedFor': 'global mail routing'
+    }
+  },
+  // Trading Station membership (task #144 Phase 1): the credential that
+  // gates POST /atlas/trade/submit the exact same way
+  // atlas.postoffice.membership gates POST /atlas/postoffice/send just
+  // above — holding one is what makes THIS domain willing to hold a
+  // wallet's trade intent as an open listing, pending whichever other
+  // member claims it (SPEC.md §7). Same one-click issuance path
+  // (`atlas.tradingstation.membership` is just
+  // another ASSET_CATALOG entry — no dedicated endpoint needed), same
+  // `tradeScope: 'bound'` reasoning as the other two membership cards
+  // above: a membership itself is a relationship, not a good, so it can
+  // never be the THING being traded even once trading UI generalizes
+  // beyond fungible classes.
+  'atlas.tradingstation.membership': {
+    name: `${DOMAIN} Trading Station Membership Card`,
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    thumbnail: `https://${DOMAIN}/assets/badge.png`,
+    fungible: false,
+    presentation: 'document',
+    tradeScope: 'bound',
+    properties: {
+      'atlas.rarity': 'common',
+      'com.example.tier': 'tradingstation-member',
+      'com.example.issuedFor': 'remote trade settlement'
     }
   },
   // Fungible classes (SPEC.md §5.4/§5.4.1: splittable, consolidatable,
@@ -358,6 +427,18 @@ const ASSET_CATALOG = {
     fungible: true,
     presentation: 'collectible',
     properties: { 'atlas.purity': '99.99%', 'atlas.state': 'solid', 'com.example.form': 'ingot' }
+  },
+  // Added alongside the market's new Mine Silver stall (v1.15) — same
+  // reused-art convention as iron/gold above, badge.glb/png again since a
+  // mid-tier metal reads closer to iron's "common, everyday-icon" feel than
+  // gold's already-rare signet ring.
+  'atlas.element.silver': {
+    name: 'Silver Ingot',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    thumbnail: `https://${DOMAIN}/assets/badge.png`,
+    fungible: true,
+    presentation: 'collectible',
+    properties: { 'atlas.purity': '99.9%', 'atlas.state': 'solid', 'com.example.source': 'Coastal Bazaar mine' }
   }
 };
 
@@ -563,6 +644,51 @@ function appendPostOfficeMember(entry) {
 function isValidPostOfficeMember(ownerPublicKey) {
   const doc = readPostOfficeMembers();
   return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId));
+}
+
+// Trading Station membership roster — same read/append shape as
+// readPostOfficeMembers/appendPostOfficeMember above. See
+// TRADINGSTATION_MEMBERS_FILE's own comment for why nothing currently
+// reads this back as a gate (that check is done per-request instead,
+// against the membership credential the caller actually presents).
+function readTradingStationMembers() {
+  if (!fs.existsSync(TRADINGSTATION_MEMBERS_FILE)) return { members: [] };
+  return JSON.parse(fs.readFileSync(TRADINGSTATION_MEMBERS_FILE, 'utf8'));
+}
+function appendTradingStationMember(entry) {
+  const doc = readTradingStationMembers();
+  doc.members.push(entry);
+  fs.writeFileSync(TRADINGSTATION_MEMBERS_FILE, JSON.stringify(doc, null, 2));
+}
+
+// Pending remote trade store — same read/append shape as the mail/asset-
+// update stores above, plus a remove (a settled or cancelled intent
+// shouldn't linger and be matchable again) and a prune (an expired one
+// should stop being matchable even if nobody's removed it yet). Pruning
+// happens lazily, on read, rather than on a timer — same "no background
+// sweep in this demo" simplicity as the rest of this file; the only place
+// staleness would matter is the matching check right after, which always
+// reads fresh via this function.
+function readPendingTrades() {
+  if (!fs.existsSync(PENDING_TRADES_FILE)) return { trades: [] };
+  const doc = JSON.parse(fs.readFileSync(PENDING_TRADES_FILE, 'utf8'));
+  const now = Date.now();
+  const live = doc.trades.filter((t) => new Date(t.intent.payload.expiresAt).getTime() >= now);
+  if (live.length !== doc.trades.length) {
+    doc.trades = live;
+    fs.writeFileSync(PENDING_TRADES_FILE, JSON.stringify(doc, null, 2));
+  }
+  return doc;
+}
+function appendPendingTrade(entry) {
+  const doc = readPendingTrades();
+  doc.trades.push(entry);
+  fs.writeFileSync(PENDING_TRADES_FILE, JSON.stringify(doc, null, 2));
+}
+function removePendingTrade(id) {
+  const doc = readPendingTrades();
+  doc.trades = doc.trades.filter((t) => t.id !== id);
+  fs.writeFileSync(PENDING_TRADES_FILE, JSON.stringify(doc, null, 2));
 }
 
 // Task #96 — records one successful send against the SENDER's own
@@ -806,6 +932,13 @@ async function main() {
       ...(catalogEntry.thumbnail ? { thumbnail: catalogEntry.thumbnail } : {}),
       fungible: catalogEntry.fungible,
       presentation: catalogEntry.presentation,
+      // Task #160: the third asset-level flag, always present (never
+      // conditionally omitted the way `properties` is) — same discipline
+      // fungible/presentation already get, since this is meant to be
+      // checked by exact name the same way they are. 'local' is the
+      // implicit default for any catalog entry that doesn't set its own
+      // (see ASSET_CATALOG's own comment on atlas.wearable).
+      tradeScope: catalogEntry.tradeScope || 'local',
       ...(Object.keys(properties).length ? { properties } : {})
     };
     return issueAsset(ownerPublicKey, asset, quantity, supersedes);
@@ -822,11 +955,35 @@ async function main() {
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
-    if (!credential.asset || credential.asset.fungible !== true) return 'asset class is not fungible — cannot split, consolidate, or trade a unique asset';
+    // Task #160: checked ahead of the fungible rejection below so a bound
+    // credential gets its own, clearer message rather than the generic
+    // "not fungible" one — true for every bound class today anyway (they're
+    // all fungible: false), but this is the real, deliberate reason
+    // they're excluded, not a side effect of that other check.
+    if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be split, consolidated, or traded';
+    if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot split, consolidate, or trade a unique asset';
     if (typeof credential.quantity !== 'number' || credential.quantity < minQuantity) return 'asset has insufficient quantity';
     if (isRevoked(credential.id)) return 'asset already revoked';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
+    return null;
+  }
+
+  // Task #144 Phase 1: a lighter check for a held MEMBERSHIP credential
+  // presented alongside a request (same shape POST /atlas/trade/submit
+  // needs for its "do you actually hold this domain's Trading Station
+  // card" gate) — deliberately NOT checkPresentedAsset above, since that
+  // function's fungible/minQuantity checks would reject every membership
+  // class outright (they're all fungible: false, quantity 1). Everything
+  // else is the same discipline: right shape, right owner, right class,
+  // not revoked, signature checks out against this issuer's own key.
+  async function checkPresentedMembership(credential, expectedOwner, expectedClass) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
+    if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'membership does not belong to this signer';
+    if (!credential.asset || credential.asset.class !== expectedClass) return 'membership is the wrong class';
+    if (isRevoked(credential.id)) return 'membership already revoked';
+    const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+    if (!ok) return 'membership signature does not check out';
     return null;
   }
 
@@ -847,7 +1004,7 @@ async function main() {
         if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
-          return sendJson(res, 400, { error: 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.element.iron, or atlas.element.gold.' });
+          return sendJson(res, 400, { error: 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.tradingstation.membership, atlas.element.iron, atlas.element.gold, or atlas.element.silver.' });
         }
 
         // fungible: true — quantity is caller-chosen and must be a positive
@@ -911,6 +1068,24 @@ async function main() {
           const welcomeSignature = await sign(welcomePayload);
           appendMail({ ...welcomePayload, signature: welcomeSignature });
           console.log('Post Office member logged + welcome mail queued for', credential.id);
+        }
+
+        // Trading Station (task #144 Phase 1) — same shape as Post Office
+        // just above: claiming this class IS joining, logged to its own
+        // roster, welcome mail addressed by this credential's own id so it
+        // arrives through the ordinary mail-check loop.
+        if (assetClass === 'atlas.tradingstation.membership') {
+          appendTradingStationMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
+          const welcomePayload = {
+            id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
+            credentialId: credential.id,
+            subject: 'Trading Station membership active',
+            body: 'You can now submit a remote trade intent to ' + DOMAIN + "'s Trading Station without standing at the stall — it'll hold your offer until a matching counterparty intent arrives.",
+            sentAt: new Date().toISOString()
+          };
+          const welcomeSignature = await sign(welcomePayload);
+          appendMail({ ...welcomePayload, signature: welcomeSignature });
+          console.log('Trading Station member logged + welcome mail queued for', credential.id);
         }
 
         return sendJson(res, 200, credential);
@@ -1029,55 +1204,183 @@ async function main() {
       // exactly what a fungible:false asset isn't (there's no quantity to
       // negotiate on a one-of-a-kind thing). checkPresentedAsset enforces
       // this the same way it does for split/consolidate above.
-      if (req.method === 'POST' && req.url === '/atlas/asset/trade') {
-        const { intentA, intentB, balanceA, balanceB } = JSON.parse((await readBody(req)) || '{}');
-        if (!intentA || !intentB || !balanceA || !balanceB) return sendJson(res, 400, { error: 'intentA, intentB, balanceA, balanceB are all required' });
 
-        // 1. Intent — each side's own signature over their own offer.
-        const okA = await verifyEnvelope(intentA.payload, intentA.proof);
-        const okB = await verifyEnvelope(intentB.payload, intentB.proof);
-        if (!okA) return sendJson(res, 400, { error: 'intentA signature does not check out' });
-        if (!okB) return sendJson(res, 400, { error: 'intentB signature does not check out' });
+      // Task #144 Phase 1 / v1.14 open listings (SPEC.md §7) — a visitor
+      // posts their own half of a trade to the station on its own, with NO
+      // counterparty named at all. Posting only ever queues — it never
+      // auto-settles against whatever else happens to be pending. That's a
+      // deliberate v1.14 change from this endpoint's original Phase 1 shape
+      // (which tried to match a fresh submission against a waiting
+      // counterparty-pinned intent): once a listing is meant to be publicly
+      // browsed and claimed by whoever wants it, silently settling it out
+      // from under a browsing buyer because of an unrelated submission
+      // elsewhere is exactly backwards. v1.15 removed this server's earlier
+      // §7 in-person mechanism (both signed intents arriving in the same
+      // call) entirely — this open-listing model is now the only path. See
+      // GET /atlas/trade/listings (browse) and POST
+      // /atlas/trade/claim (settle) below for the other two-thirds of this.
+      //
+      // Gated on holding this domain's atlas.tradingstation.membership,
+      // presented fresh with the request (checkPresentedMembership) — the
+      // same "prove you hold it, right now, signed" shape checkPresentedAsset
+      // already uses for the balance itself, not a server-side allow-list
+      // lookup (see TRADINGSTATION_MEMBERS_FILE's own comment on why).
+      if (req.method === 'POST' && req.url === '/atlas/trade/submit') {
+        const { membership, intent, balance } = JSON.parse((await readBody(req)) || '{}');
+        if (!membership || !intent || !balance) return sendJson(res, 400, { error: 'membership, intent, and balance are all required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
 
-        const pubA = intentA.proof.publicKey, pubB = intentB.proof.publicKey;
-        if (intentA.payload.counterparty !== pubB || intentB.payload.counterparty !== pubA) {
-          return sendJson(res, 400, { error: 'intents do not name each other as counterparty' });
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const selfPub = intent.proof.publicKey;
+
+        const membershipProblem = await checkPresentedMembership(membership, selfPub, 'atlas.tradingstation.membership');
+        if (membershipProblem) return sendJson(res, 400, { error: 'membership: ' + membershipProblem });
+
+        if (new Date(intent.payload.expiresAt).getTime() < Date.now()) return sendJson(res, 400, { error: 'intent has already expired' });
+
+        const offerSelf = intent.payload.offer, wantSelf = intent.payload.want;
+        const balanceProblem = await checkPresentedAsset(balance, selfPub, offerSelf.class, offerSelf.quantity);
+        if (balanceProblem) return sendJson(res, 400, { error: 'balance: ' + balanceProblem });
+
+        const pendingId = 'urn:atlas:trade:' + webcrypto.randomUUID();
+        appendPendingTrade({ id: pendingId, intent, balance, submittedAt: new Date().toISOString() });
+        console.log('Listing posted:', offerSelf.quantity, offerSelf.class, '-> wants', wantSelf.quantity, wantSelf.class);
+        return sendJson(res, 200, { status: 'pending', pendingId, expiresAt: intent.payload.expiresAt });
+      }
+
+      // v1.14 (SPEC.md §7) — browse this station's own open, unexpired
+      // listings. Deliberately ungated: reading reveals nothing a poster
+      // didn't already choose to make public by posting (offer, want, and
+      // their own public key — exactly what a prospective buyer needs),
+      // the same "read is open, write is gated" asymmetry Post Office's
+      // own inbox-check already has against its send. readPendingTrades()
+      // already lazily prunes anything expired, so nothing extra is needed
+      // here beyond shaping each entry for a browsing client.
+      if (req.method === 'GET' && req.url === '/atlas/trade/listings') {
+        const pendingDoc = readPendingTrades();
+        const listings = pendingDoc.trades.map((t) => ({
+          pendingId: t.id,
+          posterPublicKey: t.intent.proof.publicKey,
+          offer: t.intent.payload.offer,
+          want: t.intent.payload.want,
+          expiresAt: t.intent.payload.expiresAt
+        }));
+        return sendJson(res, 200, { listings });
+      }
+
+      // v1.14 (SPEC.md §7) — fulfill one specific open listing by id.
+      // Same Intent/Settle discipline §7 already uses, just triggered by a
+      // claim naming a listing instead of a live-matched pair arriving
+      // together. Delivery to the poster (not live for this call) reuses
+      // the same two mechanisms this codebase already has, unmodified: a
+      // REMAINDER credential supersedes the old balance id, so it arrives
+      // "for free" the next time that wallet's own /atlas/mail/check asks
+      // about that (still-held, not-yet-superseded) id — see
+      // appendAssetUpdate below, consumed by wallet.js's processAssetUpdates
+      // exactly like a reissue. A newly RECEIVED credential (of a class the
+      // poster may never have held before, so there's no old id for it to
+      // supersede) is instead attached to a system mail message addressed
+      // to that same old balance id — task #59's existing, tested
+      // gift-claim path (wallet.js's claimMailGift) already knows how to
+      // absorb an already-fully-signed credential from a mail attachment,
+      // so nothing new is needed on the receiving end at all. The claimant
+      // is by definition live for this call, so their own side applies
+      // directly in the response — no mail round-trip needed for them.
+      if (req.method === 'POST' && req.url === '/atlas/trade/claim') {
+        const { pendingId, membership, intent, balance } = JSON.parse((await readBody(req)) || '{}');
+        if (!pendingId || !membership || !intent || !balance) return sendJson(res, 400, { error: 'pendingId, membership, intent, and balance are all required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const claimantPub = intent.proof.publicKey;
+
+        const membershipProblem = await checkPresentedMembership(membership, claimantPub, 'atlas.tradingstation.membership');
+        if (membershipProblem) return sendJson(res, 400, { error: 'membership: ' + membershipProblem });
+
+        if (new Date(intent.payload.expiresAt).getTime() < Date.now()) return sendJson(res, 400, { error: 'intent has already expired' });
+
+        const pendingDoc = readPendingTrades();
+        const posted = pendingDoc.trades.find((t) => t.id === pendingId);
+        if (!posted) return sendJson(res, 404, { error: 'listing not found — already claimed, withdrawn, or expired' });
+
+        const posterPub = posted.intent.proof.publicKey;
+        const offerA = posted.intent.payload.offer, wantA = posted.intent.payload.want;
+        const balanceA = posted.balance;
+        const offerB = intent.payload.offer, wantB = intent.payload.want, balanceB = balance;
+
+        // Mirror check — the claimant's offer/want must exactly match what
+        // this listing wants/offers, same shape §7's own Match step uses.
+        if (offerB.class !== wantA.class || offerB.quantity !== wantA.quantity ||
+            wantB.class !== offerA.class || wantB.quantity !== offerA.quantity) {
+          return sendJson(res, 400, { error: 'your intent does not mirror this listing\'s offer/want' });
         }
-        if (new Date(intentA.payload.expiresAt).getTime() < Date.now() || new Date(intentB.payload.expiresAt).getTime() < Date.now()) {
-          return sendJson(res, 400, { error: 'an intent has expired' });
+
+        const claimantBalanceProblem = await checkPresentedAsset(balanceB, claimantPub, offerB.class, offerB.quantity);
+        if (claimantBalanceProblem) return sendJson(res, 400, { error: 'balance: ' + claimantBalanceProblem });
+
+        // Re-checks the poster's own balance fresh (not just trusted from
+        // when it was posted) in case it was since spent or revoked some
+        // other way.
+        const posterBalanceProblem = await checkPresentedAsset(balanceA, posterPub, offerA.class, offerA.quantity);
+        if (posterBalanceProblem) {
+          removePendingTrade(posted.id); // no longer honorable — drop it rather than leave a dead listing others keep trying to claim
+          return sendJson(res, 400, { error: 'the poster\'s balance no longer checks out (' + posterBalanceProblem + ') — listing withdrawn' });
         }
-
-        // 2. Match — do the two offers actually mirror each other?
-        const offerA = intentA.payload.offer, wantA = intentA.payload.want;
-        const offerB = intentB.payload.offer, wantB = intentB.payload.want;
-        const mirrors = offerA.class === wantB.class && offerA.quantity === wantB.quantity &&
-                         offerB.class === wantA.class && offerB.quantity === wantA.quantity;
-        if (!mirrors) return sendJson(res, 400, { error: 'intents do not mirror — offer/want mismatch' });
-
-        // 3. Settle — check both presented balances actually cover the offer (and are fungible), then issue.
-        const probA = await checkPresentedAsset(balanceA, pubA, offerA.class, offerA.quantity);
-        if (probA) return sendJson(res, 400, { error: 'balanceA: ' + probA });
-        const probB = await checkPresentedAsset(balanceB, pubB, offerB.class, offerB.quantity);
-        if (probB) return sendJson(res, 400, { error: 'balanceB: ' + probB });
 
         const remainderA = balanceA.quantity - offerA.quantity;
         const remainderB = balanceB.quantity - offerB.quantity;
-
         const [aRemainder, aReceived, bRemainder, bReceived] = await Promise.all([
-          remainderA > 0 ? mintAssetByClass(pubA, offerA.class, remainderA, balanceA.id) : Promise.resolve(null),
-          mintAssetByClass(pubA, wantA.class, wantA.quantity, balanceA.id),
-          remainderB > 0 ? mintAssetByClass(pubB, offerB.class, remainderB, balanceB.id) : Promise.resolve(null),
-          mintAssetByClass(pubB, wantB.class, wantB.quantity, balanceB.id)
+          remainderA > 0 ? mintAssetByClass(posterPub, offerA.class, remainderA, balanceA.id) : Promise.resolve(null),
+          mintAssetByClass(posterPub, wantA.class, wantA.quantity, balanceA.id),
+          remainderB > 0 ? mintAssetByClass(claimantPub, offerB.class, remainderB, balanceB.id) : Promise.resolve(null),
+          mintAssetByClass(claimantPub, wantB.class, wantB.quantity, balanceB.id)
         ]);
-
-        // 4. Atomicity — both sides' pre-trade balances are only revoked
-        // once every new credential above has actually been signed, so a
-        // failure earlier in this handler leaves nothing settled at all.
         revoke(balanceA.id, 'superseded');
         revoke(balanceB.id, 'superseded');
+        removePendingTrade(posted.id);
 
-        console.log('Settled trade:', offerA.quantity, offerA.class, '<->', offerB.quantity, offerB.class);
-        return sendJson(res, 200, { aRemainder, aReceived, bRemainder, bReceived });
+        if (aRemainder) appendAssetUpdate({ id: balanceA.id, status: 'superseded', reason: 'superseded', newCredential: aRemainder });
+        const noticePayload = {
+          id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
+          credentialId: balanceA.id,
+          subject: 'Listing claimed at ' + DOMAIN,
+          body: `Your open listing of ${offerA.quantity} ${offerA.class} for ${wantA.quantity} ${wantA.class} was claimed while you were away.`,
+          attachedAsset: aReceived,
+          sentAt: new Date().toISOString()
+        };
+        const noticeSignature = await sign(noticePayload);
+        appendMail({ ...noticePayload, signature: noticeSignature });
+
+        console.log('Listing claimed:', offerA.quantity, offerA.class, '<->', offerB.quantity, offerB.class, '(poster notified by mail)');
+        return sendJson(res, 200, { status: 'settled', remainder: bRemainder, received: bReceived });
+      }
+
+      // v1.14 (SPEC.md §7) — a poster withdraws their own still-open
+      // listing. Authorized the same way any other signed action in this
+      // spec is: a small envelope over {pendingId, action:'cancel'},
+      // accepted only when the signing key matches the listing's own
+      // poster. Nothing to withdraw from a listing that's already been
+      // claimed or expired — readPendingTrades() has already dropped the
+      // latter by the time this looks it up.
+      if (req.method === 'POST' && req.url === '/atlas/trade/cancel') {
+        const { pendingId, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!pendingId || !intent) return sendJson(res, 400, { error: 'pendingId and intent are both required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.pendingId !== pendingId || intent.payload.action !== 'cancel') return sendJson(res, 400, { error: 'intent does not authorize canceling this listing' });
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+
+        const pendingDoc = readPendingTrades();
+        const posted = pendingDoc.trades.find((t) => t.id === pendingId);
+        if (!posted) return sendJson(res, 404, { error: 'listing not found — already claimed, withdrawn, or expired' });
+        if (posted.intent.proof.publicKey !== intent.proof.publicKey) return sendJson(res, 403, { error: 'only the original poster can withdraw this listing' });
+
+        removePendingTrade(pendingId);
+        console.log('Listing withdrawn:', posted.intent.payload.offer.quantity, posted.intent.payload.offer.class);
+        return sendJson(res, 200, { status: 'canceled' });
       }
 
       // --- mail (correspondence tied to a held credential — see task
@@ -1116,7 +1419,7 @@ async function main() {
           if (!giftOwnerPublicKey) return sendJson(res, 400, { error: 'giftOwnerPublicKey is required when giftAssetClass is set' });
           const catalogEntry = ASSET_CATALOG[giftAssetClass];
           if (!catalogEntry) {
-            return sendJson(res, 400, { error: 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, or atlas.element.gold.' });
+            return sendJson(res, 400, { error: 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, atlas.element.gold, or atlas.element.silver.' });
           }
           // Same fungible/quantity validation as /atlas/asset/issue above.
           let mintQuantity;
@@ -1208,11 +1511,11 @@ async function main() {
       // same way the recipient doesn't need to be standing here to receive.
       // Three checks, in order:
       // 1. Sender authentication — verifyEnvelope(payload, proof), the same
-      //    self-signed-envelope check /atlas/asset/trade already uses for
-      //    intents. proof.publicKey, once verified, IS the sender's
-      //    identity — no separate "from" field in the signed payload is
-      //    needed for that, same reasoning trade's intentA/intentB already
-      //    rely on (see the comment there).
+      //    self-signed-envelope check /atlas/trade/submit and /claim already
+      //    use for their own intents. proof.publicKey, once verified, IS the
+      //    sender's identity — no separate "from" field in the signed
+      //    payload is needed for that, same reasoning a trade intent's own
+      //    signer identity already relies on (SPEC.md §7).
       // 2. Sender membership — isValidPostOfficeMember(proof.publicKey)
       //    against THIS domain's own roster. This is what makes "send
       //    through this Post Office" mean something: it's not an open

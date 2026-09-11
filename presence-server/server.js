@@ -276,7 +276,13 @@ function addMember(connId, domainRaw, worldRaw, nameRaw, publicKeyRaw, extra) {
   // 'poll' member (no persistent connection to push down) — drained and
   // returned on their next /presence/poll/sync. Harmless but unused on a
   // 'ws' member, who gets signals pushed immediately instead.
-  const member = Object.assign({ name, publicKey, x: 0, y: 0, z: 0, yaw: 0, pendingSignals: [] }, extra);
+  // lastActivityAt (task #137) starts at join time and is bumped only by
+  // REAL activity afterward — see moveMember's own change-detection,
+  // sendChatMessage, and noteActivity() below — never just by the passage
+  // of a heartbeat/sync tick the way `lastSeen` is. It's what lets a
+  // second join under the same identity tell "still genuinely here" apart
+  // from "tab's been open and idle for ages."
+  const member = Object.assign({ name, publicKey, x: 0, y: 0, z: 0, yaw: 0, pendingSignals: [], lastActivityAt: Date.now() }, extra);
   room.set(connId, member);
   connIndex.set(connId, { roomKey, room });
 
@@ -285,6 +291,241 @@ function addMember(connId, domainRaw, worldRaw, nameRaw, publicKeyRaw, extra) {
   // rather than something worth extra protocol complexity to avoid.
   broadcast(room, connId, { type: 'joined', id: connId, name, publicKey, x: 0, y: 0, z: 0, yaw: 0 });
   return { roomKey, room, roster };
+}
+
+// ---------- duplicate-identity join guard (task #137) ----------
+//
+// addMember() above is the low-level "just add this connId as a room
+// member" primitive — it has no opinion about whether this identity is
+// already present. This section adds that opinion on top of it, without
+// changing addMember() itself, so every existing caller keeps working
+// unchanged; requestJoin() further down is the new entry point every join
+// path (WS and poll alike) calls instead.
+//
+// Two timers, two different jobs:
+//   - ACTIVITY_IDLE_MS: how long a member can go without REAL activity
+//     (movement, chat, or an explicit activity ping — see noteActivity()
+//     below) before a second join under the same publicKey is allowed to
+//     just silently replace them, no questions asked — they're presumed
+//     an abandoned tab, not someone actually here.
+//   - DUPLICATE_JOIN_COUNTDOWN_MS: once a second join DOES trigger a
+//     prompt (the existing member was recently active), how long that
+//     existing member gets to explicitly respond (Leave now / Keep this
+//     session active) before the newcomer wins by default — an
+//     unresponsive session is usually just a backgrounded tab, and
+//     blocking real re-entry indefinitely would be worse than letting it
+//     through.
+// Both env-overridable, same convention as POLL_TIMEOUT_MS above, so a
+// test isn't stuck actually waiting out 20 real minutes or 60 real
+// seconds.
+const ACTIVITY_IDLE_MS = Number(process.env.ACTIVITY_IDLE_MS) || 20 * 60 * 1000;
+const DUPLICATE_JOIN_COUNTDOWN_MS = Number(process.env.DUPLICATE_JOIN_COUNTDOWN_MS) || 60000;
+// How long a RESOLVED challenge's outcome stays available for a
+// poll-transport new joiner's /presence/poll/join-status to pick up
+// before the sweep below drops it — long enough to tolerate a couple of
+// missed/slow polls, same reasoning POLL_TIMEOUT_MS already gives the
+// staleness sweep.
+const CHALLENGE_RESULT_GRACE_MS = 30000;
+
+function isMemberActive(member) {
+  return Date.now() - (member.lastActivityAt || 0) <= ACTIVITY_IDLE_MS;
+}
+
+// Bumps a member's own activity clock. Called for real movement (see
+// moveMember's own change-detection), an in-world chat send (see
+// sendChatMessage), and an explicit ping from the client for anything
+// else worth counting — wallet activity (minting, trading, splitting,
+// etc.) in particular, since extension/wallet.js has no visibility into
+// presence at all; viewer.js relays that as a deliberate ping instead
+// (the 'activity' WS message type and /presence/poll/activity route
+// below). Safe to call on an id that isn't actually joined (no-op).
+function noteActivity(connId) {
+  const loc = connIndex.get(connId);
+  if (!loc) return;
+  const member = loc.room.get(connId);
+  if (member) member.lastActivityAt = Date.now();
+}
+
+// Linear scan rather than a publicKey->connId index — the number of
+// members in any one room is expected to stay small (a demo-scale
+// prototype, per this file's own top-of-file scope note), and this only
+// runs on a join, not on every move/sync tick.
+function findMemberByPublicKey(room, publicKey) {
+  if (!publicKey) return null; // anonymous visitors never dedupe against anyone — nothing to correlate
+  for (const [connId, member] of room) {
+    if (member.publicKey === publicKey) return [connId, member];
+  }
+  return null;
+}
+
+// challengeId -> { roomKey, existingConnId, newJoin, createdAt,
+// resolvedAt, resolution, timer }. newJoin is { connId, domain, world,
+// name, publicKey, extra, onResolved }: onResolved is set only when the
+// new joiner is itself a still-open WS connection waiting on the
+// outcome — it lets resolveChallenge() call straight back into that
+// connection's own handleConnection() closure (so its `joined` flag gets
+// set correctly the moment a pending join actually completes, not just
+// have a message pushed down the wire with nothing local to show for
+// it). A poll-transport new joiner has no such callback; it finds out
+// via /presence/poll/join-status instead.
+const duplicateJoinChallenges = new Map();
+
+// Task #139 — lets /presence/poll/sync's 404 handler tell a poll client
+// WHY its id no longer exists, so it can decide whether auto-rejoining is
+// safe. connId -> an expiry timestamp (reusing CHALLENGE_RESULT_GRACE_MS's
+// window, same reasoning: long enough that a slow/throttled tab's next
+// poll still finds the tag, short enough not to grow unbounded — swept
+// alongside duplicateJoinChallenges itself below). Populated only by
+// resolveChallenge()'s 'yield' branch, evicting the LOSING side of a
+// duplicate-join challenge — that is the one eviction reason where
+// auto-rejoining would be actively harmful (it would just re-trigger a
+// fresh challenge against whoever just won, fighting forever). Every
+// OTHER reason a poll id can go missing (the plain staleness sweep below,
+// most commonly triggered by a backgrounded tab's setInterval getting
+// throttled well past POLL_TIMEOUT_MS — see that route's own comment) is
+// safe to silently self-heal from, since nothing else is contesting that
+// identity.
+const recentDuplicateJoinLosses = new Map();
+
+function notifyMemberOfSignal(member, payload) {
+  if (member.transport === 'ws') sendText(member.socket, payload);
+  else member.pendingSignals.push(payload);
+}
+
+// Creates a challenge, notifies the existing member (instant if WS, next
+// poll sync if polling — same delivery path signals like friend-requests
+// already use), and schedules the default (newcomer-wins) outcome for if
+// nobody ever responds. Assumes the caller already confirmed the existing
+// member is worth asking (see requestJoin below) — doesn't re-check that
+// itself.
+function createDuplicateJoinChallenge(roomKey, existingConnId, newJoin) {
+  const challengeId = crypto.randomBytes(8).toString('hex');
+  const challenge = {
+    challengeId, roomKey, existingConnId, newJoin,
+    createdAt: Date.now(), resolvedAt: null, resolution: null, timer: null
+  };
+  challenge.timer = setTimeout(() => resolveChallenge(challengeId, 'yield'), DUPLICATE_JOIN_COUNTDOWN_MS);
+  duplicateJoinChallenges.set(challengeId, challenge);
+
+  const loc = connIndex.get(existingConnId);
+  const existingMember = loc && loc.room.get(existingConnId);
+  if (existingMember) {
+    notifyMemberOfSignal(existingMember, {
+      type: 'signal', kind: 'duplicate-join-request',
+      challengeId, countdownMs: DUPLICATE_JOIN_COUNTDOWN_MS
+    });
+  }
+  return challengeId;
+}
+
+// 'yield' — the existing member either explicitly clicked Leave, the
+// countdown ran out with no response (the default outcome), or they left
+// the room on their own for an unrelated reason in the meantime (see
+// resolveAnyChallengeWaitingOnExisting below): evict them, reusing
+// removeMember() so their room's peers see the normal 'left' broadcast,
+// and complete the newcomer's join. 'keep' — the existing member
+// explicitly chose to stay: the newcomer's join is denied outright,
+// nothing about the existing member changes. No-op if this challenge is
+// unknown or already resolved, so a redundant call (e.g. both the
+// countdown timer and an explicit response racing each other) is safe.
+function resolveChallenge(challengeId, decision) {
+  const challenge = duplicateJoinChallenges.get(challengeId);
+  if (!challenge || challenge.resolvedAt) return;
+  clearTimeout(challenge.timer);
+  challenge.resolvedAt = Date.now();
+
+  const { existingConnId, newJoin } = challenge;
+
+  if (decision === 'keep') {
+    challenge.resolution = { status: 'denied' };
+    if (newJoin.onResolved) newJoin.onResolved(challenge.resolution);
+    return;
+  }
+
+  // decision === 'yield'. Explicit notice before eviction (WS existing
+  // member only — a poll member finds out the same way any other
+  // silently-evicted poll session does, via its own next
+  // /presence/poll/sync coming back 404, which the client surfaces
+  // instead of swallowing — see pollPresence()'s own fix in viewer.js).
+  const existingLoc = connIndex.get(existingConnId);
+  const existingMember = existingLoc && existingLoc.room.get(existingConnId);
+  if (existingMember && existingMember.transport === 'ws') {
+    sendText(existingMember.socket, { type: 'signal', kind: 'duplicate-join-lost', challengeId });
+  }
+  // Task #139 — tag this eviction so the poll-transport /presence/poll/sync
+  // route can tell the losing side's client WHY its id just went missing,
+  // even though (unlike the WS branch just above) there's no push channel
+  // to tell it directly — see recentDuplicateJoinLosses's own comment.
+  recentDuplicateJoinLosses.set(existingConnId, Date.now() + CHALLENGE_RESULT_GRACE_MS);
+  removeMember(existingConnId); // safe no-op if they already left on their own in the meantime
+
+  const result = addMember(newJoin.connId, newJoin.domain, newJoin.world, newJoin.name, newJoin.publicKey, newJoin.extra);
+  challenge.resolution = result ? { status: 'joined', id: newJoin.connId, roster: result.roster } : { status: 'denied' };
+  if (newJoin.onResolved) newJoin.onResolved(challenge.resolution);
+}
+
+// If the member who just left (normally, or swept for inactivity, or
+// evicted by an unrelated duplicate-join challenge of their own) was the
+// EXISTING half of a still-pending challenge, there's nothing left to
+// wait for — resolve it immediately as 'yield' instead of leaving that
+// challenge's newcomer waiting out the rest of a countdown for someone
+// who's already gone. Called from removeMember() itself, so this covers
+// every eviction path (explicit leave, staleness sweep, WS close/error,
+// another challenge's own 'yield') in one place.
+function resolveAnyChallengeWaitingOnExisting(connId) {
+  duplicateJoinChallenges.forEach((challenge, challengeId) => {
+    if (!challenge.resolvedAt && challenge.existingConnId === connId) resolveChallenge(challengeId, 'yield');
+  });
+}
+
+// Mirror of the above for the NEW-joiner side: if whoever was waiting on
+// a challenge disconnects before it resolves (closed the tab, gave up),
+// the challenge is moot — cancel it outright rather than let its timer
+// fire later and add a member for a connection that's already gone. Only
+// meaningful for a WS new joiner (`onResolved` set) — a poll-transport
+// pending join has no persistent connection to hook a disconnect to in
+// the first place, so it's simply left to resolve normally and the
+// eventual /presence/poll/join-status call for it just never comes.
+function cancelPendingChallengeForNewJoiner(connId) {
+  duplicateJoinChallenges.forEach((challenge, challengeId) => {
+    if (!challenge.resolvedAt && challenge.newJoin.connId === connId && challenge.newJoin.onResolved) {
+      clearTimeout(challenge.timer);
+      duplicateJoinChallenges.delete(challengeId);
+    }
+  });
+}
+
+// The dedupe-aware entry point every join path (WS and poll alike) calls
+// instead of addMember() directly. `onResolved(resolution)` is provided
+// only by the WS join handler (see its own comment); poll callers omit
+// it and instead learn the outcome via /presence/poll/join-status.
+// Returns one of:
+//   {ok:false}                                            — invalid domain/world
+//   {ok:true, immediate:true, roomKey, room, roster}       — joined right now (addMember's own shape)
+//   {ok:true, immediate:false, challengeId, countdownMs}   — pending, ask again later
+function requestJoin(connId, domainRaw, worldRaw, nameRaw, publicKeyRaw, extra, onResolved) {
+  const domain = String(domainRaw || '').slice(0, MAX_ID_LEN);
+  const world = String(worldRaw || '').slice(0, MAX_ID_LEN);
+  if (!domain || !world) return { ok: false };
+  const publicKey = publicKeyRaw ? String(publicKeyRaw).slice(0, MAX_PUBLIC_KEY_LEN) : null;
+  const roomKey = roomKeyFor(domain, world);
+  const room = getOrCreateRoom(roomKey);
+
+  const existing = findMemberByPublicKey(room, publicKey);
+  if (existing) {
+    const [existingConnId, existingMember] = existing;
+    if (isMemberActive(existingMember)) {
+      const name = String(nameRaw || 'Visitor').slice(0, MAX_NAME_LEN);
+      const challengeId = createDuplicateJoinChallenge(roomKey, existingConnId, {
+        connId, domain, world, name, publicKey, extra, onResolved: onResolved || null
+      });
+      return { ok: true, immediate: false, challengeId, countdownMs: DUPLICATE_JOIN_COUNTDOWN_MS };
+    }
+    removeMember(existingConnId); // stale — nothing worth asking about, just take the slot
+  }
+
+  const result = addMember(connId, domain, world, nameRaw, publicKeyRaw, extra);
+  return result ? { ok: true, immediate: true, roomKey: result.roomKey, room: result.room, roster: result.roster } : { ok: false };
 }
 
 // Relays a signal from fromConnId to toConnId, but ONLY if both are
@@ -325,6 +566,7 @@ function removeMember(connId) {
   loc.room.delete(connId);
   broadcast(loc.room, connId, { type: 'left', id: connId });
   if (loc.room.size === 0) rooms.delete(loc.roomKey);
+  resolveAnyChallengeWaitingOnExisting(connId); // task #137 — see that function's own comment
 }
 
 // Shared move path: validates and applies a position update for an
@@ -338,7 +580,13 @@ function moveMember(connId, x, y, z, yaw) {
   if (!member) return false;
   if (![x, y, z, yaw].every(isFiniteNumber)) return false;
   if (Math.abs(x) > MAX_COORD || Math.abs(y) > MAX_COORD || Math.abs(z) > MAX_COORD) return false;
+  // Task #137's activity clock only counts a REAL change — a poll
+  // member's sync tick reports its current pose every 2s regardless of
+  // whether it moved at all, and that repetition shouldn't look like
+  // activity (see isMemberActive() / ACTIVITY_IDLE_MS above).
+  const actuallyMoved = member.x !== x || member.y !== y || member.z !== z || member.yaw !== yaw;
   member.x = x; member.y = y; member.z = z; member.yaw = yaw;
+  if (actuallyMoved) member.lastActivityAt = Date.now();
   broadcast(loc.room, connId, { type: 'moved', id: connId, x, y, z, yaw });
   return true;
 }
@@ -524,6 +772,19 @@ function sendChatMessage(connId, textRaw) {
   member.cursor = seq;
 
   broadcastChat(loc.room, { type: 'chat-message', message });
+
+  // Task #137's activity clock: a chat send counts as activity for this
+  // same identity's PRESENCE-room membership too, if it has one — chat
+  // and presence are deliberately separate room concepts (see this
+  // section's own header comment above), so this is a lookup by
+  // publicKey against the presence room for member.world, not a shared
+  // connId (a poll-transport visitor gets a different connId for each).
+  if (member.publicKey) {
+    const presenceRoom = rooms.get(roomKeyFor(loc.domain, member.world));
+    const found = presenceRoom && findMemberByPublicKey(presenceRoom, member.publicKey);
+    if (found) found[1].lastActivityAt = Date.now();
+  }
+
   return { ok: true, message };
 }
 
@@ -578,7 +839,7 @@ function handleConnection(socket) {
   attachFrameReader(socket, {
     onPing: (payload) => writeFrame(socket, OP_PONG, payload),
     onPong: () => { alive = true; },
-    onClose: () => { leaveRoom(); leaveChat(); sendClose(socket); },
+    onClose: () => { leaveRoom(); leaveChat(); cancelPendingChallengeForNewJoiner(connId); sendClose(socket); },
     onMessage: (text) => {
       let msg;
       try { msg = JSON.parse(text); } catch (err) { return; } // malformed JSON — ignore, don't drop the connection over it
@@ -586,10 +847,27 @@ function handleConnection(socket) {
 
       if (msg.type === 'join') {
         if (joined) return; // one join per connection
-        const result = addMember(connId, msg.domain, msg.world, msg.name, msg.publicKey, { transport: 'ws', socket });
-        if (!result) return;
-        joined = true;
-        sendText(socket, { type: 'welcome', id: connId, roster: result.roster });
+        // Task #137 — requestJoin() may not settle this immediately: if
+        // the same identity is already active elsewhere in this room, it
+        // holds this as a pending challenge instead. onResolved is how
+        // this connection's OWN `joined` flag gets set correctly once
+        // that eventually settles (favorably or not) — a plain pushed
+        // message wouldn't touch this closure's local state at all.
+        const result = requestJoin(connId, msg.domain, msg.world, msg.name, msg.publicKey, { transport: 'ws', socket }, (resolution) => {
+          if (resolution.status === 'joined') {
+            joined = true;
+            sendText(socket, { type: 'welcome', id: connId, roster: resolution.roster });
+          } else {
+            sendText(socket, { type: 'join-denied' });
+          }
+        });
+        if (!result.ok) return;
+        if (result.immediate) {
+          joined = true;
+          sendText(socket, { type: 'welcome', id: connId, roster: result.roster });
+        } else {
+          sendText(socket, { type: 'join-pending', challengeId: result.challengeId, countdownMs: result.countdownMs });
+        }
         return;
       }
 
@@ -609,6 +887,30 @@ function handleConnection(socket) {
         // it worked when the relay itself (or its reply) arrives.
         if (!joined) return;
         relaySignal(connId, msg.to, msg.kind, msg.publicKey, msg.name);
+        return;
+      }
+
+      if (msg.type === 'activity') {
+        // Task #137 — explicit activity ping for anything the server has
+        // no other way to observe (wallet actions in particular — see
+        // noteActivity()'s own comment). Silently ignored if not joined.
+        if (!joined) return;
+        noteActivity(connId);
+        return;
+      }
+
+      if (msg.type === 'duplicate-join-response') {
+        // Task #137 — this connection is the EXISTING half of a pending
+        // challenge, responding to the notice it was pushed. Only
+        // meaningful while actually joined, and only for a challenge
+        // that's really waiting on THIS connection — resolveChallenge()
+        // itself is also idempotent, but this check keeps a stray/late
+        // message from some other challenge from doing anything here.
+        if (!joined) return;
+        const challenge = duplicateJoinChallenges.get(String(msg.challengeId || ''));
+        if (challenge && challenge.existingConnId === connId) {
+          resolveChallenge(challenge.challengeId, msg.decision === 'keep' ? 'keep' : 'yield');
+        }
         return;
       }
 
@@ -638,14 +940,14 @@ function handleConnection(socket) {
     }
   });
 
-  socket.on('close', () => { leaveRoom(); leaveChat(); });
-  socket.on('error', () => { leaveRoom(); leaveChat(); });
+  socket.on('close', () => { leaveRoom(); leaveChat(); cancelPendingChallengeForNewJoiner(connId); });
+  socket.on('error', () => { leaveRoom(); leaveChat(); cancelPendingChallengeForNewJoiner(connId); });
 
   // Heartbeat: catches connections that went dead without a clean TCP
   // close (a laptop put to sleep with the tab open is the common real
   // case) so they don't linger in a room's roster forever.
   const heartbeat = setInterval(() => {
-    if (!alive) { clearInterval(heartbeat); try { socket.destroy(); } catch (err) {} leaveRoom(); return; }
+    if (!alive) { clearInterval(heartbeat); try { socket.destroy(); } catch (err) {} leaveRoom(); cancelPendingChallengeForNewJoiner(connId); return; }
     alive = false;
     try { writeFrame(socket, OP_PING, Buffer.alloc(0)); } catch (err) {}
   }, HEARTBEAT_MS);
@@ -683,6 +985,22 @@ setInterval(() => {
     if (member && member.transport === 'poll' && now - member.lastSeen > POLL_TIMEOUT_MS) {
       leaveChatRoom(connId);
     }
+  });
+  // Task #137 — drop RESOLVED challenges once no poll-transport new
+  // joiner is likely to still be asking about them (CHALLENGE_RESULT_GRACE_MS
+  // past resolution). A challenge that's still pending is left alone here
+  // entirely — its own setTimeout (createDuplicateJoinChallenge) is what
+  // guarantees it eventually resolves, this sweep only ever cleans up
+  // after that already happened.
+  duplicateJoinChallenges.forEach((challenge, challengeId) => {
+    if (challenge.resolvedAt && now - challenge.resolvedAt > CHALLENGE_RESULT_GRACE_MS) {
+      duplicateJoinChallenges.delete(challengeId);
+    }
+  });
+  // Task #139 — same grace-period cleanup for recentDuplicateJoinLosses;
+  // each entry stores its own already-computed expiry timestamp.
+  recentDuplicateJoinLosses.forEach((expiresAt, connId) => {
+    if (now > expiresAt) recentDuplicateJoinLosses.delete(connId);
   });
 }, POLL_SWEEP_INTERVAL_MS);
 
@@ -724,18 +1042,70 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/presence/poll/join') {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = crypto.randomBytes(8).toString('hex');
-      const result = addMember(connId, body.domain, body.world, body.name, body.publicKey, { transport: 'poll', lastSeen: Date.now() });
-      if (!result) return sendJson(res, 400, { error: 'domain and world are required' });
-      return sendJson(res, 200, { id: connId, roster: result.roster });
+      // Task #137 — requestJoin() (not addMember() directly) so the same
+      // dedupe-by-publicKey guard applies to polling joiners, not just
+      // WS ones. No onResolved callback here — a poll transport has no
+      // persistent connection to call back into, so a 'pending' outcome
+      // is picked up by this same connId polling /presence/poll/join-status
+      // instead (see that route below).
+      const result = requestJoin(connId, body.domain, body.world, body.name, body.publicKey, { transport: 'poll', lastSeen: Date.now() });
+      if (!result.ok) return sendJson(res, 400, { error: 'domain and world are required' });
+      if (result.immediate) return sendJson(res, 200, { id: connId, roster: result.roster });
+      return sendJson(res, 200, { status: 'pending', id: connId, challengeId: result.challengeId, countdownMs: result.countdownMs });
+    }
+
+    // Task #137 — a poll-transport new joiner whose /presence/poll/join
+    // came back {status:'pending', ...} calls this to find out how the
+    // challenge eventually settled. Returns {status:'pending'} again if
+    // it hasn't yet, or the same {status:'joined', id, roster} /
+    // {status:'denied'} shape resolveChallenge() itself produces.
+    if (req.method === 'POST' && req.url === '/presence/poll/join-status') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const challenge = duplicateJoinChallenges.get(String(body.challengeId || ''));
+      if (!challenge) return sendJson(res, 404, { error: 'unknown or expired challenge' });
+      if (!challenge.resolvedAt) return sendJson(res, 200, { status: 'pending' });
+      return sendJson(res, 200, challenge.resolution);
+    }
+
+    // Task #137 — the EXISTING member's explicit answer (Leave now / Keep
+    // this session active) to a duplicate-join-request notice, polling
+    // transport. `id` must be the challenge's own existingConnId — same
+    // "prove you're really the one being asked" check the WS side's
+    // 'duplicate-join-response' message handler applies.
+    if (req.method === 'POST' && req.url === '/presence/poll/duplicate-response') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const connId = String(body.id || '');
+      const challenge = duplicateJoinChallenges.get(String(body.challengeId || ''));
+      if (!challenge || challenge.existingConnId !== connId) return sendJson(res, 404, { error: 'unknown or expired challenge' });
+      resolveChallenge(challenge.challengeId, body.decision === 'keep' ? 'keep' : 'yield');
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // Task #137 — explicit activity ping, polling transport (see
+    // noteActivity()'s own comment for what this is for — wallet activity
+    // in particular, which the presence server has no other way to see).
+    if (req.method === 'POST' && req.url === '/presence/poll/activity') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const connId = String(body.id || '');
+      if (!connIndex.get(connId)) return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin' });
+      noteActivity(connId);
+      return sendJson(res, 200, { ok: true });
     }
 
     if (req.method === 'POST' && req.url === '/presence/poll/sync') {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = String(body.id || '');
+      // Task #139 — tells the client WHY, if this id turns out to be gone:
+      // 'duplicate-join-lost' means auto-rejoining would just fight
+      // whoever won the challenge, anything else (plain staleness, most
+      // often a backgrounded tab's poll timer throttled past
+      // POLL_TIMEOUT_MS) is safe to silently self-heal from. See
+      // recentDuplicateJoinLosses's own comment.
+      const notFoundReason = recentDuplicateJoinLosses.has(connId) ? 'duplicate-join-lost' : 'stale';
       const loc = connIndex.get(connId);
-      if (!loc) return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin' });
+      if (!loc) return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin', reason: notFoundReason });
       const member = loc.room.get(connId);
-      if (!member || member.transport !== 'poll') return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin' });
+      if (!member || member.transport !== 'poll') return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin', reason: notFoundReason });
       member.lastSeen = Date.now();
       if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw));
       // Drain any signals (friend requests etc, #67) queued for this

@@ -7,6 +7,7 @@
   },
   "defaultWorld": "workshop",
   "postOffice": true,
+  "chat": true,
   "worlds": [
     {
       "id": "workshop",

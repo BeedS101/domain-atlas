@@ -44,7 +44,7 @@ $attachedAsset = null;
 if ($giftAssetClass) {
   if (!$giftOwnerPublicKey) send_json(400, ['error' => 'giftOwnerPublicKey is required when giftAssetClass is set']);
   if (!isset(ATLAS_ASSET_CATALOG[$giftAssetClass])) {
-    send_json(400, ['error' => 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, or atlas.element.gold.']);
+    send_json(400, ['error' => 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, atlas.element.gold, or atlas.element.silver.']);
   }
   $giftCatalogEntry = ATLAS_ASSET_CATALOG[$giftAssetClass];
   if ($giftCatalogEntry['fungible']) {

@@ -12,12 +12,13 @@ balances before splitting/trading, and settles two-party trades atomically.
 
 Nothing in the browser extension needs to change to use this. It calls the
 same URLs (/atlas/asset/issue, /atlas/asset/reissue, /atlas/asset/split,
-/atlas/asset/consolidate, /atlas/asset/trade, /atlas/revoke,
-/atlas/mail/check) either way — this bundle's .htaccess makes PHP answer
-those exact clean URLs. (/atlas/mail/send and /atlas/asset/reissue are the
-two exceptions — they're demo/admin actions, meant to be called by you the
-domain operator, not the wallet — see "Sending mail to subscribers" and
-"Updating an already-issued asset" below.)
+/atlas/asset/consolidate, /atlas/trade/submit,
+/atlas/trade/listings, /atlas/trade/claim, /atlas/trade/cancel,
+/atlas/revoke, /atlas/mail/check) either way — this bundle's .htaccess
+makes PHP answer those exact clean URLs. (/atlas/mail/send and
+/atlas/asset/reissue are the two exceptions — they're demo/admin actions,
+meant to be called by you the domain operator, not the wallet — see
+"Sending mail to subscribers" and "Updating an already-issued asset" below.)
 
 This bundle is a standing mirror of issuer-server/server.js, not a
 one-time port — whenever the Node server gains a new endpoint or a new
@@ -50,7 +51,10 @@ What's in this folder
     asset/reissue.php        - POST /atlas/asset/reissue     (publish an updated version of an already-issued non-fungible asset — demo/admin use)
     asset/split.php          - POST /atlas/asset/split       (split a fungible balance)
     asset/consolidate.php    - POST /atlas/asset/consolidate (merge fungible balances)
-    asset/trade.php          - POST /atlas/asset/trade       (settle a fungible trade)
+    trade/submit.php         - POST /atlas/trade/submit      (post an open listing — see "Trading Station" below)
+    trade/listings.php       - GET  /atlas/trade/listings    (browse open listings — see "Trading Station" below)
+    trade/claim.php          - POST /atlas/trade/claim       (fulfill a specific listing by id — see "Trading Station" below)
+    trade/cancel.php         - POST /atlas/trade/cancel      (withdraw your own open listing — see "Trading Station" below)
     revoke.php              - POST /atlas/revoke            (revoke by id)
     mail/send.php            - POST /atlas/mail/send         (send mail about a held credential — demo/admin use)
     mail/check.php           - POST /atlas/mail/check        (wallet's periodic mail check)
@@ -341,6 +345,92 @@ raw-key fragment exactly as before this task.
 
 With this, task #94 is now fully built -- handle addressing was its last
 open piece.
+
+
+Trading Station — open listings (task #144 Phase 1, v1.14/v1.15, SPEC.md §7)
+------------------------------------------------------------------
+A visitor posts a listing naming no counterparty at all (submit), anyone
+can browse what's currently open at this station (listings), and any other
+member can fulfill a specific one by id (claim) — no two visitors ever need
+to be present, or even aware of each other, at the same moment. v1.15
+removed this station's earlier /atlas/asset/trade endpoint, which required
+both sides' signed intents to arrive in the same call (only workable when
+both visitors stood at the same in-world stall together); open listings are
+now the only trading mechanism this station supports.
+
+Joining is the same one-click shape as Post Office above: request an
+atlas.tradingstation.membership credential (POST /atlas/asset/issue with
+that assetClass — the extension's own "Join Trading Station" button and
+its in-world Trading Post desk both already do this) and hold onto it.
+Every submit/claim call must present a currently-valid one, checked fresh
+against the request the same way a trade balance itself is — not a
+server-side allow-list lookup. Browsing listings needs no membership at
+all; reading one reveals nothing its poster didn't already choose to make
+public by posting it.
+
+  curl -X POST https://your-domain/atlas/trade/submit \
+    -H 'Content-Type: application/json' \
+    -d '{"membership": {...your Trading Station membership credential...}, "intent": {"payload": {"offer": {"class":"atlas.element.iron","quantity":10}, "want": {"class":"atlas.element.gold","quantity":5}, "expiresAt": "..."}, "proof": {...your signature over payload...}}, "balance": {...the balance credential covering your offer...}}'
+
+Response: {"status":"pending","pendingId":"...","expiresAt":"..."} — always;
+posting only ever queues a listing, it never auto-settles. (Earlier than
+v1.14, submit tried to match a fresh submission against whatever was
+already pending — dropped, because a listing meant to be browsed shouldn't
+silently vanish out from under a browsing buyer due to an unrelated
+submission elsewhere.)
+
+  curl https://your-domain/atlas/trade/listings
+
+Response: {"listings":[{"pendingId":"...","posterPublicKey":"...","offer":{...},"want":{...},"expiresAt":"..."}, ...]} —
+every currently open, unexpired listing at this station.
+
+  curl -X POST https://your-domain/atlas/trade/claim \
+    -H 'Content-Type: application/json' \
+    -d '{"pendingId": "urn:atlas:trade:...", "membership": {...your membership...}, "intent": {"payload": {"offer": {"class":"atlas.element.gold","quantity":5}, "want": {"class":"atlas.element.iron","quantity":10}, "expiresAt": "..."}, "proof": {...}}, "balance": {...the balance covering your offer...}}'
+
+Your intent's offer/want must exactly mirror the target listing's want/offer.
+Response: {"status":"settled","remainder":{...}|null,"received":{...}} — your
+own remainder/received credentials come back directly, since you were live
+for this call.
+
+  curl -X POST https://your-domain/atlas/trade/cancel \
+    -H 'Content-Type: application/json' \
+    -d '{"pendingId": "urn:atlas:trade:...", "intent": {"payload": {"pendingId": "urn:atlas:trade:...", "action": "cancel"}, "proof": {...signed by the same key that posted it...}}}'
+
+Withdraws your own still-open listing. Response: {"status":"canceled"}.
+Rejected if the listing's already been claimed, expired, or belongs to a
+different key.
+
+Delivery to the poster when THEY aren't live for the claim needs no new
+mechanism at all: a remainder credential supersedes the old balance id, so
+it arrives automatically the next time that wallet's own /atlas/mail/check
+asks about that id (same channel /atlas/asset/reissue already uses below);
+a newly-received credential of a class that wallet may never have held
+before rides along as a claimable gift attached to a system mail message,
+reusing the exact same Claim mechanism "A message can also carry a gift"
+above already describes. Both arrive in the one /atlas/mail/check response.
+
+Trading Station roster is stored in lib/atlas-tradingstation-members-store.json
+(same "not web-reachable" reasoning as every other roster in this bundle);
+open listings live in lib/atlas-pending-trades-store.json and are pruned
+lazily (an expired one simply stops appearing in listings, on the next read).
+
+
+Bound credentials — what can never be traded (task #160, SPEC.md §5)
+------------------------------------------------------------------
+Every asset carries a third signed flag alongside fungible/presentation:
+`tradeScope`. Most classes are `"local"` (the implicit default — a trade
+only ever finalizes at the asset's own issuing domain regardless of any
+flag, since only that domain holds the signing key to re-mint it). The
+three membership classes — atlas.membership, atlas.postoffice.membership,
+atlas.tradingstation.membership — are `"bound"` instead: a relationship
+credential, not a tradeable good, rejected outright by
+check_presented_asset() (in lib/bootstrap.php) with a dedicated "asset is
+bound to its owner..." error before it ever reaches the ordinary fungible
+check — every split/consolidate/trade/trade-submit endpoint shares that
+one function, so this is enforced in exactly one place for all of them.
+A reserved `"global"` value exists for a later federated-venue scenario;
+nothing in this bundle checks for it yet.
 
 
 Updating an already-issued asset

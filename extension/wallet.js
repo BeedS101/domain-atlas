@@ -180,6 +180,29 @@ const AtlasWallet = (() => {
     return Array.from(bytes).map((b) => SEED_WORDLIST[b]).join(' ');
   }
 
+  // URGENT FIX, same day as #118: that change hardcoded PBKDF2's iteration
+  // count to 600,000 with no way to tell what an EXISTING encrypted blob
+  // was actually created under — every wallet that already existed before
+  // #118 shipped was encrypted at the old 250,000, and unlockIdentity()
+  // below started deriving the WRONG key for every one of them, which
+  // AES-GCM correctly reports as a decrypt failure — indistinguishable
+  // from "wrong password" to both the code and the person typing the
+  // right one. That's a real lockout, not a hardening improvement, for
+  // anyone who already had a wallet. Fixed the only way that doesn't
+  // require anyone to remember which iteration count their wallet was
+  // last touched under: every encrypted blob now RECORDS its own
+  // `kdfIterations` alongside salt/iv/ciphertext, `deriveAesKey` takes
+  // that count explicitly instead of assuming the current constant, and
+  // a blob with no such field (anything that predates this fix) is
+  // assumed to be exactly what it always was — KDF_ITERATIONS_LEGACY.
+  // unlockIdentity() also uses a successful legacy unlock as the trigger
+  // to transparently re-encrypt under KDF_ITERATIONS_CURRENT with a fresh
+  // salt/iv, so a wallet that unlocks correctly once finishes migrating
+  // itself with no separate step and no risk of ever locking out someone
+  // who hasn't logged in since.
+  const KDF_ITERATIONS_CURRENT = 600000;
+  const KDF_ITERATIONS_LEGACY = 250000;
+
   // Derives one AES-GCM key from one or more secrets combined. Each secret
   // is hashed to a fixed-length digest first, then the digests are
   // concatenated — so the boundary between secrets is never ambiguous (a
@@ -194,8 +217,26 @@ const AtlasWallet = (() => {
   // it. The high iteration count is the separate, real defense against
   // offline brute force either way — someone with the file can try keys
   // forever with no one to rate-limit them, so each guess needs to be
-  // deliberately slow.
-  async function deriveAesKey(secrets, saltBytes) {
+  // deliberately slow. 600,000 (task #118) matches current OWASP guidance
+  // for PBKDF2-HMAC-SHA256 as of this writing — raised from an earlier
+  // 250,000; see the comment above KDF_ITERATIONS_CURRENT for why the
+  // count is now an explicit parameter instead of hardcoded here, and why
+  // that matters. A further, bigger-lift hardening pass (a memory-hard KDF
+  // like Argon2/scrypt, which resists GPU/ASIC-accelerated cracking far
+  // better than any PBKDF2 iteration count can) is deliberately NOT done
+  // here — Web Crypto has no native Argon2/scrypt, so that would mean
+  // bundling a WASM implementation into the extension, a real new
+  // dependency this project has otherwise stayed away from. Left as a
+  // later task (#171), not bundled into this change.
+  //
+  // `iterations` defaults to the current constant so every call site that
+  // ENCRYPTS a fresh blob (createIdentity, changePassword's new blob,
+  // exportIdentity, importIdentity's local re-encrypt) can just omit it —
+  // only a call site DECRYPTING an existing blob ever needs to pass a
+  // specific count, and it should always be whatever that blob's own
+  // `kdfIterations` field says (or KDF_ITERATIONS_LEGACY if the field is
+  // absent), never assumed.
+  async function deriveAesKey(secrets, saltBytes, iterations) {
     const digests = await Promise.all(secrets.map((s) =>
       crypto.subtle.digest('SHA-256', new TextEncoder().encode(s || ''))
     ));
@@ -203,7 +244,7 @@ const AtlasWallet = (() => {
     digests.forEach((d, i) => combined.set(new Uint8Array(d), i * 32));
     const baseKey = await crypto.subtle.importKey('raw', combined, 'PBKDF2', false, ['deriveKey']);
     return crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt: saltBytes, iterations: 250000, hash: 'SHA-256' },
+      { name: 'PBKDF2', salt: saltBytes, iterations: iterations || KDF_ITERATIONS_CURRENT, hash: 'SHA-256' },
       baseKey,
       { name: 'AES-GCM', length: 256 },
       false,
@@ -314,6 +355,7 @@ const AtlasWallet = (() => {
         salt: b64urlEncode(salt.buffer),
         iv: b64urlEncode(iv.buffer),
         ciphertext: b64urlEncode(ciphertext),
+        kdfIterations: KDF_ITERATIONS_CURRENT,
         createdAt: new Date().toISOString()
       }
     });
@@ -331,7 +373,12 @@ const AtlasWallet = (() => {
     if (!atlasIdentity) throw new Error('No identity set up on this device yet.');
     const salt = new Uint8Array(b64urlDecode(atlasIdentity.salt));
     const iv = new Uint8Array(b64urlDecode(atlasIdentity.iv));
-    const key = await deriveAesKey([password], salt);
+    // A blob with no kdfIterations field predates that field entirely
+    // (see the comment above KDF_ITERATIONS_CURRENT) — it was encrypted
+    // under the old hardcoded constant, not whatever KDF_ITERATIONS_CURRENT
+    // happens to be today, so it MUST be read back with that same count.
+    const iterations = atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY;
+    const key = await deriveAesKey([password], salt, iterations);
     let plaintext;
     try {
       plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(atlasIdentity.ciphertext));
@@ -339,6 +386,36 @@ const AtlasWallet = (() => {
       throw new Error('Incorrect password.');
     }
     const { publicKey, privateKeyJwk } = JSON.parse(new TextDecoder().decode(plaintext));
+
+    // Self-migrating: a correct unlock under anything less than today's
+    // current iteration count is the one moment this code already has the
+    // plaintext AND a proven-correct password in hand, so it's also the
+    // safest possible moment to re-encrypt under KDF_ITERATIONS_CURRENT
+    // with a fresh salt/iv and write it back — no separate migration step,
+    // no re-prompting, and a wallet that's simply never been unlocked
+    // since #118 shipped is never at risk of being treated as "wrong
+    // password" for it. A failure here shouldn't block the unlock that
+    // already succeeded, so it's best-effort.
+    if (iterations < KDF_ITERATIONS_CURRENT) {
+      try {
+        const newSalt = crypto.getRandomValues(new Uint8Array(16));
+        const newIv = crypto.getRandomValues(new Uint8Array(12));
+        const newKey = await deriveAesKey([password], newSalt);
+        const newCiphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: newIv }, newKey, plaintext);
+        await chrome.storage.local.set({
+          atlasIdentity: {
+            ...atlasIdentity,
+            salt: b64urlEncode(newSalt.buffer),
+            iv: b64urlEncode(newIv.buffer),
+            ciphertext: b64urlEncode(newCiphertext),
+            kdfIterations: KDF_ITERATIONS_CURRENT
+          }
+        });
+      } catch (err) {
+        // Best-effort — the unlock itself already succeeded either way.
+      }
+    }
+
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     await chrome.storage.local.set({ atlasIdentityMode: 'local' });
     return { publicKey };
@@ -363,7 +440,7 @@ const AtlasWallet = (() => {
     if (!atlasIdentity) throw new Error('No identity set up on this device yet.');
     const salt = new Uint8Array(b64urlDecode(atlasIdentity.salt));
     const iv = new Uint8Array(b64urlDecode(atlasIdentity.iv));
-    const key = await deriveAesKey([currentPassword], salt);
+    const key = await deriveAesKey([currentPassword], salt, atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY);
     let plaintext;
     try {
       plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(atlasIdentity.ciphertext));
@@ -381,7 +458,8 @@ const AtlasWallet = (() => {
         ...atlasIdentity,
         salt: b64urlEncode(newSalt.buffer),
         iv: b64urlEncode(newIv.buffer),
-        ciphertext: b64urlEncode(newCiphertext)
+        ciphertext: b64urlEncode(newCiphertext),
+        kdfIterations: KDF_ITERATIONS_CURRENT
       }
     });
     // The session-cached unlocked identity (publicKey/privateKeyJwk) is
@@ -422,7 +500,7 @@ const AtlasWallet = (() => {
     }
     const localSalt = new Uint8Array(b64urlDecode(atlasIdentity.salt));
     const localIv = new Uint8Array(b64urlDecode(atlasIdentity.iv));
-    const localKey = await deriveAesKey([password], localSalt);
+    const localKey = await deriveAesKey([password], localSalt, atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY);
     let plaintext;
     try {
       plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: localIv }, localKey, b64urlDecode(atlasIdentity.ciphertext));
@@ -441,6 +519,7 @@ const AtlasWallet = (() => {
       salt: b64urlEncode(exportSalt.buffer),
       iv: b64urlEncode(exportIv.buffer),
       ciphertext: b64urlEncode(ciphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT,
       exportedAt: new Date().toISOString()
     };
   }
@@ -454,7 +533,7 @@ const AtlasWallet = (() => {
     if (!fileData || fileData.format !== 'atlas-identity-export/1.0') throw new Error('Not an Atlas identity file.');
     const salt = new Uint8Array(b64urlDecode(fileData.salt));
     const iv = new Uint8Array(b64urlDecode(fileData.iv));
-    const key = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], salt);
+    const key = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], salt, fileData.kdfIterations || KDF_ITERATIONS_LEGACY);
     let plaintext;
     try {
       plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(fileData.ciphertext));
@@ -475,6 +554,7 @@ const AtlasWallet = (() => {
         salt: b64urlEncode(localSalt.buffer),
         iv: b64urlEncode(localIv.buffer),
         ciphertext: b64urlEncode(localCiphertext),
+        kdfIterations: KDF_ITERATIONS_CURRENT,
         createdAt: new Date().toISOString()
       }
     });
@@ -684,11 +764,28 @@ const AtlasWallet = (() => {
     return cleaned;
   }
 
+  // Task #137's activity-tracking design needs to know "did THIS wallet's
+  // holdings just change" without wallet.js knowing anything at all about
+  // presence, worlds, or connections — those are viewer.js's concern
+  // entirely. saveWallet() is the one choke point essentially every
+  // mutation already runs through (mint, split, consolidate, trade
+  // settle/claim, PvP-loss, mail-gift claim — 14 call sites as of this
+  // writing), so a listener registered here fires for all of them without
+  // wallet.js needing a matching call added at each individual UI action.
+  // Deliberately fire-and-forget: a listener throwing is caught and
+  // dropped rather than allowed to break the save it's just observing.
+  const walletChangeListeners = [];
+  function onWalletChanged(callback) { walletChangeListeners.push(callback); }
+  function notifyWalletChanged(ownerPublicKey) {
+    walletChangeListeners.forEach((cb) => { try { cb(ownerPublicKey); } catch (err) { /* an observer's own bug is not this save's problem */ } });
+  }
+
   async function saveWallet(ownerPublicKey, entries) {
     const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
     const wallets = atlasWallets || {};
     wallets[ownerPublicKey] = entries;
     await chrome.storage.local.set({ atlasWallets: wallets });
+    notifyWalletChanged(ownerPublicKey);
   }
 
   // The one issuance entry point for every asset class this build can
@@ -1021,41 +1118,155 @@ const AtlasWallet = (() => {
 
   // ---------- trading stations (§7 client half) ----------
 
+  // v1.15 (SPEC.md §7) — counterpartyPublicKey is optional: an open listing
+  // posted via Sell names none at all, while a claim names the poster. The
+  // key must be OMITTED from payload entirely when there's no counterparty,
+  // not merely set to undefined: canonicalize() below signs whatever keys
+  // Object.keys() finds, undefined-valued or not, but JSON.stringify (used
+  // to actually put this payload on the wire) silently drops
+  // undefined-valued keys — so a payload literal `{ counterparty: undefined,
+  // ... }` would get signed as if the key were present, then arrive at the
+  // server without it, and fail verify_envelope's own canonicalize() check
+  // the moment it's re-signed server-side against what actually arrived.
   async function proposeIntent(role, offer, want, counterpartyPublicKey, expiresMinutes) {
     const payload = {
       offer, want,
-      counterparty: counterpartyPublicKey,
+      ...(counterpartyPublicKey !== undefined ? { counterparty: counterpartyPublicKey } : {}),
       expiresAt: new Date(Date.now() + (expiresMinutes || 10) * 60000).toISOString()
     };
     const proof = await signAs(role, payload);
     return { payload, proof };
   }
 
-  async function settleTrade(issuerDomain, intentSelf, intentCounterparty, balanceSelf, balanceCounterparty) {
-    const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/trade', {
+  // Task #144 Phase 1 / v1.14 open listings (SPEC.md §7) — posts this
+  // signer's own half of a trade to the station as an open listing, naming
+  // no counterparty at all. Mirrors mintAsset()'s "one HTTP call plus local
+  // bookkeeping" role, not a second copy of the station's own logic. Always
+  // queues — posting a listing never settles it on the spot (see the
+  // endpoint's own comment for why that changed in v1.14); recorded locally
+  // (getSubmittedTrades/saveSubmittedTrades below) purely for this wallet's
+  // own Listings sub-tab display, with reconcileSubmittedTrades (see
+  // checkAllMail below) noticing later once it's claimed.
+  async function submitTradeIntent(issuerDomain, membership, offer, want, balance, expiresMinutes) {
+    const intent = await proposeIntent('self', offer, want, undefined, expiresMinutes);
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/submit', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ intentA: intentSelf, intentB: intentCounterparty, balanceA: balanceSelf, balanceB: balanceCounterparty })
+      body: JSON.stringify({ membership, intent, balance })
     });
-    if (!res.ok) throw new Error('Trade failed: ' + (await res.text()));
-    const { aRemainder, aReceived, bRemainder, bReceived } = await res.json();
+    if (!res.ok) throw new Error('Trade submit failed: ' + (await res.text()));
+    const result = await res.json();
+    const owner = await getIdentity();
 
-    const identity = await getIdentity();
-    const counterparty = await getCounterparty();
+    const records = await getSubmittedTrades(owner.publicKey);
+    records.push({
+      pendingId: result.pendingId,
+      domain: issuerDomain,
+      offer, want,
+      balanceId: balance.id,
+      submittedAt: new Date().toISOString(),
+      expiresAt: result.expiresAt,
+      status: 'pending'
+    });
+    await saveSubmittedTrades(owner.publicKey, records);
+    return result;
+  }
 
-    let selfWallet = (await getWallet(identity.publicKey)).filter((e) => e.credential.id !== balanceSelf.id);
-    if (aRemainder) selfWallet.push({ credential: aRemainder, lastVerdict: await verifyCredential(aRemainder) });
-    selfWallet.push({ credential: aReceived, lastVerdict: await verifyCredential(aReceived) });
-    await saveWallet(identity.publicKey, selfWallet);
-    await autoConsolidateAssetWallet(identity.publicKey);
+  // v1.14 (SPEC.md §7) — browse a station's own open, unexpired listings.
+  // Read-only, no membership presented (the endpoint itself is ungated —
+  // see its own comment), so this is a plain GET with no local bookkeeping
+  // at all: nothing here is "this wallet's own," it's every member's.
+  async function fetchTradeListings(issuerDomain) {
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/listings');
+    if (!res.ok) throw new Error('Fetching listings failed: ' + (await res.text()));
+    const { listings } = await res.json();
+    return listings;
+  }
 
-    let cpWallet = (await getWallet(counterparty.publicKey)).filter((e) => e.credential.id !== balanceCounterparty.id);
-    if (bRemainder) cpWallet.push({ credential: bRemainder, lastVerdict: await verifyCredential(bRemainder) });
-    cpWallet.push({ credential: bReceived, lastVerdict: await verifyCredential(bReceived) });
-    await saveWallet(counterparty.publicKey, cpWallet);
-    await autoConsolidateAssetWallet(counterparty.publicKey);
+  // v1.14 (SPEC.md §7) — fulfill one specific open listing. Builds this
+  // signer's own mirrored intent (offer = listing.want, want = listing.offer)
+  // naming the poster as counterparty for the signed record's own sake, and
+  // presents it against the listing's id. The claimant is always live for
+  // this call, so their own remainder/received apply directly, right here,
+  // the moment the claim succeeds.
+  async function claimTradeListing(issuerDomain, membership, listing, balance, expiresMinutes) {
+    const intent = await proposeIntent('self', listing.want, listing.offer, listing.posterPublicKey, expiresMinutes);
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingId: listing.pendingId, membership, intent, balance })
+    });
+    if (!res.ok) throw new Error('Claim failed: ' + (await res.text()));
+    const result = await res.json();
+    const owner = await getIdentity();
 
-    return { aRemainder, aReceived, bRemainder, bReceived };
+    let wallet = (await getWallet(owner.publicKey)).filter((e) => e.credential.id !== balance.id);
+    if (result.remainder) wallet.push({ credential: result.remainder, lastVerdict: await verifyCredential(result.remainder) });
+    wallet.push({ credential: result.received, lastVerdict: await verifyCredential(result.received) });
+    await saveWallet(owner.publicKey, wallet);
+    await autoConsolidateAssetWallet(owner.publicKey);
+    return result;
+  }
+
+  // v1.14 (SPEC.md §7) — withdraw one of this signer's own still-open
+  // listings. The signed payload is deliberately minimal — just enough to
+  // prove "I, holder of this key, want this specific listing gone" — the
+  // same "small signed statement, not a full credential" shape a mail
+  // gift-claim's own proof already uses elsewhere in this file. Updates the
+  // local record to 'canceled' on success so the Listings tab stops
+  // showing it as open without needing a fresh mail check to notice.
+  async function cancelTradeListing(issuerDomain, pendingId) {
+    const payload = { pendingId, action: 'cancel' };
+    const proof = await signAs('self', payload);
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingId, intent: { payload, proof } })
+    });
+    if (!res.ok) throw new Error('Cancel failed: ' + (await res.text()));
+    const result = await res.json();
+    const owner = await getIdentity();
+    const records = await getSubmittedTrades(owner.publicKey);
+    const record = records.find((r) => r.pendingId === pendingId);
+    if (record) {
+      record.status = 'canceled';
+      record.canceledAt = new Date().toISOString();
+      await saveSubmittedTrades(owner.publicKey, records);
+    }
+    return result;
+  }
+
+  // Local-only record of this identity's own submitted remote trade
+  // intents (task #144 Phase 1), purely for the wallet's Trade tab display
+  // — same "not signed, not sent anywhere, this device's own bookkeeping"
+  // shape as the alias store below. `status` starts 'pending' and is only
+  // ever flipped locally, either immediately (submitTradeIntent above, when
+  // the station settles it on the spot) or later (reconcileSubmittedTrades
+  // below, once a mail check notices the balance it staked got superseded
+  // or revoked out from under it — the sign a match happened while this
+  // wallet wasn't looking). Expiry itself isn't a stored status — the UI
+  // compares `expiresAt` to now at render time, same "computed, not
+  // persisted" approach as everywhere else a timestamp alone is enough.
+  async function getSubmittedTrades(ownerPublicKey) {
+    const { atlasSubmittedTrades } = await chrome.storage.local.get('atlasSubmittedTrades');
+    return (atlasSubmittedTrades || {})[ownerPublicKey] || [];
+  }
+
+  async function saveSubmittedTrades(ownerPublicKey, records) {
+    const { atlasSubmittedTrades } = await chrome.storage.local.get('atlasSubmittedTrades');
+    const all = atlasSubmittedTrades || {};
+    all[ownerPublicKey] = records;
+    await chrome.storage.local.set({ atlasSubmittedTrades: all });
+  }
+
+  // Removes one submitted-trade record from this wallet's own local
+  // bookkeeping (the Listings tab's own Delete button, for a settled or
+  // expired card — there's nothing left to withdraw from either, so this
+  // is purely local housekeeping, unlike cancelTradeListing above which
+  // still has to tell the server to drop a live listing).
+  async function deleteSubmittedTrade(ownerPublicKey, pendingId) {
+    const records = await getSubmittedTrades(ownerPublicKey);
+    await saveSubmittedTrades(ownerPublicKey, records.filter((r) => r.pendingId !== pendingId));
   }
 
   // ---------- identity alias (local, cosmetic nickname) ----------
@@ -1236,11 +1447,30 @@ const AtlasWallet = (() => {
     const existing = friends.find((f) => f.publicKey === publicKey);
     if (existing) {
       // Re-adding (e.g. a later live request from the same person) just
-      // refreshes the saved name rather than creating a duplicate entry.
+      // refreshes the saved name rather than creating a duplicate entry —
+      // any notes already jotted down (see updateFriendNotes below) are
+      // left untouched.
       existing.name = trimmedName;
     } else {
-      friends.push({ publicKey, name: trimmedName, addedAt: new Date().toISOString() });
+      friends.push({ publicKey, name: trimmedName, notes: '', addedAt: new Date().toISOString() });
     }
+    await chrome.storage.local.set({ atlasFriends: friends });
+  }
+
+  // Contacts -> Contacts sub-tab's free-text notes field (task #67
+  // follow-up): a purely personal annotation ("met at the plaza market",
+  // "owes me 10 iron") with no meaning to the protocol at all — never
+  // sent anywhere, just stored alongside the entry exactly like `name`
+  // already is. Upserts onto an EXISTING friend only (there's no
+  // standalone "create a contact with no key" concept here) — throws if
+  // the key isn't actually a saved friend, same "no such X" shape as
+  // updateCalendarEvent above.
+  async function updateFriendNotes(publicKey, notes) {
+    if (!publicKey) throw new Error('No public key given.');
+    const friends = await getFriends();
+    const entry = friends.find((f) => f.publicKey === publicKey);
+    if (!entry) throw new Error('No such contact.');
+    entry.notes = (notes || '').slice(0, MAX_NOTES_LENGTH);
     await chrome.storage.local.set({ atlasFriends: friends });
   }
 
@@ -1248,6 +1478,152 @@ const AtlasWallet = (() => {
     const friends = await getFriends();
     const remaining = friends.filter((f) => f.publicKey !== publicKey);
     await chrome.storage.local.set({ atlasFriends: remaining });
+    // A removed contact can't stay a member of any local group either —
+    // see the Groups section below. Cheap either way (groups are a small
+    // local list), and keeps memberPublicKeys from silently accumulating
+    // dangling keys nobody could ever see rendered as a contact again.
+    const { atlasContactGroups } = await chrome.storage.local.get('atlasContactGroups');
+    const groups = atlasContactGroups || [];
+    if (groups.length) {
+      let changed = false;
+      groups.forEach((g) => {
+        const before = g.memberPublicKeys.length;
+        g.memberPublicKeys = g.memberPublicKeys.filter((k) => k !== publicKey);
+        if (g.memberPublicKeys.length !== before) changed = true;
+      });
+      if (changed) await chrome.storage.local.set({ atlasContactGroups: groups });
+    }
+  }
+
+  // ---------- contact groups (Contacts -> Groups sub-tab) ----------
+  //
+  // Deliberately lightweight, LOCAL-ONLY personal organization over the
+  // existing Friends list above — NOT the bigger guilds/clans/events
+  // system that's a separate, much bigger future item. A group here is
+  // just a name plus a set of member public keys drawn from this wallet's
+  // own saved friends; nothing about a group is ever sent to a server or
+  // to another wallet. Same flat-array-in-chrome.storage.local shape as
+  // Friends/Favorites/Calendar above, and the same "outside the wallet"
+  // scope: untouched by locking, identity-switch, or wallet import/export.
+  const MAX_GROUP_NAME_LENGTH = 40;
+  const MAX_NOTES_LENGTH = 500;
+
+  async function getContactGroups() {
+    const { atlasContactGroups } = await chrome.storage.local.get('atlasContactGroups');
+    return atlasContactGroups || [];
+  }
+
+  async function addContactGroup(name) {
+    const trimmed = (name || '').trim().slice(0, MAX_GROUP_NAME_LENGTH);
+    if (!trimmed) throw new Error('A group needs a name.');
+    if (aliasContainsBlockedWord(trimmed)) throw new Error('That name isn\'t allowed here — try something else.');
+    const groups = await getContactGroups();
+    const id = 'grp-' + Date.now().toString(36) + '-' + b64urlEncode(crypto.getRandomValues(new Uint8Array(6)).buffer);
+    groups.push({ id, name: trimmed, memberPublicKeys: [] });
+    await chrome.storage.local.set({ atlasContactGroups: groups });
+    return id;
+  }
+
+  async function renameContactGroup(id, name) {
+    const trimmed = (name || '').trim().slice(0, MAX_GROUP_NAME_LENGTH);
+    if (!trimmed) throw new Error('A group needs a name.');
+    if (aliasContainsBlockedWord(trimmed)) throw new Error('That name isn\'t allowed here — try something else.');
+    const groups = await getContactGroups();
+    const group = groups.find((g) => g.id === id);
+    if (!group) throw new Error('No such group.');
+    group.name = trimmed;
+    await chrome.storage.local.set({ atlasContactGroups: groups });
+  }
+
+  async function removeContactGroup(id) {
+    const groups = await getContactGroups();
+    const remaining = groups.filter((g) => g.id !== id);
+    await chrome.storage.local.set({ atlasContactGroups: remaining });
+  }
+
+  async function addContactToGroup(groupId, publicKey) {
+    const groups = await getContactGroups();
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) throw new Error('No such group.');
+    if (!group.memberPublicKeys.includes(publicKey)) group.memberPublicKeys.push(publicKey);
+    await chrome.storage.local.set({ atlasContactGroups: groups });
+  }
+
+  async function removeContactFromGroup(groupId, publicKey) {
+    const groups = await getContactGroups();
+    const group = groups.find((g) => g.id === groupId);
+    if (!group) throw new Error('No such group.');
+    group.memberPublicKeys = group.memberPublicKeys.filter((k) => k !== publicKey);
+    await chrome.storage.local.set({ atlasContactGroups: groups });
+  }
+
+  // ---------- chat moderation: mute / block (#114) ----------
+  //
+  // Both are purely local, per-viewer preferences with no server
+  // involvement at all — same "outside the wallet" scope as Friends right
+  // above (flat array keyed by publicKey, untouched by locking, identity-
+  // switch, or wallet import/export), and, like chat itself, usable even
+  // by an anonymous visitor with no unlocked identity.
+  //
+  // Mute: silences a sender in THIS viewer's own chat rendering only — no
+  // notification to the muted person, nothing sent to any server, purely a
+  // client-side filter in viewer.js's renderChatMessages().
+  //
+  // Block: also silences a sender in chat, the same filter, but is
+  // deliberately its OWN separate list from mute (a person can be muted
+  // without being blocked, and vice versa) — see below for why this is a
+  // NEW list rather than reusing the existing mail "Block sender" feature.
+  //
+  // Not reusing AtlasWallet.blockPostOfficeSender's list: that feature
+  // (task #94, see its own comment above) blocks a sender at one SPECIFIC
+  // Post Office domain membership, server-side — it takes a `domain`
+  // argument, requires a signed request round-tripped to that domain's own
+  // server, and only ever affects mail delivery through that one
+  // membership. Chat blocking here needs to be instant, offline-capable,
+  // and effective across every chat room a public key might show up in
+  // (there's no "Post Office membership" concept for an anonymous or
+  // domain-agnostic chat participant in the first place) — a fundamentally
+  // different shape, not just a different call site for the same list. So
+  // this is its own local list, keyed by publicKey exactly like Friends.
+
+  async function getMutedChatUsers() {
+    const { atlasMutedChatUsers } = await chrome.storage.local.get('atlasMutedChatUsers');
+    return atlasMutedChatUsers || [];
+  }
+
+  async function muteChatUser(publicKey, name) {
+    if (!publicKey) throw new Error('No public key to mute.');
+    const muted = await getMutedChatUsers();
+    if (!muted.some((m) => m.publicKey === publicKey)) {
+      muted.push({ publicKey, name: name || 'Visitor', mutedAt: new Date().toISOString() });
+      await chrome.storage.local.set({ atlasMutedChatUsers: muted });
+    }
+  }
+
+  async function unmuteChatUser(publicKey) {
+    const muted = await getMutedChatUsers();
+    const remaining = muted.filter((m) => m.publicKey !== publicKey);
+    await chrome.storage.local.set({ atlasMutedChatUsers: remaining });
+  }
+
+  async function getBlockedChatUsers() {
+    const { atlasBlockedChatUsers } = await chrome.storage.local.get('atlasBlockedChatUsers');
+    return atlasBlockedChatUsers || [];
+  }
+
+  async function blockChatUser(publicKey, name) {
+    if (!publicKey) throw new Error('No public key to block.');
+    const blocked = await getBlockedChatUsers();
+    if (!blocked.some((b) => b.publicKey === publicKey)) {
+      blocked.push({ publicKey, name: name || 'Visitor', blockedAt: new Date().toISOString() });
+      await chrome.storage.local.set({ atlasBlockedChatUsers: blocked });
+    }
+  }
+
+  async function unblockChatUser(publicKey) {
+    const blocked = await getBlockedChatUsers();
+    const remaining = blocked.filter((b) => b.publicKey !== publicKey);
+    await chrome.storage.local.set({ atlasBlockedChatUsers: remaining });
   }
 
   // ---------- favorite domains (#61) ----------
@@ -1318,6 +1694,83 @@ const AtlasWallet = (() => {
     await chrome.storage.local.set({ atlasFavoriteDomains: favorites });
   }
 
+  // ---------- calendar events (Social -> Calendar) ----------
+  //
+  // Manually-added local reminders — same "outside the wallet, device-wide,
+  // not per-identity" scope as Favorites/Friends/Recent worlds above (a
+  // flat array in chrome.storage.local, not keyed by owner public key the
+  // way Mail is), because there's nothing identity-specific about "remember
+  // to do X on this date": no domain, no credential, no counterparty ever
+  // sees or signs one of these. Purely a local sticky note.
+  //
+  // getCalendarEvents() always returns the list sorted soonest-first by
+  // dateTime — unlike Favorites (whose array order IS a user-curated
+  // display order, reordered explicitly via moveFavoriteDomain), a
+  // calendar's natural order is chronological and there's no reason to let
+  // it drift from that, so every caller gets it pre-sorted rather than
+  // re-sorting in the UI layer. Sorted by dateTime (the START time) even
+  // for events that carry an endDateTime too — soonest-to-START is still
+  // the natural reading order for a flat list.
+  async function getCalendarEvents() {
+    const { atlasCalendarEvents } = await chrome.storage.local.get('atlasCalendarEvents');
+    const events = atlasCalendarEvents || [];
+    return events.slice().sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
+  }
+
+  // An event's end time is optional — endDateTime is an ISO string when
+  // set, or `null` when the event has no end (an instant, no-duration
+  // event, which is all any event could be before this field existed).
+  // Existing stored events from before this field was added simply lack
+  // the key (`undefined`) rather than being migrated to `null` — every
+  // reader in this file and in viewer.js treats "falsy" (missing OR null)
+  // as "no end time", so the two are always handled identically.
+  function validateCalendarEventTimes(dateTime, endDateTime) {
+    if (endDateTime && new Date(endDateTime).getTime() <= new Date(dateTime).getTime()) {
+      throw new Error("An event's end time must be after its start time.");
+    }
+  }
+
+  async function addCalendarEvent(entry) {
+    if (!entry || !entry.title) throw new Error('An event needs a title.');
+    if (!entry.dateTime) throw new Error('An event needs a date/time.');
+    validateCalendarEventTimes(entry.dateTime, entry.endDateTime);
+    const events = await getCalendarEvents();
+    const id = 'cal-' + Date.now().toString(36) + '-' + b64urlEncode(crypto.getRandomValues(new Uint8Array(6)).buffer);
+    events.push({
+      id,
+      title: entry.title,
+      dateTime: entry.dateTime, // ISO string
+      endDateTime: entry.endDateTime || null, // ISO string, or null (see comment above)
+      notes: entry.notes || '',
+      createdAt: new Date().toISOString()
+    });
+    await chrome.storage.local.set({ atlasCalendarEvents: events });
+    return id;
+  }
+
+  // Merges `patch` (any of title/dateTime/endDateTime/notes) into the
+  // existing event — same partial-update shape as setChatPanelSettings's
+  // patch object elsewhere in this file, just applied to one array entry
+  // instead of a single settings blob. Validated against the MERGED
+  // result (not just whatever `patch` happens to include) so an update
+  // that only touches, say, the title can't accidentally leave a
+  // previously-valid dateTime/endDateTime pair in an invalid state.
+  async function updateCalendarEvent(id, patch) {
+    const events = await getCalendarEvents();
+    const index = events.findIndex((e) => e.id === id);
+    if (index === -1) throw new Error('No such calendar event.');
+    const merged = { ...events[index], ...patch };
+    validateCalendarEventTimes(merged.dateTime, merged.endDateTime);
+    events[index] = merged;
+    await chrome.storage.local.set({ atlasCalendarEvents: events });
+  }
+
+  async function removeCalendarEvent(id) {
+    const events = await getCalendarEvents();
+    const remaining = events.filter((e) => e.id !== id);
+    await chrome.storage.local.set({ atlasCalendarEvents: remaining });
+  }
+
   // ---------- player character size (#33 follow-up) ----------
   //
   // A purely cosmetic size multiplier on the rendered character model (see
@@ -1362,12 +1815,34 @@ const AtlasWallet = (() => {
   const CHAT_MAX_WIDTH = 640;
   const CHAT_MIN_HEIGHT = 120;
   const CHAT_MAX_HEIGHT = 480;
+  // defaultTabPreference (#113) — which tab a freshly-entered world's chat
+  // opens on. 'auto' preserves the original pre-#113 behavior exactly
+  // (whatever tab is already selected stays selected — see viewer.js's
+  // refreshChatAvailability(), which is the only place this is read);
+  // 'world'/'domain' force that tab whenever it's actually available,
+  // falling back to the other one when it isn't. Validated against this
+  // fixed list, same "unrecognized value silently falls back to the
+  // default" posture every other field in clampChatPanelSettings() uses.
+  const CHAT_TAB_PREFERENCES = ['auto', 'domain', 'world'];
+  // historyOnJoin — whether a freshly-joined chat room's recent-history
+  // backlog (chat-history over WS, or the join response's `messages` over
+  // the polling fallback — see joinChatRoom()/chat_join_room() server-side)
+  // gets shown at all. Defaults true, preserving the exact original
+  // behavior from before this setting existed. This is a purely local/
+  // client display preference — turning it off does NOT ask either server
+  // to withhold history (neither backend has any notion of this setting);
+  // the client just discards the batch it already received and starts the
+  // message list empty, same "starts empty, only what arrives live from
+  // here on" list either way it renders. See viewer.js's connectChat()/
+  // pollChat() for where the discard actually happens.
   const DEFAULT_CHAT_PANEL_SETTINGS = {
     width: 320,
     height: 200,
     opacity: 0.9,
     textSize: 12,
     minimized: false,
+    defaultTabPreference: 'auto',
+    historyOnJoin: true,
     lastSize: { width: 320, height: 200 }
   };
 
@@ -1380,6 +1855,8 @@ const AtlasWallet = (() => {
       opacity: Number.isFinite(Number(s.opacity)) ? Math.max(0.2, Math.min(1, Number(s.opacity))) : DEFAULT_CHAT_PANEL_SETTINGS.opacity,
       textSize: Number.isFinite(Number(s.textSize)) ? Math.max(10, Math.min(20, Number(s.textSize))) : DEFAULT_CHAT_PANEL_SETTINGS.textSize,
       minimized: !!s.minimized,
+      defaultTabPreference: CHAT_TAB_PREFERENCES.includes(s.defaultTabPreference) ? s.defaultTabPreference : DEFAULT_CHAT_PANEL_SETTINGS.defaultTabPreference,
+      historyOnJoin: s.historyOnJoin === undefined ? DEFAULT_CHAT_PANEL_SETTINGS.historyOnJoin : !!s.historyOnJoin,
       lastSize: {
         width: Number.isFinite(Number(lastSizeRaw.width)) ? Math.max(CHAT_MIN_WIDTH, Math.min(CHAT_MAX_WIDTH, Number(lastSizeRaw.width))) : DEFAULT_CHAT_PANEL_SETTINGS.lastSize.width,
         height: Number.isFinite(Number(lastSizeRaw.height)) ? Math.max(CHAT_MIN_HEIGHT, Math.min(CHAT_MAX_HEIGHT, Number(lastSizeRaw.height))) : DEFAULT_CHAT_PANEL_SETTINGS.lastSize.height
@@ -1403,6 +1880,51 @@ const AtlasWallet = (() => {
       lastSize: Object.assign({}, current.lastSize, patch && patch.lastSize)
     }));
     await chrome.storage.local.set({ atlasChatPanelSettings: merged });
+    return merged;
+  }
+
+  // ---------- Asset Viewer panel settings (#150) ----------
+  //
+  // Mirrors getChatPanelSettings/setChatPanelSettings above exactly — same
+  // "clamp on every read AND every write, patch rather than replace" shape,
+  // same chrome.storage.local/global-scope/no-unlock-required convention
+  // (a hover panel's own opacity/size is a display preference, not identity
+  // data — same reasoning as chat's settings and atlasCharacterScale).
+  // Smaller than chat's settings object on purpose: the Asset Viewer has no
+  // minimize state, no tab preference, no history toggle — just the two
+  // controls its own settings-gear popover actually offers (viewer.js),
+  // plus width/height for its resize handle. No `lastSize` either — nothing
+  // here ever minimizes, so there's no "restore to" size to remember.
+  const ASSET_VIEWER_MIN_WIDTH = 220;
+  const ASSET_VIEWER_MAX_WIDTH = 480;
+  const ASSET_VIEWER_MIN_HEIGHT = 180;
+  const ASSET_VIEWER_MAX_HEIGHT = 560;
+  const DEFAULT_ASSET_VIEWER_SETTINGS = {
+    width: 280,
+    height: 240,
+    opacity: 0.95,
+    textSize: 12
+  };
+
+  function clampAssetViewerSettings(raw) {
+    const s = raw && typeof raw === 'object' ? raw : {};
+    return {
+      width: Number.isFinite(Number(s.width)) ? Math.max(ASSET_VIEWER_MIN_WIDTH, Math.min(ASSET_VIEWER_MAX_WIDTH, Number(s.width))) : DEFAULT_ASSET_VIEWER_SETTINGS.width,
+      height: Number.isFinite(Number(s.height)) ? Math.max(ASSET_VIEWER_MIN_HEIGHT, Math.min(ASSET_VIEWER_MAX_HEIGHT, Number(s.height))) : DEFAULT_ASSET_VIEWER_SETTINGS.height,
+      opacity: Number.isFinite(Number(s.opacity)) ? Math.max(0.2, Math.min(1, Number(s.opacity))) : DEFAULT_ASSET_VIEWER_SETTINGS.opacity,
+      textSize: Number.isFinite(Number(s.textSize)) ? Math.max(10, Math.min(20, Number(s.textSize))) : DEFAULT_ASSET_VIEWER_SETTINGS.textSize
+    };
+  }
+
+  async function getAssetViewerSettings() {
+    const { atlasAssetViewerSettings } = await chrome.storage.local.get('atlasAssetViewerSettings');
+    return clampAssetViewerSettings(atlasAssetViewerSettings);
+  }
+
+  async function setAssetViewerSettings(patch) {
+    const current = await getAssetViewerSettings();
+    const merged = clampAssetViewerSettings(Object.assign({}, current, patch));
+    await chrome.storage.local.set({ atlasAssetViewerSettings: merged });
     return merged;
   }
 
@@ -1586,6 +2108,7 @@ const AtlasWallet = (() => {
     await autoConsolidateAssetWallet(ownerPublicKey);
 
     entry.claimed = true;
+    entry.read = true; // clicking Claim is at least as strong a "seen it" signal as opening the card
     await saveMail(ownerPublicKey, entries);
     return { credential, verdict };
   }
@@ -1737,6 +2260,19 @@ const AtlasWallet = (() => {
     return wallet
       .filter((e) => e.credential && e.credential.asset && e.credential.asset.class === 'atlas.postoffice.membership')
       .map((e) => ({ domain: e.credential.issuer.domain, credentialId: e.credential.id }));
+  }
+
+  // Task #144 Phase 1 — exact analogue of getPostOfficeMemberships above,
+  // for the new atlas.tradingstation.membership class instead. Returns the
+  // full credential (not just its id) since submitTradeIntent needs to
+  // present it whole with every /atlas/trade/submit call — unlike Post
+  // Office sends, which only ever need the domain + a credentialId to
+  // address by.
+  async function getTradingStationMemberships(ownerPublicKey) {
+    const wallet = await getWallet(ownerPublicKey);
+    return wallet
+      .filter((e) => e.credential && e.credential.asset && e.credential.asset.class === 'atlas.tradingstation.membership')
+      .map((e) => ({ domain: e.credential.issuer.domain, credentialId: e.credential.id, credential: e.credential }));
   }
 
   // Task #94 (consent/block model, "both, recipient's choice" per direct
@@ -1998,6 +2534,33 @@ const AtlasWallet = (() => {
   // replaced. A `newCredential` that fails any check is discarded — the
   // old (now-revoked) entry stays exactly as it was, no different from any
   // other verification failure this wallet already handles.
+  // Task #144 Phase 1 — the other half of what an `updates` array can mean
+  // for this wallet, alongside processAssetUpdates above: not just "here's
+  // what your credential turned into", but also, for THIS identity's own
+  // locally-recorded submitted trades, "here's the sign one of them just
+  // settled while you weren't looking" — a pending trade's staked balance
+  // id showing up in `updates` (superseded or plain revoked, either way)
+  // means the station matched and settled it. The actual remainder/
+  // received credentials are handled by processAssetUpdates and the
+  // ordinary mail-gift-claim path respectively (see POST /atlas/trade/
+  // submit's own comment) — this function only updates the LOCAL record's
+  // display status, never touches wallet contents itself.
+  async function reconcileSubmittedTrades(ownerPublicKey, domain, updates) {
+    if (!updates || updates.length === 0) return;
+    const records = await getSubmittedTrades(ownerPublicKey);
+    const updatedIds = new Set(updates.map((u) => u.id));
+    let changed = false;
+    for (const record of records) {
+      if (record.domain !== domain || record.status !== 'pending') continue;
+      if (updatedIds.has(record.balanceId)) {
+        record.status = 'settled';
+        record.settledAt = new Date().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) await saveSubmittedTrades(ownerPublicKey, records);
+  }
+
   async function processAssetUpdates(ownerPublicKey, domain, updates) {
     if (!updates || updates.length === 0) return;
     const wallet = await getWallet(ownerPublicKey);
@@ -2063,7 +2626,16 @@ const AtlasWallet = (() => {
   // the exact same code path the periodic background loop already uses,
   // rather than standing up a second, competing check mechanism.
   async function checkAllMail(opts = {}) {
-    const identity = await getIdentity();
+    // `opts.identity` lets a caller check mail for an identity other than
+    // "self" (getIdentity()) through this exact same path — e.g. tests
+    // exercising task #144 Phase 1's remote-settlement delivery, where the
+    // absent counterparty in this single-profile demo is the local
+    // "counterparty" role, which nothing else in this automatic loop ever
+    // polls on behalf of (see restartMailCheckLoop in viewer.js — it only
+    // ever calls this with no args, i.e. self). A real deployment doesn't
+    // need this at all: each visitor's own extension always IS "self" from
+    // its own point of view.
+    const identity = opts.identity || await getIdentity();
     if (!identity) return 0;
 
     const assets = await getWallet(identity.publicKey);
@@ -2102,6 +2674,7 @@ const AtlasWallet = (() => {
           newCount++;
         }
         await processAssetUpdates(identity.publicKey, domain, updates);
+        await reconcileSubmittedTrades(identity.publicKey, domain, updates);
       } catch (err) {
         // unreachable domain — move on, don't let it block the others
       }
@@ -2126,10 +2699,13 @@ const AtlasWallet = (() => {
     splitAsset, consolidateAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
     dropItem, pickUpItem, getDroppedItems, getDroppedItemsInWorld,
-    proposeIntent, settleTrade, verifySignedPayload,
+    proposeIntent, verifySignedPayload,
+    submitTradeIntent, fetchTradeListings, claimTradeListing, cancelTradeListing,
+    getSubmittedTrades, deleteSubmittedTrade, getTradingStationMemberships,
     recordWorldVisit, getRecentWorlds,
     getCharacterScale, setCharacterScale,
     getChatPanelSettings, setChatPanelSettings, chatMessageContainsBlockedWord,
+    getAssetViewerSettings, setAssetViewerSettings,
     getAutoLockMinutes, setAutoLockMinutes,
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
@@ -2140,7 +2716,13 @@ const AtlasWallet = (() => {
     setPostOfficeMailMode, blockPostOfficeSender, unblockPostOfficeSender, getPostOfficeSettings,
     setPostOfficeHandle, resolvePostOfficeHandle,
     getAssetUpdateNotices, markAssetUpdateNoticesSeen,
-    getFriends, addFriend, removeFriend,
-    getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain
+    getFriends, addFriend, removeFriend, updateFriendNotes,
+    getContactGroups, addContactGroup, renameContactGroup, removeContactGroup,
+    addContactToGroup, removeContactFromGroup,
+    getMutedChatUsers, muteChatUser, unmuteChatUser,
+    getBlockedChatUsers, blockChatUser, unblockChatUser,
+    getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain,
+    getCalendarEvents, addCalendarEvent, updateCalendarEvent, removeCalendarEvent,
+    onWalletChanged
   };
 })();

@@ -18,11 +18,11 @@
 // doesn't need to be standing here to receive.
 // Three checks, in order:
 // 1. Sender authentication — verify_envelope($payload, $proof), the same
-//    self-signed-envelope check atlas/asset/trade.php already uses for
-//    intents. $proof['publicKey'], once verified, IS the sender's
-//    identity — no separate "from" field inside the signed payload is
-//    needed for that, same reasoning trade.php's intentA/intentB already
-//    rely on.
+//    self-signed-envelope check atlas/trade/submit.php and claim.php
+//    already use for their own intents. $proof['publicKey'], once
+//    verified, IS the sender's identity — no separate "from" field inside
+//    the signed payload is needed for that, same reasoning a trade
+//    intent's own signer identity already relies on (SPEC.md §7).
 // 2. Sender membership — find_postoffice_membership($proof['publicKey'])
 //    against THIS domain's own roster. This is what makes "send through
 //    this Post Office" mean something: it's not an open relay for anyone

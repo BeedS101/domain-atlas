@@ -20,7 +20,7 @@ $assetClass = $body['assetClass'] ?? null;
 $quantity = $body['quantity'] ?? null;
 if (!$ownerPublicKey) send_json(400, ['error' => 'ownerPublicKey is required']);
 if (!isset(ATLAS_ASSET_CATALOG[$assetClass])) {
-  send_json(400, ['error' => 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.element.iron, or atlas.element.gold.']);
+  send_json(400, ['error' => 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.tradingstation.membership, atlas.element.iron, atlas.element.gold, or atlas.element.silver.']);
 }
 
 // fungible: true — quantity is caller-chosen and must be a positive
@@ -80,6 +80,24 @@ if ($assetClass === 'atlas.postoffice.membership') {
     'credentialId' => $credential['id'],
     'subject' => 'Your address is live',
     'body' => 'Anyone who has your public key can now reach you through ' . atlas_domain() . "'s Global Mail — share it the way you'd share an email address.",
+    'sentAt' => iso_now(),
+  ];
+  $welcomeSignature = atlas_sign($kp['privateKey'], $welcomePayload);
+  append_mail(array_merge($welcomePayload, ['signature' => $welcomeSignature]));
+}
+
+// Trading Station (task #144 Phase 1) — same shape as Post Office just
+// above: claiming this class IS joining, logged to its own roster, welcome
+// mail addressed by this credential's own id so it arrives through the
+// ordinary mail/check.php loop. Mirrors issuer-server/server.js's same
+// branch in its /atlas/asset/issue handler.
+if ($assetClass === 'atlas.tradingstation.membership') {
+  append_tradingstation_member(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'joinedAt' => $credential['issuedAt']]);
+  $welcomePayload = [
+    'id' => 'urn:atlas:mail:' . atlas_uuid(),
+    'credentialId' => $credential['id'],
+    'subject' => 'Trading Station membership active',
+    'body' => 'You can now submit a remote trade intent to ' . atlas_domain() . "'s Trading Station without standing at the stall — it'll hold your offer until a matching counterparty intent arrives.",
     'sentAt' => iso_now(),
   ];
   $welcomeSignature = atlas_sign($kp['privateKey'], $welcomePayload);

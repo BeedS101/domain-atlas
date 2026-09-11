@@ -42,6 +42,9 @@ What's in this folder
       sync.php       - POST /presence/poll/sync     (heartbeat + move + roster fetch)
       signal.php     - POST /presence/poll/signal   (friend-request relay, #67)
       leave.php      - POST /presence/poll/leave    (a visitor explicitly leaves)
+      join-status.php       - POST /presence/poll/join-status       (#137: poll a pending duplicate-join challenge)
+      duplicate-response.php - POST /presence/poll/duplicate-response (#137: existing member answers Leave/Keep)
+      activity.php           - POST /presence/poll/activity          (#137: explicit "still here" ping, e.g. wallet activity)
       chat-join.php  - POST /presence/poll/chat-join  (a visitor joins a domain's chat)
       chat-sync.php  - POST /presence/poll/chat-sync  (heartbeat + fetch new messages)
       chat-send.php  - POST /presence/poll/chat-send  (send one chat message)
@@ -192,6 +195,40 @@ so both files live in lib/ behind the same web-access deny-all .htaccess
 as everything else private in this bundle, not under .well-known. There's
 no admin/listing endpoint for either, same reasoning as issuer-php's
 subscriber roster.
+
+
+Duplicate-identity join guard (task #137)
+----------------------------------------
+Same rule as the Node version: if a visitor's wallet publicKey is already
+present in the room it's joining, the join isn't just let through as a
+second copy of the same identity. If that existing member has gone
+PRESENCE_ACTIVITY_IDLE_MS (env ACTIVITY_IDLE_MS, default 20 minutes) with
+no real movement, chat send, or explicit activity ping, it's presumed an
+abandoned tab and the new join silently takes its place. Otherwise the new
+join is held pending — /presence/poll/join returns
+{status:'pending', id, challengeId, countdownMs} instead of {id, roster} —
+while the existing member is notified (via the same pendingSignals
+mechanism friend requests already use, delivered on its own next
+/presence/poll/sync) and gets PRESENCE_DUPLICATE_JOIN_COUNTDOWN_MS (env
+DUPLICATE_JOIN_COUNTDOWN_MS, default 60 seconds) to explicitly answer
+Leave now or Keep this session active via /presence/poll/duplicate-response.
+No answer in time means the newcomer wins by default. The pending
+new joiner finds out how it settled by polling /presence/poll/join-status
+with the challengeId until it stops returning {status:'pending'}.
+
+One PHP-specific wrinkle: presence-server.js schedules the countdown's
+default outcome with a real timer so it fires even if nobody asks again.
+This bundle has no long-running process to run one, so instead every
+single request that touches presence/lib/atlas-presence-store.json — a
+join, a sync, a signal, an activity ping, from ANY visitor anywhere — also
+checks whether any pending challenge's countdown has run out and settles
+it right there (see presence_sweep_challenges() in lib/store.php). In
+practice that's frequent enough (every visitor syncs roughly every couple
+of seconds) that the timing stays close to the Node version's; the only
+real difference is a challenge could in principle sit unresolved a little
+longer if literally nothing touches the store in the meantime — the same
+"lazy instead of timer-based, fine at demo/small-site scale" tradeoff this
+bundle already makes for staleness sweeping.
 
 
 One real architectural difference from the Node version, worth knowing

@@ -14,7 +14,18 @@
     padding: 0 16px; background: rgba(14,22,27,0.92);
     border-bottom: 1px solid #2c3c44; z-index: 10;
   }
-  #placeLabel { font-size: 14px; }
+  /* A long world name + domain + world-id string (see viewer.js's
+     placeLabel.innerHTML assignment) has no natural line break, so without
+     a width cap it would just keep pushing #controls further right instead
+     of wrapping. max-width forces it to wrap; max-height + overflow-y then
+     turn "wraps into more lines than the bar is tall" into a scrollbar
+     inside the label itself, rather than spilling text below #bar's fixed
+     56px height into the canvas underneath it. */
+  #placeLabel {
+    font-size: 14px; line-height: 1.3;
+    max-width: 260px; max-height: 40px; min-width: 0;
+    overflow-y: auto; overflow-wrap: anywhere; padding-right: 4px;
+  }
   #placeLabel .domain { color: #a9b8bf; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; margin-left: 8px; }
   #controls { display: flex; align-items: center; gap: 10px; }
   button {
@@ -25,7 +36,16 @@
   button:hover { border-color: #57ab9b; }
   button:disabled { opacity: 0.4; cursor: default; }
   #closeBtn { border-color: #c05a1f; color: #e08a4c; }
-  #status { font-size: 12px; color: #a9b8bf; max-width: 260px; text-align: right; }
+  /* statusEl.textContent in viewer.js carries everything from "In sync
+     with <domain> · <world>" to full trade-settlement/error messages —
+     with only a max-width and no height cap, long text just wrapped and
+     grew #status (and #bar, since #bar has no overflow: hidden of its
+     own) taller than the bar's fixed 56px instead of staying contained.
+     max-height + overflow-y turns that into an actual scrollbar. */
+  #status {
+    font-size: 12px; color: #a9b8bf; line-height: 1.3; text-align: right;
+    max-width: 260px; max-height: 40px; overflow-y: auto; overflow-wrap: anywhere;
+  }
 
   #scene { display: block; margin-top: 56px; }
   #scene3d { display: none; position: fixed; top: 56px; left: 0; right: 0; bottom: 0; width: 100%; height: calc(100% - 56px); outline: none; touch-action: none; }
@@ -36,6 +56,40 @@
     padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44; display: none;
   }
   #scene3dHint.active { display: block; }
+
+  /* Task #137 — a poll/WS join that came back "pending" because this
+     same identity is already active elsewhere in this room, waiting on
+     the OTHER session's Leave/Keep decision (or the countdown lapsing).
+     Same small pill look as #scene3dHint above, just a second instance
+     since the two are never shown at the same time anyway (this one only
+     matters before a world's presence room is actually joined). */
+  #presenceJoinWaitingHint {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
+    padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44; display: none;
+  }
+  #presenceJoinWaitingHint.active { display: block; }
+  #presenceTransientHint {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
+    padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44; display: none;
+  }
+  #presenceTransientHint.active { display: block; }
+
+  /* Task #137 — the notice shown to the EXISTING session when a second
+     join under the same identity shows up elsewhere. Deliberately a
+     small centered panel, not a full-page dark overlay — this is an
+     FYI-with-a-decision, not a blocking security gate, and the visitor
+     should still be able to see (though not necessarily interact with)
+     the world behind it while deciding. */
+  #duplicateJoinModal { display: none; position: fixed; inset: 0; z-index: 20; align-items: center; justify-content: center; }
+  #duplicateJoinModal.active { display: flex; }
+  #duplicateJoinBox {
+    background: rgba(20,31,38,0.97); border: 1px solid #2c3c44; border-radius: 10px;
+    padding: 18px 20px; max-width: 340px; box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  }
+  #duplicateJoinBox .subhead { margin-bottom: 8px; }
+  #duplicateJoinCountdownLine { font-size: 12px; color: #a9b8bf; margin-bottom: 12px; }
   #hint {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
@@ -59,10 +113,10 @@
   #socialBadge.show { display: flex; }
 
   /* Sub-tab-bar pattern, shared by every tab that has its own second level
-     of tabbing — Social's Mail/Friends/Favorites (#socialSubtabBar) and
-     Inventory's Collectibles/Documents (#inventorySubtabBar) both use this
-     one class rather than each inventing their own look. A smaller echo of
-     #walletTabBar's own look, nested one level in. */
+     of tabbing — Social's Mail/Contacts/Favorites/Calendar (#socialSubtabBar)
+     and Inventory's Collectibles/Documents (#inventorySubtabBar) both use
+     this one class rather than each inventing their own look. A smaller
+     echo of #walletTabBar's own look, nested one level in. */
   .subtab-bar { display: flex; gap: 6px; margin-bottom: 14px; }
   .subtab-bar button { flex: 1; font-size: 12px; padding: 6px 10px; position: relative; }
   .subtab-bar button.active-subtab { background: #1d2f38; border-color: #4a90a4; color: #fff6ef; }
@@ -72,11 +126,89 @@
     display: none; align-items: center; justify-content: center; padding: 0 3px;
   }
   .subtab-badge.show { display: flex; }
-  /* Generic show-one-hide-the-rest sub-screen, shared by Social's three
+  /* Generic show-one-hide-the-rest sub-screen, shared by Social's four
      sub-screens and Inventory's two (Collectibles/Documents) — same
      pattern as .wallet-screen one level up, just for a nested tab bar. */
   .subscreen { display: none; }
   .subscreen.active { display: block; }
+  /* Calendar (Social -> Calendar): one card per manually-added event,
+     .info-card's own look (see that class's comment further down) plus an
+     .overdue variant that just recolors the date/time line — a subtle
+     "this already happened" cue, nothing more elaborate than that. */
+  .calendar-event .calendar-event-when { font-size: 11px; color: #a9b8bf; margin-top: 2px; }
+  .calendar-event.overdue .calendar-event-when { color: #f2a4b4; }
+  .calendar-event .calendar-event-notes { font-size: 12px; line-height: 1.5; white-space: pre-wrap; margin-top: 6px; color: #cfd8db; }
+  /* The add/edit form's two datetime-local fields need a small label each
+     once there are two of them (a bare, unlabeled datetime-local was fine
+     when there was only ever one) — same uppercase/dim styling as
+     .calendar-day-viewer-other-label below rather than inventing a new
+     look for it. datetime-local has no usable placeholder text of its own
+     (browsers don't render one), so this is a real label, not a hint. */
+  .calendar-field-label { font-size: 10px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 8px; margin-bottom: 3px; }
+  /* Calendar month-grid widget: a persistent phone-widget-style month view
+     pinned above the add/edit form and event list in calendarSubscreen
+     (see renderCalendarMonthGrid/refreshCalendarMonthGrid in viewer.js).
+     Sized for #walletPanel's fixed 360px width (328px usable once its 16px
+     padding is subtracted) — 7 equal columns via 1fr rather than a fixed
+     px size, so the grid always fills that width exactly regardless of
+     rounding, same reasoning .btn-row's buttons already use flex:1 for. */
+  .calendar-month-widget { border: 1px solid #2c3c44; border-radius: 8px; padding: 10px; margin-bottom: 14px; }
+  .calendar-month-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+  .calendar-month-label { font-size: 13px; font-weight: 600; flex: 1; text-align: center; }
+  .calendar-month-nav { padding: 4px 10px; font-size: 14px; line-height: 1; }
+  .calendar-grid-weekdays, .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+  .calendar-grid-weekdays { margin-bottom: 4px; }
+  .calendar-grid-weekdays span { font-size: 9px; text-align: center; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.03em; }
+  .calendar-grid-day {
+    position: relative; display: flex; align-items: center; justify-content: center;
+    aspect-ratio: 1 / 1; border-radius: 6px; font-size: 11px; cursor: pointer;
+    border: 1px solid transparent; color: #e7edef;
+  }
+  .calendar-grid-day:hover { border-color: #2c3c44; }
+  .calendar-grid-day.other-month { color: #6f838c; opacity: 0.55; }
+  .calendar-grid-day.today { border-color: #57ab9b; color: #fff6ef; }
+  .calendar-grid-day.selected { background: #1d2f38; border-color: #4a90a4; color: #fff6ef; }
+  .calendar-grid-day .calendar-grid-dot {
+    position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%);
+    width: 4px; height: 4px; border-radius: 999px; background: #e0b84c;
+  }
+  /* Day-viewer widget — appears directly under the month-grid widget once
+     a day is clicked there (see renderCalendarDayViewer in viewer.js).
+     Same border/radius/padding/spacing language as .calendar-month-widget
+     above, and hidden via the plain [hidden] attribute rather than a CSS
+     class: it's a binary "a day is selected, or it isn't" with no separate
+     show/hide state worth tracking beyond calendarSelectedDate itself. */
+  .calendar-day-viewer { border: 1px solid #2c3c44; border-radius: 8px; padding: 10px; margin-bottom: 14px; }
+  .calendar-day-viewer-header { font-size: 13px; font-weight: 600; text-align: center; margin-bottom: 8px; }
+  /* "Other times" bucket — events on the selected day whose hour falls
+     outside the hour-slot range below (see CALENDAR_DAY_VIEW_START_HOUR/
+     CALENDAR_DAY_VIEW_END_HOUR in viewer.js), shown up top instead of
+     being silently dropped. */
+  .calendar-day-viewer-other { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #2c3c44; }
+  .calendar-day-viewer-other-label { font-size: 10px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+  .calendar-day-hour-row { display: flex; gap: 8px; padding: 3px 0; border-top: 1px solid #1d2830; }
+  .calendar-day-hour-row:first-child { border-top: none; }
+  .calendar-day-hour-label { flex: 0 0 42px; font-size: 10px; color: #a9b8bf; padding-top: 2px; }
+  .calendar-day-hour-events { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  /* Clicking one of these opens it for editing in the add/edit form below —
+     same edit flow the event-list's own cards use (openCalendarEventForEdit
+     in viewer.js), not a separate copy of it. */
+  .calendar-day-event {
+    background: #1d2f38; border: 1px solid #2c3c44; border-radius: 6px; padding: 4px 6px;
+    font-size: 11px; cursor: pointer; overflow-wrap: anywhere;
+  }
+  .calendar-day-event:hover { border-color: #4a90a4; }
+  .calendar-day-event .calendar-day-event-time { color: #a9b8bf; font-size: 10px; margin-right: 4px; }
+  .calendar-day-event.overdue { border-color: #6b3a46; }
+  .calendar-day-event.overdue .calendar-day-event-time { color: #f2a4b4; }
+  /* An inset left accent (not a plain border, so it can't be silently
+     overridden by .overdue's own all-sides `border-color` above, and both
+     can be visible on the same chip at once) marking a chip that
+     represents a SPAN of time rather than a single instant — an event
+     with an end time, or one of its continuation rows on a day it merely
+     passes through. See renderCalendarDayEventChip in viewer.js. */
+  .calendar-day-event.has-duration { box-shadow: inset 3px 0 0 #4a90a4; padding-left: 7px; }
+  .calendar-day-event.has-duration.overdue { box-shadow: inset 3px 0 0 #f2a4b4; }
   .mail-card { position: relative; }
   .mail-card.unread::before {
     content: ''; position: absolute; top: 14px; left: -10px; width: 7px; height: 7px;
@@ -165,7 +297,6 @@
   .resource-group-header button { font-size: 11px; padding: 5px 10px; white-space: nowrap; }
   .empty-note { color: #a9b8bf; font-size: 12px; }
   #loadoutNote { font-size: 12px; color: #e0b84c; margin-bottom: 8px; }
-  #tradeStatus { font-size: 11px; color: #a9b8bf; margin-top: 8px; }
 
   .subhead { font-size: 11px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em; margin: 14px 0 6px; }
 
@@ -258,6 +389,40 @@
     pointer-events: none; display: none;
   }
 
+  /* Chat username hover tooltip (#115) — same visual language and
+     positioning approach as #portalHoverTooltip right above (a single
+     floating div, position:fixed, shown/hidden and moved per-hover from JS
+     rather than pinned), just anchored to a hovered .chat-name span instead
+     of a canvas hitbox. z-index above #chatWidget (7) so it's never clipped
+     underneath the panel it floats next to. */
+  #chatUserTooltip {
+    position: fixed; z-index: 9; max-width: 220px;
+    background: rgba(20,31,38,0.94); color: #f2ece4;
+    border: 1px solid #2c3c44; border-radius: 8px;
+    padding: 8px 10px; font-size: 11.5px; line-height: 1.5;
+    pointer-events: none; display: none;
+  }
+
+  /* Chat username right-click menu (#116) — same "small floating popover,
+     shown/hidden by JS" idea as the mail-card-menu-items popover used for
+     mail's own "⋯" block-sender menu (reused here for the visual/
+     interaction language: dark card, thin border, full-width stacked
+     buttons), just a standalone singleton positioned at the click point
+     instead of anchored `position:absolute` under a toggle button —
+     there's no single fixed toggle to anchor to here, the trigger can be
+     any message's sender name anywhere in the scrollable list. */
+  #chatUserContextMenu {
+    display: none; position: fixed; z-index: 10;
+    background: #16232a; border: 1px solid #2c3c44; border-radius: 8px;
+    padding: 6px; min-width: 150px;
+  }
+  #chatUserContextMenu.show { display: block; }
+  #chatUserContextMenu button {
+    width: 100%; text-align: left; font-size: 12px; padding: 6px 8px;
+  }
+  #chatUserContextMenu button.danger-btn { border-color: #c0405a; color: #f2a4b4; }
+  #chatUserContextMenu button.danger-btn:hover { border-color: #e0607a; }
+
   /* In-world chat — anchored bottom-left of the canvas (the canvas itself
      already starts below #bar, so "fixed, left/bottom" IS the canvas's own
      bottom-left corner). #chatWidget is the ONE positioned element (fixed,
@@ -288,20 +453,41 @@
     overflow: hidden;
   }
   #chatWidget.minimized #chatPanel { height: auto !important; }
-  #chatWidget.minimized #chatMessagesWorld,
-  #chatWidget.minimized #chatMessagesDomain,
+  #chatWidget.minimized #chatMessages,
   #chatWidget.minimized #chatInputRow { display: none !important; }
   #chatPanelHeader {
     position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
     padding: 4px 6px; border-bottom: 1px solid #2c3c44; background: rgba(14,22,27,0.6);
     cursor: default;
   }
+  /* #chatTabBar (dynamic tab list — one per opted-in world plus "Domain",
+     see viewer.js's computeChatTabs()) is NOT given the shared
+     .subtab-bar class other sub-navigation bars in the wallet panel use
+     (#inventorySubtabBar etc. below): .subtab-bar's own descendant rule
+     (".subtab-bar button") carries higher specificity (a class + a type
+     selector) than .chat-tab alone, so wrapping these buttons in it would
+     silently override .chat-tab's compact pill font-size/padding with
+     .subtab-bar's larger ones — a visual regression, not the "reuse for
+     consistency" this is meant to be. Every individual button still gets
+     the exact same .chat-tab / .active-subtab classes as before, so a
+     single tab looks pixel-identical to the old fixed pair; this class
+     only adds the row-level behavior (a variable number of tabs) those
+     other bars never needed: shrink-proof buttons that overflow into a
+     horizontal scroll region instead of wrapping (wrapping would fight
+     the settings-gear/resize-handle for room in this compact one-line
+     header) once there are more tabs than #chatPanel's current width
+     (CHAT_MIN_WIDTH..CHAT_MAX_WIDTH, see viewer.js) comfortably fits. */
+  .chat-tab-bar {
+    display: flex; flex: 1 1 auto; min-width: 0; gap: 2px;
+    overflow-x: auto; scrollbar-width: thin;
+  }
   .chat-tab {
+    flex: 0 0 auto; white-space: nowrap;
     background: none; border: none; color: #a9b8bf; font-size: 11px; padding: 3px 8px;
     border-radius: 999px; cursor: pointer;
   }
   .chat-tab.active-subtab { background: #2c3c44; color: #f2ece4; }
-  .chat-header-spacer { flex: 1 1 auto; }
+  .chat-header-spacer { flex: 0 0 auto; }
   .chat-icon-btn {
     background: none; border: none; color: #a9b8bf; font-size: 13px; line-height: 1;
     padding: 3px 6px; cursor: pointer; border-radius: 6px;
@@ -322,7 +508,7 @@
     color: #d7e0e4; line-height: 1.45; word-break: break-word;
   }
   .chat-messages .chat-line { margin-bottom: 2px; }
-  .chat-messages .chat-line .chat-name { color: #57a593; font-weight: 600; }
+  .chat-messages .chat-line .chat-name { color: #57a593; font-weight: 600; cursor: pointer; }
   .chat-messages .empty-note { color: #6f838c; font-size: 11px; }
   /* A sibling of #chatPanel now (see the HTML comment there for why), so
      its containing block for position:absolute is #chatWidget itself
@@ -338,6 +524,11 @@
   }
   #chatSettingsPopover label { display: block; margin-bottom: 8px; }
   #chatSettingsPopover input[type="range"] { width: 100%; margin-top: 4px; }
+  #chatSettingsPopover select {
+    width: 100%; margin-top: 4px; background: rgba(20,31,38,0.85);
+    border: 1px solid #2c3c44; border-radius: 6px; color: #f2ece4;
+    font-size: 11px; padding: 3px 4px; font-family: inherit;
+  }
   #chatSettingsPopover .chat-settings-note { color: #a9b8bf; margin-top: 4px; }
   #chatMinimizeToggleBtn { width: 100%; margin-top: 2px; }
   #chatTextInput {
@@ -347,6 +538,78 @@
   }
   #chatTextInput::placeholder { color: #6f838c; }
   #chatTextInput:disabled { opacity: 0.55; cursor: not-allowed; }
+
+  /* Asset Viewer hover panel (task #150) — hovering a wallet asset card
+     (renderAssetCard() in viewer.js, used by every Collectibles/Documents
+     list) opens this floating panel near the card, same "single floating
+     div, positioned per-hover from JS" idea as #portalHoverTooltip/
+     #chatUserTooltip above, just with actual interactive content (a
+     settings gear + popover, a resize handle, a "Show model" button) so
+     it's built from the same widget/panel/popover trio as #chatWidget
+     rather than a plain inert div. #assetViewerWidget is the ONE
+     positioned element (fixed, top/left written by JS per hover — see
+     positionAssetViewer() in viewer.js); #assetViewerPanel is the visible
+     bordered card inside it. z-index above #walletPanel (11) so it's
+     never hidden underneath the panel whose cards it floats next to. */
+  #assetViewerWidget {
+    position: fixed; z-index: 12;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  #assetViewerPanel {
+    display: flex; flex-direction: column;
+    background: rgba(20,31,38,0.85); border: 1px solid #2c3c44; border-radius: 10px;
+    overflow: hidden;
+  }
+  #assetViewerHeader {
+    position: relative; flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
+    padding: 4px 6px; border-bottom: 1px solid #2c3c44; background: rgba(14,22,27,0.6);
+    font-size: 11px; color: #a9b8bf; font-weight: 600;
+  }
+  /* Unlike .chat-header-spacer (which relies on .chat-tab-bar's own
+     flex-grow to do the actual pushing), nothing else in this header
+     grows — so this spacer does the growing itself, pushing the settings
+     gear to the header's right edge. */
+  .asset-viewer-header-spacer { flex: 1 1 auto; }
+  /* Bottom-right grab target, not top-right like #chatResizeHandle — this
+     panel is positioned by its top-left corner (see positionAssetViewer()),
+     not bottom-anchored like #chatWidget, so growing from the opposite
+     (bottom-right) corner is what keeps the ANCHORED corner (top-left)
+     from moving mid-drag, the same "resize away from the anchor" principle
+     chat's own handle follows, just mirrored for this panel's own anchor.
+     The drag-tracking mechanism itself (document-level mousemove/mouseup,
+     not the handle's own) is identical to chat's — see viewer.js. */
+  #assetViewerResizeHandle {
+    position: absolute; bottom: -3px; right: -3px; width: 14px; height: 14px;
+    cursor: nwse-resize; border-radius: 3px; background: #3a4d56;
+    border: 1px solid #57a593;
+  }
+  #assetViewerBody {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 10px;
+    color: #d7e0e4; line-height: 1.45;
+  }
+  #assetViewerBody .name { font-weight: 600; margin-bottom: 2px; }
+  #assetViewerBody .meta { font-size: 11px; color: #a9b8bf; margin-bottom: 6px; }
+  .asset-viewer-thumbnail {
+    display: block; max-width: 100%; max-height: 120px; object-fit: contain;
+    margin-bottom: 8px; border-radius: 6px; background: rgba(0,0,0,0.2);
+  }
+  .asset-viewer-properties { font-size: 11px; color: #d7e0e4; margin-top: 4px; }
+  .asset-viewer-properties > div { margin-bottom: 2px; }
+  #assetViewerShowModelBtn { margin-top: 8px; width: 100%; }
+  .asset-viewer-model-status { font-size: 11px; color: #a9b8bf; margin-top: 8px; }
+  .asset-viewer-model-canvas {
+    display: block; margin-top: 8px; width: 100%; max-width: 240px; height: 160px;
+    border-radius: 6px; background: rgba(0,0,0,0.25);
+  }
+  /* Sibling of #assetViewerPanel, same "escape the panel's overflow clip"
+     reasoning as #chatSettingsPopover's own HTML comment. */
+  #assetViewerSettingsPopover {
+    position: absolute; top: 100%; right: 0; margin-top: 6px;
+    background: #16232a; border: 1px solid #2c3c44; border-radius: 8px;
+    padding: 10px; width: 170px; font-size: 11px; color: #d7e0e4; z-index: 13;
+  }
+  #assetViewerSettingsPopover label { display: block; margin-bottom: 8px; }
+  #assetViewerSettingsPopover input[type="range"] { width: 100%; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -377,26 +640,126 @@
   </div>
   <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain</div>
   <div id="scene3dHint">WASD to walk · drag to look · scroll to zoom out · walk into a glowing ring to take that portal · F11 for fullscreen</div>
+
+  <!-- Task #137 — shown to a NEW joiner while requestJoin() on the
+       presence server is holding their join as "pending" (this same
+       identity was recently active elsewhere in this room already).
+       Cleared the moment a real 'welcome' arrives (joined) or the
+       existing session explicitly declines ('join-denied'/'denied'). -->
+  <div id="presenceJoinWaitingHint">Waiting for the other session using your identity to respond…</div>
+
+  <!-- Same pill look, but for a one-off message that shows itself and
+       clears itself a few seconds later — this session's own presence
+       membership having just been evicted out from under it (task #137's
+       "duplicate-join-lost" notice) or a poll session finding its own
+       sync coming back 404/unknown (task #137's related fix to
+       pollPresence() no longer silently swallowing that). Distinct
+       element from presenceJoinWaitingHint above since that one's shown
+       for as long as a state lasts, not a fire-and-forget notice. -->
+  <div id="presenceTransientHint"></div>
+
+  <!-- Task #137 — shown to the EXISTING session when a second join under
+       the same identity shows up elsewhere in this same room. See
+       handleIncomingSignal()'s 'duplicate-join-request' branch in
+       viewer.js for what populates and opens this. -->
+  <div id="duplicateJoinModal">
+    <div id="duplicateJoinBox">
+      <div class="subhead">Another session with your identity is trying to join this world.</div>
+      <div id="duplicateJoinCountdownLine">If you don't respond within <span id="duplicateJoinCountdown">60</span>s, they'll be let in automatically.</div>
+      <div class="btn-row">
+        <button id="duplicateJoinLeaveBtn" type="button" class="btn-secondary">Leave now</button>
+        <button id="duplicateJoinKeepBtn" type="button" class="btn-secondary">Keep this session active</button>
+      </div>
+    </div>
+  </div>
   <div id="portalHoverTooltip"></div>
+  <!-- Chat username hover tooltip (#115) / right-click menu (#116) — see
+       their own CSS comments above, and viewer.js's renderChatUserTooltip()/
+       openChatUserContextMenu() for what fills these in. Singletons reused
+       across every message row, same convention as #portalHoverTooltip. -->
+  <div id="chatUserTooltip"></div>
+  <div id="chatUserContextMenu">
+    <button type="button" data-action="chat-pm">Private message</button>
+    <button type="button" data-action="chat-mute">Mute user</button>
+    <button type="button" data-action="chat-block" class="danger-btn">Block user</button>
+  </div>
+
+  <!-- Asset Viewer hover panel (task #150) — opens near whichever wallet
+       asset card (Resources/Items, i.e. Collectibles/Documents — see
+       renderAssetCard() in viewer.js) the mouse is currently over: name,
+       class, issuer, the FULL properties list (no click-to-expand toggle —
+       unlike the inline card, this panel has room), the asset's thumbnail
+       image if its credential has one, and a "Show model" button if it
+       also has a model — clicking that lazily creates the canvas inside
+       #assetViewerModelArea and renders it via window.MiniGLTF.previewModel()
+       (gltf-mini.js). Hidden by default; shown/positioned/filled in by
+       viewer.js's openAssetViewer()/positionAssetViewer(). Settings gear +
+       popover and the resize handle mirror #chatSettingsBtn/
+       #chatSettingsPopover/#chatResizeHandle exactly (see viewer.js), just
+       for this panel's own opacity/text-size/width/height, persisted via
+       AtlasWallet.get/setAssetViewerSettings() (wallet.js) instead of
+       get/setChatPanelSettings(). -->
+  <div id="assetViewerWidget" hidden>
+    <div id="assetViewerPanel" style="width:280px;height:240px;">
+      <div id="assetViewerHeader">
+        <span>Asset Viewer</span>
+        <div class="asset-viewer-header-spacer"></div>
+        <button id="assetViewerSettingsBtn" type="button" class="chat-icon-btn" title="Asset Viewer settings">⚙</button>
+        <div id="assetViewerResizeHandle" title="Drag to resize"></div>
+      </div>
+      <div id="assetViewerBody"></div>
+    </div>
+    <div id="assetViewerSettingsPopover" hidden>
+      <label>Opacity
+        <input id="assetViewerOpacityInput" type="range" min="0.2" max="1" step="0.05">
+      </label>
+      <label>Text size
+        <input id="assetViewerTextSizeInput" type="range" min="10" max="20" step="1">
+      </label>
+    </div>
+  </div>
 
   <!-- In-world chat — read-only for everyone, sendable only while the
-       wallet is unlocked (see viewer.js's connectChat()/chat-send
-       handling). "This World" is the current domain+world only; "Domain"
-       is every world in the current domain — both tabs render from the
-       SAME received message stream (see renderChatMessages() in
-       viewer.js), just filtered differently, since the server already
-       tags every message with which world it was sent from. -->
+       wallet is unlocked AND the active tab is one you're actually allowed
+       to send into (see viewer.js's connectChat()/chat-send handling and
+       refreshChatSendability()). The tab bar itself is dynamic, not a
+       fixed pair: a leftmost "Domain" tab whenever manifest.chat is set
+       (every world in the current domain — sendable from anywhere),
+       plus one tab per world that individually opted in via its own
+       world.chat: true (sendable only while you're actually standing in
+       that world — see chatWorldId). Every tab renders from the SAME
+       received message stream (see renderChatMessages() in viewer.js),
+       just filtered differently, since the server already tags every
+       message with which world it was sent from.
+
+       #111/#112 — the whole widget is hidden outright (display:none, set
+       by refreshChatAvailability() in viewer.js) for a world that hasn't
+       opted into chat at all (neither manifest.chat nor its own world.chat
+       is true). When it IS on, the tab list only ever contains what this
+       manifest+world combination actually declared — there is no longer a
+       hidden-but-present tab to fall back from. -->
   <div id="chatWidget">
     <div id="chatPanel" style="width:320px;height:200px;">
       <div id="chatPanelHeader">
-        <button id="chatTabWorldBtn" type="button" class="chat-tab active-subtab">This World</button>
-        <button id="chatTabDomainBtn" type="button" class="chat-tab">Domain</button>
+        <!-- Populated by viewer.js's renderChatTabBar() — one button per
+             opted-in scope (a leftmost "Domain" tab when manifest.chat is
+             set, then one per world with its own world.chat: true, in
+             manifest.worlds order), each carrying data-tab-id so this can
+             be selected reliably regardless of how many there are or what
+             order they render in. See refreshChatAvailability() for how
+             the list itself gets (re)computed on every world entry. -->
+        <div id="chatTabBar" class="chat-tab-bar"></div>
         <div class="chat-header-spacer"></div>
         <button id="chatSettingsBtn" type="button" class="chat-icon-btn" title="Chat settings">⚙</button>
         <div id="chatResizeHandle" title="Drag to resize"></div>
       </div>
-      <div id="chatMessagesWorld" class="chat-messages"></div>
-      <div id="chatMessagesDomain" class="chat-messages" hidden></div>
+      <!-- Single shared message list — whichever tab is active, filtered
+           in viewer.js's renderChatMessages() (unfiltered for "domain",
+           tagged-world-only for a "world:<id>" tab) and re-rendered on
+           every tab switch or new incoming message. Replaces the old
+           fixed #chatMessagesWorld/#chatMessagesDomain pair now that the
+           tab list itself is dynamic. -->
+      <div id="chatMessages" class="chat-messages"></div>
     </div>
     <!-- A sibling of #chatPanel, NOT nested inside it, even though it
          visually pops up right above the header — #chatPanel has
@@ -416,6 +779,37 @@
       <label>Text size
         <input id="chatTextSizeInput" type="range" min="10" max="20" step="1">
       </label>
+      <label>Opens on
+        <!-- #113, revised for the dynamic per-world tab list: which tab a
+             freshly-entered world's chat defaults to. "Current world"
+             selects the world you just walked into's own tab, falling
+             back to "Domain" if that world has no dedicated tab of its
+             own (chat there is only on via the domain-wide flag);
+             "Domain" does the reverse. "Auto" is stored as its own value
+             (unchanged set of choices) but is now a deliberate alias for
+             "Current world": the fixed This-World/Domain pair it used to
+             mean "whichever was already selected" for no longer exists —
+             every tab is a real named world (or Domain) now, so there's
+             no plain "This World" pseudo-tab left for "whatever's already
+             selected" to mean anything special. See viewer.js's
+             refreshChatAvailability() for where this is actually read. -->
+        <select id="chatDefaultTabInput">
+          <option value="auto">Auto (current world)</option>
+          <option value="world">Current world</option>
+          <option value="domain">Domain</option>
+        </select>
+      </label>
+      <!-- historyOnJoin — purely a local display preference (see
+           AtlasWallet's own comment on DEFAULT_CHAT_PANEL_SETTINGS): OFF
+           just means the recent-history batch this client already received
+           on join gets discarded instead of shown, starting the list empty
+           from that point forward. Neither presence-server nor presence-php
+           is asked to withhold anything, and both keep sending it exactly
+           as before. -->
+      <label style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+        <input id="chatHistoryOnJoinInput" type="checkbox" style="margin:0;">
+        Show history on join
+      </label>
       <button id="chatMinimizeToggleBtn" type="button" class="btn-secondary">Minimize</button>
       <div id="chatLoginNote" class="chat-settings-note"></div>
     </div>
@@ -434,11 +828,16 @@
            socialBadge below, just for "an asset you hold changed" instead
            of "new mail arrived". -->
       <button id="walletTabBtn" type="button">Wallet<span id="assetUpdatesBadge" class="subtab-badge"></span></button>
-      <!-- Social (#61/#67): Mail moved in here alongside the new Friends
-           and Favorites sub-sections — see #socialScreen below. socialBadge
+      <!-- Social (#61/#67): Mail moved in here alongside the new Contacts
+           (originally "Friends") and Favorites sub-sections — see
+           #socialScreen below. socialBadge
            is the COMBINED count (unread mail + pending incoming friend
            requests); each sub-tab also carries its own count. -->
       <button id="socialTabBtn" type="button">Social<span id="socialBadge"></span></button>
+      <!-- Trade: promoted from a collapsible category inside Wallet to its
+           own top-level tab once #144 Phase 1 grew it past what a
+           collapsed section was really built for — see tradeScreen below. -->
+      <button id="tradeTabBtn" type="button">Trade</button>
       <button id="settingsTabBtn" type="button">Settings</button>
     </div>
 
@@ -650,6 +1049,30 @@
         </div>
       </div>
 
+      <!-- Chat Admin (#116) — manages the two purely-local, per-viewer chat
+           moderation lists a right-click on a chat username can add to (see
+           viewer.js's openChatUserContextMenu()): muted users (silenced in
+           this viewer's own chat rendering only, no server involvement) and
+           blocked users (same local silencing effect). Blocked senders here
+           is its OWN list, deliberately NOT the same one as Mail Settings'
+           "Blocked senders" above — that one blocks a sender at one
+           specific Post Office domain membership, server-side; this one is
+           an instant, offline, cross-domain, per-public-key client-side
+           chat filter, a different mechanism entirely (see
+           AtlasWallet.blockChatUser's own comment for the full reasoning).
+           Nothing here touches or duplicates that other list's UI. -->
+      <div class="settings-category" data-category="chat-admin">
+        <button type="button" class="settings-category-toggle"><span>Chat Admin</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="subhead">Muted and blocked chat users — local to this browser only. Right-click a name in chat to add someone here.</div>
+          <h3 style="margin-top:14px;">Muted users</h3>
+          <div id="chatMutedUsersList" class="item-list" style="margin-top:8px;"></div>
+          <h3>Blocked users</h3>
+          <div class="empty-note">Separate from Mail Settings' "Blocked senders" above (that one is server-side, per Post Office membership) — this list only affects chat, purely on this device.</div>
+          <div id="chatBlockedUsersList" class="item-list" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
       <!-- Player character size — a purely visual scale on the rendered
            character model in 3D (gltf-mini-v1) worlds (see gltf-mini.js's
            characterScale). Doesn't affect movement speed or collision.
@@ -677,12 +1100,15 @@
       <!-- Same collapsible-category pattern as Settings (see the JS
            comment on walletPanel's click listener). Inventory defaults
            OPEN — it's what "your wallet" actually means, the reason you
-           opened this panel — while Identity, Trading station, and Recent
-           worlds default closed. Identity used to default open too, but
-           your public key/nickname/counterparty controls aren't what most
-           visits to this panel are actually for, so it's tucked away the
-           same as the situational categories now — just a tap on its
-           header away, same as any other collapsed category here. -->
+           opened this panel — while Identity and Recent worlds default
+           closed. Identity used to default open too, but your public
+           key/nickname/counterparty controls aren't what most visits to
+           this panel are actually for, so it's tucked away the same as
+           the situational categories now — just a tap on its header away,
+           same as any other collapsed category here. Trading station used
+           to be a third collapsible category here too — it's now its own
+           top-level Trade tab (see tradeScreen), once it grew past what a
+           collapsed section was built for. -->
       <div class="settings-category" data-category="identity">
         <button type="button" class="settings-category-toggle"><span>Identity</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
@@ -734,7 +1160,7 @@
            fungible and non-fungible together, e.g. a Bronze Compass
            alongside stacks of Iron/Gold Ingots) and Documents
            (presentation: "document" — currently just atlas.membership).
-           Reuses the exact sub-tab-bar pattern Social's Mail/Friends/
+           Reuses the exact sub-tab-bar pattern Social's Mail/Contacts/
            Favorites already established (.subtab-bar/.subscreen), not a
            new one. -->
       <div class="settings-category open" data-category="inventory">
@@ -762,6 +1188,17 @@
               <button id="mintGoldBtn" type="button">Mine 10 gold (counterparty)</button>
             </div>
             <input type="text" id="collectiblesSearchInput" placeholder="Search collectibles…" style="margin-top:8px;">
+            <!-- Task #151 — filters the "Yours" list below (only) down to
+                 assets whose class is in the CURRENT world's
+                 policy.acceptedItemClasses AND whose issuer passes its
+                 policy.trustedIssuers; see isAssetCompatibleWithWorld() in
+                 viewer.js. Never affects the Counterparty's list, since
+                 "compatible with this world" is about what YOU could
+                 meaningfully load/drop here. -->
+            <label class="check-row">
+              <input type="checkbox" id="collectiblesCompatOnlyCheckbox">
+              <span>Only show items compatible with this world</span>
+            </label>
             <div class="subhead">Yours</div>
             <div id="selfCollectiblesList" class="item-list"></div>
 
@@ -787,6 +1224,11 @@
                Collectibles above. -->
           <div id="documentsSubscreen" class="subscreen">
             <input type="text" id="documentsSearchInput" placeholder="Search documents…" style="margin-top:8px;">
+            <!-- Same "Yours"-only compatibility filter as Collectibles above (#151). -->
+            <label class="check-row">
+              <input type="checkbox" id="documentsCompatOnlyCheckbox">
+              <span>Only show items compatible with this world</span>
+            </label>
             <div class="subhead">Yours</div>
             <div id="selfDocumentsList" class="item-list"></div>
             <div class="subhead">Counterparty's</div>
@@ -795,30 +1237,133 @@
         </div>
       </div>
 
-      <div class="settings-category" data-category="trading">
-        <button type="button" class="settings-category-toggle"><span>Trading station</span><span class="chevron">▸</span></button>
-        <div class="settings-category-body">
-          <div id="tradeNote" class="empty-note">Visit the Trading Post to trade.</div>
-          <div class="btn-col">
-            <button id="tradeBtn" type="button" disabled>Settle trade: 10 iron ⇄ 5 gold</button>
+    </div>
+
+    <!-- Screen: Trade — promoted out of Wallet's own "Trading station"
+         collapsible category to a full top-level tab once Phase 1 (#144)
+         grew it into a real two-part screen (In-person / Remote), with
+         Phase 2's order-book work still to come on top of that — more than
+         a collapsed category was really built for, and conceptually its
+         own activity the same way Mail earning a place under Social (not
+         under Wallet) already established. Same subtab-bar/subscreen
+         shape Social's own sub-tabs use, just one level up (a top-level
+         screen instead of a category body) since there's no longer a
+         collapsible wrapper to nest inside. -->
+    <div id="tradeScreen" class="wallet-screen">
+
+      <div id="tradingSubtabBar" class="subtab-bar">
+        <button id="tradingBuySubtabBtn" type="button" class="active-subtab">Buy</button>
+        <button id="tradingSellSubtabBtn" type="button">Sell</button>
+        <button id="tradingListingsSubtabBtn" type="button">Listings</button>
+      </div>
+
+      <!-- Shared Trading Station picker (v1.14, SPEC.md §7) — Buy, Sell,
+           and Listings all act against one station domain at a time, so
+           this one control lives above all three instead of being
+           duplicated per sub-screen. Membership
+           (atlas.tradingstation.membership) is required to Sell (post) or
+           to claim a Buy listing, but NOT to browse Buy — same "read open,
+           write gated" asymmetry as Post Office's inbox-check vs. send —
+           so the select also offers the current world's own station domain
+           even before joining it (see refreshRemoteTradeStationOptions),
+           letting a visitor window-shop before deciding to join. -->
+      <div id="tradingStationBar">
+        <label for="remoteTradeStationDomainSelect" class="subhead">Trading Station</label>
+        <select id="remoteTradeStationDomainSelect">
+          <option value="">No Trading Station available</option>
+        </select>
+
+        <div id="tradingStationJoinSection">
+          <div class="subhead">This domain offers remote trading — join its Trading Station to sell or claim through it.</div>
+          <div class="btn-row">
+            <button id="tradingStationJoinBtn" type="button" class="btn-secondary">Join</button>
           </div>
-          <div id="tradeStatus"></div>
+          <div id="tradingStationJoinStatus" class="empty-note" style="margin-top:6px;"></div>
         </div>
+      </div>
+
+      <!-- Sub-screen: Buy (v1.14) — browse the selected station's open,
+           unexpired listings (GET /atlas/trade/listings, ungated) and
+           claim one outright. Replaces the old "submit to a specific
+           counterparty" form entirely — there is no more pinned-intent
+           path in the extension. -->
+      <div id="tradingBuySubscreen" class="subscreen active">
+        <div class="subhead">Browse what other wallets have listed for sale at this Trading Station and claim one — first come, first served.</div>
+        <div class="btn-row">
+          <button id="tradingBuyRefreshBtn" type="button" class="btn-secondary">Refresh</button>
+        </div>
+        <div id="tradingBuyList" class="item-list"></div>
+        <div id="tradingBuyStatus" class="empty-note" style="margin-top:6px;"></div>
+      </div>
+
+      <!-- Sub-screen: Sell (v1.14) — post an open listing naming no
+           counterparty at all (proposeIntent('self', offer, want,
+           undefined, ...) in wallet.js); anyone browsing Buy at this
+           station can claim it. -->
+      <div id="tradingSellSubscreen" class="subscreen">
+        <div class="subhead">Post something you hold for anyone at this Trading Station to claim.</div>
+
+        <!-- "You offer" lists this wallet's own held fungible asset classes
+             (refreshTradingSellOfferOptions in viewer.js) — you can only ever
+             offer something you actually hold, so free text here just
+             invited typos. "You want" lists this demo's known fungible
+             classes (there are only three — iron, gold, and silver — see
+             viewer.js's own comment on why that list is static rather than
+             fetched). -->
+        <div class="subhead" style="margin-top:10px;">You offer</div>
+        <select id="tradingSellOfferClassSelect">
+          <option value="">No fungible assets to offer</option>
+        </select>
+        <input type="number" id="tradingSellOfferQtyInput" placeholder="Quantity" min="1" value="10">
+
+        <div class="subhead" style="margin-top:10px;">You want</div>
+        <select id="tradingSellWantClassSelect">
+          <option value="atlas.element.iron">Iron Ingot (atlas.element.iron)</option>
+          <option value="atlas.element.gold">Gold Ingot (atlas.element.gold)</option>
+          <option value="atlas.element.silver">Silver Ingot (atlas.element.silver)</option>
+        </select>
+        <input type="number" id="tradingSellWantQtyInput" placeholder="Quantity" min="1" value="5">
+
+        <!-- Per-listing expiry, in hours (v1.15) — used to be a hardcoded
+             10 MINUTES shared by every listing (see wallet.js's
+             proposeIntent, still expressed internally as expiresMinutes);
+             this input lets each listing pick its own lifetime, converted
+             to minutes right where it's read in viewer.js. 24h default. -->
+        <div class="subhead" style="margin-top:10px;">Expires in (hours)</div>
+        <input type="number" id="tradingSellExpiresHoursInput" placeholder="Hours" min="1" value="24">
+
+        <div class="btn-row" style="margin-top:8px;">
+          <button id="tradingSellSubmitBtn" type="button" class="btn-secondary">Post listing</button>
+        </div>
+        <div id="tradingSellStatus" class="empty-note" style="margin-top:6px;"></div>
+      </div>
+
+      <!-- Sub-screen: Listings (v1.14) — this wallet's own posted listings
+           (AtlasWallet.getSubmittedTrades, same local record Sell just
+           wrote), with a Cancel action (POST /atlas/trade/cancel) for
+           anything still open. -->
+      <div id="tradingListingsSubscreen" class="subscreen">
+        <div class="subhead">Listings you've posted, across every Trading Station.</div>
+        <div id="tradingListingsList" class="item-list"></div>
+        <div id="tradingListingsStatus" class="empty-note" style="margin-top:6px;"></div>
       </div>
 
     </div>
 
-    <!-- Screen: Social (#61/#67) — Mail, Friends, and Favorites, as three
-         sub-sections of one tab rather than three top-level tabs. Mail used
-         to be its own top-level tab; it moved in here so all the "other
-         people / other domains you keep coming back to" features live in
-         one place. -->
+    <!-- Screen: Social (#61/#67) — Mail, Contacts, Favorites, and Calendar,
+         as four sub-sections of one tab rather than four top-level tabs.
+         Mail used to be its own top-level tab; it moved in here so all the
+         "other people / other domains / things to remember" features live
+         in one place. Calendar is local-only (see calendarSubscreen below)
+         — added alongside the other three purely as a fourth sub-tab,
+         same pattern byte-for-byte. -->
     <div id="socialScreen" class="wallet-screen">
 
       <div id="socialSubtabBar" class="subtab-bar">
         <button id="mailSubtabBtn" type="button">Mail<span id="mailBadge" class="subtab-badge"></span></button>
-        <button id="friendsSubtabBtn" type="button">Friends<span id="friendRequestsBadge" class="subtab-badge"></span></button>
+        <button id="contactsSubtabBtn" type="button">Contacts<span id="friendRequestsBadge" class="subtab-badge"></span></button>
         <button id="favoritesSubtabBtn" type="button">Favorites</button>
+        <button id="calendarSubtabBtn" type="button">Calendar<span id="calendarBadge" class="subtab-badge"></span></button>
       </div>
 
       <!-- Sub-screen: Mail — correspondence a domain sent about a
@@ -833,7 +1378,7 @@
              and sits first) vs. "Mail Settings" (addressing, who can
              reach you, how often it checks — configured occasionally, not
              read every visit). Same .subtab-bar/.subscreen pattern as
-             Social's Mail/Friends/Favorites and Inventory's Collectibles/
+             Social's Mail/Contacts/Favorites and Inventory's Collectibles/
              Documents, just one level deeper. -->
         <div id="mailInnerSubtabBar" class="subtab-bar">
           <button id="mailInboxSubtabBtn" type="button">Mail</button>
@@ -864,7 +1409,7 @@
                redundant "Mail" heading no longer makes sense once this
                whole block is itself titled "Mail"). -->
           <div id="mailBoxInboxSubscreen" class="subscreen active">
-            <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere. Also checks automatically every time you open the Mail tab.</div>
+            <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere. Also checks automatically every time you open the Mail tab, and again each time you return to Inbox specifically (even without leaving Mail — see #102).</div>
             <div class="btn-row">
               <button id="checkMailNowBtn" type="button" class="btn-secondary">Check now</button>
             </div>
@@ -908,8 +1453,9 @@
             <select id="postOfficeToDomainInput" style="margin-top:8px;">
               <option value="">No Post Office memberships yet</option>
             </select>
-            <!-- Friend quick-pick: saved friends (Social -> Friends) are added
-                 over a live presence connection and only ever carry a public
+            <!-- Friend quick-pick: saved friends (Social -> Contacts) can be
+                 added over a live presence connection, or manually by
+                 address, and only ever carry a public
                  key + display name — no Post Office/domain info, since
                  friending isn't domain-scoped the way mail membership is (see
                  AtlasWallet.getFriends's own comment). So picking one here
@@ -1073,24 +1619,94 @@
         </div>
       </div>
 
-      <!-- Sub-screen: Friends (#67) — friend requests happen LIVE, over the
-           same presence connection that makes other visitors show up as
-           walking characters (see connectPresence/pollPresence's signal
-           relay in viewer.js, and relaySignal() in presence-server.js).
-           There's no mail-based or standalone way to friend-request someone
-           — both people have to be in the same room at the same moment,
-           same as actually meeting them. -->
-      <div id="friendsSubscreen" class="subscreen">
-        <h3>People here now</h3>
-        <div class="subhead">Other visitors currently in this same world. Only someone with an unlocked wallet identity can be added.</div>
-        <div id="friendsHereList" class="item-list"></div>
+      <!-- Sub-screen: Contacts (#67, restructured) — was the flat "Friends"
+           sub-tab (People here now / Friend requests / Friends, back to
+           back). Now three inner sub-tabs of its own, same nested
+           .subtab-bar/.subscreen pattern Mail already uses for its own
+           Mail/Mail Settings split (see mailInnerSubtabBar above):
+             - Contacts: the actual saved list (renderFriendCard), now with
+               a search box and a per-contact notes field.
+             - Add Contact: every way to add someone — the live "People
+               here now"/"Friend requests" flow this sub-tab USED to be,
+               moved in unchanged, plus a new manual add-by-address form.
+             - Groups: local-only personal organization over the saved
+               list, unrelated to the bigger future guilds/clans system.
+           The underlying data is still called "friends" throughout
+           wallet.js (AtlasWallet.getFriends/addFriend/removeFriend,
+           atlasFriends storage key) — only the user-facing tab chrome
+           renamed to "Contacts", see viewer.js's own comment on why that
+           line was drawn there. -->
+      <div id="contactsSubscreen" class="subscreen">
 
-        <h3>Friend requests</h3>
-        <div class="subhead">Only live while you're still in the same world as whoever sent it — a request can't be answered after either of you leaves.</div>
-        <div id="friendRequestsList" class="item-list"></div>
+        <div id="contactsInnerSubtabBar" class="subtab-bar">
+          <button id="contactsListSubtabBtn" type="button">Contacts</button>
+          <button id="addContactSubtabBtn" type="button">Add Contact<span id="addContactBadge" class="subtab-badge"></span></button>
+          <button id="contactGroupsSubtabBtn" type="button">Groups</button>
+        </div>
 
-        <h3>Friends</h3>
-        <div id="friendsList" class="item-list"></div>
+        <!-- Sub-screen: Contacts — the actual saved friends list. -->
+        <div id="contactsListSubscreen" class="subscreen active">
+          <input type="text" id="contactsSearchInput" placeholder="Search contacts (name or notes)…" style="margin-top:8px;">
+          <div id="contactsList" class="item-list" style="margin-top:10px;"></div>
+        </div>
+
+        <!-- Sub-screen: Add Contact — everything that was here before this
+             restructuring (People here now / Friend requests, both driven
+             LIVE over the current presence connection — see
+             connectPresence/pollPresence's signal relay in viewer.js, and
+             relaySignal() in presence-server.js; there's no mail-based or
+             standalone way to friend-request someone, both people have to
+             be in the same room at the same moment), plus a new manual
+             add-by-address form for when you already know someone's
+             handle or public key without having to meet them in-world. -->
+        <div id="addContactSubscreen" class="subscreen">
+          <h3>People here now</h3>
+          <div class="subhead">Other visitors currently in this same world. Only someone with an unlocked wallet identity can be added.</div>
+          <div id="friendsHereList" class="item-list"></div>
+
+          <h3>Friend requests</h3>
+          <div class="subhead">Only live while you're still in the same world as whoever sent it — a request can't be answered after either of you leaves.</div>
+          <div id="friendRequestsList" class="item-list"></div>
+
+          <!-- Manual add-by-address (new): the one way to add a contact
+               that needs neither of you to be standing in the same world
+               right now. Same handle-vs-raw-key toggle pattern as
+               Compose's recipient field (postOfficeToggleRawKeyBtn) —
+               handle-first by default, "#domain" resolved against a
+               Post Office this wallet has already joined via
+               AtlasWallet.resolvePostOfficeHandle, raw key as the
+               fallback for someone without a registered handle. -->
+          <h3>Add by address</h3>
+          <div class="subhead">Know someone's handle or public key already? Add them directly — no need to meet in a world first.</div>
+          <input type="text" id="manualAddNameInput" placeholder="Name for this contact" maxlength="24" style="margin-top:8px;">
+          <input type="text" id="manualAddHandleInput" placeholder="Their handle (e.g. bruno#localhost:8002)" style="margin-top:8px;">
+          <textarea id="manualAddPublicKeyInput" placeholder="Their public key" hidden style="margin-top:8px;min-height:48px;font-family:monospace;font-size:11px;"></textarea>
+          <div class="btn-row" style="margin-top:4px;">
+            <button id="manualAddToggleRawKeyBtn" type="button" class="link-btn">Paste a raw public key instead</button>
+          </div>
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="manualAddContactBtn" type="button" class="btn-secondary">Add contact</button>
+          </div>
+          <div id="manualAddContactStatus" class="empty-note" style="margin-top:6px;"></div>
+        </div>
+
+        <!-- Sub-screen: Groups (new) — lightweight, LOCAL-ONLY personal
+             organization over the saved Contacts list above. Deliberately
+             not the bigger future guilds/clans/events system: just a
+             name plus a set of member contacts, nothing ever sent
+             anywhere. A "we'll iterate on it" v1, not a polished final
+             design — see AtlasWallet.getContactGroups/addContactGroup/
+             etc. in wallet.js. -->
+        <div id="contactGroupsSubscreen" class="subscreen">
+          <div class="subhead">Purely local — group your saved contacts however you like. Not shared with anyone, and unrelated to any world's own guild/clan system.</div>
+          <input type="text" id="newGroupNameInput" placeholder="New group name" maxlength="40" style="margin-top:8px;">
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="createGroupBtn" type="button" class="btn-secondary">Create group</button>
+          </div>
+          <div id="groupsStatus" class="empty-note" style="margin-top:6px;"></div>
+          <div id="contactGroupsList" class="item-list" style="margin-top:14px;"></div>
+        </div>
+
       </div>
 
       <!-- Sub-screen: Favorites (#61) — bookmarked domains, with a live
@@ -1105,6 +1721,69 @@
         </div>
         <div id="addCurrentFavoriteStatus" class="empty-note" style="margin-top:6px;"></div>
         <div id="favoritesList" class="item-list" style="margin-top:14px;"></div>
+      </div>
+
+      <!-- Sub-screen: Calendar — manually-added local reminders, nothing
+           more. Entirely local (AtlasWallet.getCalendarEvents/
+           addCalendarEvent/updateCalendarEvent/removeCalendarEvent in
+           wallet.js, same flat-array-in-chrome.storage.local pattern as
+           Favorites above) — no domain or server is ever involved in a
+           calendar event, unlike Mail. There is deliberately no background
+           alert here: the "due soon" badge on this sub-tab (and folded into
+           the outer Social tab's own badge, see updateSocialBadge in
+           viewer.js) is the only reminder this version gives, and only ever
+           while the wallet panel happens to be open — see refreshCalendarDisplay's
+           own comment on the "due soon" window chosen. A background-alerts
+           version (a real notification while the panel is closed) is a
+           deliberately separate future phase, not built here. -->
+      <div id="calendarSubscreen" class="subscreen">
+        <!-- Persistent month-grid widget — always visible above the
+             add/edit form and event list below, never navigated away
+             from. See renderCalendarMonthGrid/refreshCalendarMonthGrid in
+             viewer.js for the render logic and calendarGridViewDate/
+             calendarSelectedDate for the (session-only, non-persisted)
+             state it renders from. -->
+        <div id="calendarMonthWidget" class="calendar-month-widget">
+          <div class="calendar-month-header">
+            <button type="button" id="calendarPrevMonthBtn" class="calendar-month-nav" aria-label="Previous month">&lsaquo;</button>
+            <div id="calendarMonthLabel" class="calendar-month-label"></div>
+            <button type="button" id="calendarNextMonthBtn" class="calendar-month-nav" aria-label="Next month">&rsaquo;</button>
+          </div>
+          <div class="calendar-grid-weekdays">
+            <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+          </div>
+          <div id="calendarMonthGrid" class="calendar-grid"></div>
+        </div>
+
+        <!-- Day-viewer widget — hidden until a day is clicked in the
+             month-grid widget above (see renderCalendarDayViewer and the
+             grid's own click handler in viewer.js). Sits directly under
+             the month grid and above the add/edit form, and hides itself
+             again whenever calendarSelectedDate goes back to null (fresh
+             sub-tab open, or the form being reset/submitted). -->
+        <div id="calendarDayViewer" class="calendar-day-viewer" hidden>
+          <div id="calendarDayViewerHeader" class="calendar-day-viewer-header"></div>
+          <div id="calendarDayViewerBody" class="calendar-day-viewer-body"></div>
+        </div>
+
+        <div class="subhead">Add event</div>
+        <input type="text" id="calendarEventTitleInput" placeholder="Title" maxlength="120">
+        <div class="calendar-field-label">Starts</div>
+        <input type="datetime-local" id="calendarEventDateTimeInput">
+        <!-- Optional end time (endDateTime in wallet.js) — leaving this
+             blank keeps the event a plain instant, exactly as before this
+             field existed. See the submit handler in viewer.js for the
+             end-after-start validation. -->
+        <div class="calendar-field-label">Ends (optional)</div>
+        <input type="datetime-local" id="calendarEventEndDateTimeInput">
+        <textarea id="calendarEventNotesInput" placeholder="Notes (optional)" style="margin-top:8px;"></textarea>
+        <div class="btn-row" style="margin-top:8px;">
+          <button id="calendarSaveEventBtn" type="button" class="btn-secondary">Add event</button>
+          <button id="calendarCancelEditBtn" type="button" class="btn-secondary" hidden>Cancel edit</button>
+        </div>
+        <div id="calendarEventStatus" class="empty-note" style="margin-top:6px;"></div>
+
+        <div id="calendarEventsList" class="item-list" style="margin-top:14px;"></div>
       </div>
 
     </div>

@@ -84,13 +84,49 @@
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
-  function capabilitySummary(world) {
+  // Task #151/#152 — same additions as viewer.js's own
+  // portalCapabilitySummary()/effectiveAcceptedItemClasses() (the in-world
+  // portal-hover tooltip), extended here too so this Enter button's own
+  // hover panel — the FIRST tooltip a visitor ever sees, before even
+  // entering — shows the same declared-but-previously-buried manifest
+  // data: chat (manifest.chat/world.chat, same two-level opt-in
+  // viewer.js's chatEnabledForWorld() checks — inlined here since this
+  // content script doesn't share that function), trading (a world a
+  // client can recognize as a trading venue by profile.genre, SPEC.md §7 —
+  // "trading-station" is this reference implementation's convention), and
+  // accepted item classes/trusted issuers (policy.acceptedItemClasses/
+  // policy.trustedIssuers — the exact fields task #151's wallet
+  // compatibility checkbox also reads, nothing new declared here either).
+  // acceptedItemClasses falls back to a domain-level manifest.acceptedItemClasses
+  // default (task #152) only when a world doesn't declare its own array at
+  // all — an explicit empty array on the world still means "recognizes
+  // nothing" and is never overridden by the domain default; a trailing
+  // ".*" entry (e.g. "atlas.element.*") is shown verbatim here since this
+  // is just a display list, not a match — see viewer.js's classMatchesAny()
+  // for where that pattern actually gets interpreted.
+  function effectiveAcceptedItemClasses(manifest, world) {
+    const policy = world.policy || {};
+    if (Array.isArray(policy.acceptedItemClasses)) return policy.acceptedItemClasses;
+    if (manifest && Array.isArray(manifest.acceptedItemClasses)) return manifest.acceptedItemClasses;
+    return [];
+  }
+  function capabilitySummary(manifest, world) {
     const cap = (world.profile && world.profile.capabilities) || {};
     const bits = [];
     if (cap.combat && cap.combat !== 'none') bits.push('combat: ' + cap.combat);
     if (cap.building && cap.building !== 'none') bits.push('building: ' + cap.building);
     if (cap.vehicles) bits.push('vehicles');
     if (cap.landOwnership) bits.push('land ownership');
+    if ((manifest && manifest.chat === true) || world.chat === true) bits.push('chat');
+    if (world.profile && world.profile.genre === 'trading-station') bits.push('trading');
+    const policy = world.policy || {};
+    if (policy.itemDropsAllowed) {
+      const classes = effectiveAcceptedItemClasses(manifest, world);
+      bits.push('accepts drops' + (classes.length ? ': ' + classes.join(', ') : ''));
+      if (policy.trustedIssuers && policy.trustedIssuers !== 'any') {
+        bits.push('issuers: ' + (Array.isArray(policy.trustedIssuers) ? policy.trustedIssuers.join(', ') : policy.trustedIssuers));
+      }
+    }
     return bits.length ? bits.join(' · ') : 'no special capabilities declared';
   }
 
@@ -181,7 +217,7 @@
       const lines = [
         '<div style="font-weight:600;margin-bottom:4px;">' + escapeHtml(world.name) + '</div>',
         '<div>Genre: ' + escapeHtml(genre) + ' · Scale: ' + escapeHtml(scale) + '</div>',
-        '<div>' + escapeHtml(capabilitySummary(world)) + '</div>',
+        '<div>' + escapeHtml(capabilitySummary(manifest, world)) + '</div>',
         '<div>👥 Live now: ' + (participants === undefined ? '…' : (participants === null ? 'unavailable' : participants)) + '</div>',
         '<div>📦 Download size: ' + sizeText(size) + '</div>'
       ];
@@ -252,11 +288,32 @@
 
   // The viewer runs in an extension-origin iframe, cross-origin from the host
   // page, so it can't reach back into this page's DOM directly. It asks to be
-  // closed via postMessage instead.
+  // closed via postMessage instead — and, since setting document.title
+  // inside the iframe does nothing visible (an iframe doesn't own the
+  // top-level browser tab title), it asks THIS page to set the tab title on
+  // its behalf too, the same way.
+  //
+  // originalDocumentTitle remembers this host page's own title from before
+  // the overlay ever touched it, captured lazily on the FIRST title message
+  // of an overlay session (not at content-script load time — a "close" reset
+  // it back to null already once, and this stays null again until the next
+  // 'domain-atlas-title' message actually arrives) so it can be restored on
+  // close, and reset to null on close so a later re-open captures a fresh
+  // original rather than the stale one from a previous session.
+  let originalDocumentTitle = null;
   window.addEventListener('message', (event) => {
     if (event.data === 'domain-atlas-close') {
       const overlay = document.getElementById('domain-atlas-overlay');
       if (overlay) overlay.remove();
+      if (originalDocumentTitle !== null) {
+        document.title = originalDocumentTitle;
+        originalDocumentTitle = null;
+      }
+      return;
+    }
+    if (event.data && typeof event.data === 'object' && event.data.type === 'domain-atlas-title') {
+      if (originalDocumentTitle === null) originalDocumentTitle = document.title;
+      document.title = String(event.data.title);
     }
   });
 })();

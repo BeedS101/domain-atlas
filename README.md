@@ -171,14 +171,15 @@ Wallet/Settings panels once you've got items to work with:
 ## 4. Try it — loadouts, transfer-on-loss, resources, and trading
 
 These all live in the same wallet panel, and use one addition worth being
-upfront about: a second **counterparty** identity. Demonstrating a
-two-party transfer or a two-sided trade needs two independent signers, and
+upfront about: a second **counterparty** identity, needed for the
+transfer-on-loss demo below since that needs two independent signers and
 this demo runs in one browser tab. Rather than fake that, the "self"
 identity is a real WebAuthn passkey throughout, exactly as in section 3,
 and the "counterparty" is a second, purely local ECDSA P-256 keypair — no
 WebAuthn, generated and stored the same way a lightweight non-passkey
 client would. It signs for real; it just isn't a hardware-backed key. Click
-**Create counterparty identity** in the wallet panel to generate it.
+**Create counterparty identity** in the wallet panel to generate it. Trading
+below doesn't use it at all — see that section.
 
 **Loadouts and transfer-on-loss (§5.2):**
 
@@ -201,10 +202,10 @@ client would. It signs for real; it just isn't a hardware-backed key. Click
 **Fungible resources (§5.4):**
 
 4. Walk back to Plaza, then through the **market** portal into the Trading
-   Post. Click **Mine 20 iron (self)** and **Mine 10 gold (counterparty)**
-   — each mint POSTs to the issuer, gets back a real signed
-   `domain-atlas-resource/1.0` balance credential, and verifies it the
-   same way items are verified.
+   Post. Click **Mine 20 iron**, **Mine 10 gold**, and **Mine 15 silver** —
+   all three mint to your own self identity; each mint POSTs to the issuer,
+   gets back a real signed `domain-atlas-resource/1.0` balance credential,
+   and verifies it the same way items are verified.
 5. Click **Send half** on a resource card to split a balance: the issuer
    validates the presented credential, then issues two new balances (a
    remainder back to the sender, the sent amount to the recipient) both
@@ -214,18 +215,20 @@ client would. It signs for real; it just isn't a hardware-backed key. Click
 
 **Trading stations (§7):**
 
-6. With both parties holding a resource each, click **Settle trade**. Both
-   sides' intents are built and independently signed (self via WebAuthn,
-   counterparty via its local key), sent to the issuer, which is playing
-   the trading-station role here — the spec allows a station to be a
-   separate party, but collapsing it onto the issuer keeps this demo to
-   one server. It checks both intents actually mirror each other (offering
-   what the other wants, at matching quantities, naming each other as
-   counterparty, not expired), validates both presented balances, then
-   atomically issues four new credentials (remainder + received, for each
-   side) and revokes the two pre-trade balances. Either both sides settle
-   or neither does — no in-between state where one party paid and the
-   other didn't.
+6. Open the wallet's **Trade** tab. Click **Join** to get this domain's
+   Trading Station membership, then, on **Sell**, pick what you hold and
+   what you want (say, 10 iron for 5 gold) and click **Post listing** — a
+   signed intent naming no counterparty at all, queued at the station as an
+   open listing. On **Buy**, click **Refresh** to browse every open,
+   unexpired listing any member has posted, and **Trade** on one to claim
+   it: the station checks your own mirroring intent and presented balance,
+   confirms the listing is still open, and atomically issues both sides'
+   new credentials while revoking both pre-trade balances — the same
+   all-or-nothing settlement any two-party trade needs, just triggered by a
+   claim instead of two visitors standing at the same stall at once. A
+   listing you haven't claimed can be withdrawn from the **Listings** tab
+   with **Cancel**; a settled, canceled, or expired one can be cleared from
+   that same tab with **Delete**.
 
 ## 5. Try the directory service
 
@@ -344,8 +347,8 @@ never a silent step (SPEC.md §11.2).
 
 **Friends work live, through presence — not through mail.** Adding a
 friend needs both people simultaneously in the same `domain::world` room:
-open the Friends tab while standing in a world with someone else in it,
-and "People here now" lists them with an Add friend button (only if
+open the Contacts tab's Add Contact sub-tab while standing in a world with
+someone else in it, and "People here now" lists them with an Add friend button (only if
 they've got an unlocked wallet identity announced — an anonymous visitor
 can't be friended, same "presence never requires an identity" principle
 world entry itself has always had). Clicking it sends a `friend-request`
@@ -472,7 +475,7 @@ mail you" panel:
   mail) carries an inline **Block sender** button next to Delete.
 - **Friends only.** Switch a membership to friends-only and the domain
   will only relay mail from public keys in a snapshot you submit — pulled
-  from this wallet's own local Friends list (Social → Friends), which
+  from this wallet's own local Friends list (Social → Contacts), which
   otherwise never leaves the wallet at all; turning this on is an explicit,
   one-time disclosure of that snapshot to that one domain. It's a snapshot,
   not a live sync — add someone to Friends later and they're not covered
@@ -612,18 +615,21 @@ It's still not hardened for anything beyond a demo, and a few
 simplifications are worth naming plainly rather than leaving implicit:
 
 - The **counterparty identity** is a second real keypair, but not a second
-  WebAuthn device — see section 4 above. A production wallet would just be
-  two separate installs, each with its own passkey.
+  WebAuthn device — see section 4 above. It demos §5.2's transfer-on-loss
+  in one browser tab; trading (§7) no longer uses it at all, having moved
+  to real, independent wallets posting and claiming listings. A production
+  wallet would just be two separate installs, each with its own passkey.
 - The **issuer also plays the trading station** for §7, instead of being a
-  separate party the way the spec allows. The settlement logic (verify
-  both intents, verify both balances, atomic issue+revoke) doesn't change
+  separate party the way the spec allows. The settlement logic (verify an
+  intent, verify a presented balance, atomic issue+revoke) doesn't change
   either way — this just avoids standing up a second server for the demo.
 - The issuer's endpoints — `/atlas/asset/issue`, `/atlas/asset/reissue`
   (§5.1.1, replacing a non-fungible asset's state without changing its
   `id`; the wallet auto-adopts the replacement and shows an unseen-count
   badge on the Wallet tab, see `AtlasWallet.processAssetUpdates`),
   `/atlas/asset/split` and `/atlas/asset/consolidate` (§5.4/§5.4.1),
-  `/atlas/asset/trade` (§7), `/atlas/revoke`, `/atlas/mail/send` and
+  the `/atlas/trade/*` family — submit, listings, claim, cancel (§7),
+  `/atlas/revoke`, `/atlas/mail/send` and
   `/atlas/mail/check` (§11.1), and the `/atlas/postoffice/*` family
   (§7 below, SPEC.md §11.3) — have no auth by design (beyond Post Office's
   own self-signed-envelope checks on its self-service endpoints), so the

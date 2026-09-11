@@ -41,11 +41,17 @@
 //      over polling.
 //   3. B sends a profanity-laden message — rejected client-side, never
 //      reaches A, same as the WebSocket path's own check.
-//   4. This World vs Domain tabs still work over polling: B walks
-//      Plaza -> Arena and sends there; B's This World tab shows only the
-//      Arena message, Domain tab shows both — proves the client-side
-//      world-tag filtering (renderChatMessages()) is transport-agnostic,
-//      exactly as designed.
+//   4. Per-world vs Domain tab filtering still works over polling: B walks
+//      Plaza -> Arena and sends there; B's own-world tab ("Example
+//      Arena", selected by default on arrival) shows only the Arena
+//      message, then switching to "Domain" (visible here — demo-domain-a
+//      now sets manifest.chat: true domain-wide, on top of plaza/arena's
+//      own individual flags, as of this same round of work) shows BOTH
+//      messages via the same underlying domain-scoped stream — proves the
+//      client-side world-tag filtering (renderChatMessages()) is
+//      transport-agnostic, exactly as designed, and that the dynamic tab
+//      list itself renders correctly over the polling transport too, not
+//      just WebSocket.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -112,11 +118,15 @@ async function waitForCondition(frame, fn, description, timeoutMs = 12000) {
   }
 }
 
-async function chatWorldLines(frame) {
-  return frame.evaluate(() => Array.from(document.querySelectorAll('#chatMessagesWorld .chat-line')).map((el) => el.textContent));
+// Single shared #chatMessages container now (see #113's dynamic tab list)
+// — its content is always whichever tab is currently ACTIVE, so reading
+// "the world view" vs "the domain view" is a matter of which tab is
+// selected when this is called, not which of two elements is queried.
+async function chatLines(frame) {
+  return frame.evaluate(() => Array.from(document.querySelectorAll('#chatMessages .chat-line')).map((el) => el.textContent));
 }
-async function chatDomainLines(frame) {
-  return frame.evaluate(() => Array.from(document.querySelectorAll('#chatMessagesDomain .chat-line')).map((el) => el.textContent));
+async function clickChatTab(frame, tabId) {
+  await frame.locator('#chatTabBar [data-tab-id="' + tabId + '"]').click();
 }
 async function sendChat(frame, text) {
   await frame.locator('#chatTextInput').fill(text);
@@ -146,15 +156,18 @@ async function sendChat(frame, text) {
   try {
     console.log('STEP 1: A (anonymous) enters the Plaza against a WS-disabled server — reads empty chat with no error');
     const a = await openOverlay(contextA, 'Visitor A (anonymous)');
-    await waitForCondition(a.frame, () => document.getElementById('chatMessagesWorld').textContent.includes('No messages'), 'A\'s This World tab to show the empty-state note via polling', 8000);
+    // Default defaultTabPreference is 'auto', which now behaves as
+    // 'world' (see #113's dynamic-tab-list revision) — A lands on Plaza's
+    // own tab (world:plaza) automatically.
+    await waitForCondition(a.frame, () => document.getElementById('chatMessages').textContent.includes('No messages'), 'A\'s own-world tab to show the empty-state note via polling', 8000);
     console.log('PASS: A reads empty chat via the polling fallback, no error');
 
     console.log('STEP 2: B enters, creates + unlocks an identity, sends a message — within a couple of polling cycles A sees it');
     const b = await openOverlay(contextB, 'Visitor B');
     await createIdentity(b.frame, 'chat-poll-test-password-b');
     await sendChat(b.frame, 'hello via polling');
-    await waitForCondition(a.frame, () => document.querySelectorAll('#chatMessagesWorld .chat-line').length === 1, 'A to see B\'s message via polling', 8000);
-    const aLines = await chatWorldLines(a.frame);
+    await waitForCondition(a.frame, () => document.querySelectorAll('#chatMessages .chat-line').length === 1, 'A to see B\'s message via polling', 8000);
+    const aLines = await chatLines(a.frame);
     if (!aLines[0].includes('hello via polling')) throw new Error('Expected A to see "hello via polling", got: ' + JSON.stringify(aLines));
     console.log('PASS: A (anonymous) received B\'s message over the polling fallback — got: ' + aLines[0]);
 
@@ -164,29 +177,41 @@ async function sendChat(frame, text) {
     await b.page.waitForTimeout(500);
     const bStatus = await b.frame.evaluate(() => document.getElementById('chatSendStatus').textContent);
     if (!/blocked/i.test(bStatus)) throw new Error('Expected a "blocked" status on B\'s side, got: ' + JSON.stringify(bStatus));
-    const stillOne = await chatWorldLines(a.frame);
+    const stillOne = await chatLines(a.frame);
     if (stillOne.length !== 1) throw new Error('Expected the blocked message to never reach A, A has: ' + JSON.stringify(stillOne));
     console.log('PASS: profanity rejected client-side over the polling path too, status="' + bStatus + '"');
 
-    console.log('STEP 4: This World vs Domain tabs still work over polling — B walks Plaza -> Arena and sends there');
+    console.log('STEP 4: per-world vs Domain tabs still work over polling — B walks Plaza -> Arena and sends there');
     const portals = await projectPortals(b.frame);
     const toArena = portals.find((p) => p.to === 'arena');
     await b.frame.locator('#scene').click({ position: { x: toArena.sx, y: toArena.sy } });
     await b.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
     await b.page.waitForTimeout(500);
     await sendChat(b.frame, 'arena via polling');
-    await waitForCondition(b.frame, () => document.querySelectorAll('#chatMessagesDomain .chat-line').length === 2, 'B\'s Domain tab to show both messages via polling', 8000);
-
-    const bWorldAtArena = await chatWorldLines(b.frame);
+    // B lands on Arena's own tab (world:arena) by default on arrival —
+    // should show only the Arena message.
+    await waitForCondition(b.frame, () => document.querySelectorAll('#chatMessages .chat-line').length === 1, 'B\'s own-world tab at Arena to show its message via polling', 8000);
+    const bWorldAtArena = await chatLines(b.frame);
     if (bWorldAtArena.length !== 1 || !bWorldAtArena[0].includes('arena via polling')) {
-      throw new Error('Expected B\'s This World tab at Arena to show only the Arena message, got: ' + JSON.stringify(bWorldAtArena));
+      throw new Error('Expected B\'s own-world tab at Arena to show only the Arena message, got: ' + JSON.stringify(bWorldAtArena));
     }
-    console.log('PASS: This World tab at Arena correctly filters to just the Arena message, over polling');
+    console.log('PASS: own-world tab at Arena correctly filters to just the Arena message, over polling');
 
-    await b.frame.locator('#chatTabDomainBtn').click();
-    const bDomain = await chatDomainLines(b.frame);
-    if (bDomain.length !== 2) throw new Error('Expected Domain tab to show both messages, got: ' + JSON.stringify(bDomain));
-    console.log('PASS: Domain tab shows both messages over polling: ' + JSON.stringify(bDomain));
+    // This round's demo-domain-a change (on top of #111/#112): plaza and
+    // arena still each opt in individually (world.chat: true), but
+    // manifest.chat is now ALSO true domain-wide, so — unlike when this
+    // test was first written — the "Domain" tab IS available here, not
+    // hidden. Switching to it should show BOTH messages via the same
+    // underlying domain-scoped stream (the same chatMessages array
+    // renderChatMessages() always maintains, just unfiltered instead of
+    // tagged-world-only), proving that over polling too.
+    const tabIds = await b.frame.evaluate(() => Array.from(document.querySelectorAll('#chatTabBar [data-tab-id]')).map((el) => el.dataset.tabId));
+    if (!tabIds.includes('domain')) throw new Error('Expected a "Domain" tab available at Arena — demo-domain-a now sets manifest.chat: true domain-wide, got tabs: ' + JSON.stringify(tabIds));
+    await clickChatTab(b.frame, 'domain');
+    await waitForCondition(b.frame, () => document.querySelectorAll('#chatMessages .chat-line').length === 2, 'B\'s Domain tab to show both messages via polling', 8000);
+    const bDomain = await chatLines(b.frame);
+    if (bDomain.length !== 2) throw new Error('Expected the Domain tab to carry both messages, got: ' + JSON.stringify(bDomain));
+    console.log('PASS: "Domain" tab (now domain-wide-enabled) shows both messages over polling: ' + JSON.stringify(bDomain));
 
     console.log('\nALL CHAT POLLING FALLBACK CHECKS PASSED');
   } catch (err) {

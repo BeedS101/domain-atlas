@@ -97,6 +97,37 @@ function atlas_postoffice_members_file() {
   return __DIR__ . '/atlas-postoffice-members-store.json';
 }
 
+// Trading Station membership roster (task #144 Phase 1) — same flat-array
+// shape as atlas_postoffice_members_file() above, kept as its own file for
+// the same reason Post Office's is separate from the plain subscriber
+// roster: a Trading Station membership is a different class, gating a
+// different endpoint (POST /atlas/trade/submit instead of
+// /atlas/postoffice/send). Not actually consulted as an abuse gate the way
+// Post Office's roster is — /atlas/trade/submit instead validates the
+// membership credential presented WITH the request (same "prove you hold
+// it, right now, signed" shape check_presented_asset already uses for a
+// trade balance) — this roster exists for the same future-facing reason
+// task #144's own notes flag for directory federation: a self-contained,
+// appendable record of who's joined. Mirrors issuer-server/server.js's
+// TRADINGSTATION_MEMBERS_FILE.
+function atlas_tradingstation_members_file() {
+  return __DIR__ . '/atlas-tradingstation-members-store.json';
+}
+
+// Pending remote trade intents (task #144 Phase 1) — one entry per
+// submitted-but-not-yet-matched intent, holding both the signed intent
+// envelope and the presented balance credential exactly as submitted, so a
+// later matching call has everything it needs to settle without asking the
+// original submitter to resend anything. Same flock-guarded flat-array
+// shape as every other store in this file. Removed once matched
+// (remove_pending_trade()) or once found expired (pruned lazily wherever
+// this store is read for matching, not on a timer — same "no background
+// sweep" simplicity as the rest of this demo). Mirrors issuer-server/
+// server.js's PENDING_TRADES_FILE.
+function atlas_pending_trades_file() {
+  return __DIR__ . '/atlas-pending-trades-store.json';
+}
+
 // Task #42: serialized/limited-edition support — one running total minted
 // per class, persisted the same "not web-reachable" way as everything
 // else in this file. Mirrors issuer-server/server.js's
@@ -182,6 +213,13 @@ const ATLAS_ASSET_CATALOG = [
   'atlas.membership' => [
     'name' => 'Domain Atlas Membership Card', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
     'fungible' => false, 'presentation' => 'document',
+    // Task #160: user-bound — a relationship credential, not a tradeable
+    // good. Blocked outright by check_presented_asset() below regardless
+    // of the fungible check that already excludes it today; this makes
+    // the exclusion an explicit, protocol-visible declaration rather than
+    // an accident of it not being fungible. Mirrors issuer-server/
+    // server.js's ASSET_CATALOG entry of the same name.
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.rarity' => 'common',
       'com.example.tier' => 'member',
@@ -213,10 +251,32 @@ const ATLAS_ASSET_CATALOG = [
   'atlas.postoffice.membership' => [
     'name' => '{domain} Global Mail Membership Card', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
     'fungible' => false, 'presentation' => 'document',
+    'tradeScope' => 'bound', // task #160 — same reasoning as atlas.membership above
     'properties' => [
       'atlas.rarity' => 'common',
       'com.example.tier' => 'postoffice-member',
       'com.example.issuedFor' => 'global mail routing',
+    ],
+  ],
+  // Trading Station membership (task #144 Phase 1): the credential that
+  // gates POST /atlas/trade/submit the exact same way
+  // atlas.postoffice.membership gates POST /atlas/postoffice/send just
+  // above — holding one is what makes THIS domain willing to hold a
+  // wallet's remote trade intent pending a counterparty match, instead of
+  // requiring both visitors to stand at the same in-world stall at once
+  // (SPEC.md §7's original, still-supported, synchronous shape). Same
+  // one-click issuance path (just another ATLAS_ASSET_CATALOG entry — no
+  // dedicated endpoint needed), same 'tradeScope' => 'bound' reasoning as
+  // the other two membership cards above. Mirrors issuer-server/
+  // server.js's ASSET_CATALOG entry of the same name.
+  'atlas.tradingstation.membership' => [
+    'name' => '{domain} Trading Station Membership Card', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => false, 'presentation' => 'document',
+    'tradeScope' => 'bound',
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.tier' => 'tradingstation-member',
+      'com.example.issuedFor' => 'remote trade settlement',
     ],
   ],
   'atlas.element.iron' => [
@@ -228,6 +288,13 @@ const ATLAS_ASSET_CATALOG = [
     'name' => 'Gold Ingot', 'modelPath' => '/assets/ring.glb', 'thumbnailPath' => '/assets/ring.png',
     'fungible' => true, 'presentation' => 'collectible',
     'properties' => ['atlas.purity' => '99.99%', 'atlas.state' => 'solid', 'com.example.form' => 'ingot'],
+  ],
+  // Added alongside the market's new Mine Silver stall (v1.15) — mirrors
+  // issuer-server/server.js's ASSET_CATALOG entry of the same name.
+  'atlas.element.silver' => [
+    'name' => 'Silver Ingot', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => true, 'presentation' => 'collectible',
+    'properties' => ['atlas.purity' => '99.9%', 'atlas.state' => 'solid', 'com.example.source' => 'Coastal Bazaar mine'],
   ],
 ];
 
@@ -251,6 +318,15 @@ function atlas_asset_catalog_entry($assetClass) {
   if (!empty($entry['thumbnailPath'])) $result['thumbnail'] = 'https://' . atlas_domain() . $entry['thumbnailPath'];
   $result['fungible'] = $entry['fungible'];
   $result['presentation'] = $entry['presentation'];
+  // Task #160: the third asset-level flag, always present (never
+  // conditionally omitted the way 'properties' is) — same discipline
+  // fungible/presentation already get, since this is meant to be checked
+  // by exact value the same way they are. 'local' is the implicit default
+  // for any catalog entry that doesn't set its own (see
+  // ATLAS_ASSET_CATALOG's own comment on atlas.wearable in the Node
+  // version this mirrors). Mirrors issuer-server/server.js's
+  // mintAssetByClass()'s `catalogEntry.tradeScope || 'local'`.
+  $result['tradeScope'] = isset($entry['tradeScope']) ? $entry['tradeScope'] : 'local';
   if (!empty($entry['properties'])) $result['properties'] = $entry['properties'];
   return $result;
 }
@@ -502,6 +578,110 @@ function find_postoffice_membership($ownerPublicKey) {
     }
   }
   return null;
+}
+
+// ---------- Trading Station members (task #144 Phase 1) — same
+// flock-guarded read/append shape as Post Office members above. Nothing
+// currently reads this back as a gate (see
+// atlas_tradingstation_members_file()'s own comment on why) — that check
+// is done per-request instead, against the membership credential the
+// caller actually presents. Mirrors issuer-server/server.js's
+// readTradingStationMembers()/appendTradingStationMember(). ----------
+
+function read_tradingstation_members() {
+  $fh = fopen(atlas_tradingstation_members_file(), 'c+');
+  if ($fh === false) return ['members' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['members' => []];
+}
+
+function append_tradingstation_member($entry) {
+  $file = atlas_tradingstation_members_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+  $doc['members'][] = $entry;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// ---------- Pending remote trades (task #144 Phase 1) — same
+// flock-guarded shape as the mail/asset-update stores above, plus a
+// remove (a settled or cancelled intent shouldn't linger and be matchable
+// again) and a lazy prune on every read (an expired one should stop being
+// matchable even if nobody's removed it yet — no background sweep in this
+// demo, same reasoning as everywhere else in this file). Mirrors
+// issuer-server/server.js's readPendingTrades()/appendPendingTrade()/
+// removePendingTrade(). ----------
+
+function read_pending_trades() {
+  $file = atlas_pending_trades_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return ['trades' => []];
+  flock($fh, LOCK_EX); // exclusive, not shared — a prune below may write back
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['trades' => []];
+
+  $nowMs = (int) round(microtime(true) * 1000);
+  $live = array_values(array_filter($doc['trades'], function ($t) use ($nowMs) {
+    $exp = strtotime($t['intent']['payload']['expiresAt'] ?? '');
+    return $exp !== false && ($exp * 1000) >= $nowMs;
+  }));
+  if (count($live) !== count($doc['trades'])) {
+    $doc['trades'] = $live;
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $doc;
+}
+
+function append_pending_trade($entry) {
+  $file = atlas_pending_trades_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['trades' => []];
+  $doc['trades'][] = $entry;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+function remove_pending_trade($id) {
+  $file = atlas_pending_trades_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['trades' => []];
+  $doc['trades'] = array_values(array_filter($doc['trades'], function ($t) use ($id) {
+    return $t['id'] !== $id;
+  }));
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
 }
 
 // Task #96 — records one successful send against the SENDER's own

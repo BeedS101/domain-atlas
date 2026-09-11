@@ -5,11 +5,14 @@
     "name": "Example Plaza Demo",
     "contact": "demo@localhost"
   },
+  "chat": true,
+  "tradingStation": true,
   "defaultWorld": "plaza",
   "worlds": [
     {
       "id": "plaza",
       "name": "Example Plaza",
+      "chat": true,
       "entry": {
         "scene": "/spatial/plaza/scene.json",
         "renderer": ["procedural-v1"]
@@ -43,6 +46,7 @@
     {
       "id": "arena",
       "name": "Example Arena",
+      "chat": true,
       "entry": {
         "scene": "/spatial/arena/scene.json",
         "renderer": ["procedural-v1"]

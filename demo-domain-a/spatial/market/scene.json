@@ -4,13 +4,16 @@
   "objects": [
     { "type": "box", "position": [0, 1, -5], "size": [3, 2, 0.3], "color": "#57a593", "label": "Trading Post" },
     { "type": "box", "position": [-2, 0.5, -1], "size": [1, 1, 1], "color": "#c05a1f", "label": "Iron" },
-    { "type": "box", "position": [2, 0.5, -1], "size": [1, 1, 1], "color": "#e0b84c", "label": "Gold" }
+    { "type": "box", "position": [2, 0.5, -1], "size": [1, 1, 1], "color": "#e0b84c", "label": "Gold" },
+    { "type": "box", "position": [4.5, 0.5, -1], "size": [1, 1, 1], "color": "#b9c2c7", "label": "Silver" }
   ],
   "portalMarkers": [
     { "position": [0, 0, 5], "portalIndex": 0 }
   ],
   "interactables": [
     { "position": [-2, 0.5, -1], "label": "Mine Iron", "action": "mint", "class": "atlas.element.iron", "quantity": 20, "role": "self" },
-    { "position": [2, 0.5, -1], "label": "Mine Gold", "action": "mint", "class": "atlas.element.gold", "quantity": 10, "role": "counterparty" }
+    { "position": [2, 0.5, -1], "label": "Mine Gold", "action": "mint", "class": "atlas.element.gold", "quantity": 10, "role": "self" },
+    { "position": [4.5, 0.5, -1], "label": "Mine Silver", "action": "mint", "class": "atlas.element.silver", "quantity": 15, "role": "self" },
+    { "position": [0, 1, -5], "label": "Join Trading Station", "action": "issue", "class": "atlas.tradingstation.membership", "oncePerUser": true }
   ]
 }
