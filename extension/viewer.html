@@ -96,6 +96,63 @@
     padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44;
   }
 
+  /* Task #195 — in-world chess, a scene-local minigame (see chess.js's own
+     header comment for why this deliberately touches no manifest field,
+     credential, or SPEC.md section). A real dark backdrop rather than
+     duplicateJoinModal's "see the world behind it" look — this is a
+     voluntary, attention-holding activity you walked up to and clicked
+     on, not an FYI popping up over whatever you were already doing, so
+     dimming the scene behind it is the right call here even though it
+     wasn't for that one. z-index sits between #walletPanel (11) and
+     #duplicateJoinModal (20): the wallet can still be the thing you
+     summon over a modal if you want to check an item mid-game (rare, but
+     nothing prevents it), while a real duplicate-identity decision still
+     wins over a game. */
+  #chessModal { display: none; position: fixed; inset: 0; z-index: 15; align-items: center; justify-content: center; background: rgba(8,13,16,0.72); }
+  #chessModal.active { display: flex; }
+  #chessBox {
+    background: rgba(20,31,38,0.98); border: 1px solid #2c3c44; border-radius: 10px;
+    padding: 16px 18px; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    max-width: calc(100vw - 32px); max-height: calc(100vh - 88px); overflow-y: auto;
+  }
+  #chessBoxHeader { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  #chessBoxHeader h3 { margin: 0; font-size: 14px; }
+  #chessCloseBtn { padding: 4px 10px; font-size: 13px; }
+  #chessControls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+  #chessControls label { font-size: 11px; color: #a9b8bf; display: flex; align-items: center; gap: 4px; }
+  #chessControls select { font-family: inherit; font-size: 12px; background: #141f26; color: #e7edef; border: 1px solid #2c3c44; border-radius: 6px; padding: 4px 6px; }
+  /* 8x8 grid at a fixed 44px per square (352px board) — comfortably
+     clickable without needing the modal to be huge, and small enough that
+     even a phone-width preview still fits within max-width above. */
+  #chessBoard { display: grid; grid-template-columns: repeat(8, 44px); grid-template-rows: repeat(8, 44px); border: 2px solid #2c3c44; border-radius: 4px; overflow: hidden; }
+  .chess-square {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px; line-height: 1; cursor: pointer; position: relative; user-select: none;
+  }
+  .chess-square.light { background: #3a4d56; }
+  .chess-square.dark { background: #1b2830; }
+  .chess-square.selected { box-shadow: inset 0 0 0 3px #4a90a4; }
+  .chess-square.last-move { box-shadow: inset 0 0 0 3px rgba(224,184,76,0.55); }
+  .chess-square.in-check { box-shadow: inset 0 0 0 3px #f2a4b4; }
+  /* A plain dot for a quiet empty legal destination, a ring for one that
+     would capture — same "different enough to read at a glance without
+     needing a legend" reasoning as this project's other status-via-shape
+     choices (e.g. .has-duration's inset accent on a calendar chip). */
+  .chess-square.legal-move::after {
+    content: ''; position: absolute; width: 14px; height: 14px; border-radius: 999px;
+    background: rgba(224,184,76,0.55);
+  }
+  .chess-square.legal-move.has-piece::after {
+    width: 36px; height: 36px; background: none; box-shadow: inset 0 0 0 3px rgba(224,184,76,0.75);
+  }
+  .chess-piece.white { color: #fff6ef; text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+  .chess-piece.black { color: #0e161b; text-shadow: 0 1px 1px rgba(255,255,255,0.25); }
+  #chessStatus { margin-top: 10px; font-size: 13px; min-height: 18px; }
+  #chessCapturedRow { display: flex; justify-content: space-between; font-size: 18px; margin-top: 6px; min-height: 22px; color: #a9b8bf; }
+  #chessPromotionPicker { display: none; gap: 6px; margin-top: 10px; align-items: center; font-size: 12px; color: #a9b8bf; }
+  #chessPromotionPicker.active { display: flex; }
+  #chessPromotionPicker button { font-size: 22px; padding: 4px 10px; }
+
   #walletBtn { position: relative; }
   #walletBadge {
     position: absolute; top: -6px; right: -6px; background: #57a593; color: #0e161b;
@@ -1790,6 +1847,54 @@
 
   </div>
 
+  <!-- Task #195 — in-world chess. Board squares and pieces are rendered
+       entirely from viewer.js's renderChessBoard() (a fresh 64-element
+       pass every time the position changes) rather than 64 hardcoded
+       divs here, the same "markup is a shell, viewer.js owns the
+       content" pattern the item/mail/calendar lists already use. -->
+  <div id="chessModal">
+    <div id="chessBox">
+      <div id="chessBoxHeader">
+        <h3>Chess</h3>
+        <button id="chessCloseBtn" type="button" class="btn-secondary">Close</button>
+      </div>
+      <div id="chessControls">
+        <label>Bot difficulty
+          <select id="chessDifficultyInput">
+            <option value="easy">Easy</option>
+            <option value="medium" selected>Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+        </label>
+        <label>Play as
+          <select id="chessPlayerColorInput">
+            <option value="w" selected>White</option>
+            <option value="b">Black</option>
+          </select>
+        </label>
+        <button id="chessNewGameBtn" type="button" class="btn-secondary">New game</button>
+      </div>
+      <div id="chessBoard"></div>
+      <div id="chessCapturedRow">
+        <span id="chessCapturedByWhite"></span>
+        <span id="chessCapturedByBlack"></span>
+      </div>
+      <div id="chessStatus"></div>
+      <!-- Only shown mid-move, when a pawn reaching the back rank needs a
+           choice before the move can actually be applied — see
+           chess.js's needsPromotion flag and viewer.js's
+           handleChessSquareClick(). -->
+      <div id="chessPromotionPicker">
+        Promote to:
+        <button type="button" data-promo="q">♛</button>
+        <button type="button" data-promo="r">♜</button>
+        <button type="button" data-promo="b">♝</button>
+        <button type="button" data-promo="n">♞</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="chess.js"></script>
   <script src="wallet.js"></script>
   <script src="gltf-mini.js"></script>
   <script src="viewer.js"></script>

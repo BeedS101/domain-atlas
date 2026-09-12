@@ -15,7 +15,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["viewer.html", "viewer.js", "wallet.js", "gltf-mini.js", "identity-popup.html", "identity-popup.js"],
+      "resources": ["viewer.html", "viewer.js", "wallet.js", "chess.js", "gltf-mini.js", "identity-popup.html", "identity-popup.js"],
       "matches": ["<all_urls>"]
     }
   ]

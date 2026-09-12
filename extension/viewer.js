@@ -2383,7 +2383,7 @@ function drawInteractable(marker, originX, originY, pulse) {
   ctx.fillText(marker.label || 'Collect', base.x, cy - radius - 8);
   ctx.font = '9px system-ui, sans-serif';
   ctx.fillStyle = '#a9b8bf';
-  ctx.fillText('click to collect', base.x, base.y + 22);
+  ctx.fillText(marker.action === 'open-chess' ? 'click to play' : 'click to collect', base.x, base.y + 22);
 
   return { sx: base.x, sy: cy, radius: radius + 14, marker };
 }
@@ -7265,6 +7265,277 @@ importWalletFileInput.addEventListener('change', async () => {
   }
 });
 
+// ---------- in-world chess (task #195, win rewards task #201) ----------
+//
+// A scene-local minigame — see chess.js's own header comment for why it
+// deliberately involves no manifest field, credential, or SPEC.md change.
+// Human vs. bot only; two-player is future work (tracked in the private
+// backlog, not this file). One game lives in memory (chessGame below) for
+// as long as this page stays open — closing the modal (chessCloseBtn)
+// only hides it, it doesn't end the game, so walking back up to the stall
+// and clicking it again resumes exactly where you left off. A page
+// reload, or clicking "New game," does lose it; there's no persistence
+// across a reload for this v1, the same "worth noting, not a bug" scope
+// cut chat's own message history already makes.
+//
+// Task #201 adds the one exception to "chess never touches the wallet":
+// beating the bot mints a real reward (gold, plus a trophy for a Hard win)
+// via AtlasWallet.mintAsset — see CHESS_WIN_REWARDS / maybeAwardChessWin()
+// further down. Playing still needs no identity at all; only collecting a
+// win's reward does, exactly like every other mint/issue interactable.
+const chessModalEl = document.getElementById('chessModal');
+const chessBoardEl = document.getElementById('chessBoard');
+const chessStatusEl = document.getElementById('chessStatus');
+const chessCapturedByWhiteEl = document.getElementById('chessCapturedByWhite');
+const chessCapturedByBlackEl = document.getElementById('chessCapturedByBlack');
+const chessDifficultyInput = document.getElementById('chessDifficultyInput');
+const chessPlayerColorInput = document.getElementById('chessPlayerColorInput');
+const chessNewGameBtn = document.getElementById('chessNewGameBtn');
+const chessCloseBtn = document.getElementById('chessCloseBtn');
+const chessPromotionPickerEl = document.getElementById('chessPromotionPicker');
+
+const CHESS_PIECE_GLYPHS = {
+  wp: '♙', wn: '♘', wb: '♗', wr: '♖', wq: '♕', wk: '♔',
+  bp: '♟', bn: '♞', bb: '♝', br: '♜', bq: '♛', bk: '♚',
+};
+
+let chessGame = null; // null until the first "New game" — see openChessModal()
+let chessSelectedSquare = null; // a from-square index, or null when nothing is selected
+let chessLegalTargets = []; // AtlasChess.getLegalMovesFrom() result for chessSelectedSquare
+let chessPendingPromotion = null; // {from, to}, only while the promotion picker is up
+let chessBotThinking = false; // guards clicks landing while the bot's move is in flight
+
+function renderChessBoard() {
+  if (!chessGame) { chessBoardEl.innerHTML = ''; return; }
+  const board = chessGame.board;
+  const inCheck = chessGame.status === 'active' && AtlasChess.isInCheck(chessGame, chessGame.turn);
+  const kingSquare = inCheck ? board.findIndex((p) => p === chessGame.turn + 'k') : -1;
+  chessBoardEl.innerHTML = '';
+  // Rendered with rank 8 at the top and rank 1 at the bottom (a real
+  // board's own orientation) when playing White, flipped when playing
+  // Black, so "your side" always sits nearest you regardless of color.
+  for (let displayRow = 0; displayRow < 8; displayRow++) {
+    for (let displayCol = 0; displayCol < 8; displayCol++) {
+      const rank = chessGame.playerColor === 'w' ? 7 - displayRow : displayRow;
+      const file = chessGame.playerColor === 'w' ? displayCol : 7 - displayCol;
+      const square = rank * 8 + file;
+      const div = document.createElement('div');
+      div.className = 'chess-square ' + ((rank + file) % 2 === 0 ? 'dark' : 'light');
+      const piece = board[square];
+      if (piece) {
+        const glyph = document.createElement('span');
+        glyph.className = 'chess-piece ' + (AtlasChess.colorOf(piece) === 'w' ? 'white' : 'black');
+        glyph.textContent = CHESS_PIECE_GLYPHS[piece];
+        div.appendChild(glyph);
+      }
+      if (chessSelectedSquare === square) div.classList.add('selected');
+      if (chessGame.lastMove && (chessGame.lastMove.from === square || chessGame.lastMove.to === square)) div.classList.add('last-move');
+      if (square === kingSquare) div.classList.add('in-check');
+      if (chessLegalTargets.some((m) => m.to === square)) {
+        div.classList.add('legal-move');
+        if (piece) div.classList.add('has-piece');
+      }
+      div.dataset.square = String(square);
+      chessBoardEl.appendChild(div);
+    }
+  }
+}
+
+function renderChessCaptured() {
+  chessCapturedByWhiteEl.textContent = chessGame.captured.w.map((p) => CHESS_PIECE_GLYPHS[p]).join(' ');
+  chessCapturedByBlackEl.textContent = chessGame.captured.b.map((p) => CHESS_PIECE_GLYPHS[p]).join(' ');
+}
+
+function chessColorName(c) { return c === 'w' ? 'White' : 'Black'; }
+
+function renderChessStatus() {
+  if (!chessGame) { chessStatusEl.textContent = ''; return; }
+  if (chessGame.status === 'checkmate') {
+    const youWon = chessGame.winner === chessGame.playerColor;
+    chessStatusEl.textContent = 'Checkmate — ' + chessColorName(chessGame.winner) + ' wins. ' + (youWon ? 'You won!' : 'The bot won.');
+    return;
+  }
+  if (chessGame.status === 'stalemate') { chessStatusEl.textContent = 'Draw by stalemate.'; return; }
+  if (chessGame.status === 'draw') { chessStatusEl.textContent = 'Draw — insufficient material or the fifty-move rule.'; return; }
+  if (chessBotThinking) { chessStatusEl.textContent = 'Bot is thinking…'; return; }
+  const toMove = chessGame.turn === chessGame.playerColor ? 'Your move' : "Bot's move";
+  const check = AtlasChess.isInCheck(chessGame, chessGame.turn) ? ' — check!' : '';
+  chessStatusEl.textContent = toMove + ' (' + chessColorName(chessGame.turn) + ')' + check;
+}
+
+function renderChessAll() {
+  renderChessBoard();
+  renderChessCaptured();
+  renderChessStatus();
+}
+
+// Task #201: a real minted reward for a real win. Gold scales with
+// difficulty, and beating Hard also earns a one-off trophy keepsake. Reuses
+// the exact same AtlasWallet.mintAsset() path the market's own Mine Gold
+// stall uses (see handleInteractable's 'mint' branch) — chess stays
+// scene-local right up until the instant it actually wins, at which point
+// handing over a real signed credential is the whole point, so this is the
+// one deliberate place chess reaches into the wallet. Keyed by the
+// difficulty dropdown's value at the moment of victory, same as
+// maybeTriggerChessBotMove() already reads it live rather than freezing it
+// at "New game" time — difficulty has always been a live setting in this
+// build, not something pinned to a given game.
+const CHESS_WIN_REWARDS = {
+  easy: { gold: 5 },
+  medium: { gold: 10 },
+  hard: { gold: 20, trophy: true }
+};
+
+// Fires once, right after a move that ends the game with the player as the
+// winner — never on a draw, stalemate, or a bot win (see this function's two
+// call sites below; the bot's own move-application site doesn't call this at
+// all, since a side can never deliver checkmate to itself). No identity yet
+// isn't an error here — chess never required one to play in the first place
+// (see handleInteractable's 'open-chess' comment) — it just means there's
+// nowhere to mint the reward into yet, so the visitor gets a plain note
+// instead of a raw mint failure. `game` is captured up front and re-checked
+// against the live chessGame after each await, so a visitor who starts a new
+// game (or reopens later) while this is still in flight never has a stale
+// result overwrite the wrong game's status line.
+async function maybeAwardChessWin() {
+  const game = chessGame;
+  if (!game || game.status !== 'checkmate' || game.winner !== game.playerColor) return;
+  const reward = CHESS_WIN_REWARDS[chessDifficultyInput.value];
+  if (!reward) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (chessGame !== game) return;
+  if (!identity) {
+    chessStatusEl.textContent += ' Create a wallet identity to claim your reward next time!';
+    return;
+  }
+  try {
+    const domain = manifestDomainOf(currentManifest);
+    await AtlasWallet.mintAsset('self', domain, 'atlas.element.gold', reward.gold);
+    let trophyNote = '';
+    if (reward.trophy) {
+      // Client-side dedupe, same spirit as handleInteractable's 'issue'
+      // oncePerUser check — a trophy is a singular achievement, not
+      // something repeated Hard wins should keep re-minting duplicates of.
+      const wallet = await AtlasWallet.getWallet(identity.publicKey);
+      const alreadyHasTrophy = wallet.some((e) => e.credential.asset.class === 'atlas.trophy.chess' && e.credential.issuer.domain === domain);
+      if (!alreadyHasTrophy) {
+        await AtlasWallet.mintAsset('self', domain, 'atlas.trophy.chess');
+        trophyNote = ' + a trophy';
+      }
+    }
+    await refreshInventoryDisplay();
+    if (chessGame === game) chessStatusEl.textContent += ' You earned ' + reward.gold + ' gold' + trophyNote + '!';
+  } catch (err) {
+    if (chessGame === game) chessStatusEl.textContent += ' (Reward mint failed: ' + err.message + ')';
+  }
+}
+
+function startNewChessGame() {
+  chessGame = AtlasChess.createGame(chessPlayerColorInput.value);
+  chessSelectedSquare = null;
+  chessLegalTargets = [];
+  chessPendingPromotion = null;
+  chessPromotionPickerEl.classList.remove('active');
+  chessBotThinking = false;
+  renderChessAll();
+  maybeTriggerChessBotMove();
+}
+
+function openChessModal() {
+  chessModalEl.classList.add('active');
+  if (!chessGame) startNewChessGame();
+  else renderChessAll();
+}
+
+function closeChessModal() {
+  chessModalEl.classList.remove('active');
+}
+
+// Runs the bot's move if it's currently the bot's turn — called after
+// every real move (the player's, or "New game" when the player chose to
+// play Black) so the bot always replies on its own, with no separate
+// "bot's turn" button to click. The setTimeout(0)-ish delay (rather than
+// calling AtlasChess.getBotMove() synchronously in the same tick) exists
+// so "Bot is thinking…" actually paints before the search runs — the
+// search itself is still a single synchronous, blocking call with no
+// worker thread behind it (see chess.js's own comment on why Hard is
+// capped at depth 3 specifically so that block stays short).
+function maybeTriggerChessBotMove() {
+  if (!chessGame || chessGame.status !== 'active') return;
+  if (chessGame.turn === chessGame.playerColor) return;
+  chessBotThinking = true;
+  renderChessStatus();
+  setTimeout(() => {
+    if (!chessGame || chessGame.status !== 'active') { chessBotThinking = false; return; }
+    const move = AtlasChess.getBotMove(chessGame, chessDifficultyInput.value);
+    chessBotThinking = false;
+    if (!move) { renderChessAll(); return; } // shouldn't happen — finalizeStatus would already have ended the game
+    chessGame = AtlasChess.makeMove(chessGame, move);
+    renderChessAll();
+  }, 30);
+}
+
+function handleChessSquareClick(square) {
+  if (!chessGame || chessGame.status !== 'active') return;
+  if (chessBotThinking || chessPendingPromotion) return;
+  if (chessGame.turn !== chessGame.playerColor) return; // not your move — clicks are inert
+
+  if (chessSelectedSquare !== null) {
+    const target = chessLegalTargets.find((m) => m.to === square);
+    if (target) {
+      if (target.needsPromotion) {
+        chessPendingPromotion = { from: target.from, to: target.to };
+        chessPromotionPickerEl.classList.add('active');
+        return;
+      }
+      chessGame = AtlasChess.makeMove(chessGame, target);
+      chessSelectedSquare = null;
+      chessLegalTargets = [];
+      renderChessAll();
+      maybeTriggerChessBotMove();
+      maybeAwardChessWin();
+      return;
+    }
+  }
+  // Clicking your own piece (nothing was selected yet, or re-clicking a
+  // different piece of your own) reselects; clicking the already-selected
+  // square, an empty square, or an opponent piece with no legal capture
+  // there just clears the selection — there's no explicit "deselect"
+  // control, this covers every case that isn't "make the move."
+  const piece = chessGame.board[square];
+  if (piece && AtlasChess.colorOf(piece) === chessGame.playerColor) {
+    chessSelectedSquare = square;
+    chessLegalTargets = AtlasChess.getLegalMovesFrom(chessGame, square);
+  } else {
+    chessSelectedSquare = null;
+    chessLegalTargets = [];
+  }
+  renderChessBoard();
+}
+
+chessBoardEl.addEventListener('click', (e) => {
+  const squareEl = e.target.closest('.chess-square');
+  if (!squareEl) return;
+  handleChessSquareClick(Number(squareEl.dataset.square));
+});
+
+chessPromotionPickerEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-promo]');
+  if (!btn || !chessPendingPromotion) return;
+  const { from, to } = chessPendingPromotion;
+  chessPendingPromotion = null;
+  chessPromotionPickerEl.classList.remove('active');
+  chessGame = AtlasChess.makeMove(chessGame, { from, to, promotion: btn.dataset.promo });
+  chessSelectedSquare = null;
+  chessLegalTargets = [];
+  renderChessAll();
+  maybeTriggerChessBotMove();
+  maybeAwardChessWin();
+});
+
+chessNewGameBtn.addEventListener('click', startNewChessGame);
+chessCloseBtn.addEventListener('click', closeChessModal);
+
 // ---------- cache management (Settings -> Cache) ----------
 //
 // Reads from gltf-mini.js's asset cache via window.MiniGLTF.cache — same
@@ -7521,17 +7792,23 @@ mintGoldBtn.addEventListener('click', async () => {
 });
 
 // Dispatch for a clicked in-scene interactable (see the "interactables"
-// note in enterWorld). Only one action exists today — "mint", which does
-// exactly what the Settings-panel mine buttons above do, just triggered by
-// clicking the stall itself instead of opening the wallet. The busy guard
-// exists because — unlike a portal (leaves the scene) or a dropped item
-// (removes its own marker once picked up) — a mint stall stays put and
+// note in enterWorld). Two actions exist today: "mint" (does exactly what
+// the Settings-panel mine buttons above do, just triggered by clicking
+// the stall itself instead of opening the wallet) and "open-chess" (task
+// #195 — opens the chess modal; see that section further down). The busy
+// guard exists because — unlike a portal (leaves the scene) or a dropped
+// item (removes its own marker once picked up) — a stall stays put and
 // stays clickable, so nothing else stops a fast double-click from firing
-// two mints at once.
+// two mints (or two modal-opens) at once.
 async function handleInteractable(marker) {
   if (interactableBusy) return;
   interactableBusy = true;
   try {
+    // Chess needs no identity at all — unlike every other interactable
+    // here, it never touches the wallet, so it deliberately skips the
+    // identityRequired gate just below rather than making a visitor
+    // create or unlock an identity just to play a local minigame.
+    if (marker.action === 'open-chess') { openChessModal(); return; }
     // Task #63, scoped: inside a world that requires identity, a locked
     // wallet shouldn't just fail this click with an error message the way
     // it would in any ordinary world (see the 'issue' branch's own

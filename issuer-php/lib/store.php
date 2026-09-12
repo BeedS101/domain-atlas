@@ -296,6 +296,24 @@ const ATLAS_ASSET_CATALOG = [
     'fungible' => true, 'presentation' => 'collectible',
     'properties' => ['atlas.purity' => '99.9%', 'atlas.state' => 'solid', 'com.example.source' => 'Coastal Bazaar mine'],
   ],
+  // Task #201: a one-off keepsake for beating the in-world chess bot on
+  // Hard difficulty, minted alongside the per-win gold reward (see
+  // extension/viewer.js's CHESS_WIN_REWARDS / maybeAwardChessWin()) — just
+  // another catalog entry atlas/asset/issue.php already knows how to mint,
+  // no dedicated endpoint needed. Reuses the signet ring's model/thumbnail,
+  // same "this one's the rare one" reasoning gold already borrows it for
+  // above. No tradeScope override — like atlas.badge, this is an
+  // achievement, not a relationship, so it stays ordinarily tradeable/
+  // giftable rather than 'bound'. Mirrors issuer-server/server.js's
+  // ASSET_CATALOG entry of the same name.
+  'atlas.trophy.chess' => [
+    'name' => 'Chess Champion Trophy', 'modelPath' => '/assets/ring.glb', 'thumbnailPath' => '/assets/ring.png',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.rarity' => 'rare',
+      'com.example.awardedFor' => 'Defeating the in-world chess bot on Hard difficulty',
+    ],
+  ],
 ];
 
 // Builds the `asset` wrapper (name/class/model/thumbnail/fungible/

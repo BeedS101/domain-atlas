@@ -439,6 +439,27 @@ const ASSET_CATALOG = {
     fungible: true,
     presentation: 'collectible',
     properties: { 'atlas.purity': '99.9%', 'atlas.state': 'solid', 'com.example.source': 'Coastal Bazaar mine' }
+  },
+  // Task #201: a one-off keepsake for beating the in-world chess bot on
+  // Hard difficulty, minted alongside the per-win gold reward (see
+  // viewer.js's CHESS_WIN_REWARDS / maybeAwardChessWin()) — not gated by
+  // any dedicated endpoint, just another catalog entry POST /atlas/asset/
+  // issue already knows how to mint, same as everything else here.
+  // Reuses the signet ring's model/thumbnail for the same "this one's the
+  // rare one" reasoning gold already borrows it for above, rather than
+  // the plainer badge.glb every common item reuses. No tradeScope override
+  // — like atlas.badge, this is an achievement, not a relationship, so it
+  // stays ordinarily tradeable/giftable rather than 'bound'.
+  'atlas.trophy.chess': {
+    name: 'Chess Champion Trophy',
+    model: `https://${DOMAIN}/assets/ring.glb`,
+    thumbnail: `https://${DOMAIN}/assets/ring.png`,
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.rarity': 'rare',
+      'com.example.awardedFor': 'Defeating the in-world chess bot on Hard difficulty'
+    }
   }
 };
 
@@ -1004,7 +1025,7 @@ async function main() {
         if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
-          return sendJson(res, 400, { error: 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.tradingstation.membership, atlas.element.iron, atlas.element.gold, or atlas.element.silver.' });
+          return sendJson(res, 400, { error: 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.tradingstation.membership, atlas.element.iron, atlas.element.gold, atlas.element.silver, or atlas.trophy.chess.' });
         }
 
         // fungible: true — quantity is caller-chosen and must be a positive
@@ -1419,7 +1440,7 @@ async function main() {
           if (!giftOwnerPublicKey) return sendJson(res, 400, { error: 'giftOwnerPublicKey is required when giftAssetClass is set' });
           const catalogEntry = ASSET_CATALOG[giftAssetClass];
           if (!catalogEntry) {
-            return sendJson(res, 400, { error: 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, atlas.element.gold, or atlas.element.silver.' });
+            return sendJson(res, 400, { error: 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, atlas.element.gold, atlas.element.silver, or atlas.trophy.chess.' });
           }
           // Same fungible/quantity validation as /atlas/asset/issue above.
           let mintQuantity;

@@ -20,7 +20,7 @@ $assetClass = $body['assetClass'] ?? null;
 $quantity = $body['quantity'] ?? null;
 if (!$ownerPublicKey) send_json(400, ['error' => 'ownerPublicKey is required']);
 if (!isset(ATLAS_ASSET_CATALOG[$assetClass])) {
-  send_json(400, ['error' => 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.tradingstation.membership, atlas.element.iron, atlas.element.gold, or atlas.element.silver.']);
+  send_json(400, ['error' => 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.tradingstation.membership, atlas.element.iron, atlas.element.gold, atlas.element.silver, or atlas.trophy.chess.']);
 }
 
 // fungible: true — quantity is caller-chosen and must be a positive
