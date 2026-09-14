@@ -73,6 +73,31 @@ if ($senderMembership === null) {
   send_json(400, ['error' => 'you do not hold a Global Mail membership at this domain — join its Post Office before sending through it']);
 }
 
+// Task #97 (SPEC.md §11.4, domain-to-domain federation): sender
+// authentication and sender membership above are unchanged and were just
+// checked first, exactly as for a local send. If payload.to names a domain
+// other than this one, this domain isn't the recipient's home — it becomes
+// the RELAYING party instead of attempting local delivery. Mirrors
+// issuer-server/server.js's send handler's own relay branch exactly.
+if (!empty($to['domain']) && $to['domain'] !== atlas_domain()) {
+  $relayAttestation = ['relayingDomain' => atlas_domain(), 'relayingDomainHandle' => $senderMembership['handle'] ?? null];
+  $relaySignature = atlas_sign($kp['privateKey'], $relayAttestation);
+  try {
+    $relayResult = atlas_http_post_json(
+      atlas_base_url($to['domain']) . '/atlas/postoffice/relay',
+      ['payload' => $payload, 'proof' => $proof, 'relayAttestation' => $relayAttestation, 'relaySignature' => $relaySignature]
+    );
+  } catch (Exception $e) {
+    send_json(502, ['error' => 'could not reach ' . $to['domain'] . ' to relay this message: ' . $e->getMessage()]);
+  }
+  if ($relayResult['status'] < 200 || $relayResult['status'] >= 300) {
+    $reason = $relayResult['body']['error'] ?? 'unknown reason';
+    send_json($relayResult['status'] ?: 502, ['error' => $to['domain'] . ' rejected this message: ' . $reason]);
+  }
+  record_postoffice_send($senderMembership['credentialId']); // task #96 — relaying still counts as a send from THIS member
+  send_json(200, $relayResult['body']);
+}
+
 $membership = find_postoffice_membership($to['publicKey']);
 if ($membership === null) {
   send_json(400, ['error' => 'recipient does not hold a valid Global Mail membership at this domain — nothing was sent']);

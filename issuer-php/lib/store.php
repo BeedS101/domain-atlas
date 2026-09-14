@@ -97,6 +97,26 @@ function atlas_postoffice_members_file() {
   return __DIR__ . '/atlas-postoffice-members-store.json';
 }
 
+// Task #97 (SPEC.md §11.4, domain-to-domain federation): the operator-level
+// safety valve federation is explicitly built with — see
+// issuer-server/server.js's FEDERATION_BLOCKLIST_FILE for the full
+// reasoning, mirrored here. A plain operator-edited JSON file (no admin-auth
+// API surface exists in this bundle to gate one), same "not web-reachable,
+// lib/ + .htaccess deny" posture as the private key file. Distinct from
+// atlas_postoffice_members_file()'s per-member blockedSenders (SPEC.md
+// §11.3): that blocks one troublesome SENDER; this blocks an entire PEER
+// DOMAIN's relayed mail outright.
+function atlas_federation_blocklist_file() {
+  return __DIR__ . '/atlas-federation-blocklist.json';
+}
+function is_domain_blocked($domain) {
+  $path = atlas_federation_blocklist_file();
+  if (!file_exists($path)) return false;
+  $doc = json_decode(file_get_contents($path), true);
+  $blocked = is_array($doc) && isset($doc['blocked']) ? $doc['blocked'] : [];
+  return in_array($domain, $blocked, true);
+}
+
 // Trading Station membership roster (task #144 Phase 1) — same flat-array
 // shape as atlas_postoffice_members_file() above, kept as its own file for
 // the same reason Post Office's is separate from the plain subscriber

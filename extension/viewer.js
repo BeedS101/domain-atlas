@@ -1811,6 +1811,13 @@ const backupWebAuthnNote = document.getElementById('backupWebAuthnNote');
 const exportPasswordInput = document.getElementById('exportPasswordInput');
 const exportSeedInput = document.getElementById('exportSeedInput');
 const exportIdentityBtn = document.getElementById('exportIdentityBtn');
+const fullBackupLocalSection = document.getElementById('fullBackupLocalSection');
+const fullBackupWebAuthnNote = document.getElementById('fullBackupWebAuthnNote');
+const fullBackupExportPasswordInput = document.getElementById('fullBackupExportPasswordInput');
+const fullBackupExportSeedInput = document.getElementById('fullBackupExportSeedInput');
+const exportFullBackupBtn = document.getElementById('exportFullBackupBtn');
+const fullBackupExportStatusEl = document.getElementById('fullBackupExportStatus');
+const restoreFullBackupBtn = document.getElementById('restoreFullBackupBtn');
 const exportStatusEl = document.getElementById('exportStatus');
 const exportBtn = document.getElementById('exportBtn');
 const importWalletBtn = document.getElementById('importWalletBtn');
@@ -1910,6 +1917,39 @@ const assetViewerResizeHandleEl = document.getElementById('assetViewerResizeHand
 const assetViewerSettingsPopoverEl = document.getElementById('assetViewerSettingsPopover');
 const assetViewerOpacityInput = document.getElementById('assetViewerOpacityInput');
 const assetViewerTextSizeInput = document.getElementById('assetViewerTextSizeInput');
+
+// Messaging window (task #111 first slice) — see the big comment block
+// further below (near openMessagingWindow()) for the whole design; these
+// are just its DOM refs, declared alongside the other floating-widget refs
+// above (#chatWidget/#assetViewerWidget) since they're the same
+// widget/panel/popover family.
+const messagingBtn = document.getElementById('messagingBtn');
+const messagingBadge = document.getElementById('messagingBadge');
+const messagingWidgetEl = document.getElementById('messagingWidget');
+const messagingPanelEl = document.getElementById('messagingPanel');
+const messagingHeaderEl = document.getElementById('messagingHeader');
+const messagingResizeHandleEl = document.getElementById('messagingResizeHandle');
+const messagingCloseBtn = document.getElementById('messagingCloseBtn');
+const messagingSettingsBtn = document.getElementById('messagingSettingsBtn');
+const messagingSettingsPopoverEl = document.getElementById('messagingSettingsPopover');
+const messagingOpacityInput = document.getElementById('messagingOpacityInput');
+const messagingChatsViewEl = document.getElementById('messagingChatsView');
+const messagingCallsViewEl = document.getElementById('messagingCallsView');
+const messagingCallsBodyEl = document.getElementById('messagingCallsBody');
+const messagingContactsViewEl = document.getElementById('messagingContactsView');
+const messagingChatViewEl = document.getElementById('messagingChatView');
+const messagingChatsListEl = document.getElementById('messagingChatsList');
+const messagingContactsListEl = document.getElementById('messagingContactsList');
+const messagingChatBackBtn = document.getElementById('messagingChatBackBtn');
+const messagingChatViewNameEl = document.getElementById('messagingChatViewName');
+const messagingClearHistoryBtn = document.getElementById('messagingClearHistoryBtn');
+const messagingClearHistoryConfirmEl = document.getElementById('messagingClearHistoryConfirm');
+const messagingClearHistoryConfirmBtn = document.getElementById('messagingClearHistoryConfirmBtn');
+const messagingClearHistoryCancelBtn = document.getElementById('messagingClearHistoryCancelBtn');
+const messagingChatMessagesEl = document.getElementById('messagingChatMessages');
+const messagingChatDomainRowEl = document.getElementById('messagingChatDomainRow');
+const messagingChatDomainSelectEl = document.getElementById('messagingChatDomainSelect');
+const messagingChatTextInputEl = document.getElementById('messagingChatTextInput');
 
 let portalHitboxes = []; // [{sx, sy, radius, portal}]
 let itemMarkerHitboxes = []; // [{sx, sy, radius, marker}] — dropped items, 2D renderer only for now
@@ -2842,6 +2882,11 @@ async function refreshIdentityModeControls() {
   changePasswordSection.style.display = mode === 'webauthn' ? 'none' : '';
   backupLocalSection.style.display = mode === 'webauthn' ? 'none' : '';
   backupWebAuthnNote.style.display = mode === 'webauthn' ? '' : 'none';
+  // Task #122: Full backup is local-identity-only for the same reason
+  // Identity backup is, just above — see exportFullBackup's own comment
+  // in wallet.js.
+  fullBackupLocalSection.style.display = mode === 'webauthn' ? 'none' : '';
+  fullBackupWebAuthnNote.style.display = mode === 'webauthn' ? '' : 'none';
 }
 
 // ---------- wallet panel screen routing ----------
@@ -3376,6 +3421,570 @@ document.addEventListener('mouseup', async () => {
   // trigger its mouseleave again — no further mouse movement is guaranteed
   // once the button is already up.
   if (assetViewerPanelEl && !assetViewerPanelEl.matches(':hover')) scheduleAssetViewerClose();
+});
+
+// ---------- Messaging window (task #111 first slice) ----------
+//
+// Bruno's spec, in full: a separate floating window ("similar to the
+// asset viewer window... moved around to the users desired location on
+// the canvas, resizable, opacity control") with two tabs — "Chats" (a
+// main-view thread list, newest first, clicking a thread opens a chat
+// view with history oldest-to-newest and a bottom-anchored textbox) and
+// "Contacts" (the same saved-friends list Mail's own Contacts sub-tab
+// shows, reused purely as a picker — clicking a contact opens the chat
+// view ready for a brand-new message). Transport is deliberately NOT a
+// new system: every chat message is ordinary Post Office mail carrying
+// AtlasWallet's reserved CHAT_SUBJECT_MARKER, diverted out of the regular
+// Mail store by checkAllMail() (wallet.js) into its own atlasChatMessages
+// store — see that function's own comment for why this never touches
+// existing Mail tab behavior. A real "persistent connection" transport is
+// explicitly future work per Bruno's own words ("we'll add a persistent
+// connection later after the interface is up") — nothing here assumes or
+// prepares for it beyond keeping send/receive behind AtlasWallet's own
+// function names (sendChatMessage/getChatThreads/etc.) rather than
+// something viewer.js could only ever satisfy via mail.
+//
+// Chrome (widget/panel/header/resize handle/settings popover) mirrors
+// #assetViewerWidget's own structure — see this file's HTML/CSS comments
+// on #messagingWidget for why dragging is NEW here rather than reused.
+
+let messagingSettingsCache = null;
+let messagingActiveTab = 'chats'; // 'chats' | 'calls' | 'contacts' — which tab the bar shows as active
+let messagingCurrentChat = null; // {publicKey, handle, domain} while (chat view) is open, else null
+
+function applyMessagingWindowSettings(settings) {
+  messagingSettingsCache = settings;
+  if (!messagingPanelEl) return;
+  messagingPanelEl.style.width = settings.width + 'px';
+  messagingPanelEl.style.height = settings.height + 'px';
+  if (messagingWidgetEl) messagingWidgetEl.style.opacity = String(settings.opacity);
+  if (messagingOpacityInput) messagingOpacityInput.value = String(settings.opacity);
+  // Only override the CSS default top/right perch once the user has
+  // actually dragged this window somewhere — see wallet.js's own comment
+  // on the `positioned` flag.
+  if (settings.positioned && messagingWidgetEl) {
+    messagingWidgetEl.style.left = settings.left + 'px';
+    messagingWidgetEl.style.top = settings.top + 'px';
+    messagingWidgetEl.style.right = 'auto';
+  }
+}
+
+// Keeps the top-bar badge current regardless of whether the window is
+// open — same "cheap either way, refreshed on every mail-check tick"
+// posture as mailBadge/socialBadge.
+async function refreshMessagingBadge() {
+  if (!messagingBadge) return;
+  const identity = await AtlasWallet.getIdentity();
+  const count = identity ? await AtlasWallet.getChatUnreadCount(identity.publicKey) : 0;
+  messagingBadge.textContent = String(count);
+  messagingBadge.classList.toggle('show', count > 0);
+}
+
+// Whether this wallet can currently send a chat message at all — same
+// "unlocked identity required, self-signed envelope" gate sendChatMessage
+// itself enforces server-side via signWithSelf; checked here purely to
+// disable/label the textbox rather than let a send attempt fail.
+async function refreshMessagingSendability() {
+  if (!messagingChatTextInputEl) return;
+  const unlocked = await AtlasWallet.isUnlocked();
+  // "Has a domain to send through" covers two states: an already-resolved
+  // single domain (messagingCurrentChat.domain) OR the ambiguous-picker
+  // row being shown instead (messagingChatDomainRowEl visible) — either
+  // way sendMessagingChatMessage() has somewhere to actually send to. Ends
+  // up false only when this wallet holds no Post Office membership at all
+  // (resolveChatSendDomain returned null) — nothing to pick from either.
+  const hasDomain = !!(messagingCurrentChat && (messagingCurrentChat.domain || (messagingChatDomainRowEl && !messagingChatDomainRowEl.hidden)));
+  messagingChatTextInputEl.disabled = !unlocked || !messagingCurrentChat || !hasDomain;
+  if (!unlocked) messagingChatTextInputEl.placeholder = 'Unlock your wallet to send messages…';
+  else if (!hasDomain) messagingChatTextInputEl.placeholder = 'Join a Post Office (Mail settings) to message people';
+  else messagingChatTextInputEl.placeholder = 'Message this contact…';
+}
+
+function renderMessagingTabBar() {
+  document.querySelectorAll('.messaging-tab').forEach((btn) => {
+    btn.classList.toggle('active-subtab', btn.dataset.messagingTab === messagingActiveTab);
+  });
+}
+
+const MESSAGING_TABS = ['chats', 'calls', 'contacts'];
+
+// Switches the window to one of the three real tabs, always leaving (chat
+// view) — reaching (chat view) is only ever done via openMessagingChatView
+// below, never through the tab bar itself. `callContext` (optional — a
+// display label) is set only when arriving here via a Contacts row's
+// "Call" button (TODO round 1 item 4), so the Calls placeholder can at
+// least name who you meant to call even though nothing real happens yet.
+async function showMessagingTab(tab, callContext) {
+  messagingActiveTab = MESSAGING_TABS.includes(tab) ? tab : 'chats';
+  messagingCurrentChat = null;
+  await AtlasWallet.setMessagingWindowSettings({ activeTab: messagingActiveTab });
+  renderMessagingTabBar();
+  if (messagingChatsViewEl) messagingChatsViewEl.hidden = messagingActiveTab !== 'chats';
+  if (messagingCallsViewEl) messagingCallsViewEl.hidden = messagingActiveTab !== 'calls';
+  if (messagingContactsViewEl) messagingContactsViewEl.hidden = messagingActiveTab !== 'contacts';
+  if (messagingChatViewEl) messagingChatViewEl.hidden = true;
+  if (messagingActiveTab === 'chats') await renderMessagingChatsList();
+  else if (messagingActiveTab === 'calls') renderMessagingCallsPlaceholder(callContext);
+  else await renderMessagingContactsList();
+}
+
+// Calls (TODO round 1 item 3 — added after Chats per Bruno's follow-up
+// request; task #111's ORIGINAL framing was "Chats / Calls / Contacts",
+// this tab was just deferred out of the first slice). No real calling
+// design exists yet (voice? video? just a log? — genuinely undecided, see
+// the private notes), so this deliberately shows an honest placeholder
+// rather than any fake "ringing"/"connected" UI that would mislead Bruno
+// into thinking calling actually works. `callContext` personalizes it
+// when reached via a Contacts row's "Call" button; reaching it via the
+// tab bar directly shows the generic version.
+function renderMessagingCallsPlaceholder(callContext) {
+  if (!messagingCallsBodyEl) return;
+  messagingCallsBodyEl.innerHTML = callContext
+    ? '<div class="empty-note">Voice/video calling isn\'t built yet. You chose Call for ' + escapeHtml(callContext) + ' — this is where that call would start once real-time calling ships.</div>'
+    : '<div class="empty-note">Voice/video calling isn\'t built yet — it\'s on the roadmap (task #111).</div>';
+}
+
+function formatMessagingTime(iso) {
+  try { return new Date(iso).toLocaleString(); } catch (err) { return ''; }
+}
+
+// Chats (main view) — one row per counterparty, newest message first,
+// exactly AtlasWallet.getChatThreads()'s own ordering (see its comment for
+// why that's the right ordering already, nothing to re-sort here). Each
+// row now also carries its own delete button (TODO round 2 item 3) — a
+// trash icon that reveals an inline "Delete this conversation?" confirm
+// row rather than deleting immediately, same two-click safety pattern
+// renderFriendCard() already established for wallet Contacts (see
+// REMOVE_CONTACT_CONFIRM_GRACE_MS's own comment for why a grace period on
+// top of that). Only the .messaging-list-item-main wrapper opens the
+// chat — the delete button is a plain sibling so clicking it never also
+// triggers open-chat-thread.
+async function renderMessagingChatsList() {
+  if (!messagingChatsListEl) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) {
+    messagingChatsListEl.innerHTML = '<div class="empty-note">Sign in to your wallet to see your chats.</div>';
+    return;
+  }
+  const threads = await AtlasWallet.getChatThreads(identity.publicKey);
+  if (threads.length === 0) {
+    messagingChatsListEl.innerHTML = '<div class="empty-note">No conversations yet — start one from the Contacts tab.</div>';
+    return;
+  }
+  messagingChatsListEl.innerHTML = threads.map((t) => {
+    const label = t.counterpartyHandle || short(t.counterpartyPublicKey, 20);
+    const previewPrefix = t.lastMessage.direction === 'out' ? 'You: ' : '';
+    const key = escapeHtml(t.counterpartyPublicKey);
+    return (
+      '<div class="messaging-list-item">' +
+      '<div class="messaging-list-item-main" data-action="open-chat-thread" data-key="' + key + '" data-handle="' + escapeHtml(t.counterpartyHandle || '') + '" data-domain="' + escapeHtml(t.domain || '') + '">' +
+      '<div style="flex:1 1 auto;min-width:0;">' +
+      '<div class="name">' + escapeHtml(label) + '</div>' +
+      '<div class="preview">' + escapeHtml(previewPrefix + t.lastMessage.body) + '</div>' +
+      '</div>' +
+      '<div class="meta-col">' +
+      '<span class="time">' + formatMessagingTime(t.lastMessage.sentAt) + '</span>' +
+      (t.unreadCount > 0 ? '<span class="messaging-thread-unread">' + t.unreadCount + '</span>' : '') +
+      '</div>' +
+      '</div>' +
+      '<button type="button" data-action="delete-chat-thread-ask" data-key="' + key + '" class="chat-icon-btn" title="Delete this conversation">🗑</button>' +
+      '</div>' +
+      '<div class="remove-confirm-row empty-note" data-key="' + key + '" hidden>' +
+      'Delete this conversation from this device? This can\'t be undone. ' +
+      '<button type="button" data-action="delete-chat-thread-confirm" data-key="' + key + '" class="danger-btn">Delete</button> ' +
+      '<button type="button" data-action="delete-chat-thread-cancel" data-key="' + key + '" class="btn-secondary">Cancel</button>' +
+      '</div>'
+    );
+  }).join('');
+}
+
+// Contacts tab — deliberately just AtlasWallet.getFriends() (the SAME list
+// Mail's own Contacts sub-tab reads), reused purely as a picker per
+// Bruno's own spec ("displays same contacts as mail contacts"). No domain
+// is stored per contact (getFriends() never has one — see its own
+// comment in wallet.js), so this list carries only what's needed to open
+// (chat view); resolveChatSendDomain() below is what works out which
+// Post Office to actually send through. Each row now shows a "Chat"/
+// "Call" button pair (TODO round 1 item 4) instead of the row itself
+// being the click target — "Chat" opens (chat view) exactly as clicking
+// the row used to; "Call" hands the contact's display label to
+// showMessagingTab('calls', ...) purely so the placeholder can name them.
+async function renderMessagingContactsList() {
+  if (!messagingContactsListEl) return;
+  const friends = await AtlasWallet.getFriends();
+  if (friends.length === 0) {
+    messagingContactsListEl.innerHTML = '<div class="empty-note">No contacts saved yet — add one from the wallet\'s Contacts tab.</div>';
+    return;
+  }
+  messagingContactsListEl.innerHTML = friends.map((f) => (
+    '<div class="messaging-list-item">' +
+    '<div class="messaging-list-item-main" style="cursor:default;" data-key="' + escapeHtml(f.publicKey) + '" data-handle="' + escapeHtml(f.name || '') + '">' +
+    '<div style="flex:1 1 auto;min-width:0;">' +
+    '<div class="name">' + escapeHtml(f.name) + '</div>' +
+    '<div class="preview">' + escapeHtml(short(f.publicKey, 24)) + '</div>' +
+    '</div>' +
+    '</div>' +
+    '<div class="messaging-contact-actions">' +
+    '<button type="button" data-action="messaging-contact-chat" data-key="' + escapeHtml(f.publicKey) + '" data-handle="' + escapeHtml(f.name || '') + '">Chat</button>' +
+    '<button type="button" data-action="messaging-contact-call" data-key="' + escapeHtml(f.publicKey) + '" data-handle="' + escapeHtml(f.name || '') + '">Call</button>' +
+    '</div>' +
+    '</div>'
+  )).join('');
+}
+
+function renderMessagingChatMessage(entry) {
+  const time = (() => { try { return new Date(entry.sentAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); } catch (err) { return ''; } })();
+  return (
+    '<div class="messaging-chat-line ' + (entry.direction === 'out' ? 'out' : 'in') + '">' +
+    escapeHtml(entry.body) +
+    '<span class="time">' + time + '</span>' +
+    '</div>'
+  );
+}
+
+async function renderMessagingChatHistory() {
+  if (!messagingChatMessagesEl || !messagingCurrentChat) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) { messagingChatMessagesEl.innerHTML = '<div class="empty-note">Sign in to your wallet to see this conversation.</div>'; return; }
+  const messages = await AtlasWallet.getChatThreadMessages(identity.publicKey, messagingCurrentChat.publicKey);
+  messagingChatMessagesEl.innerHTML = messages.length
+    ? messages.map(renderMessagingChatMessage).join('')
+    : '<div class="empty-note">No messages yet — say hello!</div>';
+  messagingChatMessagesEl.scrollTop = messagingChatMessagesEl.scrollHeight;
+  await AtlasWallet.markChatThreadRead(identity.publicKey, messagingCurrentChat.publicKey);
+  await refreshMessagingBadge();
+}
+
+// Works out which Post Office domain a brand-new conversation should send
+// through, reusing Mail Compose's own established pattern
+// (getPostOfficeMemberships/getLastPostOfficeSendDomain — see viewer.js's
+// refreshPostOfficeSendOptions) rather than inventing a new one. Contacts
+// carries no domain (getFriends() never stores one), so this only ever
+// runs for a chat that doesn't already have messages of its own; an
+// EXISTING thread's domain (t.domain, threaded straight through from
+// getChatThreads()) is reused silently instead — continuing a
+// conversation should never re-ask a question already answered.
+async function resolveChatSendDomain(identity, domainHint) {
+  if (domainHint) return domainHint;
+  const memberships = await AtlasWallet.getPostOfficeMemberships(identity.publicKey);
+  if (memberships.length === 0) return null;
+  if (memberships.length === 1) return memberships[0].domain;
+  const lastUsed = await AtlasWallet.getLastChatSendDomain(identity.publicKey);
+  if (lastUsed && memberships.some((m) => m.domain === lastUsed)) return lastUsed;
+  return undefined; // genuinely ambiguous — caller shows the picker
+}
+
+// Opens (chat view) for a given counterparty — either an existing thread
+// (domainHint set, from getChatThreads()) or a brand-new conversation
+// started from Contacts (domainHint undefined). Shows the domain picker
+// ONLY when resolveChatSendDomain() can't already work out a single
+// answer, per that function's own comment.
+async function openMessagingChatView(publicKey, handle, domainHint) {
+  messagingCurrentChat = { publicKey, handle: handle || null, domain: domainHint || null };
+  if (messagingChatsViewEl) messagingChatsViewEl.hidden = true;
+  if (messagingContactsViewEl) messagingContactsViewEl.hidden = true;
+  if (messagingChatViewEl) messagingChatViewEl.hidden = false;
+  if (messagingChatViewNameEl) messagingChatViewNameEl.textContent = handle || short(publicKey, 24);
+  // Reset any Clear History confirm bar left open from a previous visit to
+  // this (chat view) — a fresh conversation should never inherit another
+  // conversation's mid-confirm state (TODO round 2 item 3).
+  if (messagingClearHistoryConfirmEl) messagingClearHistoryConfirmEl.hidden = true;
+  if (messagingClearHistoryBtn) messagingClearHistoryBtn.hidden = false;
+
+  const identity = await AtlasWallet.getIdentity();
+  if (messagingChatDomainRowEl) messagingChatDomainRowEl.hidden = true;
+  if (identity && !domainHint) {
+    const resolved = await resolveChatSendDomain(identity, domainHint);
+    if (resolved === undefined) {
+      // Ambiguous — populate and show the "send via" picker, same options
+      // Mail Compose's own domain select offers.
+      const memberships = await AtlasWallet.getPostOfficeMemberships(identity.publicKey);
+      if (messagingChatDomainSelectEl) {
+        messagingChatDomainSelectEl.innerHTML = memberships.map((m) => '<option value="' + escapeHtml(m.domain) + '">' + escapeHtml(m.domain) + '</option>').join('');
+      }
+      if (messagingChatDomainRowEl) messagingChatDomainRowEl.hidden = false;
+    } else {
+      messagingCurrentChat.domain = resolved; // null if this wallet has no Post Office membership at all
+    }
+  }
+
+  await renderMessagingChatHistory();
+  await refreshMessagingSendability();
+  messagingChatTextInputEl && messagingChatTextInputEl.focus();
+}
+
+// Returning to Chats has to actually re-render the thread list, not just
+// re-reveal whatever was cached there before this conversation started —
+// sending (or receiving) a message while in (chat view) is exactly what
+// changes that list's ordering/preview/unread count. Only two branches
+// here on purpose: (chat view) is reached exclusively from the Chats tab
+// (a thread row) or the Contacts tab ("Chat" button) — "Call" switches
+// straight to the Calls tab instead of opening (chat view) at all (see
+// renderMessagingContactsList's own comment), so messagingActiveTab can
+// never be 'calls' while this runs.
+async function closeMessagingChatView() {
+  messagingCurrentChat = null;
+  if (messagingChatViewEl) messagingChatViewEl.hidden = true;
+  if (messagingActiveTab === 'chats') {
+    if (messagingChatsViewEl) messagingChatsViewEl.hidden = false;
+    await renderMessagingChatsList();
+  } else {
+    if (messagingContactsViewEl) messagingContactsViewEl.hidden = false;
+    await renderMessagingContactsList();
+  }
+}
+
+async function sendMessagingChatMessage() {
+  if (!messagingChatTextInputEl || !messagingCurrentChat) return;
+  const body = messagingChatTextInputEl.value.trim();
+  if (!body) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  let domain = messagingCurrentChat.domain;
+  if (!domain && messagingChatDomainSelectEl && !messagingChatDomainRowEl.hidden) domain = messagingChatDomainSelectEl.value;
+  if (!domain) return; // no Post Office membership to send through — nothing this UI can do about that yet
+
+  messagingChatTextInputEl.disabled = true;
+  try {
+    await AtlasWallet.sendChatMessage(domain, messagingCurrentChat.publicKey, body, messagingCurrentChat.handle);
+    messagingCurrentChat.domain = domain; // now a known-good domain for the rest of this conversation
+    messagingChatTextInputEl.value = '';
+    if (messagingChatDomainRowEl) messagingChatDomainRowEl.hidden = true;
+    await renderMessagingChatHistory();
+  } catch (err) {
+    // No dedicated status line in this first slice — same minimal-surface
+    // posture as the in-world chat textbox itself, which has none either.
+    // eslint-disable-next-line no-console
+    console.warn('Chat send failed:', err.message);
+  } finally {
+    await refreshMessagingSendability();
+    messagingChatTextInputEl.focus();
+  }
+}
+
+// Re-renders whatever the Messaging window is currently showing (called
+// after every checkAllMail() tick — see restartMailCheckLoop/
+// checkItemUpdatesForDomain/checkMailNowBtn's own new calls) and always
+// keeps the top-bar badge current regardless of whether the window is
+// open at all.
+async function refreshMessagingDisplay() {
+  await refreshMessagingBadge();
+  if (!messagingWidgetEl || messagingWidgetEl.hidden) return;
+  if (messagingCurrentChat) {
+    await renderMessagingChatHistory();
+  } else if (messagingActiveTab === 'chats') {
+    await renderMessagingChatsList();
+  } else if (messagingActiveTab === 'contacts') {
+    await renderMessagingContactsList();
+  }
+  // 'calls' tab: nothing data-backed to refresh — the placeholder
+  // (renderMessagingCallsPlaceholder) is static, see its own comment.
+}
+
+async function openMessagingWindow() {
+  const settings = await AtlasWallet.getMessagingWindowSettings();
+  applyMessagingWindowSettings(settings);
+  messagingWidgetEl.hidden = false;
+  messagingActiveTab = MESSAGING_TABS.includes(settings.activeTab) ? settings.activeTab : 'chats';
+  renderMessagingTabBar();
+  if (messagingChatViewEl) messagingChatViewEl.hidden = true;
+  if (messagingChatsViewEl) messagingChatsViewEl.hidden = messagingActiveTab !== 'chats';
+  if (messagingCallsViewEl) messagingCallsViewEl.hidden = messagingActiveTab !== 'calls';
+  if (messagingContactsViewEl) messagingContactsViewEl.hidden = messagingActiveTab !== 'contacts';
+  messagingCurrentChat = null;
+  if (messagingActiveTab === 'chats') await renderMessagingChatsList();
+  else if (messagingActiveTab === 'calls') renderMessagingCallsPlaceholder();
+  else await renderMessagingContactsList();
+}
+
+function closeMessagingWindow() {
+  messagingWidgetEl.hidden = true;
+  if (messagingSettingsPopoverEl) messagingSettingsPopoverEl.hidden = true;
+}
+
+messagingBtn && messagingBtn.addEventListener('click', async () => {
+  if (messagingWidgetEl.hidden) await openMessagingWindow();
+  else closeMessagingWindow();
+});
+
+messagingCloseBtn && messagingCloseBtn.addEventListener('click', closeMessagingWindow);
+
+document.querySelectorAll('.messaging-tab').forEach((btn) => {
+  btn.addEventListener('click', () => showMessagingTab(btn.dataset.messagingTab));
+});
+
+messagingChatBackBtn && messagingChatBackBtn.addEventListener('click', closeMessagingChatView);
+
+// Clear History (TODO round 2 item 3) — the SAME AtlasWallet.deleteChatThread()
+// the main view's per-row delete button uses, just triggered from inside
+// the conversation instead. Deliberately leaves (chat view) open afterward
+// (now showing "No messages yet…") rather than closing it, since the user
+// is still looking at this conversation and clearing it isn't the same
+// intent as leaving it — same ask/confirm/cancel shape as everywhere else
+// in this file, sized to a single row rather than needing the
+// REMOVE_CONTACT_CONFIRM_GRACE_MS misclick guard (Clear History is a
+// dedicated icon button off in the header, not swapped in in place of the
+// button someone just clicked, so the double-click/twitch risk that guard
+// exists for doesn't apply here).
+messagingClearHistoryBtn && messagingClearHistoryBtn.addEventListener('click', () => {
+  messagingClearHistoryBtn.hidden = true;
+  if (messagingClearHistoryConfirmEl) messagingClearHistoryConfirmEl.hidden = false;
+});
+messagingClearHistoryCancelBtn && messagingClearHistoryCancelBtn.addEventListener('click', () => {
+  if (messagingClearHistoryConfirmEl) messagingClearHistoryConfirmEl.hidden = true;
+  if (messagingClearHistoryBtn) messagingClearHistoryBtn.hidden = false;
+});
+messagingClearHistoryConfirmBtn && messagingClearHistoryConfirmBtn.addEventListener('click', async () => {
+  if (!messagingCurrentChat) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (identity) await AtlasWallet.deleteChatThread(identity.publicKey, messagingCurrentChat.publicKey);
+  if (messagingClearHistoryConfirmEl) messagingClearHistoryConfirmEl.hidden = true;
+  if (messagingClearHistoryBtn) messagingClearHistoryBtn.hidden = false;
+  await renderMessagingChatHistory();
+  await refreshMessagingBadge();
+});
+
+// One delegated listener for both lists — same "closest matching action
+// button/card" convention as socialScreen's own click handler above.
+// Delete-thread actions are checked FIRST, with an early return, so they
+// never also fall through to open-chat-thread even though the delete
+// button/confirm row live inside the same .messaging-list-item as the
+// clickable .messaging-list-item-main (see renderMessagingChatsList's own
+// comment on why the button is a plain sibling rather than something the
+// DOM needs restructuring to keep separate). Same
+// ask/confirm/cancel-with-a-grace-period shape as wallet Contacts'
+// remove-contact-* actions above, just against AtlasWallet.deleteChatThread()
+// instead of removeFriend().
+messagingChatsListEl && messagingChatsListEl.addEventListener('click', async (e) => {
+  const askBtn = e.target.closest('[data-action="delete-chat-thread-ask"]');
+  if (askBtn) {
+    const row = askBtn.closest('.messaging-list-item');
+    const confirmRow = row && row.nextElementSibling;
+    if (confirmRow && confirmRow.classList.contains('remove-confirm-row')) {
+      askBtn.hidden = true;
+      confirmRow.hidden = false;
+      const confirmBtn = confirmRow.querySelector('[data-action="delete-chat-thread-confirm"]');
+      if (confirmBtn) {
+        confirmBtn.disabled = true;
+        setTimeout(() => {
+          if (!confirmRow.hidden) confirmBtn.disabled = false; // same misclick guard as REMOVE_CONTACT_CONFIRM_GRACE_MS
+        }, REMOVE_CONTACT_CONFIRM_GRACE_MS);
+      }
+    }
+    return;
+  }
+  const cancelBtn = e.target.closest('[data-action="delete-chat-thread-cancel"]');
+  if (cancelBtn) {
+    const confirmRow = cancelBtn.closest('.remove-confirm-row');
+    const row = confirmRow && confirmRow.previousElementSibling;
+    if (confirmRow) confirmRow.hidden = true;
+    const reAskBtn = row && row.querySelector('[data-action="delete-chat-thread-ask"]');
+    if (reAskBtn) reAskBtn.hidden = false;
+    return;
+  }
+  const confirmBtn = e.target.closest('[data-action="delete-chat-thread-confirm"]');
+  if (confirmBtn) {
+    const identity = await AtlasWallet.getIdentity();
+    if (identity) await AtlasWallet.deleteChatThread(identity.publicKey, confirmBtn.dataset.key);
+    await renderMessagingChatsList();
+    await refreshMessagingBadge();
+    return;
+  }
+  const item = e.target.closest('[data-action="open-chat-thread"]');
+  if (!item) return;
+  openMessagingChatView(item.dataset.key, item.dataset.handle || null, item.dataset.domain || null);
+});
+// Contacts tab (TODO round 1 item 4): "Chat" opens (chat view) exactly
+// like the old whole-row click used to; "Call" just switches to the
+// (placeholder) Calls tab, naming the contact so the placeholder can say
+// who you meant to call — see renderMessagingCallsPlaceholder's comment.
+messagingContactsListEl && messagingContactsListEl.addEventListener('click', (e) => {
+  const chatBtn = e.target.closest('[data-action="messaging-contact-chat"]');
+  if (chatBtn) {
+    openMessagingChatView(chatBtn.dataset.key, chatBtn.dataset.handle || null, null);
+    return;
+  }
+  const callBtn = e.target.closest('[data-action="messaging-contact-call"]');
+  if (callBtn) {
+    showMessagingTab('calls', callBtn.dataset.handle || short(callBtn.dataset.key, 20));
+    return;
+  }
+});
+
+messagingChatTextInputEl && messagingChatTextInputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); sendMessagingChatMessage(); }
+});
+
+// ---------- Messaging settings popover (opacity only) ----------
+// Same pattern as chatSettingsBtn/assetViewerSettingsBtn above.
+messagingSettingsBtn && messagingSettingsBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  messagingSettingsPopoverEl.hidden = !messagingSettingsPopoverEl.hidden;
+});
+document.addEventListener('click', (e) => {
+  if (messagingSettingsPopoverEl && !messagingSettingsPopoverEl.hidden && !messagingSettingsPopoverEl.contains(e.target) && e.target !== messagingSettingsBtn) {
+    messagingSettingsPopoverEl.hidden = true;
+  }
+});
+messagingOpacityInput && messagingOpacityInput.addEventListener('input', async () => {
+  applyMessagingWindowSettings(await AtlasWallet.setMessagingWindowSettings({ opacity: parseFloat(messagingOpacityInput.value) }));
+});
+
+// ---------- Drag-to-move (header) ----------
+// The one genuinely new interaction this window introduces (see this
+// file's HTML/CSS comments on #messagingHeader for why neither #chatWidget
+// nor #assetViewerWidget already have this) — same document-level
+// mousemove/mouseup tracking idiom as every resize handle in this file,
+// just moving the widget's own top/left instead of a panel's width/height.
+// Ignores a mousedown that started on a button/tab/handle inside the
+// header (settings gear, close, resize handle, tab buttons) — only the
+// header's own empty space should start a drag.
+let messagingDrag = null;
+messagingHeaderEl && messagingHeaderEl.addEventListener('mousedown', (e) => {
+  if (e.target.closest('button, .messaging-tab, #messagingResizeHandle')) return;
+  e.preventDefault();
+  const rect = messagingWidgetEl.getBoundingClientRect();
+  messagingDrag = { startX: e.clientX, startY: e.clientY, startLeft: rect.left, startTop: rect.top };
+});
+document.addEventListener('mousemove', (e) => {
+  if (!messagingDrag) return;
+  const left = Math.max(0, Math.min(window.innerWidth - 40, messagingDrag.startLeft + (e.clientX - messagingDrag.startX)));
+  const top = Math.max(0, Math.min(window.innerHeight - 40, messagingDrag.startTop + (e.clientY - messagingDrag.startY)));
+  messagingWidgetEl.style.left = left + 'px';
+  messagingWidgetEl.style.top = top + 'px';
+  messagingWidgetEl.style.right = 'auto';
+});
+document.addEventListener('mouseup', async () => {
+  if (!messagingDrag) return;
+  messagingDrag = null;
+  const rect = messagingWidgetEl.getBoundingClientRect();
+  await AtlasWallet.setMessagingWindowSettings({ left: Math.round(rect.left), top: Math.round(rect.top), positioned: true });
+});
+
+// ---------- Resize handle ----------
+// Same document-level drag-tracking as chatResizeHandleEl/
+// assetViewerResizeHandleEl above — grows from the bottom-right corner
+// since this panel (like the Asset Viewer's) is positioned by its
+// top-left, not bottom-anchored.
+let messagingResizeDrag = null;
+messagingResizeHandleEl && messagingResizeHandleEl.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  e.stopPropagation(); // don't also let messagingHeaderEl's own mousedown start a drag-to-move
+  const rect = messagingPanelEl.getBoundingClientRect();
+  messagingResizeDrag = { startX: e.clientX, startY: e.clientY, startWidth: rect.width, startHeight: rect.height };
+});
+document.addEventListener('mousemove', (e) => {
+  if (!messagingResizeDrag) return;
+  const width = Math.max(260, Math.min(560, messagingResizeDrag.startWidth + (e.clientX - messagingResizeDrag.startX)));
+  const height = Math.max(260, Math.min(640, messagingResizeDrag.startHeight + (e.clientY - messagingResizeDrag.startY)));
+  messagingPanelEl.style.width = width + 'px';
+  messagingPanelEl.style.height = height + 'px';
+});
+document.addEventListener('mouseup', async () => {
+  if (!messagingResizeDrag) return;
+  messagingResizeDrag = null;
+  const rect = messagingPanelEl.getBoundingClientRect();
+  await AtlasWallet.setMessagingWindowSettings({ width: Math.round(rect.width), height: Math.round(rect.height) });
 });
 
 function renderPropertiesToggle(properties) {
@@ -4015,6 +4624,38 @@ document.addEventListener('keydown', (e) => {
 chrome.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName === 'session' && changes.atlasUnlockedIdentity) {
     await refreshIdentityDisplay();
+    // Task #111 TODO round 1, item 1: the Messaging button/window are
+    // gated behind an unlocked wallet, stricter than in-world chat's own
+    // "readable while logged out" posture — see refreshMessagingLockGate()'s
+    // own comment. This listener is the single point EVERY local-mode
+    // lock/unlock path already funnels through (password unlock, lock,
+    // quick lock, auto-lock, identity creation, import — anything that
+    // touches chrome.storage.session.atlasUnlockedIdentity), so it's the
+    // one place this needs wiring rather than four separate button
+    // handlers.
+    await refreshMessagingLockGate();
+    // Task #111 TODO round 2, item 1: fetch mail/chat immediately on
+    // login rather than waiting for the periodic loop's next tick —
+    // `changes.atlasUnlockedIdentity.newValue` is only present when this
+    // change is a LOGIN (unlock/create/import), not a lock (which clears
+    // the key, leaving newValue undefined), so this only ever fires once
+    // per actual login, not on every lock too.
+    if (changes.atlasUnlockedIdentity.newValue) {
+      await AtlasWallet.checkAllMail();
+      await refreshMailDisplay();
+      await refreshInventoryDisplay();
+      await refreshMessagingDisplay();
+      // Whole-storage at-rest encryption pass: Muted/Blocked chat lists are
+      // now per-identity and encrypted (see CHAT_MODERATION_GUEST_SLOT in
+      // wallet.js), so refreshChatModerationCache()'s in-memory Sets are
+      // stuck on the shared anonymous "guest" bucket from before this
+      // login until explicitly refreshed here — same "fetch on login"
+      // treatment as mail/messaging just above, and needed for the same
+      // reason: this listener is the one place every local-mode
+      // unlock/create/import path already funnels through.
+      await refreshChatModerationCache();
+      renderChatMessages();
+    }
   }
 });
 
@@ -4035,6 +4676,21 @@ confirmWebAuthnCreateBtn.addEventListener('click', async () => {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
     await refreshInventoryDisplay();
+    await refreshMessagingLockGate(); // WebAuthn never touches atlasUnlockedIdentity — the storage listener above never fires for this path, so this needs its own explicit call
+    // Task #111 TODO round 2, item 1: same "fetch on login" treatment the
+    // storage-change listener gives local-mode logins — WebAuthn identity
+    // creation is also "a wallet just became usable" and never triggers
+    // that listener (no chrome.storage.session key involved), so it needs
+    // its own explicit call here.
+    await AtlasWallet.checkAllMail();
+    await refreshMailDisplay();
+    await refreshMessagingDisplay();
+    // Same reasoning as above: the whole-storage encryption pass makes
+    // Muted/Blocked chat lists per-identity, and this path never fires the
+    // chrome.storage.onChanged listener that now handles that refresh for
+    // local-mode logins.
+    await refreshChatModerationCache();
+    renderChatMessages();
   } catch (err) {
     webauthnCreateScreenStatus.textContent = err.message;
   } finally {
@@ -4140,6 +4796,39 @@ confirmImportBtn.addEventListener('click', async () => {
   }
 });
 
+// Task #122 — same file/password/seed inputs as confirmImportBtn above,
+// just handed to importFullBackup instead of importIdentity: restores
+// the identity AND everything encrypted under it (mail, chat, contacts,
+// calendar, trades, etc.), not just the key. importFullBackup() sets
+// chrome.storage.session.atlasUnlockedIdentity exactly like importIdentity
+// does, so the shared chrome.storage.onChanged listener elsewhere in this
+// file already picks up the "just logged in" refreshes (mail check,
+// messaging, chat moderation cache) — only the refreshes that listener
+// does NOT cover are called explicitly here, same split confirmImportBtn
+// itself relies on.
+restoreFullBackupBtn.addEventListener('click', async () => {
+  if (!pendingOnboardImportFile) {
+    importScreenStatus.textContent = 'Choose a backup file first.';
+    return;
+  }
+  restoreFullBackupBtn.disabled = true;
+  importScreenStatus.textContent = 'Decrypting and restoring…';
+  try {
+    await AtlasWallet.importFullBackup(pendingOnboardImportFile, onboardImportPasswordInput.value, onboardImportSeedInput.value);
+    onboardImportPasswordInput.value = '';
+    onboardImportSeedInput.value = '';
+    showWalletScreen('mainWalletScreen');
+    await refreshIdentityDisplay();
+    await refreshInventoryDisplay();
+    refreshChatIdentity(); // same immediate reflection as confirmImportBtn/seedConfirmBtn above
+    importScreenStatus.textContent = '';
+  } catch (err) {
+    importScreenStatus.textContent = err.message;
+  } finally {
+    restoreFullBackupBtn.disabled = false;
+  }
+});
+
 unlockBtn.addEventListener('click', async () => {
   unlockBtn.disabled = true;
   unlockScreenStatus.textContent = 'Unlocking…';
@@ -4162,6 +4851,7 @@ lockWalletBtn.addEventListener('click', async () => {
   await AtlasWallet.lockIdentity();
   walletPanel.classList.remove('open');
   await refreshQuickLockButtonVisibility();
+  await refreshMessagingLockGate();
   refreshChatIdentity(); // same immediate reflection as the unlock path above — locking should drop back to anonymous chat right away
 });
 
@@ -4178,9 +4868,33 @@ async function refreshQuickLockButtonVisibility() {
   quickLockWalletBtn.style.display = (await AtlasWallet.isUnlocked()) ? '' : 'none';
 }
 
+// Task #111 TODO round 1, item 1 (2026-09-14): the Messaging button/window
+// are gated behind an unlocked wallet — deliberately stricter than
+// in-world chat's own "readable while logged out" posture (see
+// #chatWidget's own HTML comment) — per Bruno's explicit ask. Mirrors
+// refreshQuickLockButtonVisibility right above almost exactly (same
+// isUnlocked() check, same "call this everywhere lock state might have
+// changed" convention: the chrome.storage.onChanged listener that already
+// covers every LOCAL-mode lock/unlock path, PLUS the two manual lock
+// button handlers directly below for good measure, PLUS the WebAuthn
+// creation handler, which never touches session storage at all so the
+// listener never fires for it). The one thing this does beyond hiding the
+// button: if the window is currently OPEN and the wallet just became
+// locked, force it closed — a stricter gate than just disabling the send
+// textbox the way refreshMessagingSendability() already does, since
+// Bruno's ask was for the window itself, not just sending, to require an
+// unlocked wallet.
+async function refreshMessagingLockGate() {
+  if (!messagingBtn) return;
+  const unlocked = await AtlasWallet.isUnlocked();
+  messagingBtn.style.display = unlocked ? '' : 'none';
+  if (!unlocked && messagingWidgetEl && !messagingWidgetEl.hidden) closeMessagingWindow();
+}
+
 quickLockWalletBtn && quickLockWalletBtn.addEventListener('click', async () => {
   await AtlasWallet.lockIdentity();
   await refreshQuickLockButtonVisibility();
+  await refreshMessagingLockGate();
   refreshChatIdentity(); // same immediate reflection the other two lock/unlock paths get
   // If the wallet panel happens to be open to a screen that only makes
   // sense unlocked (mainWalletScreen, say), route it to wherever locking
@@ -4294,9 +5008,18 @@ function renderMailCard(entry, container, friendNameByKey) {
   // authoritative one takes the front line. Friend name is the fallback
   // for the raw-key case specifically, not a replacement for handles.
   const friendName = entry.message.from && friendNameByKey && friendNameByKey.get(entry.message.from.publicKey);
+  // Task #97 (SPEC.md §11.4): a relayed message's `from.homeDomain` names
+  // where the sender ACTUALLY holds membership and registered any handle —
+  // entry.message.domain is only ever where THIS wallet fetched the
+  // message FROM (its own membership domain), which for a relayed message
+  // is the RECIPIENT's home, not the sender's. Showing "handle#<our own
+  // domain>" for a relayed sender would be actively wrong, not just
+  // uninformative — homeDomain wins whenever present; plain domain-to-
+  // domain-unaware mail (from.homeDomain undefined) is unaffected.
+  const senderDomain = (entry.message.from && entry.message.from.homeDomain) || entry.message.domain;
   const fromLine = entry.message.from
     ? 'From ' + (entry.message.from.handle
-        ? escapeHtml(entry.message.from.handle) + '#' + escapeHtml(entry.message.domain)
+        ? escapeHtml(entry.message.from.handle) + '#' + escapeHtml(senderDomain)
         : friendName
           ? escapeHtml(friendName) + ' (friend) via ' + escapeHtml(entry.message.domain)
           : escapeHtml(entry.message.from.publicKey.slice(0, 20)) + '… via ' + escapeHtml(entry.message.domain))
@@ -4396,7 +5119,10 @@ function mailFilterKeyFor(entry) {
 
 function mailFilterLabelFor(entry, friendNameByKey) {
   if (!entry.message.from) return entry.message.domain;
-  if (entry.message.from.handle) return entry.message.from.handle + '#' + entry.message.domain;
+  // Task #97: same homeDomain-over-delivery-domain preference as
+  // renderMailCard's own fromLine above, and for the identical reason —
+  // see that comment.
+  if (entry.message.from.handle) return entry.message.from.handle + '#' + (entry.message.from.homeDomain || entry.message.domain);
   const friendName = friendNameByKey && friendNameByKey.get(entry.message.from.publicKey);
   return friendName || (entry.message.from.publicKey.slice(0, 16) + '…');
 }
@@ -7117,6 +7843,10 @@ checkMailNowBtn && checkMailNowBtn.addEventListener('click', async () => {
     // refresh the items list/badge too so a manual "Check now" surfaces
     // that immediately, same as the periodic loop below already does.
     await refreshInventoryDisplay();
+    // Task #111: checkAllMail() may also have just delivered a new chat
+    // message (diverted into atlasChatMessages, see that function's own
+    // comment) — refresh the Messaging window/badge the same way.
+    await refreshMessagingDisplay();
   }
 });
 
@@ -7201,6 +7931,32 @@ exportIdentityBtn.addEventListener('click', async () => {
     exportStatusEl.textContent = 'Export failed: ' + err.message;
   } finally {
     exportIdentityBtn.disabled = false;
+  }
+});
+
+// Task #122 — same download-a-Blob mechanics as exportIdentityBtn just
+// above, just a bigger file and a different wallet.js call.
+exportFullBackupBtn.addEventListener('click', async () => {
+  exportFullBackupBtn.disabled = true;
+  fullBackupExportStatusEl.textContent = 'Gathering and encrypting everything…';
+  try {
+    const data = await AtlasWallet.exportFullBackup(fullBackupExportPasswordInput.value, fullBackupExportSeedInput.value);
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'atlas-full-backup.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    fullBackupExportStatusEl.textContent = 'Exported — keep the file, your password, and your seed phrase stored separately from each other.';
+    fullBackupExportPasswordInput.value = '';
+    fullBackupExportSeedInput.value = '';
+  } catch (err) {
+    fullBackupExportStatusEl.textContent = 'Export failed: ' + err.message;
+  } finally {
+    exportFullBackupBtn.disabled = false;
   }
 });
 
@@ -7908,6 +8664,7 @@ async function restartMailCheckLoop() {
     // below, called from enterWorld) is the immediate, single-domain half.
     await refreshMailDisplay();
     await refreshInventoryDisplay();
+    await refreshMessagingDisplay(); // task #111 — same "keep it current in the background" reasoning
   }, ms);
 }
 
@@ -7921,6 +8678,7 @@ function checkItemUpdatesForDomain(domain) {
     .then(async () => {
       await refreshInventoryDisplay();
       await refreshMailDisplay();
+      await refreshMessagingDisplay(); // task #111 — same reasoning as the two calls above
     })
     .catch(() => {
       // AtlasWallet.checkAllMail already swallows a single unreachable
@@ -7931,6 +8689,14 @@ function checkItemUpdatesForDomain(domain) {
     });
 }
 restartMailCheckLoop();
+// Populates the top-bar Messaging badge immediately on load, same as
+// mailBadge/socialBadge get on their own initial refresh paths — otherwise
+// it would just read 0 (hidden) until the mail-check loop's first tick.
+refreshMessagingBadge();
+// Sets the Messages button's initial visibility on load too — otherwise a
+// visitor with no unlocked identity would see it flash visible until
+// SOME lock-state-changing action happened to run refreshMessagingLockGate.
+refreshMessagingLockGate();
 
 // ---------- auto-lock on inactivity (#71) ----------
 //
@@ -7966,6 +8732,7 @@ setInterval(async () => {
   if (Date.now() - lastActivityTime < minutes * 60 * 1000) return;
   await AtlasWallet.lockIdentity();
   await refreshQuickLockButtonVisibility();
+  await refreshMessagingLockGate();
   refreshChatIdentity(); // an auto-lock should drop chat back to anonymous immediately too, same as the manual lock paths
   // Same re-routing the two manual lock buttons already trigger (Settings'
   // Lock wallet, and the top-bar Quick lock) — if the panel's open to a

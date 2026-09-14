@@ -646,9 +646,23 @@ const AtlasWallet = (() => {
 
   // ---------- counterparty ("the other visitor") ----------
 
+  // Encrypted at rest (2026-09-14, second round) — this is the single
+  // most glaring plaintext gap the whole-storage-encryption pass turned
+  // up: unlike the real identity (always password/AES-GCM-protected from
+  // day one), this demo "other visitor" keypair's own privateKeyJwk sat
+  // in plain chrome.storage.local the entire time. It's global rather
+  // than per-owner (there's only ever one counterparty, not one per real
+  // identity), so it's encrypted under whichever LOCAL identity happens
+  // to be active when it's created/touched.
   async function getCounterparty() {
     const { atlasCounterparty } = await chrome.storage.local.get('atlasCounterparty');
-    return atlasCounterparty || null;
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'counterparty', atlasCounterparty, null, (v) => saveCounterparty(v));
+  }
+
+  async function saveCounterparty(counterparty) {
+    const identity = await getIdentity();
+    await chrome.storage.local.set({ atlasCounterparty: await encryptAtRest(identity, 'counterparty', counterparty) });
   }
 
   async function createCounterparty() {
@@ -656,7 +670,7 @@ const AtlasWallet = (() => {
     const rawPublic = await crypto.subtle.exportKey('raw', pair.publicKey);
     const privateKeyJwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
     const counterparty = { publicKey: b64urlEncode(rawPublic), privateKeyJwk, createdAt: new Date().toISOString() };
-    await chrome.storage.local.set({ atlasCounterparty: counterparty });
+    await saveCounterparty(counterparty);
     return counterparty;
   }
 
@@ -751,13 +765,29 @@ const AtlasWallet = (() => {
     return !!(entry && entry.credential && entry.credential.credential === 'domain-atlas-asset/1.0');
   }
 
+  // Encrypted at rest (2026-09-14, second round) — the actual credentials/
+  // currency held here are arguably the single most sensitive thing this
+  // wallet stores locally besides the private key itself, so this is a
+  // high-priority entry in the broader storage-encryption pass. The
+  // migration write below is inlined (not routed through saveWallet())
+  // on purpose: saveWallet() also fires notifyWalletChanged() for task
+  // #137's activity tracking, and a passive read that happens to trigger
+  // a one-time plaintext-to-encrypted upgrade (or the pre-existing
+  // post-merge cleanup right below it) shouldn't count as wallet
+  // "activity" the same way an actual mint/trade/gift does — same
+  // reasoning the pre-existing post-merge cleanup already writes directly
+  // rather than through saveWallet().
   async function getWallet(ownerPublicKey) {
     const { atlasWallets, atlasResourceWallets } = await chrome.storage.local.get(['atlasWallets', 'atlasResourceWallets']);
     const wallets = atlasWallets || {};
-    const entries = wallets[ownerPublicKey] || [];
+    const identity = await getIdentity();
+    const entries = await decryptAtRestAndMigrate(identity, 'wallet', wallets[ownerPublicKey], [], async (v) => {
+      wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', v);
+      await chrome.storage.local.set({ atlasWallets: wallets });
+    });
     const cleaned = entries.filter(isPostMergeAssetCredential);
     if (cleaned.length !== entries.length) {
-      wallets[ownerPublicKey] = cleaned;
+      wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', cleaned);
       await chrome.storage.local.set({ atlasWallets: wallets });
     }
     if (atlasResourceWallets) await chrome.storage.local.remove('atlasResourceWallets'); // fully orphaned since the merge — nothing valid to salvage, nothing else reads it
@@ -783,7 +813,8 @@ const AtlasWallet = (() => {
   async function saveWallet(ownerPublicKey, entries) {
     const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
     const wallets = atlasWallets || {};
-    wallets[ownerPublicKey] = entries;
+    const identity = await getIdentity();
+    wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', entries);
     await chrome.storage.local.set({ atlasWallets: wallets });
     notifyWalletChanged(ownerPublicKey);
   }
@@ -1001,13 +1032,29 @@ const AtlasWallet = (() => {
 
   // ---------- loadout (§5.2) ----------
 
+  // Encrypted + per-identity (2026-09-14, second round) — same migration
+  // shape as Friends above. setLoadout() silently no-ops with no active
+  // identity (nothing to scope it to), same "can't do this without an
+  // identity" posture as the rest of this batch.
   async function getLoadout() {
+    const identity = await getIdentity();
     const { atlasLoadout } = await chrome.storage.local.get('atlasLoadout');
-    return atlasLoadout || [];
+    if (Array.isArray(atlasLoadout)) {
+      if (!identity) return [];
+      await setLoadout(atlasLoadout);
+      return atlasLoadout;
+    }
+    if (!identity) return [];
+    return decryptAtRestAndMigrate(identity, 'loadout', (atlasLoadout || {})[identity.publicKey], [], (v) => setLoadout(v));
   }
 
   async function setLoadout(ids) {
-    await chrome.storage.local.set({ atlasLoadout: ids });
+    const identity = await getIdentity();
+    if (!identity) return;
+    const { atlasLoadout } = await chrome.storage.local.get('atlasLoadout');
+    const all = (atlasLoadout && !Array.isArray(atlasLoadout)) ? atlasLoadout : {};
+    all[identity.publicKey] = await encryptAtRest(identity, 'loadout', ids);
+    await chrome.storage.local.set({ atlasLoadout: all });
   }
 
   async function loadItem(itemId) {
@@ -1038,16 +1085,19 @@ const AtlasWallet = (() => {
   // A dropped item here is only ever visible to, and only ever
   // reclaimable by, whoever dropped it — visually "left on the ground in
   // that world," not actually offered to it.
+  // Encrypted at rest (2026-09-14, second round).
   async function getDroppedItems(ownerPublicKey) {
     if (!ownerPublicKey) return [];
     const { atlasDroppedItems } = await chrome.storage.local.get('atlasDroppedItems');
-    return (atlasDroppedItems || {})[ownerPublicKey] || [];
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'droppedItems', (atlasDroppedItems || {})[ownerPublicKey], [], (v) => saveDroppedItems(ownerPublicKey, v));
   }
 
   async function saveDroppedItems(ownerPublicKey, list) {
     const { atlasDroppedItems } = await chrome.storage.local.get('atlasDroppedItems');
     const all = atlasDroppedItems || {};
-    all[ownerPublicKey] = list;
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'droppedItems', list);
     await chrome.storage.local.set({ atlasDroppedItems: all });
   }
 
@@ -1247,15 +1297,18 @@ const AtlasWallet = (() => {
   // wallet wasn't looking). Expiry itself isn't a stored status — the UI
   // compares `expiresAt` to now at render time, same "computed, not
   // persisted" approach as everywhere else a timestamp alone is enough.
+  // Encrypted at rest (2026-09-14, second round).
   async function getSubmittedTrades(ownerPublicKey) {
     const { atlasSubmittedTrades } = await chrome.storage.local.get('atlasSubmittedTrades');
-    return (atlasSubmittedTrades || {})[ownerPublicKey] || [];
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'submittedTrades', (atlasSubmittedTrades || {})[ownerPublicKey], [], (v) => saveSubmittedTrades(ownerPublicKey, v));
   }
 
   async function saveSubmittedTrades(ownerPublicKey, records) {
     const { atlasSubmittedTrades } = await chrome.storage.local.get('atlasSubmittedTrades');
     const all = atlasSubmittedTrades || {};
-    all[ownerPublicKey] = records;
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'submittedTrades', records);
     await chrome.storage.local.set({ atlasSubmittedTrades: all });
   }
 
@@ -1353,30 +1406,65 @@ const AtlasWallet = (() => {
     return ALIAS_BLOCKLIST.some((word) => normalized.includes(word));
   }
 
+  // Encrypted + per-identity (2026-09-14, second round). Aliases' own
+  // pre-migration shape is already a flat OBJECT (publicKey -> alias
+  // string), same JS type as the new per-owner map, so telling old from
+  // new needs its own check rather than Friends/Groups' simple
+  // Array.isArray: a legacy map's own values are bare strings; the new
+  // shape's per-owner slots are always objects (an encrypted envelope, or
+  // — in an edge case this code never actually produces itself — a plain
+  // nested alias map), never a string directly.
+  function isLegacyFlatAliases(raw) {
+    return !!(raw && typeof raw === 'object' && Object.values(raw).some((v) => typeof v === 'string'));
+  }
+
+  async function getAliasesForOwner(identity) {
+    const { atlasAliases } = await chrome.storage.local.get('atlasAliases');
+    if (isLegacyFlatAliases(atlasAliases)) {
+      if (!identity) return {};
+      await saveAliasesForOwner(identity.publicKey, atlasAliases);
+      return atlasAliases;
+    }
+    if (!identity) return {};
+    return decryptAtRestAndMigrate(identity, 'aliases', (atlasAliases || {})[identity.publicKey], {}, (v) => saveAliasesForOwner(identity.publicKey, v));
+  }
+
+  async function saveAliasesForOwner(ownerPublicKey, aliasesForOwner) {
+    const { atlasAliases } = await chrome.storage.local.get('atlasAliases');
+    const all = isLegacyFlatAliases(atlasAliases) ? {} : (atlasAliases || {});
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'aliases', aliasesForOwner);
+    await chrome.storage.local.set({ atlasAliases: all });
+  }
+
   async function setAlias(publicKey, alias) {
     if (!publicKey) throw new Error('No identity to set an alias for.');
     const trimmed = (alias || '').trim();
     if (!trimmed) throw new Error('Alias cannot be empty — clear it instead if you want to remove it.');
     if (trimmed.length > MAX_ALIAS_LENGTH) throw new Error('Alias must be ' + MAX_ALIAS_LENGTH + ' characters or fewer.');
     if (aliasContainsBlockedWord(trimmed)) throw new Error('That alias isn\'t allowed here — try something else.');
-    const { atlasAliases } = await chrome.storage.local.get('atlasAliases');
-    const aliases = atlasAliases || {};
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const aliases = await getAliasesForOwner(identity);
     aliases[publicKey] = trimmed;
-    await chrome.storage.local.set({ atlasAliases: aliases });
+    await saveAliasesForOwner(identity.publicKey, aliases);
   }
 
   async function clearAlias(publicKey) {
     if (!publicKey) return;
-    const { atlasAliases } = await chrome.storage.local.get('atlasAliases');
-    const aliases = atlasAliases || {};
+    const identity = await getIdentity();
+    if (!identity) return;
+    const aliases = await getAliasesForOwner(identity);
     delete aliases[publicKey];
-    await chrome.storage.local.set({ atlasAliases: aliases });
+    await saveAliasesForOwner(identity.publicKey, aliases);
   }
 
   async function getAlias(publicKey) {
     if (!publicKey) return null;
-    const { atlasAliases } = await chrome.storage.local.get('atlasAliases');
-    return (atlasAliases || {})[publicKey] || null;
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const aliases = await getAliasesForOwner(identity);
+    return aliases[publicKey] || null;
   }
 
   // ---------- recent worlds (navigation history) ----------
@@ -1388,10 +1476,22 @@ const AtlasWallet = (() => {
   // identity (local or passkey) is currently active.
   const MAX_RECENT_WORLDS = 10;
 
+  // Encrypted + per-identity (2026-09-14, second round) — same migration
+  // shape as Friends above. recordWorldVisit() silently no-ops with no
+  // active identity, same posture as everywhere else in this batch.
+  async function saveRecentWorlds(ownerPublicKey, list) {
+    const { atlasRecentWorlds } = await chrome.storage.local.get('atlasRecentWorlds');
+    const all = (atlasRecentWorlds && !Array.isArray(atlasRecentWorlds)) ? atlasRecentWorlds : {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'recentWorlds', list);
+    await chrome.storage.local.set({ atlasRecentWorlds: all });
+  }
+
   async function recordWorldVisit(entry) {
     if (!entry || !entry.domain || !entry.world) return;
-    const { atlasRecentWorlds } = await chrome.storage.local.get('atlasRecentWorlds');
-    let list = (atlasRecentWorlds || []).filter((e) => !(e.domain === entry.domain && e.world === entry.world));
+    const identity = await getIdentity();
+    if (!identity) return;
+    let list = (await getRecentWorlds()).filter((e) => !(e.domain === entry.domain && e.world === entry.world));
     list.unshift({
       domain: entry.domain,
       world: entry.world,
@@ -1400,12 +1500,19 @@ const AtlasWallet = (() => {
       visitedAt: new Date().toISOString()
     });
     list = list.slice(0, MAX_RECENT_WORLDS);
-    await chrome.storage.local.set({ atlasRecentWorlds: list });
+    await saveRecentWorlds(identity.publicKey, list);
   }
 
   async function getRecentWorlds() {
+    const identity = await getIdentity();
     const { atlasRecentWorlds } = await chrome.storage.local.get('atlasRecentWorlds');
-    return atlasRecentWorlds || [];
+    if (Array.isArray(atlasRecentWorlds)) {
+      if (!identity) return [];
+      await saveRecentWorlds(identity.publicKey, atlasRecentWorlds);
+      return atlasRecentWorlds;
+    }
+    if (!identity) return [];
+    return decryptAtRestAndMigrate(identity, 'recentWorlds', (atlasRecentWorlds || {})[identity.publicKey], [], (v) => saveRecentWorlds(identity.publicKey, v));
   }
 
   // ---------- friends (#67) ----------
@@ -1428,13 +1535,43 @@ const AtlasWallet = (() => {
   // connections; it never sees or stores anyone's friends list — that stays
   // entirely client-side, here.
   //
-  // Same "outside the wallet" scope as Recent worlds above: friends are a
-  // client convenience with no ownership/security meaning, untouched by
-  // locking, identity-switch, or wallet import/export.
-
+  // Encrypted + made per-identity (2026-09-14, second round): Friends
+  // used to be "outside the wallet" entirely — one shared list, usable
+  // with no identity at all, untouched by locking. Bruno decided this
+  // (and the whole family of similar "outside the wallet" lists below —
+  // Groups, Aliases, Recent worlds, Favorites, Calendar, chat Mute/Block)
+  // should be treated as personal data instead: encrypted at rest AND
+  // scoped to whichever identity is unlocked, the same bar Mail/Wallet/
+  // Chat already hold. That necessarily means picking SOME identity's key
+  // to encrypt under, so a bare array still sitting under the raw
+  // `atlasFriends` key is the PRE-migration shape: the first time it's
+  // read back under an unlocked local identity, the whole thing is
+  // adopted as-is into THAT identity's own new slot, one time only. If
+  // more than one identity already existed before this shipped, only
+  // whichever one happens to be active for that first read keeps the old
+  // shared list — every other identity starts empty from here on, same
+  // as if Friends had always been personal. WebAuthn identities can use
+  // all of this exactly as before, just without the encryption (no
+  // private key material to derive from — same fallback chat's own
+  // encryption already has).
   async function getFriends() {
+    const identity = await getIdentity();
     const { atlasFriends } = await chrome.storage.local.get('atlasFriends');
-    return atlasFriends || [];
+    if (Array.isArray(atlasFriends)) {
+      if (!identity) return [];
+      await saveFriends(identity.publicKey, atlasFriends);
+      return atlasFriends;
+    }
+    if (!identity) return [];
+    return decryptAtRestAndMigrate(identity, 'friends', (atlasFriends || {})[identity.publicKey], [], (v) => saveFriends(identity.publicKey, v));
+  }
+
+  async function saveFriends(ownerPublicKey, friends) {
+    const { atlasFriends } = await chrome.storage.local.get('atlasFriends');
+    const all = (atlasFriends && !Array.isArray(atlasFriends)) ? atlasFriends : {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'friends', friends);
+    await chrome.storage.local.set({ atlasFriends: all });
   }
 
   async function addFriend(publicKey, name) {
@@ -1442,7 +1579,8 @@ const AtlasWallet = (() => {
     const trimmedName = (name || '').trim().slice(0, MAX_ALIAS_LENGTH) || 'Friend';
     if (aliasContainsBlockedWord(trimmedName)) throw new Error('That name isn\'t allowed here — try something else.');
     const identity = await getIdentity();
-    if (identity && identity.publicKey === publicKey) throw new Error('That\'s your own identity, not someone else\'s.');
+    if (!identity) throw new Error('Unlock your wallet first.');
+    if (identity.publicKey === publicKey) throw new Error('That\'s your own identity, not someone else\'s.');
     const friends = await getFriends();
     const existing = friends.find((f) => f.publicKey === publicKey);
     if (existing) {
@@ -1454,7 +1592,7 @@ const AtlasWallet = (() => {
     } else {
       friends.push({ publicKey, name: trimmedName, notes: '', addedAt: new Date().toISOString() });
     }
-    await chrome.storage.local.set({ atlasFriends: friends });
+    await saveFriends(identity.publicKey, friends);
   }
 
   // Contacts -> Contacts sub-tab's free-text notes field (task #67
@@ -1467,23 +1605,26 @@ const AtlasWallet = (() => {
   // updateCalendarEvent above.
   async function updateFriendNotes(publicKey, notes) {
     if (!publicKey) throw new Error('No public key given.');
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const friends = await getFriends();
     const entry = friends.find((f) => f.publicKey === publicKey);
     if (!entry) throw new Error('No such contact.');
     entry.notes = (notes || '').slice(0, MAX_NOTES_LENGTH);
-    await chrome.storage.local.set({ atlasFriends: friends });
+    await saveFriends(identity.publicKey, friends);
   }
 
   async function removeFriend(publicKey) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const friends = await getFriends();
     const remaining = friends.filter((f) => f.publicKey !== publicKey);
-    await chrome.storage.local.set({ atlasFriends: remaining });
+    await saveFriends(identity.publicKey, remaining);
     // A removed contact can't stay a member of any local group either —
     // see the Groups section below. Cheap either way (groups are a small
     // local list), and keeps memberPublicKeys from silently accumulating
     // dangling keys nobody could ever see rendered as a contact again.
-    const { atlasContactGroups } = await chrome.storage.local.get('atlasContactGroups');
-    const groups = atlasContactGroups || [];
+    const groups = await getContactGroups();
     if (groups.length) {
       let changed = false;
       groups.forEach((g) => {
@@ -1491,7 +1632,7 @@ const AtlasWallet = (() => {
         g.memberPublicKeys = g.memberPublicKeys.filter((k) => k !== publicKey);
         if (g.memberPublicKeys.length !== before) changed = true;
       });
-      if (changed) await chrome.storage.local.set({ atlasContactGroups: groups });
+      if (changed) await saveContactGroups(identity.publicKey, groups);
     }
   }
 
@@ -1502,25 +1643,43 @@ const AtlasWallet = (() => {
   // system that's a separate, much bigger future item. A group here is
   // just a name plus a set of member public keys drawn from this wallet's
   // own saved friends; nothing about a group is ever sent to a server or
-  // to another wallet. Same flat-array-in-chrome.storage.local shape as
-  // Friends/Favorites/Calendar above, and the same "outside the wallet"
-  // scope: untouched by locking, identity-switch, or wallet import/export.
+  // to another wallet. Same encrypted-and-per-identity treatment as
+  // Friends right above, including the same one-time flat-array-to-
+  // per-owner migration — see that function's own comment for the full
+  // reasoning.
   const MAX_GROUP_NAME_LENGTH = 40;
   const MAX_NOTES_LENGTH = 500;
 
   async function getContactGroups() {
+    const identity = await getIdentity();
     const { atlasContactGroups } = await chrome.storage.local.get('atlasContactGroups');
-    return atlasContactGroups || [];
+    if (Array.isArray(atlasContactGroups)) {
+      if (!identity) return [];
+      await saveContactGroups(identity.publicKey, atlasContactGroups);
+      return atlasContactGroups;
+    }
+    if (!identity) return [];
+    return decryptAtRestAndMigrate(identity, 'contactGroups', (atlasContactGroups || {})[identity.publicKey], [], (v) => saveContactGroups(identity.publicKey, v));
+  }
+
+  async function saveContactGroups(ownerPublicKey, groups) {
+    const { atlasContactGroups } = await chrome.storage.local.get('atlasContactGroups');
+    const all = (atlasContactGroups && !Array.isArray(atlasContactGroups)) ? atlasContactGroups : {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'contactGroups', groups);
+    await chrome.storage.local.set({ atlasContactGroups: all });
   }
 
   async function addContactGroup(name) {
     const trimmed = (name || '').trim().slice(0, MAX_GROUP_NAME_LENGTH);
     if (!trimmed) throw new Error('A group needs a name.');
     if (aliasContainsBlockedWord(trimmed)) throw new Error('That name isn\'t allowed here — try something else.');
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const groups = await getContactGroups();
     const id = 'grp-' + Date.now().toString(36) + '-' + b64urlEncode(crypto.getRandomValues(new Uint8Array(6)).buffer);
     groups.push({ id, name: trimmed, memberPublicKeys: [] });
-    await chrome.storage.local.set({ atlasContactGroups: groups });
+    await saveContactGroups(identity.publicKey, groups);
     return id;
   }
 
@@ -1528,33 +1687,41 @@ const AtlasWallet = (() => {
     const trimmed = (name || '').trim().slice(0, MAX_GROUP_NAME_LENGTH);
     if (!trimmed) throw new Error('A group needs a name.');
     if (aliasContainsBlockedWord(trimmed)) throw new Error('That name isn\'t allowed here — try something else.');
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const groups = await getContactGroups();
     const group = groups.find((g) => g.id === id);
     if (!group) throw new Error('No such group.');
     group.name = trimmed;
-    await chrome.storage.local.set({ atlasContactGroups: groups });
+    await saveContactGroups(identity.publicKey, groups);
   }
 
   async function removeContactGroup(id) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const groups = await getContactGroups();
     const remaining = groups.filter((g) => g.id !== id);
-    await chrome.storage.local.set({ atlasContactGroups: remaining });
+    await saveContactGroups(identity.publicKey, remaining);
   }
 
   async function addContactToGroup(groupId, publicKey) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const groups = await getContactGroups();
     const group = groups.find((g) => g.id === groupId);
     if (!group) throw new Error('No such group.');
     if (!group.memberPublicKeys.includes(publicKey)) group.memberPublicKeys.push(publicKey);
-    await chrome.storage.local.set({ atlasContactGroups: groups });
+    await saveContactGroups(identity.publicKey, groups);
   }
 
   async function removeContactFromGroup(groupId, publicKey) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const groups = await getContactGroups();
     const group = groups.find((g) => g.id === groupId);
     if (!group) throw new Error('No such group.');
     group.memberPublicKeys = group.memberPublicKeys.filter((k) => k !== publicKey);
-    await chrome.storage.local.set({ atlasContactGroups: groups });
+    await saveContactGroups(identity.publicKey, groups);
   }
 
   // ---------- chat moderation: mute / block (#114) ----------
@@ -1586,44 +1753,97 @@ const AtlasWallet = (() => {
   // different shape, not just a different call site for the same list. So
   // this is its own local list, keyed by publicKey exactly like Friends.
 
+  // Encrypted + per-identity where possible (2026-09-14, second round) —
+  // same migration shape as Friends/Groups above, with one difference:
+  // this list has to keep working for a genuinely anonymous visitor with
+  // no identity at all (see this section's own comment above), which
+  // encryption can't do (nothing to derive a key from). CHAT_MODERATION_GUEST_SLOT
+  // is the bucket used whenever there's no identity to encrypt under —
+  // stored as plain, unencrypted entries under that fixed slot, same as
+  // this list has always behaved. The moment a real LOCAL identity is
+  // active, mutes/blocks are filed under (and encrypted for) that
+  // identity instead. A locked local identity falls back to the guest
+  // slot too (nothing to decrypt with right now), so moderation still
+  // functions while locked, just against the shared guest list rather
+  // than that identity's own — resolved the moment it unlocks again (see
+  // viewer.js's refreshChatModerationCache(), now also called from the
+  // post-unlock hook).
+  const CHAT_MODERATION_GUEST_SLOT = 'guest';
+
   async function getMutedChatUsers() {
+    const identity = await getIdentity();
+    const owner = identity ? identity.publicKey : CHAT_MODERATION_GUEST_SLOT;
     const { atlasMutedChatUsers } = await chrome.storage.local.get('atlasMutedChatUsers');
-    return atlasMutedChatUsers || [];
+    if (Array.isArray(atlasMutedChatUsers)) {
+      await saveMutedChatUsers(owner, atlasMutedChatUsers);
+      return atlasMutedChatUsers;
+    }
+    return decryptAtRestAndMigrate(identity, 'mutedChatUsers', (atlasMutedChatUsers || {})[owner], [], (v) => saveMutedChatUsers(owner, v));
+  }
+
+  async function saveMutedChatUsers(ownerPublicKey, muted) {
+    const { atlasMutedChatUsers } = await chrome.storage.local.get('atlasMutedChatUsers');
+    const all = (atlasMutedChatUsers && !Array.isArray(atlasMutedChatUsers)) ? atlasMutedChatUsers : {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'mutedChatUsers', muted);
+    await chrome.storage.local.set({ atlasMutedChatUsers: all });
   }
 
   async function muteChatUser(publicKey, name) {
     if (!publicKey) throw new Error('No public key to mute.');
+    const identity = await getIdentity();
+    const owner = identity ? identity.publicKey : CHAT_MODERATION_GUEST_SLOT;
     const muted = await getMutedChatUsers();
     if (!muted.some((m) => m.publicKey === publicKey)) {
       muted.push({ publicKey, name: name || 'Visitor', mutedAt: new Date().toISOString() });
-      await chrome.storage.local.set({ atlasMutedChatUsers: muted });
+      await saveMutedChatUsers(owner, muted);
     }
   }
 
   async function unmuteChatUser(publicKey) {
+    const identity = await getIdentity();
+    const owner = identity ? identity.publicKey : CHAT_MODERATION_GUEST_SLOT;
     const muted = await getMutedChatUsers();
     const remaining = muted.filter((m) => m.publicKey !== publicKey);
-    await chrome.storage.local.set({ atlasMutedChatUsers: remaining });
+    await saveMutedChatUsers(owner, remaining);
   }
 
   async function getBlockedChatUsers() {
+    const identity = await getIdentity();
+    const owner = identity ? identity.publicKey : CHAT_MODERATION_GUEST_SLOT;
     const { atlasBlockedChatUsers } = await chrome.storage.local.get('atlasBlockedChatUsers');
-    return atlasBlockedChatUsers || [];
+    if (Array.isArray(atlasBlockedChatUsers)) {
+      await saveBlockedChatUsers(owner, atlasBlockedChatUsers);
+      return atlasBlockedChatUsers;
+    }
+    return decryptAtRestAndMigrate(identity, 'blockedChatUsers', (atlasBlockedChatUsers || {})[owner], [], (v) => saveBlockedChatUsers(owner, v));
+  }
+
+  async function saveBlockedChatUsers(ownerPublicKey, blocked) {
+    const { atlasBlockedChatUsers } = await chrome.storage.local.get('atlasBlockedChatUsers');
+    const all = (atlasBlockedChatUsers && !Array.isArray(atlasBlockedChatUsers)) ? atlasBlockedChatUsers : {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'blockedChatUsers', blocked);
+    await chrome.storage.local.set({ atlasBlockedChatUsers: all });
   }
 
   async function blockChatUser(publicKey, name) {
     if (!publicKey) throw new Error('No public key to block.');
+    const identity = await getIdentity();
+    const owner = identity ? identity.publicKey : CHAT_MODERATION_GUEST_SLOT;
     const blocked = await getBlockedChatUsers();
     if (!blocked.some((b) => b.publicKey === publicKey)) {
       blocked.push({ publicKey, name: name || 'Visitor', blockedAt: new Date().toISOString() });
-      await chrome.storage.local.set({ atlasBlockedChatUsers: blocked });
+      await saveBlockedChatUsers(owner, blocked);
     }
   }
 
   async function unblockChatUser(publicKey) {
+    const identity = await getIdentity();
+    const owner = identity ? identity.publicKey : CHAT_MODERATION_GUEST_SLOT;
     const blocked = await getBlockedChatUsers();
     const remaining = blocked.filter((b) => b.publicKey !== publicKey);
-    await chrome.storage.local.set({ atlasBlockedChatUsers: remaining });
+    await saveBlockedChatUsers(owner, remaining);
   }
 
   // ---------- favorite domains (#61) ----------
@@ -1649,9 +1869,28 @@ const AtlasWallet = (() => {
   //
   // Same "outside the wallet" scope as Recent worlds and Friends above.
 
-  async function getFavoriteDomains() {
+  // Encrypted + per-identity (2026-09-14, second round) — same migration
+  // shape as Friends above. The mutators below silently no-op with no
+  // active identity (isFavoriteDomain/getFavoriteDomains just read back
+  // empty), same posture as everywhere else in this batch.
+  async function saveFavoriteDomains(ownerPublicKey, favorites) {
     const { atlasFavoriteDomains } = await chrome.storage.local.get('atlasFavoriteDomains');
-    return atlasFavoriteDomains || [];
+    const all = (atlasFavoriteDomains && !Array.isArray(atlasFavoriteDomains)) ? atlasFavoriteDomains : {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'favoriteDomains', favorites);
+    await chrome.storage.local.set({ atlasFavoriteDomains: all });
+  }
+
+  async function getFavoriteDomains() {
+    const identity = await getIdentity();
+    const { atlasFavoriteDomains } = await chrome.storage.local.get('atlasFavoriteDomains');
+    if (Array.isArray(atlasFavoriteDomains)) {
+      if (!identity) return [];
+      await saveFavoriteDomains(identity.publicKey, atlasFavoriteDomains);
+      return atlasFavoriteDomains;
+    }
+    if (!identity) return [];
+    return decryptAtRestAndMigrate(identity, 'favoriteDomains', (atlasFavoriteDomains || {})[identity.publicKey], [], (v) => saveFavoriteDomains(identity.publicKey, v));
   }
 
   async function isFavoriteDomain(domain) {
@@ -1661,6 +1900,8 @@ const AtlasWallet = (() => {
 
   async function addFavoriteDomain(entry) {
     if (!entry || !entry.domain || !entry.manifestUrl) throw new Error('Missing domain/manifest to favorite.');
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const favorites = await getFavoriteDomains();
     if (favorites.some((f) => f.domain === entry.domain)) return; // already favorited — adding again is a no-op, not a duplicate or an error
     favorites.push({
@@ -1671,13 +1912,15 @@ const AtlasWallet = (() => {
       presenceBase: entry.presenceBase || null,
       addedAt: new Date().toISOString()
     });
-    await chrome.storage.local.set({ atlasFavoriteDomains: favorites });
+    await saveFavoriteDomains(identity.publicKey, favorites);
   }
 
   async function removeFavoriteDomain(domain) {
+    const identity = await getIdentity();
+    if (!identity) return;
     const favorites = await getFavoriteDomains();
     const remaining = favorites.filter((f) => f.domain !== domain);
-    await chrome.storage.local.set({ atlasFavoriteDomains: remaining });
+    await saveFavoriteDomains(identity.publicKey, remaining);
   }
 
   // direction is 'up' or 'down' — swaps this entry with its immediate
@@ -1685,23 +1928,32 @@ const AtlasWallet = (() => {
   // than an error, so a UI button can just always be clickable and this
   // quietly does nothing when there's nowhere to move.
   async function moveFavoriteDomain(domain, direction) {
+    const identity = await getIdentity();
+    if (!identity) return;
     const favorites = await getFavoriteDomains();
     const index = favorites.findIndex((f) => f.domain === domain);
     if (index === -1) return;
     const targetIndex = direction === 'up' ? index - 1 : index + 1;
     if (targetIndex < 0 || targetIndex >= favorites.length) return;
     [favorites[index], favorites[targetIndex]] = [favorites[targetIndex], favorites[index]];
-    await chrome.storage.local.set({ atlasFavoriteDomains: favorites });
+    await saveFavoriteDomains(identity.publicKey, favorites);
   }
 
   // ---------- calendar events (Social -> Calendar) ----------
   //
-  // Manually-added local reminders — same "outside the wallet, device-wide,
-  // not per-identity" scope as Favorites/Friends/Recent worlds above (a
-  // flat array in chrome.storage.local, not keyed by owner public key the
-  // way Mail is), because there's nothing identity-specific about "remember
-  // to do X on this date": no domain, no credential, no counterparty ever
-  // sees or signs one of these. Purely a local sticky note.
+  // Manually-added local reminders. Originally a single flat array shared
+  // by every identity on the device ("nothing identity-specific about
+  // 'remember to do X on this date'"); as of the whole-storage at-rest
+  // encryption pass (see encryptAtRest/decryptAtRestAndMigrate above) this
+  // is now per-identity and AES-GCM encrypted at rest, same as
+  // Friends/ContactGroups/RecentWorlds/FavoriteDomains — encrypting a
+  // shared list requires picking a single identity's key, so "shared
+  // across all identities" could not survive encryption. A legacy flat
+  // array (Array.isArray(atlasCalendarEvents)) is migrated one-time into
+  // whichever identity happens to be unlocked when it's first read after
+  // upgrading; requires an unlocked identity to read or write at all now
+  // (getCalendarEvents returns [] with none active; add/update/remove
+  // throw "Unlock your wallet first.").
   //
   // getCalendarEvents() always returns the list sorted soonest-first by
   // dateTime — unlike Favorites (whose array order IS a user-curated
@@ -1711,9 +1963,27 @@ const AtlasWallet = (() => {
   // re-sorting in the UI layer. Sorted by dateTime (the START time) even
   // for events that carry an endDateTime too — soonest-to-START is still
   // the natural reading order for a flat list.
-  async function getCalendarEvents() {
+  async function saveCalendarEvents(ownerPublicKey, events) {
     const { atlasCalendarEvents } = await chrome.storage.local.get('atlasCalendarEvents');
-    const events = atlasCalendarEvents || [];
+    const all = (atlasCalendarEvents && !Array.isArray(atlasCalendarEvents)) ? atlasCalendarEvents : {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'calendarEvents', events);
+    await chrome.storage.local.set({ atlasCalendarEvents: all });
+  }
+
+  async function getCalendarEvents() {
+    const identity = await getIdentity();
+    const { atlasCalendarEvents } = await chrome.storage.local.get('atlasCalendarEvents');
+    let events;
+    if (Array.isArray(atlasCalendarEvents)) {
+      if (!identity) return [];
+      await saveCalendarEvents(identity.publicKey, atlasCalendarEvents);
+      events = atlasCalendarEvents;
+    } else if (!identity) {
+      events = [];
+    } else {
+      events = await decryptAtRestAndMigrate(identity, 'calendarEvents', (atlasCalendarEvents || {})[identity.publicKey], [], (v) => saveCalendarEvents(identity.publicKey, v));
+    }
     return events.slice().sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
   }
 
@@ -1734,6 +2004,8 @@ const AtlasWallet = (() => {
     if (!entry || !entry.title) throw new Error('An event needs a title.');
     if (!entry.dateTime) throw new Error('An event needs a date/time.');
     validateCalendarEventTimes(entry.dateTime, entry.endDateTime);
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const events = await getCalendarEvents();
     const id = 'cal-' + Date.now().toString(36) + '-' + b64urlEncode(crypto.getRandomValues(new Uint8Array(6)).buffer);
     events.push({
@@ -1744,7 +2016,7 @@ const AtlasWallet = (() => {
       notes: entry.notes || '',
       createdAt: new Date().toISOString()
     });
-    await chrome.storage.local.set({ atlasCalendarEvents: events });
+    await saveCalendarEvents(identity.publicKey, events);
     return id;
   }
 
@@ -1756,19 +2028,23 @@ const AtlasWallet = (() => {
   // that only touches, say, the title can't accidentally leave a
   // previously-valid dateTime/endDateTime pair in an invalid state.
   async function updateCalendarEvent(id, patch) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const events = await getCalendarEvents();
     const index = events.findIndex((e) => e.id === id);
     if (index === -1) throw new Error('No such calendar event.');
     const merged = { ...events[index], ...patch };
     validateCalendarEventTimes(merged.dateTime, merged.endDateTime);
     events[index] = merged;
-    await chrome.storage.local.set({ atlasCalendarEvents: events });
+    await saveCalendarEvents(identity.publicKey, events);
   }
 
   async function removeCalendarEvent(id) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
     const events = await getCalendarEvents();
     const remaining = events.filter((e) => e.id !== id);
-    await chrome.storage.local.set({ atlasCalendarEvents: remaining });
+    await saveCalendarEvents(identity.publicKey, remaining);
   }
 
   // ---------- player character size (#33 follow-up) ----------
@@ -2019,6 +2295,251 @@ const AtlasWallet = (() => {
     return { assetsAdded, assetsSkippedDuplicate, assetsSkippedNotOwned };
   }
 
+  // ---------- full account backup / restore (task #122) ----------
+  //
+  // exportWallet()/importWallet() above only ever moved PUBLIC asset
+  // credentials — nothing secret, no identity, by design (see its own
+  // comment). This is the other thing entirely: a real backup of this
+  // local identity plus every piece of personal data now encrypted at
+  // rest under it (see the whole-storage encryption pass just above —
+  // Wallet/Mail/Trades/Contacts/Calendar/Chat/etc.), meant to survive
+  // this device dying and be restorable onto a fresh one that has never
+  // unlocked this identity before.
+  //
+  // That last requirement is exactly why this can't just be "re-encrypt
+  // the session-cached key under a backup password": a session cache only
+  // exists on a device that has already unlocked once. Instead this reuses
+  // exportIdentity()/importIdentity()'s own two-secret model verbatim —
+  // password + seed phrase combined via deriveAesKey, at the current KDF
+  // iteration count, with the same "don't trust the session cache, ask for
+  // the password again" rigor — since a full backup is strictly MORE
+  // sensitive than the identity alone (it also carries every message,
+  // trade, and contact this identity has), not less. WebAuthn identities
+  // are out of scope for the same reason they're out of scope for
+  // exportIdentity(): the private key never leaves the authenticator, so
+  // there is nothing exportable to bundle.
+  //
+  // Design choice worth calling out: rather than hand-rolling a fresh
+  // read/decrypt/re-encrypt/write path for each of the ~15 data families
+  // below (each with its own legacy-migration quirks — see e.g.
+  // isLegacyFlatAliases above), export calls the SAME getX() getters the
+  // UI already uses (which already resolve migration + decryption), and
+  // import calls the SAME saveX() setters (which already re-encrypt under
+  // whatever identity is active) — the backup file itself carries plain
+  // decrypted values, protected by the one outer password+seed-phrase
+  // layer instead of by each store's own per-identity key. This is far
+  // less code and far less likely to silently mis-handle one of those
+  // migration edge cases than reimplementing storage access from scratch.
+  async function exportFullBackup(password, seedPhrase) {
+    const identity = await getIdentity();
+    if (!identity || identity.mode !== 'local') {
+      throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
+    }
+    if (!seedPhrase || normalizeSeedPhrase(seedPhrase).split(' ').length < 4) {
+      throw new Error('Enter the full seed phrase you were shown when you created this identity.');
+    }
+
+    // Re-verify the password against the LOCAL encrypted blob rather than
+    // trusting that the wallet happens to be unlocked this session — same
+    // reasoning as exportIdentity() above, just for a file that carries
+    // far more than the identity alone.
+    const { atlasIdentity } = await chrome.storage.local.get('atlasIdentity');
+    if (!atlasIdentity) throw new Error('No local identity set up on this device yet.');
+    const localSalt = new Uint8Array(b64urlDecode(atlasIdentity.salt));
+    const localIv = new Uint8Array(b64urlDecode(atlasIdentity.iv));
+    const localKey = await deriveAesKey([password], localSalt, atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY);
+    try {
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: localIv }, localKey, b64urlDecode(atlasIdentity.ciphertext));
+    } catch (err) {
+      throw new Error('Incorrect password.');
+    }
+
+    const owner = identity.publicKey;
+    const [
+      wallet, mail, sentMail, submittedTrades, droppedItems, assetUpdateNotices,
+      friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
+      mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
+      chatE2eeKeyPair, chatE2eePeerKeys
+    ] = await Promise.all([
+      getWallet(owner), getMail(owner), getSentMail(owner), getSubmittedTrades(owner), getDroppedItems(owner), getAssetUpdateNotices(owner),
+      getFriends(), getContactGroups(), getAliasesForOwner(identity), getRecentWorlds(), getFavoriteDomains(), getCalendarEvents(),
+      getMutedChatUsers(), getBlockedChatUsers(), getLoadout(), getChatMessages(owner), getCounterparty(),
+      // Task #158 — without these, a restore would generate a BRAND NEW
+      // e2ee keypair on the new device, permanently losing the ability to
+      // decrypt this identity's past end-to-end-encrypted chat threads
+      // (the shared secret is tied to this exact keypair) and forgetting
+      // every peer key this identity had already verified.
+      getChatE2eeKeyPair(identity), getE2eePeerKeysForOwner(identity)
+    ]);
+
+    // Low-sensitivity per-owner bookkeeping that was never wrapped in
+    // encryptAtRest to begin with (just IDs and domain names — see each
+    // key's own comment further down in this file). Included anyway for
+    // restore fidelity: without atlasDeletedMailIds/atlasDeletedChatIds a
+    // restore would resurrect mail/chat this identity explicitly deleted,
+    // and without the "last domain used" pair Compose/Chat would forget a
+    // pure convenience default.
+    const [deletedMailIdsAll, deletedChatIdsAll, lastChatSendDomainAll, lastPostOfficeSendDomainAll, lastPostOfficeSettingsDomainAll] = await Promise.all([
+      chrome.storage.local.get('atlasDeletedMailIds'),
+      chrome.storage.local.get('atlasDeletedChatIds'),
+      chrome.storage.local.get('atlasLastChatSendDomain'),
+      chrome.storage.local.get('atlasLastPostOfficeSendDomain'),
+      chrome.storage.local.get('atlasLastPostOfficeSettingsDomain')
+    ]);
+
+    // Device-level UI preferences — not identity-scoped at all, but
+    // carried along so restoring onto a fresh device feels like picking
+    // this one back up rather than starting cold on settings too.
+    const settingsRaw = await chrome.storage.local.get([
+      'atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings',
+      'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes'
+    ]);
+
+    const payload = {
+      identity: { publicKey: identity.publicKey, privateKeyJwk: identity.privateKeyJwk },
+      data: {
+        wallet, mail, sentMail, submittedTrades, droppedItems, assetUpdateNotices,
+        friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
+        mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
+        chatE2eeKeyPair, chatE2eePeerKeys,
+        deletedMailIds: (deletedMailIdsAll.atlasDeletedMailIds || {})[owner] || [],
+        deletedChatIds: (deletedChatIdsAll.atlasDeletedChatIds || {})[owner] || [],
+        lastChatSendDomain: (lastChatSendDomainAll.atlasLastChatSendDomain || {})[owner] || null,
+        lastPostOfficeSendDomain: (lastPostOfficeSendDomainAll.atlasLastPostOfficeSendDomain || {})[owner] || null,
+        lastPostOfficeSettingsDomain: (lastPostOfficeSettingsDomainAll.atlasLastPostOfficeSettingsDomain || {})[owner] || null
+      },
+      settings: settingsRaw
+    };
+
+    const exportSalt = crypto.getRandomValues(new Uint8Array(16));
+    const exportIv = crypto.getRandomValues(new Uint8Array(12));
+    const exportKey = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], exportSalt);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: exportIv }, exportKey, new TextEncoder().encode(JSON.stringify(payload))
+    );
+    return {
+      format: 'atlas-full-backup/1.0',
+      salt: b64urlEncode(exportSalt.buffer),
+      iv: b64urlEncode(exportIv.buffer),
+      ciphertext: b64urlEncode(ciphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT,
+      exportedAt: new Date().toISOString()
+    };
+  }
+
+  // The counterpart to exportFullBackup() above. Decrypting the file IS
+  // the authentication check (same one-shot "success or failure on the
+  // whole pair at once" posture as importIdentity()) — there's no partial
+  // credit for getting the password right and the seed phrase wrong, or
+  // vice versa. On success this both restores the identity (re-encrypted
+  // locally under the password alone, exactly like importIdentity()) AND
+  // repopulates every data family from the backup via the same saveX()
+  // setters normal use goes through, so each one gets freshly encrypted
+  // under the restored identity's own key on THIS device — never a raw
+  // copy of whatever ciphertext the original device happened to have.
+  async function importFullBackup(fileData, password, seedPhrase) {
+    if (!fileData || fileData.format !== 'atlas-full-backup/1.0') throw new Error('Not an Atlas full backup file.');
+    const salt = new Uint8Array(b64urlDecode(fileData.salt));
+    const iv = new Uint8Array(b64urlDecode(fileData.iv));
+    const key = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], salt, fileData.kdfIterations || KDF_ITERATIONS_LEGACY);
+    let payload;
+    try {
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(fileData.ciphertext));
+      payload = JSON.parse(new TextDecoder().decode(plaintext));
+    } catch (err) {
+      throw new Error('Incorrect password or seed phrase.');
+    }
+    if (!payload || !payload.identity || !payload.identity.publicKey || !payload.identity.privateKeyJwk) {
+      throw new Error('This backup file is missing its identity — it may be corrupted.');
+    }
+
+    const { publicKey, privateKeyJwk } = payload.identity;
+
+    // Restore the identity itself first — everything else below is keyed
+    // to it. Same local re-encrypt + session-activate as importIdentity().
+    const localSalt = crypto.getRandomValues(new Uint8Array(16));
+    const localIv = crypto.getRandomValues(new Uint8Array(12));
+    const localKey = await deriveAesKey([password], localSalt);
+    const localPlaintext = new TextEncoder().encode(JSON.stringify({ publicKey, privateKeyJwk }));
+    const localCiphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: localIv }, localKey, localPlaintext);
+    await chrome.storage.local.set({
+      atlasIdentity: {
+        format: 'atlas-identity-local/1.0',
+        publicKey,
+        salt: b64urlEncode(localSalt.buffer),
+        iv: b64urlEncode(localIv.buffer),
+        ciphertext: b64urlEncode(localCiphertext),
+        kdfIterations: KDF_ITERATIONS_CURRENT,
+        createdAt: new Date().toISOString()
+      }
+    });
+    await chrome.storage.local.set({ atlasIdentityMode: 'local' });
+    await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
+    const identity = { mode: 'local', publicKey, privateKeyJwk };
+
+    const owner = publicKey;
+    const d = payload.data || {};
+    await Promise.all([
+      saveWallet(owner, d.wallet || []),
+      saveMail(owner, d.mail || []),
+      saveSentMail(owner, d.sentMail || []),
+      saveSubmittedTrades(owner, d.submittedTrades || []),
+      saveDroppedItems(owner, d.droppedItems || []),
+      saveAssetUpdateNotices(owner, d.assetUpdateNotices || []),
+      saveFriends(owner, d.friends || []),
+      saveContactGroups(owner, d.contactGroups || []),
+      saveAliasesForOwner(owner, d.aliases || {}),
+      saveRecentWorlds(owner, d.recentWorlds || []),
+      saveFavoriteDomains(owner, d.favoriteDomains || []),
+      saveCalendarEvents(owner, d.calendarEvents || []),
+      saveMutedChatUsers(owner, d.mutedChatUsers || []),
+      saveBlockedChatUsers(owner, d.blockedChatUsers || []),
+      setLoadout(d.loadout || []),
+      saveChatMessages(owner, d.chatMessages || []),
+      saveCounterparty(d.counterparty || null),
+      // Task #158 — restoring the SAME e2ee keypair (not generating a
+      // fresh one) is what keeps this identity able to decrypt its past
+      // end-to-end-encrypted chat threads on the new device; restoring
+      // the peer-key cache means it doesn't have to re-bootstrap (an
+      // unencrypted first message again) with everyone it already
+      // verified a key for.
+      ...(d.chatE2eeKeyPair ? [saveChatE2eeKeyPair(owner, d.chatE2eeKeyPair)] : []),
+      saveE2eePeerKeysForOwner(owner, d.chatE2eePeerKeys || {})
+    ]);
+
+    // Low-sensitivity bookkeeping — restored as a raw per-owner slot
+    // merge, exactly matching how each of these keys is written elsewhere
+    // in this file (see e.g. addDeletedChatIds/setLastChatSendDomain
+    // above), since none of them ever went through encryptAtRest.
+    async function restoreOwnerKeyedRaw(topLevelKey, value) {
+      if (value === undefined) return;
+      const got = await chrome.storage.local.get(topLevelKey);
+      const all = got[topLevelKey] || {};
+      all[owner] = value;
+      await chrome.storage.local.set({ [topLevelKey]: all });
+    }
+    await Promise.all([
+      restoreOwnerKeyedRaw('atlasDeletedMailIds', d.deletedMailIds),
+      restoreOwnerKeyedRaw('atlasDeletedChatIds', d.deletedChatIds),
+      restoreOwnerKeyedRaw('atlasLastChatSendDomain', d.lastChatSendDomain),
+      restoreOwnerKeyedRaw('atlasLastPostOfficeSendDomain', d.lastPostOfficeSendDomain),
+      restoreOwnerKeyedRaw('atlasLastPostOfficeSettingsDomain', d.lastPostOfficeSettingsDomain)
+    ]);
+
+    // Device-level UI settings — only the keys the backup actually
+    // carried are written, so restoring an older-format backup (or one
+    // made before some setting existed) can't blank out whatever this
+    // device already has configured for a setting the backup never knew
+    // about.
+    const s = payload.settings || {};
+    const settingsToSet = {};
+    ['atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings', 'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes']
+      .forEach((k) => { if (s[k] !== undefined) settingsToSet[k] = s[k]; });
+    if (Object.keys(settingsToSet).length) await chrome.storage.local.set(settingsToSet);
+
+    return { publicKey };
+  }
+
   // ---------- mail (correspondence tied to a held credential) ----------
   //
   // A domain can send a message about a specific credential it issued —
@@ -2048,15 +2569,20 @@ const AtlasWallet = (() => {
     await chrome.storage.local.set({ atlasMailSettings: settings });
   }
 
+  // Encrypted at rest (2026-09-14, second round) — see decryptAtRestAndMigrate's
+  // own comment for the opportunistic-migration behavior on pre-existing
+  // plaintext mail.
   async function getMail(ownerPublicKey) {
     const { atlasMail } = await chrome.storage.local.get('atlasMail');
-    return (atlasMail || {})[ownerPublicKey] || [];
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'mail', (atlasMail || {})[ownerPublicKey], [], (v) => saveMail(ownerPublicKey, v));
   }
 
   async function saveMail(ownerPublicKey, entries) {
     const { atlasMail } = await chrome.storage.local.get('atlasMail');
     const all = atlasMail || {};
-    all[ownerPublicKey] = entries;
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'mail', entries);
     await chrome.storage.local.set({ atlasMail: all });
   }
 
@@ -2139,12 +2665,41 @@ const AtlasWallet = (() => {
   // already resolved one (Compose's handle-first path does; the raw-key
   // path has none). It plays no role in the actual send: the server call
   // is identical either way, keyed only on toPublicKey.
-  async function sendUserMail(toDomain, toPublicKey, subject, body, toHandle) {
+  //
+  // The actual sign-and-POST is factored out into postOfficeSendRaw() below
+  // so the new Messaging window's sendChatMessage() (task #111 follow-up)
+  // can reuse the exact same wire call without also picking up sendUserMail's
+  // OWN local bookkeeping (writing to atlasSentMail, touching the Mail
+  // Compose "last domain" convenience) — a chat message has its own,
+  // separate local record and its own separate "last domain" memory, so it
+  // routes through THIS domain's Post Office without leaving any trace in
+  // the Mail tab at all. See sendChatMessage()'s own comment further down.
+  // Task #97 (SPEC.md §11.4, domain-to-domain federation): toPublicKey is
+  // normally a bare public-key string, meaning "the recipient is a member
+  // of toDomain itself" — every call site before this feature, unchanged.
+  // Passing { publicKey, domain } instead addresses someone at a DIFFERENT
+  // home domain than the one being sent through — toDomain still means
+  // "which of MY OWN memberships to submit through" (exactly as before),
+  // `domain` means "where the recipient actually lives." This wallet still
+  // only ever talks to ITS OWN membership domain (toDomain) — it's THAT
+  // domain's own server that does the cross-domain relay hop, never this
+  // client directly. See recipientKeyOf() below for the storage-side half
+  // of this — every local record still keys off a plain public-key string.
+  function normalizeSendTarget(toPublicKey) {
+    return typeof toPublicKey === 'string'
+      ? { publicKey: toPublicKey, domain: null }
+      : { publicKey: toPublicKey.publicKey, domain: toPublicKey.domain || null };
+  }
+
+  async function postOfficeSendRaw(toDomain, toPublicKey, subject, body) {
     if (!toDomain) throw new Error('toDomain is required — a Post Office this wallet already holds a Global Mail membership at.');
     if (!toPublicKey) throw new Error('toPublicKey is required.');
     if (!subject || !body) throw new Error('subject and body are required.');
 
-    const payload = { to: { publicKey: toPublicKey }, subject, body };
+    const target = normalizeSendTarget(toPublicKey);
+    const to = { publicKey: target.publicKey };
+    if (target.domain && target.domain !== toDomain) to.domain = target.domain;
+    const payload = { to, subject, body };
     const proof = await signWithSelf(payload);
     const res = await fetch(baseUrl(toDomain) + '/atlas/postoffice/send', {
       method: 'POST',
@@ -2152,7 +2707,11 @@ const AtlasWallet = (() => {
       body: JSON.stringify({ payload, proof })
     });
     if (!res.ok) throw new Error('Send failed: ' + (await res.text()));
-    const result = await res.json();
+    return res.json();
+  }
+
+  async function sendUserMail(toDomain, toPublicKey, subject, body, toHandle) {
+    const result = await postOfficeSendRaw(toDomain, toPublicKey, subject, body);
 
     // Record this locally for the wallet's own Sent tab — the relaying
     // domain never hands the message back to the sender afterward (it
@@ -2163,9 +2722,16 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     if (identity && result && result.id) {
       const entries = await getSentMail(identity.publicKey);
+      // Task #97: normalized to a plain public-key string for the "to"
+      // record regardless of whether toPublicKey was a bare string or a
+      // { publicKey, domain } federated address — recipientDomain (only
+      // set when it differs from toDomain, i.e. an actually-federated send)
+      // is recorded alongside it purely for the Sent tab's own display,
+      // never re-parsed back into anything.
+      const target = normalizeSendTarget(toPublicKey);
       entries.unshift({
         id: result.id,
-        to: { publicKey: toPublicKey, handle: toHandle || null },
+        to: { publicKey: target.publicKey, handle: toHandle || null, recipientDomain: (target.domain && target.domain !== toDomain) ? target.domain : null },
         domain: toDomain,
         subject: result.subject || subject,
         body: result.body || body,
@@ -2182,6 +2748,670 @@ const AtlasWallet = (() => {
     return result;
   }
 
+  // ---------- Chats (task #111 first slice) ----------
+  //
+  // Bruno's explicit spec: "a separate system from mail, although messages
+  // can be routed through the mail system for now" — a real-time transport
+  // ("persistent connection") is future work, deferred until after this
+  // interface exists. For now, every chat message is a completely ordinary
+  // Post Office mail (postOfficeSendRaw() above), carrying ONE thing a
+  // normal composed message never would: CHAT_SUBJECT_MARKER as its
+  // subject. That marker is what checkAllMail() below keys off of to divert
+  // an arriving message into atlasChatMessages instead of atlasMail — the
+  // ONLY change checkAllMail() makes to its existing behavior. A leading
+  // NUL byte makes the marker something no person could type into the
+  // subject field of a normal Mail Compose message (there is no subject
+  // field here at all — chat messages never go through Compose), so this
+  // can never collide with genuine mail, accidentally or otherwise.
+  //
+  // Deliberately NOT reusing the existing `entry.message.from` presence
+  // check (every Post-Office-relayed message already carries `from`,
+  // whether sent via Mail Compose or here) — doing that would silently
+  // reclassify every already-shipped Mail Compose message as "chat" too,
+  // an unrequested and disruptive change to a feature that already works.
+  // This marker is scoped to ONLY messages sent through sendChatMessage()
+  // below, so the existing Mail tab (list, badge, Sent history) stays
+  // completely untouched by any of this.
+  const CHAT_SUBJECT_MARKER = ' atlas.chat.v1';
+
+  function isChatTransportMessage(subject) {
+    return subject === CHAT_SUBJECT_MARKER;
+  }
+
+  // ---------- Chats: encrypted at rest (TODO round 1, item 2 — 2026-09-14) ----------
+  //
+  // Bruno's explicit ask: chat message content, unlike everything else
+  // this wallet stores (mail, sent mail, contacts, the credential wallet
+  // itself), should be encrypted on disk — readable only while the wallet
+  // is unlocked. The ONLY thing already encrypted at rest anywhere in this
+  // file before this was a local-password identity's own private key
+  // (createIdentity/unlockIdentity above, AES-GCM with a PBKDF2-derived
+  // key) — but that derived key is a local variable inside those
+  // functions, thrown away the instant they return; there is no password-
+  // derived key sitting around anywhere to reuse for a second purpose.
+  //
+  // Rather than prompt for the password again, this derives a stable
+  // symmetric key straight from the identity's own ECDSA private scalar
+  // (the JWK's `d` member) — present in
+  // chrome.storage.session.atlasUnlockedIdentity for exactly as long as
+  // local mode is unlocked, and nowhere else (see getIdentity() above).
+  // Same key every time for the same identity, so a message encrypted
+  // today still decrypts fine after a lock/unlock cycle, an export/
+  // reimport, or a browser restart — but the key itself is never written
+  // to disk anywhere, only ever recomputed in memory while unlocked.
+  //
+  // WebAuthn identities have no private key material available client-side
+  // at all (it never leaves the hardware authenticator — see getIdentity's
+  // own comment), so there is nothing to derive a key from; chat bodies
+  // for a WebAuthn identity stay plain strings, same as any message would
+  // have been before this feature existed. This is a smaller gap than it
+  // sounds: isUnlocked() is unconditionally true for WebAuthn mode anyway
+  // (no lock state exists there to protect against in the first place).
+  // encryptChatBody/decryptChatBody both degrade to plain-string
+  // passthrough whenever privateKeyJwk isn't available, rather than
+  // throwing — see each function's own early-return.
+  async function deriveChatEncryptionKey(privateKeyJwk) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('atlas.chat.v1:' + privateKeyJwk.d));
+    return crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  }
+
+  // Returns either a plain string (WebAuthn mode, or nothing to encrypt
+  // with) or an { __atlasChatEncrypted, iv, ciphertext } envelope (local
+  // mode) — every OTHER chat function only ever deals with plaintext
+  // bodies; only this pair (and the storage boundary functions that call
+  // them: sendChatMessage, checkAllMail's chat branch, getChatThreads,
+  // getChatThreadMessages) ever sees the on-disk shape directly.
+  async function encryptChatBody(identity, plaintext) {
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return plaintext;
+    const key = await deriveChatEncryptionKey(identity.privateKeyJwk);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext));
+    return { __atlasChatEncrypted: true, iv: b64urlEncode(iv), ciphertext: b64urlEncode(new Uint8Array(ciphertext)) };
+  }
+
+  async function decryptChatBody(identity, storedBody) {
+    if (typeof storedBody === 'string' || !storedBody) return storedBody; // already plain — WebAuthn mode, or a pre-encryption message
+    if (!storedBody.__atlasChatEncrypted) return '[unreadable message]';
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return '[Encrypted — unlock your wallet to read]';
+    try {
+      const key = await deriveChatEncryptionKey(identity.privateKeyJwk);
+      const plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: b64urlDecode(storedBody.iv) },
+        key,
+        b64urlDecode(storedBody.ciphertext)
+      );
+      return new TextDecoder().decode(plaintext);
+    } catch (err) {
+      return '[Could not decrypt this message]';
+    }
+  }
+
+  // ---------- generic at-rest encryption for the rest of this wallet's
+  // personal data (2026-09-14, second round) ----------
+  //
+  // Bruno, after shipping chat's own encryption above, asked to extend
+  // "encrypted at rest" to the whole local data store, not just chat.
+  // This generalizes deriveChatEncryptionKey/encryptChatBody/
+  // decryptChatBody's own approach (AES-GCM, key derived from the
+  // identity's own ECDSA private scalar, no second password prompt
+  // needed) to arbitrary JSON-serializable values — deliberately a
+  // SEPARATE derived key per `storeName` (same raw-scalar-plus-SHA-256
+  // derivation, just a different label) rather than reusing chat's own
+  // key outright: cheap key separation between data categories, and it
+  // means chat's already-shipped ciphertext never has to be touched or
+  // re-derived under a new label. Every caller below passes a stable,
+  // unique storeName ('mail', 'friends', 'wallet', etc.).
+  //
+  // Same WebAuthn/no-identity/locked graceful-fallback shape as chat's
+  // own pair: encryptAtRest passes plaintext through untouched when
+  // there's no local-mode private key available to derive from;
+  // decryptAtRest returns `fallback` in that case instead of throwing —
+  // callers treat that exactly like "nothing saved yet," which is the
+  // honest state of the world while locked (see each call site's own
+  // "opportunistic migration" comment for how PRE-encryption plaintext
+  // data already on disk gets picked up and upgraded).
+  async function deriveAtRestKey(privateKeyJwk, storeName) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('atlas.store.v1:' + storeName + ':' + privateKeyJwk.d));
+    return crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  }
+
+  async function encryptAtRest(identity, storeName, value) {
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return value;
+    const key = await deriveAtRestKey(identity.privateKeyJwk, storeName);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(value)));
+    return { __atlasEncrypted: true, iv: b64urlEncode(iv), ciphertext: b64urlEncode(new Uint8Array(ciphertext)) };
+  }
+
+  async function decryptAtRest(identity, storeName, stored, fallback) {
+    if (stored === undefined || stored === null) return fallback;
+    if (!stored || typeof stored !== 'object' || !stored.__atlasEncrypted) return stored; // legacy plaintext (pre-encryption data), or a shape encryptAtRest never produced
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return fallback; // locked, no identity yet, or WebAuthn — can't decrypt right now
+    try {
+      const key = await deriveAtRestKey(identity.privateKeyJwk, storeName);
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlDecode(stored.iv) }, key, b64urlDecode(stored.ciphertext));
+      return JSON.parse(new TextDecoder().decode(plaintext));
+    } catch (err) {
+      return fallback;
+    }
+  }
+
+  // Wraps decryptAtRest with a one-time, fire-and-forget upgrade: the
+  // first time a call site reads back a value that's still in its
+  // PRE-encryption plaintext shape (an old array/object saved before this
+  // feature existed, not an { __atlasEncrypted } envelope) while a local
+  // identity is actually unlocked, it re-saves that same value through
+  // `saveFn` so it's encrypted from then on — centralizing this here
+  // means every individual getter below doesn't have to repeat the "is
+  // this still plaintext, and do we have a key right now" check by hand.
+  // Best-effort: a failed migration save just means the next read tries
+  // again, same as leaving a message unread and checking later.
+  async function decryptAtRestAndMigrate(identity, storeName, stored, fallback, saveFn) {
+    const alreadyEncrypted = !!(stored && typeof stored === 'object' && stored.__atlasEncrypted);
+    const value = await decryptAtRest(identity, storeName, stored, fallback);
+    if (stored !== undefined && stored !== null && !alreadyEncrypted && identity && identity.mode === 'local' && identity.privateKeyJwk) {
+      Promise.resolve(saveFn(value)).catch(() => {});
+    }
+    return value;
+  }
+
+  // One flat array per owner identity, both directions mixed together
+  // (`direction: 'out'|'in'`) rather than mail's separate atlasMail/
+  // atlasSentMail pair — a chat thread is inherently a merge of both sides
+  // in one chronological list (see viewer.js's chat view), so storing them
+  // together here is what makes building that view a single filter+sort
+  // instead of a two-source merge on every render.
+  async function getChatMessages(ownerPublicKey) {
+    const { atlasChatMessages } = await chrome.storage.local.get('atlasChatMessages');
+    return (atlasChatMessages || {})[ownerPublicKey] || [];
+  }
+
+  async function saveChatMessages(ownerPublicKey, entries) {
+    const { atlasChatMessages } = await chrome.storage.local.get('atlasChatMessages');
+    const all = atlasChatMessages || {};
+    all[ownerPublicKey] = entries;
+    await chrome.storage.local.set({ atlasChatMessages: all });
+  }
+
+  // Groups the flat per-owner list into one row per counterparty, newest
+  // message first — the Chats tab's (main view) list. counterpartyHandle
+  // is taken from whichever message in the thread has one (a handle can
+  // only ever be learned from an INCOMING message's `from.handle`, or from
+  // whatever `toHandle` a caller supplied when composing an outgoing one —
+  // see sendChatMessage()), preferring the most recent message that has
+  // one so a since-registered handle eventually wins over an older blank.
+  async function getChatThreads(ownerPublicKey) {
+    const identity = await getIdentity(); // needed to decrypt lastMessage.body below — see decryptChatBody's own comment
+    const entries = await getChatMessages(ownerPublicKey);
+    const byCounterparty = new Map();
+    // Oldest-first pass so the "last write wins" handle-preference below
+    // naturally ends up preferring the NEWEST message that actually has one.
+    const sorted = [...entries].sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
+    for (const entry of sorted) {
+      const thread = byCounterparty.get(entry.counterpartyPublicKey) || {
+        counterpartyPublicKey: entry.counterpartyPublicKey,
+        counterpartyHandle: null,
+        domain: entry.domain,
+        lastMessage: null,
+        unreadCount: 0
+      };
+      if (entry.counterpartyHandle) thread.counterpartyHandle = entry.counterpartyHandle;
+      thread.domain = entry.domain; // most recently used domain for this counterparty
+      thread.lastMessage = { body: await decryptChatBody(identity, entry.body), sentAt: entry.sentAt, direction: entry.direction };
+      byCounterparty.set(entry.counterpartyPublicKey, thread);
+    }
+    // Unread count is a separate pass (not foldable into the loop above)
+    // since it's a straight count of `read === false` entries for that
+    // counterparty, independent of ordering.
+    entries.forEach((entry) => {
+      if (entry.direction === 'in' && !entry.read) {
+        const thread = byCounterparty.get(entry.counterpartyPublicKey);
+        if (thread) thread.unreadCount++;
+      }
+    });
+    return [...byCounterparty.values()].sort((a, b) => new Date(b.lastMessage.sentAt) - new Date(a.lastMessage.sentAt));
+  }
+
+  // One counterparty's full history, oldest first (newest-at-the-bottom is
+  // exactly what Bruno's spec asked the (chat view) to render) — the (chat
+  // view)'s own message list.
+  async function getChatThreadMessages(ownerPublicKey, counterpartyPublicKey) {
+    const identity = await getIdentity();
+    const entries = await getChatMessages(ownerPublicKey);
+    const thread = entries
+      .filter((e) => e.counterpartyPublicKey === counterpartyPublicKey)
+      .sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
+    return Promise.all(thread.map(async (e) => ({ ...e, body: await decryptChatBody(identity, e.body) })));
+  }
+
+  async function markChatThreadRead(ownerPublicKey, counterpartyPublicKey) {
+    const entries = await getChatMessages(ownerPublicKey);
+    let changed = false;
+    entries.forEach((e) => {
+      if (e.counterpartyPublicKey === counterpartyPublicKey && e.direction === 'in' && !e.read) {
+        e.read = true;
+        changed = true;
+      }
+    });
+    if (changed) await saveChatMessages(ownerPublicKey, entries);
+  }
+
+  async function getChatUnreadCount(ownerPublicKey) {
+    const entries = await getChatMessages(ownerPublicKey);
+    return entries.filter((e) => e.direction === 'in' && !e.read).length;
+  }
+
+  // ---------- Chats: end-to-end encryption (task #158, 2026-09-14) ----------
+  //
+  // Everything above (encryptChatBody/decryptChatBody, and the generic
+  // encryptAtRest family) protects a chat message's body sitting in THIS
+  // device's own storage after the fact. It does nothing for the trip in
+  // between: sendChatMessage posts the plain body straight to the
+  // relaying domain's /atlas/postoffice/send, which writes it to its own
+  // mail store as plaintext (issuer-server/server.js's appendMail) — any
+  // relaying domain can read every word of every chat message it carries.
+  // This section closes that gap with real per-pair Diffie-Hellman key
+  // agreement (ECDH, P-256) so the relay only ever sees ciphertext.
+  //
+  // Deliberately a SEPARATE ECDH keypair per identity, not a reuse of the
+  // identity's own ECDSA signing key — mixing a key's use between signing
+  // and key-agreement is a well-known thing to avoid even when the same
+  // curve happens to work for both, and generating a second keypair costs
+  // almost nothing extra here. Generated once, lazily, on first use
+  // (getChatE2eeKeyPair) and persisted encrypted-at-rest under storeName
+  // 'chatE2eeKeypair' — same encryptAtRest/decryptAtRest primitives the
+  // rest of this file's whole-storage encryption pass already uses.
+  //
+  // The hard problem real E2E messaging has to solve is: how does a
+  // recipient trust that a shared "here's my key" announcement really
+  // came from the person it claims to, rather than from the relay itself
+  // quietly substituting its own key and sitting in the middle? This
+  // reuses infrastructure this project already has: every key
+  // announcement is signed with the SENDER'S OWN existing identity key
+  // (signChatE2eeKeyAnnouncement/verifyChatE2eeKeyAnnouncement, the exact
+  // same raw-ecdsa envelope shape signWithSelf/verifySignedPayload already
+  // use for presentIdentity) — a relay can relay that signed announcement,
+  // but it cannot forge one, so it cannot substitute a key of its own
+  // without the recipient's verification catching it.
+  //
+  // Bootstrap / first-contact gap, disclosed rather than hidden: encrypting
+  // to someone requires already knowing THEIR e2ee public key, which this
+  // wallet can only ever have learned from a message they already sent —
+  // there is no separate key-discovery step or server endpoint here (kept
+  // deliberately out of scope, along with real forward secrecy /
+  // per-message key rotation — see the chat history comment on this in
+  // conversation with Bruno, 2026-09-14: "simple static key first"). So
+  // the very FIRST message in a brand-new conversation, in whichever
+  // direction happens to go first, is sent as a signed-but-UNENCRYPTED key
+  // announcement (still authentic, just not confidential) — carrying this
+  // wallet's own e2ee public key so the other side can encrypt their
+  // reply. Every message after that, in EITHER direction, is fully
+  // end-to-end encrypted. A leaked long-term identity key would still let
+  // someone decrypt that pair's PAST messages (no ratcheting) — a real,
+  // accepted limitation of this "simple" round, not an oversight.
+  //
+  // Wire shape (the actual string carried as `body` over
+  // /atlas/postoffice/send — deliberately packed INSIDE body rather than
+  // as new top-level payload fields, since body is the one field the
+  // relay already treats as fully opaque and never needs code changes on
+  // either issuer-server.js or issuer-php to carry):
+  //   { v: 1,
+  //     key: { announcement: { chatE2eePublicKeyJwk }, envelope: <signed, see above> },
+  //     encrypted: true,  iv, ciphertext                 // the normal case
+  //     -- or, before the recipient's key is known yet --
+  //     encrypted: false, plaintext                      // first-message bootstrap only
+  //   }
+  // Anything that doesn't parse as this shape (every chat message ever
+  // sent before this shipped) is treated as plain pre-existing text —
+  // fully backward compatible, no migration needed.
+
+  async function saveChatE2eeKeyPair(ownerPublicKey, pair) {
+    const { atlasChatE2eeKeypairs } = await chrome.storage.local.get('atlasChatE2eeKeypairs');
+    const all = atlasChatE2eeKeypairs || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'chatE2eeKeypair', pair);
+    await chrome.storage.local.set({ atlasChatE2eeKeypairs: all });
+  }
+
+  // Local-mode only, same posture as encryptAtRest/encryptChatBody — a
+  // WebAuthn identity's private key never leaves the hardware
+  // authenticator, so there's no way to run ECDH against it client-side.
+  // Returns null for WebAuthn/no-identity; callers already treat "no e2ee
+  // available" as "fall back to the old plain-body behavior."
+  async function getChatE2eeKeyPair(identity) {
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return null;
+    const { atlasChatE2eeKeypairs } = await chrome.storage.local.get('atlasChatE2eeKeypairs');
+    const existing = await decryptAtRest(identity, 'chatE2eeKeypair', (atlasChatE2eeKeypairs || {})[identity.publicKey], null);
+    if (existing) return existing;
+    const kp = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+    const pair = {
+      publicKeyJwk: await crypto.subtle.exportKey('jwk', kp.publicKey),
+      privateKeyJwk: await crypto.subtle.exportKey('jwk', kp.privateKey)
+    };
+    await saveChatE2eeKeyPair(identity.publicKey, pair);
+    return pair;
+  }
+
+  // The cache of "e2ee public keys this identity has learned belong to
+  // other people" — one map per owner identity (publicKey -> their chat
+  // e2ee public key JWK), encrypted at rest like everything else this
+  // session's whole-storage pass touched. Only ever populated by a
+  // SUCCESSFULLY VERIFIED key announcement (see unwrapChatMessageFromWire)
+  // — never from an unauthenticated source.
+  async function getE2eePeerKeysForOwner(identity) {
+    if (!identity) return {};
+    const { atlasChatE2eePeerKeys } = await chrome.storage.local.get('atlasChatE2eePeerKeys');
+    return decryptAtRest(identity, 'chatE2eePeerKeys', (atlasChatE2eePeerKeys || {})[identity.publicKey], {});
+  }
+
+  async function saveE2eePeerKeysForOwner(ownerPublicKey, peerKeys) {
+    const { atlasChatE2eePeerKeys } = await chrome.storage.local.get('atlasChatE2eePeerKeys');
+    const all = atlasChatE2eePeerKeys || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'chatE2eePeerKeys', peerKeys);
+    await chrome.storage.local.set({ atlasChatE2eePeerKeys: all });
+  }
+
+  async function getE2eePeerPublicKey(identity, peerPublicKey) {
+    const forOwner = await getE2eePeerKeysForOwner(identity);
+    return forOwner[peerPublicKey] || null;
+  }
+
+  async function rememberE2eePeerPublicKey(identity, peerPublicKey, publicKeyJwk) {
+    if (!identity) return;
+    const forOwner = await getE2eePeerKeysForOwner(identity);
+    forOwner[peerPublicKey] = publicKeyJwk;
+    await saveE2eePeerKeysForOwner(identity.publicKey, forOwner);
+  }
+
+  // Signs a JWK e2ee public key with this identity's OWN existing ECDSA
+  // key — deliberately NOT signWithSelf (which dispatches to a real
+  // WebAuthn ceremony for a WebAuthn-mode identity; this function is only
+  // ever called after a caller has already confirmed `identity.mode ===
+  // 'local'`, so a WebAuthn prompt on every single chat message sent is
+  // never a risk here). Byte-identical envelope shape to signWithSelf's
+  // own raw-ecdsa branch, so the existing verifySignedPayload verifies it
+  // with no changes needed there.
+  async function signChatE2eeKeyAnnouncement(identity, publicKeyJwk) {
+    const announcement = { chatE2eePublicKeyJwk: publicKeyJwk };
+    const privateKey = await crypto.subtle.importKey('jwk', identity.privateKeyJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+    const data = new TextEncoder().encode(canonicalize(announcement));
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, data);
+    return { announcement, envelope: { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) } };
+  }
+
+  // The binding check that closes the "relay substitutes its own key"
+  // MITM gap: verifySignedPayload alone only proves SOME identity signed
+  // this announcement, not that it was the identity the message actually
+  // claims to be from — envelope.publicKey is attacker-influenceable
+  // input sitting inside the wire body, so it's checked against the
+  // OUTER, relay-vouched sender (message.from.publicKey) explicitly here.
+  async function verifyChatE2eeKeyAnnouncement(claimedSenderPublicKey, signed) {
+    if (!signed || !signed.announcement || !signed.envelope || !claimedSenderPublicKey) return false;
+    if (signed.envelope.publicKey !== claimedSenderPublicKey) return false;
+    try {
+      return await verifySignedPayload(signed.announcement, signed.envelope);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Raw ECDH agreement, then a SHA-256 pass (with a domain-separation
+  // label, same idea as deriveAtRestKey's own storeName label above)
+  // rather than importing the raw shared point straight as an AES key —
+  // WebCrypto's own ECDH deriveKey path would technically allow that, but
+  // hashing first is the safer, more conventional habit and costs nothing.
+  async function deriveChatE2eeSharedKey(ownPrivateKeyJwk, peerPublicKeyJwk) {
+    const privateKey = await crypto.subtle.importKey('jwk', ownPrivateKeyJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
+    const publicKey = await crypto.subtle.importKey('jwk', peerPublicKeyJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const sharedBits = await crypto.subtle.deriveBits({ name: 'ECDH', public: publicKey }, privateKey, 256);
+    const label = new TextEncoder().encode('atlas.chat.e2ee.v1');
+    const combined = new Uint8Array(sharedBits.byteLength + label.length);
+    combined.set(new Uint8Array(sharedBits), 0);
+    combined.set(label, sharedBits.byteLength);
+    const digest = await crypto.subtle.digest('SHA-256', combined);
+    return crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  }
+
+  // Called from sendChatMessage right before the message ever leaves this
+  // device. See the section comment above for the wire shape and the
+  // first-message bootstrap gap.
+  async function wrapChatMessageForWire(identity, peerPublicKey, plainBody) {
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return plainBody; // WebAuthn/no-identity: unchanged from before this feature
+    const ownKeyPair = await getChatE2eeKeyPair(identity);
+    const signedKey = await signChatE2eeKeyAnnouncement(identity, ownKeyPair.publicKeyJwk);
+    const peerKeyJwk = await getE2eePeerPublicKey(identity, peerPublicKey);
+    if (!peerKeyJwk) {
+      return JSON.stringify({ v: 1, key: signedKey, encrypted: false, plaintext: plainBody });
+    }
+    const sharedKey = await deriveChatE2eeSharedKey(ownKeyPair.privateKeyJwk, peerKeyJwk);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, sharedKey, new TextEncoder().encode(plainBody));
+    return JSON.stringify({ v: 1, key: signedKey, encrypted: true, iv: b64urlEncode(iv), ciphertext: b64urlEncode(new Uint8Array(ciphertext)) });
+  }
+
+  // Called from checkAllMail's chat branch on every incoming chat
+  // message's raw wire body, BEFORE encryptChatBody's own at-rest
+  // encryption ever sees it — this function's job is purely to undo
+  // whatever wrapChatMessageForWire did in transit; what comes out of it
+  // is a plain string that then goes through the exact same local-storage
+  // encryption path every chat message always has.
+  async function unwrapChatMessageFromWire(identity, senderPublicKey, wireBody) {
+    let envelope;
+    try {
+      envelope = JSON.parse(wireBody);
+    } catch (err) {
+      return wireBody; // not JSON at all -> a pre-#158 plaintext message, pass through unchanged
+    }
+    if (!envelope || envelope.v !== 1 || !envelope.key || !envelope.key.announcement) return wireBody; // doesn't match this feature's shape -> treat as plain text too
+
+    const peerPublicKeyJwk = envelope.key.announcement.chatE2eePublicKeyJwk;
+    let keyIsGenuine = false;
+    if (identity && identity.mode === 'local' && identity.privateKeyJwk && peerPublicKeyJwk) {
+      keyIsGenuine = await verifyChatE2eeKeyAnnouncement(senderPublicKey, envelope.key);
+      if (keyIsGenuine) await rememberE2eePeerPublicKey(identity, senderPublicKey, peerPublicKeyJwk);
+      // A key announcement that fails verification is never cached and
+      // never trusted for decryption below — see verifyChatE2eeKeyAnnouncement's
+      // own comment on exactly what this is defending against.
+    }
+
+    if (!envelope.encrypted) return typeof envelope.plaintext === 'string' ? envelope.plaintext : '[unreadable message]';
+
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return '[Encrypted — unlock your wallet to read]';
+    if (!keyIsGenuine) return "[Could not verify sender's encryption key — message not shown]";
+    try {
+      const ownKeyPair = await getChatE2eeKeyPair(identity);
+      const sharedKey = await deriveChatE2eeSharedKey(ownKeyPair.privateKeyJwk, peerPublicKeyJwk);
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlDecode(envelope.iv) }, sharedKey, b64urlDecode(envelope.ciphertext));
+      return new TextDecoder().decode(plaintext);
+    } catch (err) {
+      return '[Could not decrypt this message]';
+    }
+  }
+
+  // Sends a chat message through the SAME Post Office plumbing Mail Compose
+  // uses (postOfficeSendRaw), stamped with CHAT_SUBJECT_MARKER, and records
+  // its own local copy in atlasChatMessages — deliberately NOT sendUserMail
+  // (that would also write an entry into atlasSentMail, surfacing this
+  // marker-subject message in the Mail tab's Sent list, and would overwrite
+  // Mail Compose's own remembered "send via" domain out from under it; see
+  // sendUserMail's own comment above postOfficeSendRaw). `toHandle`
+  // (optional) mirrors sendUserMail's own parameter — a display hint for
+  // this wallet's OWN thread list when the caller already knows it (the
+  // Contacts tab does, from the saved contact's name).
+  async function sendChatMessage(toDomain, toPublicKey, body, toHandle) {
+    if (!body) throw new Error('body is required.');
+    // Task #158 — identity resolved BEFORE sending now (it used to be
+    // fetched after), since wrapChatMessageForWire needs it to end-to-end
+    // encrypt the wire body; postOfficeSendRaw only ever sees the wrapped
+    // envelope from here on, never the plain text.
+    const identity = await getIdentity();
+    // Task #97: normalized to a plain public-key string up front — the e2ee
+    // peer-key cache (wrapChatMessageForWire) and this wallet's own thread
+    // storage both key off a bare string, same as before this feature;
+    // toPublicKey's original shape (string, or { publicKey, domain } for a
+    // federated recipient) still flows through to postOfficeSendRaw
+    // unchanged, since that's the only layer that needs the domain.
+    const target = normalizeSendTarget(toPublicKey);
+    const wireBody = await wrapChatMessageForWire(identity, target.publicKey, body);
+    const result = await postOfficeSendRaw(toDomain, toPublicKey, CHAT_SUBJECT_MARKER, wireBody);
+
+    if (identity && result && result.id) {
+      const entries = await getChatMessages(identity.publicKey);
+      entries.push({
+        id: result.id,
+        direction: 'out',
+        counterpartyPublicKey: target.publicKey,
+        counterpartyHandle: toHandle || null,
+        domain: toDomain,
+        // Always the ORIGINAL plain text, never result.body — result.body
+        // is now whatever wireBody was (the E2EE envelope, or plaintext if
+        // this identity can't do E2EE at all), and this wallet's own
+        // sent-message record should obviously always be human-readable.
+        body: await encryptChatBody(identity, body),
+        sentAt: result.sentAt || new Date().toISOString(),
+        read: true // this wallet's own outgoing message — nothing to mark unread
+      });
+      await saveChatMessages(identity.publicKey, entries);
+      await setLastChatSendDomain(identity.publicKey, toDomain);
+    }
+    return result;
+  }
+
+  // ---------- Chats: deletion (TODO round 2, item 3 — 2026-09-14) ----------
+  //
+  // Bruno asked for two things that turn out to be the same underlying
+  // operation from two different UI entry points: "clear chat history"
+  // from inside an open (chat view), and "delete individual chat" from
+  // the (main view) thread list — both mean "forget every message with
+  // this one counterparty," just triggered from different screens (a
+  // cleared conversation stays open, now empty; a deleted one disappears
+  // from the thread list entirely). One function covers both.
+  //
+  // Mirrors deleteMailMessage/clearAllMail's own two-part shape exactly:
+  // removing entries from atlasChatMessages alone is NOT enough, because
+  // checkAllMail()'s `knownIds` dedup only ever looks at what's CURRENTLY
+  // in atlasChatMessages — delete a message's entry and the very next
+  // poll would just re-fetch and re-add it from the relaying domain's
+  // still-standing copy (there is no protocol-level way to ask a domain
+  // to forget an old message either, same limitation mail's own delete
+  // already documents). atlasDeletedChatIds is the permanent "seen but
+  // deleted, never resurrect" suppression list that closes that gap —
+  // see checkAllMail's own `knownIds` construction for where this gets
+  // folded in.
+  async function getDeletedChatIds(ownerPublicKey) {
+    const { atlasDeletedChatIds } = await chrome.storage.local.get('atlasDeletedChatIds');
+    return (atlasDeletedChatIds || {})[ownerPublicKey] || [];
+  }
+
+  async function addDeletedChatIds(ownerPublicKey, ids) {
+    if (!ids.length) return;
+    const { atlasDeletedChatIds } = await chrome.storage.local.get('atlasDeletedChatIds');
+    const all = atlasDeletedChatIds || {};
+    const existing = new Set(all[ownerPublicKey] || []);
+    ids.forEach((id) => existing.add(id));
+    all[ownerPublicKey] = Array.from(existing);
+    await chrome.storage.local.set({ atlasDeletedChatIds: all });
+  }
+
+  // Deletes every stored message with one counterparty — "clear history"
+  // (chat view) and "delete chat" (main view) both call this directly;
+  // the only difference is what the UI does afterward (stay vs. go back).
+  async function deleteChatThread(ownerPublicKey, counterpartyPublicKey) {
+    const entries = await getChatMessages(ownerPublicKey);
+    const toDelete = entries.filter((e) => e.counterpartyPublicKey === counterpartyPublicKey);
+    if (toDelete.length === 0) return;
+    const remaining = entries.filter((e) => e.counterpartyPublicKey !== counterpartyPublicKey);
+    await saveChatMessages(ownerPublicKey, remaining);
+    await addDeletedChatIds(ownerPublicKey, toDelete.map((e) => e.id));
+  }
+
+  // Chats' own "last domain used" memory — separate storage key from Mail
+  // Compose's getLastPostOfficeSendDomain/setLastPostOfficeSendDomain
+  // (same reasoning as sendChatMessage not touching atlasSentMail: a chat
+  // send should never silently change what Mail Compose defaults to next
+  // time, and vice versa, even though both ultimately resolve a domain from
+  // the same getPostOfficeMemberships() list).
+  async function getLastChatSendDomain(ownerPublicKey) {
+    const { atlasLastChatSendDomain } = await chrome.storage.local.get('atlasLastChatSendDomain');
+    return (atlasLastChatSendDomain || {})[ownerPublicKey] || null;
+  }
+
+  async function setLastChatSendDomain(ownerPublicKey, domain) {
+    const { atlasLastChatSendDomain } = await chrome.storage.local.get('atlasLastChatSendDomain');
+    const all = atlasLastChatSendDomain || {};
+    all[ownerPublicKey] = domain;
+    await chrome.storage.local.set({ atlasLastChatSendDomain: all });
+  }
+
+  // ---------- Messaging window chrome settings ----------
+  //
+  // Same "client display preference, not identity data" reasoning as
+  // getChatPanelSettings/getAssetViewerSettings above (outside any
+  // per-identity wallet scope, untouched by locking/identity-switch). The
+  // one thing neither of those two needs that this DOES — left/top — is
+  // because Bruno's spec explicitly asked for this window to be freely
+  // draggable ("moved around to the users desired location on the
+  // canvas"), unlike chat (always bottom-left anchored) or the Asset
+  // Viewer (always re-positioned by JS next to whatever card is hovered).
+  // `positioned` distinguishes "never been dragged yet, use the CSS
+  // default top-right corner" (false) from "has an explicit saved spot"
+  // (true) — without it, a fresh install's default left/top of 0 would
+  // have to be treated as if the user had actually dragged it there.
+  const MESSAGING_MIN_WIDTH = 260;
+  const MESSAGING_MAX_WIDTH = 560;
+  const MESSAGING_MIN_HEIGHT = 260;
+  const MESSAGING_MAX_HEIGHT = 640;
+  const DEFAULT_MESSAGING_WINDOW_SETTINGS = {
+    // width bumped 320 -> 360 (TODO round 1 item 3): adding the Calls tab
+    // made the header's three-tab-bar wide enough, at the old default
+    // width, to leave almost no empty header space to grab for
+    // drag-to-move (see #messagingHeader's mousedown handler in viewer.js
+    // — it only excludes clicks that land ON a button/tab, not clicks
+    // squeezed into whatever sliver of #messagingHeaderSpacer is left).
+    // 360 restores a comfortable empty strip next to the tab bar again.
+    width: 360,
+    height: 380,
+    opacity: 0.92,
+    left: 0,
+    top: 0,
+    positioned: false,
+    activeTab: 'chats' // 'chats' | 'calls' | 'contacts'
+  };
+
+  // 'calls' (TODO round 1 item 3) was missed here when the Calls tab was
+  // first added — this clamp only accepted 'chats'/'contacts', so leaving
+  // the window on Calls and reopening it silently clamped back to Chats.
+  // Fixed by checking membership in the same three-value set viewer.js's
+  // own MESSAGING_TABS constant uses, rather than special-casing each
+  // value one at a time.
+  const VALID_MESSAGING_TABS = ['chats', 'calls', 'contacts'];
+
+  function clampMessagingWindowSettings(raw) {
+    const s = raw && typeof raw === 'object' ? raw : {};
+    return {
+      width: Number.isFinite(Number(s.width)) ? Math.max(MESSAGING_MIN_WIDTH, Math.min(MESSAGING_MAX_WIDTH, Number(s.width))) : DEFAULT_MESSAGING_WINDOW_SETTINGS.width,
+      height: Number.isFinite(Number(s.height)) ? Math.max(MESSAGING_MIN_HEIGHT, Math.min(MESSAGING_MAX_HEIGHT, Number(s.height))) : DEFAULT_MESSAGING_WINDOW_SETTINGS.height,
+      opacity: Number.isFinite(Number(s.opacity)) ? Math.max(0.2, Math.min(1, Number(s.opacity))) : DEFAULT_MESSAGING_WINDOW_SETTINGS.opacity,
+      left: Number.isFinite(Number(s.left)) ? Number(s.left) : DEFAULT_MESSAGING_WINDOW_SETTINGS.left,
+      top: Number.isFinite(Number(s.top)) ? Number(s.top) : DEFAULT_MESSAGING_WINDOW_SETTINGS.top,
+      positioned: !!s.positioned,
+      activeTab: VALID_MESSAGING_TABS.includes(s.activeTab) ? s.activeTab : 'chats'
+    };
+  }
+
+  async function getMessagingWindowSettings() {
+    const { atlasMessagingWindowSettings } = await chrome.storage.local.get('atlasMessagingWindowSettings');
+    return clampMessagingWindowSettings(atlasMessagingWindowSettings);
+  }
+
+  async function setMessagingWindowSettings(patch) {
+    const current = await getMessagingWindowSettings();
+    const merged = clampMessagingWindowSettings(Object.assign({}, current, patch));
+    await chrome.storage.local.set({ atlasMessagingWindowSettings: merged });
+    return merged;
+  }
+
   // ---------- sent mail (this wallet's own outgoing Post Office history) ----------
   //
   // sendUserMail() above never touched local storage before this — the
@@ -2190,15 +3420,19 @@ const AtlasWallet = (() => {
   // nothing here is read by the protocol side, and (same as the received
   // side's mail) there's no way to un-send or edit what a domain already
   // relayed — Delete/Clear below only remove the local record of it.
+  // Encrypted at rest (2026-09-14, second round) — same treatment as
+  // getMail/saveMail above.
   async function getSentMail(ownerPublicKey) {
     const { atlasSentMail } = await chrome.storage.local.get('atlasSentMail');
-    return (atlasSentMail || {})[ownerPublicKey] || [];
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'sentMail', (atlasSentMail || {})[ownerPublicKey], [], (v) => saveSentMail(ownerPublicKey, v));
   }
 
   async function saveSentMail(ownerPublicKey, entries) {
     const { atlasSentMail } = await chrome.storage.local.get('atlasSentMail');
     const all = atlasSentMail || {};
-    all[ownerPublicKey] = entries;
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'sentMail', entries);
     await chrome.storage.local.set({ atlasSentMail: all });
   }
 
@@ -2498,15 +3732,18 @@ const AtlasWallet = (() => {
   // but this handling isn't gated on that: `updates` can carry a plain
   // `status: "revoked"` entry for ANY asset, fungible or not, so both
   // branches below apply uniformly rather than assuming non-fungible.
+  // Encrypted at rest (2026-09-14, second round).
   async function getAssetUpdateNotices(ownerPublicKey) {
     const { atlasAssetUpdateNotices } = await chrome.storage.local.get('atlasAssetUpdateNotices');
-    return (atlasAssetUpdateNotices || {})[ownerPublicKey] || [];
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'assetUpdateNotices', (atlasAssetUpdateNotices || {})[ownerPublicKey], [], (v) => saveAssetUpdateNotices(ownerPublicKey, v));
   }
 
   async function saveAssetUpdateNotices(ownerPublicKey, notices) {
     const { atlasAssetUpdateNotices } = await chrome.storage.local.get('atlasAssetUpdateNotices');
     const all = atlasAssetUpdateNotices || {};
-    all[ownerPublicKey] = notices;
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'assetUpdateNotices', notices);
     await chrome.storage.local.set({ atlasAssetUpdateNotices: all });
   }
 
@@ -2653,8 +3890,20 @@ const AtlasWallet = (() => {
     // removed from resurfacing here — knownIds alone isn't enough, since
     // deleting a message takes it OUT of `existing`.
     const deletedIds = new Set(await getDeletedMailIds(identity.publicKey));
-    const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds]);
+    // Chats (task #111 first slice): a chat-marked message never lands in
+    // `existing` (see the branch below), so its id has to be folded into
+    // `knownIds` from its OWN store instead — otherwise every poll would
+    // see it as "new" again forever and duplicate it into atlasChatMessages
+    // on every single check.
+    const existingChat = await getChatMessages(identity.publicKey);
+    // deletedChatIds (see deleteChatThread) is chat's own equivalent of
+    // deletedIds right above — a message the user deleted (individually,
+    // or as part of clearing/deleting a whole thread) must stay gone
+    // across future checks too, same reasoning as mail's own list.
+    const deletedChatIds = new Set(await getDeletedChatIds(identity.publicKey));
+    const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds, ...existingChat.map((e) => e.id), ...deletedChatIds]);
     let newCount = 0;
+    let chatChanged = false;
 
     for (const [domain, idSet] of byDomain) {
       try {
@@ -2669,9 +3918,40 @@ const AtlasWallet = (() => {
           if (knownIds.has(message.id)) continue;
           const ok = await verifyMailMessage(domain, message);
           if (!ok) continue; // never surface anything that doesn't check out
-          existing.push({ message: { ...message, domain }, read: false, receivedAt: new Date().toISOString() });
           knownIds.add(message.id);
-          newCount++;
+          // The ONLY branch point checkAllMail gained for Chats: a message
+          // whose subject is the reserved CHAT_SUBJECT_MARKER is diverted
+          // into atlasChatMessages instead of atlasMail — everything else
+          // about this loop (fetch, per-domain try/catch, signature
+          // verification, asset-update/trade reconciliation) is completely
+          // unchanged, so ordinary Mail Compose mail is unaffected. Chat
+          // transport is Post-Office-only (sendChatMessage always goes
+          // through /atlas/postoffice/send), so `message.from` is always
+          // present here — see /atlas/postoffice/send's own comment,
+          // issuer-server/server.js, for why.
+          if (isChatTransportMessage(message.subject) && message.from && message.from.publicKey) {
+            // Task #158 — message.body is the raw wire body (possibly one
+            // of this feature's E2EE envelopes, possibly a pre-#158 plain
+            // string) exactly as the relay delivered it. Unwrap it to
+            // plain text FIRST (verifying + caching the sender's e2ee key
+            // along the way), then let it go through the exact same
+            // at-rest encryption every chat message already got.
+            const plainBody = await unwrapChatMessageFromWire(identity, message.from.publicKey, message.body);
+            existingChat.push({
+              id: message.id,
+              direction: 'in',
+              counterpartyPublicKey: message.from.publicKey,
+              counterpartyHandle: message.from.handle || null,
+              domain,
+              body: await encryptChatBody(identity, plainBody),
+              sentAt: message.sentAt,
+              read: false
+            });
+            chatChanged = true;
+          } else {
+            existing.push({ message: { ...message, domain }, read: false, receivedAt: new Date().toISOString() });
+            newCount++;
+          }
         }
         await processAssetUpdates(identity.publicKey, domain, updates);
         await reconcileSubmittedTrades(identity.publicKey, domain, updates);
@@ -2682,6 +3962,10 @@ const AtlasWallet = (() => {
 
     existing.sort((a, b) => new Date(b.message.sentAt) - new Date(a.message.sentAt));
     await saveMail(identity.publicKey, existing);
+    if (chatChanged) {
+      existingChat.sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
+      await saveChatMessages(identity.publicKey, existingChat);
+    }
     const settings = await getMailSettings();
     settings.lastCheckedAt = new Date().toISOString();
     await chrome.storage.local.set({ atlasMailSettings: settings });
@@ -2695,6 +3979,7 @@ const AtlasWallet = (() => {
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
     getCounterparty, createCounterparty,
     getWallet, mintAsset, verifyCredential, reverifyAll, exportWallet, importWallet, deleteAsset,
+    exportFullBackup, importFullBackup,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
@@ -2723,6 +4008,11 @@ const AtlasWallet = (() => {
     getBlockedChatUsers, blockChatUser, unblockChatUser,
     getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain,
     getCalendarEvents, addCalendarEvent, updateCalendarEvent, removeCalendarEvent,
+    getChatThreads, getChatThreadMessages, markChatThreadRead, getChatUnreadCount, sendChatMessage,
+    deleteChatThread,
+    getChatE2eeKeyPair, getE2eePeerPublicKey,
+    getLastChatSendDomain, setLastChatSendDomain,
+    getMessagingWindowSettings, setMessagingWindowSettings,
     onWalletChanged
   };
 })();

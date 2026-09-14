@@ -192,6 +192,94 @@ function verify_own_credential_signature($publicKeyB64url, $credential, $payload
   }
 }
 
+// ---------- Task #97 (SPEC.md §11.4, domain-to-domain federation) ----------
+//
+// This bundle has never before needed to make an OUTBOUND request to
+// another domain — every other cross-domain trust check in this protocol
+// has always been the CLIENT's job (extension/wallet.js's own
+// verifyCredential()). Federation's relay step is the first time a SERVER
+// itself needs to. No HTTP client library exists anywhere in this
+// dependency-free bundle, so this uses plain file_get_contents() against an
+// http(s):// stream wrapper (allow_url_fopen, on by default) rather than
+// requiring the curl extension — 'ignore_errors' => true is what lets a
+// non-2xx response's JSON body still be read instead of file_get_contents()
+// just returning false, same as issuer-server/server.js's own fetch() calls
+// read the body on a rejection.
+
+// Same http(s)-scheme-by-hostname convention issuer-server/server.js's own
+// baseUrl() and extension/wallet.js's own baseUrl() already use — kept in
+// sync on purpose, a mismatch here would mean this domain tries to relay to
+// or verify another domain over the wrong scheme.
+function atlas_base_url($domain) {
+  if (strpos($domain, 'http') === 0) return rtrim($domain, '/');
+  $isLocalHost = preg_match('/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/', $domain);
+  return rtrim(($isLocalHost ? 'http://' : 'https://') . $domain, '/');
+}
+
+// POSTs JSON to another domain and returns its status + decoded body
+// regardless of whether that status was 2xx — a relay attempt needs to see
+// WHY the home domain rejected something, not just that it did.
+function atlas_http_post_json($url, $body) {
+  $context = stream_context_create([
+    'http' => [
+      'method' => 'POST',
+      'header' => "Content-Type: application/json\r\n",
+      'content' => json_encode($body),
+      'ignore_errors' => true,
+      'timeout' => 10,
+    ],
+  ]);
+  $raw = @file_get_contents($url, false, $context);
+  if ($raw === false) throw new Exception('could not reach ' . $url);
+  $status = 0;
+  if (isset($http_response_header)) {
+    foreach ($http_response_header as $header) {
+      if (preg_match('#^HTTP/\S+\s+(\d+)#', $header, $m)) { $status = (int) $m[1]; break; }
+    }
+  }
+  $decoded = json_decode($raw, true);
+  return ['status' => $status, 'body' => is_array($decoded) ? $decoded : []];
+}
+
+// Task #97 (SPEC.md §11.4 step 3): fetches another domain's own published
+// signing key — the exact same cross-domain trust bootstrap
+// verifyCredential() in extension/wallet.js already performs client-side
+// (§5 step 1), mirrored here since this is now a server-to-server check
+// too. Picks whichever published key is valid RIGHT NOW (an attestation is
+// checked at the moment it arrives, not against some earlier issuedAt),
+// same as issuer-server/server.js's fetchDomainPublicKey().
+function fetch_domain_public_key($domain) {
+  $context = stream_context_create(['http' => ['method' => 'GET', 'ignore_errors' => true, 'timeout' => 10]]);
+  $raw = @file_get_contents(atlas_base_url($domain) . '/.well-known/atlas-key.json', false, $context);
+  if ($raw === false) throw new Exception('could not fetch ' . $domain . '\'s published key');
+  $keyDoc = json_decode($raw, true);
+  if (!is_array($keyDoc) || empty($keyDoc['keys'])) throw new Exception($domain . ' returned no usable key document');
+  $now = time();
+  foreach ($keyDoc['keys'] as $k) {
+    $from = strtotime($k['validFrom']);
+    $until = (!empty($k['validUntil'])) ? strtotime($k['validUntil']) : PHP_INT_MAX;
+    if ($now >= $from && $now <= $until) return $k['publicKey'];
+  }
+  throw new Exception($domain . ' has no currently-valid published key');
+}
+
+// Task #97 (SPEC.md §11.4 step 3): verifies a relaying domain's own
+// attestation against a public key already fetched via
+// fetch_domain_public_key() above — the raw-ecdsa half of verify_envelope(),
+// but checked against an externally-supplied domain key rather than a key
+// pulled out of the envelope itself. Mirrors issuer-server/server.js's
+// verifyDomainSignature().
+function verify_domain_signature($publicKeyB64url, $payload, $signatureB64url) {
+  try {
+    $pubPem = ec_raw_point_to_pem(b64url_decode($publicKeyB64url));
+    $data = canonicalize($payload);
+    $rawSig = b64url_decode($signatureB64url);
+    return ecdsa_verify_raw($pubPem, $rawSig, $data);
+  } catch (Exception $e) {
+    return false;
+  }
+}
+
 // The signed payload shape (SPEC.md §5: canonicalize({id, asset, owner,
 // quantity, supersedes, issuedAt})) — used both to re-verify a presented
 // credential's signature (before honoring a reissue/split/consolidate/

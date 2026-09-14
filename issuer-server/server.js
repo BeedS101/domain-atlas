@@ -147,6 +147,23 @@ const SUBSCRIBERS_FILE = path.join(STATE_DIR, 'atlas-subscribers-store.json');
 // this domain only agrees to store/relay mail for someone it issued a
 // card to.
 const POSTOFFICE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-postoffice-members-store.json');
+// Task #97 (SPEC.md §11.4, domain-to-domain federation): the operator-level
+// safety valve federation is explicitly built with, per Bruno's own request
+// alongside choosing "auto-federate by default." Federation itself needs no
+// registration (any domain publishing a valid atlas-key.json can relay in or
+// out, matching this protocol's existing no-registration posture generally)
+// — this file is the ONE-SIDED exception: an operator naming a specific
+// relaying domain whose attestations (see verifyRelayAttestation below) THIS
+// domain will no longer accept, checked before that verification ever runs.
+// Deliberately a plain operator-edited JSON file, not a new admin-auth API
+// surface, same "state dir, git-ignored, edit it directly" posture the
+// issuer's own private key already has — a real admin UI for this is a
+// nice-to-have nobody's asked for yet, not a blocker to the mechanism itself
+// working. Distinct from POSTOFFICE_MEMBERS_FILE's per-member block list
+// (SPEC.md §11.3): that blocks one troublesome SENDER; this blocks an entire
+// PEER DOMAIN's relayed mail outright, regardless of which of its members
+// sent it.
+const FEDERATION_BLOCKLIST_FILE = path.join(STATE_DIR, 'atlas-federation-blocklist.json');
 // Trading Station membership roster (task #144 Phase 1) — same flat-array
 // shape as POSTOFFICE_MEMBERS_FILE above, kept as its own file for the same
 // reason Post Office's is separate from the plain subscriber roster: a
@@ -532,6 +549,70 @@ async function verifyEnvelope(payload, envelope) {
   }
 
   return false;
+}
+
+// Task #97 (SPEC.md §11.4): reads the operator's own federation blocklist —
+// see FEDERATION_BLOCKLIST_FILE's own comment above for what this is and
+// isn't. Missing file means nothing is blocked, same "absence is the empty
+// case" convention every other store file in this server already uses.
+function readFederationBlocklist() {
+  if (!fs.existsSync(FEDERATION_BLOCKLIST_FILE)) return { blocked: [] };
+  return JSON.parse(fs.readFileSync(FEDERATION_BLOCKLIST_FILE, 'utf8'));
+}
+function isDomainBlocked(domain) {
+  return (readFederationBlocklist().blocked || []).includes(domain);
+}
+
+// Same http(s)-scheme-by-hostname convention extension/wallet.js's own
+// baseUrl() already uses (plain HTTP for localhost/loopback, since every
+// demo/test domain in this project runs that way; HTTPS otherwise) — kept
+// in exact sync with that function on purpose, since a mismatch here would
+// mean this server tries to relay to another domain over the wrong scheme.
+function baseUrl(domain) {
+  if (domain.startsWith('http')) return domain.replace(/\/$/, '');
+  const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(domain);
+  return ((isLocalHost ? 'http://' : 'https://') + domain).replace(/\/$/, '');
+}
+
+// Task #97 (SPEC.md §11.4 step 3): fetches ANOTHER domain's own published
+// signing key, the exact same cross-domain trust bootstrap
+// verifyCredential() in extension/wallet.js already performs client-side
+// (§5 step 1) — this is the first time this SERVER itself has ever needed
+// to make an outbound request to another domain, since until federation
+// existed, every cross-domain trust check in this protocol was a CLIENT's
+// job. Picks whichever published key is valid RIGHT NOW (a relay attestation
+// is checked at the moment it arrives, not against some earlier issuedAt the
+// way an asset credential's own verification is), rather than requiring the
+// caller to know which key era they're in.
+async function fetchDomainPublicKey(domain) {
+  const res = await fetch(baseUrl(domain) + '/.well-known/atlas-key.json', { cache: 'no-store' });
+  if (!res.ok) throw new Error('could not fetch ' + domain + '\'s published key (HTTP ' + res.status + ')');
+  const keyDoc = await res.json();
+  const now = Date.now();
+  const activeKey = (keyDoc.keys || []).find((k) => {
+    const from = new Date(k.validFrom).getTime();
+    const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+    return now >= from && now <= until;
+  });
+  if (!activeKey) throw new Error(domain + ' has no currently-valid published key');
+  return activeKey.publicKey;
+}
+
+// Task #97 (SPEC.md §11.4 step 3): verifies a relaying domain's own
+// attestation against a public key already fetched via fetchDomainPublicKey
+// above — the raw-ecdsa half of verifyEnvelope, but checked against an
+// externally-supplied domain key rather than a key pulled out of the
+// envelope itself (a client's own identity key is self-declared and only
+// meaningful once bound to something else that vouches for it; a domain's
+// published key is ALREADY the trust anchor, nothing further to bind it to).
+async function verifyDomainSignature(publicKeyB64url, payload, signatureB64url) {
+  try {
+    const pub = await subtle.importKey('raw', fromB64url(publicKeyB64url), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const data = new TextEncoder().encode(canonicalize(payload));
+    return await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, fromB64url(signatureB64url), data);
+  } catch (err) {
+    return false;
+  }
 }
 
 async function loadOrCreateKeypair() {
@@ -1574,6 +1655,38 @@ async function main() {
         if (!senderMembership) {
           return sendJson(res, 400, { error: 'you do not hold a Global Mail membership at this domain — join its Post Office before sending through it' });
         }
+
+        // Task #97 (SPEC.md §11.4, domain-to-domain federation): sender
+        // authentication and sender membership above are unchanged and were
+        // just checked first, exactly as for a local send — this preserves
+        // "not an open relay for anyone with a wallet" under federation too.
+        // If payload.to names a domain other than this one, this domain
+        // isn't the recipient's home — it becomes the RELAYING party instead
+        // of attempting local delivery, and everything below this branch
+        // (recipient membership, consent, `from`) becomes the HOME domain's
+        // job, run on its own copy of this same handler via /atlas/postoffice/relay.
+        if (payload.to.domain && payload.to.domain !== DOMAIN) {
+          const relayAttestation = { relayingDomain: DOMAIN, relayingDomainHandle: senderMembership.handle || null };
+          const relaySignature = await sign(relayAttestation);
+          let relayRes;
+          try {
+            relayRes = await fetch(baseUrl(payload.to.domain) + '/atlas/postoffice/relay', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ payload, proof, relayAttestation, relaySignature })
+            });
+          } catch (err) {
+            return sendJson(res, 502, { error: 'could not reach ' + payload.to.domain + ' to relay this message: ' + err.message });
+          }
+          const relayBody = await relayRes.json().catch(() => ({}));
+          if (!relayRes.ok) {
+            return sendJson(res, relayRes.status, { error: payload.to.domain + ' rejected this message: ' + (relayBody.error || 'unknown reason') });
+          }
+          recordPostOfficeSend(senderMembership.credentialId); // task #96 — relaying still counts as a send from THIS member, same abuse-detection log as a local send
+          console.log('Post Office relayed mail from', proof.publicKey.slice(0, 16) + '...', 'via', DOMAIN, '-> home domain', payload.to.domain, ':', payload.subject);
+          return sendJson(res, 200, relayBody);
+        }
+
         const membership = doc.members.find((m) => m.ownerPublicKey === payload.to.publicKey && !isRevoked(m.credentialId));
         if (!membership) {
           return sendJson(res, 400, { error: 'recipient does not hold a valid Global Mail membership at this domain — nothing was sent' });
@@ -1621,6 +1734,116 @@ async function main() {
         appendMail(message);
         recordPostOfficeSend(senderMembership.credentialId); // task #96 — abuse-detection log, see its own comment
         console.log('Post Office relayed mail from', proof.publicKey.slice(0, 16) + '...', '->', payload.to.publicKey.slice(0, 16) + '...', ':', payload.subject);
+        return sendJson(res, 200, message);
+      }
+
+      // Task #97 (SPEC.md §11.4) — the receiving half of domain-to-domain
+      // federation: another domain (the RELAYING domain, having already run
+      // /atlas/postoffice/send's own sender-auth + sender-membership checks
+      // on its own side) asks THIS domain (the recipient's HOME domain) to
+      // finish delivery to one of its own members. Four checks, in order,
+      // mirroring SPEC.md §11.4 exactly — each meaningless without the one
+      // before it, same discipline §11.3's own three-step order already
+      // follows:
+      //   1. Sender auth (verifyEnvelope) — re-run independently here, not
+      //      trusted secondhand from the relaying domain's own say-so.
+      //   2. Relaying-domain authentication (see below) — stands in for
+      //      §11.3 step 2 (sender membership), which this domain has no way
+      //      to check directly since the sender isn't ITS member.
+      //   3. Recipient membership + consent — identical to §11.3 step 3,
+      //      just keyed off the ORIGINAL sender's public key rather than
+      //      whoever happened to relay the message in.
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/relay') {
+        const { payload, proof, relayAttestation, relaySignature } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof || !relayAttestation || !relaySignature) {
+          return sendJson(res, 400, { error: 'payload, proof, relayAttestation, and relaySignature are required' });
+        }
+        if (!payload.to || !payload.to.publicKey || !payload.subject || !payload.body) {
+          return sendJson(res, 400, { error: 'payload.to.publicKey, payload.subject, and payload.body are required' });
+        }
+        if (!relayAttestation.relayingDomain) {
+          return sendJson(res, 400, { error: 'relayAttestation.relayingDomain is required' });
+        }
+        // Sanity check, defense in depth rather than a correctness
+        // requirement — a well-behaved relaying domain would never send us
+        // a message addressed elsewhere, but nothing stops a misbehaving one
+        // from trying.
+        if (payload.to.domain && payload.to.domain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'this message is not addressed to this domain' });
+        }
+
+        // Step 1 — sender authentication, independently re-verified here
+        // exactly as /atlas/postoffice/send does for a local sender; the
+        // relaying domain having already checked this once on its own side
+        // is not a substitute for this domain checking it too.
+        const senderOk = await verifyEnvelope(payload, proof);
+        if (!senderOk) return sendJson(res, 400, { error: 'sender signature does not check out' });
+
+        // Task #97's operator safety valve (see FEDERATION_BLOCKLIST_FILE's
+        // own comment): checked BEFORE spending a network round-trip
+        // fetching the relaying domain's key, since a blocked domain's
+        // attestation is never going to be accepted regardless of whether
+        // it's genuine.
+        if (isDomainBlocked(relayAttestation.relayingDomain)) {
+          return sendJson(res, 403, { error: 'this domain is not accepting relayed mail from ' + relayAttestation.relayingDomain });
+        }
+
+        // Step 2 — relaying-domain authentication (SPEC.md §11.4 step 3):
+        // fetch ITS published key and verify the attestation against it.
+        // This is what stands in for sender-membership when this domain has
+        // no way to check the sender's membership at the relaying domain
+        // directly — a relaying domain can sign its OWN attestation but
+        // cannot forge another domain's, the same asymmetry every other
+        // domain-key check in this protocol already relies on.
+        let relayingDomainKey;
+        try {
+          relayingDomainKey = await fetchDomainPublicKey(relayAttestation.relayingDomain);
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not verify ' + relayAttestation.relayingDomain + ': ' + err.message });
+        }
+        const attestationOk = await verifyDomainSignature(relayingDomainKey, relayAttestation, relaySignature);
+        if (!attestationOk) {
+          return sendJson(res, 400, { error: relayAttestation.relayingDomain + '\'s relay attestation does not check out' });
+        }
+
+        // Step 3 — recipient membership + consent, byte-for-byte the same
+        // check /atlas/postoffice/send runs for a local send, keyed off the
+        // ORIGINAL sender's public key (proof.publicKey) rather than the
+        // relaying domain's own identity — a trusted relaying domain vouching
+        // for its member does not bypass the recipient's own settings.
+        const doc = readPostOfficeMembers();
+        const membership = doc.members.find((m) => m.ownerPublicKey === payload.to.publicKey && !isRevoked(m.credentialId));
+        if (!membership) {
+          return sendJson(res, 400, { error: 'recipient does not hold a valid Global Mail membership at this domain — nothing was sent' });
+        }
+        const blockedSenders = membership.blockedSenders || [];
+        if (blockedSenders.includes(proof.publicKey)) {
+          return sendJson(res, 400, { error: 'recipient is not accepting mail from you right now' });
+        }
+        if (membership.mailMode === 'friendsOnly' && !(membership.friends || []).includes(proof.publicKey)) {
+          return sendJson(res, 400, { error: 'recipient is not accepting mail from you right now' });
+        }
+
+        // `from` gains `homeDomain` here — SPEC.md §11.4's one addition to
+        // §11.3's `from` shape — naming the RELAYING domain (which is where
+        // the sender actually holds membership and registered any handle),
+        // so the recipient's client can render the sender's real address
+        // (handle#relayingDomain) instead of misattributing it to whichever
+        // domain happened to deliver the message (this one).
+        const from = { publicKey: proof.publicKey, homeDomain: relayAttestation.relayingDomain };
+        if (relayAttestation.relayingDomainHandle) from.handle = relayAttestation.relayingDomainHandle;
+        const outPayload = {
+          id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
+          credentialId: membership.credentialId,
+          subject: payload.subject,
+          body: payload.body,
+          from,
+          sentAt: new Date().toISOString()
+        };
+        const signature = await sign(outPayload);
+        const message = { ...outPayload, signature };
+        appendMail(message);
+        console.log('Post Office relay accepted: from', proof.publicKey.slice(0, 16) + '...', 'via', relayAttestation.relayingDomain, '-> local member', payload.to.publicKey.slice(0, 16) + '...', ':', payload.subject);
         return sendJson(res, 200, message);
       }
 
