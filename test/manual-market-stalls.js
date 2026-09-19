@@ -155,8 +155,9 @@ async function projectInteractables(frame) {
 
     console.log('STEP 4: clicking the "Join Trading Station" desk on the Trading Post sign issues a real membership credential');
     if (!membershipDesk || membershipDesk.class !== 'atlas.tradingstation.membership') throw new Error('Expected the fourth interactable to be the membership desk, got: ' + JSON.stringify(membershipDesk));
-    // Status already reads "Collected 15 × atlas.element.silver." from
-    // STEP 3 — startsWith('Collected') alone would resolve instantly
+    // Status already reads "Collected 15 g of atlas.element.silver." from
+    // STEP 3 (task #206: quantities print as grams now) — startsWith
+    // ('Collected') alone would resolve instantly
     // against that stale text, so wait for it to actually change first.
     const statusBeforeMembership = await frame.locator('#status').textContent();
     await frame.locator('#scene').click({ position: { x: membershipDesk.sx, y: membershipDesk.sy } });

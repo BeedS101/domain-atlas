@@ -55,9 +55,12 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.locator('#requestItemBtn').click();
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
 
-    await frame.locator('#mintIronBtn').click();
+    // Task #211 removed the dev-only mine buttons — mint the exact same
+    // way they used to (AtlasWallet.mintAsset + the same
+    // refreshInventoryDisplay() the button handlers called) directly.
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, { timeout: 10000 });
-    await frame.locator('#mintGoldBtn').click();
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('counterparty', 'localhost:8001', 'atlas.element.gold', 10); await refreshInventoryDisplay(); });
     await frame.waitForFunction(() => document.querySelectorAll('#counterpartyCollectiblesList .wallet-item').length > 0, { timeout: 10000 });
     console.log('PASS: setup complete — item + iron balance (self), gold balance (counterparty), all under Collectibles');
 
@@ -75,7 +78,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.waitForFunction(() => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
       const itemCard = cards.find((c) => c.textContent.includes('Bronze Compass'));
-      const ironCard = cards.find((c) => c.textContent.includes('Iron Ingot'));
+      const ironCard = cards.find((c) => c.textContent.includes('Iron (Fe)'));
       return itemCard && !itemCard.hidden && ironCard && ironCard.hidden;
     }, { timeout: 5000 });
     console.log('PASS: matching search term keeps the item visible and hides the non-matching iron balance in the same list');
@@ -107,7 +110,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.locator('#collectiblesSearchInput').fill('iron');
     await frame.waitForFunction(() => {
       const selfCards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
-      const ironCard = selfCards.find((c) => c.textContent.includes('Iron Ingot'));
+      const ironCard = selfCards.find((c) => c.textContent.includes('Iron (Fe)'));
       const compassCard = selfCards.find((c) => c.textContent.includes('Bronze Compass'));
       const cpCards = document.querySelectorAll('#counterpartyCollectiblesList .wallet-item');
       return ironCard && !ironCard.hidden && compassCard && compassCard.hidden
@@ -135,8 +138,10 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('STEP 4: the search text survives a list refresh (minting more iron re-renders the list; the filter re-applies)');
     await frame.locator('#collectiblesSearchInput').fill('gold');
     await frame.waitForFunction(() => Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item')).every((c) => c.hidden), { timeout: 5000 });
-    await frame.locator('#mintIronBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mintIronBtn').disabled === false, { timeout: 10000 });
+    // Task #211 removed the dev-only mine buttons — mint the same way its
+    // handler used to (AtlasWallet.mintAsset then refreshInventoryDisplay()),
+    // which is exactly the "list re-renders" trigger this step is testing.
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
     const selfStillHidden = await frame.evaluate(() => Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item')).every((c) => c.hidden));
     if (!selfStillHidden) throw new Error('Expected the "gold" filter to still hide the self list (now with a larger iron balance) after a re-render');
     console.log('PASS: filter re-applied automatically after the list re-rendered from a fresh mint');
@@ -171,14 +176,14 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     }, { timeout: 5000 });
     console.log('PASS: clicking it again collapses the detail panel');
 
-    const resourceCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Iron Ingot' });
+    const resourceCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Iron (Fe)' });
     const resourcePropsLink = resourceCard.locator('.properties-link');
     const resourcePropsDetail = resourceCard.locator('.properties-detail');
     if (!(await resourcePropsDetail.isHidden())) throw new Error('Expected the resource balance\'s properties detail to start collapsed');
     await resourcePropsLink.click();
     await frame.waitForFunction(() => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
-      const card = cards.find((c) => c.textContent.includes('Iron Ingot'));
+      const card = cards.find((c) => c.textContent.includes('Iron (Fe)'));
       const detail = card && card.querySelector('.properties-detail');
       return detail && !detail.hidden && detail.textContent.includes('atlas.purity: 99.9%');
     }, { timeout: 5000 });
@@ -188,7 +193,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.locator('#collectiblesSearchInput').fill('99.9%');
     await frame.waitForFunction(() => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
-      const ironCard = cards.find((c) => c.textContent.includes('Iron Ingot'));
+      const ironCard = cards.find((c) => c.textContent.includes('Iron (Fe)'));
       return ironCard && !ironCard.hidden;
     }, { timeout: 5000 });
     await frame.locator('#collectiblesSearchInput').fill('');

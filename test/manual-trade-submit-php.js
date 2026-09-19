@@ -20,8 +20,13 @@
 // the UI.
 //
 // Covers:
-//   1. POST /atlas/asset/issue's "Unknown assetClass" error now lists
-//      atlas.tradingstation.membership (it didn't before this port).
+//   1. POST /atlas/asset/issue's "Unknown assetClass" error rejects an
+//      unknown class with a 400 (originally this checked that the error
+//      text specifically NAMED atlas.tradingstation.membership; task #204
+//      changed that message to point at GET /atlas/trade/catalog instead
+//      of enumerating every class, once the periodic-table expansion
+//      pushed the catalog past 125 entries — see the matching comment in
+//      issue.php — so this step now just checks the rejection itself).
 //   2. Issuing atlas.tradingstation.membership succeeds, is tradeScope:
 //      "bound", logs to the roster file, and queues a welcome mail
 //      message (mirroring atlas.postoffice.membership's existing
@@ -162,12 +167,12 @@ async function issueAsset(ownerPublicKey, assetClass, quantity) {
     const poster = await generateIdentity();
     const claimant = await generateIdentity();
 
-    console.log('STEP 1: POST /atlas/asset/issue with an unknown class now lists atlas.tradingstation.membership in its error');
+    console.log('STEP 1: POST /atlas/asset/issue rejects an unknown assetClass with a 400 (task #204: the error text itself no longer enumerates every known class by name)');
     const unknown = await post('/atlas/asset/issue', { ownerPublicKey: poster.publicKey, assetClass: 'atlas.nonexistent' });
-    if (unknown.status !== 400 || !unknown.body.error.includes('atlas.tradingstation.membership')) {
-      throw new Error('Expected the Unknown assetClass error to list atlas.tradingstation.membership, got: ' + JSON.stringify(unknown.body));
+    if (unknown.status !== 400 || !unknown.body.error || !unknown.body.error.includes('trade/catalog')) {
+      throw new Error('Expected a 400 pointing at GET /atlas/trade/catalog, got: ' + JSON.stringify(unknown.body));
     }
-    console.log('PASS: error now lists it ->', unknown.body.error);
+    console.log('PASS: rejected ->', unknown.body.error);
 
     console.log('STEP 2: issuing atlas.tradingstation.membership to poster succeeds, is tradeScope: bound, logs to the roster, and queues a welcome mail');
     const posterMembership = await issueAsset(poster.publicKey, 'atlas.tradingstation.membership');

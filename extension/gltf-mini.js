@@ -678,6 +678,20 @@
     let floorPrim = null;
     let portalTriggers = []; // [{position:[x,z], radius, portalIndex, ring}]
     let boundingBoxes = []; // [{min:[x,z], max:[x,z]}] for simple collision
+    // Task #208 — scene.json-declared "walk up and press E" nodes (loot
+    // crates today, a mining node's respawn timer tomorrow — see the
+    // frame()-loop comment on interactCooldownUntil for why the cooldown
+    // is generic rather than crate-specific). Same shape as the 2D
+    // renderer's interactableHitboxes/handleInteractable() in viewer.js —
+    // marker is the raw scene.json entry (label/action/class/quantity/
+    // oncePerUser), passed through untouched so both renderers share the
+    // exact same dispatch function instead of two parallel copies of the
+    // mint/issue logic.
+    let interactTriggers = []; // [{position:[x,z], radius, marker}]
+    let interactCooldownUntil = new Map(); // trigger index -> performance.now() ms it becomes interactable again
+    let lastInteractPromptLabel = null; // debug/test hook, see getInteractPrompt() below
+    let lastInteractPromptMarker = null; // task #213 — the same raw scene.json entry the label was derived from, or null; see getInteractPromptMarker() below
+    let lastNearbyInteractMarkers = []; // task #227 — every in-range, not-yet-owned marker (not just the nearest), nearest-first; see getNearbyInteractMarkers() below
 
     const camera = {
       pos: (sceneData.camera && sceneData.camera.start) ? sceneData.camera.start.slice() : [0, 1.6, 4],
@@ -754,6 +768,7 @@
     const keys = {};
     let dragging = false, lastX = 0, lastY = 0;
     let portalCooldown = new Set();
+    let wasInteractKeyDown = false; // edge-detect so holding E only fires once, not every frame
 
     // Held mouse buttons, tracked separately from the pointerdown/up drag
     // handling below — mousedown/mouseup (unlike pointerdown/up, which only
@@ -995,6 +1010,19 @@
         beacon.modelMatrix = placement;
         return { position: m.position, radius: m.radius || 1.2, portalIndex: m.portalIndex, ring, beacon };
       });
+
+      // No geometry of its own (unlike a portal's ring/beacon) — the crate
+      // or node's own model, placed as an ordinary scene object just above,
+      // is what's actually visible; this only tracks where to stand and
+      // what to run when E is pressed there. Re-derived fresh on every
+      // loadScene() the same as portalTriggers, so switching worlds can't
+      // leave a stale trigger armed from wherever was visited before.
+      interactTriggers = (sceneData.interactables || []).map((m) => ({
+        position: m.position,
+        radius: m.radius || 1.0,
+        marker: m
+      }));
+      interactCooldownUntil = new Map();
       portalCooldown = new Set();
     }
 
@@ -1126,6 +1154,71 @@
           portalCooldown.delete(idx);
         }
       });
+
+      // Interactable proximity + E-to-collect. Deliberately NOT auto-fired
+      // on proximity like the portal check just above — walking near a
+      // loot crate shouldn't loot it any more than walking near a door
+      // should always open it, so this only ever fires on an actual E
+      // keydown (edge-detected via wasInteractKeyDown so holding the key
+      // down doesn't repeat-fire every frame).
+      //
+      // Task #227 — collects EVERY in-range, not-yet-owned trigger into
+      // `nearby`, sorted nearest-first, instead of tracking only the
+      // single closest one: Bruno asked for the Previewer to show a list
+      // when the character is close to two or more items at once, and for
+      // E to keep working — collecting the nearest one at a time — even
+      // when several are in range together. `nearestInteract` (E's actual
+      // target, and what the "E — <label>" prompt names) is simply
+      // `nearby[0]`, so E always fires on the closest AVAILABLE one; once
+      // that one is collected, opts.isMarkerAlreadyOwned starts returning
+      // true for it and it drops out of `nearby` on the very next frame —
+      // the next-nearest naturally becomes nearby[0], which is exactly
+      // "press E multiple times to collect them one at a time" with no
+      // extra bookkeeping needed here.
+      //
+      // opts.isMarkerAlreadyOwned (viewer.js's isOncePerUserClassOwned) is
+      // optional and checked once per trigger per frame — a plain sync
+      // predicate, never a wallet read from inside this loop; a marker
+      // it flags is excluded here, upstream of both E's own target
+      // selection AND whatever the Previewer ends up showing, so "the
+      // previewer must ignore it" (Bruno's own words) and "E skips an
+      // already-owned crate" are the same one filter, not two.
+      const nearby = [];
+      interactTriggers.forEach((trigger, idx) => {
+        const dx = camera.pos[0] - trigger.position[0];
+        const dz = camera.pos[2] - trigger.position[2];
+        const dist = Math.hypot(dx, dz);
+        const cooldownUntil = interactCooldownUntil.get(idx) || 0;
+        if (dist < trigger.radius && t >= cooldownUntil && !(opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(trigger.marker))) {
+          nearby.push({ idx, marker: trigger.marker, dist });
+        }
+      });
+      nearby.sort((a, b) => a.dist - b.dist);
+      const nearestInteract = nearby.length ? nearby[0] : null;
+      lastInteractPromptLabel = nearestInteract ? (nearestInteract.marker.label || 'Interact') : null;
+      lastInteractPromptMarker = nearestInteract ? nearestInteract.marker : null;
+      lastNearbyInteractMarkers = nearby.map((n) => n.marker);
+      // Task #213/#227 — the nearest marker (still the "E — <label>"
+      // prompt's own target) travels alongside the label as before, plus
+      // now the FULL nearby list as a third argument — still backward
+      // compatible, since a caller reading only the first one or two
+      // arguments (there is none left in this codebase, but the shape is
+      // kept anyway) keeps working unchanged. viewer.js uses the full list
+      // to drive the Previewer's multi-item view.
+      if (opts.onInteractPrompt) opts.onInteractPrompt(lastInteractPromptLabel, lastInteractPromptMarker, lastNearbyInteractMarkers);
+      const interactKeyDown = !!keys['KeyE'];
+      if (interactKeyDown && !wasInteractKeyDown && nearestInteract && opts.onInteract) {
+        // A short cooldown applies regardless of what the action turns out
+        // to be — it debounces a mashed/held E key today, and is also the
+        // hook a future repeatable mining node's respawn timer would use
+        // (via a longer per-marker `cooldownMs`) without any renderer
+        // change; a one-time crate's real "can't reopen" enforcement is
+        // still the server-side oncePerUser check in handleInteractable(),
+        // this alone would never be enough to guarantee that on its own.
+        interactCooldownUntil.set(nearestInteract.idx, t + (nearestInteract.marker.cooldownMs || 1500));
+        opts.onInteract(nearestInteract.marker);
+      }
+      wasInteractKeyDown = interactKeyDown;
 
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -1317,6 +1410,30 @@
         const len = Math.hypot(x, z) || 1;
         return [x / len, z / len];
       },
+      // Debug/test hook, task #208 — the same string the on-screen "E —
+      // <label>" prompt is currently showing (or null when nothing's in
+      // range), computed fresh every frame in the proximity check above.
+      // Lets a test confirm the prompt appears/disappears at the right
+      // moment without reading canvas pixels, same convention as every
+      // other getter here. A test can teleport by writing directly to the
+      // already-exposed `camera.pos` array (no separate teleport hook
+      // needed) and then poll this to confirm the trigger radius worked.
+      getInteractPrompt: () => lastInteractPromptLabel,
+      // Task #213 — same debug/test-hook convention as getInteractPrompt()
+      // just above, one level less processed: the raw scene.json entry the
+      // current prompt label was derived from (or null), so a test can
+      // confirm which interactable's `class` a proximity-driven Asset
+      // Viewer preview should be showing without re-deriving it from the
+      // label string.
+      getInteractPromptMarker: () => lastInteractPromptMarker,
+      // Task #227 — same debug/test-hook convention as the two getters just
+      // above, one step wider: every marker currently in E-range (not just
+      // whichever one is nearest/would-be-collected-next), nearest-first,
+      // already filtered through opts.isMarkerAlreadyOwned. Lets a test
+      // confirm the Previewer's multi-item list matches the renderer's own
+      // idea of what's actually in range, without re-deriving proximity
+      // math the test has no access to.
+      getNearbyInteractMarkers: () => lastNearbyInteractMarkers,
       // ---------- presence (#66) ----------
       // viewer.js owns the actual WebSocket connection and join/move/left
       // message protocol against presence-server; this file only renders

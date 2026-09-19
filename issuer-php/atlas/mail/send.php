@@ -44,7 +44,9 @@ $attachedAsset = null;
 if ($giftAssetClass) {
   if (!$giftOwnerPublicKey) send_json(400, ['error' => 'giftOwnerPublicKey is required when giftAssetClass is set']);
   if (!isset(ATLAS_ASSET_CATALOG[$giftAssetClass])) {
-    send_json(400, ['error' => 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, atlas.element.gold, atlas.element.silver, or atlas.trophy.chess.']);
+    // Task #204: see the matching comment on issue.php's own "Unknown
+    // assetClass" message for why this stopped enumerating every class.
+    send_json(400, ['error' => 'Unknown giftAssetClass. See GET /atlas/trade/catalog for tradable classes, or ATLAS_ASSET_CATALOG_BASE in issuer-php/lib/store.php (plus issuer-php/lib/elements-catalog.php) for the full list.']);
   }
   $giftCatalogEntry = ATLAS_ASSET_CATALOG[$giftAssetClass];
   if ($giftCatalogEntry['fungible']) {

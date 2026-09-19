@@ -66,6 +66,19 @@ async function clickPortalTo(frame, targetWorld) {
   await frame.locator('#scene').click({ position: { x: p.sx, y: p.sy } });
 }
 
+// Task #211 moved every per-card action (Send half/Load/Simulate loss/
+// Drop/Hide) behind the card's own "⋯" menu, collapsed by default —
+// clicking an action button directly (what this file used to do) no
+// longer works since it starts out hidden. Opens the containing card's
+// menu first, waits for the popover to actually show, then clicks the
+// real action button inside it — same two-step a person would do by hand.
+async function clickCardMenuAction(actionLocator) {
+  const card = actionLocator.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " wallet-item ")][1]');
+  await card.locator('.card-menu-toggle').click();
+  await card.locator('.card-menu-items.show').waitFor({ state: 'visible', timeout: 3000 });
+  await actionLocator.click();
+}
+
 (async () => {
   const userDataDir = path.resolve(__dirname, '.chrome-profile-loadout');
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -124,13 +137,13 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('PASS: PvP warning shown for this world');
 
     console.log('STEP 2: loading the item into this world');
-    await frame.locator('#selfCollectiblesList [data-action="toggle-load"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList [data-action="toggle-load"]'));
     await frame.waitForFunction(() => !!document.querySelector('#selfCollectiblesList [data-action="lose"]'), { timeout: 5000 });
     console.log('PASS: item loaded, "Simulate PvP loss" now available');
     await page.screenshot({ path: shot('lt-02-loaded-in-arena.png') });
 
     console.log('STEP 3: simulating a PvP loss (real ECDSA-signed transfer to the counterparty key)');
-    await frame.locator('#selfCollectiblesList [data-action="lose"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList [data-action="lose"]'));
     await frame.waitForFunction(
       () => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0 &&
             document.querySelectorAll('#counterpartyCollectiblesList .wallet-item').length > 0,
@@ -153,25 +166,27 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('PASS: in the Trading Post');
 
     console.log('STEP 5: mining resources — 20 iron to self, 10 gold to counterparty');
-    // mintIronBtn/mintGoldBtn are the wallet panel's own always-available
-    // mint shortcuts (Inventory category), independent of the market
-    // scene's in-world stalls — mintGoldBtn deliberately still mints to
-    // 'counterparty' here (unchanged by v1.15's market-stall fix, which
-    // only touched the market scene's own "Mine Gold" interactable): this
-    // file, and test/manual-wallet-search.js, both rely on it to seed the
-    // counterparty's own list with a distinct fungible class.
-    await frame.locator('#mintIronBtn').click();
-    await frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron Ingot ×20'), { timeout: 15000 });
-    await frame.locator('#mintGoldBtn').click();
-    await frame.waitForFunction(() => document.getElementById('counterpartyCollectiblesList').textContent.includes('Gold Ingot ×10'), { timeout: 15000 });
+    // Task #211 removed the wallet panel's own always-available mint
+    // shortcuts (Inventory category's "Mine 20 iron (self)"/"Mine 10 gold
+    // (counterparty)" buttons) — this now mints the exact same way those
+    // handlers used to (AtlasWallet.mintAsset then refreshInventoryDisplay()),
+    // still deliberately minting the gold to 'counterparty' (unchanged by
+    // v1.15's market-stall fix, which only touched the market scene's own
+    // "Mine Gold" interactable): this file, and test/manual-wallet-search.js,
+    // both rely on this to seed the counterparty's own list with a distinct
+    // fungible class.
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
+    await frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×20 g'), { timeout: 15000 });
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('counterparty', 'localhost:8001', 'atlas.element.gold', 10); await refreshInventoryDisplay(); });
+    await frame.waitForFunction(() => document.getElementById('counterpartyCollectiblesList').textContent.includes('Gold (Au) ×10 g'), { timeout: 15000 });
     console.log('PASS: both real resource balances minted and verified');
     await page.screenshot({ path: shot('lt-04-resources-minted.png') });
 
     console.log('STEP 6: splitting — sending 10 of self\'s iron to the counterparty');
-    await frame.locator('#selfCollectiblesList [data-action="split"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList [data-action="split"]'));
     await frame.waitForFunction(
-      () => document.getElementById('selfCollectiblesList').textContent.includes('Iron Ingot ×10') &&
-            document.getElementById('counterpartyCollectiblesList').textContent.includes('Iron Ingot ×10'),
+      () => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×10 g') &&
+            document.getElementById('counterpartyCollectiblesList').textContent.includes('Iron (Fe) ×10 g'),
       { timeout: 15000 }
     );
     console.log('PASS: split settled — self kept the remainder, counterparty received a fresh balance, old one revoked');

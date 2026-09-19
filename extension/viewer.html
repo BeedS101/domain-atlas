@@ -56,6 +56,20 @@
     padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44; display: none;
   }
   #scene3dHint.active { display: block; }
+  /* Task #208 — "E — <label>" prompt for a scene.json interactable
+     (loot crate, mining node) within range in the 3D renderer. Sits just
+     above #scene3dHint's permanent control reminder rather than replacing
+     it, since both can be relevant at once (you can see how to move AND
+     that something's in reach right now); only ever shown while gltf-mini
+     actually reports something in range (see onInteractPrompt in
+     viewer.js), so an ordinary walk-through world with no interactables
+     never shows it at all. */
+  #scene3dInteractHint {
+    position: fixed; bottom: 52px; left: 50%; transform: translateX(-50%);
+    font-size: 13px; font-weight: 600; color: #e8f0f2; background: rgba(20,31,38,0.9);
+    padding: 7px 14px; border-radius: 999px; border: 1px solid #3a8f6f; display: none;
+  }
+  #scene3dInteractHint.active { display: block; }
 
   /* Task #137 — a poll/WS join that came back "pending" because this
      same identity is already active elsewhere in this room, waiting on
@@ -287,21 +301,28 @@
   .mail-card .mail-gift { font-size: 12px; margin-top: 6px; display: flex; align-items: center; gap: 8px; }
   .mail-card .mail-gift button { font-size: 11px; padding: 4px 10px; }
   .mail-card .mail-gift-claimed { color: #a9b8bf; }
-  /* Block sender's own menu — tucked behind a small "⋯" toggle instead of
-     sitting directly in .item-actions (see renderMailCard's own comment on
-     why: it used to, and was too easy to hit by accident right next to
-     Delete/Reply). .mail-card-menu-items only shows once .show is toggled
-     on it (delegated click handler in viewer.js), same show/hide-by-class
-     convention as .subscreen and .subtab-badge elsewhere in this file. */
-  .mail-card-menu { position: relative; flex: 0 0 auto !important; }
-  .mail-card-menu-toggle { padding: 6px 10px !important; font-size: 15px !important; line-height: 1; }
-  .mail-card-menu-items {
+  /* A card's "⋯" more-actions menu — originally just mail's Block
+     sender/Add to calendar/Add Contact trio, tucked behind a toggle
+     instead of sitting directly in .item-actions (see renderMailCard's
+     own comment on why: it used to, and was too easy to hit by accident
+     right next to Delete/Reply). Task #211 generalized this from
+     .mail-card-menu* to the plain .card-menu* names below so
+     renderAssetCard's per-card actions (Send half/Load/Simulate loss/
+     Drop/Hide) could reuse the exact same collapsed-menu pattern — same
+     markup shape, same closeAllCardMenus()/outside-click handling in
+     viewer.js, just used from two different card renderers now.
+     .card-menu-items only shows once .show is toggled on it (delegated
+     click handlers in viewer.js), same show/hide-by-class convention as
+     .subscreen and .subtab-badge elsewhere in this file. */
+  .card-menu { position: relative; flex: 0 0 auto !important; }
+  .card-menu-toggle { padding: 6px 10px !important; font-size: 15px !important; line-height: 1; }
+  .card-menu-items {
     display: none; position: absolute; right: 0; top: 100%; margin-top: 4px;
     background: #16232a; border: 1px solid #2c3c44; border-radius: 8px;
     padding: 6px; z-index: 5; min-width: 130px;
   }
-  .mail-card-menu-items.show { display: block; }
-  .mail-card-menu-items button { width: 100%; }
+  .card-menu-items.show { display: block; }
+  .card-menu-items button { width: 100%; }
 
   #walletPanel {
     display: none; position: fixed; top: 56px; right: 0; bottom: 0; width: 360px;
@@ -328,6 +349,13 @@
      the same. */
   .wallet-item, .info-card { border: 1px solid #2c3c44; border-radius: 8px; padding: 10px; }
   .wallet-item .name, .info-card .name { font-weight: 600; margin-bottom: 2px; }
+  /* Task #211: an asset card's .name line also carries its "⋯" actions
+     menu (see renderAssetCard's own comment) — laid out end-to-end on one
+     line so the whole per-card action row this used to need underneath
+     goes away, shrinking every card's height. Scoped to .wallet-item only
+     (never .info-card): renderAssetCard is the only renderer that ever
+     puts anything besides plain text inside a .name div. */
+  .wallet-item .name { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .wallet-item .meta, .info-card .meta { font-size: 11px; color: #a9b8bf; }
   .wallet-item .verdict, .info-card .verdict { font-size: 11px; margin-top: 6px; }
   .wallet-item .verdict.valid, .info-card .verdict.valid { color: #57a593; }
@@ -386,6 +414,30 @@
     border: 1px solid #2c3c44; border-radius: 6px; padding: 8px; margin-top: 4px; margin-bottom: 8px;
   }
   textarea { font-family: "SFMono-Regular", Consolas, monospace; resize: vertical; min-height: 44px; }
+  /* Task #205 — generic "type to filter" combobox enhancement for a plain
+     <select> (see makeSearchableSelect() in viewer.js), built for the Trade
+     screen's four class dropdowns now that #204's periodic-table expansion
+     means some of them list up to 118 options. The real <select> this
+     wraps stays in the DOM (hidden here) so every existing call site keeps
+     working unchanged; only the visible input + filtered list below are new. */
+  .searchable-select { position: relative; }
+  .searchable-select-native { display: none; }
+  .searchable-select-input {
+    width: 100%; box-sizing: border-box; font-family: inherit; font-size: 12px;
+    background: #141f26; color: #e7edef; border: 1px solid #2c3c44; border-radius: 6px;
+    padding: 8px; margin-top: 4px;
+  }
+  .searchable-select-input:disabled { color: #6b7d84; cursor: not-allowed; }
+  .searchable-select-input::placeholder { color: #7c8d94; }
+  .searchable-select.open .searchable-select-input { border-color: #4a90a4; }
+  .searchable-select-list {
+    position: absolute; top: 100%; left: 0; right: 0; z-index: 3; margin-top: 2px;
+    max-height: 220px; overflow-y: auto; background: #101a20; border: 1px solid #2c3c44;
+    border-radius: 6px; box-shadow: 0 6px 16px rgba(0,0,0,0.4);
+  }
+  .searchable-select-option { padding: 7px 9px; font-size: 12px; cursor: pointer; }
+  .searchable-select-option.highlighted, .searchable-select-option:hover { background: #1d2f38; }
+  .searchable-select-empty { padding: 7px 9px; font-size: 12px; color: #7c8d94; font-style: italic; }
   label.check-row { display: flex; align-items: flex-start; gap: 8px; font-size: 11px; color: #a9b8bf; margin: 8px 0; cursor: pointer; }
   #seedRevealBox { display: none; }
   #seedRevealBox.show { display: block; }
@@ -468,8 +520,8 @@
   }
 
   /* Chat username right-click menu (#116) — same "small floating popover,
-     shown/hidden by JS" idea as the mail-card-menu-items popover used for
-     mail's own "⋯" block-sender menu (reused here for the visual/
+     shown/hidden by JS" idea as the .card-menu-items popover used for
+     mail's and asset cards' own "⋯" menus (reused here for the visual/
      interaction language: dark card, thin border, full-width stacked
      buttons), just a standalone singleton positioned at the click point
      instead of anchored `position:absolute` under a toggle button —
@@ -674,6 +726,90 @@
   }
   #assetViewerSettingsPopover label { display: block; margin-bottom: 8px; }
   #assetViewerSettingsPopover input[type="range"] { width: 100%; margin-top: 4px; }
+
+  /* Previewer (task #227, Bruno's follow-up to the Asset Viewer's scene-
+     hover feature above) — a SEPARATE floating panel for anything
+     hoverable directly in a 2D/3D scene (a dropped item's own marker, or
+     a scene.json stall/crate, including ones never opened yet). The Asset
+     Viewer goes back to being wallet-card-hover only — see its own HTML
+     comment and viewer.js's renderAssetViewerContent() for why that split
+     exists; this panel is the "new interactable window for previewing
+     assets" Bruno asked for instead, and never shows a "Show model"
+     button (viewer.js's renderPreviewerContent() has no equivalent of
+     #assetViewerShowModelBtn at all).
+     Positioned differently from every other floating panel in this file:
+     not re-positioned by JS per hover (Asset Viewer), not free-drag
+     (#messagingWidget) — it DOCKS. Drag #previewerHeader and let go, it
+     snaps to whichever screen corner is nearest and stays there,
+     persisted via AtlasWallet.get/setPreviewerWindowSettings() (wallet.js)
+     as a named corner (see that function's own comment on why a name
+     survives a window resize better than a remembered pixel offset would).
+     The inline bottom/left below is just the pre-JS fallback matching that
+     settings object's own default ('bottom-left'), so the panel isn't
+     pinned at 0,0 for the one frame before applyPreviewerWindowSettings()
+     first runs. z-index 12, same layer as the Asset Viewer — the two are
+     never open over the same content at once (a wallet-card hover and a
+     scene hover can't both be true at the same instant), so there's
+     nothing to actually stack against here. */
+  #previewerWidget {
+    position: fixed; z-index: 12; bottom: 16px; left: 16px;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  #previewerPanel {
+    display: flex; flex-direction: column;
+    background: rgba(20,31,38,0.9); border: 1px solid #2c3c44; border-radius: 10px;
+    overflow: hidden; width: 240px; max-height: 320px;
+  }
+  #previewerHeader {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
+    padding: 4px 6px; border-bottom: 1px solid #2c3c44; background: rgba(14,22,27,0.6);
+    font-size: 11px; color: #a9b8bf; font-weight: 600; cursor: move;
+  }
+  #previewerBody {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 10px;
+    color: #d7e0e4; line-height: 1.45;
+  }
+  /* Single-item detail view — same visual shape as the Asset Viewer's own
+     name/meta/thumbnail/properties (deliberately separate classnames, not
+     shared with .asset-viewer-* above, so nothing here can ever be
+     affected by an Asset-Viewer-only CSS change made for Asset-Viewer-only
+     reasons, or vice versa — the same "own trio, not reused" convention
+     #messagingWidget's own CSS comment already follows relative to
+     #assetViewerWidget/#chatWidget). */
+  #previewerBody .name { font-weight: 600; margin-bottom: 2px; }
+  #previewerBody .meta { font-size: 11px; color: #a9b8bf; margin-bottom: 6px; }
+  .previewer-note {
+    font-size: 11px; color: #e8c766; margin-bottom: 6px;
+    padding: 3px 6px; border-radius: 4px; background: rgba(232, 199, 102, 0.12);
+    display: inline-block;
+  }
+  .previewer-thumbnail {
+    display: block; max-width: 100%; max-height: 100px; object-fit: contain;
+    margin-bottom: 8px; border-radius: 6px; background: rgba(0,0,0,0.2);
+  }
+  .previewer-properties { font-size: 11px; color: #d7e0e4; margin-top: 4px; }
+  .previewer-properties > div { margin-bottom: 2px; }
+  .previewer-collect-hint { font-size: 10px; color: #6f838c; margin-top: 8px; }
+  /* Multi-item list (task #227's own "close to 2+ items" requirement) —
+     deliberately more compact than the single-item view above (a small
+     thumbnail + name only, no properties) since this only ever appears
+     once there's more than one thing to fit in the same small panel.
+     Distinct classnames from #previewerBody .name/.meta above (rather than
+     reusing them inside each row) so this list's own per-row rules don't
+     have to out-specificity an ID selector to override them. */
+  .previewer-list-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px; border-radius: 6px;
+    cursor: pointer; margin-bottom: 2px;
+  }
+  .previewer-list-item:hover { background: #1c2930; }
+  .previewer-list-item-thumb {
+    flex: 0 0 auto; width: 28px; height: 28px; border-radius: 6px;
+    background: rgba(0,0,0,0.25); object-fit: contain;
+  }
+  .previewer-list-item-name {
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-size: 12px;
+  }
 
   /* Messaging window (task #111 first slice) — Bruno's own spec: "a
      separate messaging window (similar to the asset viewer window)... can
@@ -891,6 +1027,7 @@
   </div>
   <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain</div>
   <div id="scene3dHint">WASD to walk · drag to look · scroll to zoom out · walk into a glowing ring to take that portal · F11 for fullscreen</div>
+  <div id="scene3dInteractHint"></div>
 
   <!-- Task #137 — shown to a NEW joiner while requestJoin() on the
        presence server is holding their join as "pending" (this same
@@ -967,6 +1104,23 @@
       <label>Text size
         <input id="assetViewerTextSizeInput" type="range" min="10" max="20" step="1">
       </label>
+    </div>
+  </div>
+
+  <!-- Previewer (task #227) — see this file's own CSS comment on
+       #previewerWidget for the full design rationale (why it's a NEW,
+       docking panel rather than reusing the Asset Viewer above it, which
+       is wallet-card-hover only from here on). Hidden by default; opened/
+       closed and its content rendered entirely by viewer.js's own
+       openPreviewer()/closePreviewer()/renderPreviewerContent() — no
+       settings gear, no resize handle, no "Show model" button, unlike
+       every other floating panel in this file. -->
+  <div id="previewerWidget" hidden>
+    <div id="previewerPanel">
+      <div id="previewerHeader">
+        <span>Previewer</span>
+      </div>
+      <div id="previewerBody"></div>
     </div>
   </div>
 
@@ -1477,6 +1631,22 @@
         </div>
       </div>
 
+      <!-- Task #209 — whether gaining something in your own wallet (a
+           mint, a claimed trade, a gift, mail delivering a credential...)
+           plays a short chime. See AtlasWallet.getWalletSoundEnabled()/
+           viewer.js's refreshInventoryDisplay() for exactly what counts.
+           On by default; readable/settable even logged out, same as
+           Player character above, since neither is identity-owned data. -->
+      <div class="settings-category" data-category="sound">
+        <button type="button" class="settings-category-toggle"><span>Sound</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <label style="display:flex;align-items:center;gap:6px;">
+            <input id="walletSoundEnabledInput" type="checkbox" style="margin:0;">
+            Play a sound when your wallet gains something
+          </label>
+        </div>
+      </div>
+
       <div class="btn-col" style="margin-top:16px;">
         <button id="backFromSettingsBtn" type="button" class="btn-secondary">Back to wallet</button>
       </div>
@@ -1545,7 +1715,7 @@
            UI-routing hint with no backend meaning. Two sub-tabs split on
            that value 1:1: Collectibles (presentation: "collectible" —
            fungible and non-fungible together, e.g. a Bronze Compass
-           alongside stacks of Iron/Gold Ingots) and Documents
+           alongside stacks of Iron/Gold) and Documents
            (presentation: "document" — currently just atlas.membership).
            Reuses the exact sub-tab-bar pattern Social's Mail/Contacts/
            Favorites already established (.subtab-bar/.subscreen), not a
@@ -1567,14 +1737,11 @@
           <!-- Sub-screen: Collectibles — every asset with
                presentation: "collectible", fungible and non-fungible
                together in one list. A stackable (fungible) card shows its
-               quantity ("Iron Ingot ×47"); a unique (non-fungible) card
+               quantity ("Iron (Fe) ×47 g" — task #206: quantities are
+               counted in grams by convention); a unique (non-fungible) card
                shows none. -->
           <div id="collectiblesSubscreen" class="subscreen active">
-            <div class="btn-row">
-              <button id="mintIronBtn" type="button">Mine 20 iron (self)</button>
-              <button id="mintGoldBtn" type="button">Mine 10 gold (counterparty)</button>
-            </div>
-            <input type="text" id="collectiblesSearchInput" placeholder="Search collectibles…" style="margin-top:8px;">
+            <input type="text" id="collectiblesSearchInput" placeholder="Search collectibles…">
             <!-- Task #151 — filters the "Yours" list below (only) down to
                  assets whose class is in the CURRENT world's
                  policy.acceptedItemClasses AND whose issuer passes its
@@ -1642,6 +1809,7 @@
         <button id="tradingBuySubtabBtn" type="button" class="active-subtab">Buy</button>
         <button id="tradingSellSubtabBtn" type="button">Sell</button>
         <button id="tradingListingsSubtabBtn" type="button">Listings</button>
+        <button id="tradingConvertSubtabBtn" type="button">Convert</button>
       </div>
 
       <!-- Shared Trading Station picker (v1.14, SPEC.md §7) — Buy, Sell,
@@ -1693,23 +1861,32 @@
         <!-- "You offer" lists this wallet's own held fungible asset classes
              (refreshTradingSellOfferOptions in viewer.js) — you can only ever
              offer something you actually hold, so free text here just
-             invited typos. "You want" lists this demo's known fungible
-             classes (there are only three — iron, gold, and silver — see
-             viewer.js's own comment on why that list is static rather than
-             fetched). -->
+             invited typos. "You want" lists this domain's own tradable
+             fungible classes, fetched live from GET /atlas/trade/catalog
+             (Task #202, refreshTradingSellWantOptions in viewer.js) rather
+             than a hardcoded list — the placeholder option below is
+             replaced as soon as that fetch completes. Task #207: both
+             quantity inputs start at 0 (min="0", not "1" — 0 is a real,
+             valid in-between state here, only /atlas/trade's own submit
+             validation requires a positive integer) and keep each other in
+             sync — typing into either one auto-fills the other at this
+             domain's own declared exchangeRate for the two selected
+             classes (updateSellSuggestion in viewer.js), the same math
+             Convert's own live estimate uses. Purely a starting-point
+             suggestion, not enforced — nothing stops overwriting either
+             field afterward, same as Sell always could. -->
         <div class="subhead" style="margin-top:10px;">You offer</div>
         <select id="tradingSellOfferClassSelect">
           <option value="">No fungible assets to offer</option>
         </select>
-        <input type="number" id="tradingSellOfferQtyInput" placeholder="Quantity" min="1" value="10">
+        <input type="number" id="tradingSellOfferQtyInput" placeholder="Quantity (g)" min="0" value="0">
 
         <div class="subhead" style="margin-top:10px;">You want</div>
         <select id="tradingSellWantClassSelect">
-          <option value="atlas.element.iron">Iron Ingot (atlas.element.iron)</option>
-          <option value="atlas.element.gold">Gold Ingot (atlas.element.gold)</option>
-          <option value="atlas.element.silver">Silver Ingot (atlas.element.silver)</option>
+          <option value="">Loading tradable assets…</option>
         </select>
-        <input type="number" id="tradingSellWantQtyInput" placeholder="Quantity" min="1" value="5">
+        <input type="number" id="tradingSellWantQtyInput" placeholder="Quantity (g)" min="0" value="0">
+        <div class="empty-note" style="margin-top:4px;">Quantities auto-suggest each other using this domain's own conversion rate — overwrite either one freely.</div>
 
         <!-- Per-listing expiry, in hours (v1.15) — used to be a hardcoded
              10 MINUTES shared by every listing (see wallet.js's
@@ -1733,6 +1910,41 @@
         <div class="subhead">Listings you've posted, across every Trading Station.</div>
         <div id="tradingListingsList" class="item-list"></div>
         <div id="tradingListingsStatus" class="empty-note" style="margin-top:6px;"></div>
+      </div>
+
+      <!-- Sub-screen: Convert (Task #203, SPEC.md §7's "Currency
+           conversion") — swap part of a held fungible balance for a
+           DIFFERENT fungible class at the domain's own declared rate
+           (POST /atlas/convert), no counterparty or listing involved at
+           all. Uses the same station picker above as Buy/Sell/Listings —
+           conversion needs no Trading Station membership, but it's still
+           the same "which domain am I dealing with right now" control the
+           rest of this screen already has. "From" only ever lists classes
+           this wallet actually holds AT that domain (refreshConvertOptions
+           in viewer.js); "To" lists every OTHER class that same domain
+           accepts converting into, defaulting to whichever one the domain
+           flags as its base currency (gold, today) unless that's already
+           the class being spent. -->
+      <div id="tradingConvertSubscreen" class="subscreen">
+        <div class="subhead">Convert part of a balance you hold into a different element, at this domain's own exchange rate.</div>
+
+        <div class="subhead" style="margin-top:10px;">Convert from</div>
+        <select id="tradingConvertFromClassSelect">
+          <option value="">No convertible balance held</option>
+        </select>
+        <input type="number" id="tradingConvertSpendQtyInput" placeholder="Quantity (g)" min="1" value="10">
+
+        <div class="subhead" style="margin-top:10px;">Convert to</div>
+        <select id="tradingConvertToClassSelect">
+          <option value="">Loading tradable assets…</option>
+        </select>
+
+        <div id="tradingConvertEstimate" class="empty-note" style="margin-top:6px;"></div>
+
+        <div class="btn-row" style="margin-top:8px;">
+          <button id="tradingConvertSubmitBtn" type="button" class="btn-secondary">Convert</button>
+        </div>
+        <div id="tradingConvertStatus" class="empty-note" style="margin-top:6px;"></div>
       </div>
 
     </div>

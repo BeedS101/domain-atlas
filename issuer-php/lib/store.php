@@ -173,7 +173,7 @@ function atlas_serial_counters_file() {
 // properties (and the exact same fungible/presentation) by construction,
 // so merging quantities can never blend or drop a differing value.
 // Mirrors issuer-server/server.js's ASSET_CATALOG.
-const ATLAS_ASSET_CATALOG = [
+const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.wearable' => [
     'name' => 'Bronze Compass', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
     'fungible' => false, 'presentation' => 'collectible',
@@ -221,6 +221,31 @@ const ATLAS_ASSET_CATALOG = [
       'com.example.enchantments' => ['fire resistance', 'silent step', 'luck +2'],
     ],
   ],
+  // Task #208: two small collectibles for the lobby's new walk-up-and-
+  // open crates. Same one-per-wallet 'issue' + oncePerUser pattern as the
+  // plaza's Bronze Compass/Signet Ring above, kept as distinct classes so
+  // opening a lobby crate isn't just the plaza's own reward relabeled for
+  // someone who already has it. No new art — reuses the badge/compass
+  // models. Mirrors issuer-server/server.js's ASSET_CATALOG entries of
+  // the same name.
+  'atlas.trinket.pin' => [
+    'name' => 'Lobby Enamel Pin', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.issuedFor' => 'Opening the lobby crate',
+      'com.example.material' => 'enamel',
+    ],
+  ],
+  'atlas.trinket.charm' => [
+    'name' => 'Lucky Charm Keychain', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.rarity' => 'uncommon',
+      'com.example.issuedFor' => 'Opening the lobby crate',
+      'com.example.material' => 'pewter',
+    ],
+  ],
   // The "subscribe to this domain" credential for the mail system below:
   // requesting one of these is what a wallet's mail-check loop treats as
   // opting in to hearing from this domain (see atlas/mail/check.php) —
@@ -229,9 +254,14 @@ const ATLAS_ASSET_CATALOG = [
   // pointing at nonexistent assets. `presentation` is 'document' rather
   // than 'collectible' here — a membership card is administrative, not
   // something a client would show off on a shelf alongside a compass.
-  // Mirrors issuer-server/server.js's ASSET_CATALOG entry of the same name.
+  // 'name' carries a literal '{domain}' token (task #227), same as
+  // atlas.postoffice.membership's own entry below — expanded by
+  // atlas_asset_catalog_entry() at request time, so a visitor subscribing
+  // from example.com gets an "example.com Subscription Card", not a
+  // generic one. Mirrors issuer-server/server.js's ASSET_CATALOG entry of
+  // the same name.
   'atlas.membership' => [
-    'name' => 'Domain Atlas Membership Card', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'name' => '{domain} Subscription Card', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
     'fungible' => false, 'presentation' => 'document',
     // Task #160: user-bound — a relationship credential, not a tradeable
     // good. Blocked outright by check_presented_asset() below regardless
@@ -299,22 +329,73 @@ const ATLAS_ASSET_CATALOG = [
       'com.example.issuedFor' => 'remote trade settlement',
     ],
   ],
+  // Task #203: 'exchangeRate'/'isBaseCurrency'/'holdingCap' — mirrors
+  // issuer-server/server.js's ASSET_CATALOG comment on these same three
+  // fields verbatim; see there for the full reasoning. Short version:
+  // 'exchangeRate' is catalog-only config (never signed onto the
+  // credential, same category as 'maxSupply'/'serialized'), read as "units
+  // of this class per 1 unit of whichever class carries
+  // 'isBaseCurrency' => true" — every convertible class needs its own,
+  // including the base currency (always 1). 'isBaseCurrency' is a pure
+  // UI/display hint with no effect on the math itself. 'holdingCap' caps
+  // how much of a freely-mineable class atlas/asset/issue.php will mint to
+  // an owner who already holds that much or more (verified against
+  // presented current-holdings credentials, not trusted from the request).
   'atlas.element.iron' => [
-    'name' => 'Iron Ingot', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    // Task #206: renamed to match the "<Name> (<Symbol>)" convention every
+    // generated element already uses (see elements-catalog.php) — was
+    // "Iron Ingot" (a leftover from before #204 gave every OTHER element
+    // that same naming scheme).
+    'name' => 'Iron (Fe)', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
     'fungible' => true, 'presentation' => 'collectible',
-    'properties' => ['atlas.purity' => '99.9%', 'atlas.state' => 'solid', 'com.example.source' => 'Coastal Bazaar mine'],
+    'exchangeRate' => 20, // 20 iron == 1 gold
+    'holdingCap' => 500,
+    // Task #205: the same real-property set (symbol/atomicNumber/category/
+    // weight/density/conductivity) task #204 gave the other 115 elements,
+    // added here too — mirrors issuer-server/server.js's entry exactly.
+    'properties' => [
+      'atlas.symbol' => 'Fe', 'atlas.atomicNumber' => 26, 'atlas.category' => 'transition metal',
+      'atlas.state' => 'solid', 'atlas.weight' => ['value' => 55.845, 'unit' => 'g/mol'],
+      'atlas.density' => ['value' => 7.874, 'unit' => 'g/cm3'],
+      'atlas.thermalConductivity' => ['value' => 80.4, 'unit' => 'W/(m*K)'],
+      'atlas.electricalConductivity' => ['value' => 10.0, 'unit' => 'MS/m'],
+      'atlas.purity' => '99.9%', 'com.example.source' => 'Coastal Bazaar mine',
+    ],
   ],
   'atlas.element.gold' => [
-    'name' => 'Gold Ingot', 'modelPath' => '/assets/ring.glb', 'thumbnailPath' => '/assets/ring.png',
+    // Task #206: see the matching comment on atlas.element.iron above.
+    'name' => 'Gold (Au)', 'modelPath' => '/assets/ring.glb', 'thumbnailPath' => '/assets/ring.png',
     'fungible' => true, 'presentation' => 'collectible',
-    'properties' => ['atlas.purity' => '99.99%', 'atlas.state' => 'solid', 'com.example.form' => 'ingot'],
+    'isBaseCurrency' => true, // task #203 — this domain's chosen conversion anchor
+    'exchangeRate' => 1,
+    'holdingCap' => 500,
+    // Task #205: see the matching comment on atlas.element.iron above.
+    'properties' => [
+      'atlas.symbol' => 'Au', 'atlas.atomicNumber' => 79, 'atlas.category' => 'transition metal',
+      'atlas.state' => 'solid', 'atlas.weight' => ['value' => 196.97, 'unit' => 'g/mol'],
+      'atlas.density' => ['value' => 19.32, 'unit' => 'g/cm3'],
+      'atlas.thermalConductivity' => ['value' => 317, 'unit' => 'W/(m*K)'],
+      'atlas.electricalConductivity' => ['value' => 45.2, 'unit' => 'MS/m'],
+      'atlas.purity' => '99.99%', 'com.example.form' => 'ingot',
+    ],
   ],
   // Added alongside the market's new Mine Silver stall (v1.15) — mirrors
   // issuer-server/server.js's ASSET_CATALOG entry of the same name.
   'atlas.element.silver' => [
-    'name' => 'Silver Ingot', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    // Task #206: see the matching comment on atlas.element.iron above.
+    'name' => 'Silver (Ag)', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
     'fungible' => true, 'presentation' => 'collectible',
-    'properties' => ['atlas.purity' => '99.9%', 'atlas.state' => 'solid', 'com.example.source' => 'Coastal Bazaar mine'],
+    'exchangeRate' => 5, // 5 silver == 1 gold
+    'holdingCap' => 500,
+    // Task #205: see the matching comment on atlas.element.iron above.
+    'properties' => [
+      'atlas.symbol' => 'Ag', 'atlas.atomicNumber' => 47, 'atlas.category' => 'transition metal',
+      'atlas.state' => 'solid', 'atlas.weight' => ['value' => 107.87, 'unit' => 'g/mol'],
+      'atlas.density' => ['value' => 10.49, 'unit' => 'g/cm3'],
+      'atlas.thermalConductivity' => ['value' => 429, 'unit' => 'W/(m*K)'],
+      'atlas.electricalConductivity' => ['value' => 63.0, 'unit' => 'MS/m'],
+      'atlas.purity' => '99.9%', 'com.example.source' => 'Coastal Bazaar mine',
+    ],
   ],
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
@@ -336,6 +417,19 @@ const ATLAS_ASSET_CATALOG = [
   ],
 ];
 
+// Task #204 — the other 115 periodic-table elements (everything except
+// the hand-authored iron/gold/silver above), convert-only, no mining
+// stall. See issuer-php/lib/elements-catalog.php's own header comment for
+// the full rationale. ATLAS_ASSET_CATALOG_BASE stays a plain `const` (all
+// its entries are compile-time literals); the merged, request-agnostic
+// result below is what every other file in this codebase actually looks
+// up by the name ATLAS_ASSET_CATALOG, unchanged from before this task —
+// `define()` (not `const`) is used here because its value is computed at
+// include time, not a constant expression. Mirrors
+// issuer-server/server.js's `Object.assign(ASSET_CATALOG, require(...))`.
+require_once __DIR__ . '/elements-catalog.php';
+define('ATLAS_ASSET_CATALOG', array_merge(ATLAS_ASSET_CATALOG_BASE, atlas_elements_catalog()));
+
 // Builds the `asset` wrapper (name/class/model/thumbnail/fungible/
 // presentation/properties) for a class, resolving model/thumbnail paths
 // against the current request's domain. Returns null for an unknown
@@ -345,7 +439,7 @@ function atlas_asset_catalog_entry($assetClass) {
   if (!isset(ATLAS_ASSET_CATALOG[$assetClass])) return null;
   $entry = ATLAS_ASSET_CATALOG[$assetClass];
   // '{domain}' is a literal template token some catalog entries carry
-  // (currently just atlas.postoffice.membership) — expanded here at
+  // (atlas.membership and atlas.postoffice.membership) — expanded here at
   // request time, same "resolved against the current request's domain"
   // treatment modelPath/thumbnailPath already get just below. A name with
   // no such token round-trips unchanged.

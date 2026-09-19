@@ -46,7 +46,11 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
     await frame.locator('#requestItemBtn').click();
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
-    await frame.locator('#mintIronBtn').click();
+    // Task #211 removed the dev-only "Mine 20 iron (self)" Settings
+    // button — mints the exact same way it used to (AtlasWallet.mintAsset
+    // directly, then the same refreshInventoryDisplay() the button's own
+    // handler called), just from the test instead of a button click.
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, { timeout: 15000 });
     console.log('PASS: identity + 1 item + 1 resource balance ready');
 

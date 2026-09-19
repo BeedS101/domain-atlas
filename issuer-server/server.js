@@ -343,6 +343,39 @@ const ASSET_CATALOG = {
       'com.example.enchantments': ['fire resistance', 'silent step', 'luck +2']
     }
   },
+  // Task #208: two small collectibles for the lobby's new walk-up-and-
+  // open crates (see demo-domain-a/spatial/lobby/scene.json's
+  // interactables and gltf-mini.js's proximity-interact support). Same
+  // one-per-wallet 'issue' + oncePerUser pattern the plaza's Bronze
+  // Compass/Signet Ring already use above — deliberately distinct
+  // classes rather than reusing those two, so opening a lobby crate
+  // isn't just the plaza's own reward under a different label for
+  // someone who already has it. No new art: reuses the badge/compass
+  // models the same way iron/gold/silver already reuse badge/ring.
+  'atlas.trinket.pin': {
+    name: 'Lobby Enamel Pin',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    thumbnail: `https://${DOMAIN}/assets/badge.png`,
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.rarity': 'common',
+      'com.example.issuedFor': 'Opening the lobby crate',
+      'com.example.material': 'enamel'
+    }
+  },
+  'atlas.trinket.charm': {
+    name: 'Lucky Charm Keychain',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.rarity': 'uncommon',
+      'com.example.issuedFor': 'Opening the lobby crate',
+      'com.example.material': 'pewter'
+    }
+  },
   // The "subscribe to this domain" credential discussed for the mail
   // system below: requesting one of these is what a wallet's mail-check
   // loop treats as opting in to hearing from this domain (see
@@ -352,8 +385,13 @@ const ASSET_CATALOG = {
   // rather than pointing at nonexistent assets. `presentation: 'document'`
   // here rather than 'collectible' — a membership card is administrative,
   // not something a client would show off on a shelf alongside a compass.
+  // `name` carries the domain (task #227) the same way
+  // atlas.tradingstation.membership/atlas.postoffice.membership's names
+  // already do just below — so a visitor subscribing from example.com
+  // gets an "example.com Subscription Card", not a generic one that reads
+  // the same regardless of which domain actually issued it.
   'atlas.membership': {
-    name: 'Domain Atlas Membership Card',
+    name: `${DOMAIN} Subscription Card`,
     model: `https://${DOMAIN}/assets/badge.glb`,
     thumbnail: `https://${DOMAIN}/assets/badge.png`,
     fungible: false,
@@ -429,33 +467,103 @@ const ASSET_CATALOG = {
   // unique-item entries' model/thumbnail — badge for iron (a common,
   // everyday-icon feel), the signet ring for gold (already flagged
   // 'rare' above, a fitting look for the scarcer metal).
+  // Task #203: `exchangeRate` and `isBaseCurrency` — catalog-only config,
+  // never signed onto the credential itself, same category as `maxSupply`/
+  // `serialized` just above rather than a fourth peer to `fungible`/
+  // `presentation`/`tradeScope` (SPEC.md's three signed asset flags stay
+  // exactly three — a conversion rate isn't a fact about any individual
+  // credential, it's a live, domain-set knob POST /atlas/convert looks up
+  // fresh on every call, exactly the same "looked up fresh, never copied
+  // forward" discipline mintAssetByClass already gives fungible/
+  // presentation/properties). `exchangeRate` reads as "how many units of
+  // THIS class equal 1 unit of whichever class on this domain carries
+  // `isBaseCurrency: true`" — every convertible class needs its own
+  // `exchangeRate` including the base currency itself (always 1, so
+  // POST /atlas/convert never needs to special-case "is this the base
+  // currency" beyond the UI's own default-selection hint). A class with no
+  // `exchangeRate` at all is simply not eligible for conversion (checked
+  // the same way GET /atlas/trade/catalog already excludes non-fungible/
+  // bound classes). Exactly one class per domain should carry
+  // `isBaseCurrency: true` — it's a pure UI/display hint (which side of
+  // Convert starts pre-selected) with zero effect on the actual math,
+  // which is symmetric between any two rated classes regardless of which
+  // one is "the" currency — so a domain can pick a different base
+  // currency than gold just by moving the flag, no protocol change needed.
+  // `holdingCap` (task #203) is the companion piece: since every one of
+  // these three classes is also freely mineable via the market's stalls
+  // (no real scarcity — see the comment on POST /atlas/asset/issue's own
+  // cap check), a fixed conversion rate alone would make the domain a
+  // risk-free arbitrage machine (mine unlimited gold, convert at a fixed
+  // rate, no real cost). The cap doesn't fix that by itself, but it does
+  // mean mining eventually stops being the answer and Convert/Trade
+  // actually has to get used once a wallet is sitting at the ceiling.
   'atlas.element.iron': {
-    name: 'Iron Ingot',
+    // Task #206: renamed to match the "<Name> (<Symbol>)" convention every
+    // generated element already uses (see elements-catalog.js) — was
+    // "Iron Ingot" (a leftover from before #204 gave every OTHER element
+    // that same naming scheme).
+    name: 'Iron (Fe)',
     model: `https://${DOMAIN}/assets/badge.glb`,
     thumbnail: `https://${DOMAIN}/assets/badge.png`,
     fungible: true,
     presentation: 'collectible',
-    properties: { 'atlas.purity': '99.9%', 'atlas.state': 'solid', 'com.example.source': 'Coastal Bazaar mine' }
+    exchangeRate: 20, // 20 iron == 1 gold — most common of the three, so the most units per gold
+    holdingCap: 500,
+    // Task #205: the same real-property set (symbol/atomicNumber/category/
+    // weight/density/conductivity) task #204 gave the other 115 elements,
+    // added here too — reference values, same source/confidence level as
+    // elements-catalog.js's own (see that file's header comment).
+    properties: {
+      'atlas.symbol': 'Fe', 'atlas.atomicNumber': 26, 'atlas.category': 'transition metal',
+      'atlas.state': 'solid', 'atlas.weight': { value: 55.845, unit: 'g/mol' },
+      'atlas.density': { value: 7.874, unit: 'g/cm3' },
+      'atlas.thermalConductivity': { value: 80.4, unit: 'W/(m*K)' },
+      'atlas.electricalConductivity': { value: 10.0, unit: 'MS/m' },
+      'atlas.purity': '99.9%', 'com.example.source': 'Coastal Bazaar mine'
+    }
   },
   'atlas.element.gold': {
-    name: 'Gold Ingot',
+    // Task #206: see the matching comment on atlas.element.iron above.
+    name: 'Gold (Au)',
     model: `https://${DOMAIN}/assets/ring.glb`,
     thumbnail: `https://${DOMAIN}/assets/ring.png`,
     fungible: true,
     presentation: 'collectible',
-    properties: { 'atlas.purity': '99.99%', 'atlas.state': 'solid', 'com.example.form': 'ingot' }
+    isBaseCurrency: true, // task #203 — this domain's chosen conversion anchor; see the comment above
+    exchangeRate: 1,
+    holdingCap: 500,
+    // Task #205: see the matching comment on atlas.element.iron above.
+    properties: {
+      'atlas.symbol': 'Au', 'atlas.atomicNumber': 79, 'atlas.category': 'transition metal',
+      'atlas.state': 'solid', 'atlas.weight': { value: 196.97, unit: 'g/mol' },
+      'atlas.density': { value: 19.32, unit: 'g/cm3' },
+      'atlas.thermalConductivity': { value: 317, unit: 'W/(m*K)' },
+      'atlas.electricalConductivity': { value: 45.2, unit: 'MS/m' },
+      'atlas.purity': '99.99%', 'com.example.form': 'ingot'
+    }
   },
   // Added alongside the market's new Mine Silver stall (v1.15) — same
   // reused-art convention as iron/gold above, badge.glb/png again since a
   // mid-tier metal reads closer to iron's "common, everyday-icon" feel than
   // gold's already-rare signet ring.
   'atlas.element.silver': {
-    name: 'Silver Ingot',
+    // Task #206: see the matching comment on atlas.element.iron above.
+    name: 'Silver (Ag)',
     model: `https://${DOMAIN}/assets/badge.glb`,
     thumbnail: `https://${DOMAIN}/assets/badge.png`,
     fungible: true,
     presentation: 'collectible',
-    properties: { 'atlas.purity': '99.9%', 'atlas.state': 'solid', 'com.example.source': 'Coastal Bazaar mine' }
+    exchangeRate: 5, // 5 silver == 1 gold — mid-tier, between iron and gold
+    holdingCap: 500,
+    // Task #205: see the matching comment on atlas.element.iron above.
+    properties: {
+      'atlas.symbol': 'Ag', 'atlas.atomicNumber': 47, 'atlas.category': 'transition metal',
+      'atlas.state': 'solid', 'atlas.weight': { value: 107.87, unit: 'g/mol' },
+      'atlas.density': { value: 10.49, unit: 'g/cm3' },
+      'atlas.thermalConductivity': { value: 429, unit: 'W/(m*K)' },
+      'atlas.electricalConductivity': { value: 63.0, unit: 'MS/m' },
+      'atlas.purity': '99.9%', 'com.example.source': 'Coastal Bazaar mine'
+    }
   },
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
@@ -479,6 +587,15 @@ const ASSET_CATALOG = {
     }
   }
 };
+
+// Task #204 — the other 115 periodic-table elements (everything except
+// the hand-authored iron/gold/silver above), convert-only, no mining
+// stall. See issuer-server/elements-catalog.js's own header comment for
+// the full rationale; keep this merge as the ONE place that file's
+// entries enter ASSET_CATALOG, so GET /atlas/trade/catalog, /atlas/convert,
+// and /atlas/asset/issue's holdingCap check all see them automatically
+// with no per-endpoint changes needed.
+Object.assign(ASSET_CATALOG, require('./elements-catalog')(DOMAIN));
 
 const MIME = {
   '.html': 'text/html', '.js': 'application/javascript', '.json': 'application/json',
@@ -1089,6 +1206,32 @@ async function main() {
     return null;
   }
 
+  // Task #203: sums an owner's VERIFIED current holdings of one class, off
+  // whatever balance credentials the wallet chose to present alongside a
+  // mint request — used only by the `holdingCap` check in POST
+  // /atlas/asset/issue below. Deliberately forgiving of anything that
+  // fails validation (wrong owner, wrong class, already revoked, bad
+  // signature) rather than rejecting the whole mint over it: an unverified
+  // presented credential just doesn't count towards the total, the same
+  // "only what checks out counts" posture as everywhere else, and a wallet
+  // presenting nothing at all is trusted as genuinely holding zero — there
+  // is no credential a fresh wallet with none yet COULD present to prove a
+  // negative, so treating "nothing presented" as "0 held" is the only
+  // reading that doesn't lock a brand-new wallet out of ever mining a
+  // capped class at all. A wallet that owns some and simply doesn't
+  // mention it is undercounted, never overcounted — this cap is a
+  // cooperative-client convenience for the reference wallet, not an
+  // adversarial-abuse defense (nothing here protects value that could be
+  // taken from someone ELSE, only how much a wallet can mint for itself).
+  async function currentHeldQuantity(ownerPublicKey, cls, presentedBalances) {
+    let total = 0;
+    for (const cred of (Array.isArray(presentedBalances) ? presentedBalances : [])) {
+      const problem = await checkPresentedAsset(cred, ownerPublicKey, cls, 1);
+      if (!problem) total += cred.quantity;
+    }
+    return total;
+  }
+
   const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
@@ -1102,11 +1245,19 @@ async function main() {
     try {
       // --- §5 asset credentials ---
       if (req.method === 'POST' && req.url === '/atlas/asset/issue') {
-        const { ownerPublicKey, assetClass, quantity } = JSON.parse((await readBody(req)) || '{}');
+        const { ownerPublicKey, assetClass, quantity, existingBalances } = JSON.parse((await readBody(req)) || '{}');
         if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
-          return sendJson(res, 400, { error: 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.tradingstation.membership, atlas.element.iron, atlas.element.gold, atlas.element.silver, or atlas.trophy.chess.' });
+          // Task #204: this list used to enumerate every known class by
+          // name, which was fine at ~10 classes but stopped being useful
+          // once the periodic-table expansion pushed the catalog past 125
+          // — pointing at the actual catalog is more useful than a wall of
+          // names anyway. GET /atlas/trade/catalog only lists the
+          // tradable subset (fungible, non-bound), not every class (e.g.
+          // atlas.membership is intentionally excluded there), so this
+          // also names ASSET_CATALOG directly for the full picture.
+          return sendJson(res, 400, { error: 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ASSET_CATALOG in issuer-server/server.js (plus issuer-server/elements-catalog.js) for the full list.' });
         }
 
         // fungible: true — quantity is caller-chosen and must be a positive
@@ -1125,6 +1276,29 @@ async function main() {
             return sendJson(res, 400, { error: 'quantity must be 1 (or omitted) for a non-fungible assetClass' });
           }
           mintQuantity = 1;
+        }
+
+        // Task #203: a fresh mint of a class carrying `holdingCap`
+        // (ASSET_CATALOG — today, every one of the three freely-mineable
+        // fungible elements) is refused once the requesting owner already
+        // holds that much or more, verified against whatever balance
+        // credentials the wallet presents alongside the request
+        // (currentHeldQuantity above), not merely trusted from the
+        // request. This applies uniformly to every path that reaches this
+        // one shared endpoint — a market mining stall AND a chess-win gold
+        // reward alike — since the point is capping how much of a class
+        // can be freely CREATED, not gating one specific UI button. It
+        // does NOT apply to mintAssetByClass's other call sites
+        // (split/consolidate/convert/trade re-mints all pass a non-null
+        // `supersedes`) — receiving a large balance through a legitimate
+        // transfer of EXISTING value was never the thing worth capping.
+        if (catalogEntry.fungible && typeof catalogEntry.holdingCap === 'number') {
+          const currentHeld = await currentHeldQuantity(ownerPublicKey, assetClass, existingBalances);
+          if (currentHeld >= catalogEntry.holdingCap) {
+            return sendJson(res, 400, {
+              error: `already holding ${currentHeld} ${catalogEntry.name} (cap: ${catalogEntry.holdingCap}) — convert some to another element (POST /atlas/convert) or spend it before mining more`
+            });
+          }
         }
 
         // A first minting — never a reissue — so supersedes is always null here.
@@ -1300,6 +1474,115 @@ async function main() {
         return sendJson(res, 200, merged);
       }
 
+      // Task #203 (SPEC.md §7's new "Currency conversion" paragraph) —
+      // convert one presented fungible balance into another fungible class,
+      // via each class's own `exchangeRate` (ASSET_CATALOG, catalog-only
+      // config — see that comment for the full reasoning). Deliberately
+      // shaped like /atlas/asset/split just above rather than anything in
+      // the trading-station section below: there's no counterparty, no
+      // listing, no async delivery — the domain itself is always the other
+      // side, so this settles synchronously in one call the same way a
+      // split does, just minting a DIFFERENT class as the result instead of
+      // more of the same one. `toPublicKey` is never a parameter here —
+      // conversion always stays with the same owner who presented the
+      // balance, unlike split's optional gift-to-someone-else shape.
+      //
+      // The rate always routes through the shared base-currency unit
+      // regardless of which two classes are named (SOURCE/goldRate ->
+      // gold-equivalent -> TARGET/goldRate), so any two rated classes
+      // convert directly — iron -> silver works exactly the same way
+      // gold -> silver does, not just base-currency pairs.
+      if (req.method === 'POST' && req.url === '/atlas/convert') {
+        const { credential, spendAmount, toClass } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !toClass || !Number.isInteger(spendAmount) || spendAmount <= 0) {
+          return sendJson(res, 400, { error: 'credential, spendAmount, and toClass are required' });
+        }
+        const expectedOwner = credential.owner && credential.owner.publicKey;
+        const fromClass = credential.asset && credential.asset.class;
+        const problem = await checkPresentedAsset(credential, expectedOwner, fromClass, spendAmount);
+        if (problem) return sendJson(res, 400, { error: problem });
+
+        if (toClass === fromClass) return sendJson(res, 400, { error: 'cannot convert a class into itself' });
+        const toEntry = ASSET_CATALOG[toClass];
+        if (!toEntry || toEntry.fungible !== true || (toEntry.tradeScope || 'local') === 'bound') {
+          return sendJson(res, 400, { error: 'toClass must be a known, fungible, non-bound assetClass' });
+        }
+        const fromRate = ASSET_CATALOG[fromClass].exchangeRate;
+        const toRate = toEntry.exchangeRate;
+        if (typeof fromRate !== 'number' || typeof toRate !== 'number') {
+          return sendJson(res, 400, { error: 'one or both classes are not eligible for conversion (no exchangeRate set)' });
+        }
+
+        // valueInBaseCurrency = how many units of the domain's base
+        // currency spendAmount of fromClass is worth; resultQuantity =
+        // that same value expressed in toClass units. Floors rather than
+        // rejects a non-exact rate — same "round down, don't fail" choice
+        // as any other integer-quantity math in this protocol — but a
+        // spend too small to produce even 1 unit of toClass is rejected
+        // outright rather than silently minting nothing.
+        const valueInBaseCurrency = spendAmount / fromRate;
+        const resultQuantity = Math.floor(valueInBaseCurrency * toRate);
+        if (resultQuantity < 1) {
+          return sendJson(res, 400, {
+            error: `converting ${spendAmount} ${fromClass} into ${toClass} at this domain's rate rounds down to 0 — convert a larger amount`
+          });
+        }
+
+        const remainderQty = credential.quantity - spendAmount;
+        const [received, remainder] = await Promise.all([
+          mintAssetByClass(expectedOwner, toClass, resultQuantity, credential.id),
+          remainderQty > 0 ? mintAssetByClass(expectedOwner, fromClass, remainderQty, credential.id) : Promise.resolve(null)
+        ]);
+        revoke(credential.id, 'superseded');
+        console.log('Converted', spendAmount, fromClass, '->', resultQuantity, toClass, 'for', expectedOwner.slice(0, 16) + '...');
+        return sendJson(res, 200, { received, remainder });
+      }
+
+      // Task #213 — asset-class lookup, for previewing a class the caller
+      // does not (yet) hold a credential of at all: a scene's hoverable
+      // stall/crate (demo-domain-a/spatial/lobby/scene.json's
+      // `interactables`, keyed by `class`) names a class but carries none
+      // of ASSET_CATALOG's own name/thumbnail/model/properties — those only
+      // travel today inside an actual minted credential. GET
+      // /atlas/trade/catalog already establishes that an issuer may
+      // voluntarily publish more about its OWN classes than SPEC.md §5.1's
+      // "no central catalog" floor requires (a class is a namespace, not an
+      // approval-gated registry — see that endpoint's own comment above)
+      // — but it's deliberately narrow: fungible-only, tradeScope-filtered,
+      // no model/properties at all, since all it ever had to answer was
+      // "what can I ask this Trading Station for". This endpoint answers a
+      // different question — "what IS this class, whether or not I can
+      // trade for it, whether or not I've ever held one" — so it covers
+      // every class in the catalog (fungible or not, any tradeScope) and
+      // returns the full display shape: model and properties included, the
+      // same fields mintAssetByClass signs onto a real credential's `asset`
+      // (asset.serial/asset.editionSize aside — those are per-INSTANCE, not
+      // per-class, so a pre-mint preview has nothing to show there).
+      //
+      // Ungated, same "read is open" reasoning as /atlas/trade/catalog and
+      // /atlas/trade/listings: nothing here is secret — anyone who walks up
+      // to the lobby crate and opens it would see all of this anyway, on
+      // their own freshly-minted credential, one action later. Query-string
+      // shaped (?class=...) rather than a path segment, matching this
+      // codebase's existing convention of putting every parameter in a
+      // JSON body or a query string, never in the URL path itself.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/asset/class') {
+        const cls = new URLSearchParams(req.url.split('?')[1] || '').get('class');
+        if (!cls) return sendJson(res, 400, { error: 'class query parameter is required' });
+        const entry = ASSET_CATALOG[cls];
+        if (!entry) return sendJson(res, 404, { error: 'unknown assetClass' });
+        return sendJson(res, 200, {
+          class: cls,
+          name: entry.name,
+          thumbnail: entry.thumbnail || null,
+          model: entry.model || null,
+          fungible: entry.fungible,
+          presentation: entry.presentation,
+          tradeScope: entry.tradeScope || 'local',
+          ...(entry.properties && Object.keys(entry.properties).length ? { properties: entry.properties } : {})
+        });
+      }
+
       // --- §7 trading stations (this server plays the station role — see file header) ---
       // Fungible-only, per SPEC.md §7: offer/want only ever name a class
       // and a quantity, which is exactly what a fungible balance is and
@@ -1369,6 +1652,54 @@ async function main() {
           expiresAt: t.intent.payload.expiresAt
         }));
         return sendJson(res, 200, { listings });
+      }
+
+      // Task #202 (SPEC.md §7) — catalog discovery: what CAN a wallet ask
+      // this domain's Trading Station for in the "You want" side of a trade,
+      // without already having one in hand? Before this, the wallet's Sell
+      // UI hardcoded the three fungible classes this specific demo happens
+      // to define (see viewer.js's refreshTradingSellOfferOptions comment) —
+      // fine for one domain, but useless for any other domain running this
+      // same code with its own catalog. Deliberately ungated, same "read is
+      // open" reasoning as /atlas/trade/listings just above: a catalog entry
+      // is already public the moment /atlas/asset/issue exists to hand it
+      // out, so listing the classes reveals nothing new.
+      //
+      // Filtered to fungible===true (the only kind a quantity-based trade
+      // intent's offer/want shape supports today — see SPEC.md §5.4) and
+      // tradeScope!=='bound' (a membership card can never be the THING
+      // traded, same exclusion checkPresentedAsset already enforces at claim
+      // time — see its own tradeScope==='bound' check below). Defaults
+      // tradeScope the same way mintAssetByClass does (`|| 'local'`) so an
+      // entry that never bothered to set the flag is treated the same at
+      // discovery time as it is at mint time.
+      //
+      // This same shape is designed to extend to a FOREIGN domain's catalog
+      // later (fetched live while composing a trade, per the wallet UX idea
+      // discussed for cross-domain trading) — see the private design notes
+      // for what changes and what doesn't when that day comes.
+      if (req.method === 'GET' && req.url === '/atlas/trade/catalog') {
+        const classes = Object.keys(ASSET_CATALOG)
+          .filter((cls) => {
+            const entry = ASSET_CATALOG[cls];
+            return entry.fungible === true && (entry.tradeScope || 'local') !== 'bound';
+          })
+          .map((cls) => ({
+            class: cls,
+            name: ASSET_CATALOG[cls].name,
+            thumbnail: ASSET_CATALOG[cls].thumbnail || null,
+            tradeScope: ASSET_CATALOG[cls].tradeScope || 'local',
+            // Task #203 — surfaced here (rather than a separate rates
+            // endpoint) so the same fetch that already drives the Sell
+            // tab's "You want" dropdown also drives Convert's live rate
+            // preview. `exchangeRate` is only present when the class is
+            // actually eligible for conversion (see POST /atlas/convert);
+            // `isBaseCurrency` is a display hint only, never checked by
+            // the conversion math itself.
+            ...(typeof ASSET_CATALOG[cls].exchangeRate === 'number' ? { exchangeRate: ASSET_CATALOG[cls].exchangeRate } : {}),
+            ...(ASSET_CATALOG[cls].isBaseCurrency ? { isBaseCurrency: true } : {})
+          }));
+        return sendJson(res, 200, { domain: DOMAIN, classes });
       }
 
       // v1.14 (SPEC.md §7) — fulfill one specific open listing by id.
@@ -1521,7 +1852,10 @@ async function main() {
           if (!giftOwnerPublicKey) return sendJson(res, 400, { error: 'giftOwnerPublicKey is required when giftAssetClass is set' });
           const catalogEntry = ASSET_CATALOG[giftAssetClass];
           if (!catalogEntry) {
-            return sendJson(res, 400, { error: 'Unknown giftAssetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.element.iron, atlas.element.gold, atlas.element.silver, or atlas.trophy.chess.' });
+            // Task #204: see the matching comment on /atlas/asset/issue's
+            // own "Unknown assetClass" message above for why this stopped
+            // enumerating every class by name.
+            return sendJson(res, 400, { error: 'Unknown giftAssetClass. See GET /atlas/trade/catalog for tradable classes, or ASSET_CATALOG in issuer-server/server.js (plus issuer-server/elements-catalog.js) for the full list.' });
           }
           // Same fungible/quantity validation as /atlas/asset/issue above.
           let mintQuantity;

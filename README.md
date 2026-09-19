@@ -754,8 +754,8 @@ simplifications are worth naming plainly rather than leaving implicit:
   `id`; the wallet auto-adopts the replacement and shows an unseen-count
   badge on the Wallet tab, see `AtlasWallet.processAssetUpdates`),
   `/atlas/asset/split` and `/atlas/asset/consolidate` (§5.4/§5.4.1),
-  the `/atlas/trade/*` family — submit, listings, claim, cancel (§7),
-  `/atlas/revoke`, `/atlas/mail/send` and
+  the `/atlas/trade/*` family — submit, listings, claim, cancel, catalog
+  (§7), `/atlas/convert` (§7's currency conversion), `/atlas/revoke`, `/atlas/mail/send` and
   `/atlas/mail/check` (§11.1), and the `/atlas/postoffice/*` family
   (§8 above, SPEC.md §11.3) — have no auth by design (beyond Post Office's
   own self-signed-envelope checks on its self-service endpoints), so the

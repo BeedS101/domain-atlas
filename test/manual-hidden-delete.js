@@ -11,6 +11,21 @@ const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
+// Task #211 moved a .wallet-item asset card's per-card actions (including
+// Hide) behind that card's own "⋯" menu, collapsed by default — clicking
+// Hide directly (what this file used to do) no longer works since it
+// starts out hidden. Opens the containing card's menu first, waits for
+// the popover to actually show, then clicks the real action button
+// inside it. Not needed for #hiddenAssetsList's own Unhide/Delete
+// buttons below — that list is .info-card, not .wallet-item, and keeps
+// its always-visible action row unchanged.
+async function clickCardMenuAction(actionLocator) {
+  const card = actionLocator.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " wallet-item ")][1]');
+  await card.locator('.card-menu-toggle').click();
+  await card.locator('.card-menu-items.show').waitFor({ state: 'visible', timeout: 3000 });
+  await actionLocator.click();
+}
+
 (async () => {
   const userDataDir = path.resolve(__dirname, '.chrome-profile-hidden-delete');
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -47,7 +62,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('PASS: confirmed — main item card has no Delete button');
 
     console.log('STEP 2: hide the item, then find Delete sitting next to Unhide in Settings -> Hidden assets');
-    await frame.locator('#selfCollectiblesList button[data-action="hide"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList button[data-action="hide"]'));
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
     await frame.locator('#settingsTabBtn').click();
     await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });

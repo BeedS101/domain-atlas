@@ -11,6 +11,22 @@ const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
+// Task #211 moved a .wallet-item asset card's per-card actions (Send
+// half/Load/Simulate loss/Drop/Hide) behind that card's own "⋯" menu,
+// collapsed by default — clicking "Drop here" directly (what this file
+// used to do) no longer works since it starts out hidden. Opens the
+// containing card's menu first, waits for the popover to actually show,
+// then clicks the real action button inside it, same two-step a person
+// would do by hand. Not needed for #droppedItemsList's own "Pick up"
+// button below — that list is .info-card, not .wallet-item, and keeps
+// its always-visible action row unchanged.
+async function clickCardMenuAction(actionLocator) {
+  const card = actionLocator.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " wallet-item ")][1]');
+  await card.locator('.card-menu-toggle').click();
+  await card.locator('.card-menu-items.show').waitFor({ state: 'visible', timeout: 3000 });
+  await actionLocator.click();
+}
+
 // Mirrors verify-wallet.js's projectPortals helper: waits for the scene's
 // item markers to exist, then projects each one's 3D position to the same
 // 2D canvas pixel coordinates viewer.js's own project() would draw it at
@@ -77,7 +93,7 @@ async function projectItemMarkers(frame) {
     console.log('PASS: identity + one item (Bronze Compass) ready');
 
     console.log('STEP 1: pressing Escape right after "Drop here" cancels the placement — the item never leaves the wallet');
-    await frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
     await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
     await frame.locator('body').press('Escape');
     await frame.waitForFunction(() => document.getElementById('status').textContent === 'Drop cancelled.', { timeout: 5000 });
@@ -88,7 +104,7 @@ async function projectItemMarkers(frame) {
     console.log('PASS: Escape backed out of placement, nothing dropped');
 
     console.log('STEP 2: "Drop here" then clicking the scene places the item there — it leaves the normal list and appears under "Dropped in this world"');
-    await frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
     await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
     // A drop-in-progress claims the very next canvas click no matter where
     // it lands, so any on-canvas point works here.
@@ -115,7 +131,7 @@ async function projectItemMarkers(frame) {
     console.log('PASS: clicking the in-scene marker picked the item back up, marker and "Dropped" section both gone');
 
     console.log('STEP 4: drop again, this time pick it up via the wallet-panel "Pick up" button instead of the scene');
-    await frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
     await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
     await frame.locator('#scene').click({ position: { x: 260, y: 180 } });
     await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });

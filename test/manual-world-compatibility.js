@@ -18,8 +18,10 @@
 // - plaza: acceptedItemClasses ["atlas.wearable","atlas.badge","atlas.wearable.ring"],
 //   trustedIssuers "any" — the Bronze Compass (atlas.wearable, via
 //   #requestItemBtn) is compatible; mined iron (atlas.element.iron, via
-//   #mintIronBtn) is NOT (wrong class) — exactly the two catalog items
-//   the existing #44/#150 tests already mint, no new catalog entries needed.
+//   AtlasWallet.mintAsset() — task #211 removed the dev-only mine buttons
+//   this used to click, see STEP 0's setup below) is NOT (wrong class) —
+//   exactly the two catalog items the existing #44/#150 tests already
+//   mint, no new catalog entries needed.
 // - museum: itemDropsAllowed false, acceptedItemClasses [] — portal
 //   tooltip must NOT show an "accepts drops" bit for it.
 // - market: profile.genre "trading-station" — portal tooltip must show
@@ -82,7 +84,10 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     await frame.locator('#requestItemBtn').click();
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
-    await frame.locator('#mintIronBtn').click();
+    // Task #211 removed the dev-only "Mine 20 iron (self)" Settings button
+    // — mints the same way its handler used to (AtlasWallet.mintAsset then
+    // the same refreshInventoryDisplay() call).
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item, #selfCollectiblesList .resource-group-header').length >= 2, { timeout: 15000 });
     console.log('PASS: wallet holds both a Bronze Compass and mined iron');
 

@@ -18,9 +18,13 @@ try {
 $ownerPublicKey = $body['ownerPublicKey'] ?? null;
 $assetClass = $body['assetClass'] ?? null;
 $quantity = $body['quantity'] ?? null;
+$existingBalances = $body['existingBalances'] ?? null;
 if (!$ownerPublicKey) send_json(400, ['error' => 'ownerPublicKey is required']);
 if (!isset(ATLAS_ASSET_CATALOG[$assetClass])) {
-  send_json(400, ['error' => 'Unknown assetClass. Try atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.membership, atlas.postoffice.membership, atlas.tradingstation.membership, atlas.element.iron, atlas.element.gold, atlas.element.silver, or atlas.trophy.chess.']);
+  // Task #204: this used to enumerate every known class by name, which
+  // stopped being useful once the periodic-table expansion pushed the
+  // catalog past 125 classes — pointing at the catalog itself instead.
+  send_json(400, ['error' => 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ATLAS_ASSET_CATALOG_BASE in issuer-php/lib/store.php (plus issuer-php/lib/elements-catalog.php) for the full list.']);
 }
 
 // fungible: true — quantity is caller-chosen and must be a positive
@@ -39,6 +43,20 @@ if ($catalogEntry['fungible']) {
     send_json(400, ['error' => 'quantity must be 1 (or omitted) for a non-fungible assetClass']);
   }
   $mintQuantity = 1;
+}
+
+// Task #203: mirrors issuer-server/server.js's same check in its
+// /atlas/asset/issue handler verbatim — see that comment for the full
+// reasoning. Applies uniformly to every path through this one shared
+// endpoint (a market mining stall or a chess-win gold reward alike), and
+// only to a genuinely fresh mint here — split/consolidate/convert/trade
+// re-mints all call mint_asset_by_class() directly with a non-null
+// $supersedes, never through this file.
+if ($catalogEntry['fungible'] && isset($catalogEntry['holdingCap'])) {
+  $currentHeld = current_held_quantity($kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $existingBalances);
+  if ($currentHeld >= $catalogEntry['holdingCap']) {
+    send_json(400, ['error' => 'already holding ' . $currentHeld . ' ' . $catalogEntry['name'] . ' (cap: ' . $catalogEntry['holdingCap'] . ') — convert some to another element (POST /atlas/convert) or spend it before mining more']);
+  }
 }
 
 // A first minting — never a reissue — so supersedes is always null here.

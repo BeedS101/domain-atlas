@@ -426,3 +426,19 @@ function check_presented_membership($publicKeyB64url, $credential, $expectedOwne
   if (!$ok) return 'membership signature does not check out';
   return null;
 }
+
+// Task #203: sums an owner's VERIFIED current holdings of one class, off
+// whatever balance credentials the wallet chose to present alongside a
+// mint request — used only by the 'holdingCap' check in
+// atlas/asset/issue.php. Mirrors issuer-server/server.js's
+// currentHeldQuantity() exactly, including its "nothing presented is
+// trusted as 0 held" reasoning — see that function's own comment for the
+// full explanation.
+function current_held_quantity($publicKeyB64url, $ownerPublicKey, $cls, $presentedBalances) {
+  $total = 0;
+  foreach ((is_array($presentedBalances) ? $presentedBalances : []) as $cred) {
+    $problem = check_presented_asset($publicKeyB64url, $cred, $ownerPublicKey, $cls, 1);
+    if ($problem === null) $total += $cred['quantity'];
+  }
+  return $total;
+}

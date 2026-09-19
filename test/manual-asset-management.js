@@ -11,6 +11,22 @@ const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
+// Task #211 moved every per-card action (Send half/Load/Simulate loss/
+// Drop/Hide) on a .wallet-item asset card behind that card's own "⋯"
+// menu, collapsed by default — clicking an action button directly (what
+// this file used to do for "hide") no longer works since it starts out
+// hidden. Opens the containing card's menu first, waits for the popover
+// to actually show, then clicks the real action button inside it — same
+// two-step a person would do by hand. Not needed for #hiddenAssetsList's
+// own "unhide" buttons — those live on .info-card, not .wallet-item, and
+// keep their always-visible action row unchanged.
+async function clickCardMenuAction(actionLocator) {
+  const card = actionLocator.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " wallet-item ")][1]');
+  await card.locator('.card-menu-toggle').click();
+  await card.locator('.card-menu-items.show').waitFor({ state: 'visible', timeout: 3000 });
+  await actionLocator.click();
+}
+
 (async () => {
   const userDataDir = path.resolve(__dirname, '.chrome-profile-asset-mgmt');
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -58,7 +74,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('PASS: back from Settings returns to the main wallet screen');
 
     console.log('STEP 2: hiding the item — no confirm dialog (reversible), disappears from the main view but shows up in Settings');
-    await frame.locator('#selfCollectiblesList button[data-action="hide"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList button[data-action="hide"]'));
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
     console.log('PASS: item removed from the main wallet view after hiding');
 
@@ -80,24 +96,21 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('PASS: unhiding brought the item back to the main view, still verifying fine');
 
     console.log('STEP 2b: hiding it again, so STEP 3 starts from the same empty-list baseline as before');
-    await frame.locator('#selfCollectiblesList button[data-action="hide"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList button[data-action="hide"]'));
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
 
     console.log('STEP 3: minting iron twice — should auto-consolidate into ONE balance, no manual click needed');
-    // mintIronBtn is disabled (and re-labeled "Mining…") for the duration of each mint,
-    // including the awaited autoConsolidateAssetWallet() call inside mintAsset() —
-    // so waiting for the button to re-enable is the reliable signal that a given mint
-    // (and any merge it triggered) has fully landed in the DOM before the next click.
-    await frame.locator('#mintIronBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mintIronBtn').disabled === true, { timeout: 5000 }).catch(() => {});
-    await frame.waitForFunction(() => document.getElementById('mintIronBtn').disabled === false, { timeout: 15000 });
+    // Task #211 removed the dev-only "Mine 20 iron (self)" Settings button
+    // — mints the same way its handler used to: AtlasWallet.mintAsset()
+    // (which itself awaits autoConsolidateAssetWallet() internally), then
+    // the same refreshInventoryDisplay() call, awaited here in the test
+    // instead of inferred from a button's disabled state.
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, { timeout: 15000 });
-    await frame.locator('#mintIronBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mintIronBtn').disabled === true, { timeout: 5000 }).catch(() => {});
-    await frame.waitForFunction(() => document.getElementById('mintIronBtn').disabled === false, { timeout: 15000 });
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 15000 });
     const mergedName = await frame.locator('#selfCollectiblesList .wallet-item .name').textContent();
-    if (!mergedName.includes('Iron Ingot ×40')) throw new Error('Expected a single 40-iron balance after auto-consolidating, got: ' + mergedName);
+    if (!mergedName.includes('Iron (Fe) ×40 g')) throw new Error('Expected a single 40-iron balance after auto-consolidating, got: ' + mergedName);
     const mergedMeta = await frame.locator('#selfCollectiblesList .wallet-item .meta').textContent();
     if (!mergedMeta.includes('consolidated from 2 balances')) throw new Error('Expected the merged balance to note it was consolidated from 2, got: ' + mergedMeta);
     const mergedVerdict = await frame.locator('#selfCollectiblesList .wallet-item .verdict').textContent();
@@ -107,17 +120,15 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     console.log('PASS: two 20-iron mints auto-merged into one real, issuer-signed 40-iron balance, no button click ->', mergedName.trim(), '/', mergedMeta.trim());
 
     console.log('STEP 4: minting a third time — should auto-merge into the existing balance again (40 -> 60)');
-    await frame.locator('#mintIronBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mintIronBtn').disabled === true, { timeout: 5000 }).catch(() => {});
-    await frame.waitForFunction(() => document.getElementById('mintIronBtn').disabled === false, { timeout: 15000 });
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
     await frame.waitForFunction(() => {
       const name = document.querySelector('#selfCollectiblesList .wallet-item .name');
-      return document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1 && name && name.textContent.includes('Iron Ingot ×60');
+      return document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1 && name && name.textContent.includes('Iron (Fe) ×60 g');
     }, { timeout: 15000 });
-    console.log('PASS: a third mint merged straight into the running total -> Iron Ingot ×60');
+    console.log('PASS: a third mint merged straight into the running total -> Iron (Fe) ×60 g');
 
     console.log('STEP 5: hiding the merged resource balance too — no confirm dialog (reversible), disappears from the main view but shows up in Settings, same as items in STEP 2');
-    await frame.locator('#selfCollectiblesList button[data-action="hide"]').click();
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList button[data-action="hide"]'));
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
     console.log('PASS: resource balance removed from the main wallet view after hiding');
 
@@ -135,21 +146,21 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="hidden-assets"]').classList.contains('open'), { timeout: 5000 });
     // Two entries here, not one: the Bronze Compass has stayed hidden ever
     // since STEP 2b re-hid it (it's never unhidden again after that), and
-    // now the Iron Ingot balance joins it — proving the unified list really
+    // now the Iron (Fe) balance joins it — proving the unified list really
     // does hold both a non-fungible item and a fungible balance together.
     await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 2, { timeout: 5000 });
     const hiddenListText = await frame.locator('#hiddenAssetsList').textContent();
-    if (!hiddenListText.includes('Bronze Compass') || !hiddenListText.includes('Iron Ingot')) {
+    if (!hiddenListText.includes('Bronze Compass') || !hiddenListText.includes('Iron (Fe)')) {
       throw new Error('Expected both the hidden item and the hidden resource balance listed together: ' + hiddenListText);
     }
     console.log('PASS: hidden item and hidden resource balance both listed together under Settings -> Hidden assets');
 
-    // Unhide only the Iron Ingot card — the Bronze Compass card must stay put.
-    await frame.locator('#hiddenAssetsList .info-card', { hasText: 'Iron Ingot' }).locator('button[data-action="unhide"]').click();
+    // Unhide only the Iron (Fe) card — the Bronze Compass card must stay put.
+    await frame.locator('#hiddenAssetsList .info-card', { hasText: 'Iron (Fe)' }).locator('button[data-action="unhide"]').click();
     await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 1, { timeout: 5000 });
     const stillHiddenText = await frame.locator('#hiddenAssetsList').textContent();
     if (!stillHiddenText.includes('Bronze Compass')) throw new Error('Bronze Compass should still be hidden: ' + stillHiddenText);
-    if (stillHiddenText.includes('Iron Ingot')) throw new Error('Iron Ingot should no longer be in the hidden list: ' + stillHiddenText);
+    if (stillHiddenText.includes('Iron (Fe)')) throw new Error('Iron (Fe) should no longer be in the hidden list: ' + stillHiddenText);
     await frame.locator('#backFromSettingsBtn').click();
     await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });

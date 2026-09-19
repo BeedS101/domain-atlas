@@ -169,7 +169,7 @@ async function claimPostOfficeMembership(frame, label) {
 
     console.log('STEP 4: opening the "⋯" menu shows Add Contact alongside Add to calendar/Block sender');
     await mailCard.locator('button[data-action="toggle-mail-menu"]').click();
-    const menuItems = mailCard.locator('.mail-card-menu-items');
+    const menuItems = mailCard.locator('.card-menu-items');
     await menuItems.waitFor({ state: 'visible', timeout: 2000 });
     const addContactBtn = menuItems.locator('button[data-action="add-contact-from-mail"]');
     if ((await addContactBtn.count()) !== 1) throw new Error('Expected exactly one Add Contact button in the open menu');
@@ -189,7 +189,7 @@ async function claimPostOfficeMembership(frame, label) {
     const cardTextAfter = await mailCardAfter.textContent();
     if (!cardTextAfter.includes('(friend)')) throw new Error('Expected the From line to now read as a friend: ' + cardTextAfter);
     await mailCardAfter.locator('button[data-action="toggle-mail-menu"]').click();
-    const menuItemsAfter = mailCardAfter.locator('.mail-card-menu-items');
+    const menuItemsAfter = mailCardAfter.locator('.card-menu-items');
     await menuItemsAfter.waitFor({ state: 'visible', timeout: 2000 });
     if ((await menuItemsAfter.locator('button[data-action="add-contact-from-mail"]').count()) !== 0) throw new Error('Add Contact button should have disappeared once the sender is already a saved contact');
     if ((await menuItemsAfter.locator('button[data-action="block-sender"]').count()) !== 1) throw new Error('Block sender should still be present after adding the contact');

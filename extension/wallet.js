@@ -829,19 +829,63 @@ const AtlasWallet = (() => {
   // and local bookkeeping, not a second copy of that rule.
   async function mintAsset(role, issuerDomain, assetClass, quantity) {
     const owner = await identityOf(role);
+    const wallet = await getWallet(owner.publicKey);
+    // Task #203 — attached for EVERY fungible mint (cheap, and the server
+    // decides whether it actually needs to look at it), so a class the
+    // issuer later gives a `holdingCap` doesn't need this wallet build
+    // updated again to start cooperating with it. Scoped to credentials
+    // this SAME issuer domain actually signed — anything else would just
+    // fail verification server-side and be silently ignored anyway (see
+    // /atlas/asset/issue's own currentHeldQuantity), so there's no reason
+    // to send it. A non-fungible mint never carries this — holdingCap is
+    // only ever meaningful for a quantity-based class.
+    const existingBalances = quantity !== undefined
+      ? wallet.filter((e) => e.credential.asset.class === assetClass && e.credential.issuer.domain === issuerDomain).map((e) => e.credential)
+      : undefined;
     const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/issue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ownerPublicKey: owner.publicKey, assetClass, ...(quantity !== undefined ? { quantity } : {}) })
+      body: JSON.stringify({
+        ownerPublicKey: owner.publicKey, assetClass,
+        ...(quantity !== undefined ? { quantity } : {}),
+        ...(existingBalances && existingBalances.length ? { existingBalances } : {})
+      })
     });
     if (!res.ok) throw new Error('Mint failed: ' + (await res.text()));
     const credential = await res.json();
     const verdict = await verifyCredential(credential);
-    const wallet = await getWallet(owner.publicKey);
     wallet.push({ credential, lastVerdict: verdict });
     await saveWallet(owner.publicKey, wallet);
     await autoConsolidateAssetWallet(owner.publicKey);
     return { credential, verdict };
+  }
+
+  // Task #203 (SPEC.md §7's "Currency conversion") — converts part or all
+  // of a held fungible balance into a DIFFERENT fungible class at the
+  // issuing domain's own declared rate (POST /atlas/convert). Mirrors
+  // splitAsset()'s own shape below almost exactly — present the balance,
+  // name how much to spend, get a result back — except the class changes
+  // instead of the owner, so there's no toPublicKey here. Always
+  // self-directed (SPEC.md §7's conversion paragraph: the domain itself is
+  // always the other side, so there's no counterparty to name), and
+  // settles synchronously — the caller gets `received`/`remainder`
+  // directly in the response, same as a claimant's own side of a trade
+  // settlement, with no mail round-trip needed for either.
+  async function convertAsset(role, credential, spendAmount, toClass) {
+    const owner = await identityOf(role);
+    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/convert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential, spendAmount, toClass })
+    });
+    if (!res.ok) throw new Error('Convert failed: ' + (await res.text()));
+    const result = await res.json();
+    let wallet = (await getWallet(owner.publicKey)).filter((e) => e.credential.id !== credential.id);
+    if (result.remainder) wallet.push({ credential: result.remainder, lastVerdict: await verifyCredential(result.remainder) });
+    wallet.push({ credential: result.received, lastVerdict: await verifyCredential(result.received) });
+    await saveWallet(owner.publicKey, wallet);
+    await autoConsolidateAssetWallet(owner.publicKey);
+    return result;
   }
 
   // The signed payload shape (SPEC.md §5): canonicalize({id, asset, owner,
@@ -1231,6 +1275,58 @@ const AtlasWallet = (() => {
     if (!res.ok) throw new Error('Fetching listings failed: ' + (await res.text()));
     const { listings } = await res.json();
     return listings;
+  }
+
+  // Task #202 (SPEC.md §7) — catalog discovery: this domain's own tradable
+  // fungible classes, for populating the Sell tab's "You want" dropdown
+  // live instead of a hardcoded list (see viewer.js's
+  // refreshTradingSellOfferOptions comment on why that list was static
+  // until now). Read-only, ungated, same shape as fetchTradeListings just
+  // above — nothing here is "this wallet's own," it's every visitor's view
+  // of what the domain is willing to mint.
+  async function fetchTradableClasses(issuerDomain) {
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/catalog');
+    if (!res.ok) throw new Error('Fetching tradable classes failed: ' + (await res.text()));
+    const { classes } = await res.json();
+    return classes;
+  }
+
+  // Task #213 (SPEC.md §5.1.2 "Class discovery") — look up ANY class this
+  // domain defines, whether or not this wallet has ever held one: the
+  // server-side lookup a hover preview needs for a scene's still-unopened
+  // crate or stall, whose scene.json interactable/itemMarker only ever
+  // carries the bare `class` string, never a display name/model/
+  // properties. Unlike fetchTradableClasses just above, this covers every
+  // class the issuer defines — fungible or not, any tradeScope — because a
+  // class doesn't need to be tradable, or fungible, to be worth previewing
+  // before it's held (see the endpoint's own SPEC.md comment for why this
+  // is a separate read rather than folded into the trading catalog).
+  //
+  // Memoized per (domain, class) for the lifetime of this page: a class
+  // definition is effectively static once minted, and a hover handler
+  // firing on every mousemove would otherwise refetch the same class
+  // dozens of times a second. Resolves to `null` for a class this domain
+  // doesn't define (the endpoint's 404) — also cached, so hovering a
+  // broken/typo'd scene.json entry repeatedly doesn't keep hammering the
+  // issuer for an answer that will never change. A real fetch failure
+  // (network error, 5xx) is deliberately NOT cached — evicted as soon as
+  // it happens — so the next hover gets a fresh attempt instead of
+  // permanently repeating whatever transient error just occurred. Not
+  // persisted to chrome.storage: this is a same-page-session convenience,
+  // not wallet state, and losing it on reload/navigation is fine.
+  const assetClassInfoCache = new Map(); // 'domain\u0000class' -> Promise<info|null>
+  async function fetchAssetClassInfo(issuerDomain, cls) {
+    const key = issuerDomain + '\u0000' + cls;
+    if (assetClassInfoCache.has(key)) return assetClassInfoCache.get(key);
+    const promise = (async () => {
+      const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/class?class=' + encodeURIComponent(cls));
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error('Fetching asset class info failed: ' + (await res.text()));
+      return res.json();
+    })();
+    assetClassInfoCache.set(key, promise);
+    promise.catch(() => assetClassInfoCache.delete(key));
+    return promise;
   }
 
   // v1.14 (SPEC.md §7) — fulfill one specific open listing. Builds this
@@ -2074,6 +2170,25 @@ const AtlasWallet = (() => {
     return clamped;
   }
 
+  // Task #209 — whether the wallet plays a short chime whenever the
+  // holder's OWN wallet gains something (a mint, a gift, a claimed trade,
+  // a mail-delivered credential — see viewer.js's refreshInventoryDisplay()
+  // for exactly what counts). Same category as character scale right
+  // above: a client display/notification preference, not anything owned
+  // by an identity, so it lives outside any per-identity wallet scope —
+  // on by default (most people want the feedback), untouched by locking,
+  // identity-switch, or import/export, and readable even by a visitor
+  // with no unlocked identity at all (nothing about this needs one).
+  async function getWalletSoundEnabled() {
+    const { atlasWalletSoundEnabled } = await chrome.storage.local.get('atlasWalletSoundEnabled');
+    return atlasWalletSoundEnabled !== false; // unset (fresh install) reads as enabled
+  }
+
+  async function setWalletSoundEnabled(enabled) {
+    await chrome.storage.local.set({ atlasWalletSoundEnabled: !!enabled });
+    return !!enabled;
+  }
+
   // ---------- in-world chat panel settings ----------
   //
   // Same reasoning as character scale right above: a client display
@@ -2201,6 +2316,54 @@ const AtlasWallet = (() => {
     const current = await getAssetViewerSettings();
     const merged = clampAssetViewerSettings(Object.assign({}, current, patch));
     await chrome.storage.local.set({ atlasAssetViewerSettings: merged });
+    return merged;
+  }
+
+  // ---------- Previewer panel settings (#227) ----------
+  //
+  // Bruno's follow-up to the Asset Viewer's scene-hover feature: a
+  // SEPARATE floating panel, "Previewer," for anything hoverable directly
+  // in a 2D/3D scene (dropped items, stalls/crates) — the Asset Viewer
+  // goes back to being wallet-card-hover only (see viewer.js's own
+  // comment on why that split exists). Unlike the Asset Viewer (always
+  // re-positioned by JS next to whatever's hovered) or #messagingWidget
+  // (free-drag, stays exactly where dropped), Bruno asked for this one to
+  // DOCK — drag it and let go, and it snaps to whichever screen corner is
+  // nearest, staying there from release to release rather than sitting
+  // wherever the cursor happened to let go. That's why this stores a
+  // `dock` corner NAME rather than raw left/top the way
+  // atlasMessagingWindowSettings does: a named corner re-derives its own
+  // correct on-screen position after a window resize (`bottom-right` is
+  // still the bottom-right corner at any canvas size), where a remembered
+  // pixel offset would drift or end up off-screen entirely.
+  //
+  // No width/height/opacity here (unlike Asset Viewer/messaging) — the
+  // Previewer's size is intentionally fixed by its content (a compact
+  // list has no resize handle to drag), so there is nothing else for this
+  // settings object to carry yet.
+  const VALID_PREVIEWER_DOCKS = ['top-left', 'top-right', 'bottom-left', 'bottom-right'];
+  // bottom-left: away from #walletPanel's own right-edge dock and from the
+  // top-left area a fresh visitor's eye tends to land on first — an
+  // out-of-the-way default corner for a panel that will often be popping
+  // open/closed as someone walks around a scene.
+  const DEFAULT_PREVIEWER_WINDOW_SETTINGS = { dock: 'bottom-left' };
+
+  function clampPreviewerWindowSettings(raw) {
+    const s = raw && typeof raw === 'object' ? raw : {};
+    return {
+      dock: VALID_PREVIEWER_DOCKS.includes(s.dock) ? s.dock : DEFAULT_PREVIEWER_WINDOW_SETTINGS.dock
+    };
+  }
+
+  async function getPreviewerWindowSettings() {
+    const { atlasPreviewerWindowSettings } = await chrome.storage.local.get('atlasPreviewerWindowSettings');
+    return clampPreviewerWindowSettings(atlasPreviewerWindowSettings);
+  }
+
+  async function setPreviewerWindowSettings(patch) {
+    const current = await getPreviewerWindowSettings();
+    const merged = clampPreviewerWindowSettings(Object.assign({}, current, patch));
+    await chrome.storage.local.set({ atlasPreviewerWindowSettings: merged });
     return merged;
   }
 
@@ -3981,16 +4144,18 @@ const AtlasWallet = (() => {
     getWallet, mintAsset, verifyCredential, reverifyAll, exportWallet, importWallet, deleteAsset,
     exportFullBackup, importFullBackup,
     hideAsset, unhideAsset,
-    splitAsset, consolidateAsset,
+    splitAsset, consolidateAsset, convertAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
     dropItem, pickUpItem, getDroppedItems, getDroppedItemsInWorld,
     proposeIntent, verifySignedPayload,
-    submitTradeIntent, fetchTradeListings, claimTradeListing, cancelTradeListing,
+    submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
     getSubmittedTrades, deleteSubmittedTrade, getTradingStationMemberships,
     recordWorldVisit, getRecentWorlds,
     getCharacterScale, setCharacterScale,
+    getWalletSoundEnabled, setWalletSoundEnabled,
     getChatPanelSettings, setChatPanelSettings, chatMessageContainsBlockedWord,
     getAssetViewerSettings, setAssetViewerSettings,
+    getPreviewerWindowSettings, setPreviewerWindowSettings,
     getAutoLockMinutes, setAutoLockMinutes,
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,

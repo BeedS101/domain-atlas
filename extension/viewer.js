@@ -11,6 +11,7 @@ const canvas = document.getElementById('scene');
 const ctx = canvas.getContext('2d');
 const scene3dCanvas = document.getElementById('scene3d');
 const scene3dHint = document.getElementById('scene3dHint');
+const scene3dInteractHint = document.getElementById('scene3dInteractHint'); // task #208 — "E — <label>" proximity prompt
 const hintEl = document.getElementById('hint');
 const portalTooltipEl = document.getElementById('portalHoverTooltip');
 
@@ -1061,14 +1062,14 @@ chatPanelEl && chatPanelEl.addEventListener('mouseout', (e) => {
   if (!nameEl) return;
   // Only hide if the pointer actually left the name span, not just moved
   // to a child of it (it has none today, but this is the correct general
-  // check, same as e.g. the mail-card-menu's own outside-click guard).
+  // check, same as e.g. the card-menu's own outside-click guard).
   if (nameEl.contains(e.relatedTarget)) return;
   hideChatUserTooltip();
 });
 
 // ---------- chat username right-click menu (#116): private message / mute / block ----------
-// Visual/interaction pattern reused from mail's own "⋯" block-sender menu
-// (renderMailCard's blockHtml, .mail-card-menu-items in viewer.html) — dark
+// Visual/interaction pattern reused from mail's/asset cards' own "⋯" menus
+// (renderMailCard's blockHtml, .card-menu-items in viewer.html) — dark
 // card, thin border, full-width stacked buttons — via #chatUserContextMenu's
 // own CSS, just a standalone singleton positioned at the click point
 // (there's no one fixed toggle button to anchor a right-click menu under)
@@ -1836,6 +1837,7 @@ const importCacheStatusEl = document.getElementById('importCacheStatus');
 const clearAllCacheBtn = document.getElementById('clearAllCacheBtn');
 const characterScaleInputEl = document.getElementById('characterScaleInput');
 const characterScaleValueEl = document.getElementById('characterScaleValue');
+const walletSoundEnabledInputEl = document.getElementById('walletSoundEnabledInput'); // task #209
 const backFromSettingsBtn = document.getElementById('backFromSettingsBtn');
 const walletTabBar = document.getElementById('walletTabBar');
 const walletTabBtn = document.getElementById('walletTabBtn');
@@ -1866,8 +1868,6 @@ const collectiblesSubtabBtn = document.getElementById('collectiblesSubtabBtn');
 const documentsSubtabBtn = document.getElementById('documentsSubtabBtn');
 const collectiblesSubscreen = document.getElementById('collectiblesSubscreen');
 const documentsSubscreen = document.getElementById('documentsSubscreen');
-const mintIronBtn = document.getElementById('mintIronBtn');
-const mintGoldBtn = document.getElementById('mintGoldBtn');
 const collectiblesSearchInput = document.getElementById('collectiblesSearchInput');
 const collectiblesCompatOnlyCheckbox = document.getElementById('collectiblesCompatOnlyCheckbox');
 const selfCollectiblesListEl = document.getElementById('selfCollectiblesList');
@@ -1902,6 +1902,203 @@ const tradingSellSubmitBtn = document.getElementById('tradingSellSubmitBtn');
 const tradingSellStatusEl = document.getElementById('tradingSellStatus');
 const tradingListingsListEl = document.getElementById('tradingListingsList');
 const tradingListingsStatusEl = document.getElementById('tradingListingsStatus');
+// Task #203 — Convert sub-tab of the Trade screen.
+const tradingConvertSubtabBtn = document.getElementById('tradingConvertSubtabBtn');
+const tradingConvertSubscreen = document.getElementById('tradingConvertSubscreen');
+const tradingConvertFromClassSelect = document.getElementById('tradingConvertFromClassSelect');
+const tradingConvertSpendQtyInput = document.getElementById('tradingConvertSpendQtyInput');
+const tradingConvertToClassSelect = document.getElementById('tradingConvertToClassSelect');
+const tradingConvertEstimateEl = document.getElementById('tradingConvertEstimate');
+const tradingConvertSubmitBtn = document.getElementById('tradingConvertSubmitBtn');
+const tradingConvertStatusEl = document.getElementById('tradingConvertStatus');
+
+// Task #205 — a generic "type to filter" enhancement for a plain <select>,
+// wanted specifically for the Trade screen's four class dropdowns (Sell's
+// "you offer"/"you want", Convert's "convert from"/"convert to") now that
+// the periodic-table expansion (#204) means "To" and "you want" can list up
+// to 118 options — scrolling a plain dropdown to find "Platinum" by eye
+// stopped being practical. Deliberately generic rather than trading-specific,
+// in case a future screen ever grows a similarly long list.
+//
+// Design: the real <select> stays in the DOM, fully functional and
+// invisible (`.searchable-select-native`, display:none) — every existing
+// call site keeps reading/writing `.value`/`.disabled`/`.options` and
+// listening for 'change' exactly as before (see refreshTradingSellOfferOptions
+// etc. just below, and the 'change' listeners further down this file);
+// this only adds a visible text input + filtered list IN FRONT of it that
+// mirrors the select's state and drives it by dispatching a real
+// `change` event on selection (bubbling, so existing listeners fire) —
+// no rewrite of any populate/read logic was needed anywhere else.
+// Native `select.value = x` assignments elsewhere do NOT fire a 'change'
+// event and can't be intercepted without redefining the property (fragile,
+// not worth it here), so each refresh function calls the returned handle's
+// `.sync()` once after it finishes populating/restoring a value — see the
+// `finally` blocks added to refreshTradingSellOfferOptions,
+// refreshTradingSellWantOptions, refreshConvertOptions and
+// refreshConvertToOptions below.
+function makeSearchableSelect(select) {
+  if (!select) return null;
+  const wrapper = document.createElement('div');
+  wrapper.className = 'searchable-select';
+  select.parentNode.insertBefore(wrapper, select);
+  select.classList.add('searchable-select-native');
+  wrapper.appendChild(select);
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.className = 'searchable-select-input';
+  wrapper.appendChild(input);
+
+  const list = document.createElement('div');
+  list.className = 'searchable-select-list';
+  list.hidden = true;
+  wrapper.appendChild(list);
+
+  let highlighted = -1;
+
+  function optionsData() {
+    return Array.from(select.options).map((o) => ({ value: o.value, label: o.text }));
+  }
+
+  // The placeholder/empty-state option (e.g. "Loading tradable assets…",
+  // "No fungible assets to offer") always has value "" by convention
+  // everywhere this is used — real classes always have a non-empty
+  // `atlas.*` value — so it's identified that way rather than by position.
+  function placeholderLabel() {
+    const opts = optionsData();
+    const real = opts.filter((o) => o.value !== '');
+    if (real.length === 0 && opts.length > 0) return opts[0].label;
+    return '';
+  }
+
+  function currentLabel() {
+    const opts = optionsData();
+    const match = opts.find((o) => o.value === select.value);
+    return match ? match.label : '';
+  }
+
+  function render(filterText) {
+    const query = filterText.trim().toLowerCase();
+    const opts = optionsData().filter((o) => o.value !== '');
+    const filtered = query ? opts.filter((o) => o.label.toLowerCase().includes(query)) : opts;
+    list.innerHTML = '';
+    highlighted = -1;
+    if (filtered.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'searchable-select-empty';
+      empty.textContent = opts.length === 0 ? 'Nothing to choose from' : 'No matches';
+      list.appendChild(empty);
+      return filtered;
+    }
+    filtered.forEach((o, i) => {
+      const row = document.createElement('div');
+      row.className = 'searchable-select-option';
+      row.textContent = o.label;
+      row.dataset.value = o.value;
+      row.addEventListener('mousedown', (ev) => {
+        // mousedown (not click) so this fires BEFORE the input's own
+        // blur handler would otherwise revert the text first.
+        ev.preventDefault();
+        choose(o.value, o.label);
+      });
+      row.addEventListener('mouseenter', () => setHighlighted(i));
+      list.appendChild(row);
+    });
+    return filtered;
+  }
+
+  function setHighlighted(i) {
+    const rows = list.querySelectorAll('.searchable-select-option');
+    rows.forEach((r) => r.classList.remove('highlighted'));
+    highlighted = i;
+    if (i >= 0 && rows[i]) {
+      rows[i].classList.add('highlighted');
+      rows[i].scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function openList() {
+    if (select.disabled) return;
+    render(input.value === currentLabel() ? '' : input.value);
+    list.hidden = false;
+    wrapper.classList.add('open');
+  }
+
+  function closeList() {
+    list.hidden = true;
+    wrapper.classList.remove('open');
+    highlighted = -1;
+  }
+
+  function choose(value, label) {
+    const changed = select.value !== value;
+    select.value = value;
+    input.value = label;
+    closeList();
+    if (changed) select.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Task #212: select the current label on focus (tab into it, or click
+  // straight into an already-filled box) so the very next keystroke
+  // starts a fresh filter instead of appending to/editing the old text —
+  // same "focus = ready to type something new" expectation a lot of
+  // search boxes and address bars set. openList() alone (this listener's
+  // whole job before this) already handles showing the dropdown; select()
+  // just changes what focus additionally does to the text itself.
+  input.addEventListener('focus', () => {
+    openList();
+    input.select();
+  });
+  input.addEventListener('input', () => {
+    const filtered = render(input.value);
+    list.hidden = false;
+    wrapper.classList.add('open');
+    if (filtered.length === 1) setHighlighted(0);
+  });
+  input.addEventListener('keydown', (ev) => {
+    if (select.disabled) return;
+    const rows = () => Array.from(list.querySelectorAll('.searchable-select-option'));
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      if (list.hidden) { openList(); return; }
+      setHighlighted(Math.min(highlighted + 1, rows().length - 1));
+    } else if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      setHighlighted(Math.max(highlighted - 1, 0));
+    } else if (ev.key === 'Enter') {
+      ev.preventDefault();
+      const r = rows()[highlighted] || rows()[0];
+      if (r) choose(r.dataset.value, r.textContent);
+    } else if (ev.key === 'Escape') {
+      input.value = currentLabel();
+      closeList();
+      input.blur();
+    }
+  });
+  input.addEventListener('blur', () => {
+    // A short delay so a list-item mousedown's preventDefault (above) has
+    // already run before this reverts the text — belt-and-braces alongside
+    // that preventDefault, since blur order across browsers isn't something
+    // worth trusting completely on its own.
+    setTimeout(() => { input.value = currentLabel(); closeList(); }, 0);
+  });
+
+  return {
+    sync() {
+      input.disabled = select.disabled;
+      input.placeholder = select.disabled ? placeholderLabel() : 'Type to search…';
+      input.value = currentLabel();
+      closeList();
+    }
+  };
+}
+
+const tradingSellOfferCombo = makeSearchableSelect(tradingSellOfferClassSelect);
+const tradingSellWantCombo = makeSearchableSelect(tradingSellWantClassSelect);
+const tradingConvertFromCombo = makeSearchableSelect(tradingConvertFromClassSelect);
+const tradingConvertToCombo = makeSearchableSelect(tradingConvertToClassSelect);
 
 // Asset Viewer (task #150) — see the big comment block above
 // openAssetViewer() (further below, near renderAssetCard) for the whole
@@ -1917,6 +2114,13 @@ const assetViewerResizeHandleEl = document.getElementById('assetViewerResizeHand
 const assetViewerSettingsPopoverEl = document.getElementById('assetViewerSettingsPopover');
 const assetViewerOpacityInput = document.getElementById('assetViewerOpacityInput');
 const assetViewerTextSizeInput = document.getElementById('assetViewerTextSizeInput');
+
+// Previewer (task #227) — see the big comment block above openPreviewer()
+// (further below) for the whole design; these are just its DOM refs.
+const previewerWidgetEl = document.getElementById('previewerWidget');
+const previewerPanelEl = document.getElementById('previewerPanel');
+const previewerHeaderEl = document.getElementById('previewerHeader');
+const previewerBodyEl = document.getElementById('previewerBody');
 
 // Messaging window (task #111 first slice) — see the big comment block
 // further below (near openMessagingWindow()) for the whole design; these
@@ -1955,6 +2159,40 @@ let portalHitboxes = []; // [{sx, sy, radius, portal}]
 let itemMarkerHitboxes = []; // [{sx, sy, radius, marker}] — dropped items, 2D renderer only for now
 let interactableHitboxes = []; // [{sx, sy, radius, marker}] — scene.json-declared clickable stalls (mining, etc.), 2D renderer only
 let interactableBusy = false; // guards against a rapid double-click firing two mints at once
+
+// Task #227 — "if the system detects it's a unique or one-per-user item
+// and the user already has it in the wallet, the previewer must ignore
+// it" (Bruno's own words). A sync-checkable snapshot of every domain|class
+// pair this wallet currently holds ANY balance/credential of, refreshed
+// from the real wallet on enterWorld() and again after a successful
+// handleInteractable() 'issue' collect — never read live from
+// AtlasWallet.getWallet() inside a hover/proximity check itself, since
+// those run on every mousemove tick (2D) or every render-loop frame (3D
+// proximity, gltf-mini.js) and an async storage read has no place in
+// either hot path. isOncePerUserClassOwned() below is what both the 2D
+// hover handler and the 3D proximity check (via the isMarkerAlreadyOwned
+// predicate handed to MiniGLTF.init(), see enterWorld()) actually call.
+//
+// Deliberately keyed by domain+class, not by marker or by oncePerUser
+// alone: a repeatable resource stall ("Mine Iron", action:'mint', no
+// oncePerUser) should never be filtered just because this wallet already
+// holds some iron — isOncePerUserClassOwned() only ever answers true for
+// a marker that is ITSELF flagged oncePerUser, same gate
+// handleInteractable()'s own dedup check already applies at collect time;
+// this is that same check, just precomputed so the previewer can consult
+// it synchronously instead of duplicating an async wallet read per frame.
+let ownedOncePerUserClassKeys = new Set(); // Set<'domain|class'>
+
+async function refreshOwnedOncePerUserClassKeys() {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) { ownedOncePerUserClassKeys = new Set(); return; }
+  const wallet = await AtlasWallet.getWallet(identity.publicKey);
+  ownedOncePerUserClassKeys = new Set(wallet.map((e) => e.credential.issuer.domain + '|' + e.credential.asset.class));
+}
+
+function isOncePerUserClassOwned(domain, marker) {
+  return !!marker.oncePerUser && ownedOncePerUserClassKeys.has(domain + '|' + marker.class);
+}
 let pendingDropCredentialId = null; // set while waiting for the next canvas click to choose a drop spot
 let currentManifest = null;   // cached manifest object
 let currentManifestUrl = null;
@@ -2050,10 +2288,19 @@ function show3DCanvas(active) {
   hintEl.style.display = active ? 'none' : '';
   scene3dCanvas.classList.toggle('active', active);
   scene3dHint.classList.toggle('active', active);
+  // Always starts hidden, whether entering or leaving 3D — the live
+  // proximity check (onInteractPrompt below) brings it back the moment
+  // gltf-mini's own frame loop reports something in range in whichever
+  // world just loaded. Without this, a prompt left over from the world
+  // just departed could flash for one frame before the new scene's own
+  // checks catch up, or linger visible after dropping back to the 2D
+  // renderer, which has no such thing at all.
+  scene3dInteractHint.classList.remove('active');
 }
 
 async function enterWorld(worldId) {
   portalHitboxes = [];
+  await refreshOwnedOncePerUserClassKeys(); // task #227 — fresh snapshot before this world's own hover/proximity checks can run against it
   const manifest = currentManifest;
   const world = manifest.worlds.find((w) => w.id === worldId) || manifest.worlds[0];
   currentWorld = world;
@@ -2141,11 +2388,77 @@ async function enterWorld(worldId) {
       // walk up to, only the "Dropped in this world" list's Pick up button.
       window.__atlasScene = { floor: sceneData.floor || { size: [10, 10], color: '#1b2830' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
 
+      // Task #227 — onInteractPrompt below fires every single animation
+      // frame (gltf-mini.js's own proximity check runs in its render loop,
+      // unconditionally, whether or not anything actually changed since the
+      // last frame — see its own comment there), unlike the 2D canvas's
+      // mousemove handler which only fires on a real mouse event. openPreviewer()
+      // already no-ops safely on a repeated identical call (previewerItemsEqual),
+      // but schedulePreviewerClose() does NOT — it resets its own grace-period
+      // timer on every call, so calling it every frame while nothing is nearby
+      // would perpetually cancel-and-restart that timer and the Previewer would
+      // never actually close. This flag makes the "call schedulePreviewerClose()"
+      // action fire exactly once, on the frame the nearby list actually becomes
+      // empty, the same one-shot transition the old (now-reverted)
+      // hovered3DInteractMarker check used to give this same callback.
+      let hadNearby3DItems = false;
+
       active3D = MiniGLTF.init(scene3dCanvas, {
         sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
         isCrossDomainPortal: (portalIndex) => !!(world.portals[portalIndex] && world.portals[portalIndex].kind === 'domain'),
         onPortalEnter: (portalIndex) => followPortal(world.portals[portalIndex]),
+        // Task #208 — same handleInteractable() the 2D renderer's click
+        // handler already calls for the market's mining stalls (see
+        // interactableHitboxes above); gltf-mini.js just supplies a
+        // different way to trigger it (proximity + E instead of a mouse
+        // click), so the actual mint/issue dispatch, oncePerUser dedup,
+        // and identity gating are shared rather than duplicated per
+        // renderer.
+        onInteract: (marker) => handleInteractable(marker),
+        // Task #213/#227 — `nearbyMarkers` (the raw scene.json
+        // interactables, added by gltf-mini.js's proximity loop — task
+        // #241) is this renderer's equivalent of the 2D canvas's
+        // item/interactable mousemove hover: the 3D lobby has no literal
+        // mouse hover at all (proximity + "E — label" is the whole
+        // interaction model, task #208), so being in E-range of one or
+        // more class-bearing interactables IS "hovering" them here.
+        // Markers with no `class` at all (the plaza's "Play Chess" stall)
+        // are already excluded upstream by gltf-mini.js, same as before.
+        // Already-owned oncePerUser markers are filtered out upstream too
+        // via the isMarkerAlreadyOwned option below, so nothing further
+        // needs filtering here — this callback just wraps whatever's left
+        // into Previewer item descriptors and hands them to the Previewer
+        // (task #227), which now owns ALL scene-hover previewing; the
+        // Asset Viewer no longer does any of this (see renderAssetViewerContent
+        // above, reverted to wallet-list-only). Anchored to
+        // scene3dInteractHint itself — a real, already-positioned DOM
+        // element (the on-screen "E — label" prompt) — rather than a
+        // synthetic rect the way the 2D canvas hover has to build one,
+        // since positioning the Previewer via CSS corner-docking doesn't
+        // even need an anchor rect the way the old Asset Viewer did, but
+        // it's passed through for parity/future use.
+        onInteractPrompt: (label, marker, nearbyMarkers) => {
+          scene3dInteractHint.textContent = label ? ('E — ' + label) : '';
+          scene3dInteractHint.classList.toggle('active', !!label);
+
+          const domain = manifestDomainOf(currentManifest);
+          const items = (nearbyMarkers || []).map((m) => ({ kind: 'interactable', marker: m, domain }));
+          if (items.length) {
+            hadNearby3DItems = true;
+            openPreviewer(items, scene3dInteractHint);
+          } else if (hadNearby3DItems) {
+            hadNearby3DItems = false;
+            schedulePreviewerClose();
+          }
+        },
+        // Task #227 — lets gltf-mini.js's own proximity loop filter
+        // already-owned oncePerUser markers out of BOTH the E-target
+        // (nearestInteract) and the reported nearby list, using the same
+        // synchronous ownership cache the 2D canvas hover/click handlers
+        // use (see refreshOwnedOncePerUserClassKeys()/isOncePerUserClassOwned
+        // above) — no async wallet read inside this per-frame hot path.
+        isMarkerAlreadyOwned: (marker) => isOncePerUserClassOwned(manifestDomainOf(currentManifest), marker),
         characterScale: await AtlasWallet.getCharacterScale(),
         // Scene asset download progress (#36) — see updateSceneLoadProgress()
         // above and loadScene()'s own comment in gltf-mini.js for why this
@@ -2549,6 +2862,18 @@ canvas.addEventListener('click', (e) => {
 let hoveredPortalMarker = null;
 const domainPortalInfoCache = new Map(); // manifest URL -> Promise<world|null>
 
+// Task #227 — the itemMarkers/interactables entry (by reference, same
+// "compare the marker, not the per-frame hitbox" reasoning hoveredPortalMarker
+// already uses above it) currently driving the Previewer panel via 2D
+// canvas hover, or null while hovering neither. Scene.json's own
+// `interactables` array is only ever reassigned on world entry (see
+// enterWorld's window.__atlasScene assignment) and window.__atlasScene.
+// itemMarkers only on refreshSceneItemMarkers() (world entry, or this
+// visitor's own drop/pick-up) — never on some other visitor's action or a
+// timer — so a marker object stays reference-stable across every
+// mousemove tick in between, exactly like a portal marker does.
+let hoveredAssetMarker = null;
+
 // Task #152 (follow-up to #151, prompted by Bruno hitting both gaps live
 // while writing his own evtec.co.za manifest):
 //
@@ -2701,6 +3026,57 @@ canvas.addEventListener('mousemove', (e) => {
   const cx = e.clientX - rect.left;
   const cy = e.clientY - rect.top;
 
+  // Task #227 — dropped items and scene.json stalls/crates get the new
+  // Previewer window (NOT the Asset Viewer above, which is wallet-card-
+  // hover only from here on — see its own comment). Checked FIRST, in the
+  // same priority order the click handler above already uses (item
+  // markers, then interactables, then portals below) so a hover can never
+  // preview one thing while a click on the exact same spot would act on a
+  // different one. Two kinds of interactable are skipped here, falling
+  // through to the portal check below exactly as if they weren't in
+  // interactableHitboxes at all: one with no `class` at all (the plaza's
+  // "Play Chess" stall, action: 'open-chess', mints nothing) and a
+  // oncePerUser one this visitor already holds (isOncePerUserClassOwned) —
+  // "the previewer must ignore it," per Bruno's own words.
+  let assetHit = null;
+  for (const hb of itemMarkerHitboxes) {
+    const dist = Math.hypot(cx - hb.sx, cy - hb.sy);
+    if (dist < hb.radius) { assetHit = hb; break; }
+  }
+  if (!assetHit) {
+    for (const hb of interactableHitboxes) {
+      const dist = Math.hypot(cx - hb.sx, cy - hb.sy);
+      if (dist < hb.radius && hb.marker.class && !isOncePerUserClassOwned(manifestDomainOf(currentManifest), hb.marker)) { assetHit = hb; break; }
+    }
+  }
+
+  if (assetHit) {
+    canvas.style.cursor = 'pointer';
+    hoveredPortalMarker = null;
+    portalTooltipEl.style.display = 'none';
+    if (hoveredAssetMarker !== assetHit.marker) {
+      hoveredAssetMarker = assetHit.marker;
+      // Anchors the panel to this hitbox's screen point — moot for the
+      // Previewer's own docked position (it never repositions itself the
+      // way the Asset Viewer does), but openPreviewer() takes the same
+      // anchor argument as openAssetViewer() for a consistent call shape
+      // between the two, and a future single-item detail affordance could
+      // still make use of it.
+      const sx = assetHit.sx, sy = assetHit.sy;
+      const anchor = { getBoundingClientRect: () => ({ left: rect.left + sx, right: rect.left + sx, top: rect.top + sy, bottom: rect.top + sy, width: 0, height: 0 }) };
+      const domain = manifestDomainOf(currentManifest);
+      const item = assetHit.marker.entry
+        ? { kind: 'dropped', entry: assetHit.marker.entry } // a real, already-signed credential this visitor dropped — no server round-trip needed
+        : { kind: 'interactable', marker: assetHit.marker, domain }; // never opened yet (or a repeatable one like "Mine Iron") — Previewer looks up the class itself
+      openPreviewer([item], anchor);
+    }
+    return;
+  }
+  if (hoveredAssetMarker) {
+    hoveredAssetMarker = null;
+    schedulePreviewerClose(); // same sticky-bridge grace period the Asset Viewer's own card hover already gets
+  }
+
   let hit = null;
   for (const hb of portalHitboxes) {
     const dist = Math.hypot(cx - hb.sx, cy - hb.sy);
@@ -2744,6 +3120,15 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseleave', () => {
   hoveredPortalMarker = null;
   portalTooltipEl.style.display = 'none';
+  // Task #227 — leaving the canvas entirely while hovering an item/
+  // interactable gets the same sticky-bridge grace period as leaving the
+  // Previewer's own docked panel (schedulePreviewerClose, not an immediate
+  // close), so the mouse can still travel onto it if it's sitting close to
+  // the canvas edge.
+  if (hoveredAssetMarker) {
+    hoveredAssetMarker = null;
+    schedulePreviewerClose();
+  }
 });
 
 // Escape backs out of "click where you want to drop it" without dropping
@@ -2974,11 +3359,12 @@ function showInventorySubtab(id) {
 // "refresh whatever a tab shows the moment it's opened" convention as
 // refreshComposeFriendPicker on Compose-tab open.
 function showTradingSubtab(id) {
-  [tradingBuySubscreen, tradingSellSubscreen, tradingListingsSubscreen]
+  [tradingBuySubscreen, tradingSellSubscreen, tradingListingsSubscreen, tradingConvertSubscreen]
     .forEach((el) => el && el.classList.toggle('active', el && el.id === id));
   if (tradingBuySubtabBtn) tradingBuySubtabBtn.classList.toggle('active-subtab', id === 'tradingBuySubscreen');
   if (tradingSellSubtabBtn) tradingSellSubtabBtn.classList.toggle('active-subtab', id === 'tradingSellSubscreen');
   if (tradingListingsSubtabBtn) tradingListingsSubtabBtn.classList.toggle('active-subtab', id === 'tradingListingsSubscreen');
+  if (tradingConvertSubtabBtn) tradingConvertSubtabBtn.classList.toggle('active-subtab', id === 'tradingConvertSubscreen');
 
   if (id === 'tradingBuySubscreen') {
     refreshTradingStationJoinButton();
@@ -2989,8 +3375,12 @@ function showTradingSubtab(id) {
     refreshTradingStationJoinButton();
     refreshRemoteTradeStationOptions();
     refreshTradingSellOfferOptions();
+    refreshTradingSellWantOptions();
   } else if (id === 'tradingListingsSubscreen') {
     refreshTradingListingsList();
+  } else if (id === 'tradingConvertSubscreen') {
+    refreshRemoteTradeStationOptions();
+    refreshConvertOptions();
   }
 }
 
@@ -3122,6 +3512,32 @@ function formatItemProperties(properties) {
   return entries.map(([key, value]) => key + ': ' + formatPropertyValue(value)).join(' · ');
 }
 
+// Task #206 — every fungible asset in this catalog is one of the periodic-
+// table elements (or iron/gold/silver, which are just iron/gold/silver's
+// own element entries — see server.js/store.php), so by convention every
+// fungible `quantity` is counted in whole GRAMS: 1 quantity unit = 1 gram.
+// This is a pure DISPLAY convention layered on top of the existing integer
+// `quantity` the protocol already uses everywhere (POST /atlas/asset/issue,
+// /split, /convert, /mail/send's `giftQuantity` all still require and
+// enforce a plain `Number.isInteger(...) && ... > 0` — see both backends) —
+// nothing about minting, splitting, converting, the holdingCap, or
+// exchangeRate math changes at all; this only changes how that same
+// integer gets PRINTED, the same way #205's naming change only changed how
+// a class's name gets printed. Auto-scales the same way a file-size
+// formatter picks KB/MB/GB: under 1000 g shown as whole grams, 1000 g and
+// up shown in kg (up to 2 decimals), 1,000,000 g and up shown in tonnes —
+// trailing zeros trimmed so "2.00 kg" reads as "2 kg" but "1.50 kg" still
+// reads as "1.5 kg". Every call site that used to print a raw `quantity`
+// (wallet cards, trade dropdowns, listings, mail gifts, status messages,
+// the mining-stall toast) now runs it through this first.
+function formatMass(grams) {
+  if (!Number.isFinite(grams)) return String(grams);
+  const trimmed = (n) => n.toFixed(2).replace(/\.?0+$/, '');
+  if (grams < 1000) return grams + ' g';
+  if (grams < 1000000) return trimmed(grams / 1000) + ' kg';
+  return trimmed(grams / 1000000) + ' t';
+}
+
 // Renders the small "Properties (N) ▸" link + its hidden detail panel for
 // a card's open properties bag (SPEC.md §5.1/§5.4) — same idea as the
 // settings-category accordion's chevron, just per-card and much smaller
@@ -3174,6 +3590,8 @@ let assetViewerCurrentEntry = null; // the wallet entry the panel is currently s
 let assetViewerCloseTimer = null;
 let assetViewerModelPreview = null; // {dispose()} from window.MiniGLTF.previewModel(), or null while no model canvas is live
 let assetViewerModelLoadToken = 0; // bumped on every dispose/re-open so a slow in-flight fetch can tell it's stale and drop its result silently
+let assetViewerThumbnailLoadToken = 0; // same pattern as assetViewerModelLoadToken, but for the thumbnail fetch/blob-URL swap in loadAssetViewerThumbnail()
+let assetViewerThumbnailBlobUrl = null; // the blob: URL currently backing the shown thumbnail <img>, if any — must be revoked before being replaced or left behind
 let assetViewerDragActive = false; // true for the duration of a resize drag — suspends the close timer entirely (see its own comment below)
 
 function applyAssetViewerSettings(settings) {
@@ -3224,14 +3642,17 @@ function renderAssetViewerContent(entry) {
   const asset = entry.credential.asset;
   const fungible = !!asset.fungible;
   let html =
-    '<div class="name">' + asset.name + (fungible ? ' ×' + entry.credential.quantity : '') + '</div>' +
+    '<div class="name">' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</div>' +
     '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + '</div>';
   // Graceful fallback (task #150 point 6): both fields are optional per
   // SPEC.md §5 — an issuer may set neither, so a class minted without them
   // just skips straight to properties with no image area and no button,
   // never a broken-image icon or a thrown error.
+  // Task #210: a placeholder area, not a real <img src="..."> — see
+  // loadAssetViewerThumbnail() below for why this fetches the bytes
+  // itself instead of letting the browser's own HTTP cache decide.
   if (asset.thumbnail) {
-    html += '<img class="asset-viewer-thumbnail" src="' + asset.thumbnail + '" alt="">';
+    html += '<div id="assetViewerThumbnailArea"></div>';
   }
   html += renderAssetViewerProperties(asset.properties);
   if (asset.model) {
@@ -3239,29 +3660,70 @@ function renderAssetViewerContent(entry) {
   }
   html += '<div id="assetViewerModelArea"></div>';
   assetViewerBodyEl.innerHTML = html;
-  // The broken-image fallback above used to be an inline onerror="..."
-  // attribute in the HTML string — Chrome's built-in extension-page CSP
-  // (script-src with no 'unsafe-inline') blocks ALL inline event handler
-  // attributes outright, so that never actually ran; it just logged a CSP
-  // violation to the console every time a thumbnail was shown. Wiring the
-  // same behavior as a real property assignment after the element exists
-  // isn't "inline execution" under CSP, so it works — and does the exact
-  // same thing (remove the element if its image 404s or otherwise fails).
   if (asset.thumbnail) {
-    const thumbnailEl = assetViewerBodyEl.querySelector('.asset-viewer-thumbnail');
-    if (thumbnailEl) thumbnailEl.onerror = () => thumbnailEl.remove();
+    const areaEl = assetViewerBodyEl.querySelector('#assetViewerThumbnailArea');
+    if (areaEl) loadAssetViewerThumbnail(asset.thumbnail, areaEl);
+  }
+}
+
+// Task #210 — Bruno found that replacing a thumbnail .png on a live site
+// didn't reliably show up for visitors: a plain <img src="..."> (what
+// this used to be) leaves staleness entirely up to the browser's own
+// HTTP cache, which — same "never trust a shared host to be configured
+// helpfully" posture issuer-php/lib/crypto.php's own comments already
+// established — can keep serving an old cached copy for a while even
+// after the file's actually been replaced on the server. Every OTHER
+// dynamic fetch in this file already avoids exactly this
+// (manifest/scene fetches above, showAssetViewerModel()'s own .glb fetch
+// just below) via `cache: 'no-store'`; the thumbnail `<img>` was the one
+// plain browser-cached image left. Fetches the bytes fresh every time
+// instead and hands the panel a same-session blob: URL, revoked and
+// replaced the same way showAssetViewerModel() disposes its own preview.
+// Token-guarded exactly like that function too, for the same reason: a
+// slow fetch for a card the visitor already hovered away from must never
+// clobber whatever the panel has since moved on to show. Creates the
+// <img> element only once real bytes are in hand — never a broken-image
+// icon, and no CSS-hidden placeholder to keep in sync with the fetch's
+// outcome.
+async function loadAssetViewerThumbnail(url, areaEl) {
+  const token = assetViewerThumbnailLoadToken;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('thumbnail fetch failed: ' + res.status);
+    const blob = await res.blob();
+    if (token !== assetViewerThumbnailLoadToken || !assetViewerBodyEl.contains(areaEl)) return; // the panel moved on while this was in flight — drop it silently
+    if (assetViewerThumbnailBlobUrl) URL.revokeObjectURL(assetViewerThumbnailBlobUrl);
+    assetViewerThumbnailBlobUrl = URL.createObjectURL(blob);
+    const img = document.createElement('img');
+    img.className = 'asset-viewer-thumbnail';
+    img.alt = '';
+    img.src = assetViewerThumbnailBlobUrl;
+    areaEl.replaceWith(img);
+  } catch (err) {
+    if (token !== assetViewerThumbnailLoadToken) return;
+    areaEl.remove(); // same graceful "no broken-image icon" fallback the old onerror handler gave
   }
 }
 
 // Only ever one live preview context at a time (task #150 point 2's
 // WebGL-lifecycle requirement) — called before starting a new one AND on
 // every path that ends the panel's current one (switching to a different
-// asset, or closing the panel outright).
+// asset, or closing the panel outright). Despite the name, this is also the
+// shared choke point for invalidating the thumbnail load: every caller of
+// this function (showAssetViewerModel, closeAssetViewer, openAssetViewer
+// switching cards) is exactly the moment a stale thumbnail fetch/blob for
+// the previous card also needs to be dropped, so there's no reason to keep
+// a second near-identical function around just for that.
 function disposeAssetViewerModelPreview() {
   assetViewerModelLoadToken++; // invalidates any fetch/parse still in flight for whatever this was previewing
   if (assetViewerModelPreview) {
     assetViewerModelPreview.dispose();
     assetViewerModelPreview = null;
+  }
+  assetViewerThumbnailLoadToken++; // invalidates any thumbnail fetch still in flight for whatever this was previewing
+  if (assetViewerThumbnailBlobUrl) {
+    URL.revokeObjectURL(assetViewerThumbnailBlobUrl);
+    assetViewerThumbnailBlobUrl = null;
   }
 }
 
@@ -3421,6 +3883,286 @@ document.addEventListener('mouseup', async () => {
   // trigger its mouseleave again — no further mouse movement is guaranteed
   // once the button is already up.
   if (assetViewerPanelEl && !assetViewerPanelEl.matches(':hover')) scheduleAssetViewerClose();
+});
+
+// ---------- Previewer (task #227) ----------
+//
+// Bruno's follow-up, in full: hovering an asset directly in a 2D/3D scene
+// felt great (task #213's original Asset Viewer scene-hover), but he asked
+// for it to move into its OWN window — "previewer" — separate from the
+// Asset Viewer, which goes back to being wallet-card-hover only (see
+// renderAssetViewerContent()/openAssetViewer() above and the "don't touch
+// the Asset Viewer" framing in his own request). Three things make this
+// genuinely a different panel, not a reskin of the Asset Viewer:
+//
+//   1. No "Show model" button, ever — renderPreviewerContent() below has
+//      no equivalent of #assetViewerShowModelBtn/showAssetViewerModel().
+//   2. It DOCKS instead of floating near whatever's hovered (Asset Viewer)
+//      or free-dragging (#messagingWidget) — drag #previewerHeader and let
+//      go, it snaps to the nearest screen corner and stays there. See the
+//      drag handler and applyPreviewerWindowSettings() further below, and
+//      wallet.js's get/setPreviewerWindowSettings() for why a named corner
+//      is stored rather than raw pixels.
+//   3. It can show MORE THAN ONE thing at once — the 3D lobby's proximity
+//      check (gltf-mini.js, extended for this task) reports every
+//      class-bearing interactable currently in range, not just the
+//      nearest, so walking up to two stalls at once shows a small
+//      clickable list instead of only ever previewing one of them.
+//      Clicking a list row collects THAT item directly — the mouse
+//      equivalent of pressing E, which still targets whichever one is
+//      nearest and simply moves on to the next-nearest once the current
+//      one is collected (see isOncePerUserClassOwned() and
+//      handleInteractable()'s own refresh of it after a successful
+//      'issue' — an already-owned oncePerUser marker is filtered out
+//      entirely rather than shown, per Bruno's own "the previewer must
+//      ignore it").
+//
+// previewerCurrentItems holds whatever's on screen right now — an array of
+// { kind: 'dropped', entry } (a real, already-signed credential this
+// visitor dropped) or { kind: 'interactable', marker, domain } (never
+// opened yet, or freely repeatable like "Mine Iron" — looked up live via
+// AtlasWallet.fetchAssetClassInfo, SPEC.md §5.1.2, same data source task
+// #213 introduced). Both 2D (single-item array, one hit at the cursor) and
+// 3D (possibly multi-item array, one per in-range interactable) funnel
+// through the exact same openPreviewer()/renderPreviewerContent() — there
+// is no renderer-specific branch anywhere in this section.
+const PREVIEWER_CLOSE_GRACE_MS = 200; // same grace window as the Asset Viewer's own sticky hover bridge (ASSET_VIEWER_CLOSE_GRACE_MS)
+let previewerCurrentItems = null; // the array currently rendered, or null while closed — compared by reference to skip a redundant re-render
+let previewerCloseTimer = null;
+let previewerDock = 'bottom-left'; // mirrors AtlasWallet's own default; kept in sync by applyPreviewerWindowSettings()
+
+// Resolved AtlasWallet.fetchAssetClassInfo() results, cached here (not just
+// inside wallet.js's own cache) so renderPreviewerContent() can render
+// synchronously for a class it's already resolved once this page-load,
+// exactly the same "Promise-cache keyed by domain\u0000class" shape task
+// #213's own (now-removed) assetPreviewEntryCache used. `undefined` (key
+// absent) means never fetched, `null` means confirmed unknown, an object is
+// a resolved class description.
+const previewerClassInfoCache = new Map();
+let previewerClassInfoLoadToken = 0; // bumped on every openPreviewer() call so a slow fetch for a target the visitor has since moved off of can't clobber a newer render
+
+function cancelPreviewerCloseTimer() {
+  if (previewerCloseTimer) { clearTimeout(previewerCloseTimer); previewerCloseTimer = null; }
+}
+
+function closePreviewer() {
+  cancelPreviewerCloseTimer();
+  previewerCurrentItems = null;
+  if (previewerBodyEl) previewerBodyEl.innerHTML = '';
+  if (previewerWidgetEl) previewerWidgetEl.hidden = true;
+}
+
+// Same sticky-bridge idea as scheduleAssetViewerClose() above: leaving
+// whatever's hovered/in-range starts a short grace timer rather than
+// closing immediately, so the mouse can travel from a 2D canvas marker (or
+// off 3D proximity range) onto the docked panel itself — to actually click
+// a list row — without it vanishing first.
+function schedulePreviewerClose() {
+  cancelPreviewerCloseTimer();
+  previewerCloseTimer = setTimeout(() => {
+    previewerCloseTimer = null;
+    closePreviewer();
+  }, PREVIEWER_CLOSE_GRACE_MS);
+}
+
+previewerWidgetEl && previewerWidgetEl.addEventListener('mouseenter', cancelPreviewerCloseTimer);
+previewerWidgetEl && previewerWidgetEl.addEventListener('mouseleave', schedulePreviewerClose);
+
+// Thumbnail image, name, and (single-item view only) properties — same
+// visual ingredients as the Asset Viewer's own renderAssetViewerContent(),
+// deliberately re-implemented here rather than shared: this function's
+// asset shape differs (a dropped item's real `entry.credential.asset`
+// alongside an interactable's fetched class-info object, which are close
+// but not identical), and per this task's own framing the two panels are
+// meant to stay independently editable, not two callers of one shared
+// renderer. No thumbnail fetch-and-blob-URL dance the way
+// loadAssetViewerThumbnail() does (task #210's staleness fix) — a plain
+// <img src> is an acceptable simplification here since these thumbnails
+// are the SAME asset-catalog images the Asset Viewer already shows on
+// every wallet-card hover, already exercised by that staleness fix; this
+// panel just isn't the one carrying that fix's own complexity a second
+// time.
+function renderPreviewerItemDetail(name, cls, domain, thumbnail, properties, note) {
+  let html = '<div class="name">' + name + '</div>' + '<div class="meta">' + cls + ' · issued by ' + domain + '</div>';
+  if (note) html += '<div class="previewer-note">' + note + '</div>';
+  if (thumbnail) html += '<img class="previewer-thumbnail" src="' + thumbnail + '" alt="">';
+  if (properties && typeof properties === 'object' && Object.keys(properties).length) {
+    html += '<div class="previewer-properties">' + Object.entries(properties).map(([k, v]) => '<div>' + k + ': ' + formatPropertyValue(v) + '</div>').join('') + '</div>';
+  }
+  return html;
+}
+
+// Looks up an interactable's class description, synchronously from the
+// cache when already known, otherwise kicking off the fetch and returning
+// null for THIS call (renderPreviewerContent re-runs once it resolves, via
+// the token-guarded .then() below) — same "show what's already known,
+// backfill the rest" shape fetchDomainPortalWorld's own tooltip caller
+// uses above for a foreign portal's manifest.
+function getOrFetchPreviewerClassInfo(domain, cls, token) {
+  const key = domain + '\u0000' + cls;
+  if (previewerClassInfoCache.has(key)) return previewerClassInfoCache.get(key);
+  AtlasWallet.fetchAssetClassInfo(domain, cls).then((info) => {
+    previewerClassInfoCache.set(key, info);
+    if (token === previewerClassInfoLoadToken) renderPreviewerContent(previewerCurrentItems);
+  }).catch(() => {}); // network hiccup — same "just don't show it (yet)" fallback this file's other best-effort fetches already fall back to
+  return undefined; // not yet known — caller renders a lightweight loading state
+}
+
+function renderPreviewerContent(items) {
+  if (!previewerBodyEl || !items || items.length === 0) return;
+  const token = previewerClassInfoLoadToken;
+
+  if (items.length === 1) {
+    const item = items[0];
+    if (item.kind === 'dropped') {
+      const asset = item.entry.credential.asset;
+      previewerBodyEl.innerHTML = renderPreviewerItemDetail(asset.name, asset.class, item.entry.credential.issuer.domain, asset.thumbnail, asset.properties, null);
+    } else {
+      const info = getOrFetchPreviewerClassInfo(item.domain, item.marker.class, token);
+      if (info === undefined) {
+        previewerBodyEl.innerHTML = '<div class="meta">Loading ' + item.marker.class + '…</div>';
+      } else if (info === null) {
+        previewerBodyEl.innerHTML = '<div class="meta">' + item.marker.class + ' (unknown class)</div>';
+      } else {
+        previewerBodyEl.innerHTML = renderPreviewerItemDetail(info.name, item.marker.class, item.domain, info.thumbnail, info.properties, 'Not collected yet') +
+          '<div class="previewer-collect-hint">Click, or press E, to collect</div>';
+      }
+    }
+    return;
+  }
+
+  // Multi-item list (task #227's own "close to 2 or more items" case) — a
+  // compact row per item, thumbnail optional (whatever's already resolved
+  // in previewerClassInfoCache; a still-loading one just shows its name).
+  // Every entry here is, by construction, something openPreviewer()'s
+  // caller has already filtered to "not already owned" (2D:
+  // isOncePerUserClassOwned in the mousemove handler; 3D: the
+  // isMarkerAlreadyOwned predicate gltf-mini.js's own proximity check
+  // consults) — this function never re-checks that itself.
+  const rows = items.map((item, i) => {
+    if (item.kind === 'dropped') {
+      const asset = item.entry.credential.asset;
+      return '<div class="previewer-list-item" data-index="' + i + '">' +
+        (asset.thumbnail ? '<img class="previewer-list-item-thumb" src="' + asset.thumbnail + '" alt="">' : '<span class="previewer-list-item-thumb"></span>') +
+        '<span class="previewer-list-item-name">' + asset.name + '</span></div>';
+    }
+    const info = getOrFetchPreviewerClassInfo(item.domain, item.marker.class, token);
+    const name = (info && info.name) || item.marker.label || item.marker.class;
+    const thumb = info && info.thumbnail;
+    return '<div class="previewer-list-item" data-index="' + i + '">' +
+      (thumb ? '<img class="previewer-list-item-thumb" src="' + thumb + '" alt="">' : '<span class="previewer-list-item-thumb"></span>') +
+      '<span class="previewer-list-item-name">' + name + '</span></div>';
+  });
+  previewerBodyEl.innerHTML = rows.join('') + '<div class="previewer-collect-hint">Click one, or press E, to collect the nearest</div>';
+}
+
+previewerBodyEl && previewerBodyEl.addEventListener('click', (e) => {
+  const row = e.target.closest('.previewer-list-item');
+  const index = row ? parseInt(row.dataset.index, 10) : 0; // the single-item view has no .previewer-list-item at all — index 0 is simply "the one thing shown"
+  const item = previewerCurrentItems && previewerCurrentItems[index];
+  if (item) collectPreviewerItem(item);
+});
+
+// Dispatches a click (or, for interactables, an E press — see gltf-mini.js)
+// to whichever real collection path already exists for that item's kind —
+// this function is deliberately thin, never a THIRD implementation of
+// mint/issue or pick-up logic alongside the 2D click handler's and
+// gltf-mini.js's own E-press handler, both of which already call
+// handleInteractable() directly.
+function collectPreviewerItem(item) {
+  if (item.kind === 'dropped') {
+    // item.entry is a raw wallet entry ({ credential: {...}, ... }) — its id
+    // lives at entry.credential.id, same as every other wallet-entry lookup
+    // in this file (deleteAsset/hideAsset/etc. in wallet.js all key off
+    // credential.id too). NOT entry.credentialId, which doesn't exist on a
+    // wallet entry at all (that flat field only exists on the OTHER shape —
+    // a dropped-items-list record, and on the itemMarkers hitbox marker
+    // that wraps this entry — see refreshSceneItemMarkers() above); getting
+    // this wrong makes pickUpDroppedItem's own filter match nothing, so the
+    // item never actually leaves the "dropped in this world" list even
+    // though the status text still (wrongly) claims success.
+    pickUpDroppedItem(item.entry.credential.id);
+  } else {
+    handleInteractable(item.marker);
+  }
+}
+
+// Opens (or updates) the Previewer for whatever's currently hovered/in
+// range. `items` is always a fresh array (built fresh by the caller every
+// mousemove tick or proximity-check frame) — compared shallowly (same
+// length, same items in the same order) against previewerCurrentItems so a
+// hover that hasn't actually changed doesn't re-render or restart any
+// in-flight class-info fetch, the same "compare the marker, not a fresh
+// object" discipline hoveredPortalMarker/hoveredAssetMarker already use
+// one layer up, just applied to a whole array here since 3D can report
+// more than one marker at once.
+function previewerItemsEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((item, i) => {
+    const other = b[i];
+    if (item.kind !== other.kind) return false;
+    return item.kind === 'dropped' ? item.entry === other.entry : item.marker === other.marker;
+  });
+}
+
+function openPreviewer(items) {
+  cancelPreviewerCloseTimer();
+  if (previewerItemsEqual(previewerCurrentItems, items)) return; // exact same thing(s) already showing — leave any in-flight class-info fetch alone
+  previewerClassInfoLoadToken++; // a still-loading fetch for whatever was showing before must never clobber this new render once it resolves
+  previewerCurrentItems = items;
+  renderPreviewerContent(items);
+  if (previewerWidgetEl) previewerWidgetEl.hidden = false;
+}
+
+// ---------- Previewer docking ----------
+//
+// Drag #previewerHeader and let go; on release, snaps to whichever of the
+// four screen corners is nearest the cursor (simple quadrant test against
+// the viewport's own center) rather than leaving it wherever the cursor
+// happened to be — "moveable to where the user selects where he wants it
+// docked," not a free-floating window like #messagingWidget. Persisted as
+// a named corner via AtlasWallet.set/getPreviewerWindowSettings() — see
+// that function's own comment in wallet.js for why a name outlives a
+// window resize better than a remembered pixel offset would.
+function applyPreviewerWindowSettings(settings) {
+  previewerDock = settings.dock;
+  if (!previewerWidgetEl) return;
+  const style = previewerWidgetEl.style;
+  style.top = style.bottom = style.left = style.right = 'auto';
+  const margin = '16px';
+  if (previewerDock === 'top-left') { style.top = margin; style.left = margin; }
+  else if (previewerDock === 'top-right') { style.top = margin; style.right = margin; }
+  else if (previewerDock === 'bottom-right') { style.bottom = margin; style.right = margin; }
+  else { style.bottom = margin; style.left = margin; } // 'bottom-left', the default
+}
+
+let previewerDrag = null;
+previewerHeaderEl && previewerHeaderEl.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  cancelPreviewerCloseTimer(); // a drag-in-progress must never have the panel disappear out from under the cursor mid-drag
+  const rect = previewerWidgetEl.getBoundingClientRect();
+  previewerDrag = { startX: e.clientX, startY: e.clientY, startLeft: rect.left, startTop: rect.top, width: rect.width, height: rect.height };
+});
+document.addEventListener('mousemove', (e) => {
+  if (!previewerDrag) return;
+  // Free-follows the cursor WHILE dragging (so it doesn't feel like it's
+  // fighting the user's hand) — only SNAPS to a corner on release, below.
+  const left = Math.max(0, Math.min(window.innerWidth - previewerDrag.width, previewerDrag.startLeft + (e.clientX - previewerDrag.startX)));
+  const top = Math.max(0, Math.min(window.innerHeight - previewerDrag.height, previewerDrag.startTop + (e.clientY - previewerDrag.startY)));
+  const style = previewerWidgetEl.style;
+  style.top = top + 'px'; style.left = left + 'px'; style.bottom = style.right = 'auto';
+});
+document.addEventListener('mouseup', async () => {
+  if (!previewerDrag) return;
+  previewerDrag = null;
+  const rect = previewerWidgetEl.getBoundingClientRect();
+  // Quadrant test against the viewport's own center — whichever corner the
+  // panel's own center ended up closer to, both axes independently, is the
+  // one it snaps to.
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+  const dock = (centerY < window.innerHeight / 2 ? 'top' : 'bottom') + '-' + (centerX < window.innerWidth / 2 ? 'left' : 'right');
+  applyPreviewerWindowSettings(await AtlasWallet.setPreviewerWindowSettings({ dock }));
 });
 
 // ---------- Messaging window (task #111 first slice) ----------
@@ -4003,7 +4745,7 @@ function renderPropertiesToggle(properties) {
 // renderItemCard/renderResourceCard pair. Every asset credential now
 // carries the same shape (asset.name/class/properties, top-level
 // quantity, asset.fungible), so one renderer covers both: a fungible
-// (stackable) entry shows its quantity in the name ("Iron Ingot ×47") and
+// (stackable) entry shows its quantity in the name ("Iron (Fe) ×47 g") and
 // offers Split instead of Load/PvP-loss; a non-fungible (unique) entry
 // shows no quantity at all and offers Load/PvP-loss instead of Split —
 // SPEC.md §5's "false moves whole via §5.2, true splits via §5.4" split,
@@ -4062,35 +4804,58 @@ function renderAssetCard(entry, container, opts) {
   const supersedesNote = Array.isArray(entry.credential.supersedes)
     ? ' · consolidated from ' + entry.credential.supersedes.length + ' balances'
     : entry.credential.supersedes ? ' · supersedes prior' : '';
-  let html =
-    '<div class="name">' + asset.name + (fungible ? ' ×' + entry.credential.quantity : '') + '</div>' +
-    '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + supersedesNote + '</div>' +
-    renderPropertiesToggle(asset.properties) +
-    '<div class="verdict ' + (v.valid ? 'valid' : 'invalid') + '">' + (v.valid ? '✓ ' : '✗ ') + v.reason + '</div>';
 
-  html += '<div class="item-actions">';
+  // Task #211: every per-card action (Send half/Load/Simulate loss/Drop/
+  // Hide) used to sit in its own .item-actions row underneath the card —
+  // Bruno wanted that gone to cut down each card's height, since most of
+  // these are reached far less often than just glancing at the name/
+  // quantity or hovering for the Asset Viewer. Tucked behind the same
+  // "⋯" collapsed-menu pattern mail's own Block sender/Add to calendar/
+  // Add Contact menu already established (.card-menu — see renderMailCard
+  // and closeAllCardMenus() for the shared open/close/outside-click
+  // wiring), just anchored inline at the end of the .name line instead of
+  // its own row, so "Gold (Au) ×123 g" and the menu toggle share one
+  // line. Still plain <button data-action="..."> elements underneath —
+  // assetActionHandler()'s delegated click dispatch below didn't need any
+  // changes to actually PERFORM these actions, only the new toggle-item-
+  // menu open/close branch.
+  let actionsHtml = '';
   if (fungible) {
     // Splitting/consolidating (SPEC.md §5.4) only makes sense for a
     // fungible balance — send half of what's here to the other side.
     const half = Math.floor(entry.credential.quantity / 2);
     if (half > 0 && opts.otherLabel) {
-      html += '<button data-action="split" data-id="' + entry.credential.id + '" data-amount="' + half + '">Send ' + half + ' to ' + opts.otherLabel + '</button>';
+      // data-amount stays the raw integer — the split handler reads it
+      // straight back out to build the actual /atlas/asset/split call, so
+      // it must never be the formatted display string; only the button's
+      // own label text goes through formatMass (task #206).
+      actionsHtml += '<button data-action="split" data-id="' + entry.credential.id + '" data-amount="' + half + '">Send ' + formatMass(half) + ' to ' + opts.otherLabel + '</button>';
     }
   } else if (opts.loadable) {
     // Loadout / PvP-loss (SPEC.md §5.2) only makes sense for a
     // non-fungible asset — a fungible quantity moves via split, not by
     // being "loaded" as a whole unit.
     const loaded = opts.loadout.includes(entry.credential.id);
-    html += '<button data-action="toggle-load" data-id="' + entry.credential.id + '">' + (loaded ? 'Unload' : 'Load into this world') + '</button>';
+    actionsHtml += '<button data-action="toggle-load" data-id="' + entry.credential.id + '">' + (loaded ? 'Unload' : 'Load into this world') + '</button>';
     if (loaded && opts.risky) {
-      html += '<button data-action="lose" data-id="' + entry.credential.id + '">Simulate PvP loss</button>';
+      actionsHtml += '<button data-action="lose" data-id="' + entry.credential.id + '">Simulate PvP loss</button>';
     }
   }
   if (opts.droppable) {
-    html += '<button data-action="drop" data-id="' + entry.credential.id + '" class="btn-secondary">Drop here</button>';
+    actionsHtml += '<button data-action="drop" data-id="' + entry.credential.id + '" class="btn-secondary">Drop here</button>';
   }
-  html += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
-  html += '</div>';
+  actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
+  const menuHtml =
+    '<div class="card-menu">' +
+    '<button type="button" class="link-btn card-menu-toggle" data-action="toggle-item-menu" title="More actions">⋯</button>' +
+    '<div class="card-menu-items">' + actionsHtml + '</div>' +
+    '</div>';
+
+  const html =
+    '<div class="name"><span>' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</span>' + menuHtml + '</div>' +
+    '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + supersedesNote + '</div>' +
+    renderPropertiesToggle(asset.properties) +
+    '<div class="verdict ' + (v.valid ? 'valid' : 'invalid') + '">' + (v.valid ? '✓ ' : '✗ ') + v.reason + '</div>';
   el.innerHTML = html;
   container.appendChild(el);
 
@@ -4130,7 +4895,7 @@ function renderAssetGroup(group, container, opts) {
     header.className = 'resource-group-header';
     header.dataset.group = key;
     header.innerHTML =
-      '<span>' + group.length + ' balances of ' + group[0].credential.asset.name + ' (' + total + ' total)</span>' +
+      '<span>' + group.length + ' balances of ' + group[0].credential.asset.name + ' (' + formatMass(total) + ' total)</span>' +
       '<button data-action="consolidate-group" data-key="' + key + '">Consolidate</button>';
     container.appendChild(header);
   }
@@ -4166,6 +4931,80 @@ function renderDroppedItemCard(entry, container) {
   container.appendChild(el);
 }
 
+// Task #209 — a short two-note "ding" whenever refreshInventoryDisplay()
+// (below) notices the holder's OWN wallet actually gained something,
+// covering every path that already funnels through it: a mint/loot-crate
+// interactable, a claimed trade, a received gift, a mail-delivered
+// credential, a split/consolidate that increases a class you're already
+// holding — all of it. Plain WebAudio, no audio file: two brief sine
+// notes with a fast attack/decay envelope, same "hand-rolled, zero
+// dependencies" spirit as chess.js/gltf-mini.js — there's no existing
+// sound asset to reuse here and no reason to add a binary one for a
+// two-note chime. Gated by AtlasWallet.getWalletSoundEnabled() (Settings
+// -> Sound), never by anything in this function itself.
+let walletChimeAudioCtx = null;
+function playWalletGainChime() {
+  try {
+    if (!walletChimeAudioCtx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return; // no WebAudio here — silently skip rather than throw
+      walletChimeAudioCtx = new Ctx();
+    }
+    const ctx = walletChimeAudioCtx;
+    // Some browsers start a freshly-created context 'suspended' until a
+    // user gesture unlocks audio on the page — by the time this ever
+    // fires, the person has already interacted with the overlay (opened
+    // it, at minimum), so this should normally be a no-op resume, but
+    // it's cheap insurance either way and never blocks the caller.
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    const now = ctx.currentTime;
+    // Two quick notes a fifth apart, second one slightly later — reads as
+    // a small "got something" pickup cue rather than an alert/error tone.
+    [[523.25, 0], [783.99, 0.09]].forEach(([freq, startOffset]) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const start = now + startOffset;
+      const dur = 0.16;
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(0.18, start + 0.015); // fast attack, kept quiet — this fires unprompted, mid whatever else the person is doing
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + dur + 0.02);
+    });
+  } catch (err) {
+    // A sound glitch should never break the actual wallet refresh it's
+    // riding along with.
+  }
+}
+
+// The previous call's self-wallet snapshot (credential id -> quantity) and
+// which identity it belonged to, purely so the chime above can tell "the
+// holder gained something" apart from "a refresh ran for some unrelated
+// reason" (this function has 25+ call sites) or "a different identity got
+// unlocked/switched to" (never a gain — just looking at a different
+// wallet). null/undefined until the first real snapshot, which
+// deliberately never chimes on its own — page load and identity-switch
+// both take this path, and neither is "receiving" anything.
+let lastSelfWalletSnapshotKey; // identity.publicKey this snapshot belongs to, or null for "no identity"
+let lastSelfWalletSnapshot = null; // Map<credentialId, quantity>
+
+function walletGainedSomething(prevSnapshot, nextSnapshot) {
+  for (const [id, qty] of nextSnapshot) {
+    const prevQty = prevSnapshot.get(id);
+    // A brand-new credential id, or an existing one whose quantity went
+    // UP (a split/consolidate/trade re-mint that grew a class already
+    // held) — never a decrease (spending, sending, gifting away), which
+    // is something the holder just did themselves on purpose and already
+    // gets its own status-line feedback, not a surprise worth a chime.
+    if (prevQty === undefined || qty > prevQty) return true;
+  }
+  return false;
+}
+
 // Inventory (task #44): renders both sub-tabs (Collectibles, Documents —
 // split on asset.presentation) from the ONE unified wallet, replacing the
 // former separate refreshItemsDisplay()/refreshResourcesDisplay() pair.
@@ -4185,6 +5024,29 @@ async function refreshInventoryDisplay() {
     : [];
 
   const selfWalletAll = identity ? await AtlasWallet.getWallet(identity.publicKey) : [];
+
+  // Task #209: the wallet-gain chime — see playWalletGainChime()/
+  // walletGainedSomething()'s own comments above for what counts and why
+  // this lives here rather than at each individual call site (mint,
+  // gift, trade claim, mail delivery...). Deliberately compares against
+  // the FULL wallet (selfWalletAll), not selfVisible below — hiding or
+  // dropping an item is a display choice, not a wallet change, and
+  // shouldn't be able to cause (or suppress) a chime either way. Runs
+  // before anything else touches selfWalletAll so an early return
+  // elsewhere in this function could never skip it.
+  const walletIdentityKey = identity ? identity.publicKey : null;
+  const nextSelfWalletSnapshot = new Map(selfWalletAll.map((e) => [e.credential.id, e.credential.quantity || 1]));
+  if (walletIdentityKey !== lastSelfWalletSnapshotKey) {
+    // First run ever, or a different identity than last time this ran
+    // (switch/unlock/lock) — nothing comparable to diff against, and
+    // "you're now looking at a different wallet" is never a gain. Store
+    // the new baseline silently.
+    lastSelfWalletSnapshotKey = walletIdentityKey;
+  } else if (lastSelfWalletSnapshot && walletGainedSomething(lastSelfWalletSnapshot, nextSelfWalletSnapshot) && await AtlasWallet.getWalletSoundEnabled()) {
+    playWalletGainChime();
+  }
+  lastSelfWalletSnapshot = nextSelfWalletSnapshot;
+
   // Dropped assets (any world, not just this one — see below) are filtered
   // out here the same way hidden ones are: not in your hands right now, so
   // they don't belong in the normal carrying list. They're not lost —
@@ -4299,7 +5161,13 @@ async function refreshSceneItemMarkers() {
   window.__atlasScene.itemMarkers = dropped
     .map((d) => {
       const entry = byId.get(d.credentialId);
-      return entry ? { position: d.position, credentialId: d.credentialId, name: entry.credential.asset.name } : null;
+      // Task #213: carries the full wallet `entry` (not just credentialId/
+      // name) so the 2D canvas hover handler below can hand a dropped
+      // item's real, already-owned credential straight to openAssetViewer()
+      // — the exact same Asset Viewer panel a wallet card's own hover
+      // already opens, with no server round-trip needed since this visitor
+      // already holds a fully-signed copy of it right here.
+      return entry ? { position: d.position, credentialId: d.credentialId, name: entry.credential.asset.name, entry } : null;
     })
     .filter(Boolean);
 }
@@ -4427,7 +5295,7 @@ function renderHiddenAssetCard(entry, ownerLabel, container) {
   const asset = entry.credential.asset;
   const fungible = !!asset.fungible;
   el.innerHTML =
-    '<div class="name">' + asset.name + (fungible ? ' ×' + entry.credential.quantity : '') + '</div>' +
+    '<div class="name">' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</div>' +
     '<div class="meta">' + asset.class + ' · ' + ownerLabel + '</div>' +
     renderPropertiesToggle(asset.properties) +
     '<div class="item-actions">' +
@@ -4935,6 +5803,7 @@ async function openSettings() {
     if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
   }
   if (autoLockMinutesInput) autoLockMinutesInput.value = String(await AtlasWallet.getAutoLockMinutes());
+  if (walletSoundEnabledInputEl) walletSoundEnabledInputEl.checked = await AtlasWallet.getWalletSoundEnabled();
   showWalletScreen('settingsScreen');
 }
 
@@ -4946,6 +5815,13 @@ characterScaleInputEl && characterScaleInputEl.addEventListener('input', async (
   const scale = await AtlasWallet.setCharacterScale(characterScaleInputEl.value);
   if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
   if (active3D && active3D.setCharacterScale) active3D.setCharacterScale(scale);
+});
+
+// Task #209. 'change' (not 'input') is the right event for a checkbox —
+// unlike the character-scale slider above there's no meaningful
+// "mid-drag" state to react to continuously.
+walletSoundEnabledInputEl && walletSoundEnabledInputEl.addEventListener('change', () => {
+  AtlasWallet.setWalletSoundEnabled(walletSoundEnabledInputEl.checked);
 });
 
 backFromSettingsBtn.addEventListener('click', routeWalletScreen);
@@ -5032,7 +5908,7 @@ function renderMailCard(entry, container, friendNameByKey) {
   // asset.thumbnail either), so a gift notice doesn't stand out as a
   // special case visually, just in what it lets you do.
   const giftHtml = !gift ? '' :
-    '<div class="mail-gift">Gift: ' + escapeHtml(gift.asset.name) + (gift.quantity > 1 ? ' ×' + gift.quantity : '') +
+    '<div class="mail-gift">Gift: ' + escapeHtml(gift.asset.name) + (gift.quantity > 1 ? ' ×' + formatMass(gift.quantity) : '') +
     (entry.claimed
       ? ' <span class="mail-gift-claimed">(claimed)</span>'
       : ' <button type="button" data-action="claim-gift">Claim</button>') +
@@ -5051,16 +5927,19 @@ function renderMailCard(entry, container, friendNameByKey) {
   // deleting/unsubscribing, so this button only ever shows up on the same
   // kind of card fromLine above already treats specially.
   //
-  // Tucked behind a small "⋯" menu (mail-card-menu) rather than sitting
-  // directly in the action row — it used to (for Block sender), but sitting
-  // right next to Delete/Reply made it too easy to hit by accident on a
-  // click meant for one of those. "Add to calendar" (a bridge to the
-  // Calendar sub-tab, see prefillCalendarEventFromMail) joined it here for
-  // the same reason: a per-message action that isn't the everyday
-  // Delete/Reply pair. See the delegated toggle-mail-menu handler below for
-  // how it opens/closes, and the outside-click listener that closes it
-  // again. Always has at least "Add to calendar" — Block sender only joins
-  // it on relayed mail (has `from`), same condition as replyHtml above.
+  // Tucked behind a small "⋯" menu (.card-menu — task #211 generalized
+  // this from a mail-only .mail-card-menu name once renderAssetCard
+  // started using the identical pattern for its own per-card actions)
+  // rather than sitting directly in the action row — it used to (for
+  // Block sender), but sitting right next to Delete/Reply made it too
+  // easy to hit by accident on a click meant for one of those. "Add to
+  // calendar" (a bridge to the Calendar sub-tab, see
+  // prefillCalendarEventFromMail) joined it here for the same reason: a
+  // per-message action that isn't the everyday Delete/Reply pair. See the
+  // delegated toggle-mail-menu handler below for how it opens/closes, and
+  // the outside-click listener that closes it again. Always has at least
+  // "Add to calendar" — Block sender only joins it on relayed mail (has
+  // `from`), same condition as replyHtml above.
   const addToCalendarHtml =
     '<button type="button" data-action="add-mail-to-calendar" data-subject="' + escapeHtml(entry.message.subject) + '" data-body="' + escapeHtml(entry.message.body) + '">Add to calendar</button>';
   // Task #154: turn a message's sender into a saved Contact without
@@ -5085,9 +5964,9 @@ function renderMailCard(entry, container, friendNameByKey) {
   // disabled controls read elsewhere in this file, e.g. requestItemBtn.
   const deleteBlockedByGift = gift && !entry.claimed;
   const menuHtml =
-    '<div class="mail-card-menu">' +
-    '<button type="button" class="link-btn mail-card-menu-toggle" data-action="toggle-mail-menu" title="More actions">⋯</button>' +
-    '<div class="mail-card-menu-items">' +
+    '<div class="card-menu">' +
+    '<button type="button" class="link-btn card-menu-toggle" data-action="toggle-mail-menu" title="More actions">⋯</button>' +
+    '<div class="card-menu-items">' +
     addToCalendarHtml +
     addContactHtml +
     blockSenderHtml +
@@ -5336,17 +6215,20 @@ async function updateSocialBadge() {
   }
 }
 
-// Closes every open block-sender menu (there's realistically at most one
-// at a time, but this is cheap either way) — used both when opening a
-// different card's menu (so two never sit open together) and on any click
-// outside a menu entirely, below.
-function closeAllMailCardMenus() {
-  mailListEl && mailListEl.querySelectorAll('.mail-card-menu-items.show').forEach((el) => el.classList.remove('show'));
+// Closes every open "⋯" card menu, wherever it lives — mail's own
+// block-sender/Add-to-calendar/Add-Contact menu, or (task #211) an asset
+// card's Send/Load/Drop/Hide menu. There's realistically at most one open
+// at a time, but this is cheap either way — used both when opening a
+// different card's menu (so two never sit open together, regardless of
+// which kind of card either one is) and on any click outside a menu
+// entirely, below.
+function closeAllCardMenus() {
+  document.querySelectorAll('.card-menu-items.show').forEach((el) => el.classList.remove('show'));
 }
 
 document.addEventListener('click', (e) => {
-  if (e.target.closest('.mail-card-menu')) return;
-  closeAllMailCardMenus();
+  if (e.target.closest('.card-menu')) return;
+  closeAllCardMenus();
 });
 
 mailListEl && mailListEl.addEventListener('click', async (e) => {
@@ -5360,12 +6242,12 @@ mailListEl && mailListEl.addEventListener('click', async (e) => {
   // returns before the unread/markMailRead fallthrough at the bottom would
   // otherwise fire, so opening the menu on an unread card doesn't ALSO
   // require a second click to actually read it). See the document-level
-  // listener below for closing it again on an outside click.
+  // listener above for closing it again on an outside click.
   const menuToggleBtn = e.target.closest('button[data-action="toggle-mail-menu"]');
   if (menuToggleBtn) {
-    const menu = menuToggleBtn.parentElement.querySelector('.mail-card-menu-items');
+    const menu = menuToggleBtn.parentElement.querySelector('.card-menu-items');
     const opening = menu && !menu.classList.contains('show');
-    closeAllMailCardMenus();
+    closeAllCardMenus();
     if (opening && menu) menu.classList.add('show');
     return;
   }
@@ -5376,7 +6258,7 @@ mailListEl && mailListEl.addEventListener('click', async (e) => {
   // add-event form pre-filled from this message.
   const addToCalendarBtn = e.target.closest('button[data-action="add-mail-to-calendar"]');
   if (addToCalendarBtn) {
-    closeAllMailCardMenus();
+    closeAllCardMenus();
     showSocialSubtab('calendarSubscreen');
     resetCalendarGridToToday();
     await refreshCalendarDisplay();
@@ -5395,7 +6277,7 @@ mailListEl && mailListEl.addEventListener('click', async (e) => {
   // refresh to catch up would leave stale state on screen.
   const addContactBtn = e.target.closest('button[data-action="add-contact-from-mail"]');
   if (addContactBtn) {
-    closeAllMailCardMenus();
+    closeAllCardMenus();
     const key = addContactBtn.dataset.key;
     const handle = addContactBtn.dataset.handle;
     const name = handle || 'Friend';
@@ -5570,7 +6452,9 @@ tradeTabBtn && tradeTabBtn.addEventListener('click', async () => {
   if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '';
   await refreshTradingBuyList();
   await refreshTradingSellOfferOptions();
+  await refreshTradingSellWantOptions();
   await refreshTradingListingsList();
+  await refreshConvertOptions();
 });
 
 contactsSubtabBtn && contactsSubtabBtn.addEventListener('click', async () => {
@@ -5649,6 +6533,7 @@ documentsSubtabBtn && documentsSubtabBtn.addEventListener('click', () => showInv
 tradingBuySubtabBtn && tradingBuySubtabBtn.addEventListener('click', () => showTradingSubtab('tradingBuySubscreen'));
 tradingSellSubtabBtn && tradingSellSubtabBtn.addEventListener('click', () => showTradingSubtab('tradingSellSubscreen'));
 tradingListingsSubtabBtn && tradingListingsSubtabBtn.addEventListener('click', () => showTradingSubtab('tradingListingsSubscreen'));
+tradingConvertSubtabBtn && tradingConvertSubtabBtn.addEventListener('click', () => showTradingSubtab('tradingConvertSubscreen'));
 
 // "Subscribing" is just requesting the current domain's atlas.membership
 // item directly (see AtlasWallet.checkAllMail's design note: holding the
@@ -6279,6 +7164,13 @@ subscribeBtn && subscribeBtn.addEventListener('click', async () => {
   try {
     await AtlasWallet.mintAsset('self', domain, 'atlas.membership');
     await refreshInventoryDisplay();
+    // Task #227 — the plaza's own "Subscribe" desk mints this exact same
+    // credential; without this, subscribing here while standing in the
+    // plaza would leave the desk's hover preview/click still offering it
+    // as if it weren't collected yet, until the next world entry refreshes
+    // this cache. See isOncePerUserClassOwned()/handleInteractable()'s own
+    // matching refresh on the desk's own collection path.
+    await refreshOwnedOncePerUserClassKeys();
   } catch (err) {
     errorMessage = 'Subscribe failed: ' + err.message;
   } finally {
@@ -6388,43 +7280,347 @@ async function refreshRemoteTradeStationOptions() {
 // actually held. Preserves the current selection across refreshes where
 // it's still valid, same convention as refreshRemoteTradeStationOptions.
 //
-// There's no equivalent dynamic list for "You want" (see the static
-// <option>s in viewer.html) — unlike what you already hold, what you
-// might WANT has nothing to enumerate from client state, and this demo's
-// entire protocol only defines three fungible classes to begin with
-// (atlas.element.iron/gold/silver, see issuer-server/server.js's
-// ASSET_CATALOG). A real deployment with more fungible classes would need
-// the issuer to expose a catalog-listing endpoint for this to grow beyond a
-// hardcoded list; nothing like that exists yet.
+// "You want" (see refreshTradingSellWantOptions below) used to be a static
+// 3-option list here in this same comment's earlier form — unlike what you
+// already hold, what you might WANT has nothing to enumerate from client
+// state, so it needed the issuer itself to say what it's willing to mint.
+// Task #202 added exactly that (GET /atlas/trade/catalog,
+// AtlasWallet.fetchTradableClasses) — see refreshTradingSellWantOptions'
+// own comment just below for the current, dynamic version.
 async function refreshTradingSellOfferOptions() {
   if (!tradingSellOfferClassSelect) return;
-  const identity = await AtlasWallet.getIdentity();
-  const previous = tradingSellOfferClassSelect.value;
-  const totals = new Map(); // class -> { quantity, name }
-  if (identity) {
-    const wallet = await AtlasWallet.getWallet(identity.publicKey);
-    wallet.forEach((e) => {
-      const c = e.credential;
-      if (!c.asset.fungible) return;
-      const existing = totals.get(c.asset.class);
-      if (existing) existing.quantity += c.quantity;
-      else totals.set(c.asset.class, { quantity: c.quantity, name: c.asset.name });
-    });
-  }
+  try {
+    const identity = await AtlasWallet.getIdentity();
+    const previous = tradingSellOfferClassSelect.value;
+    const totals = new Map(); // class -> { quantity, name }
+    if (identity) {
+      const wallet = await AtlasWallet.getWallet(identity.publicKey);
+      wallet.forEach((e) => {
+        const c = e.credential;
+        if (!c.asset.fungible) return;
+        const existing = totals.get(c.asset.class);
+        if (existing) existing.quantity += c.quantity;
+        else totals.set(c.asset.class, { quantity: c.quantity, name: c.asset.name });
+      });
+    }
 
-  tradingSellOfferClassSelect.innerHTML = '';
-  if (totals.size === 0) {
-    tradingSellOfferClassSelect.appendChild(new Option('No fungible assets to offer', ''));
-    tradingSellOfferClassSelect.disabled = true;
+    tradingSellOfferClassSelect.innerHTML = '';
+    if (totals.size === 0) {
+      tradingSellOfferClassSelect.appendChild(new Option('No fungible assets to offer', ''));
+      tradingSellOfferClassSelect.disabled = true;
+      return;
+    }
+    tradingSellOfferClassSelect.disabled = false;
+    Array.from(totals.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .forEach(([cls, info]) => {
+        tradingSellOfferClassSelect.appendChild(new Option(info.name + ' ×' + formatMass(info.quantity) + ' (' + cls + ')', cls));
+      });
+    if (totals.has(previous)) tradingSellOfferClassSelect.value = previous;
+  } finally {
+    // Task #205: the try/finally (rather than one call at the bottom) so
+    // the visible searchable-combo input stays in sync on EVERY exit path
+    // above, including the early "no fungible assets" return.
+    tradingSellOfferCombo && tradingSellOfferCombo.sync();
+    // Task #207 — this refresh can silently change (or clear) the selected
+    // offer class without firing its own 'change' event (e.g. a class you
+    // no longer hold drops out entirely); recompute the suggestion so the
+    // "you want" side doesn't keep showing a stale number for a class
+    // that's no longer actually selected.
+    updateSellSuggestion(sellDrivingSide);
+  }
+}
+
+// Sell tab's "You want" dropdown — Task #202 (SPEC.md §7). Fetched live
+// from whichever domain remoteTradeStationDomainSelect currently names
+// (AtlasWallet.fetchTradableClasses, GET /atlas/trade/catalog — ungated, so
+// this needs no identity/membership the way refreshTradingSellOfferOptions
+// above needs a wallet to sum balances from), rather than the fixed
+// 3-option list this dropdown used to carry in viewer.html. Deliberately
+// keyed off the SAME dropdown the Post/Claim/Cancel handlers already read
+// the target domain from (not currentManifest) — a wallet can be a member
+// of more than one Trading Station (refreshRemoteTradeStationOptions above
+// lists every joined membership, not just the one currently being browsed),
+// so "what can I ask for" has to match "where this listing will actually
+// post," which are only sometimes the same domain. Refreshed both when this
+// dropdown itself changes (see its own 'change' listener below) and
+// whenever the Sell sub-tab or the whole Trade tab is (re)opened.
+//
+// This is deliberately the local-station-only slice of the wallet UX idea
+// discussed for cross-domain trading; fetching a DIFFERENT domain's catalog
+// while composing a trade (an optional "target domain" field, a foreign
+// fetch, tradeScope:'global' filtering) is designed to layer on top of this
+// same endpoint/function later without changing either — see the private
+// design notes for what that adds. Preserves the current selection across
+// refreshes where it's still valid, same convention as
+// refreshTradingSellOfferOptions/refreshRemoteTradeStationOptions.
+async function refreshTradingSellWantOptions() {
+  if (!tradingSellWantClassSelect) return;
+  try {
+    const previous = tradingSellWantClassSelect.value;
+    tradingSellWantClassSelect.innerHTML = '';
+
+    const domain = remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.value;
+    if (!domain) {
+      tradingSellWantClassSelect.appendChild(new Option('Join a Trading Station first', ''));
+      tradingSellWantClassSelect.disabled = true;
+      sellCatalogCache = []; // task #207 — no domain, no rates to suggest with
+      return;
+    }
+
+    let classes;
+    try {
+      classes = await AtlasWallet.fetchTradableClasses(domain);
+    } catch (err) {
+      tradingSellWantClassSelect.appendChild(new Option('Could not load tradable assets', ''));
+      tradingSellWantClassSelect.disabled = true;
+      sellCatalogCache = [];
+      return;
+    }
+
+    // Task #207 — this same fetch already carries each class's declared
+    // exchangeRate (the catalog entry shape GET /atlas/trade/catalog always
+    // returns — see manual-trading-catalog.js's own shape assertion), so it
+    // doubles as the rate lookup updateSellSuggestion() needs below, the
+    // same way convertCatalogCache already serves Convert's own estimate.
+    sellCatalogCache = classes || [];
+
+    if (!classes || classes.length === 0) {
+      tradingSellWantClassSelect.appendChild(new Option('No tradable assets offered here', ''));
+      tradingSellWantClassSelect.disabled = true;
+      return;
+    }
+    tradingSellWantClassSelect.disabled = false;
+    classes
+      .slice()
+      .sort((a, b) => a.class.localeCompare(b.class))
+      .forEach((entry) => {
+        tradingSellWantClassSelect.appendChild(new Option(entry.name + ' (' + entry.class + ')', entry.class));
+      });
+    if (Array.from(tradingSellWantClassSelect.options).some((o) => o.value === previous)) {
+      tradingSellWantClassSelect.value = previous;
+    }
+  } finally {
+    // Task #205: see the matching comment in refreshTradingSellOfferOptions.
+    tradingSellWantCombo && tradingSellWantCombo.sync();
+    // Task #207 — the want dropdown may have just been rebuilt (a fresh
+    // domain, a refetch), which can silently invalidate whatever suggestion
+    // was showing without firing either quantity input's own 'input' event;
+    // recompute from whichever side the visitor was last actually typing
+    // into so the two fields don't drift out of sync with the new options.
+    updateSellSuggestion(sellDrivingSide);
+  }
+}
+
+// Task #207 — Sell's "you offer"/"you want" quantity auto-suggestion.
+// Both quantity inputs start at 0 (viewer.html); typing a real number into
+// EITHER one auto-fills the other at this domain's own declared
+// `exchangeRate` for the two currently-selected classes — the exact same
+// floor-conversion math updateConvertEstimate() below already uses for
+// Convert's live estimate, just applied to a barter pair instead of an
+// actual /atlas/convert spend. This is a starting-point SUGGESTION only:
+// nothing at listing-post time checks the two quantities against each
+// other at all (Sell has never enforced a "fair" rate, unlike Convert),
+// so overwriting either field afterward is always fine.
+//
+// sellDrivingSide tracks whichever quantity field the visitor actually
+// typed into most recently — the one auto-fill always treats as the
+// source of truth and never overwrites itself. It's also what
+// refreshTradingSellOfferOptions/refreshTradingSellWantOptions above
+// re-derive the suggestion from after a dropdown repopulates out from
+// under the current selection (see their own finally blocks).
+let sellCatalogCache = [];
+let sellDrivingSide = 'offer';
+
+// Returns the suggested quantity of `toClass` a `fromQty` amount of
+// `fromClass` would be "worth" at this domain's own rates, or `null` when
+// either class's rate isn't known yet (cache not loaded, or a class from
+// an issuer this domain doesn't itself catalog) — callers leave the other
+// field untouched in that case rather than clobbering it with a guess.
+function computeSuggestedSellQuantity(fromClass, fromQty, toClass) {
+  const fromEntry = sellCatalogCache.find((c) => c.class === fromClass);
+  const toEntry = sellCatalogCache.find((c) => c.class === toClass);
+  if (!fromEntry || !toEntry || typeof fromEntry.exchangeRate !== 'number' || typeof toEntry.exchangeRate !== 'number') {
+    return null;
+  }
+  if (!Number.isInteger(fromQty) || fromQty <= 0) return 0;
+  return Math.max(0, Math.floor((fromQty / fromEntry.exchangeRate) * toEntry.exchangeRate));
+}
+
+function updateSellSuggestion(drivingSide) {
+  sellDrivingSide = drivingSide;
+  if (!tradingSellOfferClassSelect || !tradingSellWantClassSelect || !tradingSellOfferQtyInput || !tradingSellWantQtyInput) return;
+  const offerClass = tradingSellOfferClassSelect.value;
+  const wantClass = tradingSellWantClassSelect.value;
+  if (!offerClass || !wantClass) return; // nothing selected on one side yet — nothing to suggest
+  if (drivingSide === 'want') {
+    const suggested = computeSuggestedSellQuantity(wantClass, parseInt(tradingSellWantQtyInput.value, 10), offerClass);
+    if (suggested !== null) tradingSellOfferQtyInput.value = suggested;
+  } else {
+    const suggested = computeSuggestedSellQuantity(offerClass, parseInt(tradingSellOfferQtyInput.value, 10), wantClass);
+    if (suggested !== null) tradingSellWantQtyInput.value = suggested;
+  }
+}
+
+// Setting .value programmatically (above) never fires 'input'/'change' on
+// its own, so these four listeners can't loop back into each other.
+tradingSellOfferQtyInput && tradingSellOfferQtyInput.addEventListener('input', () => updateSellSuggestion('offer'));
+tradingSellWantQtyInput && tradingSellWantQtyInput.addEventListener('input', () => updateSellSuggestion('want'));
+tradingSellOfferClassSelect && tradingSellOfferClassSelect.addEventListener('change', () => updateSellSuggestion(sellDrivingSide));
+tradingSellWantClassSelect && tradingSellWantClassSelect.addEventListener('change', () => updateSellSuggestion(sellDrivingSide));
+
+// Task #203 (SPEC.md §7's "Currency conversion") — Convert sub-tab.
+// Caches the last-fetched catalog (with each entry's exchangeRate) so the
+// live estimate (updateConvertEstimate below) can recompute instantly on
+// every keystroke/selection change without an async round-trip — refreshed
+// only when refreshConvertOptions() itself runs (domain change, tab open).
+let convertCatalogCache = [];
+
+// Populates BOTH dropdowns off one fetch: "Convert from" is this domain's
+// tradable classes that this wallet actually HOLDS (issued by that same
+// domain — a same-named class from a different issuer wouldn't verify
+// server-side anyway, same reasoning mintAsset's own existingBalances
+// filtering uses); "Convert to" is every OTHER tradable class the domain
+// accepts converting into, defaulting to whichever one it flags
+// `isBaseCurrency` unless that's the class already selected as the source.
+// Both empty-state and populated cases fully rebuild each select, same
+// convention as refreshTradingSellOfferOptions/refreshTradingSellWantOptions.
+async function refreshConvertOptions() {
+  if (!tradingConvertFromClassSelect || !tradingConvertToClassSelect) return;
+  try {
+    const domain = remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.value;
+    const previousFrom = tradingConvertFromClassSelect.value;
+
+    if (!domain) {
+      tradingConvertFromClassSelect.innerHTML = '';
+      tradingConvertFromClassSelect.appendChild(new Option('Join a Trading Station first', ''));
+      tradingConvertFromClassSelect.disabled = true;
+      tradingConvertToClassSelect.innerHTML = '';
+      tradingConvertToClassSelect.appendChild(new Option('Join a Trading Station first', ''));
+      tradingConvertToClassSelect.disabled = true;
+      convertCatalogCache = [];
+      // Task #205: refreshConvertToOptions (which owns tradingConvertToCombo's
+      // own sync) is skipped on this early-return path, so sync it here too.
+      tradingConvertToCombo && tradingConvertToCombo.sync();
+      updateConvertEstimate();
+      return;
+    }
+
+    let classes;
+    try {
+      classes = await AtlasWallet.fetchTradableClasses(domain);
+    } catch (err) {
+      classes = [];
+    }
+    convertCatalogCache = classes || [];
+    const convertible = convertCatalogCache.filter((c) => typeof c.exchangeRate === 'number');
+
+    const identity = await AtlasWallet.getIdentity();
+    const totals = new Map(); // class -> { quantity, name }
+    if (identity) {
+      const wallet = await AtlasWallet.getWallet(identity.publicKey);
+      wallet.forEach((e) => {
+        const c = e.credential;
+        if (!c.asset.fungible || c.issuer.domain !== domain) return;
+        const existing = totals.get(c.asset.class);
+        if (existing) existing.quantity += c.quantity;
+        else totals.set(c.asset.class, { quantity: c.quantity, name: c.asset.name });
+      });
+    }
+
+    tradingConvertFromClassSelect.innerHTML = '';
+    const holdable = convertible.filter((c) => totals.has(c.class));
+    if (holdable.length === 0) {
+      tradingConvertFromClassSelect.appendChild(new Option('No convertible balance held', ''));
+      tradingConvertFromClassSelect.disabled = true;
+    } else {
+      tradingConvertFromClassSelect.disabled = false;
+      holdable
+        .slice()
+        .sort((a, b) => a.class.localeCompare(b.class))
+        .forEach((c) => {
+          const held = totals.get(c.class);
+          tradingConvertFromClassSelect.appendChild(new Option(held.name + ' ×' + formatMass(held.quantity) + ' (' + c.class + ')', c.class));
+        });
+      if (holdable.some((c) => c.class === previousFrom)) tradingConvertFromClassSelect.value = previousFrom;
+    }
+
+    refreshConvertToOptions();
+  } finally {
+    // Task #205: see the matching comment in refreshTradingSellOfferOptions.
+    // (tradingConvertToCombo's own sync is handled inside
+    // refreshConvertToOptions, called above on every non-early-return path.)
+    tradingConvertFromCombo && tradingConvertFromCombo.sync();
+  }
+}
+
+// "Convert to" — every convertible class at this domain EXCEPT whichever
+// one is currently selected in "Convert from" (converting a class into
+// itself is meaningless, and POST /atlas/convert rejects it outright).
+// Re-run whenever "Convert from" changes, not just when the domain does.
+function refreshConvertToOptions() {
+  if (!tradingConvertToClassSelect) return;
+  try {
+    const fromClass = tradingConvertFromClassSelect.value;
+    const previousTo = tradingConvertToClassSelect.value;
+    const convertible = convertCatalogCache.filter((c) => typeof c.exchangeRate === 'number' && c.class !== fromClass);
+
+    tradingConvertToClassSelect.innerHTML = '';
+    if (convertible.length === 0) {
+      tradingConvertToClassSelect.appendChild(new Option('Nothing else to convert into here', ''));
+      tradingConvertToClassSelect.disabled = true;
+      return;
+    }
+    tradingConvertToClassSelect.disabled = false;
+    convertible
+      .slice()
+      .sort((a, b) => a.class.localeCompare(b.class))
+      .forEach((c) => {
+        tradingConvertToClassSelect.appendChild(new Option(c.name + ' (' + c.class + ')', c.class));
+      });
+    if (convertible.some((c) => c.class === previousTo)) {
+      tradingConvertToClassSelect.value = previousTo;
+    } else {
+      // Default to this domain's own declared base currency (gold, today)
+      // — the whole reason `isBaseCurrency` exists as a UI hint rather than
+      // a functional gate — unless it's not even an option here (it's the
+      // class already being spent, already excluded above).
+      const base = convertible.find((c) => c.isBaseCurrency);
+      if (base) tradingConvertToClassSelect.value = base.class;
+    }
+  } finally {
+    // Task #205: see the matching comment in refreshTradingSellOfferOptions.
+    tradingConvertToCombo && tradingConvertToCombo.sync();
+    updateConvertEstimate();
+  }
+}
+
+// Live, client-side estimate only — purely informational, computed from
+// the same cached rates the server itself will use, so it should normally
+// match exactly, but POST /atlas/convert's own response is always the
+// authoritative result. Mirrors the server's own math (see
+// issuer-server/server.js's POST /atlas/convert comment): spend amount ->
+// value in the domain's base-currency unit -> that value in the target
+// class's units, floored, rejected below 1.
+function updateConvertEstimate() {
+  if (!tradingConvertEstimateEl) return;
+  const fromClass = tradingConvertFromClassSelect && tradingConvertFromClassSelect.value;
+  const toClass = tradingConvertToClassSelect && tradingConvertToClassSelect.value;
+  const spendAmount = parseInt(tradingConvertSpendQtyInput && tradingConvertSpendQtyInput.value, 10);
+  if (!fromClass || !toClass || !Number.isInteger(spendAmount) || spendAmount <= 0) {
+    tradingConvertEstimateEl.textContent = '';
     return;
   }
-  tradingSellOfferClassSelect.disabled = false;
-  Array.from(totals.entries())
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .forEach(([cls, info]) => {
-      tradingSellOfferClassSelect.appendChild(new Option(info.name + ' ×' + info.quantity + ' (' + cls + ')', cls));
-    });
-  if (totals.has(previous)) tradingSellOfferClassSelect.value = previous;
+  const fromEntry = convertCatalogCache.find((c) => c.class === fromClass);
+  const toEntry = convertCatalogCache.find((c) => c.class === toClass);
+  if (!fromEntry || !toEntry || typeof fromEntry.exchangeRate !== 'number' || typeof toEntry.exchangeRate !== 'number') {
+    tradingConvertEstimateEl.textContent = '';
+    return;
+  }
+  const resultQuantity = Math.floor((spendAmount / fromEntry.exchangeRate) * toEntry.exchangeRate);
+  tradingConvertEstimateEl.textContent = resultQuantity >= 1
+    ? `You'll receive ~${formatMass(resultQuantity)} ${toEntry.name} (estimate — this domain's own conversion settles the exact amount)`
+    : `${formatMass(spendAmount)} ${fromEntry.name} rounds down to 0 g ${toEntry.name} at this domain's rate — try a larger amount`;
 }
 
 // Browse (Buy tab, v1.14) — the selected station's own open, unexpired
@@ -6486,7 +7682,7 @@ async function refreshTradingBuyList() {
   }
   tradingBuyListEl.innerHTML = listings.map((l) => `
     <div class="wallet-item">
-      ${l.offer.quantity} ${l.offer.class} → ${l.want.quantity} ${l.want.class}
+      ${formatMass(l.offer.quantity)} ${l.offer.class} → ${formatMass(l.want.quantity)} ${l.want.class}
       <span class="empty-note">from ${l.posterPublicKey.slice(0, 16)}… — ${formatExpiryCountdown(l.expiresAt)}</span>
       <button type="button" class="btn-secondary trading-claim-btn" data-pending-id="${l.pendingId}">Trade</button>
     </div>
@@ -6529,7 +7725,7 @@ async function refreshTradingListingsList() {
       : (status === 'settled' || status === 'expired' || status === 'canceled')
         ? `<button type="button" class="danger-btn trading-delete-listing-btn" data-pending-id="${r.pendingId}">Delete</button>`
         : '';
-    return `<div class="wallet-item">${r.offer.quantity} ${r.offer.class} → ${r.want.quantity} ${r.want.class} @ ${r.domain} — <strong>${status}</strong>${countdown} ${actionBtn}</div>`;
+    return `<div class="wallet-item">${formatMass(r.offer.quantity)} ${r.offer.class} → ${formatMass(r.want.quantity)} ${r.want.class} @ ${r.domain} — <strong>${status}</strong>${countdown} ${actionBtn}</div>`;
   }).join('');
 }
 
@@ -6552,6 +7748,8 @@ tradingStationJoinBtn && tradingStationJoinBtn.addEventListener('click', async (
 remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.addEventListener('change', () => {
   if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '';
   refreshTradingBuyList();
+  refreshTradingSellWantOptions(); // Task #202 — "You want" is scoped to whichever station this dropdown now names
+  refreshConvertOptions(); // Task #203 — both Convert dropdowns are scoped the same way
 });
 
 tradingBuyRefreshBtn && tradingBuyRefreshBtn.addEventListener('click', () => {
@@ -6596,7 +7794,7 @@ tradingBuyListEl && tradingBuyListEl.addEventListener('click', async (evt) => {
     // per-listing expiry above.
     const result = await AtlasWallet.claimTradeListing(domain, membership.credential, listing, balance, 10);
     await refreshInventoryDisplay();
-    if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '✓ Traded: sent ' + listing.want.quantity + ' ' + listing.want.class + ', received ' + listing.offer.quantity + ' ' + listing.offer.class + '.';
+    if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '✓ Traded: sent ' + formatMass(listing.want.quantity) + ' ' + listing.want.class + ', received ' + formatMass(listing.offer.quantity) + ' ' + listing.offer.class + '.';
   } catch (err) {
     if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = 'Trade failed: ' + err.message;
   } finally {
@@ -6628,7 +7826,7 @@ tradingSellSubmitBtn && tradingSellSubmitBtn.addEventListener('click', async () 
 
     const wallet = await AtlasWallet.getWallet(identity.publicKey);
     const balance = wallet.map((e) => e.credential).find((c) => c.asset.class === offerClass && c.asset.fungible && c.quantity >= offerQty);
-    if (!balance) throw new Error('Not enough ' + offerClass + ' to offer ' + offerQty + '.');
+    if (!balance) throw new Error('Not enough ' + offerClass + ' to offer ' + formatMass(offerQty) + '.');
 
     // wallet.js's proposeIntent still takes expiresMinutes (v1.14 shape,
     // unchanged) — this per-listing hours input (v1.15) is purely a
@@ -6644,6 +7842,54 @@ tradingSellSubmitBtn && tradingSellSubmitBtn.addEventListener('click', async () 
     tradingSellStatusEl.textContent = 'Post failed: ' + err.message;
   } finally {
     tradingSellSubmitBtn.disabled = false;
+  }
+});
+
+// Task #203 — live estimate recompute (no network call, uses
+// convertCatalogCache). Changing "Convert from" also re-excludes it from
+// "Convert to" (refreshConvertToOptions already calls updateConvertEstimate
+// itself once it's done rebuilding that select).
+tradingConvertFromClassSelect && tradingConvertFromClassSelect.addEventListener('change', refreshConvertToOptions);
+tradingConvertToClassSelect && tradingConvertToClassSelect.addEventListener('change', updateConvertEstimate);
+tradingConvertSpendQtyInput && tradingConvertSpendQtyInput.addEventListener('input', updateConvertEstimate);
+
+tradingConvertSubmitBtn && tradingConvertSubmitBtn.addEventListener('click', async () => {
+  tradingConvertSubmitBtn.disabled = true;
+  tradingConvertStatusEl.textContent = 'Converting…';
+  try {
+    const domain = remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.value;
+    if (!domain) throw new Error('Join a Trading Station first.');
+    const identity = await AtlasWallet.getIdentity();
+    if (!identity) throw new Error('Create your identity first.');
+
+    const fromClass = tradingConvertFromClassSelect.value;
+    const toClass = tradingConvertToClassSelect.value;
+    const spendAmount = parseInt(tradingConvertSpendQtyInput.value, 10);
+    if (!fromClass) throw new Error('Nothing to convert from.');
+    if (!toClass) throw new Error('Nothing to convert into.');
+    if (!Number.isInteger(spendAmount) || spendAmount <= 0) throw new Error('A valid quantity is required.');
+
+    // Same "one credential must cover the whole amount" convention the
+    // Sell tab's own submit handler uses just above — unlike the display-
+    // only totals in refreshConvertOptions, an actual presented balance
+    // has to be ONE signed credential, not a sum across several. Filtered
+    // by issuer domain too (unlike Sell's own lookup just above, which
+    // doesn't bother — there's only ever been one issuer in this demo so
+    // far, but Convert always talks to whichever domain is selected, so
+    // presenting a same-named balance from a DIFFERENT issuer here would
+    // silently submit to the wrong domain's endpoint).
+    const wallet = await AtlasWallet.getWallet(identity.publicKey);
+    const balance = wallet.map((e) => e.credential).find((c) => c.asset.class === fromClass && c.issuer.domain === domain && c.asset.fungible && c.quantity >= spendAmount);
+    if (!balance) throw new Error('Not enough ' + fromClass + ' to convert ' + formatMass(spendAmount) + ' — try consolidating your balances first if you hold it split across more than one credential.');
+
+    const result = await AtlasWallet.convertAsset('self', balance, spendAmount, toClass);
+    tradingConvertStatusEl.textContent = '✓ Converted — received ' + formatMass(result.received.quantity) + ' ' + result.received.asset.name + '.';
+    await refreshInventoryDisplay();
+    await refreshConvertOptions();
+  } catch (err) {
+    tradingConvertStatusEl.textContent = 'Convert failed: ' + err.message;
+  } finally {
+    tradingConvertSubmitBtn.disabled = false;
   }
 });
 
@@ -8457,6 +9703,19 @@ function assetActionHandler(listEl, role, toRole) {
       btn.classList.toggle('open', !detail.hidden);
       return;
     }
+    // Task #211's "⋯" menu — same delegated toggle/outside-click pattern
+    // mail's own menu already established (closeAllCardMenus() is shared
+    // between both). Returns before the identity lookup just below: opening
+    // the menu shouldn't need an unlocked identity any more than hovering
+    // the card for the Asset Viewer does.
+    if (btn.dataset.action === 'toggle-item-menu') {
+      const menu = btn.parentElement.querySelector('.card-menu-items');
+      const opening = menu && !menu.classList.contains('show');
+      closeAllCardMenus();
+      if (opening && menu) menu.classList.add('show');
+      return;
+    }
+    closeAllCardMenus(); // a real action was just chosen — close the menu it came from
     const who = role === 'self' ? await AtlasWallet.getIdentity() : await AtlasWallet.getCounterparty();
     if (!who) return;
 
@@ -8519,39 +9778,13 @@ droppedItemsListEl.addEventListener('click', (e) => {
   pickUpDroppedItem(btn.dataset.id);
 });
 
-mintIronBtn.addEventListener('click', async () => {
-  mintIronBtn.disabled = true;
-  mintIronBtn.textContent = 'Mining…';
-  try {
-    await AtlasWallet.mintAsset('self', manifestDomainOf(currentManifest), 'atlas.element.iron', 20);
-    await refreshInventoryDisplay();
-  } catch (err) {
-    statusEl.textContent = 'Mint failed: ' + err.message;
-  } finally {
-    mintIronBtn.disabled = false;
-    mintIronBtn.textContent = 'Mine 20 iron (self)';
-  }
-});
-
-mintGoldBtn.addEventListener('click', async () => {
-  mintGoldBtn.disabled = true;
-  mintGoldBtn.textContent = 'Mining…';
-  try {
-    await AtlasWallet.mintAsset('counterparty', manifestDomainOf(currentManifest), 'atlas.element.gold', 10);
-    await refreshInventoryDisplay();
-  } catch (err) {
-    statusEl.textContent = 'Mint failed: ' + err.message;
-  } finally {
-    mintGoldBtn.disabled = false;
-    mintGoldBtn.textContent = 'Mine 10 gold (counterparty)';
-  }
-});
-
 // Dispatch for a clicked in-scene interactable (see the "interactables"
-// note in enterWorld). Two actions exist today: "mint" (does exactly what
-// the Settings-panel mine buttons above do, just triggered by clicking
-// the stall itself instead of opening the wallet) and "open-chess" (task
-// #195 — opens the chess modal; see that section further down). The busy
+// note in enterWorld). Two actions exist today: "mint" (calls
+// AtlasWallet.mintAsset() directly — task #211 removed the old dev-only
+// "Mine 20 iron (self)"/"Mine 10 gold (counterparty)" Settings buttons
+// that used to call the same thing, since every world's own mining
+// stalls are the real, in-scene way to reach it now) and "open-chess"
+// (task #195 — opens the chess modal; see that section further down). The busy
 // guard exists because — unlike a portal (leaves the scene) or a dropped
 // item (removes its own marker once picked up) — a stall stays put and
 // stays clickable, so nothing else stops a fast double-click from firing
@@ -8580,7 +9813,11 @@ async function handleInteractable(marker) {
       statusEl.textContent = 'Mining ' + marker.class + '…';
       await AtlasWallet.mintAsset(marker.role || 'self', manifestDomainOf(currentManifest), marker.class, marker.quantity);
       await refreshInventoryDisplay();
-      statusEl.textContent = 'Collected ' + marker.quantity + ' × ' + marker.class + '.';
+      // Task #206: 'of', not '×' — once the number itself already carries a
+      // unit ("20 g"), "Collected 20 g × atlas.element.iron." read like a
+      // stray multiplication; "of" reads correctly with a unit already in
+      // the number.
+      statusEl.textContent = 'Collected ' + formatMass(marker.quantity) + ' of ' + marker.class + '.';
     } else if (marker.action === 'issue') {
       // Unlike a resource balance, an item credential isn't quantity-based
       // — every "collect" issues a brand-new unique credential, and the
@@ -8608,6 +9845,23 @@ async function handleInteractable(marker) {
       await AtlasWallet.mintAsset('self', manifestDomainOf(currentManifest), marker.class);
       await refreshInventoryDisplay();
       statusEl.textContent = 'Collected ' + (marker.label || marker.class) + '.';
+      // Task #227 — this class just became "already owned" for
+      // isOncePerUserClassOwned()'s purposes; refresh right away rather
+      // than waiting for the next world entry, so the Previewer/3D
+      // proximity list drops it immediately (and, in 3D, so the very next
+      // E press targets the NEXT nearest still-available marker instead of
+      // re-targeting this one).
+      if (marker.oncePerUser) await refreshOwnedOncePerUserClassKeys();
+      // Task #227 — the plaza's own "Subscribe" desk and the wallet
+      // panel's "Subscribe" button (#subscribeSection) both mint the same
+      // atlas.membership credential; refreshSubscribeButton() only runs on
+      // enterWorld() or the button's own click otherwise, so without this
+      // the wallet button could keep offering a subscription this visitor
+      // just got from the desk until the next world switch. Scoped to this
+      // one class rather than called unconditionally so an ordinary item
+      // pickup (compass, ring, crate) doesn't pay for a wallet-panel DOM
+      // lookup it has nothing to do with.
+      if (marker.class === 'atlas.membership') await refreshSubscribeButton();
     }
   } catch (err) {
     statusEl.textContent = (marker.action === 'mint' ? 'Mint failed: ' : 'Collect failed: ') + err.message;
@@ -8746,6 +10000,7 @@ refreshInventoryDisplay();
 refreshMailDisplay();
 AtlasWallet.getChatPanelSettings().then(applyChatPanelSize); // restore the chat panel's persisted size/opacity/text-size/minimized state before any world is entered
 AtlasWallet.getAssetViewerSettings().then(applyAssetViewerSettings); // restore the Asset Viewer panel's persisted size/opacity/text-size, same reasoning
+AtlasWallet.getPreviewerWindowSettings().then(applyPreviewerWindowSettings); // restore the Previewer's persisted dock corner before it can ever first open
 refreshChatSendability();
 
 const start = startParams();

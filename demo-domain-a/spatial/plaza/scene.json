@@ -5,7 +5,8 @@
     { "type": "box", "position": [0, 1, -6], "size": [3, 2, 0.3], "color": "#c05a1f", "label": "Example Plaza" },
     { "type": "box", "position": [-4, 0.5, -2], "size": [1, 1, 1], "color": "#2c7568", "label": "Compass Stall" },
     { "type": "box", "position": [4, 0.5, -2], "size": [1, 1, 1], "color": "#2c7568", "label": "Ring Stall" },
-    { "type": "box", "position": [0, 0.4, 2], "size": [1.4, 0.8, 1.4], "color": "#4a3826", "label": "Chess Table" }
+    { "type": "box", "position": [0, 0.4, 2], "size": [1.4, 0.8, 1.4], "color": "#4a3826", "label": "Chess Table" },
+    { "type": "box", "position": [0, 0.5, -3.5], "size": [1, 1, 1], "color": "#4a6fa5", "label": "Subscription Desk" }
   ],
   "portalMarkers": [
     { "position": [-6, 0, 4], "portalIndex": 0 },
@@ -17,6 +18,7 @@
   "interactables": [
     { "position": [-4, 0.5, -2], "label": "Bronze Compass", "action": "issue", "class": "atlas.wearable", "oncePerUser": true },
     { "position": [4, 0.5, -2], "label": "Merchant's Signet Ring", "action": "issue", "class": "atlas.wearable.ring", "oncePerUser": true },
-    { "position": [0, 0.4, 2], "label": "Play Chess", "action": "open-chess" }
+    { "position": [0, 0.4, 2], "label": "Play Chess", "action": "open-chess" },
+    { "position": [0, 0.5, -3.5], "label": "Subscription Card", "action": "issue", "class": "atlas.membership", "oncePerUser": true }
   ]
 }
