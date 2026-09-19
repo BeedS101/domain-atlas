@@ -5654,6 +5654,11 @@ confirmImportBtn.addEventListener('click', async () => {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
     await refreshInventoryDisplay();
+    // Unlike a freshly-created identity, an imported one can already own
+    // things — same staleness risk unlockBtn's handler fixes above, so the
+    // Previewer/3D proximity check for whatever world is currently loaded
+    // (if any) reflects this identity's real holdings right away.
+    await refreshOwnedOncePerUserClassKeys();
     refreshChatIdentity(); // imported identity is unlocked immediately too — same reasoning as seedConfirmBtn above
   } catch (err) {
     // Deliberately the same message whether the password, the seed
@@ -5688,6 +5693,10 @@ restoreFullBackupBtn.addEventListener('click', async () => {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
     await refreshInventoryDisplay();
+    // Same reasoning as confirmImportBtn above — a restored backup's wallet
+    // can already own oncePerUser items the current world's ownership cache
+    // doesn't know about yet.
+    await refreshOwnedOncePerUserClassKeys();
     refreshChatIdentity(); // same immediate reflection as confirmImportBtn/seedConfirmBtn above
     importScreenStatus.textContent = '';
   } catch (err) {
@@ -5707,6 +5716,17 @@ unlockBtn.addEventListener('click', async () => {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
     await refreshInventoryDisplay();
+    // A world with policy.identityRequired: false (or no policy at all) lets
+    // a visitor stand in it while still locked — enterWorld()'s own
+    // refreshOwnedOncePerUserClassKeys() call already ran with getIdentity()
+    // returning null at that point, so the ownership cache was snapshotted
+    // empty even though the locked wallet may already hold e.g. this
+    // domain's atlas.membership card. Without this, the Previewer/3D
+    // proximity check would keep offering an already-owned oncePerUser item
+    // as if it weren't collected until the next enterWorld() (leaving and
+    // re-entering) happened to refresh it — unlocking mid-visit should fix
+    // this immediately instead.
+    await refreshOwnedOncePerUserClassKeys();
     refreshChatIdentity(); // an in-progress chat session should reflect the newly-unlocked identity immediately, without requiring leaving the world
   } catch (err) {
     unlockScreenStatus.textContent = err.message;
