@@ -693,6 +693,30 @@
     let lastInteractPromptMarker = null; // task #213 — the same raw scene.json entry the label was derived from, or null; see getInteractPromptMarker() below
     let lastNearbyInteractMarkers = []; // task #227 — every in-range, not-yet-owned marker (not just the nearest), nearest-first; see getNearbyInteractMarkers() below
 
+    // Dropped items, visible and pickupable in a gltf-mini world (previously
+    // this renderer had no idea a drop even existed visually — see
+    // beginDropPlacement()'s own comment in viewer.js for how that gap used
+    // to be worked around). Deliberately NOT folded into interactTriggers/
+    // loadScene() above: a drop appears and disappears live, on the same
+    // ~4s poll viewer.js already runs for the 2D renderer's itemMarkers
+    // (WORLD_DROPS_POLL_MS), so it gets its own incremental add/remove API
+    // (setItemDrops(), below) — the same "diff and patch, don't reload the
+    // whole scene" reasoning upsertRemotePlayer/removeRemotePlayer already
+    // use for presence, rather than a full loadScene() call every poll
+    // tick (which would also leak the previous call's WebGL buffers —
+    // loadScene() never frees them, fine for a real world switch, wasteful
+    // and eventually leaky if repeated every few seconds).
+    //
+    // dropId -> { position, radius, marker, primitives, bounds }. `marker`
+    // is what flows through to opts.onInteract/onInteractPrompt exactly
+    // like a scene.json interactable's marker does, tagged with
+    // `kind: 'item-drop'` so viewer.js can route it to pickUpDroppedItem()
+    // instead of handleInteractable()'s mint/issue logic. `primitives` is
+    // null until (and unless) the dropped asset's own `asset.model` finishes
+    // loading — see setItemDrops() below for the glow-marker fallback this
+    // enables, and the render loop for how the two are drawn differently.
+    let itemDropEntries = new Map();
+
     const camera = {
       pos: (sceneData.camera && sceneData.camera.start) ? sceneData.camera.start.slice() : [0, 1.6, 4],
       yaw: ((sceneData.camera && sceneData.camera.startYaw) || 0) * Math.PI / 180,
@@ -703,6 +727,26 @@
     // scene is loaded (it's a fixed avatar, not scene content).
     const character = buildCharacter(gl);
     let walkPhase = 0;
+
+    // Shared fallback visual for a dropped item whose asset has no `model`
+    // (or whose model failed to load — see setItemDrops() below) — one
+    // small box built once and reused, repositioned per drop, rather than
+    // one VAO per drop. Same amber (#e0b84c) the 2D/isometric renderer's
+    // own drawItemMarker() glow already uses, so a drop reads as "the same
+    // kind of thing" across both renderers even though this one is real
+    // geometry rather than a canvas gradient.
+    const itemGlowPrim = buildBox(gl, 0.28, -0.14, 0.14, 0.28, [0.878, 0.722, 0.298, 1]);
+
+    // A dropped item's asset.model is authored completely independently of
+    // this world's own furniture kit — unlike a scene.json object (which
+    // gets an author-chosen `scale` tuned by whoever built the scene, see
+    // loadScene()'s objects.forEach below), there's no per-drop scale
+    // anywhere in the protocol, and a model built at a different real-world
+    // unit convention than this scene can come in far bigger (or smaller)
+    // than everything else. setItemDrops() below normalizes every loaded
+    // drop model so its largest bounding dimension always lands on this
+    // target size, regardless of what units it was actually authored in.
+    const ITEM_MODEL_TARGET_SIZE = 0.5;
 
     // Camera distance (mouse scroll wheel) replaces the old discrete
     // first-/third-person toggle with one continuous zoom: 0 is exactly
@@ -1024,6 +1068,73 @@
       }));
       interactCooldownUntil = new Map();
       portalCooldown = new Set();
+      // A world switch always gets a brand new init() (see viewer.js's
+      // active3D.destroy()/MiniGLTF.init() pair around entering a world),
+      // so itemDropEntries already starts empty here in practice — cleared
+      // anyway so a future caller of loadScene() on a still-alive instance
+      // (there is none today) doesn't inherit another world's drops.
+      itemDropEntries.clear();
+    }
+
+    // Diffs `drops` (viewer.js's live poll of this world's drops, same
+    // ~4s cadence and data source as the 2D renderer's own
+    // refreshSceneItemMarkers()) against itemDropEntries: removes any
+    // entry no longer present (claimed, or picked up by this visitor),
+    // and registers any new one immediately as a glow marker — upgraded
+    // in place to the asset's own model, if it declares one and it loads
+    // successfully (see the render loop for how the two draw differently).
+    // Each `drop` is { dropId, position, radius, model (asset.model URL,
+    // already absolute — see SPEC.md §5 — or null/undefined), domain,
+    // credential }.
+    function setItemDrops(drops) {
+      const incomingIds = new Set((drops || []).map((d) => d.dropId));
+      for (const dropId of itemDropEntries.keys()) {
+        if (!incomingIds.has(dropId)) itemDropEntries.delete(dropId);
+      }
+      (drops || []).forEach((drop) => {
+        if (itemDropEntries.has(drop.dropId)) return; // already tracked — a drop's position/model never change after it lands, nothing to update
+        const entry = {
+          position: drop.position,
+          radius: drop.radius || 0.9,
+          marker: {
+            kind: 'item-drop',
+            dropId: drop.dropId,
+            domain: drop.domain,
+            entry: { credential: drop.credential },
+            label: (drop.credential && drop.credential.asset && drop.credential.asset.name) || 'Pick up'
+          },
+          primitives: null,
+          bounds: null
+        };
+        itemDropEntries.set(drop.dropId, entry);
+        if (drop.model) {
+          // Cached by URL (modelCache, see loadModel above) — every visitor
+          // dropping the same class only pays the fetch once per session,
+          // same as any other model this renderer loads.
+          loadModel(gl, drop.model).then((model) => {
+            if (!itemDropEntries.has(drop.dropId)) return; // picked up/claimed before the model finished loading — don't resurrect a drop that's already gone
+            entry.primitives = model.primitives;
+            entry.bounds = model.bounds;
+            // Normalize to ITEM_MODEL_TARGET_SIZE by the model's own
+            // largest bounding dimension — a finely detailed model authored
+            // in real-world-scale units (say, meters, with a trophy modeled
+            // several units tall) would otherwise render at whatever raw
+            // size it happens to carry, dwarfing every other item in the
+            // scene. `size` can be non-finite/zero for a degenerate model
+            // (no accessor min/max at all) — falls back to no rescaling
+            // rather than dividing by zero or NaN-ing the whole matrix.
+            const size = model.bounds.size;
+            const maxDim = Math.max(size[0], size[1], size[2]);
+            entry.scale = (Number.isFinite(maxDim) && maxDim > 0) ? (ITEM_MODEL_TARGET_SIZE / maxDim) : 1;
+          }).catch((err) => {
+            // Graceful, not fatal — same "no broken-image icon" spirit the
+            // Asset Viewer's thumbnail already follows (viewer.js): a bad
+            // or missing model just means this drop keeps showing the
+            // amber glow fallback forever instead of its real shape.
+            console.warn('Dropped item model failed to load (' + drop.model + '), showing a marker instead:', err);
+          });
+        }
+      });
     }
 
     function resize() {
@@ -1193,6 +1304,24 @@
           nearby.push({ idx, marker: trigger.marker, dist });
         }
       });
+      // Dropped items (see setItemDrops() above) fold into the exact same
+      // `nearby`/E-press/Previewer pipeline as a scene.json interactable —
+      // proximity, nearest-first sort, one E-press collects the closest —
+      // rather than a second parallel interaction system. Keyed by dropId
+      // (a string) in the shared interactCooldownUntil map, which never
+      // collides with a static interactable's numeric idx. No
+      // isMarkerAlreadyOwned check here — that predicate is for a
+      // repeatable oncePerUser crate; a drop is already a one-shot (it
+      // simply stops being in `drops` once claimed, on the very next poll).
+      itemDropEntries.forEach((entry, dropId) => {
+        const dx = camera.pos[0] - entry.position[0];
+        const dz = camera.pos[2] - entry.position[2];
+        const dist = Math.hypot(dx, dz);
+        const cooldownUntil = interactCooldownUntil.get(dropId) || 0;
+        if (dist < entry.radius && t >= cooldownUntil) {
+          nearby.push({ idx: dropId, marker: entry.marker, dist });
+        }
+      });
       nearby.sort((a, b) => a.dist - b.dist);
       const nearestInteract = nearby.length ? nearby[0] : null;
       lastInteractPromptLabel = nearestInteract ? (nearestInteract.marker.label || 'Interact') : null;
@@ -1258,6 +1387,37 @@
       if (floorPrim) bindAndDraw(floorPrim, view, projection);
       portalTriggers.forEach((tr) => { bindAndDraw(tr.ring, view, projection); bindAndDraw(tr.beacon, view, projection); });
       placedPrimitives.forEach((prim) => bindAndDraw(prim, view, projection));
+
+      // Dropped items — a slow spin plus a gentle bob (phase-offset by X so
+      // several drops sitting near each other don't all bob in lockstep)
+      // reads as "a collectible sitting here," the same signal a portal's
+      // own pulse gives for "walk through me." A drop whose model hasn't
+      // loaded (or has none — see setItemDrops() above) draws the shared
+      // amber itemGlowPrim instead, at the same position/animation, so a
+      // fallback marker still reads as "something's here" rather than
+      // nothing at all.
+      itemDropEntries.forEach((entry) => {
+        const bob = Math.sin(t * 0.0026 + entry.position[0]) * 0.08;
+        const spin = t * 0.0009;
+        const placement = mat4Multiply(
+          mat4Translate(entry.position[0], (entry.position[1] || 0) + 0.35 + bob, entry.position[2]),
+          mat4RotateY(spin)
+        );
+        if (entry.primitives) {
+          // entry.scale (set once the model finishes loading — see
+          // setItemDrops() above) normalizes an arbitrarily-authored model
+          // down to ITEM_MODEL_TARGET_SIZE, applied in the model's own
+          // local space (before nodeMatrix), the same composition order
+          // loadScene()'s objects.forEach already uses for a scene.json
+          // object's own author-chosen scale.
+          const withScale = mat4Multiply(placement, mat4Scale(entry.scale || 1));
+          entry.primitives.forEach((prim) => {
+            bindAndDraw({ vao: prim.vao, color: prim.color, modelMatrix: mat4Multiply(withScale, prim.nodeMatrix) }, view, projection);
+          });
+        } else {
+          bindAndDraw({ vao: itemGlowPrim.vao, color: itemGlowPrim.color, modelMatrix: placement }, view, projection);
+        }
+      });
 
       // Player character. Close to distance 0 the head is deliberately
       // skipped — the camera is still basically at head height there, so
@@ -1338,6 +1498,7 @@
     function destroy() {
       stop();
       remotePlayers.clear();
+      itemDropEntries.clear();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('focusin', onFocusIn);
@@ -1434,6 +1595,31 @@
       // idea of what's actually in range, without re-deriving proximity
       // math the test has no access to.
       getNearbyInteractMarkers: () => lastNearbyInteractMarkers,
+      // Dropped items visible/pickupable in this world — see setItemDrops()
+      // and itemDropEntries' own declaration above for the full picture.
+      // viewer.js calls this on the same poll/after-drop/after-pickup
+      // schedule it already drives the 2D renderer's itemMarkers from
+      // (refreshSceneItemMarkers()), so both renderers stay in sync off the
+      // one shared drops fetch.
+      setItemDrops: (drops) => setItemDrops(drops),
+      // Debug/test hooks, same convention as getInteractPrompt() etc. above
+      // — let a test confirm a drop actually registered and which visual
+      // it's showing (a real model vs. the amber glow fallback) without
+      // reading canvas pixels.
+      getItemDropCount: () => itemDropEntries.size,
+      getItemDropRenderKind: (dropId) => {
+        const entry = itemDropEntries.get(dropId);
+        return entry ? (entry.primitives ? 'model' : 'marker') : null;
+      },
+      // The normalization factor actually applied to a loaded drop model
+      // (see ITEM_MODEL_TARGET_SIZE above) — lets a test confirm an
+      // oversized source model really did get scaled down to a sane size,
+      // without reading rendered pixels. null before the model has finished
+      // loading, or for a marker-fallback drop that never had one.
+      getItemDropScale: (dropId) => {
+        const entry = itemDropEntries.get(dropId);
+        return entry && entry.primitives ? entry.scale : null;
+      },
       // ---------- presence (#66) ----------
       // viewer.js owns the actual WebSocket connection and join/move/left
       // message protocol against presence-server; this file only renders

@@ -2445,8 +2445,17 @@ async function enterWorld(worldId) {
         // different way to trigger it (proximity + E instead of a mouse
         // click), so the actual mint/issue dispatch, oncePerUser dedup,
         // and identity gating are shared rather than duplicated per
-        // renderer.
-        onInteract: (marker) => handleInteractable(marker),
+        // renderer. A dropped item's own marker (gltf-mini.js's
+        // setItemDrops(), tagged kind: 'item-drop') is NOT a loot-crate
+        // mint/issue at all, so it's routed straight to the same
+        // pickUpDroppedItem() the 2D renderer's click handler and the
+        // Previewer's collectPreviewerItem() both already call, rather
+        // than into handleInteractable() — same "one real implementation,
+        // never a third copy" reasoning collectPreviewerItem()'s own
+        // comment states.
+        onInteract: (marker) => (
+          marker.kind === 'item-drop' ? pickUpDroppedItem(marker.domain, marker.dropId) : handleInteractable(marker)
+        ),
         // Task #213/#227 — `nearbyMarkers` (the raw scene.json
         // interactables, added by gltf-mini.js's proximity loop — task
         // #241) is this renderer's equivalent of the 2D canvas's
@@ -2474,7 +2483,17 @@ async function enterWorld(worldId) {
           scene3dInteractHint.classList.toggle('active', !!label);
 
           const domain = manifestDomainOf(currentManifest);
-          const items = (nearbyMarkers || []).map((m) => ({ kind: 'interactable', marker: m, domain }));
+          // A dropped item's marker (kind: 'item-drop', see gltf-mini.js's
+          // setItemDrops()) becomes the SAME { kind: 'dropped', entry,
+          // dropId, domain } shape the 2D renderer's own item-marker hover
+          // already builds (see the itemMarkerHitboxes hit-test above) —
+          // openPreviewer()/collectPreviewerItem() already know exactly
+          // what to do with that shape, no new branch needed there.
+          const items = (nearbyMarkers || []).map((m) => (
+            m.kind === 'item-drop'
+              ? { kind: 'dropped', entry: m.entry, dropId: m.dropId, domain: m.domain || domain }
+              : { kind: 'interactable', marker: m, domain }
+          ));
           if (items.length) {
             hadNearby3DItems = true;
             openPreviewer(items, scene3dInteractHint);
@@ -2499,6 +2518,11 @@ async function enterWorld(worldId) {
       window.__atlasActive3D = active3D;
       await active3D.ready;
       hideSceneLoadProgress(); // loading finished — the render loop is about to take over the canvas
+      // Whatever's already dropped in this world (from a previous visit, or
+      // another visitor) shows up right away rather than waiting for the
+      // first WORLD_DROPS_POLL_MS tick — same timing this call already has
+      // in the 2D branch below, right after window.__atlasScene is set up.
+      await refreshSceneItemMarkers();
       statusEl.textContent = 'In sync with ' + manifest.domain + ' · ' + world.id;
       history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
 
@@ -5290,16 +5314,18 @@ async function refreshAssetUpdatesBadge() {
   assetUpdatesBadge.classList.toggle('show', unseenCount > 0);
 }
 
-// Rebuilds window.__atlasScene.itemMarkers from whatever's currently
-// dropped in THIS world (2D renderer only for now — see the note where
-// itemMarkers is set up in enterWorld()'s 3D branch). Called after
-// entering a world and after every drop/pick-up, same pattern as the
-// portalMarkers it sits alongside.
+// Rebuilds either window.__atlasScene.itemMarkers (2D renderer) or
+// active3D's own tracked drops (gltf-mini.js's setItemDrops(), 3D renderer
+// — previously this function bailed out entirely for 3D, leaving nothing
+// visible there at all) from whatever's currently dropped in THIS world.
+// Called after entering a world and after every drop/pick-up, same pattern
+// as the portalMarkers it sits alongside.
 async function refreshSceneItemMarkers() {
-  if (!window.__atlasScene || active3D || !currentManifest || !currentWorld) return;
+  if ((!window.__atlasScene && !active3D) || !currentManifest || !currentWorld) return;
   const identity = await AtlasWallet.getIdentity();
   if (!identity) {
-    window.__atlasScene.itemMarkers = [];
+    if (active3D) active3D.setItemDrops([]);
+    else window.__atlasScene.itemMarkers = [];
     return;
   }
   // Task #250 — shared drops: every visitor's drop in this world, not just
@@ -5311,6 +5337,24 @@ async function refreshSceneItemMarkers() {
   // the same way a real wallet-entry hover already does, plus the raw
   // `dropId` a pickup actually needs.
   const dropped = await getWorldDropsSafely(manifestDomainOf(currentManifest), currentWorld.id);
+  if (active3D) {
+    // gltf-mini.js's setItemDrops() diffs this list against what it's
+    // already tracking and shows each one as its own model — resolved
+    // straight from the dropped credential's own asset.model (SPEC.md
+    // §5, always an absolute URL, so no resolveAssetUrl() prefixing needed
+    // the way a scene.json object's relative model path requires — see
+    // enterWorld()'s resolveAssetUrl option just above) — or the shared
+    // amber glow marker when there's no model, or it fails to load.
+    const domain = manifestDomainOf(currentManifest);
+    active3D.setItemDrops(dropped.map((d) => ({
+      dropId: d.dropId,
+      position: d.position,
+      model: (d.credential.asset && d.credential.asset.model) || null,
+      domain,
+      credential: d.credential
+    })));
+    return;
+  }
   window.__atlasScene.itemMarkers = dropped.map((d) => ({
     position: d.position,
     dropId: d.dropId,
@@ -5327,12 +5371,21 @@ async function refreshSceneItemMarkers() {
 // finalizeDrop() below is what actually turns that into a split first.
 function beginDropPlacement(id, amount) {
   if (active3D) {
-    // The gltf-mini (3D) renderer doesn't have a place-by-click flow or
-    // item-marker rendering yet — drop it immediately with a placeholder
-    // position so dropping/picking up still fully works via the "Dropped
-    // in this world" list, just without a glowing marker to walk up to
-    // here. See the note in wallet.js's dropping-items section.
-    finalizeDrop(id, amount, [0, 0, 0]);
+    // The gltf-mini (3D) renderer still has no place-by-click AIMING flow
+    // the way the 2D renderer's "click where you want to drop it" does —
+    // that's real future work — but a dropped item is now genuinely
+    // visible and pickupable here (see gltf-mini.js's setItemDrops()), so
+    // a fixed world-origin placeholder is no longer good enough: every
+    // drop in the same world would land stacked invisibly on top of each
+    // other at [0,0,0], regardless of where the visitor actually was.
+    // Dropping a short distance in front of wherever the visitor is
+    // currently standing/facing — reusing the same facing-direction getter
+    // presence broadcasts already rely on — is a sensible default spot
+    // without needing a real aiming UX yet.
+    const [fx, fz] = active3D.getCharacterFacingWorldDir();
+    const dropX = active3D.camera.pos[0] + fx * 1.2;
+    const dropZ = active3D.camera.pos[2] + fz * 1.2;
+    finalizeDrop(id, amount, [dropX, 0, dropZ]);
     return;
   }
   pendingDropCredentialId = id;

@@ -129,7 +129,7 @@
         "guestAccess": "open",
         "discoverable": true,
         "identityRequired": false,
-        "itemDropsAllowed": false,
+        "itemDropsAllowed": true,
         "acceptedItemClasses": [],
         "trustedIssuers": "self"
       },
