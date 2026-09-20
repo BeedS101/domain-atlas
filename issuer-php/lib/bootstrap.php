@@ -15,6 +15,21 @@ function cors_headers() {
   header('Access-Control-Allow-Headers: Content-Type');
 }
 
+// Every response here is either a write's result or a read of state that
+// can change from one request to the next (world drops being the sharpest
+// case: a client POSTs a drop, then immediately GETs the list back and
+// needs to see it right away) — never something safe for a shared cache
+// to reuse. Bare PHP scripts send no cache header of their own by default,
+// which most bare dev setups treat as "don't cache", but a real deployed
+// domain sitting behind a CDN/reverse proxy/optimization plugin (unlike
+// this project's own php -S test servers, which have no such layer) can
+// and does cache an uncontrolled GET differently — exactly what made a
+// world drop that genuinely succeeded server-side look like it vanished
+// into thin air client-side. Explicit beats implicit here.
+function no_store_headers() {
+  header('Cache-Control: no-store, no-cache, must-revalidate');
+}
+
 // Turn any uncaught exception or PHP fatal error into a JSON error response
 // instead of a blank body. Most production hosting has display_errors off,
 // so without this, any bug here (a missing PHP extension, a permissions
@@ -31,6 +46,7 @@ set_exception_handler(function ($e) {
     http_response_code($e->getCode() ?: 500);
     header('Content-Type: application/json');
     cors_headers();
+    no_store_headers();
   }
   echo json_encode(['error' => $e->getMessage()]);
   exit;
@@ -42,6 +58,7 @@ register_shutdown_function(function () {
       http_response_code(500);
       header('Content-Type: application/json');
       cors_headers();
+      no_store_headers();
     }
     echo json_encode(['error' => $err['message'] . ' in ' . basename($err['file']) . ':' . $err['line']]);
   }
@@ -51,6 +68,7 @@ function send_json($status, $obj) {
   http_response_code($status);
   header('Content-Type: application/json');
   cors_headers();
+  no_store_headers();
   echo json_encode($obj, JSON_UNESCAPED_SLASHES);
   exit;
 }
@@ -356,6 +374,21 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
 
   $asset = atlas_asset_catalog_entry($cls);
   if ($asset === null) throw new Exception('unknown asset class: ' . $cls);
+
+  // Task #250 fourth follow-up: a catalog entry's own 'randomizeProperties'
+  // callable (see atlas.wearable.ring in store.php, and random_ring_
+  // properties()'s own comment there for the full reasoning) gets one
+  // chance to override the class's static 'properties', same "genuinely
+  // new supply only" gate as the serial/cap reservation just above — a
+  // reissue's own explicit 'properties' patch is a completely separate
+  // mechanism (handled entirely by atlas/asset/reissue.php) and must never
+  // get re-rolled by this. Mirrors issuer-server/server.js's
+  // mintAssetByClass().
+  if ($supersedes === null && isset($catalogEntry['randomizeProperties']) && is_callable($catalogEntry['randomizeProperties'])) {
+    $randomized = call_user_func($catalogEntry['randomizeProperties']);
+    $asset['properties'] = array_merge(isset($asset['properties']) ? $asset['properties'] : [], $randomized);
+  }
+
   if ($serialized) {
     $properties = isset($asset['properties']) ? $asset['properties'] : [];
     $properties['atlas.serial'] = (string) $serial;
@@ -392,13 +425,83 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
     return 'asset is bound to its owner and cannot be split, consolidated, or traded';
   }
+  // Task #250 fourth follow-up: "or trade" dropped from this message — a
+  // non-fungible asset CAN now be traded at the Trading Station, just not
+  // through THIS check (see check_presented_unique_asset() below, used by
+  // atlas/trade/submit.php and atlas/trade/claim.php instead whenever the
+  // presented balance's own fungible flag says false).
   if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== true) {
-    return 'asset class is not fungible — cannot split, consolidate, or trade a unique asset';
+    return 'asset class is not fungible — cannot split or consolidate a unique asset';
   }
   if (!isset($credential['quantity']) || $credential['quantity'] < $minQuantity) return 'asset has insufficient quantity';
   if (is_revoked($credential['id'])) return 'asset already revoked';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
+  return null;
+}
+
+// Task #250 fourth follow-up (Bruno's own request) — check_presented_asset's
+// mirror for the OTHER half of SPEC.md §5.1's fungible/non-fungible split:
+// same ownership/class/tradeScope/revocation/signature checks, but requires
+// fungible === false instead of true, and there is no minQuantity to check
+// at all — a non-fungible credential's quantity is definitionally 1
+// (SPEC.md §5.1). Mirrors issuer-server/server.js's
+// checkPresentedUniqueAsset(). Lets a unique item like the Signet Ring be
+// offered/claimed at the Trading Station — see atlas/trade/submit.php and
+// atlas/trade/claim.php, and transfer_unique_asset() for how the actual
+// instance (not a fresh catalog-derived stand-in) is what changes hands.
+function check_presented_unique_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
+    return 'not an asset credential';
+  }
+  if (!isset($credential['owner']['publicKey']) || $credential['owner']['publicKey'] !== $expectedOwner) {
+    return 'asset does not belong to this signer';
+  }
+  if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
+    return 'asset is the wrong class';
+  }
+  if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
+    return 'asset is bound to its owner and cannot be traded';
+  }
+  if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
+    return 'asset class is fungible — present it as a quantity balance, not a unique item';
+  }
+  if (is_revoked($credential['id'])) return 'asset already revoked';
+  $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+  if (!$ok) return 'asset signature does not check out';
+  return null;
+}
+
+// Task #250 fourth follow-up — transfers a non-fungible credential to a new
+// owner while preserving its exact per-instance asset state (serial,
+// editionSize, a Signet Ring's randomly-rolled enchantments/stats) rather
+// than rebuilding it fresh from ATLAS_ASSET_CATALOG the way
+// mint_asset_by_class() does. Mirrors issuer-server/server.js's
+// transferUniqueAsset() — see its own comment for the World Drops bug this
+// also fixes (a serialized item was nominally droppable in the plaza's own
+// acceptedItemClasses before this, so re-deriving it fresh on claim was a
+// live gap, not just theoretical).
+function transfer_unique_asset($privateKey, $publicKeyB64url, $newOwnerPublicKey, $credential) {
+  return issue_asset($privateKey, $publicKeyB64url, $newOwnerPublicKey, $credential['asset'], $credential['quantity'], $credential['id']);
+}
+
+// Task #250 fourth follow-up — validates a trade intent's one side
+// ({class, quantity}) shape: class must be a known string, quantity a
+// positive integer, and — the actual new-this-follow-up rule — a class
+// ATLAS_ASSET_CATALOG marks fungible => false must be offered/wanted in
+// quantity exactly 1, since there is no partial share of a unique item to
+// negotiate. Mirrors issuer-server/server.js's validateTradeSideShape().
+function validate_trade_side_shape($side, $label) {
+  if (!is_array($side) || !isset($side['class']) || !is_string($side['class']) || $side['class'] === '') {
+    return $label . ': class is required';
+  }
+  if (!isset($side['quantity']) || !is_int($side['quantity']) || $side['quantity'] < 1) {
+    return $label . ': quantity must be a positive integer';
+  }
+  $catalogEntry = isset(ATLAS_ASSET_CATALOG[$side['class']]) ? ATLAS_ASSET_CATALOG[$side['class']] : null;
+  if ($catalogEntry !== null && isset($catalogEntry['fungible']) && $catalogEntry['fungible'] === false && $side['quantity'] !== 1) {
+    return $label . ': ' . $side['class'] . ' is not fungible — quantity must be 1';
+  }
   return null;
 }
 
@@ -425,6 +528,123 @@ function check_presented_membership($publicKeyB64url, $credential, $expectedOwne
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'membership signature does not check out';
   return null;
+}
+
+// Task #250 — dropping is the FIRST case in this bundle where a server has
+// to validate a credential it did NOT itself issue: a wearable minted by
+// domain A, carried into and dropped in domain B's plaza, is fully
+// supported (SPEC.md §5.5), and domain B obviously doesn't hold domain A's
+// private key to check it the fast, local way. Mirrors exactly what
+// extension/wallet.js's own verifyCredential() already does client-side for
+// any credential from a domain other than "self" — fetch THAT domain's own
+// published key + revocation ledger (never trust credential.issuer.publicKey
+// blindly — it isn't part of the signed payload, see asset_payload_of()
+// above, so nothing stops someone stamping a fake issuer.publicKey onto an
+// otherwise-unrelated signature), confirm a key matching it was valid at
+// credential.issuedAt, verify the signature against THAT key, then check
+// THAT domain's own revocation list — never this server's own is_revoked(),
+// which only knows about ids this server itself minted. Mirrors
+// issuer-server/server.js's verifyForeignAssetCredential().
+function verify_foreign_asset_credential($credential) {
+  try {
+    $issuerDomain = $credential['issuer']['domain'];
+    $context = stream_context_create(['http' => ['method' => 'GET', 'ignore_errors' => true, 'timeout' => 10]]);
+    $keyRaw = @file_get_contents(atlas_base_url($issuerDomain) . '/.well-known/atlas-key.json', false, $context);
+    if ($keyRaw === false) return false;
+    $keyDoc = json_decode($keyRaw, true);
+    if (!is_array($keyDoc) || empty($keyDoc['keys'])) return false;
+    $revRaw = @file_get_contents(atlas_base_url($issuerDomain) . '/.well-known/atlas-revocations.json', false, $context);
+    $revDoc = $revRaw !== false ? json_decode($revRaw, true) : null;
+    $revoked = is_array($revDoc) && isset($revDoc['revoked']) ? $revDoc['revoked'] : [];
+
+    $issuedAt = strtotime($credential['issuedAt']);
+    $activeKey = null;
+    foreach ($keyDoc['keys'] as $k) {
+      if (($k['publicKey'] ?? null) !== ($credential['issuer']['publicKey'] ?? null)) continue;
+      $from = strtotime($k['validFrom']);
+      $until = !empty($k['validUntil']) ? strtotime($k['validUntil']) : PHP_INT_MAX;
+      if ($issuedAt >= $from && $issuedAt <= $until) { $activeKey = $k; break; }
+    }
+    if ($activeKey === null) return false;
+
+    $sigOk = verify_domain_signature($activeKey['publicKey'], asset_payload_of($credential), $credential['signature']);
+    if (!$sigOk) return false;
+
+    foreach ($revoked as $r) {
+      if (($r['id'] ?? null) === $credential['id']) return false;
+    }
+    return true;
+  } catch (Exception $e) {
+    return false;
+  }
+}
+
+// Task #250 (World Drops, SPEC.md §5.5): a third sibling to
+// check_presented_asset()/check_presented_membership() above, for the one
+// case neither fits — presenting a credential to DROP it, which unlike
+// split/consolidate/trade is equally valid for a fungible stack or a
+// one-of-one wearable (check_presented_asset()'s fungible-must-be-true and
+// minQuantity checks would wrongly reject the latter), and unlike a
+// membership presentation, still has to exclude 'bound' assets — a
+// subscription card is exactly the kind of thing that must NOT become
+// droppable-and-takeable by a stranger. No quantity check at all: the
+// client is responsible for calling POST /atlas/asset/split first if it
+// wants to drop less than a fungible stack's full amount (see wallet.js's
+// splitForDrop/dropItem) — by the time a credential reaches this check,
+// whatever quantity it carries is the whole of what's being dropped. Also
+// unlike check_presented_asset()/check_presented_membership() (which only
+// ever run against credentials THIS domain itself issued, since split/
+// consolidate/trade/membership can only ever apply to a domain's own
+// credentials): branches on credential.issuer.domain, since a drop's
+// credential may well have come from somewhere else entirely — see
+// verify_foreign_asset_credential() just above. Mirrors issuer-server/
+// server.js's checkPresentedTransferableAsset().
+function check_presented_transferable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
+    return 'not an asset credential';
+  }
+  if (!isset($credential['owner']['publicKey']) || $credential['owner']['publicKey'] !== $expectedOwner) {
+    return 'asset does not belong to this signer';
+  }
+  if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
+    return 'asset is the wrong class';
+  }
+  if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
+    return 'asset is bound to its owner and cannot be dropped for someone else to take';
+  }
+  if (empty($credential['issuer']['domain'])) return 'asset has no issuer domain';
+  if ($credential['issuer']['domain'] === atlas_domain()) {
+    if (is_revoked($credential['id'])) return 'asset already revoked';
+    $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+    if (!$ok) return 'asset signature does not check out';
+    return null;
+  }
+  $foreignOk = verify_foreign_asset_credential($credential);
+  if (!$foreignOk) return 'could not verify this asset against its issuer (' . $credential['issuer']['domain'] . ')';
+  return null;
+}
+
+// Shared by both the same-domain claim path (atlas/world/drops/claim.php)
+// and the cross-domain relay-claim handler
+// (atlas/world/drops/relay-claim.php) — the real ownership-transfer
+// primitive this whole protocol always uses (revoke the old credential,
+// mint a fresh one naming the new owner), same as trade settlement/split/
+// consolidate. Mirrors issuer-server/server.js's fulfillWorldDropClaim().
+//
+// Fungible drops still go through mint_asset_by_class() — re-deriving from
+// the catalog is correct there (every balance of a fungible class is
+// identical by definition). A non-fungible drop instead goes through
+// transfer_unique_asset() (task #250 fourth follow-up) so its actual
+// per-instance state survives the claim — see that function's own comment
+// for the bug this fixes.
+function fulfill_world_drop_claim($kp, $credential, $claimantPublicKey) {
+  if (isset($credential['asset']['fungible']) && $credential['asset']['fungible'] === false) {
+    $received = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $credential);
+  } else {
+    $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $credential['asset']['class'], $credential['quantity'], $credential['id']);
+  }
+  atlas_revoke($credential['id'], 'claimed from a world drop');
+  return $received;
 }
 
 // Task #203: sums an owner's VERIFIED current holdings of one class, off

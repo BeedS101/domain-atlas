@@ -7,12 +7,14 @@
   },
   "chat": true,
   "tradingStation": true,
+  "calendar": true,
   "defaultWorld": "plaza",
   "worlds": [
     {
       "id": "plaza",
       "name": "Example Plaza",
       "chat": true,
+      "calendar": true,
       "entry": {
         "scene": "/spatial/plaza/scene.json",
         "renderer": ["procedural-v1"]

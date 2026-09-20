@@ -5,17 +5,30 @@
 // asset a visitor already holds, e.g. a museum exhibit's properties
 // changing after the visitor picked it up). Fungible classes are
 // deliberately rejected: SPEC.md §5.1 requires every credential of a
-// fungible class to carry identical properties so §5.4.1's consolidation
-// can sum quantities without silently blending a differing fact, so a
-// fungible credential's properties only ever change at the class level
-// (ATLAS_ASSET_CATALOG), never by reissuing one specific balance.
+// fungible class to carry identical properties/tradeScope so §5.4.1's
+// consolidation can sum quantities without silently blending a differing
+// fact, so a fungible credential's asset state only ever changes at the
+// class level (ATLAS_ASSET_CATALOG), never by reissuing one specific
+// balance.
 //
-// Input: {credential, properties} — the exact currently-held credential
-// being replaced, plus a patch merged onto its asset.properties. Verifies
-// the presented credential really was signed by this domain and isn't
-// already revoked before ever reissuing anything — an issuer can only ever
-// reissue its own assets, never forge an update for a credential it didn't
-// sign in the first place.
+// Input: {credential, properties, tradeScope} — the exact currently-held
+// credential being replaced, plus at least one of a patch merged onto its
+// asset.properties, or a new tradeScope. Verifies the presented credential
+// really was signed by this domain and isn't already revoked before ever
+// reissuing anything — an issuer can only ever reissue its own assets,
+// never forge an update for a credential it didn't sign in the first
+// place.
+//
+// `tradeScope` (task #250 third follow-up — Bruno's own request): since
+// tradeScope is baked into a credential's signed payload at mint time
+// (mint_asset_by_class()'s tradeScope-defaulting logic), tightening a
+// class's catalog entry to tradeScope => 'bound' does NOT retroactively
+// change any credential of that class minted before the catalog entry said
+// so — the old credential's own signature would break if tradeScope were
+// edited in place, so the only honest fix is the same revoke-and-re-mint
+// this endpoint already does for `properties`. See README.md's "Fixing a
+// stale tradeScope on an already-issued credential" section for the exact
+// command a domain operator would run.
 //
 // This is an issuer-initiated action (the domain deciding to publish an
 // update), not owner-initiated like a split — there's no WebAuthn
@@ -34,18 +47,27 @@ try {
 }
 
 $credential = $body['credential'] ?? null;
+$hasProperties = array_key_exists('properties', $body);
 $properties = $body['properties'] ?? null;
+$hasTradeScope = array_key_exists('tradeScope', $body);
+$tradeScope = $body['tradeScope'] ?? null;
 if (!is_array($credential) || ($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0') {
   send_json(400, ['error' => 'credential must be a domain-atlas-asset/1.0 credential']);
 }
-if (!is_array($properties) || count($properties) === 0) {
-  send_json(400, ['error' => 'properties (a non-empty patch onto asset.properties) is required']);
+if (!$hasProperties && !$hasTradeScope) {
+  send_json(400, ['error' => 'at least one of properties (a patch onto asset.properties) or tradeScope is required']);
+}
+if ($hasProperties && !is_array($properties)) {
+  send_json(400, ['error' => 'properties, when given, must be a patch object onto asset.properties']);
+}
+if ($hasTradeScope && $tradeScope !== 'local' && $tradeScope !== 'bound') {
+  send_json(400, ['error' => "tradeScope, when given, must be 'local' or 'bound'"]);
 }
 if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !== atlas_domain()) {
   send_json(400, ['error' => 'credential was not issued by this domain']);
 }
 if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
-  send_json(400, ['error' => "reissue only applies to a non-fungible asset — a fungible class's properties are fixed per class (SPEC.md §5.1), not per credential"]);
+  send_json(400, ['error' => "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential"]);
 }
 if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked']);
 
@@ -53,7 +75,8 @@ $sigOk = verify_own_credential_signature($kp['publicKeyB64url'], $credential, as
 if (!$sigOk) send_json(400, ['error' => "credential signature does not check out against this issuer's key"]);
 
 $newAsset = $credential['asset'];
-$newAsset['properties'] = array_merge($newAsset['properties'] ?? [], $properties);
+if ($hasTradeScope) $newAsset['tradeScope'] = $tradeScope;
+if ($hasProperties) $newAsset['properties'] = array_merge($newAsset['properties'] ?? [], $properties);
 $newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id']);
 
 // Same ordering guarantee §5.4's split/consolidate already give: the new

@@ -151,13 +151,21 @@ Wallet/Settings panels once you've got items to work with:
   re-verifies, and is always reachable again from **Settings → Hidden
   assets → Unhide**. Unlike Delete, hiding can never lose an asset that
   exists nowhere else.
-- **Drop and pick up items in-world.** Click **Drop** on a carried item to
-  place it at a clicked ground point (2D worlds) or your current position
-  (gltf-mini's 3D ones); it appears in that world's "Dropped in this
-  world" list with a **Pick up** button for anyone who finds it — including
-  you, later. This is client-side wallet state, not a new credential
-  transfer; ownership doesn't actually move until you deliberately give an
-  item to someone else the ways described elsewhere in this doc.
+- **Drop and pick up items in-world (SPEC.md §5.5).** Click **Drop** on a
+  carried item to place it at a clicked ground point (2D worlds) or your
+  current position (gltf-mini's 3D ones); a fungible balance's card offers
+  a quantity box first, so you can drop part of a stack instead of all of
+  it (the rest splits off and stays in your wallet). Unlike the drop
+  mechanism this replaced, this is a real, shared transfer: the item
+  genuinely leaves your wallet the moment it lands, anyone currently
+  standing in that world can see it (a live scene marker, or the "Dropped
+  in this world" list — no need to leave and come back) and pick it up with
+  a fresh, freshly-minted credential of their own, including you if nobody
+  else gets there first. Works even when the item was issued by a
+  different domain than the one hosting the world — claiming it quietly
+  relays to the actual issuer behind the scenes. A domain/Post Office/
+  Trading Station membership card can never be dropped (`tradeScope:
+  "bound"`, enforced by the server, not just the UI).
 - **Nicknames for other identities.** From a presence roster or a mail
   card, set a private alias for any public key you interact with — purely
   local, never sent anywhere, and profanity-filtered the same way
@@ -658,6 +666,42 @@ handle, by a pasted `handle#domain` address, and via the raw-key fallback.
 
 With this, task #94 is now fully built — handle addressing was its last
 open piece.
+
+## Fixing a stale tradeScope on an already-issued credential
+
+`tradeScope` is baked into a credential's signed payload at mint time
+(`mintAssetByClass`'s `catalogEntry.tradeScope || 'local'`, mirrored in
+`atlas_asset_catalog_entry()` on the PHP side). That means tightening a
+catalog entry to `tradeScope: 'bound'` — as this project has now done
+twice, for `atlas.badge`/`atlas.trinket.pin`/`atlas.trinket.charm` and
+later `atlas.wearable` — never retroactively changes any credential of
+that class minted *before* the catalog said so. The signature covers the
+whole payload, so editing `tradeScope` on an existing credential in place
+would just make it invalid; and `AtlasWallet.reverifyAll()` (the wallet
+panel's "Re-verify all" button) only re-checks each held credential's
+signature/revocation status, it never re-derives or refreshes any of the
+asset's own fields.
+
+If you (as the domain operator) need to bring an already-issued,
+still-valid credential in line with a catalog change — most commonly
+because someone picked up a class before you tightened its tradeScope —
+`POST /atlas/asset/reissue` can patch `tradeScope` the same way it already
+patches `properties`: by revoking the old credential and minting a fresh
+one with the new value applied. It only accepts a credential this domain's
+own key actually signed, and only for a non-fungible, not-already-revoked
+asset — the same restrictions the endpoint already enforces for a
+`properties` patch.
+
+```bash
+curl -X POST http://localhost:8001/atlas/asset/reissue \
+  -H 'Content-Type: application/json' \
+  -d '{"credential": <the holder'"'"'s full credential JSON>, "tradeScope": "bound"}'
+```
+
+The response's `newCredential` is what the holder's wallet will pick up on
+its next `/atlas/mail/check` (reissue notices arrive the same way any other
+asset-update notice does — see §8 above) or on request. `properties` and
+`tradeScope` can be patched together in one call if both need updating.
 
 ## 9. Verify it yourself
 

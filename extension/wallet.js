@@ -1111,62 +1111,125 @@ const AtlasWallet = (() => {
     await setLoadout((await getLoadout()).filter((id) => id !== itemId));
   }
 
-  // ---------- dropping items into a scene (local, self-only) ----------
+  // ---------- dropping items into a scene (shared — task #250) ----------
   //
-  // This is deliberately the SMALL, safe half of "drop and pick up an
-  // item": nothing about ownership ever moves. A dropped item is still
-  // this identity's credential, still sitting in this identity's own
-  // wallet the whole time — "dropped" is just a local flag plus a
-  // position, recorded per public key exactly like the alias/loadout
-  // above. No signature, no issuer round-trip, because nothing is being
-  // transferred to anyone.
+  // Until now this was local-only, self-only: nothing about ownership ever
+  // moved, a dropped item just sat flagged in this same wallet, reclaimable
+  // only by whoever dropped it. That comment used to live here (see git
+  // history) and explained why: "others can see it and pick it up" needs a
+  // world to actually host and mutate shared state, and a real answer for
+  // what happens when two people reach for it at once. Both now exist —
+  // the world's own domain server durably hosts the drop (WORLD_DROPS_FILE,
+  // issuer-server/server.js) and settles a claim by REMOVING the listing
+  // before minting anything, so whichever concurrent claim wins the removal
+  // wins the item — see that file's own comment on POST
+  // /atlas/world/drops/claim for the exact mechanism.
   //
-  // The bigger half — an item visible and takeable by OTHER visitors —
-  // would need a world to actually host and mutate shared state (nothing
-  // in this demo does; every world here is a static file, fetched fresh
-  // per visit, per viewer.js's enterWorld) and a real answer for what
-  // happens when two people reach for it at once. Deliberately not this.
-  // A dropped item here is only ever visible to, and only ever
-  // reclaimable by, whoever dropped it — visually "left on the ground in
-  // that world," not actually offered to it.
-  // Encrypted at rest (2026-09-14, second round).
-  async function getDroppedItems(ownerPublicKey) {
-    if (!ownerPublicKey) return [];
-    const { atlasDroppedItems } = await chrome.storage.local.get('atlasDroppedItems');
+  // A dropped item genuinely leaves this wallet's local storage the moment
+  // it's dropped (below) — it's not secretly still "mine," it's sitting in
+  // the world for anyone, including the original dropper, to claim. Picking
+  // it back up (pickUpItem) always mints a fresh replacement credential via
+  // the issuer, the exact same way a stranger claiming it would; there's no
+  // special "this was always still mine" shortcut.
+  //
+  // Cross-domain-issued items are fully supported: the world's own domain
+  // hosts the listing regardless of who minted the credential, and relays
+  // a claim to the actual issuer (POST /atlas/world/drops/relay-claim) when
+  // it isn't the one hosting the drop — only the issuer can legitimately
+  // re-sign its own credential to a new owner. See SPEC.md §5.5.
+
+  // Carves exactly `amount` off a fungible balance into its own fresh
+  // credential, for viewer.js to hand straight to dropItem() below — NOT
+  // the same call as the existing splitAsset(), and deliberately so: a
+  // drop is always a self-to-self split (the wallet owner keeps the
+  // remainder, the SAME owner is also the nominal "recipient" of the
+  // carved-off piece, right up until it's dropped a moment later), and
+  // splitAsset()'s own autoConsolidateAssetWallet(toOwner) call would see
+  // both halves sitting in that one wallet and immediately merge them back
+  // into a single credential — quietly undoing the split before dropItem
+  // ever got to use it. So this helper only ever saves the REMAINDER back
+  // into the wallet; the carved-off piece is returned straight to the
+  // caller and never touches local storage at all (dropItem() would just
+  // have to strip it back out again anyway, same as it does for a whole,
+  // unsplit credential).
+  async function splitForDrop(credential, amount) {
     const identity = await getIdentity();
-    return decryptAtRestAndMigrate(identity, 'droppedItems', (atlasDroppedItems || {})[ownerPublicKey], [], (v) => saveDroppedItems(ownerPublicKey, v));
+    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/split', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential, sendAmount: amount, toPublicKey: identity.publicKey })
+    });
+    if (!res.ok) throw new Error('Split failed: ' + (await res.text()));
+    const { sent, remainder } = await res.json();
+    let wallet = (await getWallet(identity.publicKey)).filter((e) => e.credential.id !== credential.id);
+    if (remainder) wallet.push({ credential: remainder, lastVerdict: await verifyCredential(remainder) });
+    await saveWallet(identity.publicKey, wallet);
+    if (remainder) await autoConsolidateAssetWallet(identity.publicKey);
+    return sent;
   }
 
-  async function saveDroppedItems(ownerPublicKey, list) {
-    const { atlasDroppedItems } = await chrome.storage.local.get('atlasDroppedItems');
-    const all = atlasDroppedItems || {};
-    const identity = await getIdentity();
-    all[ownerPublicKey] = await encryptAtRest(identity, 'droppedItems', list);
-    await chrome.storage.local.set({ atlasDroppedItems: all });
-  }
+  // `credential` is the FULL signed credential being dropped (server needs
+  // the whole thing to verify + store for other visitors to render);
+  // `worldDomain` is whichever domain's world this is happening in — NOT
+  // necessarily credential.issuer.domain, e.g. a wearable minted by one
+  // domain, carried into and dropped in a different domain's plaza.
+  // `position` is renderer-native coordinates, same convention as before
+  // (a clicked ground point for the 2D renderer, or a placeholder for 3D —
+  // see viewer.js's beginDropPlacement).
+  async function dropItem(credential, worldDomain, world, position) {
+    const payload = { action: 'drop', credentialId: credential.id, world, droppedAt: new Date().toISOString() };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential, world, position, intent: { payload, proof } })
+    });
+    if (!res.ok) throw new Error('Drop failed: ' + (await res.text()));
+    const result = await res.json(); // { status, dropId }
 
-  // domain/world identify WHERE, in whichever manifest this owner was
-  // standing in when they dropped it; position is renderer-native
-  // coordinates (viewer.js supplies a clicked ground point for the 2D
-  // renderer, or the live camera position for gltf-mini's 3D one).
-  async function dropItem(ownerPublicKey, credentialId, domain, world, position) {
-    if (!ownerPublicKey) throw new Error('No identity to drop an item from.');
-    const list = (await getDroppedItems(ownerPublicKey)).filter((d) => d.credentialId !== credentialId);
-    list.push({ credentialId, domain, world, position, droppedAt: new Date().toISOString() });
-    await saveDroppedItems(ownerPublicKey, list);
+    const identity = await getIdentity();
+    const wallet = (await getWallet(identity.publicKey)).filter((e) => e.credential.id !== credential.id);
+    await saveWallet(identity.publicKey, wallet);
     // Visually it's no longer "carried" once it's sitting in the scene —
     // keep the loadout list honest, same as hiding an item already does.
-    await unloadItem(credentialId);
+    await unloadItem(credential.id);
+    return result;
   }
 
-  async function pickUpItem(ownerPublicKey, credentialId) {
-    if (!ownerPublicKey) return;
-    const list = (await getDroppedItems(ownerPublicKey)).filter((d) => d.credentialId !== credentialId);
-    await saveDroppedItems(ownerPublicKey, list);
+  // Every current drop in `world`, from every visitor who's ever dropped
+  // something there and not yet had it claimed — this is genuinely shared,
+  // public data (see the endpoint's own "read is open" comment), not
+  // filtered to this wallet's own. viewer.js is responsible for labeling
+  // which rows are "yours" (droppedBy === this identity's own public key).
+  async function getWorldDrops(worldDomain, world) {
+    const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drops?world=' + encodeURIComponent(world));
+    if (!res.ok) throw new Error('Fetching drops failed: ' + (await res.text()));
+    const { drops } = await res.json();
+    return drops; // [{dropId, world, position, credential, droppedBy, droppedAt}]
   }
 
-  async function getDroppedItemsInWorld(ownerPublicKey, domain, world) {
-    return (await getDroppedItems(ownerPublicKey)).filter((d) => d.domain === domain && d.world === world);
+  // Claims (picks up) one drop by id — works identically whether it's a
+  // stranger's item or the caller's own earlier drop; the server doesn't
+  // (and shouldn't) treat "reclaiming your own" as a special case, see
+  // fulfillWorldDropClaim()'s own comment server-side. Always yields a
+  // freshly-minted credential, added to this wallet like any other mint.
+  async function pickUpItem(worldDomain, dropId) {
+    const payload = { action: 'claim', dropId, claimedAt: new Date().toISOString() };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drops/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dropId, intent: { payload, proof } })
+    });
+    if (!res.ok) throw new Error('Pick up failed: ' + (await res.text()));
+    const { credential } = await res.json();
+
+    const identity = await getIdentity();
+    const wallet = await getWallet(identity.publicKey);
+    wallet.push({ credential, lastVerdict: await verifyCredential(credential) });
+    await saveWallet(identity.publicKey, wallet);
+    await autoConsolidateAssetWallet(identity.publicKey);
+    return credential;
   }
 
   // Only self can lose something here, deliberately: the whole point of
@@ -1289,6 +1352,44 @@ const AtlasWallet = (() => {
     if (!res.ok) throw new Error('Fetching tradable classes failed: ' + (await res.text()));
     const { classes } = await res.json();
     return classes;
+  }
+
+  // Domain calendar (SPEC.md §12) — a plain, unsigned, ungated read of a
+  // domain's or one of its worlds' published calendar, same "nothing here
+  // is this wallet's own" shape as fetchTradeListings/fetchTradableClasses
+  // just above. Deliberately a DIFFERENT function from getCalendarEvents/
+  // addCalendarEvent/updateCalendarEvent/removeCalendarEvent below, which
+  // are this wallet's own LOCAL reminders ("My Calendar") and never touch
+  // the network at all — this one is what viewer.js's "CurrentDomainName"
+  // and "Remote" calendar sub-tabs call instead, for a calendar that lives
+  // on someone else's server. `worldId` omitted or null fetches the
+  // domain-wide calendar (manifest-level `calendar: true`, §3); naming a
+  // world fetches that world's own. Returns `{domain, worldId, events}`
+  // straight off the wire — an empty `events` array just means this
+  // domain/world hasn't published anything there (§12.1), not an error,
+  // so the caller decides how to render that rather than this function
+  // guessing.
+  async function fetchDomainCalendar(issuerDomain, worldId) {
+    const query = worldId ? ('?world=' + encodeURIComponent(worldId)) : '';
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/calendar' + query);
+    if (!res.ok) throw new Error('Fetching calendar failed: ' + (await res.text()));
+    return res.json();
+  }
+
+  // Fetches a domain's own manifest (SPEC.md §3) by bare domain string,
+  // rather than an already-known full manifest URL — what the "Remote"
+  // calendar tab (viewer.js) uses to discover which of a REMOTE domain's
+  // worlds separately opted into a calendar (computeCalendarSources)
+  // before fetching any of them, the exact same discovery step actually
+  // entering that domain already does with its own manifest fetch. No
+  // caching, no signing needed — a manifest has never had either (§3:
+  // "cacheable, publicly readable" is a CDN/client-cache hint, not a trust
+  // mechanism; the trust boundary is TLS/DNS, same as fetchDomainCalendar
+  // just above).
+  async function fetchDomainManifest(domain) {
+    const res = await fetch(baseUrl(domain) + '/.well-known/spatial.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error('Fetching manifest failed: ' + (await res.text()));
+    return res.json();
   }
 
   // Task #213 (SPEC.md §5.1.2 "Class discovery") — look up ANY class this
@@ -2519,12 +2620,16 @@ const AtlasWallet = (() => {
 
     const owner = identity.publicKey;
     const [
-      wallet, mail, sentMail, submittedTrades, droppedItems, assetUpdateNotices,
+      wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
       friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
       mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
       chatE2eeKeyPair, chatE2eePeerKeys
     ] = await Promise.all([
-      getWallet(owner), getMail(owner), getSentMail(owner), getSubmittedTrades(owner), getDroppedItems(owner), getAssetUpdateNotices(owner),
+      // Task #250: dropped items no longer have a local-only "still
+      // secretly mine" state to back up — a drop now genuinely leaves this
+      // wallet (see dropItem()'s own comment) and lives server-side on
+      // whichever world hosts it, not in this device's own storage.
+      getWallet(owner), getMail(owner), getSentMail(owner), getSubmittedTrades(owner), getAssetUpdateNotices(owner),
       getFriends(), getContactGroups(), getAliasesForOwner(identity), getRecentWorlds(), getFavoriteDomains(), getCalendarEvents(),
       getMutedChatUsers(), getBlockedChatUsers(), getLoadout(), getChatMessages(owner), getCounterparty(),
       // Task #158 — without these, a restore would generate a BRAND NEW
@@ -2561,7 +2666,7 @@ const AtlasWallet = (() => {
     const payload = {
       identity: { publicKey: identity.publicKey, privateKeyJwk: identity.privateKeyJwk },
       data: {
-        wallet, mail, sentMail, submittedTrades, droppedItems, assetUpdateNotices,
+        wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
         friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
         mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
         chatE2eeKeyPair, chatE2eePeerKeys,
@@ -2647,7 +2752,11 @@ const AtlasWallet = (() => {
       saveMail(owner, d.mail || []),
       saveSentMail(owner, d.sentMail || []),
       saveSubmittedTrades(owner, d.submittedTrades || []),
-      saveDroppedItems(owner, d.droppedItems || []),
+      // Task #250: no saveDroppedItems() anymore — an OLDER backup file's
+      // d.droppedItems (if present) is simply not restored; the underlying
+      // credentials themselves still come back fine via d.wallet above,
+      // same as always, they just won't remember which position they were
+      // last left sitting at in a scene.
       saveAssetUpdateNotices(owner, d.assetUpdateNotices || []),
       saveFriends(owner, d.friends || []),
       saveContactGroups(owner, d.contactGroups || []),
@@ -4146,7 +4255,7 @@ const AtlasWallet = (() => {
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
-    dropItem, pickUpItem, getDroppedItems, getDroppedItemsInWorld,
+    dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
     getSubmittedTrades, deleteSubmittedTrade, getTradingStationMemberships,
@@ -4173,6 +4282,7 @@ const AtlasWallet = (() => {
     getBlockedChatUsers, blockChatUser, unblockChatUser,
     getFavoriteDomains, isFavoriteDomain, addFavoriteDomain, removeFavoriteDomain, moveFavoriteDomain,
     getCalendarEvents, addCalendarEvent, updateCalendarEvent, removeCalendarEvent,
+    fetchDomainCalendar, fetchDomainManifest,
     getChatThreads, getChatThreadMessages, markChatThreadRead, getChatUnreadCount, sendChatMessage,
     deleteChatThread,
     getChatE2eeKeyPair, getE2eePeerPublicKey,

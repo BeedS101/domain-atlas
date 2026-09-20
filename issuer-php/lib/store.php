@@ -148,6 +148,92 @@ function atlas_pending_trades_file() {
   return __DIR__ . '/atlas-pending-trades-store.json';
 }
 
+// World drops (task #250, SPEC.md §5.5): "others can see it and pick it up"
+// needs a world to actually host and mutate shared state — this is that
+// state, one flat array of currently-live drops across every world this
+// domain hosts (scoped by each entry's own `world` string, whatever the
+// requesting client's own scene/manifest happens to call it — this bundle
+// has no independent notion of what worlds exist, same as issuer-server/
+// server.js). Same "not web-reachable, flock-guarded flat array" shape as
+// mail/asset-updates/subscribers above. Mirrors issuer-server/server.js's
+// WORLD_DROPS_FILE/readWorldDrops()/appendWorldDrop()/removeWorldDrop().
+function atlas_world_drops_file() {
+  return __DIR__ . '/atlas-world-drops-store.json';
+}
+
+// Domain calendar (SPEC.md §12): one flat list of events, each tagged with
+// the `worldId` it belongs to (null for the domain-wide calendar), same
+// "one file, filter on read" shape atlas_world_drops_file() above uses —
+// this bundle has no bound on how many worlds might opt in (manifest
+// `calendar: true`, §3), and a single small JSON file scales fine for a
+// demo of this size. Mirrors issuer-server/server.js's CALENDAR_FILE. This
+// bundle does not itself check that a given worldId actually has
+// `calendar: true` in the manifest before serving or accepting events for
+// it — same "client-side-only gate" posture the (unrelated,
+// undocumented-in-SPEC.md) chat opt-in already has; the manifest is what a
+// client reads to decide whether to ask at all.
+function atlas_calendar_file() {
+  return __DIR__ . '/atlas-calendar-store.json';
+}
+
+function read_world_drops() {
+  $fh = fopen(atlas_world_drops_file(), 'c+');
+  if ($fh === false) return ['drops' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['drops' => []];
+}
+
+function append_world_drop($entry) {
+  $file = atlas_world_drops_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['drops' => []];
+  $doc['drops'][] = $entry;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// Reservation-by-removal (task #250's concurrency mechanism, same as
+// remove_pending_trade() above): whichever concurrent claim's removal
+// actually finds-and-deletes the entry wins the item; a losing concurrent
+// claim gets a clean "already gone" error from the caller instead. Returns
+// the removed entry (so the caller can still act on it), or null if it was
+// already gone. Mirrors issuer-server/server.js's removeWorldDrop().
+function remove_world_drop($dropId) {
+  $file = atlas_world_drops_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['drops' => []];
+  $found = null;
+  foreach ($doc['drops'] as $d) {
+    if ($d['dropId'] === $dropId) { $found = $d; break; }
+  }
+  if ($found !== null) {
+    $doc['drops'] = array_values(array_filter($doc['drops'], function ($d) use ($dropId) {
+      return $d['dropId'] !== $dropId;
+    }));
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
+}
+
 // Task #42: serialized/limited-edition support — one running total minted
 // per class, persisted the same "not web-reachable" way as everything
 // else in this file. Mirrors issuer-server/server.js's
@@ -177,6 +263,21 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.wearable' => [
     'name' => 'Bronze Compass', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
     'fungible' => false, 'presentation' => 'collectible',
+    // Task #250 second follow-up (Bruno's own request): the Compass was
+    // deliberately left OUT of the first #250 follow-up (atlas.badge/
+    // atlas.trinket.pin/atlas.trinket.charm below, all bound) specifically
+    // to keep the flagship non-fungible World Drops demo item droppable.
+    // Once the demo's own drop/pickup showcase leans on fungibles instead
+    // (atlas.element.iron/gold/silver — already droppable, already the
+    // subject of the split-then-drop partial-quantity path) there was no
+    // reason left to exempt this one, oncePerUser giveaway from the exact
+    // same drop-then-re-request courtesy-check loophole atlas.badge's own
+    // comment below explains. Mirrors issuer-server/server.js's
+    // ASSET_CATALOG entry. World Drops UI/protocol test coverage that used
+    // to drop a Bronze Compass now mints atlas.trophy.chess directly
+    // instead — see test/manual-drop-pickup.js, manual-previewer-2d.js, and
+    // manual-world-drops-protocol(-php).js for the swap.
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.rarity' => 'common',
       'com.example.era' => 'Victorian',
@@ -187,6 +288,18 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.badge' => [
     'name' => 'Plaza Visitor Badge', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
     'fungible' => false, 'presentation' => 'collectible',
+    // Task #250 follow-up (Bruno's own request): a oncePerUser giveaway's
+    // "already collected this" check is only a per-device courtesy (see
+    // alreadyHasRequestableItem() in extension/viewer.js) — it looks at
+    // what's CURRENTLY held, not a real issuance ledger. Without this,
+    // dropping the badge and requesting it again would quietly re-arm
+    // that courtesy check, letting one visitor collect it over and over.
+    // 'tradeScope' => 'bound' closes that off the same way it already
+    // does for membership cards, at the cost of never being
+    // droppable/tradeable at all — the right tradeoff for something
+    // that's meant to just mark "this visitor was here once," not
+    // circulate. Mirrors issuer-server/server.js's ASSET_CATALOG entry.
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.rarity' => 'common',
       'com.example.issuedFor' => 'Plaza visit',
@@ -207,19 +320,40 @@ const ATLAS_ASSET_CATALOG_BASE = [
     // mint_asset_by_class() stamp a running per-instance atlas.serial/
     // atlas.editionSize onto every genuinely new mint (never onto a
     // split/consolidate/trade re-mint — those pass a non-null $supersedes,
-    // see reserve_supply() below); `maxSupply => 5` caps total instances
+    // see reserve_supply() below); `maxSupply` caps total instances
     // ever issued. Deliberately NOT applied to the two fungible element
     // classes below — this feature is orthogonal to them and there's no
     // reason to touch a passing surface for a demo-only feature. Mirrors
     // issuer-server/server.js's ASSET_CATALOG entry of the same name.
+    //
+    // Raised 5 -> 20 (Bruno's own request, alongside making this class
+    // tradeable at the Trading Station — see check_presented_unique_asset()
+    // below): 5 was too tight to ever have more than a couple of rings
+    // loose enough to actually list/claim through an open Trading Station
+    // listing without immediately running the demo dry. reserve_supply()'s
+    // running count only ever compares against the CURRENT maxSupply, so
+    // already-issued rings keep the serial/editionSize they were minted
+    // with; editionSize on any new mint reflects the new cap of 20.
     'serialized' => true,
-    'maxSupply' => 5,
+    'maxSupply' => 20,
+    // Task #250 fourth follow-up (Bruno's own request): rarity/
+    // enchantments/stats used to be these same three fixed values on EVERY
+    // mint. 'randomizeProperties' (see random_ring_properties() below, and
+    // RING_RARITY_TIERS/RING_ENCHANTMENT_POOL near reserve_supply() in this
+    // same file) is consulted by mint_asset_by_class() for every genuinely
+    // new mint and overrides atlas.rarity/com.example.enchantments/
+    // com.example.stats with a fresh weighted-rarity roll each time — the
+    // 'properties' below are now only the FALLBACK shown by GET
+    // /atlas/asset/class's pre-mint preview (which reads this catalog entry
+    // directly and never rolls anything, since there's no instance yet to
+    // roll for). Mirrors issuer-server/server.js's ASSET_CATALOG entry.
     'properties' => [
-      'atlas.rarity' => 'rare',
+      'atlas.rarity' => 'common',
       'com.example.material' => 'silver',
       'com.example.origin' => 'Coastal Bazaar',
-      'com.example.enchantments' => ['fire resistance', 'silent step', 'luck +2'],
+      'com.example.note' => 'Rarity, enchantments, and stats are rolled randomly at mint time',
     ],
+    'randomizeProperties' => 'random_ring_properties',
   ],
   // Task #208: two small collectibles for the lobby's new walk-up-and-
   // open crates. Same one-per-wallet 'issue' + oncePerUser pattern as the
@@ -231,6 +365,9 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.trinket.pin' => [
     'name' => 'Lobby Enamel Pin', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
     'fungible' => false, 'presentation' => 'collectible',
+    // Task #250 follow-up — same "closes the drop-then-re-request
+    // courtesy-check loophole" reasoning as atlas.badge above.
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.rarity' => 'common',
       'com.example.issuedFor' => 'Opening the lobby crate',
@@ -240,6 +377,8 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.trinket.charm' => [
     'name' => 'Lucky Charm Keychain', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
     'fungible' => false, 'presentation' => 'collectible',
+    // Task #250 follow-up — same reasoning as atlas.badge/atlas.trinket.pin above.
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.rarity' => 'uncommon',
       'com.example.issuedFor' => 'Opening the lobby crate',
@@ -403,10 +542,12 @@ const ATLAS_ASSET_CATALOG_BASE = [
   // another catalog entry atlas/asset/issue.php already knows how to mint,
   // no dedicated endpoint needed. Reuses the signet ring's model/thumbnail,
   // same "this one's the rare one" reasoning gold already borrows it for
-  // above. No tradeScope override — like atlas.badge, this is an
-  // achievement, not a relationship, so it stays ordinarily tradeable/
-  // giftable rather than 'bound'. Mirrors issuer-server/server.js's
-  // ASSET_CATALOG entry of the same name.
+  // above. No tradeScope override — this is a genuine achievement, not
+  // a relationship or a scarcity-gated giveaway (unlike atlas.badge/
+  // atlas.trinket.pin/atlas.trinket.charm above, all 'bound' as of the
+  // task #250 follow-up), so it stays ordinarily tradeable/giftable/
+  // droppable. Mirrors issuer-server/server.js's ASSET_CATALOG entry of
+  // the same name.
   'atlas.trophy.chess' => [
     'name' => 'Chess Champion Trophy', 'modelPath' => '/assets/ring.glb', 'thumbnailPath' => '/assets/ring.png',
     'fungible' => false, 'presentation' => 'collectible',
@@ -816,6 +957,109 @@ function remove_pending_trade($id) {
   fclose($fh);
 }
 
+// Domain calendar (SPEC.md §12) — same flock-guarded read/append/update/
+// remove shape as world drops above. read_calendar_events() is the one
+// GET /atlas/calendar actually calls: filtered to one $worldId (null
+// meaning the domain-wide calendar) and sorted soonest-first, the same
+// ordering AtlasWallet.getCalendarEvents() already guarantees for a
+// wallet's own local reminders (extension/wallet.js). Mirrors
+// issuer-server/server.js's readCalendarStore()/readCalendarEvents()/
+// addCalendarEvent()/updateCalendarEvent()/removeCalendarEvent().
+function read_calendar_store() {
+  $fh = fopen(atlas_calendar_file(), 'c+');
+  if ($fh === false) return ['events' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['events' => []];
+}
+
+function read_calendar_events($worldId) {
+  $normalized = $worldId ?: null;
+  $events = read_calendar_store()['events'];
+  $filtered = array_values(array_filter($events, function ($e) use ($normalized) {
+    return (isset($e['worldId']) ? $e['worldId'] : null) === $normalized;
+  }));
+  usort($filtered, function ($a, $b) {
+    return strtotime($a['dateTime']) <=> strtotime($b['dateTime']);
+  });
+  return $filtered;
+}
+
+function add_calendar_event($entry) {
+  $file = atlas_calendar_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['events' => []];
+  $doc['events'][] = $entry;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// Returns the updated entry (or null if $id doesn't exist), same "hand
+// back what you just changed" convention as everywhere else in this file.
+function update_calendar_event($id, $patch) {
+  $file = atlas_calendar_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['events' => []];
+  $found = null;
+  foreach ($doc['events'] as &$e) {
+    if ($e['id'] === $id) {
+      foreach ($patch as $key => $value) $e[$key] = $value;
+      $found = $e;
+      break;
+    }
+  }
+  unset($e);
+  if ($found !== null) {
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
+}
+
+// Returns the removed entry (or null if it was already gone). Mirrors
+// issuer-server/server.js's removeCalendarEvent().
+function remove_calendar_event($id) {
+  $file = atlas_calendar_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['events' => []];
+  $found = null;
+  foreach ($doc['events'] as $e) {
+    if ($e['id'] === $id) { $found = $e; break; }
+  }
+  if ($found !== null) {
+    $doc['events'] = array_values(array_filter($doc['events'], function ($e) use ($id) {
+      return $e['id'] !== $id;
+    }));
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
+}
+
 // Task #96 — records one successful send against the SENDER's own
 // membership, called from atlas/postoffice/send.php right after a message
 // actually goes out. Mirrors issuer-server/server.js's
@@ -1017,4 +1261,62 @@ function reserve_supply($cls, $quantity, $maxSupply) {
   flock($fh, LOCK_UN);
   fclose($fh);
   return ['ok' => true, 'serial' => $current + $quantity];
+}
+
+// Task #250 fourth follow-up (Bruno's own request) — per-mint randomized
+// enchantments/stats for the Signet Ring. Mirrors issuer-server/server.js's
+// RING_RARITY_TIERS/RING_ENCHANTMENT_POOL/randomRingProperties() exactly in
+// shape (same tier names/weights/ranges, same enchantment pool) — the
+// actual rolls will obviously never match between two independently
+// running instances, but the STRUCTURE (a rarity tier, a duplicate-free
+// enchantment list scaled by tier, two named stats in range) is meant to
+// be identical, same "same protocol, same shape, independently rolled" bar
+// this project already holds cross-domain signature verification to.
+$GLOBALS['ATLAS_RING_RARITY_TIERS'] = [
+  ['name' => 'common', 'weight' => 50, 'statRange' => [1, 3]],
+  ['name' => 'uncommon', 'weight' => 30, 'statRange' => [3, 6]],
+  ['name' => 'rare', 'weight' => 15, 'statRange' => [6, 10]],
+  ['name' => 'legendary', 'weight' => 5, 'statRange' => [10, 15]],
+];
+$GLOBALS['ATLAS_RING_ENCHANTMENT_POOL'] = ['fire resistance', 'silent step', 'water breathing', 'quickened reflexes', 'thorns', 'second wind'];
+
+function atlas_pick_weighted_tier($tiers) {
+  $total = array_sum(array_column($tiers, 'weight'));
+  $roll = mt_rand() / mt_getrandmax() * $total;
+  foreach ($tiers as $tier) {
+    if ($roll < $tier['weight']) return $tier;
+    $roll -= $tier['weight'];
+  }
+  return $tiers[count($tiers) - 1]; // floating-point rounding fallback — never actually reachable in practice
+}
+function atlas_sample_without_replacement($pool, $count) {
+  $remaining = array_values($pool);
+  $picked = [];
+  for ($i = 0; $i < $count && count($remaining) > 0; $i++) {
+    $idx = random_int(0, count($remaining) - 1);
+    $picked[] = $remaining[$idx];
+    array_splice($remaining, $idx, 1);
+  }
+  return $picked;
+}
+// Enchantment count scales with rarity tier (common: 1, uncommon: 2, rare:
+// 3, legendary: 4, capped at the pool's own size), same as the Node side.
+function random_ring_properties() {
+  $tiers = $GLOBALS['ATLAS_RING_RARITY_TIERS'];
+  $pool = $GLOBALS['ATLAS_RING_ENCHANTMENT_POOL'];
+  $tier = atlas_pick_weighted_tier($tiers);
+  $tierIndex = array_search($tier, $tiers);
+  $enchantCount = min($tierIndex + 1, count($pool));
+  $enchantments = array_map(
+    function ($name) use ($tier) { return $name . ' +' . random_int($tier['statRange'][0], $tier['statRange'][1]); },
+    atlas_sample_without_replacement($pool, $enchantCount)
+  );
+  return [
+    'atlas.rarity' => $tier['name'],
+    'com.example.enchantments' => $enchantments,
+    'com.example.stats' => [
+      'luck' => random_int($tier['statRange'][0], $tier['statRange'][1]),
+      'defense' => random_int($tier['statRange'][0], $tier['statRange'][1]),
+    ],
+  ];
 }

@@ -2,6 +2,23 @@
 # (no .php extension — matches what extension/wallet.js already calls, so
 # nothing in the extension needs to change to use this PHP backend instead
 # of the Node one).
+#
+# The second condition (!-d, added alongside the original !-f) exists
+# because of a real bug World Drops shipped with: this project's very
+# first endpoint whose own directory (atlas/world/drops/, home to
+# claim.php + relay-claim.php) shares its exact name with a sibling
+# "bare" endpoint that also needs to answer GET /atlas/world/drops. On a
+# real Apache host, without this condition, a bare request for that
+# directory's own name would still try to match this rule (a directory
+# fails the -f "is a regular file" test same as a nonexistent path does),
+# rewriting to a nonsense "drops/.php" target instead of leaving Apache's
+# own default directory-index handling (drops/index.php) to answer it —
+# and that collision came back as a bare Apache 500, never even reaching
+# this app's own PHP error handling. Excluding an actual directory here
+# lets Apache do what it already does by default for one (redirect
+# /atlas/world/drops -> /atlas/world/drops/, then serve its index.php)
+# instead of this rule fighting that.
 RewriteEngine On
 RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule ^(.+)$ $1.php [L]

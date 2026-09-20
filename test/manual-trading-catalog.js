@@ -20,28 +20,33 @@
 //
 // Covers:
 //   1. Node: GET /atlas/trade/catalog returns iron/gold/silver plus every
-//      one of task #204's 115 periodic-table elements — 118 fungible,
-//      non-bound classes exactly, no more, no fewer. (Originally this
-//      asserted an EXACT 3-class list; #204's expansion widened it to "the
-//      original 3 are present, PLUS the 115 new ones, PLUS nothing else"
-//      — see assertCatalogShape below.)
-//   2. Node: every bound or non-fungible class (atlas.membership,
+//      one of task #204's 115 periodic-table elements, PLUS (task #250
+//      fourth follow-up) the two non-bound non-fungible classes
+//      (atlas.wearable.ring, atlas.trophy.chess) — 120 non-bound classes
+//      exactly, no more, no fewer. (Originally this asserted an EXACT
+//      3-class list; #204's expansion widened it to "the original 3 are
+//      present, PLUS the 115 new ones, PLUS nothing else"; the fourth
+//      follow-up widened it again to also admit non-fungible, non-bound
+//      classes — see assertCatalogShape below.)
+//   2. Node: every genuinely BOUND class (atlas.membership,
 //      atlas.postoffice.membership, atlas.tradingstation.membership,
-//      atlas.wearable, atlas.badge, atlas.wearable.ring, atlas.trophy.chess)
-//      is excluded.
+//      atlas.wearable, atlas.badge, atlas.trinket.pin, atlas.trinket.charm)
+//      is still excluded — only tradeScope is the gate now, not fungible.
 //   3. Node: each returned entry carries the right shape (class/name/
-//      thumbnail/tradeScope), tradeScope defaulting to "local" the same
-//      way mintAssetByClass's own `catalogEntry.tradeScope || 'local'`
+//      thumbnail/fungible/tradeScope), tradeScope defaulting to "local" the
+//      same way mintAssetByClass's own `catalogEntry.tradeScope || 'local'`
 //      does, and the response's own `domain` field matches ATLAS_DOMAIN.
 //   4. Node: the response is genuinely ungated — a plain GET with no
 //      identity, membership, or credential presented at all.
 //   5. PHP: issuer-php's atlas/trade/catalog.php port returns the exact
-//      same 118-class set, in the same shape, off its own independent
+//      same 120-class set, in the same shape, off its own independent
 //      ATLAS_ASSET_CATALOG (base + elements-catalog.php merge) — proving
 //      the port didn't silently drift from the Node original.
 //   6. A couple of #204's new element entries carry exchangeRate (every
-//      element in the catalog is rated) and the isBaseCurrency flag still
-//      lands only on gold, not on any of the 115 new ones.
+//      FUNGIBLE element in the catalog is rated — the two non-fungible
+//      classes carry no exchangeRate at all, there's no "exchange rate"
+//      for a unique item) and the isBaseCurrency flag still lands only on
+//      gold, not on any of the 115 new elements or the two unique classes.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -61,13 +66,16 @@ const NODE_DOCROOT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-catalog-do
 const PHP_BUNDLE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-catalog-php-'));
 
 const ORIGINAL_THREE = ['atlas.element.gold', 'atlas.element.iron', 'atlas.element.silver'];
-// Task #204 added the other 115 periodic-table elements (118 total fungible
-// classes) — a fixed count check plus "the original 3 are in there" is more
-// maintainable than hand-listing all 118 names here.
-const EXPECTED_TOTAL_CLASSES = 118;
+// Task #204 added the other 115 periodic-table elements (118 fungible
+// classes total). Task #250's fourth follow-up widened discovery to also
+// admit non-bound non-fungible classes, adding these two (120 total) — a
+// fixed count check plus "these are in there" is more maintainable than
+// hand-listing all 120 names here.
+const NEWLY_INCLUDED_UNIQUE_CLASSES = ['atlas.wearable.ring', 'atlas.trophy.chess'];
+const EXPECTED_TOTAL_CLASSES = 118 + NEWLY_INCLUDED_UNIQUE_CLASSES.length;
 const EXCLUDED_CLASSES = [
   'atlas.membership', 'atlas.postoffice.membership', 'atlas.tradingstation.membership',
-  'atlas.wearable', 'atlas.badge', 'atlas.wearable.ring', 'atlas.trophy.chess'
+  'atlas.wearable', 'atlas.badge', 'atlas.trinket.pin', 'atlas.trinket.charm'
 ];
 
 function get(base, urlPath) {
@@ -82,15 +90,23 @@ function assertCatalogShape(label, classes) {
   for (const original of ORIGINAL_THREE) {
     if (!names.includes(original)) throw new Error(label + ': expected the original ' + original + ' to still be present, it was missing');
   }
+  for (const unique of NEWLY_INCLUDED_UNIQUE_CLASSES) {
+    if (!names.includes(unique)) throw new Error(label + ': expected ' + unique + ' (non-bound, non-fungible) to now be present, it was missing');
+  }
   for (const excluded of EXCLUDED_CLASSES) {
-    if (names.includes(excluded)) throw new Error(label + ': expected ' + excluded + ' to be excluded (bound or non-fungible), but it was present');
+    if (names.includes(excluded)) throw new Error(label + ': expected ' + excluded + ' to be excluded (bound), but it was present');
   }
   let baseCurrencyCount = 0;
   for (const entry of classes) {
     if (!entry.name || typeof entry.name !== 'string') throw new Error(label + ': expected a string name on ' + entry.class + ', got ' + JSON.stringify(entry));
+    if (typeof entry.fungible !== 'boolean') throw new Error(label + ': expected a boolean fungible field on ' + entry.class + ', got ' + JSON.stringify(entry));
     if (entry.tradeScope !== 'local') throw new Error(label + ': expected tradeScope "local" (the unset default) on ' + entry.class + ', got ' + JSON.stringify(entry));
     if (!('thumbnail' in entry)) throw new Error(label + ': expected a thumbnail field (even if null) on ' + entry.class + ', got ' + JSON.stringify(entry));
-    if (typeof entry.exchangeRate !== 'number') throw new Error(label + ': expected every class to carry a numeric exchangeRate (task #204: every element is rated), missing on ' + entry.class);
+    if (entry.fungible) {
+      if (typeof entry.exchangeRate !== 'number') throw new Error(label + ': expected every FUNGIBLE class to carry a numeric exchangeRate (task #204: every element is rated), missing on ' + entry.class);
+    } else if ('exchangeRate' in entry) {
+      throw new Error(label + ': expected NO exchangeRate on a non-fungible class (there is no exchange rate for a unique item), found one on ' + entry.class);
+    }
     if (entry.isBaseCurrency) baseCurrencyCount++;
   }
   if (baseCurrencyCount !== 1) throw new Error(label + ': expected exactly one isBaseCurrency: true entry (gold), found ' + baseCurrencyCount);
@@ -133,20 +149,20 @@ function assertCatalogShape(label, classes) {
     if (nodeRes.body.domain !== NODE_DOMAIN) throw new Error('Expected domain ' + NODE_DOMAIN + ', got ' + JSON.stringify(nodeRes.body.domain));
     console.log('PASS: 200, ungated, domain matches ->', nodeRes.body.domain);
 
-    console.log('STEP 2: Node — the original 3 fungible elements plus task #204\'s 115 periodic-table elements (118 total), no membership cards or unique items leaking in');
+    console.log('STEP 2: Node — the original 3 fungible elements plus task #204\'s 115 periodic-table elements plus the two non-bound unique classes (120 total), no BOUND classes leaking in');
     assertCatalogShape('Node', nodeRes.body.classes);
     console.log('PASS: Node catalog ->', nodeRes.body.classes.length, 'classes, including', JSON.stringify(ORIGINAL_THREE));
 
     console.log('STEP 3: Node — tradeScope defaults to "local" for every entry, matching mintAssetByClass\'s own `catalogEntry.tradeScope || \'local\'` convention, and every entry carries a numeric exchangeRate with exactly one isBaseCurrency: true (gold)');
-    console.log('PASS: checked inside assertCatalogShape above, for all 118 entries');
+    console.log('PASS: checked inside assertCatalogShape above, for all 120 entries');
 
-    console.log('STEP 4: PHP — GET /atlas/trade/catalog on an independent bundle copy returns the exact same 118-class set, same shape');
+    console.log('STEP 4: PHP — GET /atlas/trade/catalog on an independent bundle copy returns the exact same 120-class set, same shape');
     const phpRes = await get(PHP_BASE, '/atlas/trade/catalog');
     if (phpRes.status !== 200) throw new Error('Expected 200 from PHP\'s ungated GET, got ' + phpRes.status + ': ' + JSON.stringify(phpRes.body));
     assertCatalogShape('PHP', phpRes.body.classes);
     console.log('PASS: PHP catalog matches Node\'s ->', phpRes.body.classes.length, 'classes');
 
-    console.log('STEP 5: cross-backend parity — same names, same thumbnails (once each domain prefix is stripped), same exchangeRate, for every one of the 118 shared classes');
+    console.log('STEP 5: cross-backend parity — same names, same thumbnails (once each domain prefix is stripped), same exchangeRate, for every one of the 120 shared classes');
     const nodeByClass = new Map(nodeRes.body.classes.map((c) => [c.class, c]));
     const phpByClass = new Map(phpRes.body.classes.map((c) => [c.class, c]));
     for (const cls of nodeByClass.keys()) {
@@ -158,7 +174,7 @@ function assertCatalogShape(label, classes) {
       const phpThumbPath = p.thumbnail && p.thumbnail.replace('https://localhost:' + PHP_PORT, '');
       if (nodeThumbPath !== phpThumbPath) throw new Error('Thumbnail path mismatch for ' + cls + ': Node="' + nodeThumbPath + '" PHP="' + phpThumbPath + '"');
     }
-    console.log('PASS: Node and PHP agree on name + thumbnail path + exchangeRate for all 118 shared classes — the port did not drift from the original');
+    console.log('PASS: Node and PHP agree on name + thumbnail path + exchangeRate for all 120 shared classes — the port did not drift from the original');
 
     console.log('\nALL TRADING CATALOG (TASK #202) CHECKS PASSED');
   } catch (err) {

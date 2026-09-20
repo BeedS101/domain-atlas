@@ -52,7 +52,18 @@ if ($exp === false || $exp < time()) send_json(400, ['error' => 'intent has alre
 
 $offerSelf = $intent['payload']['offer'];
 $wantSelf = $intent['payload']['want'];
-$balanceProblem = check_presented_asset($kp['publicKeyB64url'], $balance, $selfPub, $offerSelf['class'], $offerSelf['quantity']);
+$shapeProblem = validate_trade_side_shape($offerSelf, 'offer') ?? validate_trade_side_shape($wantSelf, 'want');
+if ($shapeProblem) send_json(400, ['error' => $shapeProblem]);
+
+// Task #250 fourth follow-up: which check runs is decided by the presented
+// balance's OWN signed fungible flag, not a class lookup — self-describing,
+// same posture this protocol already takes everywhere else (never
+// re-derive from a live catalog when the signed credential already states
+// it). Mirrors issuer-server/server.js's same choice in this route.
+$offerIsUnique = isset($balance['asset']['fungible']) && $balance['asset']['fungible'] === false;
+$balanceProblem = $offerIsUnique
+  ? check_presented_unique_asset($kp['publicKeyB64url'], $balance, $selfPub, $offerSelf['class'])
+  : check_presented_asset($kp['publicKeyB64url'], $balance, $selfPub, $offerSelf['class'], $offerSelf['quantity']);
 if ($balanceProblem) send_json(400, ['error' => 'balance: ' . $balanceProblem]);
 
 $pendingId = 'urn:atlas:trade:' . atlas_uuid();

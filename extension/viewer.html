@@ -209,6 +209,13 @@
      pattern as .wallet-screen one level up, just for a nested tab bar. */
   .subscreen { display: none; }
   .subscreen.active { display: block; }
+  /* Calendar's own third level of tabbing (SPEC.md §12's domain calendar
+     system: "Domain" / "My Calendar" / "Remote") — same show-one-hide-
+     the-rest idea as .subscreen just above, kept as its own class rather
+     than reusing .subscreen so nothing about #calendarSubscreen itself
+     (still an ordinary Social sub-screen one level up) is affected. */
+  .calendar-mode-subscreen { display: none; }
+  .calendar-mode-subscreen.active { display: block; }
   /* Calendar (Social -> Calendar): one card per manually-added event,
      .info-card's own look (see that class's comment further down) plus an
      .overdue variant that just recolors the date/time line — a subtle
@@ -323,6 +330,17 @@
   }
   .card-menu-items.show { display: block; }
   .card-menu-items button { width: 100%; }
+  /* Task #250 — the one card-menu row that isn't a single full-width
+     button: a fungible "Drop" needs a quantity next to it (how much of the
+     stack actually leaves the wallet), so this row splits into a narrow
+     number input plus the Drop button itself, same dark input styling the
+     rest of this file's text/number inputs already use. */
+  .drop-quantity-row { display: flex; gap: 4px; }
+  .drop-quantity-input {
+    width: 56px; flex: 0 0 auto; background: #0e161b; color: #e8eef0;
+    border: 1px solid #2c3c44; border-radius: 6px; padding: 6px 4px; font-size: 12px;
+  }
+  .drop-quantity-row button { flex: 1 1 auto; }
 
   #walletPanel {
     display: none; position: fixed; top: 56px; right: 0; bottom: 0; width: 360px;
@@ -1858,26 +1876,31 @@
       <div id="tradingSellSubscreen" class="subscreen">
         <div class="subhead">Post something you hold for anyone at this Trading Station to claim.</div>
 
-        <!-- "You offer" lists this wallet's own held fungible asset classes
-             (refreshTradingSellOfferOptions in viewer.js) — you can only ever
-             offer something you actually hold, so free text here just
-             invited typos. "You want" lists this domain's own tradable
-             fungible classes, fetched live from GET /atlas/trade/catalog
-             (Task #202, refreshTradingSellWantOptions in viewer.js) rather
-             than a hardcoded list — the placeholder option below is
-             replaced as soon as that fetch completes. Task #207: both
-             quantity inputs start at 0 (min="0", not "1" — 0 is a real,
-             valid in-between state here, only /atlas/trade's own submit
-             validation requires a positive integer) and keep each other in
-             sync — typing into either one auto-fills the other at this
-             domain's own declared exchangeRate for the two selected
-             classes (updateSellSuggestion in viewer.js), the same math
-             Convert's own live estimate uses. Purely a starting-point
-             suggestion, not enforced — nothing stops overwriting either
-             field afterward, same as Sell always could. -->
+        <!-- "You offer" lists this wallet's own held, non-bound asset
+             classes (refreshTradingSellOfferOptions in viewer.js) — you can
+             only ever offer something you actually hold, so free text here
+             just invited typos. "You want" lists this domain's own tradable
+             classes, fetched live from GET /atlas/trade/catalog (Task #202,
+             refreshTradingSellWantOptions in viewer.js) rather than a
+             hardcoded list — the placeholder option below is replaced as
+             soon as that fetch completes. Task #250 fourth follow-up
+             (Bruno's own request): both lists now also include a held/
+             tradable NON-fungible class (e.g. the Signet Ring), not just
+             fungible balances — whichever side resolves to one gets its own
+             quantity input locked to "1" and disabled (updateSellQuantityLocks
+             in viewer.js), since there's no partial share of a unique item
+             to negotiate. Task #207: a still-editable (fungible) quantity
+             input starts at 0 (min="0" — 0 is a real, valid in-between state
+             here, only /atlas/trade's own submit validation requires a
+             positive integer) and keeps the other one in sync — typing into
+             either auto-fills the other at this domain's own declared
+             exchangeRate for the two selected classes (updateSellSuggestion
+             in viewer.js), the same math Convert's own live estimate uses.
+             Purely a starting-point suggestion, not enforced — nothing stops
+             overwriting either field afterward, same as Sell always could. -->
         <div class="subhead" style="margin-top:10px;">You offer</div>
         <select id="tradingSellOfferClassSelect">
-          <option value="">No fungible assets to offer</option>
+          <option value="">Nothing tradable to offer</option>
         </select>
         <input type="number" id="tradingSellOfferQtyInput" placeholder="Quantity (g)" min="0" value="0">
 
@@ -1886,7 +1909,7 @@
           <option value="">Loading tradable assets…</option>
         </select>
         <input type="number" id="tradingSellWantQtyInput" placeholder="Quantity (g)" min="0" value="0">
-        <div class="empty-note" style="margin-top:4px;">Quantities auto-suggest each other using this domain's own conversion rate — overwrite either one freely.</div>
+        <div class="empty-note" style="margin-top:4px;">Quantities auto-suggest each other using this domain's own conversion rate — overwrite either one freely. A unique item's quantity is always 1.</div>
 
         <!-- Per-listing expiry, in hours (v1.15) — used to be a hardcoded
              10 MINUTES shared by every listing (see wallet.js's
@@ -1953,9 +1976,13 @@
          as four sub-sections of one tab rather than four top-level tabs.
          Mail used to be its own top-level tab; it moved in here so all the
          "other people / other domains / things to remember" features live
-         in one place. Calendar is local-only (see calendarSubscreen below)
-         — added alongside the other three purely as a fourth sub-tab,
-         same pattern byte-for-byte. -->
+         in one place. Calendar (see calendarSubscreen below) started
+         local-only, added alongside the other three purely as a fourth
+         sub-tab, same pattern byte-for-byte — it has since grown its own
+         nested third level of tabbing (SPEC.md §12's domain calendar
+         system: "Domain" / "My Calendar" / "Remote"), but the local-only
+         part is still exactly what it always was, just moved into the
+         "My Calendar" sub-sub-tab. -->
     <div id="socialScreen" class="wallet-screen">
 
       <div id="socialSubtabBar" class="subtab-bar">
@@ -2336,53 +2363,117 @@
            version (a real notification while the panel is closed) is a
            deliberately separate future phase, not built here. -->
       <div id="calendarSubscreen" class="subscreen">
-        <!-- Persistent month-grid widget — always visible above the
-             add/edit form and event list below, never navigated away
+        <!-- Calendar's own third level of tabbing (domain calendar
+             system): "CurrentDomainName" (calendarDomainSubscreen, label
+             on calendarDomainSubtabBtn set dynamically to the actual
+             domain by refreshCalendarDomainSources() in viewer.js) / "My
+             Calendar" (calendarMineSubscreen, exactly the pre-existing
+             local-only widget below, unchanged) / "Remote"
+             (calendarRemoteSubscreen). Same show-one-hide-the-rest idea as
+             #socialSubtabBar one level up, just scoped to
+             .calendar-mode-subscreen instead of .subscreen — see
+             showCalendarModeSubtab() in viewer.js. Opening the OUTER
+             Calendar sub-tab (calendarSubtabBtn's own click handler)
+             always lands back on "My Calendar" first, preserving this
+             sub-tab's pre-existing default behavior. -->
+        <div id="calendarModeSubtabBar" class="subtab-bar">
+          <button id="calendarDomainSubtabBtn" type="button">Domain</button>
+          <button id="calendarMineSubtabBtn" type="button">My Calendar</button>
+          <button id="calendarRemoteSubtabBtn" type="button">Remote</button>
+        </div>
+
+        <!-- "CurrentDomainName" (SPEC.md §12): a read-only view of the
+             domain a visitor is currently standing in, and any of its
+             worlds that separately opted in (manifest `calendar: true`,
+             independent per §3's field notes) — see
+             computeCalendarSources()/refreshCalendarDomainSources() in
+             viewer.js. The dropdown lists the domain-wide calendar (if
+             opted in) plus one entry per opted-in world; nothing here is
+             this wallet's own, it's fetched fresh via
+             AtlasWallet.fetchDomainCalendar() every time the selection
+             changes. -->
+        <div id="calendarDomainSubscreen" class="calendar-mode-subscreen">
+          <select id="calendarDomainSourceSelect"></select>
+          <div id="calendarDomainEventsList" class="item-list" style="margin-top:10px;"></div>
+        </div>
+
+        <!-- "My Calendar" — exactly the pre-existing local-only calendar
+             UI (month grid, day viewer, add/edit form, event list),
+             unchanged in behavior, just nested one level deeper than
+             before. Persistent month-grid widget — always visible above
+             the add/edit form and event list below, never navigated away
              from. See renderCalendarMonthGrid/refreshCalendarMonthGrid in
              viewer.js for the render logic and calendarGridViewDate/
              calendarSelectedDate for the (session-only, non-persisted)
              state it renders from. -->
-        <div id="calendarMonthWidget" class="calendar-month-widget">
-          <div class="calendar-month-header">
-            <button type="button" id="calendarPrevMonthBtn" class="calendar-month-nav" aria-label="Previous month">&lsaquo;</button>
-            <div id="calendarMonthLabel" class="calendar-month-label"></div>
-            <button type="button" id="calendarNextMonthBtn" class="calendar-month-nav" aria-label="Next month">&rsaquo;</button>
+        <div id="calendarMineSubscreen" class="calendar-mode-subscreen">
+          <div id="calendarMonthWidget" class="calendar-month-widget">
+            <div class="calendar-month-header">
+              <button type="button" id="calendarPrevMonthBtn" class="calendar-month-nav" aria-label="Previous month">&lsaquo;</button>
+              <div id="calendarMonthLabel" class="calendar-month-label"></div>
+              <button type="button" id="calendarNextMonthBtn" class="calendar-month-nav" aria-label="Next month">&rsaquo;</button>
+            </div>
+            <div class="calendar-grid-weekdays">
+              <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+            </div>
+            <div id="calendarMonthGrid" class="calendar-grid"></div>
           </div>
-          <div class="calendar-grid-weekdays">
-            <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+
+          <!-- Day-viewer widget — hidden until a day is clicked in the
+               month-grid widget above (see renderCalendarDayViewer and the
+               grid's own click handler in viewer.js). Sits directly under
+               the month grid and above the add/edit form, and hides itself
+               again whenever calendarSelectedDate goes back to null (fresh
+               sub-tab open, or the form being reset/submitted). -->
+          <div id="calendarDayViewer" class="calendar-day-viewer" hidden>
+            <div id="calendarDayViewerHeader" class="calendar-day-viewer-header"></div>
+            <div id="calendarDayViewerBody" class="calendar-day-viewer-body"></div>
           </div>
-          <div id="calendarMonthGrid" class="calendar-grid"></div>
+
+          <div class="subhead">Add event</div>
+          <input type="text" id="calendarEventTitleInput" placeholder="Title" maxlength="120">
+          <div class="calendar-field-label">Starts</div>
+          <input type="datetime-local" id="calendarEventDateTimeInput">
+          <!-- Optional end time (endDateTime in wallet.js) — leaving this
+               blank keeps the event a plain instant, exactly as before this
+               field existed. See the submit handler in viewer.js for the
+               end-after-start validation. -->
+          <div class="calendar-field-label">Ends (optional)</div>
+          <input type="datetime-local" id="calendarEventEndDateTimeInput">
+          <textarea id="calendarEventNotesInput" placeholder="Notes (optional)" style="margin-top:8px;"></textarea>
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="calendarSaveEventBtn" type="button" class="btn-secondary">Add event</button>
+            <button id="calendarCancelEditBtn" type="button" class="btn-secondary" hidden>Cancel edit</button>
+          </div>
+          <div id="calendarEventStatus" class="empty-note" style="margin-top:6px;"></div>
+
+          <div id="calendarEventsList" class="item-list" style="margin-top:14px;"></div>
         </div>
 
-        <!-- Day-viewer widget — hidden until a day is clicked in the
-             month-grid widget above (see renderCalendarDayViewer and the
-             grid's own click handler in viewer.js). Sits directly under
-             the month grid and above the add/edit form, and hides itself
-             again whenever calendarSelectedDate goes back to null (fresh
-             sub-tab open, or the form being reset/submitted). -->
-        <div id="calendarDayViewer" class="calendar-day-viewer" hidden>
-          <div id="calendarDayViewerHeader" class="calendar-day-viewer-header"></div>
-          <div id="calendarDayViewerBody" class="calendar-day-viewer-body"></div>
+        <!-- "Remote" (SPEC.md §12): a favorited-domain dropdown plus a
+             free-text domain box, sharing the exact same read-only render
+             path as calendarDomainSubscreen above but against an arbitrary
+             domain. Also browses that domain's WORLDS, not just its
+             domain-wide calendar: picking a favorite or fetching a typed
+             domain first fetches that domain's own manifest
+             (AtlasWallet.fetchDomainManifest) to discover every calendar it
+             opted into (computeCalendarSources — domain-wide plus any
+             opted-in world, same discovery step "Domain" above already
+             does with the manifest already in hand), then populates
+             calendarRemoteSourceSelect the same way. Hidden whenever a
+             domain only ever published one calendar — nothing to pick
+             between. Needs no membership/identity — §12's read side is as
+             ungated as the manifest itself. -->
+        <div id="calendarRemoteSubscreen" class="calendar-mode-subscreen">
+          <select id="calendarRemoteFavoriteSelect"></select>
+          <div class="btn-row" style="margin-top:6px;">
+            <input type="text" id="calendarRemoteDomainInput" placeholder="example.com">
+            <button id="calendarRemoteFetchBtn" type="button" class="btn-secondary">Fetch</button>
+          </div>
+          <select id="calendarRemoteSourceSelect" style="margin-top:8px;" hidden></select>
+          <div id="calendarRemoteStatus" class="empty-note" style="margin-top:6px;"></div>
+          <div id="calendarRemoteEventsList" class="item-list" style="margin-top:10px;"></div>
         </div>
-
-        <div class="subhead">Add event</div>
-        <input type="text" id="calendarEventTitleInput" placeholder="Title" maxlength="120">
-        <div class="calendar-field-label">Starts</div>
-        <input type="datetime-local" id="calendarEventDateTimeInput">
-        <!-- Optional end time (endDateTime in wallet.js) — leaving this
-             blank keeps the event a plain instant, exactly as before this
-             field existed. See the submit handler in viewer.js for the
-             end-after-start validation. -->
-        <div class="calendar-field-label">Ends (optional)</div>
-        <input type="datetime-local" id="calendarEventEndDateTimeInput">
-        <textarea id="calendarEventNotesInput" placeholder="Notes (optional)" style="margin-top:8px;"></textarea>
-        <div class="btn-row" style="margin-top:8px;">
-          <button id="calendarSaveEventBtn" type="button" class="btn-secondary">Add event</button>
-          <button id="calendarCancelEditBtn" type="button" class="btn-secondary" hidden>Cancel edit</button>
-        </div>
-        <div id="calendarEventStatus" class="empty-note" style="margin-top:6px;"></div>
-
-        <div id="calendarEventsList" class="item-list" style="margin-top:14px;"></div>
       </div>
 
     </div>

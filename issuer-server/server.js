@@ -189,6 +189,34 @@ const TRADINGSTATION_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-tradingstation-m
 // (pruned lazily wherever this store is read for matching, not on a
 // timer — same "no background sweep" simplicity as the rest of this demo).
 const PENDING_TRADES_FILE = path.join(STATE_DIR, 'atlas-pending-trades-store.json');
+// World drops (task #250, SPEC.md §5.5): the "others can see it and pick it
+// up" half of dropping an item, deliberately left undone when self-only
+// dropping first shipped (see extension/wallet.js's dropItem() comment) —
+// this is the "world actually hosting shared state" it said this demo
+// didn't have yet. One durable entry per dropped item, keyed by which
+// world it's lying in on THIS domain (a world is inherently this domain's
+// own concern, same as its scene.json), holding the full original signed
+// credential so a browsing visitor can render it without a second round
+// trip, plus where in the scene it's sitting. Same plain-read-write shape
+// as PENDING_TRADES_FILE above and for the same reason (single-threaded
+// Node here; issuer-php's mirror flock()s it, same as its own pending-trades
+// file) — reservation-safety comes from removing the entry before minting
+// anything, not from a lock on the file itself, see removeWorldDrop's own
+// call sites in /atlas/world/drops/claim and /atlas/world/drops/relay-claim.
+const WORLD_DROPS_FILE = path.join(STATE_DIR, 'atlas-world-drops-store.json');
+// Domain calendar (SPEC.md §12, Bruno's own request): one flat list of
+// events, each tagged with the `worldId` it belongs to (`null` for the
+// domain-wide calendar), same "one file, filter on read" shape
+// PENDING_TRADES_FILE/WORLD_DROPS_FILE already use above rather than one
+// file per world — there's no bound on how many worlds might opt in
+// (manifest `calendar: true`, §3), and a single small JSON file scales
+// fine for a demo of this size. This server does not itself check that a
+// given worldId actually has `calendar: true` in the manifest before
+// serving or accepting events for it — same "client-side-only gate, no
+// server-side enforcement" posture chatEnabledForWorld() already
+// documents for the (unrelated, undocumented-in-SPEC.md) chat opt-in;
+// the manifest is what a client reads to decide whether to ask at all.
+const CALENDAR_FILE = path.join(STATE_DIR, 'atlas-calendar-store.json');
 // Post Office abuse detection (task #96): how many sends within how large
 // a rolling window counts as "irregular" enough to auto-flag a membership
 // for the operator's attention — see recordPostOfficeSend() below. Tunable
@@ -294,6 +322,21 @@ const ASSET_CATALOG = {
     // can only ever settle at the asset's own issuing domain regardless of
     // any flag (only that domain holds the signing key to re-mint it). Only
     // spelled out explicitly here for classes where it isn't the default.
+    //
+    // Task #250 second follow-up (Bruno's own request): the Compass was
+    // deliberately left OUT of the first #250 follow-up (atlas.badge/
+    // atlas.trinket.pin/atlas.trinket.charm below, all bound) specifically
+    // to keep the flagship non-fungible World Drops demo item droppable.
+    // Once the demo's own drop/pickup showcase leans on fungibles instead
+    // (atlas.element.iron/gold/silver — already droppable, already the
+    // subject of the split-then-drop partial-quantity path) there was no
+    // reason left to exempt this one, oncePerUser giveaway from the exact
+    // same drop-then-re-request courtesy-check loophole atlas.badge's own
+    // comment below explains. World Drops UI/protocol test coverage that
+    // used to drop a Bronze Compass now mints atlas.trophy.chess directly
+    // instead — see test/manual-drop-pickup.js, manual-previewer-2d.js, and
+    // manual-world-drops-protocol(-php).js for the swap.
+    tradeScope: 'bound',
     properties: {
       'atlas.rarity': 'common',
       'com.example.era': 'Victorian',
@@ -307,6 +350,18 @@ const ASSET_CATALOG = {
     thumbnail: `https://${DOMAIN}/assets/badge.png`,
     fungible: false,
     presentation: 'collectible',
+    // Task #250 follow-up (Bruno's own request): a oncePerUser giveaway's
+    // "already collected this" check is only a per-device courtesy (see
+    // alreadyHasRequestableItem()'s own comment in viewer.js) — it looks
+    // at what's CURRENTLY held, not a real issuance ledger. Without this,
+    // dropping the badge and requesting it again would quietly re-arm
+    // that courtesy check, letting one visitor collect it over and over.
+    // tradeScope: 'bound' closes that off the same way it already does
+    // for membership cards, at the cost of the badge never being
+    // droppable/tradeable at all — the right tradeoff for something
+    // that's meant to just mark "this visitor was here once," not
+    // circulate.
+    tradeScope: 'bound',
     properties: {
       'atlas.rarity': 'common',
       'com.example.issuedFor': 'Plaza visit',
@@ -328,20 +383,45 @@ const ASSET_CATALOG = {
     // mintAssetByClass() stamp a running per-instance atlas.serial/
     // atlas.editionSize onto every genuinely new mint (never onto a
     // split/consolidate/trade re-mint — those aren't new supply, see
-    // reserveSupply() below); `maxSupply: 5` caps total instances ever
+    // reserveSupply() below); `maxSupply` caps total instances ever
     // issued. Deliberately NOT applied to atlas.element.iron/gold —
     // those are fungible classes exercised heavily by existing tests,
     // and this feature is orthogonal to them (maxSupply alone would work
     // there too, but there's no reason to touch a passing surface for a
     // demo-only feature).
+    //
+    // Raised 5 -> 20 (Bruno's own request, alongside making this class
+    // tradeable at the Trading Station — see checkPresentedUniqueAsset
+    // below): 5 was plenty for proving the cap mechanism works at all, but
+    // too tight to ever have more than a couple of rings loose enough to
+    // actually list/claim through an open Trading Station listing without
+    // immediately running the demo dry. reserveSupply()'s running count is
+    // unaffected by this — it only compares against whatever maxSupply
+    // currently says, so already-issued rings (serials 1-5, if any exist on
+    // a given deployment) keep their own serial/editionSize as originally
+    // minted; editionSize on any NEW mint reflects the new cap of 20.
     serialized: true,
-    maxSupply: 5,
+    maxSupply: 20,
+    // Task #250 fourth follow-up (Bruno's own request): rarity/
+    // enchantments/stats used to be these same three fixed values on
+    // EVERY mint — genuinely identical rings, only the serial number
+    // differed. `randomizeProperties` (see its own comment + RING_RARITY_
+    // TIERS/RING_ENCHANTMENT_POOL above reserveSupply) is consulted by
+    // mintAssetByClass() for every genuinely new mint and overrides
+    // atlas.rarity/com.example.enchantments/com.example.stats with a fresh
+    // weighted-rarity roll each time — the `properties` below are now only
+    // the FALLBACK shown by GET /atlas/asset/class's pre-mint preview
+    // (which reads this catalog entry directly and never rolls anything,
+    // since there's no instance yet to roll for) and whatever a caller
+    // might reissue this class's properties with; they play no part in an
+    // actual mint's outcome.
     properties: {
-      'atlas.rarity': 'rare',
+      'atlas.rarity': 'common',
       'com.example.material': 'silver',
       'com.example.origin': 'Coastal Bazaar',
-      'com.example.enchantments': ['fire resistance', 'silent step', 'luck +2']
-    }
+      'com.example.note': 'Rarity, enchantments, and stats are rolled randomly at mint time'
+    },
+    randomizeProperties: randomRingProperties
   },
   // Task #208: two small collectibles for the lobby's new walk-up-and-
   // open crates (see demo-domain-a/spatial/lobby/scene.json's
@@ -358,6 +438,9 @@ const ASSET_CATALOG = {
     thumbnail: `https://${DOMAIN}/assets/badge.png`,
     fungible: false,
     presentation: 'collectible',
+    // Task #250 follow-up — same "closes the drop-then-re-request
+    // courtesy-check loophole" reasoning as atlas.badge above.
+    tradeScope: 'bound',
     properties: {
       'atlas.rarity': 'common',
       'com.example.issuedFor': 'Opening the lobby crate',
@@ -370,6 +453,8 @@ const ASSET_CATALOG = {
     thumbnail: `https://${DOMAIN}/assets/compass.png`,
     fungible: false,
     presentation: 'collectible',
+    // Task #250 follow-up — same reasoning as atlas.badge/atlas.trinket.pin above.
+    tradeScope: 'bound',
     properties: {
       'atlas.rarity': 'uncommon',
       'com.example.issuedFor': 'Opening the lobby crate',
@@ -573,8 +658,10 @@ const ASSET_CATALOG = {
   // Reuses the signet ring's model/thumbnail for the same "this one's the
   // rare one" reasoning gold already borrows it for above, rather than
   // the plainer badge.glb every common item reuses. No tradeScope override
-  // — like atlas.badge, this is an achievement, not a relationship, so it
-  // stays ordinarily tradeable/giftable rather than 'bound'.
+  // — this is a genuine achievement, not a relationship or a scarcity-
+  // gated giveaway (unlike atlas.badge/atlas.trinket.pin/
+  // atlas.trinket.charm above, all 'bound' as of the task #250
+  // follow-up), so it stays ordinarily tradeable/giftable/droppable.
   'atlas.trophy.chess': {
     name: 'Chess Champion Trophy',
     model: `https://${DOMAIN}/assets/ring.glb`,
@@ -795,6 +882,75 @@ function reserveSupply(cls, quantity, maxSupply) {
   return { ok: true, serial: current + quantity };
 }
 
+// Task #250 fourth follow-up (Bruno's own request) — per-mint randomized
+// enchantments/stats for the Signet Ring, the first catalog class whose
+// `properties` are genuinely different on every new mint rather than fixed
+// per class. Every OTHER catalog entry's `properties` is a plain static
+// object baked in once at server startup; this is a parallel, opt-in
+// mechanism (a catalog entry's own `randomizeProperties` function, only
+// ever consulted by mintAssetByClass() below) rather than a change to how
+// `properties` itself works, so nothing about the other ~120 classes'
+// behavior shifts at all.
+//
+// A weighted rarity roll first (RING_RARITY_TIERS' `weight`s are relative,
+// not required to sum to 100 — pickWeightedTier() normalizes against
+// whatever they add up to), then a random, duplicate-free sample of
+// enchantment names from a fixed pool, each given a random magnitude drawn
+// from that tier's own statRange, plus two named numeric stats (luck,
+// defense) drawn from the same range — "enchants AND stats" per Bruno's
+// own wording, both scaling with the rolled rarity so a legendary ring is
+// meaningfully stronger, not just differently labeled.
+const RING_RARITY_TIERS = [
+  { name: 'common', weight: 50, statRange: [1, 3] },
+  { name: 'uncommon', weight: 30, statRange: [3, 6] },
+  { name: 'rare', weight: 15, statRange: [6, 10] },
+  { name: 'legendary', weight: 5, statRange: [10, 15] }
+];
+const RING_ENCHANTMENT_POOL = ['fire resistance', 'silent step', 'water breathing', 'quickened reflexes', 'thorns', 'second wind'];
+
+function randomInt(min, max) {
+  // Inclusive of both ends — Math.random() is fine here (this is loot-table
+  // flavor for a demo, not anything security- or money-sensitive; contrast
+  // webcrypto.randomUUID()/getRandomValues() used elsewhere in this file
+  // for actual ids and key material).
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+function pickWeightedTier(tiers) {
+  const total = tiers.reduce((sum, t) => sum + t.weight, 0);
+  let roll = Math.random() * total;
+  for (const tier of tiers) {
+    if (roll < tier.weight) return tier;
+    roll -= tier.weight;
+  }
+  return tiers[tiers.length - 1]; // floating-point rounding fallback — never actually reachable in practice
+}
+function sampleWithoutReplacement(pool, count) {
+  const remaining = pool.slice();
+  const picked = [];
+  for (let i = 0; i < count && remaining.length; i++) {
+    picked.push(remaining.splice(Math.floor(Math.random() * remaining.length), 1)[0]);
+  }
+  return picked;
+}
+// Enchantment count scales with rarity tier (common: 1, uncommon: 2, rare:
+// 3, legendary: 4, capped at the pool's own size) — a higher tier is
+// visibly more loaded with effects, not just numerically bigger ones.
+function randomRingProperties() {
+  const tier = pickWeightedTier(RING_RARITY_TIERS);
+  const tierIndex = RING_RARITY_TIERS.indexOf(tier);
+  const enchantCount = Math.min(tierIndex + 1, RING_ENCHANTMENT_POOL.length);
+  const enchantments = sampleWithoutReplacement(RING_ENCHANTMENT_POOL, enchantCount)
+    .map((name) => name + ' +' + randomInt(tier.statRange[0], tier.statRange[1]));
+  return {
+    'atlas.rarity': tier.name,
+    'com.example.enchantments': enchantments,
+    'com.example.stats': {
+      luck: randomInt(tier.statRange[0], tier.statRange[1]),
+      defense: randomInt(tier.statRange[0], tier.statRange[1])
+    }
+  };
+}
+
 // Mail store: a flat array of signed messages, each tied to one
 // credentialId (SPEC.md-style trust scoping discussed alongside this
 // feature — a message about a credential carries the same issuer
@@ -910,6 +1066,82 @@ function removePendingTrade(id) {
   fs.writeFileSync(PENDING_TRADES_FILE, JSON.stringify(doc, null, 2));
 }
 
+// World drops (task #250) — same read/append/remove shape as pending
+// trades just above, scoped by `world` (a plain string tag the client
+// supplies, same as everywhere else "world" already means "whatever id
+// this domain's own scene.json/manifest calls it" — this server has no
+// independent notion of what worlds exist or what their policy is; that
+// stays a client-enforced concern, same split of responsibility
+// itemDropsAllowed/acceptedItemClasses/trustedIssuers already have today).
+// No expiry/pruning here unlike readPendingTrades() — a dropped item is
+// meant to just sit there until picked up or reclaimed, not vanish on a
+// timer.
+function readWorldDrops() {
+  if (!fs.existsSync(WORLD_DROPS_FILE)) return { drops: [] };
+  return JSON.parse(fs.readFileSync(WORLD_DROPS_FILE, 'utf8'));
+}
+function appendWorldDrop(entry) {
+  const doc = readWorldDrops();
+  doc.drops.push(entry);
+  fs.writeFileSync(WORLD_DROPS_FILE, JSON.stringify(doc, null, 2));
+}
+// Returns the removed entry (or null if it was already gone) so the caller
+// can tell "I just won the reservation" from "someone else already claimed
+// this" without a second read — the exact race the claim endpoints below
+// exist to close.
+function removeWorldDrop(dropId) {
+  const doc = readWorldDrops();
+  const found = doc.drops.find((d) => d.dropId === dropId) || null;
+  if (found) {
+    doc.drops = doc.drops.filter((d) => d.dropId !== dropId);
+    fs.writeFileSync(WORLD_DROPS_FILE, JSON.stringify(doc, null, 2));
+  }
+  return found;
+}
+
+// Domain calendar (SPEC.md §12) — same plain read/append/update/remove
+// shape as PENDING_TRADES_FILE/WORLD_DROPS_FILE above. readCalendarEvents
+// is the one GET /atlas/calendar actually calls: filtered to one
+// worldId (null meaning the domain-wide calendar) and sorted soonest-
+// first, the same ordering AtlasWallet.getCalendarEvents() already
+// guarantees for a wallet's own local reminders (extension/wallet.js).
+function readCalendarStore() {
+  if (!fs.existsSync(CALENDAR_FILE)) return { events: [] };
+  return JSON.parse(fs.readFileSync(CALENDAR_FILE, 'utf8'));
+}
+function readCalendarEvents(worldId) {
+  const normalized = worldId || null;
+  return readCalendarStore()
+    .events.filter((e) => (e.worldId || null) === normalized)
+    .sort((a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime());
+}
+function addCalendarEvent(entry) {
+  const doc = readCalendarStore();
+  doc.events.push(entry);
+  fs.writeFileSync(CALENDAR_FILE, JSON.stringify(doc, null, 2));
+}
+// Returns the updated entry (or null if `id` doesn't exist) so the caller
+// can tell a genuine 404 from a successful patch without a second read.
+function updateCalendarEvent(id, patch) {
+  const doc = readCalendarStore();
+  const entry = doc.events.find((e) => e.id === id);
+  if (!entry) return null;
+  Object.assign(entry, patch);
+  fs.writeFileSync(CALENDAR_FILE, JSON.stringify(doc, null, 2));
+  return entry;
+}
+// Returns the removed entry (or null if it was already gone), same
+// "hand back what you just removed" convention removeWorldDrop uses above.
+function removeCalendarEvent(id) {
+  const doc = readCalendarStore();
+  const found = doc.events.find((e) => e.id === id) || null;
+  if (found) {
+    doc.events = doc.events.filter((e) => e.id !== id);
+    fs.writeFileSync(CALENDAR_FILE, JSON.stringify(doc, null, 2));
+  }
+  return found;
+}
+
 // Task #96 — records one successful send against the SENDER's own
 // membership, called from POST /atlas/postoffice/send right after a
 // message actually goes out. Tracking sends (not received mail) because
@@ -997,7 +1229,17 @@ function sendJson(res, status, obj) {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
+    'Access-Control-Allow-Headers': 'Content-Type',
+    // Every response here is either a write's result or a read of state
+    // that can change from one request to the next (world drops being the
+    // sharpest case: POST a drop, then GET the list back and need to see
+    // it right away) — never something safe for a shared cache to reuse.
+    // This project's own dev server has no caching layer in front of it,
+    // but a real deployed domain behind a CDN/reverse proxy does, and can
+    // cache an uncontrolled GET response — see the matching fix + comment
+    // in issuer-php/lib/bootstrap.php's send_json() for the actual bug
+    // report this traces back to.
+    'Cache-Control': 'no-store, no-cache, must-revalidate'
   });
   res.end(JSON.stringify(obj));
 }
@@ -1098,6 +1340,25 @@ async function main() {
     return { credential: 'domain-atlas-asset/1.0', ...payload, issuer: { domain: DOMAIN, publicKey: publicKeyB64url }, signature };
   }
 
+  // Task #250 fourth follow-up — transfers a NON-fungible credential to a
+  // new owner while preserving its exact per-instance asset state (serial,
+  // editionSize, a Signet Ring's randomly-rolled enchantments/stats, or any
+  // other instance-specific property) rather than rebuilding `asset` fresh
+  // from ASSET_CATALOG the way mintAssetByClass() does. Rebuilding fresh is
+  // CORRECT for a fungible re-mint (split/consolidate/trade) — SPEC.md
+  // §5.1 requires every balance of a fungible class to carry identical
+  // properties, so re-deriving from the catalog is exactly the point — but
+  // it was silently wrong for a unique item changing hands, discarding
+  // whatever made that specific instance unique and replacing it with the
+  // class's static fallback. Used by fulfillWorldDropClaim() below (fixing
+  // that latent bug — a serialized item like the ring was nominally
+  // droppable in the plaza's own acceptedItemClasses before this, so this
+  // was a live gap, not just theoretical) and by the Trading Station
+  // settlement's own unique-item side (see POST /atlas/trade/claim).
+  async function transferUniqueAsset(newOwnerPublicKey, credential) {
+    return issueAsset(newOwnerPublicKey, credential.asset, credential.quantity, credential.id);
+  }
+
   // The signed payload shape (SPEC.md §5: canonicalize({id, asset, owner,
   // quantity, supersedes, issuedAt})) — used both to re-verify a presented
   // credential's signature (before honoring a reissue/split/consolidate/
@@ -1141,10 +1402,22 @@ async function main() {
       serial = reservation.serial;
     }
 
+    // Task #250 fourth follow-up: a catalog entry's own `randomizeProperties`
+    // (see atlas.wearable.ring above, and its comment near RING_RARITY_TIERS
+    // for the full reasoning) gets one chance to override the class's static
+    // `properties`, same "genuinely new supply only" gate as the serial/cap
+    // reservation just above — a reissue's own explicit `properties` patch
+    // (handled entirely by the /atlas/asset/reissue route, not here) is a
+    // completely separate mechanism and must never get re-rolled by this.
     const baseProperties = catalogEntry.properties || {};
-    const properties = catalogEntry.serialized
-      ? { ...baseProperties, 'atlas.serial': String(serial), 'atlas.editionSize': String(catalogEntry.maxSupply) }
-      : baseProperties;
+    const randomizedProperties = supersedes === null && typeof catalogEntry.randomizeProperties === 'function'
+      ? catalogEntry.randomizeProperties()
+      : null;
+    const properties = {
+      ...baseProperties,
+      ...(randomizedProperties || {}),
+      ...(catalogEntry.serialized ? { 'atlas.serial': String(serial), 'atlas.editionSize': String(catalogEntry.maxSupply) } : {})
+    };
 
     const asset = {
       name: catalogEntry.name, class: cls, model: catalogEntry.model,
@@ -1180,8 +1453,37 @@ async function main() {
     // all fungible: false), but this is the real, deliberate reason
     // they're excluded, not a side effect of that other check.
     if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be split, consolidated, or traded';
-    if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot split, consolidate, or trade a unique asset';
+    // Task #250 fourth follow-up: "or trade" dropped from this message — a
+    // non-fungible asset CAN now be traded at the Trading Station, just not
+    // through THIS check (see checkPresentedUniqueAsset below, used by
+    // /atlas/trade/submit and /atlas/trade/claim instead whenever the
+    // presented balance's own fungible flag says false).
+    if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot split or consolidate a unique asset';
     if (typeof credential.quantity !== 'number' || credential.quantity < minQuantity) return 'asset has insufficient quantity';
+    if (isRevoked(credential.id)) return 'asset already revoked';
+    const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+    if (!ok) return 'asset signature does not check out';
+    return null;
+  }
+
+  // Task #250 fourth follow-up (Bruno's own request) — checkPresentedAsset's
+  // mirror for the OTHER half of SPEC.md §5.1's fungible/non-fungible
+  // split: same ownership/class/tradeScope/revocation/signature checks,
+  // but requires fungible === false instead of true, and there is no
+  // minQuantity to check at all — a non-fungible credential's quantity is
+  // definitionally 1 (SPEC.md §5.1), so presenting the right CREDENTIAL
+  // (verified as this signer's own, this class, not bound, not revoked,
+  // genuinely signed by this issuer) is the entire check. Lets a unique
+  // item like the Signet Ring be offered/claimed at the Trading Station —
+  // see /atlas/trade/submit and /atlas/trade/claim below, and
+  // transferUniqueAsset() for how the actual instance (not a fresh
+  // catalog-derived stand-in) is what changes hands on settlement.
+  async function checkPresentedUniqueAsset(credential, expectedOwner, expectedClass) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
+    if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
+    if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
+    if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be traded';
+    if (credential.asset.fungible !== false) return 'asset class is fungible — present it as a quantity balance, not a unique item';
     if (isRevoked(credential.id)) return 'asset already revoked';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
@@ -1204,6 +1506,109 @@ async function main() {
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'membership signature does not check out';
     return null;
+  }
+
+  // Task #250 — dropping is the FIRST case in this file where a server has
+  // to validate a credential it did NOT itself issue: a wearable minted by
+  // domain A, carried into and dropped in domain B's plaza, is fully
+  // supported (SPEC.md §5.5), and domain B obviously doesn't hold domain
+  // A's private key to check it the fast, local way. Mirrors exactly what
+  // extension/wallet.js's own verifyCredential() already does client-side
+  // for any credential from a domain other than "self": fetch THAT
+  // domain's own published key + revocation ledger (never trust
+  // credential.issuer.publicKey blindly — it isn't part of the signed
+  // payload, see assetPayloadOf() below, so nothing stops someone from
+  // stamping a fake issuer.publicKey onto an otherwise-unrelated
+  // signature), confirm a key matching it was valid at credential.issuedAt,
+  // verify the signature against THAT key, then check THAT domain's own
+  // revocation list — never this server's own isRevoked(), which only
+  // knows about ids this server itself minted and could never have heard
+  // of a foreign one being revoked.
+  async function verifyForeignAssetCredential(credential) {
+    try {
+      const base = baseUrl(credential.issuer.domain);
+      const [keyRes, revRes] = await Promise.all([
+        fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store' }),
+        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store' })
+      ]);
+      if (!keyRes.ok) return false;
+      const keyDoc = await keyRes.json();
+      const revDoc = revRes.ok ? await revRes.json() : { revoked: [] };
+      const issuedAt = new Date(credential.issuedAt).getTime();
+      const activeKey = (keyDoc.keys || []).find((k) => {
+        const from = new Date(k.validFrom).getTime();
+        const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+        return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
+      });
+      if (!activeKey) return false;
+      const sigOk = await verifyDomainSignature(activeKey.publicKey, assetPayloadOf(credential), credential.signature);
+      if (!sigOk) return false;
+      if ((revDoc.revoked || []).some((r) => r.id === credential.id)) return false;
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Task #250 (World Drops, SPEC.md §5.5): a THIRD sibling of
+  // checkPresentedAsset/checkPresentedMembership above, for the one case
+  // neither fits — presenting a credential to DROP it, which unlike
+  // split/consolidate/trade is equally valid for a fungible stack or a
+  // one-of-one wearable (checkPresentedAsset's fungible-must-be-true and
+  // minQuantity checks would wrongly reject the latter), and unlike a
+  // membership presentation, still has to exclude 'bound' assets — a
+  // subscription card is exactly the kind of thing that must NOT become
+  // droppable-and-takeable by a stranger. No quantity check at all: the
+  // client is responsible for calling POST /atlas/asset/split first if it
+  // wants to drop less than a fungible stack's full amount (see wallet.js's
+  // dropItem), by the time a credential reaches this check, whatever
+  // quantity it carries is the whole of what's being dropped. Also unlike
+  // checkPresentedAsset/checkPresentedMembership (which only ever run
+  // against credentials THIS domain itself issued, since split/consolidate/
+  // trade/membership can only ever apply to a domain's own credentials):
+  // branches on credential.issuer.domain, since a drop's credential may
+  // well have come from somewhere else entirely — see
+  // verifyForeignAssetCredential() just above.
+  async function checkPresentedTransferableAsset(credential, expectedOwner, expectedClass) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
+    if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
+    if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
+    if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be dropped for someone else to take';
+    if (!credential.issuer || !credential.issuer.domain) return 'asset has no issuer domain';
+    if (credential.issuer.domain === DOMAIN) {
+      if (isRevoked(credential.id)) return 'asset already revoked';
+      const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+      if (!ok) return 'asset signature does not check out';
+      return null;
+    }
+    const foreignOk = await verifyForeignAssetCredential(credential);
+    if (!foreignOk) return 'could not verify this asset against its issuer (' + credential.issuer.domain + ')';
+    return null;
+  }
+
+  // Task #250 — the actual custody change once a claim is legitimate,
+  // shared by both branches of POST /atlas/world/drops/claim: the local
+  // same-domain path (this domain issued the dropped credential itself)
+  // and POST /atlas/world/drops/relay-claim (a different domain issued it,
+  // and THIS call only happens on that domain's own server, reached via
+  // the relay below). Same revoke-old/mint-new-owner primitive every other
+  // real transfer in this file already uses (trade settlement, split,
+  // consolidate) — a dropped item was never "in limbo" ownership-wise
+  // while it sat in the world, so claiming it is exactly as much a fresh
+  // mint as any of those, just to a owner nobody negotiated with directly.
+  //
+  // Fungible drops still go through mintAssetByClass — re-deriving from
+  // the catalog is correct there (every balance of a fungible class is
+  // identical by definition). A non-fungible drop instead goes through
+  // transferUniqueAsset() (task #250 fourth follow-up) so its actual
+  // per-instance state survives the claim — see that function's own
+  // comment for the bug this fixes.
+  async function fulfillWorldDropClaim(credential, claimantPublicKey) {
+    const received = credential.asset.fungible === false
+      ? await transferUniqueAsset(claimantPublicKey, credential)
+      : await mintAssetByClass(claimantPublicKey, credential.asset.class, credential.quantity, credential.id);
+    revoke(credential.id, 'claimed from a world drop');
+    return received;
   }
 
   // Task #203: sums an owner's VERIFIED current holdings of one class, off
@@ -1369,38 +1774,68 @@ async function main() {
 
       // §5.1.1 reissue — a domain-initiated replacement for an asset it
       // already issued, carrying updated `asset` state (properties, most
-      // often). Non-fungible only (SPEC.md §5.1.1): a fungible class's
-      // properties have to stay identical across every balance of it for
-      // §5.4.1's consolidation to stay sound, so a fungible credential's
-      // properties only ever change at the class level (ASSET_CATALOG),
-      // never by reissuing one specific balance. This is deliberately NOT
-      // a generic "any domain can reissue any asset" endpoint either: it
-      // only accepts a credential this issuer's own key actually signed
+      // often, and now optionally tradeScope — see below). Non-fungible
+      // only (SPEC.md §5.1.1): a fungible class's properties/tradeScope
+      // have to stay identical across every balance of it for §5.4.1's
+      // consolidation to stay sound, so a fungible credential's asset state
+      // only ever changes at the class level (ASSET_CATALOG), never by
+      // reissuing one specific balance. This is deliberately NOT a generic
+      // "any domain can reissue any asset" endpoint either: it only
+      // accepts a credential this issuer's own key actually signed
       // (verifyOwnCredentialSignature below), the same restriction that
       // already applies to honoring a presented balance for a split.
       // `properties` here is a patch merged over the existing
       // asset.properties bag, not a full replacement — convenient for the
       // common case (one fact changed) without forcing every caller to
       // resend properties it isn't touching.
+      //
+      // `tradeScope` (task #250 third follow-up — Bruno's own request)
+      // patches the credential's OTHER per-instance flag: since tradeScope
+      // is baked into a credential's signed payload at mint time
+      // (mintAssetByClass's `catalogEntry.tradeScope || 'local'`), tightening
+      // a class's catalog entry to `tradeScope: 'bound'` — as this project
+      // has now done twice, for atlas.badge/atlas.trinket.pin/
+      // atlas.trinket.charm and then atlas.wearable — does NOT retroactively
+      // change any credential of that class minted before the catalog entry
+      // said so; the old credential's own signature would break if its
+      // tradeScope were edited in place, so the only honest fix is the same
+      // revoke-and-re-mint this endpoint already does for `properties`. A
+      // domain operator who finds themselves holding (or supporting a
+      // visitor who holds) a stale pre-tightening credential can call this
+      // endpoint once, e.g. via curl, to bring it in line with today's
+      // catalog — see README.md's "Fixing a stale tradeScope on an
+      // already-issued credential" section for the exact command.
       if (req.method === 'POST' && req.url === '/atlas/asset/reissue') {
-        const { credential, properties } = JSON.parse((await readBody(req)) || '{}');
+        const { credential, properties, tradeScope } = JSON.parse((await readBody(req)) || '{}');
         if (!credential || credential.credential !== 'domain-atlas-asset/1.0') {
           return sendJson(res, 400, { error: 'credential must be a domain-atlas-asset/1.0 credential' });
         }
-        if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
-          return sendJson(res, 400, { error: 'properties (a patch onto asset.properties) is required' });
+        const hasProperties = properties !== undefined;
+        const hasTradeScope = tradeScope !== undefined;
+        if (!hasProperties && !hasTradeScope) {
+          return sendJson(res, 400, { error: 'at least one of properties (a patch onto asset.properties) or tradeScope is required' });
+        }
+        if (hasProperties && (typeof properties !== 'object' || properties === null || Array.isArray(properties))) {
+          return sendJson(res, 400, { error: 'properties, when given, must be a patch object onto asset.properties' });
+        }
+        if (hasTradeScope && tradeScope !== 'local' && tradeScope !== 'bound') {
+          return sendJson(res, 400, { error: "tradeScope, when given, must be 'local' or 'bound'" });
         }
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'credential was not issued by this domain' });
         }
         if (!credential.asset || credential.asset.fungible !== false) {
-          return sendJson(res, 400, { error: "reissue only applies to a non-fungible asset — a fungible class's properties are fixed per class (SPEC.md §5.1), not per credential" });
+          return sendJson(res, 400, { error: "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential" });
         }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: 'credential signature does not check out against this issuer\'s key' });
 
-        const newAsset = { ...credential.asset, properties: { ...(credential.asset.properties || {}), ...properties } };
+        const newAsset = {
+          ...credential.asset,
+          ...(hasTradeScope ? { tradeScope } : {}),
+          ...(hasProperties ? { properties: { ...(credential.asset.properties || {}), ...properties } } : {})
+        };
         const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
         // Same ordering guarantee §5.4's split/consolidate already give:
         // the new credential is signed FIRST, then the old one revoked —
@@ -1584,11 +2019,45 @@ async function main() {
       }
 
       // --- §7 trading stations (this server plays the station role — see file header) ---
-      // Fungible-only, per SPEC.md §7: offer/want only ever name a class
-      // and a quantity, which is exactly what a fungible balance is and
-      // exactly what a fungible:false asset isn't (there's no quantity to
-      // negotiate on a one-of-a-kind thing). checkPresentedAsset enforces
-      // this the same way it does for split/consolidate above.
+      // Originally fungible-only: offer/want named a class and a quantity,
+      // which is exactly what a fungible balance is and exactly what a
+      // fungible:false asset isn't (there's no quantity to negotiate on a
+      // one-of-a-kind thing) — checkPresentedAsset enforced this the same
+      // way it does for split/consolidate above.
+      //
+      // Task #250 fourth follow-up (Bruno's own request) widened this: a
+      // unique, non-fungible item (the Signet Ring, atlas.wearable.ring) can
+      // now also be offered and claimed here. The intent shape didn't need
+      // to grow a new field for it — a side is still just {class, quantity},
+      // and for a non-fungible class quantity is simply always 1 (its
+      // credential's own quantity is definitionally 1 anyway, SPEC.md §5.1)
+      // — validateTradeSideShape() below enforces that. What DID need to
+      // change: which check function runs against a presented `balance`
+      // (checkPresentedAsset for fungible === true, checkPresentedUniqueAsset
+      // for fungible === false — decided by the presented credential's own
+      // signed fungible flag, not a class lookup), and how settlement mints
+      // the received side — a unique item is transferred via
+      // transferUniqueAsset() (the ACTUAL instance changing hands, serial/
+      // enchantments and all), never re-derived fresh via mintAssetByClass()
+      // the way a fungible spend correctly is. See checkPresentedUniqueAsset
+      // and transferUniqueAsset's own comments above for the full reasoning.
+      //
+      // Validates a trade intent's one side ({class, quantity}) shape:
+      // class must be a known string, quantity a positive integer, and —
+      // the actual new-this-follow-up rule — a class ASSET_CATALOG marks
+      // fungible: false must be offered/wanted in quantity exactly 1, since
+      // there is no partial share of a unique item to negotiate. Applied to
+      // both offer and want in /atlas/trade/submit, and to the claimant's
+      // own offer/want in /atlas/trade/claim.
+      function validateTradeSideShape(side, label) {
+        if (!side || typeof side.class !== 'string' || !side.class) return label + ': class is required';
+        if (typeof side.quantity !== 'number' || !Number.isInteger(side.quantity) || side.quantity < 1) return label + ': quantity must be a positive integer';
+        const catalogEntry = ASSET_CATALOG[side.class];
+        if (catalogEntry && catalogEntry.fungible === false && side.quantity !== 1) {
+          return label + ': ' + side.class + ' is not fungible — quantity must be 1';
+        }
+        return null;
+      }
 
       // Task #144 Phase 1 / v1.14 open listings (SPEC.md §7) — a visitor
       // posts their own half of a trade to the station on its own, with NO
@@ -1625,7 +2094,18 @@ async function main() {
         if (new Date(intent.payload.expiresAt).getTime() < Date.now()) return sendJson(res, 400, { error: 'intent has already expired' });
 
         const offerSelf = intent.payload.offer, wantSelf = intent.payload.want;
-        const balanceProblem = await checkPresentedAsset(balance, selfPub, offerSelf.class, offerSelf.quantity);
+        const shapeProblem = validateTradeSideShape(offerSelf, 'offer') || validateTradeSideShape(wantSelf, 'want');
+        if (shapeProblem) return sendJson(res, 400, { error: shapeProblem });
+
+        // Task #250 fourth follow-up: which check runs is decided by the
+        // presented balance's OWN signed fungible flag, not a class lookup
+        // — self-describing, same posture this protocol already takes
+        // everywhere else (never re-derive from a live catalog when the
+        // signed credential already states it).
+        const offerIsUnique = !!(balance && balance.asset && balance.asset.fungible === false);
+        const balanceProblem = offerIsUnique
+          ? await checkPresentedUniqueAsset(balance, selfPub, offerSelf.class)
+          : await checkPresentedAsset(balance, selfPub, offerSelf.class, offerSelf.quantity);
         if (balanceProblem) return sendJson(res, 400, { error: 'balance: ' + balanceProblem });
 
         const pendingId = 'urn:atlas:trade:' + webcrypto.randomUUID();
@@ -1665,14 +2145,23 @@ async function main() {
       // is already public the moment /atlas/asset/issue exists to hand it
       // out, so listing the classes reveals nothing new.
       //
-      // Filtered to fungible===true (the only kind a quantity-based trade
-      // intent's offer/want shape supports today — see SPEC.md §5.4) and
-      // tradeScope!=='bound' (a membership card can never be the THING
-      // traded, same exclusion checkPresentedAsset already enforces at claim
-      // time — see its own tradeScope==='bound' check below). Defaults
-      // tradeScope the same way mintAssetByClass does (`|| 'local'`) so an
-      // entry that never bothered to set the flag is treated the same at
-      // discovery time as it is at mint time.
+      // Originally filtered to fungible===true (the only kind a quantity-
+      // based trade intent's offer/want shape supported at the time — see
+      // SPEC.md §5.4) and tradeScope!=='bound' (a membership card can never
+      // be the THING traded, same exclusion checkPresentedAsset already
+      // enforces at claim time — see its own tradeScope==='bound' check
+      // below). Defaults tradeScope the same way mintAssetByClass does
+      // (`|| 'local'`) so an entry that never bothered to set the flag is
+      // treated the same at discovery time as it is at mint time.
+      //
+      // Task #250 fourth follow-up (Bruno's own request): the fungible===
+      // true restriction is gone — a unique, non-fungible class (the
+      // Signet Ring) can now be offered/claimed too (see
+      // checkPresentedUniqueAsset/transferUniqueAsset above), so it belongs
+      // in this discovery list the same as any other non-bound class. The
+      // response's own `fungible` field (new) is what a client uses to
+      // decide whether to render a quantity input or "exactly one" for a
+      // given class — tradeScope!=='bound' remains the only exclusion.
       //
       // This same shape is designed to extend to a FOREIGN domain's catalog
       // later (fetched live while composing a trade, per the wallet UX idea
@@ -1680,14 +2169,12 @@ async function main() {
       // for what changes and what doesn't when that day comes.
       if (req.method === 'GET' && req.url === '/atlas/trade/catalog') {
         const classes = Object.keys(ASSET_CATALOG)
-          .filter((cls) => {
-            const entry = ASSET_CATALOG[cls];
-            return entry.fungible === true && (entry.tradeScope || 'local') !== 'bound';
-          })
+          .filter((cls) => (ASSET_CATALOG[cls].tradeScope || 'local') !== 'bound')
           .map((cls) => ({
             class: cls,
             name: ASSET_CATALOG[cls].name,
             thumbnail: ASSET_CATALOG[cls].thumbnail || null,
+            fungible: ASSET_CATALOG[cls].fungible,
             tradeScope: ASSET_CATALOG[cls].tradeScope || 'local',
             // Task #203 — surfaced here (rather than a separate rates
             // endpoint) so the same fetch that already drives the Sell
@@ -1695,7 +2182,9 @@ async function main() {
             // preview. `exchangeRate` is only present when the class is
             // actually eligible for conversion (see POST /atlas/convert);
             // `isBaseCurrency` is a display hint only, never checked by
-            // the conversion math itself.
+            // the conversion math itself. Neither ever applies to a
+            // non-fungible class — /atlas/convert is fungible-only and
+            // always will be, there is no "exchange rate" for a unique item.
             ...(typeof ASSET_CATALOG[cls].exchangeRate === 'number' ? { exchangeRate: ASSET_CATALOG[cls].exchangeRate } : {}),
             ...(ASSET_CATALOG[cls].isBaseCurrency ? { isBaseCurrency: true } : {})
           }));
@@ -1743,32 +2232,57 @@ async function main() {
         const balanceA = posted.balance;
         const offerB = intent.payload.offer, wantB = intent.payload.want, balanceB = balance;
 
+        const claimantShapeProblem = validateTradeSideShape(offerB, 'offer') || validateTradeSideShape(wantB, 'want');
+        if (claimantShapeProblem) return sendJson(res, 400, { error: claimantShapeProblem });
+
         // Mirror check — the claimant's offer/want must exactly match what
         // this listing wants/offers, same shape §7's own Match step uses.
+        // Unchanged by task #250 fourth follow-up's unique-item support: a
+        // non-fungible side's quantity is always exactly 1 on both ends
+        // (validateTradeSideShape enforces this at submit time already), so
+        // this plain equality check keeps working without needing to know
+        // or care which side is fungible.
         if (offerB.class !== wantA.class || offerB.quantity !== wantA.quantity ||
             wantB.class !== offerA.class || wantB.quantity !== offerA.quantity) {
           return sendJson(res, 400, { error: 'your intent does not mirror this listing\'s offer/want' });
         }
 
-        const claimantBalanceProblem = await checkPresentedAsset(balanceB, claimantPub, offerB.class, offerB.quantity);
+        // Task #250 fourth follow-up: which check runs for each side is
+        // decided by that side's own presented balance's signed fungible
+        // flag — see /atlas/trade/submit's own comment on this same choice.
+        const offerBIsUnique = !!(balanceB && balanceB.asset && balanceB.asset.fungible === false);
+        const claimantBalanceProblem = offerBIsUnique
+          ? await checkPresentedUniqueAsset(balanceB, claimantPub, offerB.class)
+          : await checkPresentedAsset(balanceB, claimantPub, offerB.class, offerB.quantity);
         if (claimantBalanceProblem) return sendJson(res, 400, { error: 'balance: ' + claimantBalanceProblem });
 
         // Re-checks the poster's own balance fresh (not just trusted from
         // when it was posted) in case it was since spent or revoked some
         // other way.
-        const posterBalanceProblem = await checkPresentedAsset(balanceA, posterPub, offerA.class, offerA.quantity);
+        const offerAIsUnique = !!(balanceA && balanceA.asset && balanceA.asset.fungible === false);
+        const posterBalanceProblem = offerAIsUnique
+          ? await checkPresentedUniqueAsset(balanceA, posterPub, offerA.class)
+          : await checkPresentedAsset(balanceA, posterPub, offerA.class, offerA.quantity);
         if (posterBalanceProblem) {
           removePendingTrade(posted.id); // no longer honorable — drop it rather than leave a dead listing others keep trying to claim
           return sendJson(res, 400, { error: 'the poster\'s balance no longer checks out (' + posterBalanceProblem + ') — listing withdrawn' });
         }
 
-        const remainderA = balanceA.quantity - offerA.quantity;
-        const remainderB = balanceB.quantity - offerB.quantity;
+        // A unique side never has a remainder (its balance's quantity is
+        // definitionally 1, exactly what's being offered — SPEC.md §5.1)
+        // and is TRANSFERRED rather than re-minted from the catalog, so its
+        // actual instance state (serial, a Signet Ring's randomly-rolled
+        // enchantments/stats) survives settlement — see
+        // transferUniqueAsset()'s own comment for the bug this avoids
+        // repeating. A fungible side keeps the original spend/remainder
+        // behavior unchanged.
+        const remainderA = offerAIsUnique ? 0 : balanceA.quantity - offerA.quantity;
+        const remainderB = offerBIsUnique ? 0 : balanceB.quantity - offerB.quantity;
         const [aRemainder, aReceived, bRemainder, bReceived] = await Promise.all([
           remainderA > 0 ? mintAssetByClass(posterPub, offerA.class, remainderA, balanceA.id) : Promise.resolve(null),
-          mintAssetByClass(posterPub, wantA.class, wantA.quantity, balanceA.id),
+          offerBIsUnique ? transferUniqueAsset(posterPub, balanceB) : mintAssetByClass(posterPub, wantA.class, wantA.quantity, balanceA.id),
           remainderB > 0 ? mintAssetByClass(claimantPub, offerB.class, remainderB, balanceB.id) : Promise.resolve(null),
-          mintAssetByClass(claimantPub, wantB.class, wantB.quantity, balanceB.id)
+          offerAIsUnique ? transferUniqueAsset(claimantPub, balanceA) : mintAssetByClass(claimantPub, wantB.class, wantB.quantity, balanceB.id)
         ]);
         revoke(balanceA.id, 'superseded');
         revoke(balanceB.id, 'superseded');
@@ -1814,6 +2328,159 @@ async function main() {
         removePendingTrade(pendingId);
         console.log('Listing withdrawn:', posted.intent.payload.offer.quantity, posted.intent.payload.offer.class);
         return sendJson(res, 200, { status: 'canceled' });
+      }
+
+      // --- World Drops (task #250, SPEC.md §5.5): "others can see it and
+      // pick it up" — the shared half of dropping an item that self-only
+      // dropping (wallet.js's dropItem/getDroppedItemsInWorld) explicitly
+      // punted on. A world is inherently this domain's own concern (same
+      // as its scene.json), so this domain hosts the drop for VISIBILITY
+      // and CLAIM-RESERVATION no matter which domain actually issued the
+      // item — but only the item's own issuer can legitimately re-sign it
+      // to a new owner, so a claim on a cross-domain item is relayed to
+      // that issuer via /atlas/world/drops/relay-claim below, the exact
+      // same "sign an attestation, let the home domain verify it against
+      // my own published key" trust model /atlas/postoffice/relay already
+      // uses for federated mail (SPEC.md §11.4) — this is the second use
+      // of that same primitive, not a new one.
+      //
+      // Proof-of-identity shape throughout (`intent.payload`/`intent.proof`)
+      // deliberately mirrors /atlas/trade/submit and /claim: a small signed
+      // envelope over just enough to authorize the one action it accompanies
+      // and nothing else, verified with the same verifyEnvelope() used
+      // everywhere else in this file.
+      if (req.method === 'POST' && req.url === '/atlas/world/drop') {
+        const { credential, world, position, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !world || !position || !intent) return sendJson(res, 400, { error: 'credential, world, position, and intent are all required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.credentialId !== credential.id || intent.payload.world !== world || intent.payload.action !== 'drop') {
+          return sendJson(res, 400, { error: 'intent does not authorize dropping this credential into this world' });
+        }
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+
+        const dropperPub = intent.proof.publicKey;
+        const problem = await checkPresentedTransferableAsset(credential, dropperPub, credential.asset && credential.asset.class);
+        if (problem) return sendJson(res, 400, { error: problem });
+
+        const dropId = 'urn:atlas:worlddrop:' + webcrypto.randomUUID();
+        appendWorldDrop({ dropId, world, position, credential, droppedBy: dropperPub, droppedAt: new Date().toISOString() });
+        console.log('Dropped in', world + ':', credential.quantity, credential.asset.class, '(issued by', credential.issuer.domain + ')');
+        return sendJson(res, 200, { status: 'dropped', dropId });
+      }
+
+      // Deliberately ungated, same "read is open" reasoning as
+      // /atlas/trade/listings — a drop is already visible to anyone
+      // physically standing in the world (that's the whole point), so
+      // letting anyone ask this domain "what's on the ground in world W"
+      // reveals nothing the dropper didn't already choose to make visible
+      // by dropping it there.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/world/drops') {
+        const world = new URLSearchParams(req.url.split('?')[1] || '').get('world');
+        if (!world) return sendJson(res, 400, { error: 'world is required' });
+        const drops = readWorldDrops().drops.filter((d) => d.world === world);
+        return sendJson(res, 200, { domain: DOMAIN, world, drops });
+      }
+
+      // Claim (pick up) one specific drop by id. Reservation happens by
+      // REMOVING the entry before doing anything else — same "the file
+      // write is the lock" reasoning as removePendingTrade at trade-claim
+      // time (single-threaded Node here; issuer-php's mirror flock()s the
+      // equivalent file for the same reason its trade store already does).
+      // Whichever concurrent claim call's removeWorldDrop() actually finds
+      // and deletes the entry wins; a losing concurrent call gets a plain
+      // "gone" 404, the same experience as reaching for something someone
+      // else already picked up a half-second earlier.
+      if (req.method === 'POST' && req.url === '/atlas/world/drops/claim') {
+        const { dropId, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!dropId || !intent) return sendJson(res, 400, { error: 'dropId and intent are both required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.dropId !== dropId || intent.payload.action !== 'claim') return sendJson(res, 400, { error: 'intent does not authorize claiming this drop' });
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const claimantPub = intent.proof.publicKey;
+
+        const won = removeWorldDrop(dropId);
+        if (!won) return sendJson(res, 404, { error: 'that item is gone — already picked up, or reclaimed by whoever dropped it' });
+
+        const { credential, world } = won;
+        if (credential.issuer.domain === DOMAIN) {
+          // Same domain issued it and hosts the drop — no relay needed,
+          // straight to the shared mint/revoke primitive.
+          const received = await fulfillWorldDropClaim(credential, claimantPub);
+          console.log('World drop claimed locally:', credential.quantity, credential.asset.class, '->', claimantPub.slice(0, 16) + '...');
+          return sendJson(res, 200, { status: 'claimed', credential: received });
+        }
+
+        // Cross-domain: this server can host the listing but cannot
+        // legally re-sign someone else's credential — relay to whoever
+        // actually issued it, the same attestation-and-verify shape
+        // /atlas/postoffice/send already uses to reach a different home
+        // domain (SPEC.md §11.4 step 3), just naming a drop instead of a
+        // mail envelope.
+        const attestation = { relayingDomain: DOMAIN, world, dropId, credentialId: credential.id, claimantPublicKey: claimantPub };
+        const attestationSignature = await sign(attestation);
+        let relayRes;
+        try {
+          relayRes = await fetch(baseUrl(credential.issuer.domain) + '/atlas/world/drops/relay-claim', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credential, attestation, attestationSignature })
+          });
+        } catch (err) {
+          // The reservation above already removed the listing — this is
+          // the same acknowledged gap trade/claim's own multi-mint
+          // Promise.all has (no cross-call rollback in this demo); a
+          // network failure here can strand the item rather than restore
+          // the listing. Documented, not hidden.
+          return sendJson(res, 502, { error: 'could not reach ' + credential.issuer.domain + ' to complete this claim: ' + err.message });
+        }
+        const relayBody = await relayRes.json().catch(() => ({}));
+        if (!relayRes.ok) {
+          return sendJson(res, relayRes.status, { error: credential.issuer.domain + ' rejected this claim: ' + (relayBody.error || 'unknown reason') });
+        }
+        console.log('World drop claimed via relay to', credential.issuer.domain + ':', credential.quantity, credential.asset.class, '->', claimantPub.slice(0, 16) + '...');
+        return sendJson(res, 200, relayBody);
+      }
+
+      // The far end of the relay above: THIS domain is being told by
+      // ANOTHER domain (the one currently hosting the drop in one of its
+      // worlds) that a credential this domain itself issued has just been
+      // legitimately claimed by someone, naming who should receive it.
+      // Trust here rests on the SAME two checks /atlas/postoffice/relay's
+      // own receiving side already relies on: the attestation is signed by
+      // the domain it claims to be from (fetchDomainPublicKey + a fresh
+      // cross-domain fetch, not a cached/self-reported key), and the
+      // credential itself is genuinely this domain's own, still-live,
+      // unrevoked signature — this domain does NOT re-derive who originally
+      // dropped it or re-check the relaying domain's own bookkeeping; that
+      // domain's signed word on "this was a legitimate reservation" is the
+      // trust boundary, exactly as one federated domain's word on
+      // "this sender holds a valid membership" already is for mail relay.
+      if (req.method === 'POST' && req.url === '/atlas/world/drops/relay-claim') {
+        const { credential, attestation, attestationSignature } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !attestation || !attestationSignature) return sendJson(res, 400, { error: 'credential, attestation, and attestationSignature are all required' });
+        if (!credential.asset || !credential.issuer || credential.issuer.domain !== DOMAIN) return sendJson(res, 400, { error: 'this domain did not issue that credential' });
+        if (attestation.credentialId !== credential.id) return sendJson(res, 400, { error: 'attestation does not name the credential it was sent with' });
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that credential has already been revoked — nothing to claim' });
+
+        const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
+
+        let relayingDomainKey;
+        try {
+          relayingDomainKey = await fetchDomainPublicKey(attestation.relayingDomain);
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not verify ' + attestation.relayingDomain + '\'s own published key: ' + err.message });
+        }
+        const attestationOk = await verifyDomainSignature(relayingDomainKey, attestation, attestationSignature);
+        if (!attestationOk) return sendJson(res, 400, { error: attestation.relayingDomain + '\'s attestation signature does not check out' });
+
+        const received = await fulfillWorldDropClaim(credential, attestation.claimantPublicKey);
+        console.log('World drop relay-claimed from', attestation.relayingDomain + ':', credential.quantity, credential.asset.class, '->', attestation.claimantPublicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { status: 'claimed', credential: received });
       }
 
       // --- mail (correspondence tied to a held credential — see task
@@ -1928,6 +2595,77 @@ async function main() {
         }
 
         return sendJson(res, 200, { messages, updates });
+      }
+
+      // --- Calendar (SPEC.md §12, Bruno's own request) ---
+      //
+      // GET /atlas/calendar, optionally ?world={worldId} — ungated and
+      // unsigned, same plain-HTTPS trust boundary as the manifest and
+      // GET /atlas/trade/catalog (§12.1: "no new signature scheme for a
+      // field that was always going to be public"). No `world` param
+      // returns the domain-wide calendar; a `world` naming a world that
+      // never opted in (or doesn't exist) gets back an empty `events`
+      // array rather than an error, same "nothing to report" posture
+      // GET /atlas/trade/listings already takes for a station with
+      // nothing open.
+      if (req.method === 'GET' && (req.url === '/atlas/calendar' || req.url.startsWith('/atlas/calendar?'))) {
+        const queryStart = req.url.indexOf('?');
+        const worldId = queryStart === -1 ? null : (new URLSearchParams(req.url.slice(queryStart + 1)).get('world') || null);
+        const events = readCalendarEvents(worldId);
+        return sendJson(res, 200, { domain: DOMAIN, worldId, events });
+      }
+
+      // POST /atlas/calendar — a real, protocol-level write endpoint
+      // (§12.2), domain-operator-authenticated with no visitor signature
+      // involved, following /atlas/mail/send's own precedent immediately
+      // above: this demo has no real admin interface, so a plain endpoint
+      // stands in for whatever a real deployment would actually use, and
+      // trusts its own caller the same way. `worldId: null` (or omitted)
+      // addresses the domain-wide calendar; naming a world addresses that
+      // world's own — this server does not check that world's manifest
+      // entry actually has `calendar: true` before accepting an event for
+      // it (see CALENDAR_FILE's own comment on why).
+      if (req.method === 'POST' && req.url === '/atlas/calendar') {
+        const { action, worldId, event, id } = JSON.parse((await readBody(req)) || '{}');
+        const normalizedWorldId = worldId || null;
+
+        if (action === 'add') {
+          if (!event || !event.title || !event.dateTime) {
+            return sendJson(res, 400, { error: 'event.title and event.dateTime are required' });
+          }
+          const newEvent = {
+            id: event.id || ('urn:atlas:calendar:' + webcrypto.randomUUID()),
+            worldId: normalizedWorldId,
+            title: event.title,
+            dateTime: event.dateTime,
+            endDateTime: event.endDateTime || null,
+            notes: event.notes || ''
+          };
+          addCalendarEvent(newEvent);
+          console.log('Calendar event added' + (normalizedWorldId ? ' (world ' + normalizedWorldId + ')' : ' (domain-wide)') + ':', newEvent.title);
+          return sendJson(res, 200, newEvent);
+        }
+
+        if (action === 'update') {
+          if (!event || !event.id) return sendJson(res, 400, { error: 'event.id is required for update' });
+          const patch = {};
+          if (event.title !== undefined) patch.title = event.title;
+          if (event.dateTime !== undefined) patch.dateTime = event.dateTime;
+          if (event.endDateTime !== undefined) patch.endDateTime = event.endDateTime;
+          if (event.notes !== undefined) patch.notes = event.notes;
+          const updated = updateCalendarEvent(event.id, patch);
+          if (!updated) return sendJson(res, 404, { error: 'no calendar event with that id' });
+          return sendJson(res, 200, updated);
+        }
+
+        if (action === 'remove') {
+          if (!id) return sendJson(res, 400, { error: 'id is required for remove' });
+          const removed = removeCalendarEvent(id);
+          if (!removed) return sendJson(res, 404, { error: 'no calendar event with that id' });
+          return sendJson(res, 200, { status: 'removed', id });
+        }
+
+        return sendJson(res, 400, { error: 'action must be "add", "update", or "remove"' });
       }
 
       // --- Post Office (task #75/#87/#94, SPEC.md §11.3): user-to-user mail

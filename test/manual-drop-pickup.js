@@ -1,39 +1,108 @@
-// Manual check for dropping a wallet item into the (2D) scene and picking
-// it back up — local-only, self-only: nothing is ever transferred, "Drop
-// here" just records a position and unloads it from the loadout, "Pick
-// up" clears that record. Covers both ways of picking it back up (the
-// wallet-panel "Pick up" button, and clicking the marker directly in the
-// scene), plus Escape cancelling a placement in progress. Not part of the
-// permanent suite, same reasoning as the other manual-*.js scripts.
+// Manual check for World Drops (task #250, SPEC.md §5.5) — dropping a
+// wallet item into a scene so ANYONE standing in that world can see it and
+// pick it up, replacing the old local-only, self-only version of this
+// feature this file used to test (nothing ever left the wallet; "Drop
+// here" just recorded a position only the dropper could later reclaim —
+// see git history for that version). Now a drop genuinely leaves the
+// dropper's wallet (revoked) the moment it lands, and picking it up —
+// whether it's a stranger's item or the dropper's own earlier drop — always
+// mints a fresh replacement credential via the issuer, same as any other
+// real transfer in this protocol.
+//
+// Requires domain A's issuer-server on 8001 (2D renderer, Example Plaza) —
+// this test does not start it itself. Two independent browser profiles
+// (two genuinely separate wallet identities, same "launch two persistent
+// contexts" pattern manual-messaging-window.js already uses) since a drop
+// being visible/claimable by SOMEONE ELSE is the entire point of this
+// feature — one identity dropping and picking its own item back up would
+// never exercise the shared part at all.
+//
+// Checks:
+//   1. Escape right after opening "Click where you want to drop it"
+//      cancels the placement — the item never leaves the wallet.
+//   2. Visitor A drops a Bronze Compass (non-fungible); it leaves A's
+//      normal list and A's own "Dropped in this world" row labels it "you
+//      left this here". Visitor B — a completely different identity,
+//      standing in the same world — sees a live scene marker for it
+//      (world-drops poll loop, not a leave/re-enter), and picking it up by
+//      clicking that marker mints B a fresh Bronze Compass; the marker and
+//      A's own "Dropped" row both disappear once claimed.
+//   3. A fungible balance's card offers a quantity input next to its own
+//      "Drop…" button (not a bare "Drop here"); an out-of-range quantity
+//      is rejected with a clear status message rather than silently
+//      dropping the whole stack or nothing. Dropping a PARTIAL amount
+//      splits it off first (AtlasWallet.splitForDrop) — A's own remaining
+//      balance shrinks by exactly that much, and the dropped marker/list
+//      row shows exactly the split-off quantity, not the original stack.
+//   4. Visitor B picks up that partial drop via the wallet panel's own
+//      "Pick up" button (not the scene marker this time) and receives
+//      exactly the dropped quantity, not A's original full balance.
+//
+// Not part of the permanent suite, same reasoning as the other
+// manual-*.js scripts.
 
 const { chromium } = require('playwright');
+const fs = require('fs');
 const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+// This test asserts exact counts against Example Plaza's own shared
+// world-drops list (the whole point of the feature is that it's shared —
+// see the file header), so a stray leftover drop from an earlier, since-
+// failed run of this same script (or of manual-world-drops-protocol.js,
+// which also drops into this same live domain A) would make a fresh run's
+// "exactly N drops right now" assertions flaky. Reset just that one store
+// file before starting, the same "local dev state, safe to clear" posture
+// clearing stale .chrome-profile-* directories already has elsewhere in
+// this suite.
+const WORLD_DROPS_STORE = path.resolve(__dirname, '..', 'issuer-server', 'atlas-world-drops-store.json');
+// The live world-drops poll (extension/viewer.js's WORLD_DROPS_POLL_MS) is
+// 4000ms — generous margin above that for a waitForFunction timeout so a
+// slow CI-ish run doesn't flake on timing alone.
+const POLL_MARGIN_MS = 9000;
 
-// Task #211 moved a .wallet-item asset card's per-card actions (Send
-// half/Load/Simulate loss/Drop/Hide) behind that card's own "⋯" menu,
-// collapsed by default — clicking "Drop here" directly (what this file
-// used to do) no longer works since it starts out hidden. Opens the
-// containing card's menu first, waits for the popover to actually show,
-// then clicks the real action button inside it, same two-step a person
-// would do by hand. Not needed for #droppedItemsList's own "Pick up"
-// button below — that list is .info-card, not .wallet-item, and keeps
-// its always-visible action row unchanged.
-async function clickCardMenuAction(actionLocator) {
-  const card = actionLocator.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " wallet-item ")][1]');
+async function openOverlay(context, label) {
+  const page = await context.newPage();
+  await page.goto('http://localhost:8001', { waitUntil: 'load' });
+  await page.locator('#domain-atlas-enter-btn').click();
+  const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
+  const frame = await frameHandle.contentFrame();
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
+  return { page, frame };
+}
+
+async function createIdentity(frame, password) {
+  await frame.locator('#walletBtn').click();
+  await frame.locator('#chooseNewBtn').click();
+  await frame.locator('#newPasswordInput').fill(password);
+  await frame.locator('#newPasswordConfirmInput').fill(password);
+  await frame.locator('#confirmCreateBtn').click();
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.locator('#seedConfirmCheck').check();
+  await frame.locator('#seedConfirmBtn').click();
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
+  await frame.locator('#walletBtn').click(); // close the panel, back to the scene
+  return publicKey;
+}
+
+// Opens a .wallet-item card's own collapsed "⋯" menu (task #211) and waits
+// for it to actually show — same two-step a person would do by hand.
+async function openCardMenu(card) {
   await card.locator('.card-menu-toggle').click();
   await card.locator('.card-menu-items.show').waitFor({ state: 'visible', timeout: 3000 });
+}
+
+async function clickCardMenuAction(actionLocator) {
+  const card = actionLocator.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " wallet-item ")][1]');
+  await openCardMenu(card);
   await actionLocator.click();
 }
 
 // Mirrors verify-wallet.js's projectPortals helper: waits for the scene's
 // item markers to exist, then projects each one's 3D position to the same
-// 2D canvas pixel coordinates viewer.js's own project() would draw it at
-// (project() is a bare top-level function in viewer.js's classic <script>,
-// so — like AtlasWallet — it's reachable as a plain identifier here, not
-// window.project). The marker bobs by a few px and has a generous ~21px
-// hit radius, so ignoring the bob offset here is safe for a click test.
+// 2D canvas pixel coordinates viewer.js's own project() would draw it at.
 async function projectItemMarkers(frame) {
   return frame.evaluate(() => {
     return new Promise((resolve) => {
@@ -46,7 +115,7 @@ async function projectItemMarkers(frame) {
           const points = scene.itemMarkers.map((m) => {
             const [x, , z] = m.position;
             const p = project(x, 0, z, originX, originY);
-            return { sx: p.x, sy: p.y - 14, credentialId: m.credentialId, name: m.name };
+            return { sx: p.x, sy: p.y - 14, dropId: m.dropId, name: m.name, isMine: m.isMine };
           });
           resolve(points);
         } else {
@@ -59,93 +128,131 @@ async function projectItemMarkers(frame) {
 }
 
 (async () => {
-  const userDataDir = path.resolve(__dirname, '.chrome-profile-drop-pickup');
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    executablePath: '/opt/pw-browsers/chromium',
-    args: [
-      `--disable-extensions-except=${EXT_PATH}`,
-      `--load-extension=${EXT_PATH}`,
-      '--no-sandbox'
-    ]
-  });
+  try { fs.writeFileSync(WORLD_DROPS_STORE, JSON.stringify({ drops: [] }, null, 2)); } catch (err) { /* fine if the file doesn't exist yet — the server creates it lazily */ }
+
+  const dirA = path.resolve(__dirname, '.chrome-profile-drop-pickup-a');
+  const dirB = path.resolve(__dirname, '.chrome-profile-drop-pickup-b');
+  const launchOpts = { headless: false, executablePath: '/opt/pw-browsers/chromium', args: [`--disable-extensions-except=${EXT_PATH}`, `--load-extension=${EXT_PATH}`, '--no-sandbox'] };
+  const contextA = await chromium.launchPersistentContext(dirA, launchOpts);
+  const contextB = await chromium.launchPersistentContext(dirB, launchOpts);
 
   try {
-    const page = await context.newPage();
+    const a = await openOverlay(contextA, 'Visitor A');
+    const b = await openOverlay(contextB, 'Visitor B');
 
-    console.log('SETUP: creating an identity and requesting an item in Example Plaza (2D renderer)');
-    await page.goto('http://localhost:8001', { waitUntil: 'load' });
-    await page.locator('#domain-atlas-enter-btn').click();
-    const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
-    const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
-    await frame.locator('#walletBtn').click();
-    await frame.locator('#chooseNewBtn').click();
-    await frame.locator('#newPasswordInput').fill('drop-test-password');
-    await frame.locator('#newPasswordConfirmInput').fill('drop-test-password');
-    await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
-    await frame.locator('#seedConfirmCheck').check();
-    await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
-    await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
-    console.log('PASS: identity + one item (Bronze Compass) ready');
+    console.log('SETUP: two independent identities, both standing in Example Plaza; A requests a Bronze Compass');
+    const pkA = await createIdentity(a.frame, 'drop-test-password-a');
+    const pkB = await createIdentity(b.frame, 'drop-test-password-b');
+    if (pkA === pkB) throw new Error('Expected two independently created identities to differ');
+    await a.frame.locator('#walletBtn').click(); // createIdentity() closes the panel on its way out — reopen it to reach #requestItemBtn
+    await a.frame.locator('#requestItemBtn').click();
+    await a.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    console.log('PASS: A holds one item (Bronze Compass), B holds nothing yet');
 
-    console.log('STEP 1: pressing Escape right after "Drop here" cancels the placement — the item never leaves the wallet');
-    await clickCardMenuAction(frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
-    await frame.locator('body').press('Escape');
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Drop cancelled.', { timeout: 5000 });
-    const stillThereAfterCancel = await frame.locator('#selfCollectiblesList .wallet-item').count();
+    console.log('STEP 1: pressing Escape right after "Drop here" cancels the placement — the item never leaves A\'s wallet');
+    await clickCardMenuAction(a.frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
+    await a.frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
+    await a.frame.locator('body').press('Escape');
+    await a.frame.waitForFunction(() => document.getElementById('status').textContent === 'Drop cancelled.', { timeout: 5000 });
+    const stillThereAfterCancel = await a.frame.locator('#selfCollectiblesList .wallet-item').count();
     if (stillThereAfterCancel !== 1) throw new Error('Escape should have left the item exactly where it was, still carried');
-    const droppedSectionHiddenAfterCancel = await frame.locator('#droppedItemsSection').isHidden();
-    if (!droppedSectionHiddenAfterCancel) throw new Error('Nothing should be dropped after cancelling with Escape');
     console.log('PASS: Escape backed out of placement, nothing dropped');
 
-    console.log('STEP 2: "Drop here" then clicking the scene places the item there — it leaves the normal list and appears under "Dropped in this world"');
-    await clickCardMenuAction(frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
-    // A drop-in-progress claims the very next canvas click no matter where
-    // it lands, so any on-canvas point works here.
-    await frame.locator('#scene').click({ position: { x: 90, y: 90 } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
-    const droppedVisible = await frame.locator('#droppedItemsSection').isVisible();
-    if (!droppedVisible) throw new Error('Expected the "Dropped in this world" section to show after dropping');
-    const droppedRowText = await frame.locator('#droppedItemsList .info-card').textContent();
-    if (!droppedRowText.includes('Bronze Compass')) throw new Error('Expected the dropped row to name the item: ' + droppedRowText);
-    const markerCount = await frame.evaluate(() => (window.__atlasScene.itemMarkers || []).length);
-    if (markerCount !== 1) throw new Error('Expected exactly one item marker in the scene, got ' + markerCount);
-    console.log('PASS: item left the carried list, shows under "Dropped in this world", and has a live scene marker');
+    console.log('STEP 2: A drops the compass; it leaves A\'s carried list and shows under "Dropped in this world" as A\'s own; B sees a live marker (shared poll, no re-entry needed) and picks it up by clicking it');
+    await clickCardMenuAction(a.frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
+    await a.frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
+    await a.frame.locator('#scene').click({ position: { x: 90, y: 90 } });
+    await a.frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
+    const aDroppedRowText = await a.frame.locator('#droppedItemsList .info-card').filter({ hasText: 'Bronze Compass' }).textContent();
+    if (!aDroppedRowText.includes('Bronze Compass') || !aDroppedRowText.includes('you left this here')) {
+      throw new Error('Expected A\'s own "Dropped" row to name the item and say A left it there: ' + aDroppedRowText);
+    }
+    console.log('PASS: A\'s compass left the carried list and shows under "Dropped in this world" as A\'s own');
 
-    console.log('STEP 3: clicking the marker directly in the scene picks it back up');
-    const [marker] = await projectItemMarkers(frame);
-    await frame.locator('#scene').click({ position: { x: marker.sx, y: marker.sy } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Picked it back up.', { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });
-    const droppedHiddenAfterMarkerPickup = await frame.locator('#droppedItemsSection').isHidden();
-    if (!droppedHiddenAfterMarkerPickup) throw new Error('Expected "Dropped in this world" to disappear once nothing is dropped');
-    const markerCountAfter = await frame.evaluate(() => (window.__atlasScene.itemMarkers || []).length);
-    if (markerCountAfter !== 0) throw new Error('Expected the scene marker to be gone after pick-up');
-    console.log('PASS: clicking the in-scene marker picked the item back up, marker and "Dropped" section both gone');
+    // B never left/re-entered the world — this is the live poll
+    // (WORLD_DROPS_POLL_MS) picking up A's drop, the entire point of this
+    // feature over the old self-only version.
+    await b.frame.waitForFunction(() => (window.__atlasScene.itemMarkers || []).length === 1, { timeout: POLL_MARGIN_MS });
+    const [markerAtB] = await projectItemMarkers(b.frame);
+    if (markerAtB.isMine) throw new Error('Expected B\'s marker to be flagged as NOT B\'s own drop');
+    const bDroppedRowText = await b.frame.locator('#droppedItemsList .info-card').filter({ hasText: 'Bronze Compass' }).textContent();
+    if (!bDroppedRowText.includes('dropped by another visitor')) throw new Error('Expected B\'s own "Dropped" list to label this as someone else\'s drop: ' + bDroppedRowText);
+    await b.frame.locator('#scene').click({ position: { x: markerAtB.sx, y: markerAtB.sy } });
+    await b.frame.waitForFunction(() => document.getElementById('status').textContent === 'Picked it up.', { timeout: 5000 });
+    await b.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });
+    const bCompassOwner = await b.frame.evaluate(() => AtlasWallet.getIdentity().then(async (id) => (await AtlasWallet.getWallet(id.publicKey))[0].credential.owner.publicKey));
+    if (bCompassOwner !== pkB) throw new Error('Expected the picked-up compass to be freshly minted to B\'s own public key');
+    console.log('PASS: B picked up A\'s drop by clicking its scene marker and now owns a freshly-minted Bronze Compass');
 
-    console.log('STEP 4: drop again, this time pick it up via the wallet-panel "Pick up" button instead of the scene');
-    await clickCardMenuAction(frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
-    await frame.locator('#scene').click({ position: { x: 260, y: 180 } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
-    await frame.locator('#droppedItemsList button[data-action="pick-up"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });
-    const droppedHiddenAfterListPickup = await frame.locator('#droppedItemsSection').isHidden();
-    if (!droppedHiddenAfterListPickup) throw new Error('Expected "Dropped in this world" to disappear after using its own Pick up button');
-    console.log('PASS: the wallet-panel "Pick up" button works too, independent of finding the marker in the scene');
+    // A's own view of the world catches up on its next poll tick too, with
+    // no action from A at all.
+    await a.frame.waitForFunction(() => document.getElementById('droppedItemsSection').hidden === true, { timeout: POLL_MARGIN_MS });
+    console.log('PASS: A\'s own "Dropped in this world" section clears once B claims it, with no action from A');
 
-    console.log('\nALL DROP / PICK-UP CHECKS PASSED');
+    console.log('STEP 3: A mints 20 iron (fungible) and drops only PART of the stack — the quantity prompt + split-then-drop path');
+    // mintAsset() alone only touches wallet storage — bypassing the actual
+    // Mine Iron stall UI (not this test's subject) means nothing else
+    // triggers a re-render, so refreshInventoryDisplay() is called
+    // explicitly here, the same refresh every real minting path in
+    // viewer.js already runs after its own mint call.
+    await a.frame.evaluate(() => AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20).then(() => refreshInventoryDisplay()));
+    await a.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });
+    const ironCard = a.frame.locator('#selfCollectiblesList .wallet-item').filter({ hasText: 'Iron' });
+    await openCardMenu(ironCard);
+    const qtyInput = ironCard.locator('.drop-quantity-input');
+    const dropBtn = ironCard.locator('button[data-action="drop"][data-fungible="1"]');
+    const startingValue = await qtyInput.inputValue();
+    // Defaults to 1 (not the full balance) as of the fix Bruno asked for
+    // after using this in the wild — see renderAssetCard()'s own comment
+    // in viewer.js for why "the least you could mean" beats "assume you
+    // want to give it all away" as a default for a genuinely shared,
+    // irreversible-by-mistake drop.
+    if (startingValue !== '1') throw new Error('Expected the quantity input to default to 1, got ' + startingValue);
+    const maxAttr = await qtyInput.getAttribute('max');
+    if (maxAttr !== '20') throw new Error('Expected the quantity input\'s max to still be the full balance (20), got ' + maxAttr);
+
+    console.log('STEP 3a: an out-of-range quantity (0) is rejected with a clear message, nothing dropped');
+    await qtyInput.fill('0');
+    await dropBtn.click();
+    await a.frame.waitForFunction(() => document.getElementById('status').textContent.includes('Enter a quantity between 1 and 20'), { timeout: 5000 });
+    console.log('PASS: an invalid quantity is rejected before any placement even starts ->', await a.frame.locator('#status').textContent());
+
+    await openCardMenu(ironCard); // the invalid attempt above never opened a placement, but may have left the menu state as-is — reopen defensively
+    await qtyInput.fill('5');
+    await dropBtn.click();
+    await a.frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
+    await a.frame.locator('#scene').click({ position: { x: 150, y: 60 } });
+    await a.frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
+    const aRemainingIron = await a.frame.evaluate(() => AtlasWallet.getIdentity().then(async (id) => {
+      const entry = (await AtlasWallet.getWallet(id.publicKey)).find((e) => e.credential.asset.class === 'atlas.element.iron');
+      return entry ? entry.credential.quantity : 0;
+    }));
+    if (aRemainingIron !== 15) throw new Error('Expected splitForDrop to leave exactly 15 iron behind in A\'s wallet, got ' + aRemainingIron);
+    console.log('PASS: dropping 5 of 20 split off exactly that much — A\'s own wallet now holds 15');
+
+    console.log('STEP 4: B picks up the partial iron drop via the wallet panel\'s own "Pick up" button (not the scene marker this time), receiving exactly 5, not A\'s original 20');
+    await b.frame.waitForFunction(() => document.querySelectorAll('#droppedItemsList .info-card').length === 1, { timeout: POLL_MARGIN_MS });
+    await b.frame.locator('#walletBtn').click(); // B's panel closed itself after STEP 2's scene-marker pickup — reopen it to reach the list's own "Pick up" button
+    await b.frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    const ironRow = b.frame.locator('#droppedItemsList .info-card').filter({ hasText: 'Iron' });
+    const bIronRowText = await ironRow.textContent();
+    if (!bIronRowText.includes('5') || !bIronRowText.toLowerCase().includes('iron')) throw new Error('Expected B\'s "Dropped" list to show exactly 5 iron: ' + bIronRowText);
+    await ironRow.locator('button[data-action="pick-up"]').click();
+    await b.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, { timeout: 5000 });
+    const bIronQuantity = await b.frame.evaluate(() => AtlasWallet.getIdentity().then(async (id) => {
+      const entry = (await AtlasWallet.getWallet(id.publicKey)).find((e) => e.credential.asset.class === 'atlas.element.iron');
+      return entry ? entry.credential.quantity : 0;
+    }));
+    if (bIronQuantity !== 5) throw new Error('Expected B to receive exactly the 5 that were dropped, got ' + bIronQuantity);
+    console.log('PASS: B used the wallet panel\'s own "Pick up" button and received exactly the split-off amount (5), not A\'s original stack');
+
+    console.log('\nALL WORLD-DROPS UI CHECKS PASSED');
   } catch (err) {
     console.error('FAILURE:', err);
     process.exitCode = 1;
   } finally {
-    await context.close();
+    await contextA.close().catch(() => {});
+    await contextB.close().catch(() => {});
   }
 })();

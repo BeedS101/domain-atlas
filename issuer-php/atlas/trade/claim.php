@@ -63,35 +63,62 @@ $offerB = $intent['payload']['offer'];
 $wantB = $intent['payload']['want'];
 $balanceB = $balance;
 
+$claimantShapeProblem = validate_trade_side_shape($offerB, 'offer') ?? validate_trade_side_shape($wantB, 'want');
+if ($claimantShapeProblem) send_json(400, ['error' => $claimantShapeProblem]);
+
 // Mirror check — the claimant's offer/want must exactly match what this
-// listing wants/offers, same shape §7's own Match step uses.
+// listing wants/offers, same shape §7's own Match step uses. Unchanged by
+// task #250 fourth follow-up's unique-item support: a non-fungible side's
+// quantity is always exactly 1 on both ends (validate_trade_side_shape
+// enforces this at submit time already), so this plain equality check
+// keeps working without needing to know or care which side is fungible.
 if ($offerB['class'] !== $wantA['class'] || $offerB['quantity'] !== $wantA['quantity'] ||
     $wantB['class'] !== $offerA['class'] || $wantB['quantity'] !== $offerA['quantity']) {
   send_json(400, ['error' => "your intent does not mirror this listing's offer/want"]);
 }
 
-$claimantBalanceProblem = check_presented_asset($kp['publicKeyB64url'], $balanceB, $claimantPub, $offerB['class'], $offerB['quantity']);
+// Task #250 fourth follow-up: which check runs for each side is decided by
+// that side's own presented balance's signed fungible flag — see
+// atlas/trade/submit.php's own comment on this same choice.
+$offerBIsUnique = isset($balanceB['asset']['fungible']) && $balanceB['asset']['fungible'] === false;
+$claimantBalanceProblem = $offerBIsUnique
+  ? check_presented_unique_asset($kp['publicKeyB64url'], $balanceB, $claimantPub, $offerB['class'])
+  : check_presented_asset($kp['publicKeyB64url'], $balanceB, $claimantPub, $offerB['class'], $offerB['quantity']);
 if ($claimantBalanceProblem) send_json(400, ['error' => 'balance: ' . $claimantBalanceProblem]);
 
 // Re-checks the poster's own balance fresh (not just trusted from when it
 // was posted) in case it was since spent or revoked some other way.
-$posterBalanceProblem = check_presented_asset($kp['publicKeyB64url'], $balanceA, $posterPub, $offerA['class'], $offerA['quantity']);
+$offerAIsUnique = isset($balanceA['asset']['fungible']) && $balanceA['asset']['fungible'] === false;
+$posterBalanceProblem = $offerAIsUnique
+  ? check_presented_unique_asset($kp['publicKeyB64url'], $balanceA, $posterPub, $offerA['class'])
+  : check_presented_asset($kp['publicKeyB64url'], $balanceA, $posterPub, $offerA['class'], $offerA['quantity']);
 if ($posterBalanceProblem) {
   remove_pending_trade($posted['id']); // no longer honorable — drop it rather than leave a dead listing others keep trying to claim
   send_json(400, ['error' => "the poster's balance no longer checks out (" . $posterBalanceProblem . ') — listing withdrawn']);
 }
 
-$remainderA = $balanceA['quantity'] - $offerA['quantity'];
-$remainderB = $balanceB['quantity'] - $offerB['quantity'];
+// A unique side never has a remainder (its balance's quantity is
+// definitionally 1, exactly what's being offered — SPEC.md §5.1) and is
+// TRANSFERRED rather than re-minted from the catalog, so its actual
+// instance state (serial, a Signet Ring's randomly-rolled enchantments/
+// stats) survives settlement — see transfer_unique_asset()'s own comment
+// for the bug this avoids repeating. A fungible side keeps the original
+// spend/remainder behavior unchanged.
+$remainderA = $offerAIsUnique ? 0 : $balanceA['quantity'] - $offerA['quantity'];
+$remainderB = $offerBIsUnique ? 0 : $balanceB['quantity'] - $offerB['quantity'];
 
 $aRemainder = $remainderA > 0
   ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $posterPub, $offerA['class'], $remainderA, $balanceA['id'])
   : null;
-$aReceived = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $posterPub, $wantA['class'], $wantA['quantity'], $balanceA['id']);
+$aReceived = $offerBIsUnique
+  ? transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $posterPub, $balanceB)
+  : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $posterPub, $wantA['class'], $wantA['quantity'], $balanceA['id']);
 $bRemainder = $remainderB > 0
   ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPub, $offerB['class'], $remainderB, $balanceB['id'])
   : null;
-$bReceived = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPub, $wantB['class'], $wantB['quantity'], $balanceB['id']);
+$bReceived = $offerAIsUnique
+  ? transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPub, $balanceA)
+  : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPub, $wantB['class'], $wantB['quantity'], $balanceB['id']);
 
 atlas_revoke($balanceA['id'], 'superseded');
 atlas_revoke($balanceB['id'], 'superseded');

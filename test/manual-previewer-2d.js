@@ -229,7 +229,10 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     await frame.locator('#previewerBody').click();
     await frame.waitForFunction((prev) => document.getElementById('status').textContent !== prev, statusBeforePickup, { timeout: 5000 });
     const statusAfterPickup = await frame.locator('#status').textContent();
-    if (statusAfterPickup !== 'Picked it back up.') throw new Error('Expected "Picked it back up.", got: ' + statusAfterPickup);
+    // Task #250 — "Picked it up." (not "...back up") since a pickup is no
+    // longer necessarily reclaiming your OWN earlier drop; the wording had
+    // to stop assuming that once drops became shared.
+    if (statusAfterPickup !== 'Picked it up.') throw new Error('Expected "Picked it up.", got: ' + statusAfterPickup);
     const { itemMarkers: afterPickupMarkers } = await projectMarkers(frame);
     if (afterPickupMarkers.length !== 0) throw new Error('Expected zero dropped-item markers after picking it back up, got ' + afterPickupMarkers.length);
     console.log('PASS: clicking the Previewer picked the item back up, no marker left in the scene');

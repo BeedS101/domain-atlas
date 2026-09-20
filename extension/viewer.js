@@ -1758,6 +1758,34 @@ const calendarDayViewerEl = document.getElementById('calendarDayViewer');
 const calendarDayViewerHeaderEl = document.getElementById('calendarDayViewerHeader');
 const calendarDayViewerBodyEl = document.getElementById('calendarDayViewerBody');
 
+// Calendar's own third level of tabbing (SPEC.md §12's domain calendar
+// system) — "Domain" (this domain/world's own published calendar), "My
+// Calendar" (the local-only widget above, unchanged), "Remote" (some
+// OTHER domain's published calendar). See showCalendarModeSubtab(),
+// computeCalendarSources(), and refreshCalendarDomainSources() further
+// down for the render logic.
+const calendarModeSubtabBar = document.getElementById('calendarModeSubtabBar');
+const calendarDomainSubtabBtn = document.getElementById('calendarDomainSubtabBtn');
+const calendarMineSubtabBtn = document.getElementById('calendarMineSubtabBtn');
+const calendarRemoteSubtabBtn = document.getElementById('calendarRemoteSubtabBtn');
+const calendarDomainSubscreen = document.getElementById('calendarDomainSubscreen');
+const calendarMineSubscreen = document.getElementById('calendarMineSubscreen');
+const calendarRemoteSubscreen = document.getElementById('calendarRemoteSubscreen');
+const calendarDomainSourceSelect = document.getElementById('calendarDomainSourceSelect');
+const calendarDomainEventsListEl = document.getElementById('calendarDomainEventsList');
+const calendarRemoteFavoriteSelect = document.getElementById('calendarRemoteFavoriteSelect');
+const calendarRemoteDomainInput = document.getElementById('calendarRemoteDomainInput');
+const calendarRemoteFetchBtn = document.getElementById('calendarRemoteFetchBtn');
+const calendarRemoteSourceSelect = document.getElementById('calendarRemoteSourceSelect');
+const calendarRemoteStatusEl = document.getElementById('calendarRemoteStatus');
+const calendarRemoteEventsListEl = document.getElementById('calendarRemoteEventsList');
+// Whichever domain the "Remote" sub-sub-tab is currently showing (or null
+// before anything's been fetched yet) — set by loadRemoteCalendarForDomain()
+// below, read by calendarRemoteSourceSelect's own change handler so
+// switching sources re-fetches against the right domain without needing
+// to re-parse the text box (which the user may have since edited).
+let calendarRemoteActiveDomain = null;
+
 // The wallet panel is one of several mutually-exclusive "screens" — see
 // showWalletScreen() / routeWalletScreen() below.
 const walletScreens = document.querySelectorAll('.wallet-screen');
@@ -2194,6 +2222,7 @@ function isOncePerUserClassOwned(domain, marker) {
   return !!marker.oncePerUser && ownedOncePerUserClassKeys.has(domain + '|' + marker.class);
 }
 let pendingDropCredentialId = null; // set while waiting for the next canvas click to choose a drop spot
+let pendingDropAmount = null; // task #250 — null for a whole/non-fungible drop, else the exact quantity chosen for a fungible one (split off before the actual drop)
 let currentManifest = null;   // cached manifest object
 let currentManifestUrl = null;
 let currentOrigin = null;
@@ -2353,11 +2382,13 @@ async function enterWorld(worldId) {
   disconnectPresence(); // leaving whichever world was active before also means leaving its presence room, 3D or not
   disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), unlike presence which is 3D-only, but ONLY if the new world actually opted in (#111) — see refreshChatAvailability() just below
   await refreshChatAvailability(manifest, world); // shows/hides the widget + Domain tab for wherever we just landed, whether or not a scene ends up loading successfully below
+  refreshCalendarDomainSources(manifest, world); // SPEC.md §12 — rebuilds the Calendar sub-tab's own "Domain" dropdown for wherever we just landed, same "fresh on every world entry" reasoning as refreshChatAvailability() just above
   hideSceneLoadProgress(); // whichever world was active before might have left this showing (#36) — never carry it into the next one
 
   // A pending "click where you want to drop it" from whichever world was
   // active before doesn't carry over to a new one.
   pendingDropCredentialId = null;
+  pendingDropAmount = null;
   canvas.style.cursor = '';
 
   // Every renderer this wallet actually knows how to draw. A world that
@@ -2806,16 +2837,18 @@ canvas.addEventListener('click', (e) => {
     const originY = canvas.height / 2 + 40;
     const { x, z } = unprojectGround(cx, cy, originX, originY);
     const id = pendingDropCredentialId;
+    const amount = pendingDropAmount;
     pendingDropCredentialId = null;
+    pendingDropAmount = null;
     canvas.style.cursor = '';
-    finalizeDrop(id, [x, 0, z]);
+    finalizeDrop(id, amount, [x, 0, z]);
     return;
   }
 
   for (const hb of itemMarkerHitboxes) {
     const dist = Math.hypot(cx - hb.sx, cy - hb.sy);
     if (dist < hb.radius) {
-      pickUpDroppedItem(hb.marker.credentialId);
+      pickUpDroppedItem(manifestDomainOf(currentManifest), hb.marker.dropId);
       return;
     }
   }
@@ -3066,7 +3099,7 @@ canvas.addEventListener('mousemove', (e) => {
       const anchor = { getBoundingClientRect: () => ({ left: rect.left + sx, right: rect.left + sx, top: rect.top + sy, bottom: rect.top + sy, width: 0, height: 0 }) };
       const domain = manifestDomainOf(currentManifest);
       const item = assetHit.marker.entry
-        ? { kind: 'dropped', entry: assetHit.marker.entry } // a real, already-signed credential this visitor dropped — no server round-trip needed
+        ? { kind: 'dropped', entry: assetHit.marker.entry, dropId: assetHit.marker.dropId, domain } // a real, already-signed credential SOMEONE dropped here (maybe not this visitor) — no server round-trip needed just to preview it
         : { kind: 'interactable', marker: assetHit.marker, domain }; // never opened yet (or a repeatable one like "Mine Iron") — Previewer looks up the class itself
       openPreviewer([item], anchor);
     }
@@ -3142,6 +3175,7 @@ canvas.addEventListener('mouseleave', () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && pendingDropCredentialId) {
     pendingDropCredentialId = null;
+    pendingDropAmount = null;
     canvas.style.cursor = '';
     statusEl.textContent = 'Drop cancelled.';
     e.stopImmediatePropagation();
@@ -3303,6 +3337,16 @@ function showSocialSubtab(id) {
   if (contactsSubtabBtn) contactsSubtabBtn.classList.toggle('active-subtab', id === 'contactsSubscreen');
   if (favoritesSubtabBtn) favoritesSubtabBtn.classList.toggle('active-subtab', id === 'favoritesSubscreen');
   if (calendarSubtabBtn) calendarSubtabBtn.classList.toggle('active-subtab', id === 'calendarSubscreen');
+}
+
+// Calendar's own third level of tabbing (SPEC.md §12) — same show-one-
+// hide-the-rest idea as showSocialSubtab() just above, scoped to
+// .calendar-mode-subscreen instead of .subscreen.
+function showCalendarModeSubtab(id) {
+  [calendarDomainSubscreen, calendarMineSubscreen, calendarRemoteSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  if (calendarDomainSubtabBtn) calendarDomainSubtabBtn.classList.toggle('active-subtab', id === 'calendarDomainSubscreen');
+  if (calendarMineSubtabBtn) calendarMineSubtabBtn.classList.toggle('active-subtab', id === 'calendarMineSubscreen');
+  if (calendarRemoteSubtabBtn) calendarRemoteSubtabBtn.classList.toggle('active-subtab', id === 'calendarRemoteSubscreen');
 }
 
 function socialFriendsTabActive() {
@@ -4071,17 +4115,13 @@ previewerBodyEl && previewerBodyEl.addEventListener('click', (e) => {
 // handleInteractable() directly.
 function collectPreviewerItem(item) {
   if (item.kind === 'dropped') {
-    // item.entry is a raw wallet entry ({ credential: {...}, ... }) — its id
-    // lives at entry.credential.id, same as every other wallet-entry lookup
-    // in this file (deleteAsset/hideAsset/etc. in wallet.js all key off
-    // credential.id too). NOT entry.credentialId, which doesn't exist on a
-    // wallet entry at all (that flat field only exists on the OTHER shape —
-    // a dropped-items-list record, and on the itemMarkers hitbox marker
-    // that wraps this entry — see refreshSceneItemMarkers() above); getting
-    // this wrong makes pickUpDroppedItem's own filter match nothing, so the
-    // item never actually leaves the "dropped in this world" list even
-    // though the status text still (wrongly) claims success.
-    pickUpDroppedItem(item.entry.credential.id);
+    // Shared drops (task #250) — item.entry.credential is the dropper's own
+    // credential, embedded straight into the server's drops-store entry, NOT
+    // necessarily anything already in THIS visitor's wallet. Picking it up
+    // is keyed by item.dropId against the world's server (which may not even
+    // be this visitor's own issuing domain — see the cross-domain
+    // relay-claim path in wallet.js's pickUpItem()), not by credential id.
+    pickUpDroppedItem(item.domain, item.dropId);
   } else {
     handleInteractable(item.marker);
   }
@@ -4841,8 +4881,39 @@ function renderAssetCard(entry, container, opts) {
       actionsHtml += '<button data-action="lose" data-id="' + entry.credential.id + '">Simulate PvP loss</button>';
     }
   }
-  if (opts.droppable) {
-    actionsHtml += '<button data-action="drop" data-id="' + entry.credential.id + '" class="btn-secondary">Drop here</button>';
+  // Bruno's own catch after using this in the wild: the Drop control used
+  // to render unconditionally whenever a list was droppable at all, even
+  // for a tradeScope: 'bound' asset that the SERVER would reject the
+  // instant it was actually dropped (checkPresentedTransferableAsset()/
+  // check_presented_transferable_asset() already say so explicitly —
+  // "asset is bound to its owner and cannot be dropped for someone else
+  // to take"). That's correct enforcement, just surfaced late and
+  // confusingly — a control that's guaranteed to fail shouldn't be there
+  // to click in the first place. Checked here, not by removing
+  // opts.droppable upstream, since a bound asset still belongs in this
+  // same list and still needs its OTHER actions (Hide, etc.) — only the
+  // Drop control itself disappears for it.
+  if (opts.droppable && entry.credential.asset.tradeScope !== 'bound') {
+    // Task #250 — dropping is no longer local-only, so how MUCH of a
+    // fungible stack leaves the wallet actually matters now: someone else
+    // can walk up and take exactly what's dropped, not "the whole balance,
+    // but only visible to me" the way self-only dropping made the question
+    // moot. A non-fungible item has nothing to ask (quantity is always 1),
+    // same "Drop here" as before. See beginDropPlacement()'s own comment
+    // for what happens with a partial amount (a split() call first).
+    // Defaults to 1, not the full balance — dropping is now genuinely
+    // shared/irreversible-by-mistake (SPEC.md §5.5), unlike this same
+    // input's old self-only meaning, so the safer default is "the least
+    // you could mean" rather than "assume you want to give away
+    // everything you're holding." max stays the full balance — nothing
+    // stops a deliberate whole-stack drop, this only changes what's
+    // pre-filled before you touch it.
+    actionsHtml += fungible
+      ? '<div class="drop-quantity-row">' +
+        '<input type="number" class="drop-quantity-input" data-id="' + entry.credential.id + '" min="1" max="' + entry.credential.quantity + '" value="1">' +
+        '<button data-action="drop" data-id="' + entry.credential.id + '" data-fungible="1" class="btn-secondary">Drop…</button>' +
+        '</div>'
+      : '<button data-action="drop" data-id="' + entry.credential.id + '" class="btn-secondary">Drop here</button>';
   }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   const menuHtml =
@@ -4919,17 +4990,102 @@ function renderAssetList(entries, container, opts) {
 // up, but this list is the always-works fallback that doesn't depend on
 // finding the marker, being in exactly the right spot, or (for the 2D
 // renderer) clicking precisely on a small icon.
-function renderDroppedItemCard(entry, container) {
+// Task #250 — `drop` is a raw entry from AtlasWallet.getWorldDrops(), i.e.
+// {dropId, world, position, credential, droppedBy, droppedAt}, the SAME
+// shape for every visitor currently standing in this world (this list is
+// shared, not self-only anymore). `isMine` (droppedBy === this identity's
+// own public key) only changes the label — anyone present can pick up
+// anyone's drop; the server enforces nothing about who's "allowed" to,
+// same as walking up to it in the scene and clicking it.
+function renderDroppedItemCard(drop, container, isMine) {
   const el = document.createElement('div');
   el.className = 'info-card';
+  const qty = drop.credential.quantity > 1 ? drop.credential.quantity + ' × ' : '';
   el.innerHTML =
-    '<div class="name">' + entry.credential.asset.name + '</div>' +
-    '<div class="meta">' + entry.credential.asset.class + ' · left in the scene</div>' +
+    '<div class="name">' + qty + drop.credential.asset.name + '</div>' +
+    '<div class="meta">' + drop.credential.asset.class + ' · ' + (isMine ? 'you left this here' : 'dropped by another visitor') + '</div>' +
     '<div class="item-actions">' +
-    '<button data-action="pick-up" data-id="' + entry.credential.id + '">Pick up</button>' +
+    '<button data-action="pick-up" data-drop-id="' + drop.dropId + '">Pick up</button>' +
     '</div>';
   container.appendChild(el);
 }
+
+// Every call site below needs "what's dropped in this world right now",
+// but that's a request to some OTHER server (the world's own host, which
+// may not even be this domain — see dropItem()'s own comment on
+// worldDomain vs. credential.issuer.domain) that has nothing to do with
+// whether this wallet can show YOUR OWN assets. A drops-fetch failure —
+// that server being unreachable, mid-restart, or simply not yet running
+// the World Drops endpoints at all — must never take the rest of the
+// inventory display down with it; the very first bug report against this
+// feature was exactly that (an unrelated/unavailable drops endpoint
+// throwing inside refreshInventoryDisplay(), before it ever got to
+// rendering the owner's own Collectibles/Documents lists, so the whole
+// wallet appeared empty). Every caller of AtlasWallet.getWorldDrops() goes
+// through here instead of calling it directly, precisely so that one
+// broken dependency degrades to "no dropped-items list" rather than "no
+// wallet at all".
+async function getWorldDropsSafely(worldDomain, world) {
+  try {
+    return await AtlasWallet.getWorldDrops(worldDomain, world);
+  } catch (err) {
+    // Silent to the user (see the comment above — this must never surface
+    // as a broken wallet), but NOT silent to the console: swallowing an
+    // error without a trace anywhere makes a genuine, ongoing failure here
+    // indistinguishable from "nothing's dropped right now", which is
+    // exactly what made task #250's first real bug report (a drop that
+    // succeeded but was never visible anywhere afterward) hard to diagnose
+    // from the outside. console.warn (not .error) since this is an
+    // expected, handled condition, not an uncaught fault.
+    console.warn('getWorldDropsSafely: could not fetch drops for ' + worldDomain + ' / ' + world + ' — showing none.', err);
+    return [];
+  }
+}
+
+// Shared by refreshInventoryDisplay() (full re-render, every wallet change)
+// and the lighter live-poll below (task #250 — other visitors' drops need
+// to show up without leaving/re-entering the world, but re-running the
+// WHOLE inventory refresh every few seconds just to catch that would be
+// wasteful and would fight any list-filter text the owner is mid-typing in
+// the Collectibles/Documents search boxes).
+function renderDroppedItemsList(droppedHere, identity) {
+  droppedItemsListEl.innerHTML = '';
+  droppedItemsSectionEl.hidden = droppedHere.length === 0;
+  if (droppedHere.length > 0) {
+    droppedHere.forEach((d) => renderDroppedItemCard(d, droppedItemsListEl, !!identity && d.droppedBy === identity.publicKey));
+  }
+}
+
+// The "Dropped in this world" list's own lightweight refresh — same data
+// source as refreshSceneItemMarkers() (getWorldDrops), just rendered as the
+// list rather than in-scene markers. Both are called together by the poll
+// loop below; refreshInventoryDisplay() (a much heavier full rebuild) calls
+// through renderDroppedItemsList() directly instead of this, since it
+// already has droppedHere/identity in hand from its own work.
+async function refreshDroppedItemsDisplay() {
+  if (!currentManifest || !currentWorld) return;
+  const identity = await AtlasWallet.getIdentity();
+  const droppedHere = identity ? await getWorldDropsSafely(manifestDomainOf(currentManifest), currentWorld.id) : [];
+  renderDroppedItemsList(droppedHere, identity);
+}
+
+// Task #250 — keeps shared world-drops current for a visitor who never
+// leaves/re-enters the world: without this, another player's drop (or
+// pickup) would only ever show up here on this visitor's own next
+// enterWorld() call, the exact "only updates when you leave and come back"
+// staleness Bruno's drop request was explicitly trying to avoid for a
+// SHARED list. Same "just poll while relevant" shape as
+// restartMailCheckLoop()/checkItemUpdatesForDomain() below, just scoped to
+// "currently standing in a world" instead of "this tab is open at all",
+// and on a much shorter interval since a fresh visitor showing up and
+// dropping something is the kind of thing another visitor would notice
+// immediately if they were physically there.
+const WORLD_DROPS_POLL_MS = 4000;
+setInterval(async () => {
+  if (!currentManifest || !currentWorld) return;
+  await refreshSceneItemMarkers();
+  await refreshDroppedItemsDisplay();
+}, WORLD_DROPS_POLL_MS);
 
 // Task #209 — a short two-note "ding" whenever refreshInventoryDisplay()
 // (below) notices the holder's OWN wallet actually gained something,
@@ -5019,8 +5175,12 @@ async function refreshInventoryDisplay() {
   // identity can already exist at that point (a returning user), so this
   // needs its own guard rather than relying on identity alone, the way
   // combatOf() above already guards on currentWorld being possibly null.
+  // Task #250 — shared, not self-only: every visitor's drops in this world,
+  // straight from the world's own server (the credential is embedded right
+  // in each record, so no wallet lookup is needed/possible for someone
+  // else's drop — see renderDroppedItemCard()).
   const droppedHere = (identity && currentManifest && currentWorld)
-    ? await AtlasWallet.getDroppedItemsInWorld(identity.publicKey, manifestDomainOf(currentManifest), currentWorld.id)
+    ? await getWorldDropsSafely(manifestDomainOf(currentManifest), currentWorld.id)
     : [];
 
   const selfWalletAll = identity ? await AtlasWallet.getWallet(identity.publicKey) : [];
@@ -5047,14 +5207,13 @@ async function refreshInventoryDisplay() {
   }
   lastSelfWalletSnapshot = nextSelfWalletSnapshot;
 
-  // Dropped assets (any world, not just this one — see below) are filtered
-  // out here the same way hidden ones are: not in your hands right now, so
-  // they don't belong in the normal carrying list. They're not lost —
-  // still fully in this wallet's credential store — just visually "left
-  // somewhere," surfaced instead via the scene marker and the "Dropped in
-  // this world" list below (only for the world they're actually in).
-  const allDroppedIds = identity ? new Set((await AtlasWallet.getDroppedItems(identity.publicKey)).map((d) => d.credentialId)) : new Set();
-  const selfVisible = selfWalletAll.filter((e) => !e.hidden && !allDroppedIds.has(e.credential.id));
+  // Task #250 — a dropped credential is now fully REMOVED from local wallet
+  // storage the moment it's dropped (see AtlasWallet.dropItem()), not just
+  // flagged/filtered — so unlike the old self-only model, there's no
+  // "dropped" id set to filter out of the normal carrying list here
+  // anymore; a dropped asset naturally won't appear in selfWalletAll at
+  // all until/unless this identity (or someone else) picks it back up.
+  const selfVisible = selfWalletAll.filter((e) => !e.hidden);
 
   const cpWalletAll = counterparty ? await AtlasWallet.getWallet(counterparty.publicKey) : [];
   const cpVisible = cpWalletAll.filter((e) => !e.hidden);
@@ -5078,15 +5237,7 @@ async function refreshInventoryDisplay() {
     renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self' });
   }
 
-  droppedItemsListEl.innerHTML = '';
-  droppedItemsSectionEl.hidden = droppedHere.length === 0;
-  if (droppedHere.length > 0) {
-    const walletById = new Map(selfWalletAll.map((e) => [e.credential.id, e]));
-    droppedHere.forEach((d) => {
-      const entry = walletById.get(d.credentialId);
-      if (entry) renderDroppedItemCard(entry, droppedItemsListEl);
-    });
-  }
+  renderDroppedItemsList(droppedHere, identity);
 
   // --- Documents ---
   const selfDocuments = selfVisible.filter((e) => e.credential.asset.presentation === 'document');
@@ -5151,59 +5302,85 @@ async function refreshSceneItemMarkers() {
     window.__atlasScene.itemMarkers = [];
     return;
   }
-  const dropped = await AtlasWallet.getDroppedItemsInWorld(identity.publicKey, manifestDomainOf(currentManifest), currentWorld.id);
-  if (dropped.length === 0) {
-    window.__atlasScene.itemMarkers = [];
-    return;
-  }
-  const wallet = await AtlasWallet.getWallet(identity.publicKey);
-  const byId = new Map(wallet.map((e) => [e.credential.id, e]));
-  window.__atlasScene.itemMarkers = dropped
-    .map((d) => {
-      const entry = byId.get(d.credentialId);
-      // Task #213: carries the full wallet `entry` (not just credentialId/
-      // name) so the 2D canvas hover handler below can hand a dropped
-      // item's real, already-owned credential straight to openAssetViewer()
-      // — the exact same Asset Viewer panel a wallet card's own hover
-      // already opens, with no server round-trip needed since this visitor
-      // already holds a fully-signed copy of it right here.
-      return entry ? { position: d.position, credentialId: d.credentialId, name: entry.credential.asset.name, entry } : null;
-    })
-    .filter(Boolean);
+  // Task #250 — shared drops: every visitor's drop in this world, not just
+  // this identity's own. The credential is embedded right in each drop
+  // record now (no wallet lookup by credentialId — someone else's dropped
+  // credential was never in THIS wallet to begin with), so every marker
+  // carries an `entry` wrapper purely so the hover/Previewer code path
+  // below (openPreviewer/openAssetViewer) can keep reading `.entry.credential`
+  // the same way a real wallet-entry hover already does, plus the raw
+  // `dropId` a pickup actually needs.
+  const dropped = await getWorldDropsSafely(manifestDomainOf(currentManifest), currentWorld.id);
+  window.__atlasScene.itemMarkers = dropped.map((d) => ({
+    position: d.position,
+    dropId: d.dropId,
+    name: d.credential.asset.name,
+    entry: { credential: d.credential },
+    isMine: d.droppedBy === identity.publicKey
+  }));
 }
 
-// Entry point for the "Drop here" button on an item card.
-function beginDropPlacement(id) {
+// Entry point for the "Drop here"/"Drop…" button on an item card. `amount`
+// (task #250) is null for a non-fungible item or a fungible stack being
+// dropped whole, else the exact quantity the assetActionHandler's
+// quantity-input already validated against the credential's own balance —
+// finalizeDrop() below is what actually turns that into a split first.
+function beginDropPlacement(id, amount) {
   if (active3D) {
     // The gltf-mini (3D) renderer doesn't have a place-by-click flow or
     // item-marker rendering yet — drop it immediately with a placeholder
     // position so dropping/picking up still fully works via the "Dropped
     // in this world" list, just without a glowing marker to walk up to
     // here. See the note in wallet.js's dropping-items section.
-    finalizeDrop(id, [0, 0, 0]);
+    finalizeDrop(id, amount, [0, 0, 0]);
     return;
   }
   pendingDropCredentialId = id;
+  pendingDropAmount = amount;
   statusEl.textContent = 'Click where you want to drop it (Esc to cancel).';
   canvas.style.cursor = 'crosshair';
 }
 
-async function finalizeDrop(id, position) {
+async function finalizeDrop(id, amount, position) {
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
-  await AtlasWallet.dropItem(identity.publicKey, id, manifestDomainOf(currentManifest), currentWorld.id, position);
-  await refreshInventoryDisplay();
-  await refreshSceneItemMarkers();
-  statusEl.textContent = 'Dropped. Pick it back up here whenever you like — nobody else can.';
+  const wallet = await AtlasWallet.getWallet(identity.publicKey);
+  const entry = wallet.find((e) => e.credential.id === id);
+  if (!entry) return; // gone already (e.g. a stale card from a since-refreshed list) — nothing to drop
+  let credential = entry.credential;
+  try {
+    // Task #250 — a partial-fungible drop is "split off exactly this much
+    // into its own credential, THEN drop that new credential whole": the
+    // world-drop endpoints themselves never need quantity/partial logic at
+    // all, same reasoning splitAsset() already established for gifting part
+    // of a stack to a counterparty. Uses the dedicated splitForDrop() (NOT
+    // splitAsset) — see that function's own comment in wallet.js for why a
+    // self-to-self splitAsset call would just get auto-consolidated right
+    // back together before this ever got to drop it.
+    if (amount != null && amount < credential.quantity) {
+      credential = await AtlasWallet.splitForDrop(credential, amount);
+    }
+    const worldDomain = manifestDomainOf(currentManifest);
+    await AtlasWallet.dropItem(credential, worldDomain, currentWorld.id, position);
+    await refreshInventoryDisplay();
+    await refreshSceneItemMarkers();
+    statusEl.textContent = 'Dropped. Anyone standing here can see it and pick it up.';
+  } catch (err) {
+    statusEl.textContent = 'Drop failed: ' + err.message;
+  }
 }
 
-async function pickUpDroppedItem(credentialId) {
+async function pickUpDroppedItem(worldDomain, dropId) {
   const identity = await AtlasWallet.getIdentity();
-  if (!identity) return;
-  await AtlasWallet.pickUpItem(identity.publicKey, credentialId);
-  await refreshInventoryDisplay();
-  await refreshSceneItemMarkers();
-  statusEl.textContent = 'Picked it back up.';
+  if (!identity || !dropId) return;
+  try {
+    await AtlasWallet.pickUpItem(worldDomain, dropId);
+    await refreshInventoryDisplay();
+    await refreshSceneItemMarkers();
+    statusEl.textContent = 'Picked it up.';
+  } catch (err) {
+    statusEl.textContent = 'Pick up failed: ' + err.message;
+  }
 }
 
 // Hides (via the `hidden` attribute, which the existing CSS already
@@ -6504,8 +6681,68 @@ favoritesSubtabBtn && favoritesSubtabBtn.addEventListener('click', async () => {
 
 calendarSubtabBtn && calendarSubtabBtn.addEventListener('click', async () => {
   showSocialSubtab('calendarSubscreen');
+  // Opening the outer Calendar sub-tab always lands on "My Calendar"
+  // first — preserves this sub-tab's exact pre-existing behavior from
+  // before the "Domain"/"Remote" sub-sub-tabs existed.
+  showCalendarModeSubtab('calendarMineSubscreen');
   resetCalendarGridToToday();
   await refreshCalendarDisplay();
+});
+
+calendarDomainSubtabBtn && calendarDomainSubtabBtn.addEventListener('click', async () => {
+  showCalendarModeSubtab('calendarDomainSubscreen');
+  await loadSelectedDomainCalendar();
+});
+
+calendarMineSubtabBtn && calendarMineSubtabBtn.addEventListener('click', async () => {
+  showCalendarModeSubtab('calendarMineSubscreen');
+  resetCalendarGridToToday();
+  await refreshCalendarDisplay();
+});
+
+calendarRemoteSubtabBtn && calendarRemoteSubtabBtn.addEventListener('click', async () => {
+  showCalendarModeSubtab('calendarRemoteSubscreen');
+  await refreshCalendarRemoteFavorites();
+});
+
+// "Domain" sub-sub-tab (SPEC.md §12) — the dropdown lists the current
+// domain's own domain-wide calendar (if opted in) plus one entry per
+// opted-in world, populated by refreshCalendarDomainSources() below.
+// Changing it just re-fetches and re-renders; nothing here is persisted.
+calendarDomainSourceSelect && calendarDomainSourceSelect.addEventListener('change', () => {
+  loadSelectedDomainCalendar();
+});
+
+// "Remote" sub-sub-tab — picking a favorite fetches its calendar(s)
+// immediately, same as typing a domain and pressing Fetch; either path
+// also fills in the text box so the domain actually being viewed is
+// always visible, not just implied by the dropdown selection.
+calendarRemoteFavoriteSelect && calendarRemoteFavoriteSelect.addEventListener('change', () => {
+  const domain = calendarRemoteFavoriteSelect.value;
+  if (!domain) return;
+  if (calendarRemoteDomainInput) calendarRemoteDomainInput.value = domain;
+  loadRemoteCalendarForDomain(domain);
+});
+
+calendarRemoteFetchBtn && calendarRemoteFetchBtn.addEventListener('click', () => {
+  const domain = calendarRemoteDomainInput ? calendarRemoteDomainInput.value.trim() : '';
+  if (!domain) {
+    if (calendarRemoteStatusEl) calendarRemoteStatusEl.textContent = 'Enter a domain first.';
+    return;
+  }
+  loadRemoteCalendarForDomain(domain);
+});
+
+calendarRemoteDomainInput && calendarRemoteDomainInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') calendarRemoteFetchBtn && calendarRemoteFetchBtn.click();
+});
+
+// Switching which of the active remote domain's calendars to view — same
+// idea as calendarDomainSourceSelect's own change handler above, just
+// against calendarRemoteActiveDomain instead of currentManifest.domain.
+calendarRemoteSourceSelect && calendarRemoteSourceSelect.addEventListener('change', () => {
+  if (!calendarRemoteActiveDomain) return;
+  renderFetchedCalendarEvents(calendarRemoteEventsListEl, calendarRemoteActiveDomain, calendarRemoteSourceSelect.value || null, calendarRemoteStatusEl);
 });
 
 // Mail's own inner sub-tab bar (Mail / Mail Settings) — data underneath is
@@ -7290,7 +7527,7 @@ async function refreshRemoteTradeStationOptions() {
   if (domains.has(previous)) remoteTradeStationDomainSelect.value = previous;
 }
 
-// Sell tab's "You offer" dropdown — this wallet's own held fungible asset
+// Sell tab's "You offer" dropdown — this wallet's own held, non-bound asset
 // classes, grouped and summed across every credential of that class (a
 // wallet can hold several separate balances of the same class, same
 // "totals, not individual credentials" idea autoConsolidateAssetWallet
@@ -7300,6 +7537,16 @@ async function refreshRemoteTradeStationOptions() {
 // actually held. Preserves the current selection across refreshes where
 // it's still valid, same convention as refreshRemoteTradeStationOptions.
 //
+// Task #250 fourth follow-up (Bruno's own request) widened this from
+// fungible-only to also list a held non-fungible, non-bound class (e.g. the
+// Signet Ring) — the same class the server's checkPresentedUniqueAsset now
+// accepts. `totals` tracks each entry's own `fungible` flag alongside its
+// held count (sellOfferHoldingsCache below, consulted by
+// updateSellQuantityLocks/the Post handler to decide whether a quantity is
+// even meaningful for the selected class) — a bound class (a membership
+// card) is still excluded entirely, same as before, since the server would
+// reject offering one outright.
+//
 // "You want" (see refreshTradingSellWantOptions below) used to be a static
 // 3-option list here in this same comment's earlier form — unlike what you
 // already hold, what you might WANT has nothing to enumerate from client
@@ -7307,26 +7554,28 @@ async function refreshRemoteTradeStationOptions() {
 // Task #202 added exactly that (GET /atlas/trade/catalog,
 // AtlasWallet.fetchTradableClasses) — see refreshTradingSellWantOptions'
 // own comment just below for the current, dynamic version.
+let sellOfferHoldingsCache = new Map(); // class -> { quantity, name, fungible }
 async function refreshTradingSellOfferOptions() {
   if (!tradingSellOfferClassSelect) return;
   try {
     const identity = await AtlasWallet.getIdentity();
     const previous = tradingSellOfferClassSelect.value;
-    const totals = new Map(); // class -> { quantity, name }
+    const totals = new Map(); // class -> { quantity, name, fungible }
     if (identity) {
       const wallet = await AtlasWallet.getWallet(identity.publicKey);
       wallet.forEach((e) => {
         const c = e.credential;
-        if (!c.asset.fungible) return;
+        if (c.asset.tradeScope === 'bound') return;
         const existing = totals.get(c.asset.class);
         if (existing) existing.quantity += c.quantity;
-        else totals.set(c.asset.class, { quantity: c.quantity, name: c.asset.name });
+        else totals.set(c.asset.class, { quantity: c.quantity, name: c.asset.name, fungible: !!c.asset.fungible });
       });
     }
+    sellOfferHoldingsCache = totals;
 
     tradingSellOfferClassSelect.innerHTML = '';
     if (totals.size === 0) {
-      tradingSellOfferClassSelect.appendChild(new Option('No fungible assets to offer', ''));
+      tradingSellOfferClassSelect.appendChild(new Option('Nothing tradable to offer', ''));
       tradingSellOfferClassSelect.disabled = true;
       return;
     }
@@ -7334,13 +7583,20 @@ async function refreshTradingSellOfferOptions() {
     Array.from(totals.entries())
       .sort((a, b) => a[0].localeCompare(b[0]))
       .forEach(([cls, info]) => {
-        tradingSellOfferClassSelect.appendChild(new Option(info.name + ' ×' + formatMass(info.quantity) + ' (' + cls + ')', cls));
+        // A non-fungible class's "quantity" is a count of held instances,
+        // not a mass — formatMass (grams) would be actively misleading here
+        // ("×1 g" for a ring), so this only ever shows a held count when
+        // there's more than one instance to distinguish from "the usual
+        // single item," same restraint renderAssetViewerContent's own
+        // fungible-only mass suffix already uses.
+        const suffix = info.fungible ? ' ×' + formatMass(info.quantity) : (info.quantity > 1 ? ' ×' + info.quantity : '');
+        tradingSellOfferClassSelect.appendChild(new Option(info.name + suffix + ' (' + cls + ')', cls));
       });
     if (totals.has(previous)) tradingSellOfferClassSelect.value = previous;
   } finally {
     // Task #205: the try/finally (rather than one call at the bottom) so
     // the visible searchable-combo input stays in sync on EVERY exit path
-    // above, including the early "no fungible assets" return.
+    // above, including the early "nothing tradable" return.
     tradingSellOfferCombo && tradingSellOfferCombo.sync();
     // Task #207 — this refresh can silently change (or clear) the selected
     // offer class without firing its own 'change' event (e.g. a class you
@@ -7467,16 +7723,48 @@ function computeSuggestedSellQuantity(fromClass, fromQty, toClass) {
   return Math.max(0, Math.floor((fromQty / fromEntry.exchangeRate) * toEntry.exchangeRate));
 }
 
+// Task #250 fourth follow-up — a non-fungible side's quantity is always
+// exactly 1 (SPEC.md §5.1; validateTradeSideShape enforces this
+// server-side too). Rather than let a visitor type something invalid into
+// a quantity field that means nothing for a unique item and only find out
+// at submit time, this locks that field to "1" and disables it the moment
+// its OWN class selection resolves to a non-fungible one — mirrors the
+// wallet card menu's own "no quantity prompt at all for a non-fungible
+// item" Drop control (see renderInventoryItem's own comment on
+// drop-quantity-row). A fungible class (or nothing selected yet) leaves
+// the field exactly as before, editable and untouched.
+function lockSellQuantityIfUnique(input, isUnique) {
+  if (!input) return;
+  input.disabled = isUnique;
+  if (isUnique) input.value = '1';
+}
+function updateSellQuantityLocks() {
+  const offerClass = tradingSellOfferClassSelect && tradingSellOfferClassSelect.value;
+  const wantClass = tradingSellWantClassSelect && tradingSellWantClassSelect.value;
+  const offerInfo = offerClass ? sellOfferHoldingsCache.get(offerClass) : null;
+  const wantInfo = wantClass ? sellCatalogCache.find((c) => c.class === wantClass) : null;
+  lockSellQuantityIfUnique(tradingSellOfferQtyInput, !!offerInfo && offerInfo.fungible === false);
+  lockSellQuantityIfUnique(tradingSellWantQtyInput, !!wantInfo && wantInfo.fungible === false);
+}
+
 function updateSellSuggestion(drivingSide) {
   sellDrivingSide = drivingSide;
   if (!tradingSellOfferClassSelect || !tradingSellWantClassSelect || !tradingSellOfferQtyInput || !tradingSellWantQtyInput) return;
+  updateSellQuantityLocks();
   const offerClass = tradingSellOfferClassSelect.value;
   const wantClass = tradingSellWantClassSelect.value;
   if (!offerClass || !wantClass) return; // nothing selected on one side yet — nothing to suggest
+  // A locked (non-fungible) side is already pinned to 1 above and has no
+  // exchangeRate for computeSuggestedSellQuantity to work with anyway — it
+  // naturally returns null for that side, so no separate branch is needed
+  // here, but skipping it explicitly avoids overwriting the "1" it was
+  // just locked to with a stale/zero suggestion.
   if (drivingSide === 'want') {
+    if (tradingSellOfferQtyInput.disabled) return;
     const suggested = computeSuggestedSellQuantity(wantClass, parseInt(tradingSellWantQtyInput.value, 10), offerClass);
     if (suggested !== null) tradingSellOfferQtyInput.value = suggested;
   } else {
+    if (tradingSellWantQtyInput.disabled) return;
     const suggested = computeSuggestedSellQuantity(offerClass, parseInt(tradingSellOfferQtyInput.value, 10), wantClass);
     if (suggested !== null) tradingSellWantQtyInput.value = suggested;
   }
@@ -7679,6 +7967,23 @@ function formatExpiryCountdown(expiresAtIso) {
   return `expires in ${minutes}m`;
 }
 
+// Task #250 fourth follow-up — a listing's offer/want (from GET
+// /atlas/trade/listings) is only ever {class, quantity}, with no
+// `fungible` flag of its own (unlike an actual held credential, which
+// always carries one — see the Buy claim handler's own confirmation-line
+// formatting just above for that case). Browsing a listing BEFORE
+// claiming it has no credential in hand yet to read fungibility off of, so
+// this looks it up in a small class -> catalog-entry map built once per
+// render pass (see the two callers below) — for display only, never to
+// gate anything. Falls back to the old mass-formatting for a class the
+// catalog lookup didn't cover (a fetch failure, or an issuer that predates
+// the `fungible` field) rather than guessing.
+function formatTradeSideAmount(side, catalogByClass) {
+  const entry = catalogByClass && catalogByClass.get(side.class);
+  if (entry && entry.fungible === false) return side.class;
+  return formatMass(side.quantity) + ' ' + side.class;
+}
+
 async function refreshTradingBuyList() {
   if (!tradingBuyListEl) return;
   const domain = remoteTradeStationDomainSelect && remoteTradeStationDomainSelect.value;
@@ -7700,9 +8005,16 @@ async function refreshTradingBuyList() {
     tradingBuyListEl.innerHTML = '<div class="empty-note">Nothing listed right now.</div>';
     return;
   }
+  // Best-effort, display-only (see formatTradeSideAmount's own comment) —
+  // an ungated GET, same one Sell's own "You want" dropdown already fetches,
+  // just for formatting rather than populating a select this time.
+  const catalogByClass = new Map();
+  try {
+    (await AtlasWallet.fetchTradableClasses(domain) || []).forEach((c) => catalogByClass.set(c.class, c));
+  } catch (err) { /* falls back to mass formatting below */ }
   tradingBuyListEl.innerHTML = listings.map((l) => `
     <div class="wallet-item">
-      ${formatMass(l.offer.quantity)} ${l.offer.class} → ${formatMass(l.want.quantity)} ${l.want.class}
+      ${formatTradeSideAmount(l.offer, catalogByClass)} → ${formatTradeSideAmount(l.want, catalogByClass)}
       <span class="empty-note">from ${l.posterPublicKey.slice(0, 16)}… — ${formatExpiryCountdown(l.expiresAt)}</span>
       <button type="button" class="btn-secondary trading-claim-btn" data-pending-id="${l.pendingId}">Trade</button>
     </div>
@@ -7734,6 +8046,20 @@ async function refreshTradingListingsList() {
     tradingListingsListEl.innerHTML = '<div class="empty-note">Nothing posted yet.</div>';
     return;
   }
+  // Same display-only catalog lookup refreshTradingBuyList uses (see
+  // formatTradeSideAmount's own comment) — one fetch per distinct domain a
+  // record was posted to, since this wallet's own listings can span more
+  // than one Trading Station, unlike Buy's single currently-browsed one.
+  const domains = Array.from(new Set(records.map((r) => r.domain)));
+  const catalogByDomain = new Map();
+  await Promise.all(domains.map(async (d) => {
+    const byClass = new Map();
+    try {
+      (await AtlasWallet.fetchTradableClasses(d) || []).forEach((c) => byClass.set(c.class, c));
+    } catch (err) { /* falls back to mass formatting below */ }
+    catalogByDomain.set(d, byClass);
+  }));
+
   const now = Date.now();
   tradingListingsListEl.innerHTML = records.slice().reverse().map((r) => {
     const status = r.status === 'pending' && new Date(r.expiresAt).getTime() < now ? 'expired' : r.status;
@@ -7745,7 +8071,8 @@ async function refreshTradingListingsList() {
       : (status === 'settled' || status === 'expired' || status === 'canceled')
         ? `<button type="button" class="danger-btn trading-delete-listing-btn" data-pending-id="${r.pendingId}">Delete</button>`
         : '';
-    return `<div class="wallet-item">${formatMass(r.offer.quantity)} ${r.offer.class} → ${formatMass(r.want.quantity)} ${r.want.class} @ ${r.domain} — <strong>${status}</strong>${countdown} ${actionBtn}</div>`;
+    const catalogByClass = catalogByDomain.get(r.domain) || new Map();
+    return `<div class="wallet-item">${formatTradeSideAmount(r.offer, catalogByClass)} → ${formatTradeSideAmount(r.want, catalogByClass)} @ ${r.domain} — <strong>${status}</strong>${countdown} ${actionBtn}</div>`;
   }).join('');
 }
 
@@ -7801,8 +8128,16 @@ tradingBuyListEl && tradingBuyListEl.addEventListener('click', async (evt) => {
     const listing = listings.find((l) => l.pendingId === pendingId);
     if (!listing) throw new Error('That listing is no longer available.');
 
+    // Task #250 fourth follow-up: listing.want.quantity is already always 1
+    // for a non-fungible class (validateTradeSideShape enforced that at
+    // submit/claim time), so the only thing that needs to change here is
+    // dropping the hard `c.asset.fungible` requirement — a held instance of
+    // the class is enough on its own for a unique want, same "whichever
+    // instance is found is the one presented" indifference Sell's own
+    // balance lookup uses.
     const wallet = await AtlasWallet.getWallet(identity.publicKey);
-    const balance = wallet.map((e) => e.credential).find((c) => c.asset.class === listing.want.class && c.asset.fungible && c.quantity >= listing.want.quantity);
+    const balance = wallet.map((e) => e.credential)
+      .find((c) => c.asset.class === listing.want.class && (c.asset.fungible ? c.quantity >= listing.want.quantity : true));
     if (!balance) throw new Error('Not enough ' + listing.want.class + ' to claim this listing.');
 
     // This 10-minute figure is NOT a listing lifetime the way Sell's
@@ -7814,7 +8149,16 @@ tradingBuyListEl && tradingBuyListEl.addEventListener('click', async (evt) => {
     // per-listing expiry above.
     const result = await AtlasWallet.claimTradeListing(domain, membership.credential, listing, balance, 10);
     await refreshInventoryDisplay();
-    if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '✓ Traded: sent ' + formatMass(listing.want.quantity) + ' ' + listing.want.class + ', received ' + formatMass(listing.offer.quantity) + ' ' + listing.offer.class + '.';
+    // Task #250 fourth follow-up: `balance`/`result.received` are actual
+    // credentials, each already carrying its own real `asset.fungible` —
+    // reading fungibility straight off them (rather than fetching the
+    // catalog just to format this one confirmation line) means "sent 1
+    // atlas.wearable.ring" instead of the actively-wrong "sent 1 g
+    // atlas.wearable.ring" a unique item would otherwise get from
+    // formatMass's grams-only formatting.
+    const sentAmount = balance.asset.fungible ? formatMass(listing.want.quantity) + ' ' : '';
+    const receivedAmount = result.received && result.received.asset.fungible ? formatMass(listing.offer.quantity) + ' ' : '';
+    if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = '✓ Traded: sent ' + sentAmount + listing.want.class + ', received ' + receivedAmount + listing.offer.class + '.';
   } catch (err) {
     if (tradingBuyStatusEl) tradingBuyStatusEl.textContent = 'Trade failed: ' + err.message;
   } finally {
@@ -7832,9 +8176,19 @@ tradingSellSubmitBtn && tradingSellSubmitBtn.addEventListener('click', async () 
     if (!identity) throw new Error('Create your identity first.');
 
     const offerClass = tradingSellOfferClassSelect.value;
-    const offerQty = parseInt(tradingSellOfferQtyInput.value, 10);
     const wantClass = tradingSellWantClassSelect.value;
-    const wantQty = parseInt(tradingSellWantQtyInput.value, 10);
+    // Task #250 fourth follow-up: a non-fungible side's quantity is always
+    // exactly 1, regardless of whatever the (disabled — see
+    // updateSellQuantityLocks) quantity input happens to hold; read it
+    // straight from the held/catalog fungible flag rather than trusting
+    // the input's own value, same "don't trust client state, derive it"
+    // posture the server itself takes.
+    const offerInfo = offerClass ? sellOfferHoldingsCache.get(offerClass) : null;
+    const wantInfo = wantClass ? sellCatalogCache.find((c) => c.class === wantClass) : null;
+    const offerIsUnique = !!offerInfo && offerInfo.fungible === false;
+    const wantIsUnique = !!wantInfo && wantInfo.fungible === false;
+    const offerQty = offerIsUnique ? 1 : parseInt(tradingSellOfferQtyInput.value, 10);
+    const wantQty = wantIsUnique ? 1 : parseInt(tradingSellWantQtyInput.value, 10);
     const expiresHours = parseFloat(tradingSellExpiresHoursInput.value);
     if (!offerClass || !Number.isInteger(offerQty) || offerQty <= 0) throw new Error('A valid offer class + quantity is required.');
     if (!wantClass || !Number.isInteger(wantQty) || wantQty <= 0) throw new Error('A valid want class + quantity is required.');
@@ -7844,9 +8198,17 @@ tradingSellSubmitBtn && tradingSellSubmitBtn.addEventListener('click', async () 
     const membership = memberships.find((m) => m.domain === domain);
     if (!membership) throw new Error('No Trading Station membership held for ' + domain + '.');
 
+    // A fungible offer needs a balance with ENOUGH quantity; a non-fungible
+    // offer just needs to actually hold one instance of the class (its own
+    // quantity is definitionally 1, same as offerQty above) — whichever
+    // instance is found is the one presented, same "any credential of a
+    // sufficient class/quantity will do" indifference a fungible balance
+    // already gets (this wallet doesn't let you pick a specific balance
+    // object for a fungible class either).
     const wallet = await AtlasWallet.getWallet(identity.publicKey);
-    const balance = wallet.map((e) => e.credential).find((c) => c.asset.class === offerClass && c.asset.fungible && c.quantity >= offerQty);
-    if (!balance) throw new Error('Not enough ' + offerClass + ' to offer ' + formatMass(offerQty) + '.');
+    const balance = wallet.map((e) => e.credential)
+      .find((c) => c.asset.class === offerClass && (c.asset.fungible ? c.quantity >= offerQty : true));
+    if (!balance) throw new Error(offerIsUnique ? ('No ' + offerClass + ' held to offer.') : ('Not enough ' + offerClass + ' to offer ' + formatMass(offerQty) + '.'));
 
     // wallet.js's proposeIntent still takes expiresMinutes (v1.14 shape,
     // unchanged) — this per-listing hours input (v1.15) is purely a
@@ -8967,6 +9329,173 @@ async function refreshCalendarDisplay() {
   await updateSocialBadge();
 }
 
+// ---------- domain calendar (SPEC.md §12, "Domain"/"Remote" sub-sub-tabs) ----------
+//
+// Everything below reads a calendar published by SOME domain over the
+// network (AtlasWallet.fetchDomainCalendar) rather than this wallet's own
+// local reminders above — a read-only render, no edit/delete, no local
+// storage at all. "Domain" and "Remote" share the same render path
+// (renderFetchedCalendarEvents/renderRemoteCalendarEventCard); they only
+// differ in which domain/worldId they ask for and how that gets chosen.
+
+// Same independent, either-can-be-true composition computeChatTabs()
+// already uses for the (unrelated, undocumented-in-SPEC.md) chat opt-in —
+// see that function's own comment. Unlike chat, `calendar` IS a real
+// SPEC.md field (§3, §12), but the discovery shape a client uses to find
+// what's opted in is the same idea either way: a domain-wide entry when
+// the manifest itself says so, plus one entry per world that separately
+// says so, never one overriding the other.
+function computeCalendarSources(manifest) {
+  const sources = [];
+  if (manifest && manifest.calendar === true) sources.push({ worldId: null, label: 'Domain-wide' });
+  if (manifest && Array.isArray(manifest.worlds)) {
+    for (const w of manifest.worlds) {
+      if (w && w.calendar === true) sources.push({ worldId: w.id, label: w.name });
+    }
+  }
+  return sources;
+}
+
+// Read-only variant of renderCalendarEventCard() above — no Edit/Delete
+// actions, since a fetched-from-elsewhere event isn't this wallet's own to
+// change. Reuses formatCalendarWhen()/calendarEventUrgencyMs() as-is: both
+// only ever look at dateTime/endDateTime, which a fetched event carries in
+// the exact same shape as a local one (SPEC.md §12).
+function renderRemoteCalendarEventCard(entry, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card calendar-event';
+  const overdue = calendarEventUrgencyMs(entry) < Date.now();
+  el.classList.toggle('overdue', overdue);
+  el.innerHTML =
+    '<div class="name">' + escapeHtml(entry.title) + '</div>' +
+    '<div class="calendar-event-when">' + escapeHtml(formatCalendarWhen(entry)) + (overdue ? ' · past' : '') + '</div>' +
+    (entry.notes ? '<div class="calendar-event-notes">' + escapeHtml(entry.notes) + '</div>' : '');
+  container.appendChild(el);
+}
+
+// Shared by both "Domain" and "Remote" — fetches one calendar and renders
+// it into `containerEl`, using `statusEl` (if given) for a brief loading/
+// error line. A network failure or an empty calendar both render cleanly
+// rather than throwing up the console — see AtlasWallet.fetchDomainCalendar's
+// own comment on why an empty `events` array is not itself an error
+// (SPEC.md §12.1: the domain/world simply may not have opted in).
+async function renderFetchedCalendarEvents(containerEl, domain, worldId, statusEl) {
+  if (!containerEl) return;
+  containerEl.innerHTML = '';
+  if (statusEl) statusEl.textContent = 'Loading…';
+  try {
+    const { events } = await AtlasWallet.fetchDomainCalendar(domain, worldId);
+    if (statusEl) statusEl.textContent = '';
+    if (!events.length) {
+      containerEl.innerHTML = '<div class="empty-note">No events on this calendar.</div>';
+      return;
+    }
+    events.forEach((entry) => renderRemoteCalendarEventCard(entry, containerEl));
+  } catch (err) {
+    containerEl.innerHTML = '';
+    if (statusEl) statusEl.textContent = 'Could not load this calendar: ' + err.message;
+  }
+}
+
+// Called from enterWorld() (alongside refreshChatAvailability(), same
+// "fresh on every world entry, never cached" reasoning) — rebuilds the
+// "Domain" sub-sub-tab's own label and dropdown from whatever manifest
+// just loaded. Does NOT fetch anything by itself; it only decides what
+// options exist. If the "Domain" sub-sub-tab happens to be the one
+// currently visible, it also re-triggers a load so switching worlds while
+// already looking at it doesn't leave a stale, wrong-world calendar on
+// screen.
+function refreshCalendarDomainSources(manifest, world) {
+  if (calendarDomainSubtabBtn) calendarDomainSubtabBtn.textContent = (manifest && manifest.domain) || 'Domain';
+  if (!calendarDomainSourceSelect) return;
+  const sources = computeCalendarSources(manifest);
+  calendarDomainSourceSelect.innerHTML = '';
+  if (sources.length === 0) {
+    calendarDomainSourceSelect.appendChild(new Option('No calendar published here', ''));
+    calendarDomainSourceSelect.disabled = true;
+  } else {
+    calendarDomainSourceSelect.disabled = false;
+    sources.forEach((s) => calendarDomainSourceSelect.appendChild(new Option(s.label, s.worldId || '')));
+    // Defaults to whichever world is actually being stood in right now, if
+    // it opted in; otherwise whatever computeCalendarSources() listed
+    // first (the domain-wide entry, when present, since it's always
+    // pushed before any world's own).
+    const currentWorldValue = world ? world.id : null;
+    if (currentWorldValue && sources.some((s) => s.worldId === currentWorldValue)) {
+      calendarDomainSourceSelect.value = currentWorldValue;
+    }
+  }
+  if (calendarDomainSubscreen && calendarDomainSubscreen.classList.contains('active')) {
+    loadSelectedDomainCalendar();
+  }
+}
+
+async function loadSelectedDomainCalendar() {
+  if (!currentManifest || !calendarDomainSourceSelect || calendarDomainSourceSelect.disabled) {
+    if (calendarDomainEventsListEl) calendarDomainEventsListEl.innerHTML = '<div class="empty-note">No calendar published here.</div>';
+    return;
+  }
+  await renderFetchedCalendarEvents(calendarDomainEventsListEl, currentManifest.domain, calendarDomainSourceSelect.value || null, null);
+}
+
+// "Remote" sub-sub-tab's favorites dropdown — deduped by domain (a
+// favorite is really keyed by domain+worldId, but a remote calendar fetch
+// here is domain-wide only, so two favorites in the same domain would
+// otherwise show as two identical-looking options). Refreshed fresh every
+// time the Remote sub-sub-tab is opened, same "never cached" posture as
+// refreshFavoritesDisplay() itself.
+async function refreshCalendarRemoteFavorites() {
+  if (!calendarRemoteFavoriteSelect) return;
+  const favorites = await AtlasWallet.getFavoriteDomains();
+  const seen = new Set();
+  calendarRemoteFavoriteSelect.innerHTML = '';
+  calendarRemoteFavoriteSelect.appendChild(new Option('Choose a favorite…', ''));
+  favorites.forEach((entry) => {
+    if (!entry || !entry.domain || seen.has(entry.domain)) return;
+    seen.add(entry.domain);
+    calendarRemoteFavoriteSelect.appendChild(new Option((entry.worldName ? entry.worldName + ' — ' : '') + entry.domain, entry.domain));
+  });
+}
+
+// "Remote" sub-sub-tab's own entry point — unlike "Domain" above, there's
+// no manifest already in hand for an arbitrary other domain, so this
+// fetches one first (AtlasWallet.fetchDomainManifest) purely to run
+// computeCalendarSources() against it, the same discovery step "Domain"
+// gets for free from currentManifest. A domain with no manifest at all,
+// or one that's unreachable, fails right here with a status message
+// before ever touching /atlas/calendar; a manifest that exists but never
+// opted any calendar in (computeCalendarSources returns nothing) is a
+// normal, non-error case (§12.1) with its own clean "nothing published"
+// message instead. The source picker is hidden whenever there's only one
+// calendar to choose from — nothing to pick between in that case.
+async function loadRemoteCalendarForDomain(domain) {
+  calendarRemoteActiveDomain = domain;
+  if (calendarRemoteSourceSelect) { calendarRemoteSourceSelect.innerHTML = ''; calendarRemoteSourceSelect.hidden = true; }
+  if (calendarRemoteEventsListEl) calendarRemoteEventsListEl.innerHTML = '';
+  if (calendarRemoteStatusEl) calendarRemoteStatusEl.textContent = 'Loading…';
+
+  let manifest;
+  try {
+    manifest = await AtlasWallet.fetchDomainManifest(domain);
+  } catch (err) {
+    if (calendarRemoteStatusEl) calendarRemoteStatusEl.textContent = 'Could not reach this domain: ' + err.message;
+    return;
+  }
+
+  const sources = computeCalendarSources(manifest);
+  if (sources.length === 0) {
+    if (calendarRemoteStatusEl) calendarRemoteStatusEl.textContent = '';
+    if (calendarRemoteEventsListEl) calendarRemoteEventsListEl.innerHTML = '<div class="empty-note">This domain has not published a calendar.</div>';
+    return;
+  }
+
+  if (calendarRemoteSourceSelect) {
+    sources.forEach((s) => calendarRemoteSourceSelect.appendChild(new Option(s.label, s.worldId || '')));
+    calendarRemoteSourceSelect.hidden = sources.length <= 1;
+  }
+  await renderFetchedCalendarEvents(calendarRemoteEventsListEl, domain, sources[0].worldId, calendarRemoteStatusEl);
+}
+
 // Converts a stored ISO string into the "YYYY-MM-DDTHH:mm" shape
 // <input type="datetime-local"> needs for its value, in LOCAL time (not
 // UTC) so an edited event reopens showing the same wall-clock time it was
@@ -9755,7 +10284,25 @@ function assetActionHandler(listEl, role, toRole) {
         statusEl.textContent = 'Transfer failed: ' + err.message;
       }
     } else if (btn.dataset.action === 'drop') {
-      beginDropPlacement(id);
+      // Task #250 — a fungible balance's Drop button sits next to its own
+      // quantity input (renderAssetCard above) rather than always dropping
+      // the whole stack; a non-fungible item has no such input at all
+      // (quantity is definitionally 1), same "drop this exact credential,
+      // whole" as before.
+      if (btn.dataset.fungible) {
+        const qtyInput = btn.parentElement.querySelector('.drop-quantity-input[data-id="' + id + '"]');
+        const wallet = await AtlasWallet.getWallet(who.publicKey);
+        const entry = wallet.find((x) => x.credential.id === id);
+        const max = entry ? entry.credential.quantity : Infinity;
+        const amount = Math.floor(Number(qtyInput && qtyInput.value));
+        if (!Number.isInteger(amount) || amount < 1 || amount > max) {
+          statusEl.textContent = 'Enter a quantity between 1 and ' + max + ' to drop.';
+          return;
+        }
+        beginDropPlacement(id, amount);
+      } else {
+        beginDropPlacement(id, null);
+      }
     } else if (btn.dataset.action === 'hide') {
       await AtlasWallet.hideAsset(who.publicKey, id);
       await refreshInventoryDisplay();
@@ -9795,7 +10342,7 @@ assetActionHandler(counterpartyDocumentsListEl, 'counterparty', 'self');
 droppedItemsListEl.addEventListener('click', (e) => {
   const btn = e.target.closest('button');
   if (!btn || btn.dataset.action !== 'pick-up') return;
-  pickUpDroppedItem(btn.dataset.id);
+  pickUpDroppedItem(manifestDomainOf(currentManifest), btn.dataset.dropId);
 });
 
 // Dispatch for a clicked in-scene interactable (see the "interactables"

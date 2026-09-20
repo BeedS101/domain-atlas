@@ -10,14 +10,23 @@
 // entry is already public the moment atlas/asset/issue.php exists to hand
 // it out, so listing the classes reveals nothing new.
 //
-// Filtered to fungible===true (the only kind a quantity-based trade
-// intent's offer/want shape supports today — see SPEC.md §5.4) and
-// tradeScope!=='bound' (a membership card can never be the THING traded,
-// same exclusion check_presented_asset() already enforces at claim time).
-// Reuses atlas_asset_catalog_entry() so the resolved name/model/thumbnail/
-// tradeScope shape here is byte-for-byte the same helper every other
-// endpoint already trusts, rather than a second, possibly-drifting
+// Originally filtered to fungible===true (the only kind a quantity-based
+// trade intent's offer/want shape supported at the time — see SPEC.md
+// §5.4) and tradeScope!=='bound' (a membership card can never be the THING
+// traded, same exclusion check_presented_asset() already enforces at claim
+// time). Reuses atlas_asset_catalog_entry() so the resolved name/model/
+// thumbnail/tradeScope shape here is byte-for-byte the same helper every
+// other endpoint already trusts, rather than a second, possibly-drifting
 // reimplementation of that resolution logic.
+//
+// Task #250 fourth follow-up (Bruno's own request): the fungible===true
+// restriction is gone — a unique, non-fungible class (the Signet Ring) can
+// now be offered/claimed too (see check_presented_unique_asset()/
+// transfer_unique_asset() in lib/bootstrap.php), so it belongs in this
+// discovery list the same as any other non-bound class. The response's own
+// 'fungible' field (new) is what a client uses to decide whether to render
+// a quantity input or "exactly one" for a given class — tradeScope!=='bound'
+// remains the only exclusion.
 //
 // This same shape is designed to extend to a FOREIGN domain's catalog
 // later (fetched live while composing a trade, per the wallet UX idea
@@ -32,12 +41,13 @@ $classes = [];
 foreach (array_keys(ATLAS_ASSET_CATALOG) as $cls) {
   $entry = ATLAS_ASSET_CATALOG[$cls];
   $tradeScope = isset($entry['tradeScope']) ? $entry['tradeScope'] : 'local';
-  if ($entry['fungible'] !== true || $tradeScope === 'bound') continue;
+  if ($tradeScope === 'bound') continue;
   $resolved = atlas_asset_catalog_entry($cls);
   $row = [
     'class' => $cls,
     'name' => $resolved['name'],
     'thumbnail' => isset($resolved['thumbnail']) ? $resolved['thumbnail'] : null,
+    'fungible' => $entry['fungible'],
     'tradeScope' => $resolved['tradeScope'],
   ];
   // Task #203 — surfaced here (rather than a separate rates endpoint) so
