@@ -43,7 +43,12 @@
 //   - atlas.element.silver's model (assets/badge.glb) is a DIFFERENT,
 //     still-genuinely-missing file (not something this task fixes — a
 //     pre-existing content gap, left alone on purpose) — proving the
-//     fallback-marker path against a real 404, not a mocked one.
+//     fallback-marker path against a real 404, not a mocked one. It's also
+//     fungible (dropped as a quantity of 3), so STEP 7 doubles as coverage
+//     for the E-press prompt showing that quantity ("Silver (Ag) ×3 g",
+//     not a bare "Silver (Ag)") — a later follow-up matching the same
+//     convention the 2D renderer's marker hover and the Previewer already
+//     used for a dropped fungible item's quantity.
 //
 // Also confirms beginDropPlacement()'s other change: a 3D drop now lands a
 // short distance from wherever the visitor actually is, not hardcoded at
@@ -249,7 +254,11 @@ async function fetchDrops() {
     const silverDrop = drops.find((d) => d.dropId === silverDropId);
     if (!silverDrop) throw new Error('Expected the silver drop still listed server-side');
     await teleport(frame, silverDrop.position[0], silverDrop.position[2]);
-    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Silver (Ag)', { timeout: 5000 });
+    // "×3 g" (not a bare "Silver (Ag)") — silver is fungible and this drop
+    // is 3 of it, same "×<formatMass(quantity)>" convention the 2D
+    // renderer's own marker hover and the Previewer already show; the
+    // E-press prompt used to leave the quantity out entirely.
+    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Silver (Ag) ×3 g', { timeout: 5000 });
     // Status text alone ("Picked it up.") isn't a safe wait here — STEP 5
     // already left that exact same string on screen, so a text-equality
     // check would resolve immediately without proving E actually fired

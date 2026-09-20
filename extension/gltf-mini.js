@@ -737,6 +737,33 @@
     // geometry rather than a canvas gradient.
     const itemGlowPrim = buildBox(gl, 0.28, -0.14, 0.14, 0.28, [0.878, 0.722, 0.298, 1]);
 
+    // Same "×<grams-auto-scaled-to-kg/t>" convention viewer.js's own
+    // formatMass() uses for a fungible asset's quantity everywhere else
+    // (wallet cards, the Asset Viewer, the Previewer) — duplicated here
+    // rather than shared, same reasoning itemGlowPrim's amber color above
+    // duplicates the 2D renderer's own drawItemMarker() color instead of
+    // importing it: this module is deliberately self-contained (see the
+    // file's own header comment) and never reaches into viewer.js.
+    function formatMass(grams) {
+      if (!Number.isFinite(grams)) return String(grams);
+      const trimmed = (n) => n.toFixed(2).replace(/\.?0+$/, '');
+      if (grams < 1000) return grams + ' g';
+      if (grams < 1000000) return trimmed(grams / 1000) + ' kg';
+      return trimmed(grams / 1000000) + ' t';
+    }
+
+    // The E-press prompt's own label for a dropped item — asset.name alone
+    // for a unique item, or with its quantity suffixed for a fungible one
+    // (e.g. "Gold (Au) ×10 g" instead of a bare "Gold (Au)" that gives no
+    // hint how much is actually sitting there) — the same info the 2D
+    // renderer's drop marker hover and the Previewer already show (see
+    // droppedItemDisplayName() in viewer.js).
+    function itemDropLabel(credential) {
+      const asset = credential && credential.asset;
+      if (!asset || !asset.name) return 'Pick up';
+      return asset.name + (asset.fungible ? ' ×' + formatMass(credential.quantity) : '');
+    }
+
     // A dropped item's asset.model is authored completely independently of
     // this world's own furniture kit — unlike a scene.json object (which
     // gets an author-chosen `scale` tuned by whoever built the scene, see
@@ -1101,7 +1128,7 @@
             dropId: drop.dropId,
             domain: drop.domain,
             entry: { credential: drop.credential },
-            label: (drop.credential && drop.credential.asset && drop.credential.asset.name) || 'Pick up'
+            label: itemDropLabel(drop.credential)
           },
           primitives: null,
           bounds: null
