@@ -115,7 +115,11 @@ function assertClassInfoShape(label, cls, info, expected) {
     console.log('STEP 2: Node — a NON-fungible class this domain\'s lobby crate mints (atlas.trinket.pin), excluded from GET /atlas/trade/catalog entirely, is reachable here');
     const nodePin = await get('http://localhost:' + NODE_PORT, '/atlas/asset/class?class=atlas.trinket.pin');
     if (nodePin.status !== 200) throw new Error('Expected 200, got ' + nodePin.status + ': ' + JSON.stringify(nodePin.body));
-    assertClassInfoShape('Node', 'atlas.trinket.pin', nodePin.body, { name: 'Lobby Enamel Pin', fungible: false, presentation: 'collectible', tradeScope: 'local' });
+    // tradeScope: 'bound' as of the task #250 follow-up — a oncePerUser
+    // giveaway needed real protocol-level enforcement, not just a
+    // per-device courtesy check (see issuer-server/server.js's own
+    // ASSET_CATALOG comment on atlas.trinket.pin).
+    assertClassInfoShape('Node', 'atlas.trinket.pin', nodePin.body, { name: 'Lobby Enamel Pin', fungible: false, presentation: 'collectible', tradeScope: 'bound' });
     console.log('PASS: Node atlas.trinket.pin ->', JSON.stringify(nodePin.body.name), 'fungible=' + nodePin.body.fungible);
 
     console.log('STEP 3: Node — a tradeScope:"bound" class (atlas.tradingstation.membership), excluded from GET /atlas/trade/catalog on purpose, is ALSO reachable here');
@@ -142,7 +146,7 @@ function assertClassInfoShape(label, cls, info, expected) {
     assertClassInfoShape('PHP', 'atlas.element.iron', phpIron.body, { name: 'Iron (Fe)', fungible: true, presentation: 'collectible', tradeScope: 'local' });
     const phpPin = await get(PHP_BASE, '/atlas/asset/class?class=atlas.trinket.pin');
     if (phpPin.status !== 200) throw new Error('Expected 200 from PHP, got ' + phpPin.status + ': ' + JSON.stringify(phpPin.body));
-    assertClassInfoShape('PHP', 'atlas.trinket.pin', phpPin.body, { name: 'Lobby Enamel Pin', fungible: false, presentation: 'collectible', tradeScope: 'local' });
+    assertClassInfoShape('PHP', 'atlas.trinket.pin', phpPin.body, { name: 'Lobby Enamel Pin', fungible: false, presentation: 'collectible', tradeScope: 'bound' });
     const phpMembership = await get(PHP_BASE, '/atlas/asset/class?class=atlas.tradingstation.membership');
     if (phpMembership.status !== 200) throw new Error('Expected 200 from PHP, got ' + phpMembership.status + ': ' + JSON.stringify(phpMembership.body));
     if (phpMembership.body.tradeScope !== 'bound') throw new Error('Expected tradeScope="bound" from PHP for atlas.tradingstation.membership, got ' + JSON.stringify(phpMembership.body.tradeScope));

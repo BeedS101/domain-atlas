@@ -19,7 +19,12 @@
 //   1. Same-domain drop + list + claim by a DIFFERENT identity — the
 //      dropper's wallet loses it (revoked), the claimant gets a freshly-
 //      minted credential of the same class/quantity, and the drop
-//      disappears from the world's list.
+//      disappears from the world's list. Uses atlas.trophy.chess as the
+//      non-fungible example — NOT atlas.wearable (Bronze Compass), which
+//      became tradeScope: 'bound' in the task #250 second follow-up and can
+//      no longer be dropped at all; atlas.trophy.chess is still an
+//      ordinary, non-bound, uncapped collectible, exercising the exact same
+//      whole-item drop/pickup path the Compass used to.
 //   2. A 'bound' asset (atlas.membership) is rejected by POST
 //      /atlas/world/drop outright — task #173/#160's exclusion, actually
 //      enforced.
@@ -104,9 +109,9 @@ async function claimDrop(base, identity, dropId) {
     const alice = await generateIdentity();
     const bob = await generateIdentity();
 
-    console.log('STEP 1: Alice drops a Bronze Compass (non-fungible, same-domain) into a world hosted by Domain A; Bob picks it up');
-    const compass = await issueAsset(BASE_A, alice.publicKey, 'atlas.wearable', 1);
-    const dropRes = await dropItem(BASE_A, alice, compass, WORLD, [1, 0, 1]);
+    console.log('STEP 1: Alice drops a Chess Champion Trophy (non-fungible, same-domain) into a world hosted by Domain A; Bob picks it up');
+    const trophy = await issueAsset(BASE_A, alice.publicKey, 'atlas.trophy.chess', 1);
+    const dropRes = await dropItem(BASE_A, alice, trophy, WORLD, [1, 0, 1]);
     if (dropRes.status !== 200 || !dropRes.body.dropId) throw new Error('Expected a successful drop, got: ' + JSON.stringify(dropRes));
     const dropId = dropRes.body.dropId;
 
@@ -121,7 +126,7 @@ async function claimDrop(base, identity, dropId) {
     const claimRes = await claimDrop(BASE_A, bob, dropId);
     if (claimRes.status !== 200 || claimRes.body.status !== 'claimed') throw new Error('Expected Bob\'s claim to succeed, got: ' + JSON.stringify(claimRes));
     if (claimRes.body.credential.owner.publicKey !== bob.publicKey) throw new Error('Expected the claimed credential to name Bob as owner');
-    if (claimRes.body.credential.asset.class !== 'atlas.wearable') throw new Error('Expected the claimed credential to be atlas.wearable');
+    if (claimRes.body.credential.asset.class !== 'atlas.trophy.chess') throw new Error('Expected the claimed credential to be atlas.trophy.chess');
 
     const listAfterClaim = await get(BASE_A, '/atlas/world/drops?world=' + encodeURIComponent(WORLD));
     if (listAfterClaim.body.drops.some((d) => d.dropId === dropId)) throw new Error('Expected the drop to be gone from the list after being claimed');
@@ -135,10 +140,10 @@ async function claimDrop(base, identity, dropId) {
     }
     console.log('PASS: dropping a bound credential is rejected ->', boundDrop.body.error);
 
-    console.log('STEP 3 (cross-domain): Alice holds a Domain-A-issued compass and drops it into a world hosted by DOMAIN B; Bob (a Domain B visitor) claims it, which relays the mint+revoke back to Domain A');
-    const compassA2 = await issueAsset(BASE_A, alice.publicKey, 'atlas.wearable', 1);
+    console.log('STEP 3 (cross-domain): Alice holds a Domain-A-issued trophy and drops it into a world hosted by DOMAIN B; Bob (a Domain B visitor) claims it, which relays the mint+revoke back to Domain A');
+    const trophyA2 = await issueAsset(BASE_A, alice.publicKey, 'atlas.trophy.chess', 1);
     const crossWorld = WORLD + '-crossdomain';
-    const crossDrop = await dropItem(BASE_B, alice, compassA2, crossWorld, [2, 0, 2]);
+    const crossDrop = await dropItem(BASE_B, alice, trophyA2, crossWorld, [2, 0, 2]);
     if (crossDrop.status !== 200 || !crossDrop.body.dropId) {
       throw new Error('Expected Domain B to accept a drop of a Domain-A-issued credential (verifyForeignAssetCredential), got: ' + JSON.stringify(crossDrop));
     }
@@ -157,7 +162,13 @@ async function claimDrop(base, identity, dropId) {
     console.log('PASS: cross-domain drop (verified against the issuer\'s own published key) + relay-claim both work — Bob now holds a fresh Domain-A-issued credential');
 
     console.log('STEP 4: two concurrent claims of the same drop — only one may win');
-    const race = await issueAsset(BASE_A, alice.publicKey, 'atlas.trinket.pin', 1);
+    // atlas.trophy.chess, not atlas.wearable/atlas.trinket.pin — both of
+    // those became tradeScope: 'bound' across the two task #250 follow-ups
+    // (closing a drop-then-re-request farming loophole on a oncePerUser
+    // giveaway), so neither is droppable at all any more; this step only
+    // needs SOME ordinary droppable class to exercise the race, unrelated
+    // to which one.
+    const race = await issueAsset(BASE_A, alice.publicKey, 'atlas.trophy.chess', 1);
     const raceDrop = await dropItem(BASE_A, alice, race, WORLD, [3, 0, 3]);
     const raceDropId = raceDrop.body.dropId;
     const carol = await generateIdentity();

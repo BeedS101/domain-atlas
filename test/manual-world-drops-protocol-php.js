@@ -8,7 +8,10 @@
 // where that matters, same as federation was for Post Office.
 //
 // Checks (mirroring manual-world-drops-protocol.js's own four):
-//   1. Same-domain drop + list + claim by a different identity.
+//   1. Same-domain drop + list + claim by a different identity. Uses
+//      atlas.trophy.chess as the non-fungible example — NOT atlas.wearable
+//      (Bronze Compass), which became tradeScope: 'bound' in the task #250
+//      second follow-up and can no longer be dropped at all.
 //   2. A 'bound' asset (atlas.membership) cannot be dropped.
 //   3. Cross-domain: Domain-A-issued item dropped into a world hosted by
 //      Domain B — Domain B verifies it against Domain A's own published
@@ -119,9 +122,9 @@ function startPhpServer(bundleDir, port) {
     const alice = await generateIdentity();
     const bob = await generateIdentity();
 
-    console.log('STEP 1: Alice drops a Bronze Compass (same-domain) into a world hosted by Domain A; Bob picks it up');
-    const compass = await issueAsset(BASE_A, alice.publicKey, 'atlas.wearable', 1);
-    const dropRes = await dropItem(BASE_A, alice, compass, WORLD, [1, 0, 1]);
+    console.log('STEP 1: Alice drops a Chess Champion Trophy (same-domain) into a world hosted by Domain A; Bob picks it up');
+    const trophy = await issueAsset(BASE_A, alice.publicKey, 'atlas.trophy.chess', 1);
+    const dropRes = await dropItem(BASE_A, alice, trophy, WORLD, [1, 0, 1]);
     if (dropRes.status !== 200 || !dropRes.body.dropId) throw new Error('Expected a successful drop, got: ' + JSON.stringify(dropRes));
     const dropId = dropRes.body.dropId;
 
@@ -146,9 +149,9 @@ function startPhpServer(bundleDir, port) {
     }
     console.log('PASS: dropping a bound credential is rejected ->', boundDrop.body.error);
 
-    console.log('STEP 3 (cross-domain): Alice drops a Domain-A-issued compass into a world hosted by Domain B; Bob claims it, relayed back to Domain A');
-    const compassA2 = await issueAsset(BASE_A, alice.publicKey, 'atlas.wearable', 1);
-    const crossDrop = await dropItem(BASE_B, alice, compassA2, CROSS_WORLD, [2, 0, 2]);
+    console.log('STEP 3 (cross-domain): Alice drops a Domain-A-issued trophy into a world hosted by Domain B; Bob claims it, relayed back to Domain A');
+    const trophyA2 = await issueAsset(BASE_A, alice.publicKey, 'atlas.trophy.chess', 1);
+    const crossDrop = await dropItem(BASE_B, alice, trophyA2, CROSS_WORLD, [2, 0, 2]);
     if (crossDrop.status !== 200 || !crossDrop.body.dropId) {
       throw new Error('Expected Domain B to accept a drop of a Domain-A-issued credential (verify_foreign_asset_credential), got: ' + JSON.stringify(crossDrop));
     }
@@ -166,7 +169,13 @@ function startPhpServer(bundleDir, port) {
     console.log('PASS: cross-domain drop + relay-claim both work through issuer-php');
 
     console.log('STEP 4: two concurrent claims of the same drop — only one may win');
-    const race = await issueAsset(BASE_A, alice.publicKey, 'atlas.trinket.pin', 1);
+    // atlas.trophy.chess, not atlas.wearable/atlas.trinket.pin — both of
+    // those became tradeScope: 'bound' across the two task #250 follow-ups
+    // (closing a drop-then-re-request farming loophole on a oncePerUser
+    // giveaway), so neither is droppable at all any more; this step only
+    // needs SOME ordinary droppable class to exercise the race, unrelated
+    // to which one.
+    const race = await issueAsset(BASE_A, alice.publicKey, 'atlas.trophy.chess', 1);
     const raceDrop = await dropItem(BASE_A, alice, race, WORLD, [3, 0, 3]);
     const raceDropId = raceDrop.body.dropId;
     const carol = await generateIdentity();

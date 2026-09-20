@@ -28,10 +28,15 @@
 //   6. Hovering the SAME stall again, now that this visitor already holds
 //      the (oncePerUser) class, opens nothing at all — the Previewer
 //      ignores it, per Bruno's own words.
-//   7. Dropping the collected item and hovering its own dropped-item marker
+//   7. Dropping a collected item and hovering its own dropped-item marker
 //      shows the real owned credential (kind: 'dropped') with no preview
 //      note — dropped items are the visitor's own physical item sitting in
-//      the world, never filtered by the oncePerUser check.
+//      the world, never filtered by the oncePerUser check. Uses a directly-
+//      minted Chess Champion Trophy for this, not the Bronze Compass
+//      collected in steps 2-6 above — the Compass became tradeScope:
+//      'bound' in the task #250 second follow-up and no longer offers a
+//      Drop control at all (see test/manual-drop-pickup.js's header for the
+//      same swap, same reasoning).
 //   8. Clicking that dropped-item preview in the Previewer picks it back up.
 //   9. The Asset Viewer (#assetViewerWidget) never opened once during any
 //      of this — proof "don't touch the Asset Viewer" was honored.
@@ -206,9 +211,12 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     if (!assetViewerHiddenAfterSceneSteps) throw new Error('The Asset Viewer must never open from scene hovering — only the Previewer should (task #227)');
     console.log('PASS: Asset Viewer stayed closed through every scene-hover step');
 
-    console.log('STEP 7: dropping the compass, then hovering its OWN dropped marker shows the real owned credential — no preview note this time');
+    console.log('SETUP for STEP 7: mint a Chess Champion Trophy directly (AtlasWallet.mintAsset, same pattern manual-drop-pickup.js uses) — the Bronze Compass collected above is tradeScope: \'bound\' now and its card offers no Drop control at all');
+    await frame.evaluate(() => AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.trophy.chess').then(() => refreshInventoryDisplay()));
+    await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Chess Champion Trophy'), { timeout: 5000 });
+
+    console.log('STEP 7: dropping the trophy, then hovering its OWN dropped marker shows the real owned credential — no preview note this time');
     await frame.page().mouse.move(5, 5);
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 10000 });
     await clickCardMenuAction(frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
     await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
     await frame.locator('#scene').click({ position: { x: 90, y: 90 } });
@@ -219,7 +227,7 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     await frame.locator('#scene').hover({ position: { x: itemMarkers[0].sx, y: itemMarkers[0].sy } });
     await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
     const droppedPreview = await readPreviewer(frame);
-    if (!droppedPreview.name.includes('Bronze Compass')) throw new Error('Expected "Bronze Compass" for the dropped item\'s own marker, got: ' + droppedPreview.name);
+    if (!droppedPreview.name.includes('Chess Champion Trophy')) throw new Error('Expected "Chess Champion Trophy" for the dropped item\'s own marker, got: ' + droppedPreview.name);
     if (droppedPreview.hasNote) throw new Error('Expected NO preview note for an owned, dropped item — this is a real credential, not a class-level preview');
     if (droppedPreview.hasShowModelButton) throw new Error('The Previewer must never have a "Show model" button');
     console.log('PASS: hovering the dropped item shows the real owned credential, no preview note, no "Show model" button');
@@ -240,7 +248,10 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     console.log('STEP 9: hovering an actual WALLET CARD still opens the Asset Viewer, exactly as before this task — "don\'t touch the Asset Viewer" means it still works normally, not that it\'s disabled');
     await frame.page().mouse.move(5, 5);
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 10000 });
-    const cardBox = await frame.locator('#selfCollectiblesList .wallet-item').first().boundingBox();
+    // Two collectibles are held by this point (the Compass from steps 2-6,
+    // the Trophy picked back up in step 8) — target the Compass explicitly
+    // rather than .first(), which would otherwise depend on render order.
+    const cardBox = await frame.locator('#selfCollectiblesList .wallet-item').filter({ hasText: 'Bronze Compass' }).boundingBox();
     await frame.page().mouse.move(cardBox.x + cardBox.width / 2, cardBox.y + cardBox.height / 2);
     await frame.waitForFunction(() => document.getElementById('assetViewerWidget').hidden === false, { timeout: 3000 });
     const cardHoverContent = await frame.evaluate(() => ({
