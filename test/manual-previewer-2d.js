@@ -38,6 +38,11 @@
 //      Drop control at all (see test/manual-drop-pickup.js's header for the
 //      same swap, same reasoning).
 //   8. Clicking that dropped-item preview in the Previewer picks it back up.
+//   8b. Dropping a fungible quantity (not a whole unique item) and hovering
+//      its marker shows the quantity right in the Previewer's name — e.g.
+//      dropping 5 of a 20-iron stack previews as "Iron (Fe) ×5 g", the same
+//      "×<formatMass(quantity)>" convention wallet cards and the Asset
+//      Viewer already use, not just the bare class name with no amount.
 //   9. The Asset Viewer (#assetViewerWidget) never opened once during any
 //      of this — proof "don't touch the Asset Viewer" was honored.
 //
@@ -244,6 +249,34 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     const { itemMarkers: afterPickupMarkers } = await projectMarkers(frame);
     if (afterPickupMarkers.length !== 0) throw new Error('Expected zero dropped-item markers after picking it back up, got ' + afterPickupMarkers.length);
     console.log('PASS: clicking the Previewer picked the item back up, no marker left in the scene');
+
+    console.log('SETUP for STEP 8b: mint 20 iron (fungible) — same fixture/pattern manual-drop-pickup.js\'s STEP 3 uses');
+    await frame.evaluate(() => AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20).then(() => refreshInventoryDisplay()));
+    await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Iron'), { timeout: 5000 });
+
+    console.log('STEP 8b: dropping only PART of the iron stack (5 of 20) and hovering its marker shows the quantity in the Previewer\'s name');
+    await frame.page().mouse.move(5, 5);
+    const ironCard = frame.locator('#selfCollectiblesList .wallet-item').filter({ hasText: 'Iron' });
+    // Not clickCardMenuAction() here — that helper clicks the action the
+    // instant the menu opens, which would drop the quantity input's
+    // default (1) before this test gets a chance to change it to 5. Open
+    // the menu directly instead, same two calls clickCardMenuAction()
+    // itself makes, but fill the quantity in between.
+    await ironCard.locator('.card-menu-toggle').click();
+    await ironCard.locator('.card-menu-items.show').waitFor({ state: 'visible', timeout: 3000 });
+    await ironCard.locator('.drop-quantity-input').fill('5');
+    await ironCard.locator('button[data-action="drop"][data-fungible="1"]').click();
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
+    await frame.locator('#scene').click({ position: { x: 60, y: 120 } });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
+
+    const { itemMarkers: ironMarkers } = await projectMarkers(frame);
+    if (ironMarkers.length !== 1) throw new Error('Expected exactly one dropped iron marker, got ' + ironMarkers.length);
+    await frame.locator('#scene').hover({ position: { x: ironMarkers[0].sx, y: ironMarkers[0].sy } });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
+    const ironPreview = await readPreviewer(frame);
+    if (!ironPreview.name.includes('Iron') || !ironPreview.name.includes('×5 g')) throw new Error('Expected the Previewer name to read like "Iron (Fe) ×5 g" (the split-off quantity, not the original 20), got: ' + ironPreview.name);
+    console.log('PASS: Previewer shows the dropped quantity right in the name ->', ironPreview.name);
 
     console.log('STEP 9: hovering an actual WALLET CARD still opens the Asset Viewer, exactly as before this task — "don\'t touch the Asset Viewer" means it still works normally, not that it\'s disabled');
     await frame.page().mouse.move(5, 5);

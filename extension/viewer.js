@@ -4050,6 +4050,18 @@ previewerWidgetEl && previewerWidgetEl.addEventListener('mouseleave', schedulePr
 // every wallet-card hover, already exercised by that staleness fix; this
 // panel just isn't the one carrying that fix's own complexity a second
 // time.
+// A dropped item's own credential carries the real quantity that was
+// actually split off and dropped (see finalizeDrop()'s splitForDrop()
+// call) — e.g. dropping 10 of a stack of 47 gold drops a credential whose
+// own quantity is 10, not 47. Same "×<formatMass(quantity)> suffix for a
+// fungible asset, nothing for a unique one" convention already used by
+// renderAssetViewerContent() and renderAssetCard() for a wallet-held
+// credential; reused here rather than invented fresh so "10 gold" reads
+// identically whether it's sitting in your wallet or lying on the ground.
+function droppedItemDisplayName(asset, credential) {
+  return asset.name + (asset.fungible ? ' ×' + formatMass(credential.quantity) : '');
+}
+
 function renderPreviewerItemDetail(name, cls, domain, thumbnail, properties, note) {
   let html = '<div class="name">' + name + '</div>' + '<div class="meta">' + cls + ' · issued by ' + domain + '</div>';
   if (note) html += '<div class="previewer-note">' + note + '</div>';
@@ -4084,7 +4096,7 @@ function renderPreviewerContent(items) {
     const item = items[0];
     if (item.kind === 'dropped') {
       const asset = item.entry.credential.asset;
-      previewerBodyEl.innerHTML = renderPreviewerItemDetail(asset.name, asset.class, item.entry.credential.issuer.domain, asset.thumbnail, asset.properties, null);
+      previewerBodyEl.innerHTML = renderPreviewerItemDetail(droppedItemDisplayName(asset, item.entry.credential), asset.class, item.entry.credential.issuer.domain, asset.thumbnail, asset.properties, null);
     } else {
       const info = getOrFetchPreviewerClassInfo(item.domain, item.marker.class, token);
       if (info === undefined) {
@@ -4112,7 +4124,7 @@ function renderPreviewerContent(items) {
       const asset = item.entry.credential.asset;
       return '<div class="previewer-list-item" data-index="' + i + '">' +
         (asset.thumbnail ? '<img class="previewer-list-item-thumb" src="' + asset.thumbnail + '" alt="">' : '<span class="previewer-list-item-thumb"></span>') +
-        '<span class="previewer-list-item-name">' + asset.name + '</span></div>';
+        '<span class="previewer-list-item-name">' + droppedItemDisplayName(asset, item.entry.credential) + '</span></div>';
     }
     const info = getOrFetchPreviewerClassInfo(item.domain, item.marker.class, token);
     const name = (info && info.name) || item.marker.label || item.marker.class;
