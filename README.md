@@ -1,14 +1,22 @@
-# Domain Atlas — prototype (v1.15)
+# Domain Atlas — prototype (v1.22)
 
 A working proof that the mechanisms in `SPEC.md` are real. A browser
 extension reads a domain's manifest, renders whichever worlds it declares,
 and lets you walk through two genuinely different kinds of portal — one
 that swaps worlds inside a single domain with no network round-trip, and
 one that crosses to a completely separate domain. On top of that, a real
-wallet: a genuine WebAuthn passkey identity, real ECDSA-signed credentials
-issued by an actual small server, verified with real cryptography — items,
-fungible resources, PvP loadouts with an owner-signed transfer-on-loss, and
-a two-party trade settled atomically by a trading station.
+wallet: a genuine WebAuthn (or password-backed) identity, real ECDSA-signed
+credentials issued by an actual small server, verified with real
+cryptography — unique items and fungible resources under one credential
+shape, PvP loadouts with an owner-signed transfer-on-loss, open trade
+listings a station settles atomically (unique items included, not just
+fungible balances), drops anyone present in a world can pick up, and
+cross-domain mail through a federated Post Office. A few things ride on
+that same identity and credential machinery rather than being bolted on
+separately — an in-world chess minigame with a real mint on checkmate, a
+Messaging window with genuinely end-to-end-encrypted chat, and a calendar
+a domain (or one of its worlds) can publish and any visitor's wallet can
+read, even across domains.
 
 ```
 domain-atlas/
@@ -23,8 +31,8 @@ domain-atlas/
 ├── directory-server/              crawler/index/search over other domains' manifests (§3.3)
 ├── presence-server/                hand-rolled WebSocket server for multiplayer presence + chat
 ├── presence-php/                  plain-PHP polling port of presence + chat, same hosting reason
-├── demo-domain-a/                 "Example Plaza" — FOUR worlds: plaza, museum, arena, market
-├── demo-domain-b/                 "Neighbor Workshop" — one world, plain static server
+├── demo-domain-a/                 "Example Plaza" — FIVE worlds: plaza, museum, arena, market, lobby
+├── demo-domain-b/                 "Neighbor Workshop" — one world, a real issuer (see below)
 ├── tools/                         scene-editor.html — a standalone editor for gltf-mini scenes
 └── test/
     ├── verify.js                  proves the manifest/portal mechanism
@@ -34,9 +42,9 @@ domain-atlas/
 
 Two local servers stand in for two independent domains — same mechanism as
 two real domains, just without needing to own and deploy to actual DNS
-names to try it. Domain A runs a real issuer (below); Domain B stays a
-plain static file server on purpose, to prove it needs zero special
-integration with Domain A to trust what Domain A hands out.
+names to try it. Both run a real issuer (Domain B needs one too, for its
+own Post Office — see below); the point either way is that Domain B needs
+zero special integration with Domain A to trust what Domain A hands out.
 
 ## 1. Serve the two demo domains
 
@@ -66,7 +74,7 @@ PORT=8002 ATLAS_DOMAIN=localhost:8002 ATLAS_DOCROOT=demo-domain-b ATLAS_STATE_DI
 Confirm both are up:
 
 ```bash
-curl http://localhost:8001/.well-known/spatial.json      # four worlds: plaza, museum, arena, market
+curl http://localhost:8001/.well-known/spatial.json      # five worlds: plaza, museum, arena, market, lobby
 curl http://localhost:8001/.well-known/atlas-key.json    # domain A's real public key
 curl http://localhost:8002/.well-known/spatial.json      # one world: workshop
 curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real public key — a SEPARATE keypair from domain A's
@@ -81,11 +89,11 @@ curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real publi
 ## 3. Try it — manifest, portals, and the item wallet
 
 1. Visit `http://localhost:8001` — it looks like an ordinary page.
-2. A **🧭 Enter Space: Example Plaza (+3 more)** button appears bottom-right.
-3. Click it. The Plaza world renders with four portals: three **orange**
-   (same-origin, swap worlds, no re-fetch — to the museum, the arena, and
-   the trading post) and one **teal** (crosses to another domain, fetches a
-   fresh manifest).
+2. A **🧭 Enter Space: Example Plaza (+4 more)** button appears bottom-right.
+3. Click it. The Plaza world renders with five portals: four **orange**
+   (same-origin, swap worlds, no re-fetch — to the museum, the arena, the
+   trading post, and the lobby) and one **teal** (crosses to another
+   domain, fetches a fresh manifest).
 4. Click **Create Atlas Identity** — a real `navigator.credentials.create()`
    call, your device's own passkey prompt, a genuine keypair. It's now
    persisted, not thrown away when you close the panel.
@@ -243,7 +251,12 @@ below doesn't use it at all — see that section.
    new credentials while revoking both pre-trade balances — the same
    all-or-nothing settlement any two-party trade needs, just triggered by a
    claim instead of two visitors standing at the same stall at once. A
-   listing you haven't claimed can be withdrawn from the **Listings** tab
+   unique item works the same way, not just a fungible balance like iron or
+   gold — post a listing naming a specific held item (the Signet Ring, say)
+   as your `offer` or `want`, and a claim transfers that exact instance,
+   serial number and any rolled properties intact, rather than minting a
+   fresh substitute. A listing you haven't claimed can be withdrawn from
+   the **Listings** tab
    with **Cancel**; a settled, canceled, or expired one can be cleared from
    that same tab with **Delete**.
 
@@ -711,9 +724,11 @@ node test/verify-wallet.js             # identity, issuance, cross-domain verifi
 node test/verify-loadout-trading.js    # loadouts/transfer-on-loss, resources, trading station settlement
 node test/verify-directory.js          # directory service: crawl/index/rank, filters, free-text, key-anchored verification
 node test/verify-asset-cache.js        # gltf-mini's local GLB cache: fresh on first load, 304'd on repeat, re-fetched on real change
+node test/verify-identity-backup.js    # password identity lifecycle: onboarding, lock/unlock, export/import by password + seed phrase
 ```
 
-The first three (plus `verify-asset-cache.js`) need a display (`xvfb-run -a
+The first three (plus `verify-asset-cache.js` and
+`verify-identity-backup.js`) need a display (`xvfb-run -a
 node test/verify.js` if running headless on Linux) and both demo domains
 already running. `verify.js`, `verify-wallet.js`, and
 `verify-loadout-trading.js` use a CDP virtual authenticator to stand in for
@@ -748,6 +763,15 @@ the moment it resolves, same as a fresh download. See
 the network to actually observe it advancing rather than trusting it's
 there.
 
+`verify-identity-backup.js` covers the **password identity** path (section
+3 above) end to end without touching WebAuthn at all: onboarding routing
+(new device vs. a known, locked device vs. already unlocked), a real
+software keypair encrypted at rest under the password alone, session-scoped
+unlock/lock, and export/import gated on password + seed phrase together —
+including the security property the whole design rests on, that a wrong
+password alone and a wrong seed phrase alone fail import with the exact
+same generic message.
+
 `verify-directory.js` is different — it's testing a JSON API, not a
 browser UI, so it needs no display and drives the directory service (with
 both demo domains already running) directly over `fetch`. It also spawns
@@ -759,27 +783,43 @@ main instance's 60-second interval.
 ## What this does and doesn't prove
 
 It proves the `worlds[]` manifest shape end to end, and a real working
-slice of §3.3, §5, §5.2, §5.4, §6, §7, and §11: an issuer signing real
-credentials, a wallet verifying them with no shared account system, that
-verification holding up unchanged on a domain that was never involved in
-issuing it, an owner-signed transfer that moves an item between two
-independent keys, a fungible balance that splits and settles by issuing
-fresh signed credentials rather than mutating anything in place, a
-two-intent trade that either settles atomically or not at all, a directory
-that indexes and ranks other domains' manifests without issuing anything
-itself, and both domain-to-subscriber mail and peer-to-peer Post Office
-mail with real consent/block controls. That's the actual claim
-ownership-without-a-blockchain rests on, and none of it is just written
-down anymore — it runs.
+slice of §3.3, §5, §5.2, §5.4, §5.5, §6, §7, §11, and §12: an issuer
+signing real credentials — unique and fungible alike, under one shape, with
+real server-enforced scarcity (`maxSupply` limited editions, per-wallet
+`holdingCap`s) neither backend just leaves to client goodwill — a wallet
+verifying them with no shared account system, that verification holding up
+unchanged on a domain that was never involved in issuing it, an
+owner-signed transfer that moves an item between two independent keys, a
+fungible balance that splits and settles by issuing fresh signed
+credentials rather than mutating anything in place, an open trade listing
+any station member can post or claim and that settles atomically or not at
+all (now covering a specific unique item, not only a fungible balance), a
+world drop anyone physically present can pick up with no addressee at all,
+a directory that indexes and ranks other domains' manifests without
+issuing anything itself, both domain-to-subscriber mail and peer-to-peer
+Post Office mail (including cross-domain federation) with real
+consent/block controls, and a domain- or world-published calendar any
+visitor's wallet can read, including a different domain's. That's the
+actual claim ownership-without-a-blockchain rests on, and none of it is
+just written down anymore — it runs.
 
 On top of that, and deliberately outside `SPEC.md`'s own scope (§10 and
 its closing note are explicit that in-world chat, presence, and anything
 else that only matters inside one domain aren't the protocol's business):
 real-time multiplayer presence and in-world chat, each with a genuine
 plain-PHP polling fallback for shared cPanel-style hosting that can't run
-a persistent WebSocket process, and a duplicate-identity join guard that
-keeps two visitors sharing one key pair from corrupting each other's
-roster entry.
+a persistent WebSocket process, a duplicate-identity join guard that keeps
+two visitors sharing one key pair from corrupting each other's roster
+entry, and a fully playable in-world chess minigame (`extension/chess.js`,
+task #195/#201) that mints a real credential — gold, plus a trophy on Hard
+difficulty — on checkmate. The Social tab's **Messaging window** (task
+#111) is closer to the protocol's own business without being part of it
+either: every message is ordinary Post Office mail under the hood (§11.3
+above), just diverted into its own thread view instead of the Mail list —
+but the message bodies themselves are genuinely end-to-end encrypted
+between the two wallets (a per-pair ECDH key exchange in `wallet.js`), so
+the relaying domain can no longer read what's actually being said, which
+is more than §11.3 itself promises or requires.
 
 It's still not hardened for anything beyond a demo, and a few
 simplifications are worth naming plainly rather than leaving implicit:
@@ -797,22 +837,34 @@ simplifications are worth naming plainly rather than leaving implicit:
   (§5.1.1, replacing a non-fungible asset's state without changing its
   `id`; the wallet auto-adopts the replacement and shows an unseen-count
   badge on the Wallet tab, see `AtlasWallet.processAssetUpdates`),
-  `/atlas/asset/split` and `/atlas/asset/consolidate` (§5.4/§5.4.1),
-  the `/atlas/trade/*` family — submit, listings, claim, cancel, catalog
-  (§7), `/atlas/convert` (§7's currency conversion), `/atlas/revoke`, `/atlas/mail/send` and
-  `/atlas/mail/check` (§11.1), and the `/atlas/postoffice/*` family
-  (§8 above, SPEC.md §11.3) — have no auth by design (beyond Post Office's
-  own self-signed-envelope checks on its self-service endpoints), so the
-  tests can exercise them freely. The whole thing runs over plain HTTP on
-  localhost. A real deployment needs real HTTPS domains and a real
-  access-controlled issuance flow — the point here was proving the
-  credential mechanisms themselves work, not building a production issuer.
+  `/atlas/asset/class` (§5.1.2 class discovery), `/atlas/asset/split` and
+  `/atlas/asset/consolidate` (§5.4/§5.4.1), the `/atlas/trade/*` family —
+  submit, listings, claim, cancel, catalog (§7), `/atlas/convert` (§7's
+  currency conversion), `/atlas/world/drop`, `/atlas/world/drops`, and the
+  claim/relay-claim pair (§5.5), `/atlas/calendar` (§12), `/atlas/revoke`,
+  `/atlas/mail/send` and `/atlas/mail/check` (§11.1), and the
+  `/atlas/postoffice/*` family (§8 above, SPEC.md §11.3, including
+  `/relay` for §11.4 federation) — have no auth by design (beyond Post
+  Office's own self-signed-envelope checks on its self-service endpoints,
+  and `/atlas/calendar`'s `POST` side being operator-authenticated in
+  whatever way a real domain chooses), so the tests can exercise them
+  freely. The whole thing runs over plain HTTP on localhost. A real
+  deployment needs real HTTPS domains and a real access-controlled
+  issuance flow — the point here was proving the credential mechanisms
+  themselves work, not building a production issuer.
 - The renderer is still a dependency-free `<canvas>` stand-in for what a
   production client would do with WebXR and glTF, which real browsers
   already support well, so re-implementing that wasn't the point.
 
-Nothing in `SPEC.md` remains entirely unimplemented as of this build —
-§5.2, §5.4, §7, and §11 (Mail, including Post Office) have all moved from
-spec-only into working code, alongside §3/§3.3 (manifest/portals,
-directory), §5/§5.1/§5.3 (items, classes, revocation), and §6/§6.1
-(identity, wallet export) from v1.1.
+Most of `SPEC.md` has moved from spec-only into working code by now — not
+just what v1.1 already listed here (§3/§3.3 manifest/portals/directory,
+§5/§5.1/§5.3 items/classes/revocation, §6/§6.1 identity/wallet export) but
+§5.2, §5.4, §5.5, §7, §11 (Mail, including Post Office and §11.4
+federation), and §12 (Calendar) too. The one deliberate exception is §3.5
+through §3.7 (per-page anchors, key-anchored worlds, and domain identity
+pinning) — the directory server verifies a key-anchored manifest for
+indexing purposes (§3.6), but the browser extension itself has no
+`identityKey`/`anchors` handling and never renders one of these worlds or
+shows the disclosure §3.6.1 requires. That's a real gap, not an oversight
+worth glossing over — if you're picking up this codebase to extend it,
+that's the actual unimplemented slice of the spec.
