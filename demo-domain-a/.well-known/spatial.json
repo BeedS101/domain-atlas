@@ -42,7 +42,13 @@
           "label": "Walk to Neighbor Workshop",
           "manifest": "http://localhost:8002/.well-known/spatial.json"
         },
-        { "kind": "world", "to": "lobby", "label": "Enter the Lobby" }
+        { "kind": "world", "to": "lobby", "label": "Enter the Lobby" },
+        {
+          "kind": "key",
+          "identityKey": "BImEaR461J9_IRSc6ZbYpG8A5b2_22vvSX91ERBcelUYsl5fvNhDEPWjnZTQW3Qrv_8DSnzx94-Ou6l1gONjgxQ",
+          "manifest": "http://localhost:8001/keyworld/spatial.json",
+          "label": "Step into the Unlisted Atrium"
+        }
       ]
     },
     {

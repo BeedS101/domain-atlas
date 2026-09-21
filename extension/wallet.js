@@ -934,6 +934,32 @@ const AtlasWallet = (() => {
     }
   }
 
+  // SPEC.md §3.6 — a key-anchored world's manifest carries `identityKey`
+  // instead of `domain`, trusted by its own signature rather than by TLS
+  // and DNS. Verification is exactly what §3.6 itself describes:
+  // canonicalize the manifest with `signature` removed (the same
+  // canonicalize() above, reused unchanged per §6.2) and check `signature`
+  // against `identityKey`. Deliberately the SAME algorithm and result
+  // shape as directory-server/server.js's own verifyKeyAnchoredManifest()
+  // — a directory verifies a submission "the same way a browsing client
+  // would" (§3.3's own words), so the two must actually match, not just
+  // claim to. Returns a plain boolean (not the {valid, reason} shape
+  // verifyCredential above uses) since there's no revocation list or
+  // issuer-key-validity-window concept for a manifest at all — a manifest
+  // signature either checks out or it doesn't.
+  async function verifyKeyAnchoredManifest(manifest) {
+    if (typeof manifest.signature !== 'string' || !manifest.signature) return false;
+    if (typeof manifest.identityKey !== 'string' || !manifest.identityKey) return false;
+    const { signature, ...unsigned } = manifest;
+    try {
+      const publicKey = await crypto.subtle.importKey('raw', b64urlDecode(manifest.identityKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+      const data = new TextEncoder().encode(canonicalize(unsigned));
+      return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(signature), data);
+    } catch {
+      return false; // malformed key or signature — same outcome as "doesn't verify"
+    }
+  }
+
   // Removes an asset from this wallet's LOCAL view only — there's no way
   // to ask the issuer to un-issue a credential, and nothing here pretends
   // to. This is for decluttering (a duplicate, a revoked asset you're done
@@ -4250,7 +4276,7 @@ const AtlasWallet = (() => {
     getIdentityMode, setIdentityMode, hasLocalIdentity, hasWebAuthnIdentity,
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
     getCounterparty, createCounterparty,
-    getWallet, mintAsset, verifyCredential, reverifyAll, exportWallet, importWallet, deleteAsset,
+    getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     exportFullBackup, importFullBackup,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset,

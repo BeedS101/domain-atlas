@@ -167,6 +167,56 @@
   #chessPromotionPicker.active { display: flex; }
   #chessPromotionPicker button { font-size: 22px; padding: 4px 10px; }
 
+  /* SPEC.md §3.6.1 — mandatory disclosure shown before ever entering a
+     key-anchored world (a portal.kind === 'key' target, see
+     followKeyAnchoredPortal()/showKeyAnchoredDisclosure() in viewer.js).
+     Every key-anchored world this extension can reach today falls under
+     §3.6.1's STRONGER disclosure tier ("absent from every directory the
+     client checks") because the client doesn't check any directory at
+     all yet (confirmed by grep — no directory-service integration exists
+     in this extension) — so this is always "a real interstitial requiring
+     an explicit, deliberate action to proceed," never the lighter
+     dismissible-banner tier. Modeled on #chessModal's full dark backdrop
+     just below (this IS an attention-holding decision, not merely an
+     FYI), but ranked ABOVE every other modal in this file — z-index 25,
+     above #duplicateJoinModal's 20 — because a trust decision about what
+     you're about to enter should never be able to hide behind, or get
+     dismissed incidentally along with, something else already open. */
+  #keyAnchorModal { display: none; position: fixed; inset: 0; z-index: 25; align-items: center; justify-content: center; background: rgba(8,13,16,0.82); }
+  #keyAnchorModal.active { display: flex; }
+  #keyAnchorBox {
+    background: rgba(20,31,38,0.98); border: 1px solid #6b5324; border-radius: 10px;
+    padding: 18px 20px; max-width: 380px; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+  }
+  #keyAnchorBox .subhead { color: #e0b84c; margin-bottom: 8px; }
+  #keyAnchorBox p { font-size: 13px; line-height: 1.5; margin: 0 0 10px; }
+  #keyAnchorFingerprint {
+    font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; color: #e0b84c;
+    background: rgba(224,184,76,0.08); border: 1px solid rgba(224,184,76,0.3); border-radius: 6px;
+    padding: 6px 8px; margin: 0 0 10px; word-break: break-all;
+  }
+  #keyAnchorLabelLine { font-size: 12px; color: #a9b8bf; margin: 0 0 14px; }
+  /* Reuses .danger-btn's shape (see its own rule further below) but
+     recolored amber — this is a caution, not the same "irreversible and
+     destructive" red .danger-btn means everywhere else (block user,
+     delete asset). */
+  #keyAnchorBox .btn-row button.danger-btn { border-color: #6b5324; color: #e0b84c; }
+  #keyAnchorBox .btn-row button.danger-btn:hover { border-color: #e0b84c; }
+
+  /* Persistent reminder while actually standing in a key-anchored world —
+     the modal above is a one-time entry gate, but §3.6.1 requires the
+     client to "never render [a key-anchored world] the same way" as an
+     ordinary one, which means an ongoing visual difference too. Built
+     into placeLabel's own innerHTML string on every enterWorld() landing
+     (see placeLabel.innerHTML in viewer.js) rather than toggled via a
+     class, since placeLabel.innerHTML already gets fully replaced on
+     every world entry regardless. */
+  #placeLabel .keyAnchorBadge {
+    display: inline-block; color: #16222a; background: #e0b84c; font-weight: 600;
+    font-family: -apple-system, Segoe UI, sans-serif; font-size: 11px;
+    border-radius: 999px; padding: 2px 8px; margin-left: 8px; letter-spacing: 0.02em;
+  }
+
   #walletBtn { position: relative; }
   #walletBadge {
     position: absolute; top: -6px; right: -6px; background: #57a593; color: #0e161b;
@@ -1043,7 +1093,7 @@
     <div class="scene-load-progress-track"><div id="sceneLoadProgressFill" class="scene-load-progress-fill"></div></div>
     <div id="sceneLoadProgressSpeed"></div>
   </div>
-  <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain</div>
+  <div id="hint">Orange portals swap worlds within this domain · teal portals cross to another domain · amber portals lead to a key-anchored world with no domain at all</div>
   <div id="scene3dHint">WASD to walk · drag to look · scroll to zoom out · walk into a glowing ring to take that portal · F11 for fullscreen</div>
   <div id="scene3dInteractHint"></div>
 
@@ -1075,6 +1125,23 @@
       <div class="btn-row">
         <button id="duplicateJoinLeaveBtn" type="button" class="btn-secondary">Leave now</button>
         <button id="duplicateJoinKeepBtn" type="button" class="btn-secondary">Keep this session active</button>
+      </div>
+    </div>
+  </div>
+  <!-- SPEC.md §3.6.1 — mandatory entry disclosure for a key-anchored
+       world. See followKeyAnchoredPortal()/showKeyAnchoredDisclosure() in
+       viewer.js for what populates and opens this, and the CSS comment
+       above for why it always renders at the stronger "real interstitial"
+       tier rather than a dismissible banner. -->
+  <div id="keyAnchorModal">
+    <div id="keyAnchorBox">
+      <div class="subhead">⚠ This space has no domain behind it</div>
+      <p>You're about to enter a space anchored only to a cryptographic key — not a domain. There's no TLS certificate, no DNS name, and no directory vouching for it. Anyone holding this key can present this exact space; nobody without it can fake it — but nothing here says who they are.</p>
+      <div id="keyAnchorFingerprint"></div>
+      <div id="keyAnchorLabelLine"></div>
+      <div class="btn-row">
+        <button id="keyAnchorStayBtn" type="button" class="btn-secondary">Stay here</button>
+        <button id="keyAnchorEnterBtn" type="button" class="danger-btn">Enter anyway</button>
       </div>
     </div>
   </div>

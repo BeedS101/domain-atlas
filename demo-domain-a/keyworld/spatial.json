@@ -1,0 +1,48 @@
+{
+  "spec": "domain-atlas/1.0",
+  "identityKey": "BImEaR461J9_IRSc6ZbYpG8A5b2_22vvSX91ERBcelUYsl5fvNhDEPWjnZTQW3Qrv_8DSnzx94-Ou6l1gONjgxQ",
+  "owner": {
+    "name": "Unlisted Atrium",
+    "contact": "no directory lists this space"
+  },
+  "defaultWorld": "atrium",
+  "worlds": [
+    {
+      "id": "atrium",
+      "name": "Unlisted Atrium",
+      "entry": {
+        "scene": "/keyworld/atrium/scene.json",
+        "renderer": [
+          "procedural-v1"
+        ]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": false,
+        "identityRequired": false,
+        "itemDropsAllowed": false,
+        "trustedIssuers": "any"
+      },
+      "profile": {
+        "genre": "unlisted",
+        "scale": "room",
+        "capabilities": {
+          "building": "none",
+          "vehicles": false,
+          "combat": "none",
+          "landOwnership": false
+        }
+      },
+      "portals": [
+        {
+          "kind": "domain",
+          "to": "localhost:8001",
+          "label": "Return to Example Plaza",
+          "manifest": "http://localhost:8001/.well-known/spatial.json"
+        }
+      ]
+    }
+  ],
+  "updated": "2026-09-21T08:55:39.125Z",
+  "signature": "xg3MAyi3fRgeqsIj3JqfIwlGNLDLNeSPOR3T_BqSDQbZkDIeWkofnLyQ-rL_-eyhIb_LfTPSJo0sywBipkm1-Q"
+}

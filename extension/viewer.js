@@ -24,6 +24,17 @@ const duplicateJoinCountdownEl = document.getElementById('duplicateJoinCountdown
 const duplicateJoinLeaveBtn = document.getElementById('duplicateJoinLeaveBtn');
 const duplicateJoinKeepBtn = document.getElementById('duplicateJoinKeepBtn');
 
+// SPEC.md §3.6.1 — mandatory disclosure shown before ever entering a
+// key-anchored world (a portal.kind === 'key' target). See
+// followKeyAnchoredPortal()/showKeyAnchoredDisclosure() further below for
+// the logic, and viewer.html's own CSS comment on #keyAnchorModal for why
+// this always renders at the stronger "real interstitial" tier.
+const keyAnchorModalEl = document.getElementById('keyAnchorModal');
+const keyAnchorFingerprintEl = document.getElementById('keyAnchorFingerprint');
+const keyAnchorLabelLineEl = document.getElementById('keyAnchorLabelLine');
+const keyAnchorStayBtn = document.getElementById('keyAnchorStayBtn');
+const keyAnchorEnterBtn = document.getElementById('keyAnchorEnterBtn');
+
 // In-world chat (#105-109) — anchored bottom-left of the canvas, see the
 // "in-world chat" section further below (right after presence) for the
 // connection logic these elements are driven by.
@@ -2341,7 +2352,16 @@ async function enterWorld(worldId) {
   await refreshMyPublicKeyDisplay();
   refreshWorldGates();
 
-  placeLabel.innerHTML = world.name + ' <span class="domain">' + manifest.domain + ' · ' + world.id + '</span>';
+  // SPEC.md §3.6.1 — a key-anchored world (no manifest.domain) gets the
+  // persistent amber "no domain — key only" badge right here, not just a
+  // one-time entry warning; this line is what's on screen for as long as
+  // you're standing in the world, so it's the natural place for an
+  // ongoing reminder to live. placeLabelHTML fully rebuilds the innerHTML
+  // string each time (no static badge markup — innerHTML below would just
+  // clobber it on every world entry anyway).
+  placeLabel.innerHTML = manifest.domain
+    ? world.name + ' <span class="domain">' + manifest.domain + ' · ' + world.id + '</span>'
+    : world.name + ' <span class="domain">' + manifestLabelOf(manifest) + ' · ' + world.id + '</span><span class="keyAnchorBadge">⚠ no domain — key only</span>';
   // document.title here is a no-op for anything actually visible — this
   // document is an extension-origin IFRAME, cross-origin from the host page,
   // and an iframe doesn't own the top-level browser tab title no matter what
@@ -2355,7 +2375,7 @@ async function enterWorld(worldId) {
   // a chat feature and shouldn't silently stop updating just because a
   // world hasn't opted into chat.
   document.title = 'Domain Atlas — ' + world.name;
-  window.parent.postMessage({ type: 'domain-atlas-title', title: manifest.domain + ': ' + world.name }, '*');
+  window.parent.postMessage({ type: 'domain-atlas-title', title: manifestLabelOf(manifest) + ': ' + world.name }, '*');
   await AtlasWallet.recordWorldVisit({
     domain: manifest.domain,
     world: world.id,
@@ -2371,7 +2391,12 @@ async function enterWorld(worldId) {
   // awaited — the world itself has already been recorded/labeled above,
   // and a slow or unreachable domain shouldn't stall getting into it;
   // checkAllMail already swallows a single domain's failure on its own.
-  checkItemUpdatesForDomain(manifest.domain);
+  // Guarded on manifest.domain: checkAllMail's onlyDomain filter only
+  // filters when truthy (see wallet.js), so an unguarded call here with
+  // undefined would silently check EVERY domain this wallet holds
+  // anything from — not "no domain to check", the opposite of it — every
+  // time a key-anchored world (SPEC.md §3.6) is entered.
+  if (manifest.domain) checkItemUpdatesForDomain(manifest.domain);
 
   // Leaving whichever world was active before — if it was a 3D one, its
   // render loop and input listeners need tearing down before anything else
@@ -2437,6 +2462,15 @@ async function enterWorld(worldId) {
       active3D = MiniGLTF.init(scene3dCanvas, {
         sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
+        // NOTE (SPEC.md §3.6): only a binary same-domain/cross-domain
+        // distinction exists in the 3D renderer today — a `kind: 'key'`
+        // portal (followPortal()'s new branch, 2D-only so far) would fall
+        // through to the "same domain" (false) color here rather than get
+        // its own look. Not exercised by this round's demo content (the
+        // 3D Lobby has no key-anchored portal), so left as a known gap for
+        // whenever a 3D key-anchored portal is actually built, rather than
+        // reworking buildPortalRing/buildPortalBeacon's boolean signature
+        // for a case nothing currently uses.
         isCrossDomainPortal: (portalIndex) => !!(world.portals[portalIndex] && world.portals[portalIndex].kind === 'domain'),
         onPortalEnter: (portalIndex) => followPortal(world.portals[portalIndex]),
         // Task #208 — same handleInteractable() the 2D renderer's click
@@ -2523,7 +2557,7 @@ async function enterWorld(worldId) {
       // first WORLD_DROPS_POLL_MS tick — same timing this call already has
       // in the 2D branch below, right after window.__atlasScene is set up.
       await refreshSceneItemMarkers();
-      statusEl.textContent = 'In sync with ' + manifest.domain + ' · ' + world.id;
+      statusEl.textContent = 'In sync with ' + manifestLabelOf(manifest) + ' · ' + world.id;
       history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
 
       // Presence (#66) — join this domain+world's room so other current
@@ -2543,8 +2577,17 @@ async function enterWorld(worldId) {
       // requires an identity" principle #63 established; they simply can't
       // be friend-requested (nothing stable to add), but everything else
       // about presence works exactly as before.
-      connectPresence(manifest.domain, world.id, presenceName, manifest.presence, presenceIdentity ? presenceIdentity.publicKey : null);
-      if (chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence); // #111 — only if this world (or the whole domain) actually opted in
+      // SPEC.md §3.6 — presence and chat rooms are keyed by manifest.domain
+      // (see connectPresence/connectChat's own `domain` param), which a
+      // key-anchored world simply doesn't have. Rather than connect either
+      // one under an `undefined` room key, both are skipped entirely for a
+      // key-anchored world in this first cut — out of scope per SPEC.md
+      // §3.6/§3.6.1 (this feature is rendering + disclosure only), not a
+      // claim that presence/chat could never make sense there.
+      if (manifest.domain) {
+        connectPresence(manifest.domain, world.id, presenceName, manifest.presence, presenceIdentity ? presenceIdentity.publicKey : null);
+        if (chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence); // #111 — only if this world (or the whole domain) actually opted in
+      }
     } catch (err) {
       hideSceneLoadProgress(); // a failed load shouldn't leave a stuck progress bar over the error message
       statusEl.textContent = 'Could not load world: ' + err.message;
@@ -2575,14 +2618,16 @@ async function enterWorld(worldId) {
     };
     await refreshSceneItemMarkers();
 
-    statusEl.textContent = 'In sync with ' + manifest.domain + ' · ' + world.id;
+    statusEl.textContent = 'In sync with ' + manifestLabelOf(manifest) + ' · ' + world.id;
     history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
     // Chat has no visible character to attach to (unlike presence, #66),
     // so unlike connectPresence() it isn't gated on the 3D renderer at
     // all — a 2D (procedural-v1) world gets a live chat room too. Still
     // gated on the world/domain actually opting in (#111) same as the 3D
-    // branch above.
-    if (chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence);
+    // branch above. Also gated on manifest.domain itself (SPEC.md §3.6) —
+    // see the 3D branch's own comment on connectPresence/connectChat above
+    // for why a key-anchored world skips chat entirely in this first cut.
+    if (manifest.domain && chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence);
   } catch (err) {
     statusEl.textContent = 'Could not load world: ' + err.message;
     window.__atlasScene = { floor: { size: [10, 10], color: '#2a1a1a' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
@@ -2602,7 +2647,99 @@ async function followPortal(portal) {
   } else if (portal.kind === 'domain') {
     // Crossing a real trust boundary: fetch the other domain's own manifest.
     await loadManifest(portal.manifest);
+  } else if (portal.kind === 'key') {
+    // SPEC.md §3.6 — crossing into a world trusted by a key, not a domain.
+    await followKeyAnchoredPortal(portal);
   }
+}
+
+// SPEC.md §3.6/§3.6.1 — a portal whose `kind` is 'key' names a
+// key-anchored world by the PUBLIC KEY it must present, not a domain to
+// trust via TLS/DNS. Three checks have to pass, in this order, before this
+// wallet ever shows what's on the other side:
+//   1. the fetched manifest's own `identityKey` must equal the one THIS
+//      portal declared — otherwise a host could swap a portal's target for
+//      a different key-anchored world without the visitor noticing (the
+//      exact substitution §3.6 calls out by name);
+//   2. the manifest must actually be signed by that key
+//      (AtlasWallet.verifyKeyAnchoredManifest — the same algorithm
+//      directory-server/server.js's own verifyKeyAnchoredManifest uses for
+//      the same check, per §3.3's "the same way a browsing client would");
+//   3. only once both of those hold does the mandatory §3.6.1 disclosure
+//      even get a chance to show — there's nothing honest to disclose yet
+//      about a manifest that hasn't been shown to be genuinely
+//      key-anchored.
+// Every key-anchored world reachable from here lands in §3.6.1's STRONGER
+// disclosure tier ("absent from every directory the client checks")
+// because this extension doesn't check any directory at all yet (see the
+// CSS comment on #keyAnchorModal in viewer.html) — that's a fact about
+// this build, not a per-portal judgment call made here.
+async function followKeyAnchoredPortal(portal) {
+  if (!portal.manifest || !portal.identityKey) {
+    statusEl.textContent = 'This portal is missing what it needs to reach a key-anchored world.';
+    return;
+  }
+  statusEl.textContent = 'Fetching key-anchored manifest…';
+  let manifest;
+  try {
+    const res = await fetch(portal.manifest, { cache: 'no-store' });
+    manifest = await res.json();
+  } catch (err) {
+    statusEl.textContent = 'Could not reach that key-anchored world: ' + err.message;
+    return;
+  }
+  if (manifest.identityKey !== portal.identityKey) {
+    statusEl.textContent = 'This portal\'s key-anchored world doesn\'t match the key it was linked with — refusing to enter.';
+    return;
+  }
+  if (!(await AtlasWallet.verifyKeyAnchoredManifest(manifest))) {
+    statusEl.textContent = 'That key-anchored world\'s manifest signature doesn\'t check out — refusing to enter.';
+    return;
+  }
+  const targetWorldId = portal.world || manifest.defaultWorld;
+  const targetWorld = manifest.worlds.find((w) => w.id === targetWorldId) || manifest.worlds[0];
+  // Task #63's identity-before-entry gate applies here too — checked before
+  // the mandatory disclosure below, same "cancel means you never left"
+  // ordering loadManifest() already uses for domain portals.
+  if (!(await ensureIdentityForEntry(manifest, targetWorld))) return;
+  statusEl.textContent = '';
+  if (!(await showKeyAnchoredDisclosure(portal, manifest))) {
+    statusEl.textContent = 'Stayed here.';
+    return;
+  }
+  currentManifest = manifest;
+  currentManifestUrl = portal.manifest;
+  currentOrigin = new URL(portal.manifest).origin;
+  await enterWorld(targetWorldId);
+}
+
+// SPEC.md §3.6.1 — "a real, unavoidable disclosure — not a dismissible
+// toast, not fine print" shown before ever entering a key-anchored world,
+// requiring "an explicit, deliberate action to proceed." Resolves true on
+// "Enter anyway", false on "Stay here" (or if the modal has no buttons
+// wired up at all, which fails safely closed rather than open).
+function showKeyAnchoredDisclosure(portal, manifest) {
+  return new Promise((resolve) => {
+    if (!keyAnchorModalEl || !keyAnchorStayBtn || !keyAnchorEnterBtn) {
+      resolve(false); // no UI to show the disclosure in — never silently proceed
+      return;
+    }
+    if (keyAnchorFingerprintEl) keyAnchorFingerprintEl.textContent = manifest.identityKey;
+    if (keyAnchorLabelLineEl) {
+      keyAnchorLabelLineEl.textContent = 'Reached via portal: ' + (portal.label || portal.manifest);
+    }
+    keyAnchorModalEl.classList.add('active');
+    const finish = (result) => {
+      keyAnchorModalEl.classList.remove('active');
+      keyAnchorStayBtn.removeEventListener('click', onStay);
+      keyAnchorEnterBtn.removeEventListener('click', onEnter);
+      resolve(result);
+    };
+    const onStay = () => finish(false);
+    const onEnter = () => finish(true);
+    keyAnchorStayBtn.addEventListener('click', onStay);
+    keyAnchorEnterBtn.addEventListener('click', onEnter);
+  });
 }
 
 // --- isometric rendering (unchanged mechanics, world-agnostic) ---
@@ -2693,38 +2830,44 @@ function shade(hex, factor) {
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
 
+// SPEC.md §3.6.1 — a key-anchored portal ('key') gets its own amber look,
+// the SAME warning color already used for the risky-world loadout note and
+// the key-anchored entry disclosure (#keyAnchorModal in viewer.html) —
+// never the routine orange ('world', same domain) or teal ('domain', a
+// normal cross-domain trust boundary), because stepping through this one
+// isn't an ordinary trust boundary crossing at all.
+function portalPalette(kind) {
+  if (kind === 'domain') return { glow: '87,165,147', solid: '#57a593', tag: '⇢ domain' };
+  if (kind === 'key') return { glow: '224,184,76', solid: '#e0b84c', tag: '⚿ key-anchored' };
+  return { glow: '192,90,31', solid: '#e08a4c', tag: '↻ world' };
+}
+
 function drawPortal(marker, originX, originY, pulse) {
   const [x, y, z] = marker.position;
   const base = project(x, 0, z, originX, originY);
   const top = project(x, 2.2, z, originX, originY);
   const radius = 16 + Math.sin(pulse) * 3;
-  const isCrossDomain = marker.portal && marker.portal.kind === 'domain';
+  const palette = portalPalette(marker.portal && marker.portal.kind);
 
   const grad = ctx.createLinearGradient(base.x, base.y, top.x, top.y);
-  if (isCrossDomain) {
-    grad.addColorStop(0, 'rgba(87,165,147,0.15)');
-    grad.addColorStop(1, 'rgba(87,165,147,0.9)');
-  } else {
-    grad.addColorStop(0, 'rgba(192,90,31,0.15)');
-    grad.addColorStop(1, 'rgba(224,138,76,0.85)');
-  }
+  grad.addColorStop(0, 'rgba(' + palette.glow + ',0.15)');
+  grad.addColorStop(1, 'rgba(' + palette.glow + ',0.9)');
 
   ctx.beginPath();
   ctx.ellipse((base.x + top.x) / 2, (base.y + top.y) / 2, radius * 0.55, radius, 0, 0, Math.PI * 2);
   ctx.fillStyle = grad;
-  ctx.shadowColor = isCrossDomain ? '#57a593' : '#e08a4c';
+  ctx.shadowColor = palette.solid;
   ctx.shadowBlur = 18 + Math.sin(pulse) * 6;
   ctx.fill();
   ctx.shadowBlur = 0;
 
   if (marker.portal) {
-    const tag = isCrossDomain ? '⇢ domain' : '↻ world';
     ctx.font = '11px system-ui, sans-serif';
-    ctx.fillStyle = isCrossDomain ? '#57a593' : '#e08a4c';
+    ctx.fillStyle = palette.solid;
     ctx.textAlign = 'center';
-    ctx.fillText(marker.portal.label || tag, (base.x + top.x) / 2, base.y + 18);
+    ctx.fillText(marker.portal.label || palette.tag, (base.x + top.x) / 2, base.y + 18);
     ctx.font = '9px system-ui, sans-serif';
-    ctx.fillText(tag, (base.x + top.x) / 2, base.y + 32);
+    ctx.fillText(palette.tag, (base.x + top.x) / 2, base.y + 32);
   }
 
   return { sx: (base.x + top.x) / 2, sy: (base.y + top.y) / 2, radius: radius + 20, marker };
@@ -3059,10 +3202,17 @@ async function fetchDomainPortalWorld(portal) {
 function renderPortalTooltip(portal, world, manifest) {
   if (!portalTooltipEl) return;
   const isCrossDomain = portal.kind === 'domain';
+  const isKeyAnchored = portal.kind === 'key';
   const lines = [
-    '<div style="font-weight:600;margin-bottom:2px;">' + escapeHtml(portal.label || (isCrossDomain ? 'Cross-domain portal' : 'Portal')) + '</div>'
+    '<div style="font-weight:600;margin-bottom:2px;">' + escapeHtml(portal.label || (isCrossDomain ? 'Cross-domain portal' : isKeyAnchored ? 'Key-anchored portal' : 'Portal')) + '</div>'
   ];
   if (isCrossDomain) lines.push('<div style="color:#a9b8bf;">⇢ ' + escapeHtml(portal.to) + '</div>');
+  // SPEC.md §3.6.1 — this warning belongs in the HOVER preview too, not
+  // just the entry-time disclosure modal: a visitor deciding whether to
+  // even walk toward this portal should already know it has no domain
+  // behind it — same "never render it the same way" requirement behind
+  // drawPortal's distinct amber color for this kind (see portalPalette).
+  if (isKeyAnchored) lines.push('<div style="color:#e0b84c;">⚿ no domain — trusted only by its key</div>');
   if (world === undefined) {
     lines.push('<div>…</div>');
   } else if (world === null) {
@@ -3164,7 +3314,15 @@ canvas.addEventListener('mousemove', (e) => {
   if (portal.kind === 'world') {
     const world = (currentManifest && currentManifest.worlds.find((w) => w.id === portal.to)) || null;
     renderPortalTooltip(portal, world, currentManifest);
-  } else if (portal.kind === 'domain') {
+  } else if (portal.kind === 'domain' || portal.kind === 'key') {
+    // SPEC.md §3.6 — a 'key' portal's manifest lives at a URL just like a
+    // 'domain' one's does, so the same unauthenticated preview fetch
+    // (fetchDomainPortalWorld — no signature check, just a UI preview,
+    // same as it's always been for cross-domain portals) works unchanged
+    // here. Nothing about THIS fetch verifies identityKey/signature — that
+    // only happens for real in followKeyAnchoredPortal() at actual entry
+    // time; a hover preview that turned out to be lying costs nothing, but
+    // it still gets the isKeyAnchored warning line above regardless.
     renderPortalTooltip(portal, undefined, null);
     fetchDomainPortalWorld(portal).then((result) => {
       if (hoveredPortalMarker === hit.marker) renderPortalTooltip(portal, result ? result.world : null, result ? result.manifest : null);
@@ -3214,6 +3372,16 @@ function short(b64url, n) {
 
 function manifestDomainOf(manifest) {
   return manifest.domain;
+}
+
+// SPEC.md §3.6 — a key-anchored manifest has no domain string at all, so
+// anywhere this file would otherwise interpolate manifest.domain into a
+// human-facing label (status line, tab title, place label) falls back to
+// a short identityKey fingerprint instead. Deliberately prefixed "key:" so
+// it can never be mistaken for a real domain even at a glance — the whole
+// point of §3.6.1 is that this must never read the way a domain does.
+function manifestLabelOf(manifest) {
+  return manifest.domain || ('key:' + short(manifest.identityKey || '', 10));
 }
 
 function combatOf(world) {
@@ -6881,6 +7049,10 @@ async function refreshSubscribeButton() {
     return;
   }
   const domain = manifestDomainOf(currentManifest);
+  if (!domain) { // SPEC.md §3.6 — a key-anchored world has no domain to subscribe to
+    subscribeSectionEl.hidden = true;
+    return;
+  }
   if (await alreadyHasMembership(domain)) {
     subscribeSectionEl.hidden = true;
     return;
@@ -6908,7 +7080,11 @@ async function alreadyHasPostOfficeMembership(domain) {
 async function refreshPostOfficeJoinButton() {
   if (!postOfficeJoinSectionEl) return;
   if (postOfficeJoinStatusEl) postOfficeJoinStatusEl.textContent = '';
-  if (!currentManifest || !currentManifest.postOffice) {
+  // The `|| !manifestDomainOf(...)` half of this guard is SPEC.md §3.6 —
+  // Post Office membership/mail relay is a domain-identity feature; a
+  // key-anchored world has no domain to join a Post Office AS, even if
+  // its manifest happened to declare one.
+  if (!currentManifest || !currentManifest.postOffice || !manifestDomainOf(currentManifest)) {
     postOfficeJoinSectionEl.hidden = true;
     return;
   }
@@ -7549,7 +7725,10 @@ async function alreadyHasTradingStationMembership(domain) {
 async function refreshTradingStationJoinButton() {
   if (!tradingStationJoinSectionEl) return;
   if (tradingStationJoinStatusEl) tradingStationJoinStatusEl.textContent = '';
-  if (!currentManifest || !currentManifest.tradingStation) {
+  // SPEC.md §3.6 — same reasoning as refreshPostOfficeJoinButton's own
+  // domain guard above: Trading Station membership is a domain-identity
+  // feature a key-anchored world has no domain to join it AS.
+  if (!currentManifest || !currentManifest.tradingStation || !manifestDomainOf(currentManifest)) {
     tradingStationJoinSectionEl.hidden = true;
     return;
   }
@@ -7581,7 +7760,9 @@ async function refreshRemoteTradeStationOptions() {
     const memberships = await AtlasWallet.getTradingStationMemberships(identity.publicKey);
     memberships.forEach((m) => domains.add(m.domain));
   }
-  if (currentManifest && currentManifest.tradingStation) domains.add(manifestDomainOf(currentManifest));
+  // manifestDomainOf(...) guard here is SPEC.md §3.6 again — a key-anchored
+  // world's tradingStation flag (if it even set one) names no domain to add.
+  if (currentManifest && currentManifest.tradingStation && manifestDomainOf(currentManifest)) domains.add(manifestDomainOf(currentManifest));
 
   remoteTradeStationDomainSelect.innerHTML = '';
   if (domains.size === 0) {

@@ -1,0 +1,22 @@
+{
+  "format": "procedural-v1",
+  "floor": {
+    "size": [12, 12],
+    "color": "#241d10"
+  },
+  "objects": [
+    {
+      "type": "box",
+      "position": [0, 1, -4],
+      "size": [3, 2, 0.3],
+      "color": "#e0b84c",
+      "label": "Unlisted Atrium — no domain here"
+    }
+  ],
+  "portalMarkers": [
+    {
+      "position": [0, 0, 4],
+      "portalIndex": 0
+    }
+  ]
+}
