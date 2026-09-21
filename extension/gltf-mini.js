@@ -922,6 +922,113 @@
     // not the whole page.
     function onContextMenu(e) { e.preventDefault(); }
 
+    // Mouse-hover cursor hint for 3D interactables (Bruno's confirmed spec,
+    // verbatim: "cursor as hint only the rest stays the same"). The ONLY
+    // visible effect is canvas.style.cursor switching to 'pointer' while the
+    // mouse is over an on-screen interactable or dropped item, at ANY
+    // distance — not gated by the proximity radius that drives the E-prompt/
+    // Previewer. It never opens the Previewer and never changes what E does;
+    // the existing proximity-triggered flow above is completely untouched.
+    // It also adds no new authored data — it reuses the exact same
+    // position+radius pairs interactTriggers/itemDropEntries already carry
+    // for that proximity system, just tested with a ray instead of a planar
+    // distance.
+    //
+    // currentEyeAndBasis() recomputes the eye position and the fwd/right/up
+    // camera basis completely independently of the render loop's own inline
+    // version further down (rather than refactoring that code to expose it)
+    // — same duplication-over-shared-refactor precedent already used
+    // elsewhere in this file (see formatMass/itemDropLabel's own comment
+    // above). The two must be kept in sync by hand if the camera model ever
+    // changes (e.g. a new zoom curve).
+    function currentEyeAndBasis() {
+      const cosP = Math.cos(camera.pitch), sinP = Math.sin(camera.pitch);
+      const cosY = Math.cos(camera.yaw), sinY = Math.sin(camera.yaw);
+      const fwd = [sinY * cosP, sinP, -cosY * cosP];
+      const right = normalize(cross(fwd, [0, 1, 0]));
+      const up = normalize(cross(right, fwd));
+      let eye;
+      if (cameraDistance > 0) {
+        const heightOffset = (cameraDistance / MAX_CAMERA_DISTANCE) * MAX_FOLLOW_HEIGHT;
+        eye = [
+          camera.pos[0] - fwd[0] * cameraDistance,
+          standingEyeY + lastCharacterBaseY + heightOffset - fwd[1] * cameraDistance,
+          camera.pos[2] - fwd[2] * cameraDistance
+        ];
+      } else {
+        eye = camera.pos;
+      }
+      return { eye, fwd, right, up };
+    }
+
+    // Ray-sphere intersection (a standard quadratic solve) — origin/dir
+    // define the ray, center/radius the sphere. Returns the nearest hit
+    // distance in front of the camera (t >= 0), or null; the caller here
+    // only needs "did it hit at all" but a distance is cheap to hand back
+    // too, in case a future caller wants nearest-target picking.
+    function raySphereHit(origin, dir, center, radius) {
+      const ox = origin[0] - center[0], oy = origin[1] - center[1], oz = origin[2] - center[2];
+      const b = ox * dir[0] + oy * dir[1] + oz * dir[2];
+      const c = ox * ox + oy * oy + oz * oz - radius * radius;
+      const disc = b * b - c;
+      if (disc < 0) return null;
+      const sqrtDisc = Math.sqrt(disc);
+      const t0 = -b - sqrtDisc, t1 = -b + sqrtDisc;
+      if (t0 >= 0) return t0;
+      if (t1 >= 0) return t1;
+      return null;
+    }
+
+    // Builds the same combined interactable+drop list the proximity/E
+    // system walks (interactTriggers + itemDropEntries), each reduced to
+    // just a world position and radius, so a single ray test is reused
+    // across both instead of a third parallel data structure.
+    function hoverCandidates() {
+      const list = [];
+      interactTriggers.forEach((trigger) => { list.push({ position: trigger.position, radius: trigger.radius }); });
+      itemDropEntries.forEach((entry) => { list.push({ position: entry.position, radius: entry.radius }); });
+      return list;
+    }
+
+    function onCanvasHoverMove(e) {
+      // Dragging already repurposes the mouse for camera rotation — there's
+      // nothing meaningful under a moving look-drag crosshair, and pointer
+      // capture during a drag means clientX/Y here aren't a stable canvas
+      // position anyway, so skip the ray test entirely while dragging.
+      if (dragging) return;
+      const rect = canvas.getBoundingClientRect();
+      const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = 1 - ((e.clientY - rect.top) / rect.height) * 2;
+      const aspect = canvas.width / Math.max(1, canvas.height);
+      const fovY = Math.PI / 3; // same 60° vertical FOV as mat4Perspective's own call in the render loop below
+      const tanFov = Math.tan(fovY / 2);
+      const { eye, fwd, right, up } = currentEyeAndBasis();
+      // Ray direction: straight ahead, plus a slice of right/up scaled by
+      // the NDC offset and the same tan(fov/2)*aspect factor a perspective
+      // projection itself applies — the inverse of turning a view-space ray
+      // into a screen point, done directly against this camera's own
+      // already-known basis rather than via a generic unproject/matrix-
+      // inverse utility (this file doesn't otherwise carry one).
+      const dir = normalize([
+        fwd[0] + right[0] * ndcX * tanFov * aspect + up[0] * ndcY * tanFov,
+        fwd[1] + right[1] * ndcX * tanFov * aspect + up[1] * ndcY * tanFov,
+        fwd[2] + right[2] * ndcX * tanFov * aspect + up[2] * ndcY * tanFov
+      ]);
+      let hit = false;
+      const candidates = hoverCandidates();
+      for (let i = 0; i < candidates.length; i++) {
+        // The proximity radius interactTriggers/itemDropEntries carry is a
+        // walk-up trigger distance, not an authored visual bounding sphere
+        // — reusing it directly (per the design Bruno approved: no new
+        // scene.json field, no per-model bounding-box extraction) makes the
+        // hover target a bit generous rather than pixel-tight, which is
+        // fine for a distance hint whose whole job is "something's over
+        // there."
+        if (raySphereHit(eye, dir, candidates[i].position, candidates[i].radius) !== null) { hit = true; break; }
+      }
+      canvas.style.cursor = hit ? 'pointer' : '';
+    }
+
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     // 'focusin' (not 'focus') because it bubbles — a single listener on
@@ -935,6 +1042,7 @@
     canvas.addEventListener('contextmenu', onContextMenu);
     canvas.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mouseup', onMouseUp);
+    canvas.addEventListener('mousemove', onCanvasHoverMove);
 
     async function loadScene(newSceneData) {
       sceneData = newSceneData;
@@ -1535,6 +1643,7 @@
       canvas.removeEventListener('contextmenu', onContextMenu);
       canvas.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mouseup', onMouseUp);
+      canvas.removeEventListener('mousemove', onCanvasHoverMove);
       canvas.removeEventListener('wheel', onWheel);
     }
 
