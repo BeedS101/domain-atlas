@@ -2,11 +2,14 @@
 
 A working proof that the mechanisms in `SPEC.md` are real. A browser
 extension reads a domain's manifest, renders whichever worlds it declares,
-and lets you walk through two genuinely different kinds of portal — one
-that swaps worlds inside a single domain with no network round-trip, and
-one that crosses to a completely separate domain. On top of that, a real
-wallet: a genuine WebAuthn (or password-backed) identity, real ECDSA-signed
-credentials issued by an actual small server, verified with real
+and lets you walk through three genuinely different kinds of portal — one
+that swaps worlds inside a single domain with no network round-trip, one
+that crosses to a completely separate domain, and one that leads to a
+**key-anchored world** (§3.6) — a space trusted by its own signature
+instead of a domain, TLS, or DNS at all — gated behind a mandatory,
+non-dismissible trust disclosure before you're let in (§3.6.1). On top of
+that, a real wallet: a genuine WebAuthn (or password-backed) identity, real
+ECDSA-signed credentials issued by an actual small server, verified with real
 cryptography — unique items and fungible resources under one credential
 shape, PvP loadouts with an owner-signed transfer-on-loss, open trade
 listings a station settles atomically (unique items included, not just
@@ -32,6 +35,9 @@ domain-atlas/
 ├── presence-server/                hand-rolled WebSocket server for multiplayer presence + chat
 ├── presence-php/                  plain-PHP polling port of presence + chat, same hosting reason
 ├── demo-domain-a/                 "Example Plaza" — FIVE worlds: plaza, museum, arena, market, lobby
+│   └── keyworld/                    a SIXTH, separately-signed key-anchored manifest (§3.6) —
+│                                      not one of the five above, reachable only via Plaza's own
+│                                      amber portal, deliberately absent from any directory
 ├── demo-domain-b/                 "Neighbor Workshop" — one world, a real issuer (see below)
 ├── tools/                         scene-editor.html — a standalone editor for gltf-mini scenes
 └── test/
@@ -90,10 +96,18 @@ curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real publi
 
 1. Visit `http://localhost:8001` — it looks like an ordinary page.
 2. A **🧭 Enter Space: Example Plaza (+4 more)** button appears bottom-right.
-3. Click it. The Plaza world renders with five portals: four **orange**
+3. Click it. The Plaza world renders with six portals: four **orange**
    (same-origin, swap worlds, no re-fetch — to the museum, the arena, the
-   trading post, and the lobby) and one **teal** (crosses to another
-   domain, fetches a fresh manifest).
+   trading post, and the lobby), one **teal** (crosses to another domain,
+   fetches a fresh manifest), and one **amber**, leading to a
+   **key-anchored world** (§3.6) — trusted only by its own signature, no
+   domain at all. Hover it first: the tooltip already discloses there's no
+   domain behind it. Click it and a real, non-dismissible warning screen
+   opens before you're let in, explaining exactly what that means and what
+   it doesn't protect against; "Enter anyway" drops you into the Unlisted
+   Atrium, marked the whole time you're there with an amber badge instead
+   of a domain name. Its own portal back to Plaza is an ordinary teal
+   cross-domain one — leaving needs no special mechanism of its own.
 4. Click **Create Atlas Identity** — a real `navigator.credentials.create()`
    call, your device's own passkey prompt, a genuine keypair. It's now
    persisted, not thrown away when you close the panel.
@@ -860,11 +874,20 @@ Most of `SPEC.md` has moved from spec-only into working code by now — not
 just what v1.1 already listed here (§3/§3.3 manifest/portals/directory,
 §5/§5.1/§5.3 items/classes/revocation, §6/§6.1 identity/wallet export) but
 §5.2, §5.4, §5.5, §7, §11 (Mail, including Post Office and §11.4
-federation), and §12 (Calendar) too. The one deliberate exception is §3.5
-through §3.7 (per-page anchors, key-anchored worlds, and domain identity
-pinning) — the directory server verifies a key-anchored manifest for
-indexing purposes (§3.6), but the browser extension itself has no
-`identityKey`/`anchors` handling and never renders one of these worlds or
-shows the disclosure §3.6.1 requires. That's a real gap, not an oversight
-worth glossing over — if you're picking up this codebase to extend it,
-that's the actual unimplemented slice of the spec.
+federation), and §12 (Calendar) too. §3.6 (key-anchored worlds) and §3.6.1
+(its mandatory trust disclosure) are implemented now too, and not just on
+the directory server's side (which only ever verified a key-anchored
+manifest for indexing purposes) — the browser extension itself fetches and
+verifies one (`AtlasWallet.verifyKeyAnchoredManifest` in `wallet.js`,
+mirroring the directory server's own algorithm exactly), refuses it
+outright on a key mismatch or a bad signature, and shows the real,
+non-dismissible disclosure §3.6.1 requires before ever rendering one (see
+"Try it" above, step 3, and `test/manual-key-anchored-world.js`). The
+remaining deliberate exception is §3.5 and §3.7 (per-page anchors and
+optional domain identity pinning) — neither has any implementation
+anywhere in this codebase yet. That's a real gap, not an oversight worth
+glossing over — if you're picking up this codebase to extend it, that's
+the actual unimplemented slice of the spec. (One narrower gap inside the
+implemented slice: the 3D renderer has no distinct visual of its own for a
+key-anchored portal yet — only the 2D `procedural-v1` renderer does, which
+is what every demo content uses for one today.)
