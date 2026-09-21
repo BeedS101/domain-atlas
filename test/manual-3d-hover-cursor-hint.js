@@ -36,6 +36,11 @@ const CRATE = { position: [0.3, 0, -0.8], radius: 1.7 };
 // throughout this test (no movement keys are ever pressed).
 const EYE_Y = 1.6;
 const FAR_AWAY = { x: 20, z: 20 };
+// A closer stand point than FAR_AWAY, used for STEP 2 below, chosen so the
+// crate's angular footprint at both the old (raw, pre-fix) radius and the
+// new tightened one are comfortably far apart in degrees — see that step's
+// own comment for the actual numbers.
+const NEAR_STAND = { x: 5, z: CRATE.position[2] };
 
 async function teleport(frame, x, z) {
   await frame.evaluate(({ x, z }) => {
@@ -69,6 +74,20 @@ async function aimAt(frame, eyeX, eyeZ, target) {
 
 async function cursorStyle(frame) {
   return frame.evaluate(() => document.getElementById('scene3d').style.cursor);
+}
+
+// Converts an angular offset from dead-center (radians, purely horizontal)
+// into a CSS-pixel position within the canvas element, using the exact same
+// tan(fov/2)*aspect relationship onCanvasHoverMove() itself uses to turn a
+// mouse position into a ray direction (fovY = Math.PI/3, same as the
+// projection matrix in the render loop) — this is shared, already-exercised
+// screen/ray geometry (STEP 1's dead-center hit already proves it lines up),
+// not the radius-shrink fix STEP 2 below is actually testing, so using it to
+// place the mouse at a precise, known angle isn't circular for that check.
+function pixelForAngle(canvasBox, aspect, angleRad) {
+  const tanFov = Math.tan(Math.PI / 6); // half of the 60° vertical FOV
+  const ndcX = Math.tan(angleRad) / (tanFov * aspect);
+  return { x: ((ndcX + 1) / 2) * canvasBox.width, y: canvasBox.height / 2 };
 }
 
 (async () => {
@@ -139,17 +158,33 @@ async function cursorStyle(frame) {
     if (promptWhileFarHover !== null) throw new Error('Expected no E-press prompt while merely hovering from far away, got: ' + JSON.stringify(promptWhileFarHover));
     console.log('PASS: cursor became a pointer at long range, and the E-prompt/Previewer stayed completely untouched — hover is purely a cursor hint, exactly as specced');
 
-    console.log('STEP 2: moving the mouse to a far corner of the canvas (still standing in the same spot, same camera aim) points the ray well away from the crate — the cursor should reset');
+    console.log('STEP 2: Bruno\'s feedback on the first version — the cursor lit up well before the mouse was actually over the object, because the raw walk-up radius (1.7 for this crate) was reused as-is for the hover sphere. Standing closer (so the angular math is comfortable) and looking at the crate dead-on, a mouse position 12deg off-center sits OUTSIDE the tightened hover radius (~5.8deg angular footprint after the shrink) but would have been comfortably INSIDE the old raw radius\'s ~20deg footprint — the cursor should stay put, not go pointer');
+    await aimAt(frame, NEAR_STAND.x, NEAR_STAND.z, CRATE.position);
+    await frame.waitForTimeout(100);
+    const aspect = await frame.evaluate(() => { const c = document.getElementById('scene3d'); return c.width / c.height; });
+    const offCenterPos = pixelForAngle(canvasBox, aspect, 12 * Math.PI / 180);
+    await frame.locator('#scene3d').hover({ position: offCenterPos });
+    await frame.waitForTimeout(150); // no waitForFunction target here — proving a NEGATIVE (cursor never becomes pointer), so give it a beat and check once
+    const cursorAtModerateOffset = await cursorStyle(frame);
+    if (cursorAtModerateOffset === 'pointer') throw new Error('Expected the cursor to stay off the crate at a 12deg offset (outside the tightened hover radius) — got pointer, meaning the hit sphere is still too wide');
+    console.log('PASS: at a moderate offset that used to fall inside the old wide radius, the cursor no longer lights up — the hint now tracks the object much more closely');
+
+    console.log('STEP 3: back to dead-center from the same near stand point — should still hit (sanity check that STEP 2\'s miss is about the offset, not the closer distance)');
+    await frame.locator('#scene3d').hover({ position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } });
+    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor === 'pointer', { timeout: 5000 });
+    console.log('PASS: dead-center still hits from the closer distance too');
+
+    console.log('STEP 4: moving the mouse to a far corner of the canvas points the ray well away from the crate — the cursor should reset');
     await frame.locator('#scene3d').hover({ position: { x: 2, y: 2 } });
     await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor !== 'pointer', { timeout: 5000 });
     console.log('PASS: cursor reset once the ray no longer points at anything interactable');
 
-    console.log('STEP 3: hovering back over the crate\'s on-screen position brings the pointer cursor right back (proves this is live per-mousemove tracking, not a one-shot state)');
+    console.log('STEP 5: hovering back over the crate\'s on-screen position brings the pointer cursor right back (proves this is live per-mousemove tracking, not a one-shot state)');
     await frame.locator('#scene3d').hover({ position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } });
     await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor === 'pointer', { timeout: 5000 });
     console.log('PASS: cursor tracks the mouse live');
 
-    console.log('STEP 4: dragging to look around (mouse button held) suppresses the hover ray entirely, so it never fights with camera rotation');
+    console.log('STEP 6: dragging to look around (mouse button held) suppresses the hover ray entirely, so it never fights with camera rotation');
     const dragStart = { x: canvasBox.x + canvasBox.width / 2, y: canvasBox.y + canvasBox.height / 2 };
     await page.mouse.move(dragStart.x, dragStart.y);
     await page.mouse.down();

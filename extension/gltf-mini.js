@@ -983,10 +983,30 @@
     // system walks (interactTriggers + itemDropEntries), each reduced to
     // just a world position and radius, so a single ray test is reused
     // across both instead of a third parallel data structure.
+    // Bruno's feedback after trying the first version: the cursor was
+    // lighting up well before the mouse was actually over the rendered
+    // object. That's because the proximity `radius` these two data sources
+    // carry is a "walk up and press E" TRIGGER distance, authored with a
+    // comfortable approach margin in mind (e.g. the lobby crates' radius:
+    // 1.7, around a box only about half a unit across) — never meant to
+    // describe how big the thing actually looks on screen. Reusing it
+    // as-is for the hover ray made the hit sphere far bigger than the
+    // visible object. Shrinking it down for hover specifically (a fixed
+    // fraction, capped at a small absolute size so an oversized authored
+    // radius like the crates' can't still balloon past it) keeps the
+    // "reuse existing data, no new authoring" design intact while making
+    // the hit area track what's actually drawn much more closely. Not
+    // pixel-perfect (there's still no real per-model visual bounding box
+    // to test against — see this file's own header comment on why that
+    // was deliberately skipped), but far tighter than before.
+    const HOVER_RADIUS_SCALE = 0.35;
+    const HOVER_RADIUS_CAP = 0.5;
+    function hoverRadiusFor(radius) { return Math.min(radius * HOVER_RADIUS_SCALE, HOVER_RADIUS_CAP); }
+
     function hoverCandidates() {
       const list = [];
-      interactTriggers.forEach((trigger) => { list.push({ position: trigger.position, radius: trigger.radius }); });
-      itemDropEntries.forEach((entry) => { list.push({ position: entry.position, radius: entry.radius }); });
+      interactTriggers.forEach((trigger) => { list.push({ position: trigger.position, radius: hoverRadiusFor(trigger.radius) }); });
+      itemDropEntries.forEach((entry) => { list.push({ position: entry.position, radius: hoverRadiusFor(entry.radius) }); });
       return list;
     }
 
