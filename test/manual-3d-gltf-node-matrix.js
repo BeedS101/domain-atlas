@@ -1,18 +1,17 @@
-// Manual check for a real bug found via Bruno's own downloaded GLB models
-// (a Sketchfab-exported trophy): a glTF node's local transform is EITHER a
+// Regression test for a real bug: a glTF node's local transform is EITHER a
 // raw 16-element `matrix` OR decomposed translation/rotation/scale — never
 // both, per the glTF 2.0 spec — but gltf-mini.js's walkNode() only ever
 // read the TRS form, silently treating any matrix-only node as identity.
-// Blender/Sketchfab exports routinely bake exactly this kind of node (often
-// an axis-correction rotation, the source tool's Z-up convention into this
-// app's Y-up one) as a `matrix` rather than decomposed TRS. The practical
-// symptom Bruno hit: a trophy that renders with the right shape and colors,
-// just lying on its side instead of standing upright — the axis-correction
+// Exported files routinely bake exactly this kind of node (often an
+// axis-correction rotation, the source tool's Z-up convention into this
+// app's Y-up one) as a `matrix` rather than decomposed TRS — the practical
+// symptom: a model that renders with the right shape and colors, just lying
+// on its side instead of standing upright, because the axis-correction
 // rotation baked into an ancestor node's `matrix` was silently dropped.
 //
-// Rather than committing one of Bruno's actual (large, third-party-licensed)
-// downloaded files as a fixture, this builds a tiny synthetic GLB entirely
-// in-memory: a thin, tall "flag" quad (0.2 wide x 2.0 tall in its own local
+// Rather than committing a large third-party-licensed downloaded file as a
+// fixture, this builds a tiny synthetic GLB entirely in-memory: a thin,
+// tall "flag" quad (0.2 wide x 2.0 tall in its own local
 // space) placed under a single node whose local transform is a `matrix`
 // only (a 90-degree rotation about Z, no translation/rotation/scale fields
 // at all) — chosen so a correct implementation renders it WIDE and SHORT

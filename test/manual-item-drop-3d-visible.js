@@ -20,26 +20,22 @@
 //
 // Exercises BOTH visual outcomes with real, already-broken-or-fixed demo
 // content rather than synthetic data:
-//   - atlas.trophy.chess's model (assets/ring.glb) previously didn't exist
-//     on disk at all — this task adds a small procedural placeholder GLB
-//     there (an octahedron, same "no external asset needed" spirit as this
-//     renderer's own portal/character geometry) specifically so the shipped
-//     demo has a genuine model to render, not just a fallback. This also
-//     incidentally fixes atlas.wearable.ring's and atlas.trophy.chess's own
-//     "Show model" button in the Asset Viewer, silently broken before now.
-//     STEP 1-5 below intercept this same URL with a DELIBERATELY oversized
-//     stand-in (test/oversized-test-model.glb, same octahedron shape scaled
-//     ~18x bigger) instead of the small shipped file, specifically to
-//     exercise setItemDrops()'s per-model scale normalization
-//     (ITEM_MODEL_TARGET_SIZE in gltf-mini.js) against a model that's
-//     authored at a wildly different scale than this world's own furniture
-//     — exactly what happened with a real, independently-modeled trophy on
-//     Bruno's own site, where the dropped item rendered enormous compared
-//     to everything else in the scene. The shipped ring.glb's own bytes are
-//     separately confirmed to parse correctly (test/oversized-test-model.glb's
-//     generator script's Node-side sanity check applies equally to it) —
-//     this test's job is the scaling behavior, not re-proving small-file
-//     parsing a second time.
+//   - atlas.trophy.chess's model (assets/trophy.glb) is an originally-
+//     authored, procedurally-generated GLB (tools/make-demo-item-models.js
+//     — previously this class borrowed the signet ring's own model, see
+//     issuer-server/server.js's ASSET_CATALOG entry). STEP 1-5 below
+//     intercept this same URL with a DELIBERATELY oversized stand-in
+//     (test/oversized-test-model.glb) instead of the small shipped file,
+//     specifically to exercise setItemDrops()'s per-model scale
+//     normalization (ITEM_MODEL_TARGET_SIZE in gltf-mini.js) against a
+//     model that's authored at a wildly different scale than this world's
+//     own furniture — exactly what happened with a real, independently-
+//     modeled trophy on Bruno's own site, where the dropped item rendered
+//     enormous compared to everything else in the scene. The shipped
+//     trophy.glb's own bytes are separately confirmed to parse correctly
+//     (test/oversized-test-model.glb's generator script's Node-side
+//     sanity check applies equally to it) — this test's job is the
+//     scaling behavior, not re-proving small-file parsing a second time.
 //   - atlas.element.silver's model (assets/badge.glb) is a DIFFERENT,
 //     still-genuinely-missing file (not something this task fixes — a
 //     pre-existing content gap, left alone on purpose) — proving the
@@ -134,13 +130,13 @@ async function fetchDrops() {
     // compass.glb, not something this task created or should fix here.
     // Intercepting just this one URL and fulfilling it from a real local
     // GLB (see the header comment on why this test deliberately serves the
-    // OVERSIZED fixture here rather than the small shipped ring.glb)
+    // OVERSIZED fixture here rather than the small shipped trophy.glb)
     // exercises the actual fetch -> parseGLB -> WebGL-upload -> scale-
     // normalize pipeline end to end. atlas.element.silver's model
     // (assets/badge.glb) is deliberately left UNintercepted below — it
     // fails for real (that file still doesn't exist either way), which is
     // exactly what STEP 6 wants to prove against.
-    await context.route('https://localhost:8001/assets/ring.glb', (route) => {
+    await context.route('https://localhost:8001/assets/trophy.glb', (route) => {
       route.fulfill({ status: 200, contentType: 'model/gltf-binary', body: fs.readFileSync(OVERSIZED_GLB) });
     });
 
@@ -183,7 +179,7 @@ async function fetchDrops() {
     await frame.evaluate(() => window.__atlasActive3D.ready);
     console.log('PASS: entered the 3D lobby with a fresh wallet — itemDropsAllowed just flipped true for this world (task: 3D item-drop visibility) so there\'s actually a Drop button to click here now');
 
-    console.log('STEP 1: mint a Chess Champion Trophy (atlas.trophy.chess — model now exists, see the new assets/ring.glb), teleport to a known spot, and drop it via the real wallet UI Drop button');
+    console.log('STEP 1: mint a Chess Champion Trophy (atlas.trophy.chess — now has its own dedicated model, assets/trophy.glb), teleport to a known spot, and drop it via the real wallet UI Drop button');
     await frame.evaluate(() => AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.trophy.chess').then(() => refreshInventoryDisplay()));
     await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Chess Champion Trophy'), { timeout: 5000 });
     await frame.locator('#walletBtn').click(); // reopen the wallet panel — it closed itself after account creation earlier
@@ -203,7 +199,7 @@ async function fetchDrops() {
     if (trophyDrop.position[0] === 0 && trophyDrop.position[2] === 0) throw new Error('Drop landed at the old [0,0,0] placeholder — beginDropPlacement() should no longer do that in a 3D world');
     console.log('PASS: dropped at ' + JSON.stringify(trophyDrop.position) + ', near the visitor\'s own position, not at world origin');
 
-    console.log('STEP 3: gltf-mini.js actually tracks the drop and renders its REAL model (ring.glb loaded successfully), not the amber glow fallback');
+    console.log('STEP 3: gltf-mini.js actually tracks the drop and renders its REAL model (trophy.glb loaded successfully), not the amber glow fallback');
     await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 1, { timeout: 5000 });
     await frame.waitForFunction((dropId) => window.__atlasActive3D.getItemDropRenderKind(dropId) === 'model', trophyDrop.dropId, { timeout: 5000 });
     console.log('PASS: the trophy\'s own model loaded and is what\'s actually rendered at its drop position');

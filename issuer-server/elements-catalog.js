@@ -13,23 +13,22 @@
 // Every entry below reuses the existing badge.glb/badge.png placeholder
 // art (same convention atlas.badge/atlas.element.silver/the membership
 // cards already use) — no new 3D models or thumbnails were produced for
-// this round, per Bruno's explicit instruction.
+// this round.
 //
-// No mining stall exists for any of these — per Bruno's explicit call,
-// the ONLY way to obtain one is by converting into it (POST
-// /atlas/convert) from gold, iron, silver, or another rated element.
-// holdingCap is still set on every entry for consistency/future-proofing
-// (see generate-elements-catalog.py's own module docstring), even though
-// nothing today ever calls /atlas/asset/issue for these classes.
+// No mining stall exists for any of these — the ONLY way to obtain one is
+// by converting into it (POST /atlas/convert) from gold, iron, silver, or
+// another rated element. holdingCap is still set on every entry for
+// consistency/future-proofing (see generate-elements-catalog.py's own
+// module docstring), even though nothing today ever calls
+// /atlas/asset/issue for these classes.
 //
 // exchangeRate: 14 elements (rateSource: "market") carry a real ratio
-// computed from spot/market prices fetched ONCE on 2026-09-17 (not
-// live-updating — that was explicitly descoped). Every other element
-// (rateSource: "tier-estimate") has no real per-gram market price to
-// fetch at all, so it uses a broad, honestly-approximate tier informed by
-// real-world rarity/abundance facts instead of a fabricated precise
-// number. Full reasoning + the raw fetched price table:
-// domain-atlas-private-notes.md, "#204" section.
+// computed once from spot/market prices, not live-updating. Every other
+// element (rateSource: "tier-estimate") has no real per-gram market
+// price to fetch at all, so it uses a broad, honestly-approximate tier
+// informed by real-world rarity/abundance facts instead of a fabricated
+// precise number (see generate-elements-catalog.py's own module
+// docstring for the full reasoning).
 
 module.exports = function buildElementsCatalog(DOMAIN) {
   return {

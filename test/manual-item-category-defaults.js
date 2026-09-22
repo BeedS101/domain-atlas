@@ -1,7 +1,7 @@
 // Manual check for #152 (follow-up to #151): a domain-level DEFAULT for
 // policy.acceptedItemClasses, and trailing-".*" CATEGORY matching — both
 // added after Bruno hit the exact friction live while writing his own
-// evtec.co.za manifest: (1) copy-pasting the identical acceptedItemClasses
+// operator-example.com manifest: (1) copy-pasting the identical acceptedItemClasses
 // array into every world in a domain, and (2) expecting "atlas.wearable"/
 // "atlas.element" to cover their whole families ("atlas.wearable.ring",
 // "atlas.element.iron"/"atlas.element.gold") when the matching was always
@@ -77,9 +77,9 @@ function fakeEntry(cls, issuerDomain) {
     if (fallbackResults.ownArrayWinsOutright.join(',') !== 'com.example.custom') throw new Error('Expected a world\'s own non-empty array to win outright over the domain default, got: ' + JSON.stringify(fallbackResults.ownArrayWinsOutright));
     console.log('PASS: domain default only fills in for a genuinely missing field, never merges with or overrides a world\'s own declaration');
 
-    console.log('STEP 3: isAssetCompatibleWithWorld end to end — domain default + wildcard category together, exactly Bruno\'s evtec.co.za scenario');
+    console.log('STEP 3: isAssetCompatibleWithWorld end to end — domain default + wildcard category together, exactly Bruno\'s operator-example.com scenario');
     const compatResults = await frame.evaluate((args) => {
-      const manifest = { domain: 'evtec.co.za', acceptedItemClasses: ['atlas.wearable', 'atlas.element.*'] };
+      const manifest = { domain: 'operator-example.com', acceptedItemClasses: ['atlas.wearable', 'atlas.element.*'] };
       const world = { policy: { itemDropsAllowed: true, trustedIssuers: 'self' } }; // no own acceptedItemClasses — inherits the domain default
       return {
         wearableFromSelfCompatible: isAssetCompatibleWithWorld(args.wearableFromSelf, world, manifest),
@@ -88,16 +88,16 @@ function fakeEntry(cls, issuerDomain) {
         goldFromOtherDomainNotCompatible: isAssetCompatibleWithWorld(args.goldFromOther, world, manifest)
       };
     }, {
-      wearableFromSelf: fakeEntry('atlas.wearable', 'evtec.co.za'),
-      ironFromSelf: fakeEntry('atlas.element.iron', 'evtec.co.za'),
-      ringFromSelf: fakeEntry('atlas.wearable.ring', 'evtec.co.za'), // exact "atlas.wearable" in the list should NOT cover this
+      wearableFromSelf: fakeEntry('atlas.wearable', 'operator-example.com'),
+      ironFromSelf: fakeEntry('atlas.element.iron', 'operator-example.com'),
+      ringFromSelf: fakeEntry('atlas.wearable.ring', 'operator-example.com'), // exact "atlas.wearable" in the list should NOT cover this
       goldFromOther: fakeEntry('atlas.element.gold', 'someone-else.example') // right class family, wrong issuer under trustedIssuers: "self"
     });
     if (!compatResults.wearableFromSelfCompatible) throw new Error('Expected a plain atlas.wearable from the domain itself to be compatible via the inherited domain default');
     if (!compatResults.ironFromSelfCompatible) throw new Error('Expected atlas.element.iron to be compatible via the "atlas.element.*" category entry');
     if (compatResults.ringFromSelfNotCompatible) throw new Error('Expected atlas.wearable.ring to stay INCOMPATIBLE — "atlas.wearable" in the list is exact, not a family match');
     if (compatResults.goldFromOtherDomainNotCompatible) throw new Error('Expected gold from a different issuer to be rejected by trustedIssuers: "self", even though its class matches "atlas.element.*"');
-    console.log('PASS: domain-default + wildcard category correctly combine with trustedIssuers — exactly the evtec.co.za scenario now works with one shared array');
+    console.log('PASS: domain-default + wildcard category correctly combine with trustedIssuers — exactly the operator-example.com scenario now works with one shared array');
 
     console.log('STEP 4: giveawayClassFor skips wildcard entries — a world/domain declaring only categories has nothing concrete to hand out');
     const giveawayResults = await frame.evaluate(() => {

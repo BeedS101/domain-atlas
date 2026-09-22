@@ -3337,10 +3337,10 @@ const AtlasWallet = (() => {
   // wallet can only ever have learned from a message they already sent —
   // there is no separate key-discovery step or server endpoint here (kept
   // deliberately out of scope, along with real forward secrecy /
-  // per-message key rotation — see the chat history comment on this in
-  // conversation with Bruno, 2026-09-14: "simple static key first"). So
-  // the very FIRST message in a brand-new conversation, in whichever
-  // direction happens to go first, is sent as a signed-but-UNENCRYPTED key
+  // per-message key rotation — a deliberate "simple static key first" v1
+  // scope decision). So the very FIRST message in a brand-new
+  // conversation, in whichever direction happens to go first, is sent as
+  // a signed-but-UNENCRYPTED key
   // announcement (still authentic, just not confidential) — carrying this
   // wallet's own e2ee public key so the other side can encrypt their
   // reply. Every message after that, in EITHER direction, is fully

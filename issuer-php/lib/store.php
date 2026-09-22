@@ -540,16 +540,18 @@ const ATLAS_ASSET_CATALOG_BASE = [
   // Hard difficulty, minted alongside the per-win gold reward (see
   // extension/viewer.js's CHESS_WIN_REWARDS / maybeAwardChessWin()) — just
   // another catalog entry atlas/asset/issue.php already knows how to mint,
-  // no dedicated endpoint needed. Reuses the signet ring's model/thumbnail,
-  // same "this one's the rare one" reasoning gold already borrows it for
-  // above. No tradeScope override — this is a genuine achievement, not
-  // a relationship or a scarcity-gated giveaway (unlike atlas.badge/
-  // atlas.trinket.pin/atlas.trinket.charm above, all 'bound' as of the
-  // task #250 follow-up), so it stays ordinarily tradeable/giftable/
-  // droppable. Mirrors issuer-server/server.js's ASSET_CATALOG entry of
-  // the same name.
+  // no dedicated endpoint needed. Has its own dedicated model/thumbnail
+  // now — an originally-authored, procedurally-generated GLB
+  // (tools/make-demo-item-models.js), not the signet ring's borrowed
+  // model this used to point at before a genuine trophy asset existed.
+  // No tradeScope override — this is a genuine achievement, not a
+  // relationship or a scarcity-gated giveaway (unlike
+  // atlas.badge/atlas.trinket.pin/atlas.trinket.charm above, all 'bound'
+  // as of the task #250 follow-up), so it stays ordinarily tradeable/
+  // giftable/droppable. Mirrors issuer-server/server.js's ASSET_CATALOG
+  // entry of the same name.
   'atlas.trophy.chess' => [
-    'name' => 'Chess Champion Trophy', 'modelPath' => '/assets/ring.glb', 'thumbnailPath' => '/assets/ring.png',
+    'name' => 'Chess Champion Trophy', 'modelPath' => '/assets/trophy.glb', 'thumbnailPath' => '/assets/trophy.png',
     'fungible' => false, 'presentation' => 'collectible',
     'properties' => [
       'atlas.rarity' => 'rare',

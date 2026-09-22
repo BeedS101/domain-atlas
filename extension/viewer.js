@@ -3075,7 +3075,7 @@ const domainPortalInfoCache = new Map(); // manifest URL -> Promise<world|null>
 let hoveredAssetMarker = null;
 
 // Task #152 (follow-up to #151, prompted by Bruno hitting both gaps live
-// while writing his own evtec.co.za manifest):
+// while writing his own operator-example.com manifest):
 //
 // 1. A domain-level DEFAULT for acceptedItemClasses. Same two-level shape
 //    as manifest.chat/world.chat (see chatEnabledForWorld() above), except

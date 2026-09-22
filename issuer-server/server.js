@@ -655,17 +655,19 @@ const ASSET_CATALOG = {
   // viewer.js's CHESS_WIN_REWARDS / maybeAwardChessWin()) — not gated by
   // any dedicated endpoint, just another catalog entry POST /atlas/asset/
   // issue already knows how to mint, same as everything else here.
-  // Reuses the signet ring's model/thumbnail for the same "this one's the
-  // rare one" reasoning gold already borrows it for above, rather than
-  // the plainer badge.glb every common item reuses. No tradeScope override
-  // — this is a genuine achievement, not a relationship or a scarcity-
-  // gated giveaway (unlike atlas.badge/atlas.trinket.pin/
-  // atlas.trinket.charm above, all 'bound' as of the task #250
-  // follow-up), so it stays ordinarily tradeable/giftable/droppable.
+  // Has its own dedicated model/thumbnail now — an originally-authored,
+  // procedurally-generated GLB (tools/make-demo-item-models.js), not the
+  // signet ring's borrowed model this used to point at before a genuine
+  // trophy asset existed. No tradeScope override — this is a genuine
+  // achievement, not a relationship or a scarcity-gated giveaway (unlike
+  // atlas.badge/
+  // atlas.trinket.pin/atlas.trinket.charm above, all 'bound' as of the
+  // task #250 follow-up), so it stays ordinarily tradeable/giftable/
+  // droppable.
   'atlas.trophy.chess': {
     name: 'Chess Champion Trophy',
-    model: `https://${DOMAIN}/assets/ring.glb`,
-    thumbnail: `https://${DOMAIN}/assets/ring.png`,
+    model: `https://${DOMAIN}/assets/trophy.glb`,
+    thumbnail: `https://${DOMAIN}/assets/trophy.png`,
     fungible: false,
     presentation: 'collectible',
     properties: {

@@ -4,10 +4,11 @@
 // of using Three.js. Not a design preference — this project vendors zero
 // external libraries into the extension (see viewer.js's header comment),
 // and this sandbox's own network policy blocks fetching one anyway. So:
-// write exactly enough of the glTF 2.0 spec to load Kenney's furniture-kit
-// GLBs, which turn out to be a genuinely narrow subset — no textures, no
-// skinning, no animation, no interleaved buffers, no sparse accessors,
-// OPAQUE materials only (confirmed by inspecting the actual files). A
+// write exactly enough of the glTF 2.0 spec to load this project's own
+// furniture-kit GLBs, which turn out to be a genuinely narrow subset — no
+// textures, no skinning, no animation, no interleaved buffers, no sparse
+// accessors, OPAQUE materials only (confirmed by inspecting the actual
+// files). A
 // general-purpose glTF loader would be a much bigger undertaking; this one
 // only needs to be correct for that subset, not for glTF as a whole.
 //
@@ -323,19 +324,16 @@
 
     function walkNode(nodeIndex, parentMatrix) {
       const node = gltf.nodes[nodeIndex];
-      // Bug (Bruno's real downloaded trophy.glb, a Sketchfab export): a
-      // glTF node's local transform is EITHER a raw 16-element `matrix`
-      // OR decomposed translation/rotation/scale — never both, per spec —
-      // but this only ever read the TRS form, silently treating any
-      // matrix-only node as identity. Sketchfab/Blender exports routinely
-      // bake exactly this kind of node (often an axis-correction rotation,
-      // Z-up source data into this app's Y-up convention) as a `matrix`
-      // rather than decomposed TRS, so a model built that way rendered at
-      // the wrong orientation/scale — here, a trophy lying on its side
-      // instead of standing upright. glTF's matrix layout is already
-      // column-major 16 floats, the exact same layout mat4FromTRS/
-      // mat4Multiply use everywhere else in this file, so it can be used
-      // directly with no conversion.
+      // Fix: a glTF node's local transform is EITHER a raw 16-element
+      // `matrix` OR decomposed translation/rotation/scale — never both,
+      // per spec — but this only ever read the TRS form, silently
+      // treating any matrix-only node as identity, which renders a model
+      // at the wrong orientation/scale wherever an exporter bakes a node
+      // that way (commonly an axis-correction rotation for a source tool's
+      // Z-up data). glTF's matrix layout is already column-major 16
+      // floats, the exact same layout mat4FromTRS/mat4Multiply use
+      // everywhere else in this file, so it can be used directly with no
+      // conversion.
       const local = node.matrix ? new Float32Array(node.matrix) : mat4FromTRS(
         node.translation || [0, 0, 0],
         node.rotation || [0, 0, 0, 1],
@@ -671,20 +669,21 @@
   function init(canvas, opts) {
     const gl = canvas.getContext('webgl', { antialias: true }) || canvas.getContext('experimental-webgl');
     if (!gl) throw new Error('WebGL is not available in this browser.');
-    // Kenney's GLBs use 32-bit (UNSIGNED_INT) indices — plain WebGL1 only
-    // guarantees 16-bit index buffers for drawElements without this
-    // extension. It's been universally supported for well over a decade,
-    // but fail with a clear message rather than a cryptic INVALID_ENUM if
-    // it's ever somehow missing.
+    // This project's furniture-kit GLBs use 32-bit (UNSIGNED_INT) indices
+    // — plain WebGL1 only guarantees 16-bit index buffers for
+    // drawElements without this extension. It's been universally
+    // supported for well over a decade, but fail with a clear message
+    // rather than a cryptic INVALID_ENUM if it's ever somehow missing.
     if (!gl.getExtension('OES_element_index_uint')) {
       throw new Error('This browser\'s WebGL is missing OES_element_index_uint, needed to load these models.');
     }
     const prog = createProgram(gl);
     gl.enable(gl.DEPTH_TEST);
     // Deliberately NOT culling backfaces: the procedural floor quad's
-    // winding didn't match Kenney's model winding, and rather than chase
-    // that per-mesh across 140 varied files, just pay the (tiny, for a
-    // scene this size) overdraw cost and never have invisible geometry.
+    // winding didn't match every furniture model's own winding, and
+    // rather than chase that per-mesh across 140 varied files, just pay
+    // the (tiny, for a scene this size) overdraw cost and never have
+    // invisible geometry.
     gl.clearColor(0.055, 0.086, 0.106, 1); // matches the app's dark background
 
     let sceneData = opts.sceneData;

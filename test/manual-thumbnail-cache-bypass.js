@@ -37,7 +37,8 @@ const fs = require('fs');
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const COMPASS_PNG = path.resolve(__dirname, '..', 'demo-domain-a', 'assets', 'compass.png');
 const COMPASS_GLB = path.resolve(__dirname, '..', 'demo-domain-a', 'assets', 'compass.glb');
-const SWAP_PNG = path.resolve(__dirname, 'fixtures', 'thumbnail-swap.png'); // 40x40 red square, generated for this test — deliberately a different size than compass.png's 128x128 so a naturalWidth check alone proves which bytes actually loaded
+const COMPASS_PNG_WIDTH = 256; // compass.png's actual naturalWidth — a procedurally-generated thumbnail (tools/make-demo-item-models.js), rendered at 256x256
+const SWAP_PNG = path.resolve(__dirname, 'fixtures', 'thumbnail-swap.png'); // 40x40 red square, generated for this test — deliberately a different size than compass.png's own so a naturalWidth check alone proves which bytes actually loaded
 
 (async () => {
   const userDataDir = path.resolve(__dirname, '.chrome-profile-thumbnail-cache-bypass');
@@ -110,14 +111,14 @@ const SWAP_PNG = path.resolve(__dirname, 'fixtures', 'thumbnail-swap.png'); // 4
       await frame.page().waitForTimeout(400); // past ASSET_VIEWER_CLOSE_GRACE_MS (200ms)
     }
 
-    console.log('STEP 1: first hover fetches the thumbnail fresh and shows it (128x128)');
-    await openAndWaitForThumbnail(128);
+    console.log('STEP 1: first hover fetches the thumbnail fresh and shows it (' + COMPASS_PNG_WIDTH + 'x' + COMPASS_PNG_WIDTH + ')');
+    await openAndWaitForThumbnail(COMPASS_PNG_WIDTH);
     if (requestCount !== 1) throw new Error('Expected exactly 1 network request for the thumbnail after the first hover, got ' + requestCount);
     console.log('PASS: thumbnail loaded, 1 network request so far');
 
     console.log('STEP 2: closing and re-hovering the SAME card re-fetches the thumbnail rather than reusing a cached copy');
     await closeViewer();
-    await openAndWaitForThumbnail(128);
+    await openAndWaitForThumbnail(COMPASS_PNG_WIDTH);
     if (requestCount !== 2) throw new Error('Expected a SECOND network request on re-hover (cache:no-store bypassing any HTTP cache), got ' + requestCount + ' total requests');
     console.log('PASS: re-hovering did a real second fetch, not a cached one');
 

@@ -32,42 +32,31 @@ caveats without having to find this script first):
   has never been observed on a bulk scale, only inferred from a handful of
   atoms and periodic-table extrapolation.
 - exchangeRate: 14 elements (rateSource: "market") use a real conversion
-  ratio computed from spot/market prices fetched once on 2026-09-17
-  (Kitco for precious metals, TradingEconomics for base/industrial metals
-  -- see private notes for the full price table and the raw $/gram
-  figures each ratio was computed from). Uranium, lithium and tungsten's
-  market ratios are derived from their actually-traded compound/
-  concentrate prices (U3O8, Li2CO3, APT) adjusted for contained-element
-  fraction, not a pure-metal spot price, because pure-metal spot markets
-  for those three barely exist. Titanium's ratio is derived from sponge
-  feedstock price (a floor, not the pricier finished-ingot price).
-  Every other element (rateSource: "tier-estimate") has no real, findable
-  per-gram market price at all -- these use a broad, documented tier
-  (see TIER_RATES below) informed by real-world rarity/abundance
-  characteristics (precious/PGM-adjacent, rare-earth/specialty,
-  reactive-light-metal, bulk-industrial-nonmetal, noble-gas, or
-  effectively-unobtainable synthetic), NOT a fetched price. This mirrors
-  exactly the "market vs tier-estimate, both honestly labeled" plan from
-  the private design notes -- nothing here claims to be a real quote that
-  isn't one. Rates are fetched/computed ONCE and hard-coded; there is no
-  live-updating mechanism (that was explicitly descoped this round).
-  Gold/iron/silver's own existing exchangeRate (1 / 20 / 5) are
-  deliberately left untouched by this file -- they stay the original
-  #203 round demo numbers, not recalculated to this table's real-price
-  scale, to avoid disturbing already-shipped, already-tested behavior.
-  This is a known, documented inconsistency (a literal iron:gold price
-  ratio would be enormous, ~150,000+, not 20) -- see the private notes
-  "#204" section for the full reasoning.
-- holdingCap: every new element gets the same 500 cap #203 set for
-  gold/iron/silver, for consistency and in case a future dev-tool mint
-  button ever targets one of these classes directly -- even though, per
-  Bruno's own explicit call, NONE of these 115 has a mining stall, so the
-  cap has no fresh-mint path to actually gate today. Purely future-proofing.
+  ratio computed once from spot/market prices as of 2026-09-17. Uranium,
+  lithium and tungsten's ratios are derived from their actually-traded
+  compound/concentrate prices (U3O8, Li2CO3, APT) adjusted for
+  contained-element fraction, since pure-metal spot markets barely exist
+  for those three; titanium's ratio uses sponge feedstock price (a floor,
+  not the pricier finished-ingot price). Every other element
+  (rateSource: "tier-estimate") has no findable per-gram market price, so
+  it uses a broad rarity/abundance tier instead (see TIER_RATES below),
+  not a fetched price. Rates are fetched/computed ONCE and hard-coded;
+  there is no live-updating mechanism. Gold/iron/silver's own existing
+  exchangeRate (1 / 20 / 5) are deliberately left untouched by this file
+  -- they stay the original demo numbers, not recalculated to this
+  table's real-price scale, to avoid disturbing already-shipped,
+  already-tested behavior. This is a known, documented inconsistency (a
+  literal iron:gold price ratio would be enormous, not 20).
+- holdingCap: every new element gets the same 500 cap gold/iron/silver
+  already use, for consistency and in case a future dev-tool mint button
+  ever targets one of these classes directly -- even though none of
+  these 115 has a mining stall today, so the cap has no fresh-mint path
+  to actually gate yet. Purely future-proofing.
 - model/thumbnail: every new element reuses the existing
   badge.glb/badge.png placeholder art, the same "reused-art" convention
   atlas.badge/atlas.postoffice.membership/atlas.tradingstation.membership/
-  atlas.element.silver already use. No new 3D assets were produced this
-  round, per Bruno's explicit instruction.
+  atlas.element.silver already use. No new 3D assets were produced for
+  this round.
 """
 
 import json
@@ -296,23 +285,22 @@ HEADER_JS = '''// Task #204 — generated file, do not hand-edit (re-run
 // Every entry below reuses the existing badge.glb/badge.png placeholder
 // art (same convention atlas.badge/atlas.element.silver/the membership
 // cards already use) — no new 3D models or thumbnails were produced for
-// this round, per Bruno's explicit instruction.
+// this round.
 //
-// No mining stall exists for any of these — per Bruno's explicit call,
-// the ONLY way to obtain one is by converting into it (POST
-// /atlas/convert) from gold, iron, silver, or another rated element.
-// holdingCap is still set on every entry for consistency/future-proofing
-// (see generate-elements-catalog.py's own module docstring), even though
-// nothing today ever calls /atlas/asset/issue for these classes.
+// No mining stall exists for any of these — the ONLY way to obtain one is
+// by converting into it (POST /atlas/convert) from gold, iron, silver, or
+// another rated element. holdingCap is still set on every entry for
+// consistency/future-proofing (see generate-elements-catalog.py's own
+// module docstring), even though nothing today ever calls
+// /atlas/asset/issue for these classes.
 //
 // exchangeRate: 14 elements (rateSource: "market") carry a real ratio
-// computed from spot/market prices fetched ONCE on 2026-09-17 (not
-// live-updating — that was explicitly descoped). Every other element
-// (rateSource: "tier-estimate") has no real per-gram market price to
-// fetch at all, so it uses a broad, honestly-approximate tier informed by
-// real-world rarity/abundance facts instead of a fabricated precise
-// number. Full reasoning + the raw fetched price table:
-// domain-atlas-private-notes.md, "#204" section.
+// computed once from spot/market prices, not live-updating. Every other
+// element (rateSource: "tier-estimate") has no real per-gram market
+// price to fetch at all, so it uses a broad, honestly-approximate tier
+// informed by real-world rarity/abundance facts instead of a fabricated
+// precise number (see generate-elements-catalog.py's own module
+// docstring for the full reasoning).
 
 module.exports = function buildElementsCatalog(DOMAIN) {
   return {
