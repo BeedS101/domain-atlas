@@ -323,10 +323,24 @@
 
     function walkNode(nodeIndex, parentMatrix) {
       const node = gltf.nodes[nodeIndex];
-      const t = node.translation || [0, 0, 0];
-      const q = node.rotation || [0, 0, 0, 1];
-      const s = node.scale || [1, 1, 1];
-      const local = mat4FromTRS(t, q, s);
+      // Bug (Bruno's real downloaded trophy.glb, a Sketchfab export): a
+      // glTF node's local transform is EITHER a raw 16-element `matrix`
+      // OR decomposed translation/rotation/scale — never both, per spec —
+      // but this only ever read the TRS form, silently treating any
+      // matrix-only node as identity. Sketchfab/Blender exports routinely
+      // bake exactly this kind of node (often an axis-correction rotation,
+      // Z-up source data into this app's Y-up convention) as a `matrix`
+      // rather than decomposed TRS, so a model built that way rendered at
+      // the wrong orientation/scale — here, a trophy lying on its side
+      // instead of standing upright. glTF's matrix layout is already
+      // column-major 16 floats, the exact same layout mat4FromTRS/
+      // mat4Multiply use everywhere else in this file, so it can be used
+      // directly with no conversion.
+      const local = node.matrix ? new Float32Array(node.matrix) : mat4FromTRS(
+        node.translation || [0, 0, 0],
+        node.rotation || [0, 0, 0, 1],
+        node.scale || [1, 1, 1]
+      );
       const world = mat4Multiply(parentMatrix, local);
 
       if (node.mesh !== undefined) {
