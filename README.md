@@ -52,6 +52,13 @@ names to try it. Both run a real issuer (Domain B needs one too, for its
 own Post Office — see below); the point either way is that Domain B needs
 zero special integration with Domain A to trust what Domain A hands out.
 
+Every specific name above — `demo-domain-a`/`demo-domain-b`, "Example
+Plaza", "Neighbor Workshop", `atlas.wearable.ring`, "Bronze Compass" — is
+this demo's own invention, not something `SPEC.md` requires. A real
+deployment picks its own domain, its own world names, and its own asset
+classes; the protocol doesn't care what any of them are called (see
+`SPEC.md`'s own "A note on names").
+
 ## 1. Serve the two demo domains
 
 Domain A needs the real issuer server (Node, zero npm dependencies — there
