@@ -226,14 +226,25 @@ const MAX_NAME_LEN = 60;
 const MAX_ID_LEN = 120; // domain/world strings
 const MAX_COORD = 100000;
 const MAX_PUBLIC_KEY_LEN = 200; // base64url WebAuthn/local-identity public keys fit comfortably under this
+const MAX_COLOR_LEN = 16; // '#rrggbb' with room to spare
 
 function isFiniteNumber(n) { return typeof n === 'number' && Number.isFinite(n); }
+// Same "loose sanity, not real validation" posture as the rest of this
+// file (see the top-of-file scope note) — a move's shirtColor/pantsColor
+// only ever change what color a box renders as on someone else's screen,
+// nothing this server itself trusts or acts on, so this just keeps a
+// malformed value from propagating rather than actually checking it's a
+// real hex color.
+function sanitizeColor(v) { return typeof v === 'string' ? v.slice(0, MAX_COLOR_LEN) : null; }
 
 function rosterOf(room, exceptConnId) {
   const roster = [];
   room.forEach((member, id) => {
     if (id === exceptConnId) return;
-    roster.push({ id, name: member.name, x: member.x, y: member.y, z: member.z, yaw: member.yaw, publicKey: member.publicKey || null });
+    roster.push({
+      id, name: member.name, x: member.x, y: member.y, z: member.z, yaw: member.yaw, publicKey: member.publicKey || null,
+      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null
+    });
   });
   return roster;
 }
@@ -573,21 +584,31 @@ function removeMember(connId) {
 // already-joined connId, then broadcasts it to the room's WS members.
 // Returns false (no-op) for an unknown id or out-of-bounds/non-finite
 // coordinates — same validation either transport's move message gets.
-function moveMember(connId, x, y, z, yaw) {
+// `look` ({shirtColor, pantsColor}, both optional hex strings) rides
+// alongside position — a viewer's equipped avatar look (extension/
+// wallet.js's getAvatarLook()) can change mid-session the same way
+// position does, so it's broadcast the same way rather than only at join.
+// Always overwrites (to null when a caller sends neither field), same as
+// x/y/z/yaw — a move IS this member's current full pose, appearance
+// included, not a partial patch.
+function moveMember(connId, x, y, z, yaw, look) {
   const loc = connIndex.get(connId);
   if (!loc) return false;
   const member = loc.room.get(connId);
   if (!member) return false;
   if (![x, y, z, yaw].every(isFiniteNumber)) return false;
   if (Math.abs(x) > MAX_COORD || Math.abs(y) > MAX_COORD || Math.abs(z) > MAX_COORD) return false;
+  const shirtColor = sanitizeColor(look && look.shirtColor);
+  const pantsColor = sanitizeColor(look && look.pantsColor);
   // Task #137's activity clock only counts a REAL change — a poll
   // member's sync tick reports its current pose every 2s regardless of
   // whether it moved at all, and that repetition shouldn't look like
   // activity (see isMemberActive() / ACTIVITY_IDLE_MS above).
   const actuallyMoved = member.x !== x || member.y !== y || member.z !== z || member.yaw !== yaw;
   member.x = x; member.y = y; member.z = z; member.yaw = yaw;
+  member.shirtColor = shirtColor; member.pantsColor = pantsColor;
   if (actuallyMoved) member.lastActivityAt = Date.now();
-  broadcast(loc.room, connId, { type: 'moved', id: connId, x, y, z, yaw });
+  broadcast(loc.room, connId, { type: 'moved', id: connId, x, y, z, yaw, shirtColor, pantsColor });
   return true;
 }
 
@@ -876,7 +897,7 @@ function handleConnection(socket) {
         const now = Date.now();
         if (now - lastMoveAt < MOVE_MIN_INTERVAL_MS) return;
         lastMoveAt = now;
-        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw));
+        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor });
         return;
       }
 
@@ -1107,7 +1128,7 @@ const server = http.createServer(async (req, res) => {
       const member = loc.room.get(connId);
       if (!member || member.transport !== 'poll') return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin', reason: notFoundReason });
       member.lastSeen = Date.now();
-      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw));
+      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor });
       // Drain any signals (friend requests etc, #67) queued for this
       // member since their last sync — this poll response IS the only
       // "push" a polling member ever gets, same reasoning as the roster

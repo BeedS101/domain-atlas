@@ -1137,6 +1137,69 @@ const AtlasWallet = (() => {
     await setLoadout((await getLoadout()).filter((id) => id !== itemId));
   }
 
+  // ---------- avatar look (equipped appearance) ----------
+  //
+  // Which owned asset, if any, currently supplies this identity's rendered
+  // character colors — a persisted preference, not a signed claim of its
+  // own: nothing prevents a client from ignoring it or a hostile client
+  // from broadcasting a false one, the same trust level presence's own
+  // position/yaw already has (SPEC.md §10 — presence is explicitly outside
+  // this protocol's scope). What IS real is that only an asset actually
+  // owned in this wallet can ever be equipped in the first place: the
+  // getter re-resolves against the CURRENT wallet every time rather than
+  // caching resolved colors, so a revoked or deleted credential silently
+  // falls back to the default look instead of leaving a stale one behind.
+  // Kept per-identity and encrypted at rest, same shape as favoriteDomains/
+  // aliases above, since switching identity should switch (or clear)
+  // whose look this is — unlike characterScale, this isn't a device-wide
+  // display setting.
+  async function saveAvatarLook(ownerPublicKey, assetId) {
+    const { atlasAvatarLook } = await chrome.storage.local.get('atlasAvatarLook');
+    const all = atlasAvatarLook || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarLook', assetId);
+    await chrome.storage.local.set({ atlasAvatarLook: all });
+  }
+
+  async function getAvatarLookAssetId() {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const { atlasAvatarLook } = await chrome.storage.local.get('atlasAvatarLook');
+    return decryptAtRestAndMigrate(identity, 'avatarLook', (atlasAvatarLook || {})[identity.publicKey], null, (v) => saveAvatarLook(identity.publicKey, v));
+  }
+
+  async function setAvatarLook(assetId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    await saveAvatarLook(identity.publicKey, assetId || null);
+    return assetId || null;
+  }
+
+  // Pure — pulls the two atlas.avatar.* keys straight off an asset's own
+  // properties bag (see issuer-server/server.js's ASSET_CATALOG for the
+  // avatar-outfit classes that set them). Returns null when neither is
+  // present, so a card-menu action can check "does this asset even have a
+  // look to equip" without needing this identity's wallet or storage at
+  // all. atlas.* rather than com.example.* deliberately — see the catalog
+  // comment on why a client actually has to understand these two keys,
+  // not just display them.
+  function avatarLookPropertiesFromAsset(asset) {
+    const props = (asset && asset.properties) || {};
+    const shirtColor = props['atlas.avatar.shirtColor'] || null;
+    const pantsColor = props['atlas.avatar.pantsColor'] || null;
+    return (shirtColor || pantsColor) ? { shirtColor, pantsColor } : null;
+  }
+
+  async function getAvatarLook() {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const assetId = await getAvatarLookAssetId();
+    if (!assetId) return null;
+    const wallet = await getWallet(identity.publicKey);
+    const entry = wallet.find((e) => e.credential.id === assetId);
+    return entry ? avatarLookPropertiesFromAsset(entry.credential.asset) : null; // no longer owned — graceful fallback to the default look
+  }
+
   // ---------- dropping items into a scene (shared — task #250) ----------
   //
   // Until now this was local-only, self-only: nothing about ownership ever
@@ -4281,6 +4344,7 @@ const AtlasWallet = (() => {
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
+    getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,

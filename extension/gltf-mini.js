@@ -664,6 +664,30 @@
     return Math.max(MIN_CHARACTER_SCALE, Math.min(MAX_CHARACTER_SCALE, n));
   }
 
+  // Avatar look (equipped appearance, cross-domain since it rides the
+  // wallet rather than anything scene- or domain-specific) — a shirt/
+  // pants recolor of the shared character model built in buildCharacter()
+  // below. Colors travel end to end as plain '#rrggbb' strings (the same
+  // format the credential's own atlas.avatar.shirtColor/pantsColor
+  // properties use, and what presence broadcasts them as) — this is the
+  // one place that format actually gets turned into the [r,g,b,a] 0-1
+  // arrays bindAndDraw()'s color uniform expects, whether that hex came
+  // from this viewer's own equipped look or a remote player's presence
+  // update. Invalid/missing input just yields null, which drawCharacterAt()
+  // below already treats as "use this body part's own default color."
+  function hexToRgba01(hex) {
+    const m = typeof hex === 'string' && /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, 1];
+  }
+  function resolveAvatarColors(look) {
+    if (!look) return null;
+    const shirtColor = hexToRgba01(look.shirtColor);
+    const pantsColor = hexToRgba01(look.pantsColor);
+    return (shirtColor || pantsColor) ? { shirtColor, pantsColor } : null;
+  }
+
   // ---------- public entry point ----------
 
   function init(canvas, opts) {
@@ -837,6 +861,13 @@
     // walk speed, or how far the camera follows; it only scales the
     // rendered mesh in charBase.
     let characterScale = clampCharacterScale(opts.characterScale);
+    // This viewer's own equipped look (see wallet.js's getAvatarLook()) —
+    // { shirtColor, pantsColor } as resolved [r,g,b,a] arrays, or null for
+    // the character's plain default colors. Read once at construction and
+    // updated live via setLocalAvatarLook() below (the equip/unequip
+    // wallet-card action), same "no scene reload needed" treatment
+    // characterScale's own live setter already gets.
+    let localAvatarColors = resolveAvatarColors(opts.localAvatarLook);
 
     // Other visitors currently in this same world (#66) — viewer.js owns
     // the actual presence WebSocket connection and message protocol; this
@@ -1634,20 +1665,25 @@
       lastCharBase = charBase;
       // Factored out so the exact same draw code places both the local
       // player (below) and every remote player (further below) — the only
-      // difference between them is which base matrix and limb-swing phase
-      // gets passed in.
-      const drawCharacterAt = (base, swing, showHead) => {
-        const drawPart = (localMatrix, part) => {
-          bindAndDraw({ vao: part.vao, color: part.color, modelMatrix: mat4Multiply(base, localMatrix) }, view, projection);
+      // difference between them is which base matrix, limb-swing phase,
+      // and avatar look (see resolveAvatarColors() above) gets passed in.
+      // `colors` overrides just the torso/leg color — arms and head stay
+      // the character's own fixed skin tone regardless of equipped look,
+      // the same way a real outfit wouldn't recolor someone's hands or face.
+      const drawCharacterAt = (base, swing, showHead, colors) => {
+        const shirtColor = colors && colors.shirtColor;
+        const pantsColor = colors && colors.pantsColor;
+        const drawPart = (localMatrix, part, colorOverride) => {
+          bindAndDraw({ vao: part.vao, color: colorOverride || part.color, modelMatrix: mat4Multiply(base, localMatrix) }, view, projection);
         };
         if (showHead) drawPart(mat4Translate(0, character.shoulderY, 0), character.head);
-        drawPart(mat4Translate(0, character.hipY, 0), character.torso);
+        drawPart(mat4Translate(0, character.hipY, 0), character.torso, shirtColor);
         drawPart(mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing)), character.armL);
         drawPart(mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing)), character.armR);
-        drawPart(mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing)), character.legL);
-        drawPart(mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing)), character.legR);
+        drawPart(mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing)), character.legL, pantsColor);
+        drawPart(mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing)), character.legR, pantsColor);
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE);
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors);
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
@@ -1671,7 +1707,7 @@
         // player's arms/legs would turn to face the mirror of wherever
         // they're actually walking.
         const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4RotateY(-rp.yaw));
-        drawCharacterAt(rpBase, rpSwing, true); // always show the head — this is never our own first-person view
+        drawCharacterAt(rpBase, rpSwing, true, rp.colors); // always show the head — this is never our own first-person view
       });
 
       rafId = requestAnimationFrame(frame);
@@ -1815,11 +1851,21 @@
       // REMOTE_LERP_RATE above).
       upsertRemotePlayer: (id, state) => {
         const x = Number(state.x) || 0, y = Number(state.y) || 0, z = Number(state.z) || 0, yaw = Number(state.yaw) || 0;
+        // A newly-joined member has neither key at all (presence-server's
+        // 'joined' broadcast doesn't know their look yet — see that file's
+        // moveMember() comment) — leave `colors` alone rather than
+        // stomping it to the default the moment they spawn at the origin.
+        // A 'moved' broadcast or a roster entry always carries both keys
+        // (possibly null, for "no look equipped"), so those DO update it,
+        // default included.
+        const hasLookUpdate = 'shirtColor' in state || 'pantsColor' in state;
+        const colors = hasLookUpdate ? resolveAvatarColors({ shirtColor: state.shirtColor, pantsColor: state.pantsColor }) : null;
         const existing = remotePlayers.get(id);
         if (existing) {
           existing.tx = x; existing.ty = y; existing.tz = z; existing.tyaw = yaw;
+          if (hasLookUpdate) existing.colors = colors;
         } else {
-          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0 });
+          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null });
         }
       },
       removeRemotePlayer: (id) => { remotePlayers.delete(id); },
@@ -1831,8 +1877,16 @@
       // interpolation is genuinely happening frame to frame.
       getRemotePlayerRenderState: (id) => {
         const rp = remotePlayers.get(id);
-        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw } : null;
-      }
+        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null } : null;
+      },
+      // Live setter for this viewer's OWN equipped look (the wallet-card
+      // equip/unequip action) — same "no scene reload needed" treatment as
+      // setCharacterScale above. Accepts the same { shirtColor, pantsColor }
+      // hex-string shape wallet.js's getAvatarLook() returns.
+      setLocalAvatarLook: (look) => { localAvatarColors = resolveAvatarColors(look); },
+      // Debug/test hook — the actual resolved [r,g,b,a] colors currently
+      // applied to the local character, or null for the default look.
+      getLocalAvatarColors: () => localAvatarColors
     };
   }
 

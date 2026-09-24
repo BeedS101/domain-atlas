@@ -42,4 +42,15 @@ if (!$cls) send_json(400, ['error' => 'class query parameter is required']);
 $resolved = atlas_asset_catalog_entry($cls);
 if ($resolved === null) send_json(404, ['error' => 'unknown assetClass']);
 
+// atlas_asset_catalog_entry() OMITS model/thumbnail entirely when a class
+// has neither (correct for the signed credential shape a real mint
+// produces — SPEC.md §5's "both optional" means absent, not null) — but
+// this discovery response is unsigned display data, not part of any
+// credential, and issuer-server/server.js's own /atlas/asset/class route
+// explicitly coalesces both to null here so a caller can rely on the keys
+// always being present. Mirrors that convention on this response only,
+// without changing what a real mint of the same class actually signs.
+$resolved['model'] = $resolved['model'] ?? null;
+$resolved['thumbnail'] = $resolved['thumbnail'] ?? null;
+
 send_json(200, $resolved);

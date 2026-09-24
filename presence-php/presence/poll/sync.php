@@ -44,6 +44,12 @@ $result = with_presence_store_locked(function (&$doc) use ($id, $body) {
         // presence-server.js's own moveMember().
         $actuallyMoved = $room[$id]['x'] !== $x || $room[$id]['y'] !== $y || $room[$id]['z'] !== $z || $room[$id]['yaw'] !== $yaw;
         $room[$id]['x'] = $x; $room[$id]['y'] = $y; $room[$id]['z'] = $z; $room[$id]['yaw'] = $yaw;
+        // A sync IS this member's current full pose, appearance included —
+        // always overwrites (to null when neither key is sent), same as
+        // x/y/z/yaw, not a partial patch. Matches presence-server.js's own
+        // moveMember().
+        $room[$id]['shirtColor'] = presence_sanitize_color($body['shirtColor'] ?? null);
+        $room[$id]['pantsColor'] = presence_sanitize_color($body['pantsColor'] ?? null);
         if ($actuallyMoved) $room[$id]['lastActivityAt'] = presence_now_ms();
       }
     }

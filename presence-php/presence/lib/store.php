@@ -49,6 +49,13 @@ const PRESENCE_MAX_NAME_LEN = 60;
 const PRESENCE_MAX_ID_LEN = 120; // domain/world strings
 const PRESENCE_MAX_COORD = 100000;
 const PRESENCE_MAX_PUBLIC_KEY_LEN = 200; // matches presence-server.js's MAX_PUBLIC_KEY_LEN
+const PRESENCE_MAX_COLOR_LEN = 16; // matches presence-server.js's MAX_COLOR_LEN — '#rrggbb' with room to spare
+
+// Same "loose sanity, not real validation" posture as the bounds above —
+// matches presence-server.js's sanitizeColor() exactly.
+function presence_sanitize_color($v) {
+  return is_string($v) ? substr($v, 0, PRESENCE_MAX_COLOR_LEN) : null;
+}
 
 // Signal relay (Friends, #67), PHP side — same closed vocabulary as
 // presence-server.js's ALLOWED_SIGNAL_KINDS. See poll/signal.php for what
@@ -105,7 +112,9 @@ function presence_roster_of($room, $exceptId) {
     if ($id === $exceptId) continue;
     $roster[] = [
       'id' => $id, 'name' => $member['name'], 'x' => $member['x'], 'y' => $member['y'], 'z' => $member['z'], 'yaw' => $member['yaw'],
-      'publicKey' => isset($member['publicKey']) ? $member['publicKey'] : null
+      'publicKey' => isset($member['publicKey']) ? $member['publicKey'] : null,
+      'shirtColor' => isset($member['shirtColor']) ? $member['shirtColor'] : null,
+      'pantsColor' => isset($member['pantsColor']) ? $member['pantsColor'] : null
     ];
   }
   return $roster;

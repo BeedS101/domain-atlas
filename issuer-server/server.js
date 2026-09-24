@@ -674,6 +674,33 @@ const ASSET_CATALOG = {
       'atlas.rarity': 'rare',
       'com.example.awardedFor': 'Defeating the in-world chess bot on Hard difficulty'
     }
+  },
+  // Equippable looks: no model/thumbnail (an outfit isn't a held or
+  // displayed object, just a recolor of the shared character model — see
+  // extension/wallet.js's avatarLookPropertiesFromAsset() and
+  // extension/gltf-mini.js's drawCharacterAt()). shirtColor/pantsColor are
+  // under atlas.*, not com.example.*, because a client actually has to
+  // understand these two specific keys to render anything from them — the
+  // same "small shared vocabulary worth standardizing" reasoning SPEC.md
+  // already gives atlas.rarity/atlas.purity, applied to a pair whose whole
+  // point is being interpreted rather than just displayed.
+  'atlas.avatar.outfit.forest': {
+    name: 'Forest Ranger Outfit',
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.avatar.shirtColor': '#2f5d3a',
+      'atlas.avatar.pantsColor': '#3b2a1e'
+    }
+  },
+  'atlas.avatar.outfit.dusk': {
+    name: 'Dusk Wanderer Outfit',
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.avatar.shirtColor': '#4a3b6b',
+      'atlas.avatar.pantsColor': '#22243a'
+    }
   }
 };
 

@@ -473,6 +473,26 @@ async function fetchPresenceStatus(domain, worldId, presenceBase) {
   }
 }
 
+// This viewer's own equipped avatar look, as plain hex strings — cached
+// here (rather than read fresh from AtlasWallet on every call) because
+// currentLocalPose() below runs on every presence move-sync tick and needs
+// a synchronous read. Kept in sync by applyAvatarLookToScene(), the only
+// place that writes it.
+let localAvatarLookHex = null;
+
+// Re-reads this identity's equipped look (AtlasWallet.getAvatarLook()) and
+// applies it both to the local cache above (for presence broadcast) and to
+// the live 3D renderer, if one is active (for actually seeing it). Called
+// once on world entry (see the MiniGLTF.init() localAvatarLook option
+// right below, which seeds the very first render before this ever runs)
+// and again whenever the equip/unequip wallet-card action changes it —
+// same "no scene reload needed" live-update treatment setCharacterScale
+// already gets.
+async function applyAvatarLookToScene() {
+  localAvatarLookHex = await AtlasWallet.getAvatarLook();
+  if (active3D && active3D.setLocalAvatarLook) active3D.setLocalAvatarLook(localAvatarLookHex);
+}
+
 function currentLocalPose() {
   if (!active3D) return null;
   const pos = active3D.camera.pos;
@@ -482,7 +502,11 @@ function currentLocalPose() {
   // stand, so broadcasting eye height renders everyone else hovering
   // roughly at head height instead of standing on the floor. See
   // getCharacterFloorY()'s own comment in gltf-mini.js for the full story.
-  return { x: pos[0], y: active3D.getCharacterFloorY(), z: pos[2], yaw: active3D.getCharacterYaw() };
+  return {
+    x: pos[0], y: active3D.getCharacterFloorY(), z: pos[2], yaw: active3D.getCharacterYaw(),
+    shirtColor: (localAvatarLookHex && localAvatarLookHex.shirtColor) || null,
+    pantsColor: (localAvatarLookHex && localAvatarLookHex.pantsColor) || null
+  };
 }
 
 // Reconciles a polling roster response (the full "everyone else in the
@@ -2459,6 +2483,13 @@ async function enterWorld(worldId) {
       // hovered3DInteractMarker check used to give this same callback.
       let hadNearby3DItems = false;
 
+      // Refreshed here rather than trusting whatever localAvatarLookHex
+      // already held — this could be the first world entered all session
+      // (still its initial null even though the identity's actual equipped
+      // look, if any, has been sitting in storage the whole time), or the
+      // identity could have changed since the last time this ran.
+      localAvatarLookHex = await AtlasWallet.getAvatarLook();
+
       active3D = MiniGLTF.init(scene3dCanvas, {
         sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
@@ -2544,6 +2575,11 @@ async function enterWorld(worldId) {
         // above) — no async wallet read inside this per-frame hot path.
         isMarkerAlreadyOwned: (marker) => isOncePerUserClassOwned(manifestDomainOf(currentManifest), marker),
         characterScale: await AtlasWallet.getCharacterScale(),
+        // Just refreshed above — seeds the very first frame with this
+        // identity's actual equipped look instead of the default colors.
+        // Later changes (the equip/unequip wallet-card action) go through
+        // applyAvatarLookToScene()'s live setter instead of a re-init.
+        localAvatarLook: localAvatarLookHex,
         // Scene asset download progress (#36) — see updateSceneLoadProgress()
         // above and loadScene()'s own comment in gltf-mini.js for why this
         // counts unique models, not placed instances.
@@ -5150,6 +5186,18 @@ function renderAssetCard(entry, container, opts) {
         '</div>'
       : '<button data-action="drop" data-id="' + entry.credential.id + '" class="btn-secondary">Drop here</button>';
   }
+  // Only offered on a self card (opts.avatarLookEnabled — false for every
+  // counterparty list) for an asset that actually carries the two atlas.*
+  // properties a client renders anything from (see
+  // AtlasWallet.avatarLookPropertiesFromAsset()) — this equips it as this
+  // identity's own rendered look, which then travels to every world and
+  // domain the same way the rest of the wallet already does, since it's
+  // stored per-identity rather than per-scene (see wallet.js's
+  // getAvatarLook()/setAvatarLook()).
+  if (opts.avatarLookEnabled && AtlasWallet.avatarLookPropertiesFromAsset(asset)) {
+    const wearingThis = opts.equippedAvatarAssetId === entry.credential.id;
+    actionsHtml += '<button data-action="toggle-avatar-look" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingThis ? 'Take off (stop wearing this look)' : 'Wear as my look') + '</button>';
+  }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   const menuHtml =
     '<div class="card-menu">' +
@@ -5403,6 +5451,7 @@ async function refreshInventoryDisplay() {
   const identity = await AtlasWallet.getIdentity();
   const counterparty = await AtlasWallet.getCounterparty();
   const loadout = await AtlasWallet.getLoadout();
+  const equippedAvatarAssetId = await AtlasWallet.getAvatarLookAssetId();
   const risky = combatOf(currentWorld) !== 'none';
   // refreshInventoryDisplay() runs once, unawaited, at the bottom of this
   // file as soon as the script parses — well before enterWorld() has
@@ -5463,13 +5512,13 @@ async function refreshInventoryDisplay() {
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId });
   }
   counterpartyCollectiblesListEl.innerHTML = '';
   if (cpCollectibles.length === 0) {
     counterpartyCollectiblesListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('collectible') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no collectibles yet.') + '</div>';
   } else {
-    renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self' });
+    renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false });
   }
 
   renderDroppedItemsList(droppedHere, identity);
@@ -5481,13 +5530,13 @@ async function refreshInventoryDisplay() {
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId });
   }
   counterpartyDocumentsListEl.innerHTML = '';
   if (cpDocuments.length === 0) {
     counterpartyDocumentsListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no documents yet.') + '</div>';
   } else {
-    renderAssetList(cpDocuments, counterpartyDocumentsListEl, { loadable: false, droppable: false, otherLabel: 'self' });
+    renderAssetList(cpDocuments, counterpartyDocumentsListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false });
   }
 
   const totalHeld = selfVisible.length + cpVisible.length;
@@ -10582,6 +10631,11 @@ function assetActionHandler(listEl, role, toRole) {
       }
     } else if (btn.dataset.action === 'hide') {
       await AtlasWallet.hideAsset(who.publicKey, id);
+      await refreshInventoryDisplay();
+    } else if (btn.dataset.action === 'toggle-avatar-look') {
+      const currentlyEquipped = await AtlasWallet.getAvatarLookAssetId();
+      await AtlasWallet.setAvatarLook(currentlyEquipped === id ? null : id);
+      await applyAvatarLookToScene();
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'split') {
       btn.disabled = true;

@@ -558,6 +558,28 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'com.example.awardedFor' => 'Defeating the in-world chess bot on Hard difficulty',
     ],
   ],
+  // Equippable looks: no modelPath/thumbnailPath (an outfit isn't a held
+  // or displayed object, just a recolor of the shared character model).
+  // shirtColor/pantsColor are under atlas.*, not com.example.*, because a
+  // client actually has to understand these two specific keys to render
+  // anything from them. Mirrors issuer-server/server.js's ASSET_CATALOG
+  // entries of the same name.
+  'atlas.avatar.outfit.forest' => [
+    'name' => 'Forest Ranger Outfit',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.avatar.shirtColor' => '#2f5d3a',
+      'atlas.avatar.pantsColor' => '#3b2a1e',
+    ],
+  ],
+  'atlas.avatar.outfit.dusk' => [
+    'name' => 'Dusk Wanderer Outfit',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.avatar.shirtColor' => '#4a3b6b',
+      'atlas.avatar.pantsColor' => '#22243a',
+    ],
+  ],
 ];
 
 // Task #204 — the other 115 periodic-table elements (everything except
@@ -588,8 +610,14 @@ function atlas_asset_catalog_entry($assetClass) {
   // no such token round-trips unchanged.
   $name = str_replace('{domain}', atlas_domain(), $entry['name']);
   $result = [
-    'name' => $name, 'class' => $assetClass, 'model' => 'https://' . atlas_domain() . $entry['modelPath'],
+    'name' => $name, 'class' => $assetClass,
   ];
+  // Both optional per SPEC.md §5 (mirrors issuer-server/server.js's
+  // `model: catalogEntry.model` — undefined there just drops the key from
+  // the signed JSON the same way omitting it here does): the first
+  // catalog entries with neither field at all are the avatar-look outfits
+  // below, an appearance recolor with no held/displayed object of its own.
+  if (!empty($entry['modelPath'])) $result['model'] = 'https://' . atlas_domain() . $entry['modelPath'];
   if (!empty($entry['thumbnailPath'])) $result['thumbnail'] = 'https://' . atlas_domain() . $entry['thumbnailPath'];
   $result['fungible'] = $entry['fungible'];
   $result['presentation'] = $entry['presentation'];
