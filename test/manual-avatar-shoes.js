@@ -1,34 +1,36 @@
-// Manual check for the equippable avatar HAT — a second, independent
-// equip slot alongside the outfit look (see manual-avatar-look.js):
-// owning one of the two atlas.avatar.hat.* crates in the lobby lets a
-// visitor "wear" it as a new geometry piece on the shared character model
-// (gltf-mini.js's buildCharacter()/drawCharacterAt()), via its own
-// wallet-card action (toggle-avatar-hat) and its own per-identity storage
-// (wallet.js's getAvatarHat()/setAvatarHat()) that never touches, and is
-// never touched by, whatever outfit happens to be equipped.
+// Manual check for the equippable avatar SHOES — a third, independent
+// equip slot alongside the outfit look (manual-avatar-look.js) and the hat
+// (manual-avatar-hat.js): owning one of the two atlas.avatar.shoes.* crates
+// in the lobby lets a visitor "wear" it as a new geometry piece on the
+// shared character model (gltf-mini.js's buildCharacter()/drawCharacterAt()),
+// via its own wallet-card action (toggle-avatar-shoes) and its own
+// per-identity storage (wallet.js's getAvatarShoes()/setAvatarShoes()) that
+// never touches, and is never touched by, whatever outfit or hat happens to
+// be equipped.
 //
 // Also covers the Settings -> Player character live preview
 // (MiniGLTF.previewCharacter(), wired up in viewer.js's openSettings())
 // showing exactly what's currently equipped, without any world open.
 //
 // Covers:
-//   1. Opening the sun-hat crate mints a real atlas.avatar.hat.sunhat
+//   1. Opening the boots crate mints a real atlas.avatar.shoes.boots
 //      credential.
-//   2. Before equipping, the local character has no hat.
-//   3. Equipping the hat recolors/adds it live (no reload), the same
-//      "no reload needed" treatment the outfit already gets.
-//   4. Equipping an outfit on top does NOT disturb the hat — both apply at
-//      once, proving the two slots are genuinely independent.
-//   5. Taking the hat back off leaves the outfit equipped — independence
-//      in the other direction.
-//   6. Re-equipping the hat, then leaving and re-entering the world (a
-//      real destroy+re-init), both the hat and the outfit survive —
-//      same wallet-backed, scene-independent mechanism manual-avatar-
-//      look.js already exercises for the outfit alone.
-//   7. A second visitor sees the first visitor's hat (alongside their
-//      outfit) on the remote character, over real presence broadcast.
+//   2. Before equipping, the local character has no shoes.
+//   3. Equipping the shoes adds them live (no reload), the same "no reload
+//      needed" treatment the outfit and hat already get.
+//   4. Equipping a hat and an outfit on top does NOT disturb the shoes —
+//      all three apply at once, proving the slots are genuinely
+//      independent of each other.
+//   5. Taking the shoes back off leaves the hat and outfit equipped —
+//      independence in the other direction.
+//   6. Re-equipping the shoes, then leaving and re-entering the world (a
+//      real destroy+re-init), all three survive — same wallet-backed,
+//      scene-independent mechanism manual-avatar-hat.js already exercises
+//      for the outfit+hat pair.
+//   7. A second visitor sees the first visitor's shoes (alongside their hat
+//      and outfit) on the remote character, over real presence broadcast.
 //   8. Settings -> Player character's live preview canvas reflects the
-//      currently-equipped hat and outfit, with no world open at all.
+//      currently-equipped shoes, hat, and outfit, with no world open at all.
 //
 // Requires presence-server/server.js running on its default port (8004)
 // as well as the usual issuer-server on 8001. Not part of the permanent
@@ -38,6 +40,7 @@ const { chromium } = require('playwright');
 const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+const BOOTS_CRATE = { x: 1.3, z: -3.9, class: 'atlas.avatar.shoes.boots', name: 'Trailblazer Boots', shoeColor: '#4a3222' };
 const SUNHAT_CRATE = { x: 2.5, z: -1.5, class: 'atlas.avatar.hat.sunhat', name: 'Explorer Sun Hat', hatColor: '#d9a441' };
 const FOREST_CRATE = { x: -1.0, z: -2.0, class: 'atlas.avatar.outfit.forest', name: 'Forest Ranger Outfit', shirtColor: '#2f5d3a', pantsColor: '#3b2a1e' };
 const LAUNCH_ARGS = [
@@ -78,7 +81,7 @@ async function pressE(frame) {
   await frame.evaluate(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyE' })));
 }
 
-// Same setup shape as manual-avatar-look.js/manual-lobby-interactables.js.
+// Same setup shape as manual-avatar-look.js/manual-avatar-hat.js.
 async function createIdentityAndEnterLobby(context, password, label) {
   const page = await context.newPage();
   page.on('pageerror', (err) => console.log(label + ' PAGEERROR:', String(err)));
@@ -129,11 +132,10 @@ async function leaveLobbyToPlaza(frame) {
 }
 
 // Waits for a genuine credential of `crate.class` to land in the wallet,
-// rather than comparing the #status line's text — this test opens two
-// crates that happen to share the exact same scene.json interactable
-// label ("Open the crate"), so their post-collect status text is
-// identical and a text-diff check can't tell them apart. Checking the
-// wallet directly is unambiguous either way.
+// rather than comparing the #status line's text — several crates in this
+// scene share the exact same interactable label ("Open the crate"), so
+// their post-collect status text is identical and a text-diff check can't
+// tell them apart. Checking the wallet directly is unambiguous either way.
 async function openCrate(frame, crate) {
   await teleport(frame, crate.x, crate.z);
   await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', { timeout: 5000 });
@@ -148,10 +150,17 @@ async function openCrate(frame, crate) {
     const wallet = await AtlasWallet.getWallet(identity.publicKey);
     return wallet.some((e) => e.credential.asset.class === cls);
   }, crate.class, { timeout: 10000 });
+  // The wallet storage write (just confirmed above) and handleInteractable's
+  // own refreshInventoryDisplay() re-render of the wallet-item list are two
+  // separate steps of the same async chain — storage can resolve a beat
+  // before the DOM actually reflects the new card. A short settle here
+  // avoids racing the very next wallet-panel interaction against that
+  // in-flight re-render.
+  await frame.waitForTimeout(300);
 }
 
-// action is 'toggle-avatar-look' or 'toggle-avatar-hat' — the two
-// independent wallet-card equip actions.
+// action is one of 'toggle-avatar-look' / 'toggle-avatar-hat' /
+// 'toggle-avatar-shoes' — the three independent wallet-card equip actions.
 async function toggleFromWallet(frame, assetName, action, expectSubstring) {
   await frame.locator('#walletBtn').click();
   await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
@@ -160,14 +169,15 @@ async function toggleFromWallet(frame, assetName, action, expectSubstring) {
   // collectibles list) — the panel's 'open' class flips before that async
   // rebuild necessarily finishes, so a "⋯" menu opened (via a Playwright
   // click) on the pre-rebuild DOM can have its 'show' class silently wiped
-  // the instant the rebuild replaces it. Doing the whole "find the card ->
-  // open its menu -> click its action button" sequence inside one
-  // retried, synchronous poll sidesteps that: each poll either opens the
-  // menu or (once it's actually open) clicks the action in the very same
-  // synchronous tick, so a rebuild landing between two polls just gets
-  // picked up again on the next one instead of racing Playwright's own
-  // cached element handle against a DOM subtree that can be replaced out
-  // from under it.
+  // the instant the rebuild replaces it, with three crates now cycling
+  // through this same wallet the window is wide enough to hit often. Doing
+  // the whole "find the card -> open its menu -> click its action button"
+  // sequence inside one retried, synchronous poll sidesteps that: each
+  // poll either opens the menu or (once it's actually open) clicks the
+  // action in the very same synchronous tick, so a rebuild landing between
+  // two polls just gets picked up again on the next one instead of racing
+  // Playwright's own cached element handle against a DOM subtree that can
+  // be replaced out from under it.
   await frame.waitForFunction(({ name, action }) => {
     const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
     const c = cards.find((x) => x.textContent.includes(name));
@@ -205,39 +215,46 @@ async function closeSettingsAndWallet(frame) {
 }
 
 (async () => {
-  const dirA = path.resolve(__dirname, '.chrome-profile-avatar-hat-a');
-  const dirB = path.resolve(__dirname, '.chrome-profile-avatar-hat-b');
+  const dirA = path.resolve(__dirname, '.chrome-profile-avatar-shoes-a');
+  const dirB = path.resolve(__dirname, '.chrome-profile-avatar-shoes-b');
   const contextA = await chromium.launchPersistentContext(dirA, { headless: false, executablePath: '/opt/pw-browsers/chromium', args: LAUNCH_ARGS });
   let contextB = null;
 
   try {
-    const { frame: frameA } = await createIdentityAndEnterLobby(contextA, 'avatar-hat-password-a', 'A');
+    const { frame: frameA } = await createIdentityAndEnterLobby(contextA, 'avatar-shoes-password-a', 'A');
 
-    console.log('STEP 1: opening the sun-hat crate mints a real atlas.avatar.hat.sunhat credential');
-    await openCrate(frameA, SUNHAT_CRATE);
-    const hasHat = await frameA.evaluate(async (cls) => {
+    console.log('STEP 1: opening the boots crate mints a real atlas.avatar.shoes.boots credential');
+    await openCrate(frameA, BOOTS_CRATE);
+    const hasShoes = await frameA.evaluate(async (cls) => {
       const identity = await AtlasWallet.getIdentity();
       const wallet = await AtlasWallet.getWallet(identity.publicKey);
       return wallet.some((e) => e.credential.asset.class === cls);
-    }, SUNHAT_CRATE.class);
-    if (!hasHat) throw new Error('Expected a real ' + SUNHAT_CRATE.class + ' credential in the wallet after opening the crate');
-    console.log('PASS: crate minted a genuine ' + SUNHAT_CRATE.name + ' credential');
+    }, BOOTS_CRATE.class);
+    if (!hasShoes) throw new Error('Expected a real ' + BOOTS_CRATE.class + ' credential in the wallet after opening the crate');
+    console.log('PASS: crate minted a genuine ' + BOOTS_CRATE.name + ' credential');
 
-    console.log('STEP 2: before equipping, the local character has no hat');
-    const hatBeforeEquip = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarHatColor());
-    if (hatBeforeEquip !== null) throw new Error('Expected no hat applied yet, got: ' + JSON.stringify(hatBeforeEquip));
-    console.log('PASS: no hat (null) before equipping anything');
+    console.log('STEP 2: before equipping, the local character has no shoes');
+    const shoesBeforeEquip = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarShoeColor());
+    if (shoesBeforeEquip !== null) throw new Error('Expected no shoes applied yet, got: ' + JSON.stringify(shoesBeforeEquip));
+    console.log('PASS: no shoes (null) before equipping anything');
 
-    console.log('STEP 3: equipping the hat from its wallet card adds it to the LOCAL character live, no reload');
+    console.log('STEP 3: equipping the shoes from its wallet card adds them to the LOCAL character live, no reload');
+    await toggleFromWallet(frameA, BOOTS_CRATE.name, 'toggle-avatar-shoes', 'Take off shoes');
+    const expectedShoes = hexToRgba01(BOOTS_CRATE.shoeColor);
+    await frameA.waitForFunction((shoes) => {
+      const c = window.__atlasActive3D.getLocalAvatarShoeColor();
+      return c && c.every((v, i) => Math.abs(v - shoes[i]) < 1e-6);
+    }, expectedShoes, { timeout: 5000 });
+    console.log('PASS: local character now renders the Trailblazer Boots\' own color');
+
+    console.log('STEP 4: equipping a hat and an outfit on top does not disturb the shoes — the three slots are independent');
+    await openCrate(frameA, SUNHAT_CRATE);
     await toggleFromWallet(frameA, SUNHAT_CRATE.name, 'toggle-avatar-hat', 'Take off hat');
     const expectedHat = hexToRgba01(SUNHAT_CRATE.hatColor);
     await frameA.waitForFunction((hat) => {
       const c = window.__atlasActive3D.getLocalAvatarHatColor();
       return c && c.every((v, i) => Math.abs(v - hat[i]) < 1e-6);
     }, expectedHat, { timeout: 5000 });
-    console.log('PASS: local character now renders the Explorer Sun Hat\'s own color');
-
-    console.log('STEP 4: equipping an outfit on top does not disturb the hat — the two slots are independent');
     await openCrate(frameA, FOREST_CRATE);
     await toggleFromWallet(frameA, FOREST_CRATE.name, 'toggle-avatar-look', 'Take off (stop wearing this look)');
     const expectedShirt = hexToRgba01(FOREST_CRATE.shirtColor);
@@ -248,53 +265,60 @@ async function closeSettingsAndWallet(frame) {
       const close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
       return close(c.shirtColor, shirt) && close(c.pantsColor, pants);
     }, { shirt: expectedShirt, pants: expectedPants }, { timeout: 5000 });
-    const hatStillOn = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarHatColor());
-    if (!colorsMatch(hatStillOn, expectedHat)) throw new Error('Expected the hat to still be equipped after equipping an outfit, got: ' + JSON.stringify(hatStillOn));
-    console.log('PASS: outfit and hat are both applied at once — equipping one left the other untouched');
+    const shoesStillOn = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarShoeColor());
+    if (!colorsMatch(shoesStillOn, expectedShoes)) throw new Error('Expected the shoes to still be equipped after equipping a hat and an outfit, got: ' + JSON.stringify(shoesStillOn));
+    console.log('PASS: outfit, hat, and shoes are all applied at once — equipping the others left the shoes untouched');
 
-    console.log('STEP 5: taking the hat back off leaves the outfit equipped — independence in the other direction');
-    await toggleFromWallet(frameA, SUNHAT_CRATE.name, 'toggle-avatar-hat', 'Wear as my hat');
-    await frameA.waitForFunction(() => window.__atlasActive3D.getLocalAvatarHatColor() === null, { timeout: 5000 });
-    const outfitStillOnAfterHatOff = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarColors());
-    if (!outfitStillOnAfterHatOff || !colorsMatch(outfitStillOnAfterHatOff.shirtColor, expectedShirt)) {
-      throw new Error('Expected the outfit to remain equipped after taking the hat off, got: ' + JSON.stringify(outfitStillOnAfterHatOff));
+    console.log('STEP 5: taking the shoes back off leaves the hat and outfit equipped — independence in the other direction');
+    await toggleFromWallet(frameA, BOOTS_CRATE.name, 'toggle-avatar-shoes', 'Wear as my shoes');
+    await frameA.waitForFunction(() => window.__atlasActive3D.getLocalAvatarShoeColor() === null, { timeout: 5000 });
+    const hatStillOnAfterShoesOff = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarHatColor());
+    const outfitStillOnAfterShoesOff = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarColors());
+    if (!colorsMatch(hatStillOnAfterShoesOff, expectedHat)) {
+      throw new Error('Expected the hat to remain equipped after taking the shoes off, got: ' + JSON.stringify(hatStillOnAfterShoesOff));
     }
-    console.log('PASS: taking the hat off left the outfit exactly as it was');
+    if (!outfitStillOnAfterShoesOff || !colorsMatch(outfitStillOnAfterShoesOff.shirtColor, expectedShirt)) {
+      throw new Error('Expected the outfit to remain equipped after taking the shoes off, got: ' + JSON.stringify(outfitStillOnAfterShoesOff));
+    }
+    console.log('PASS: taking the shoes off left the hat and outfit exactly as they were');
 
-    console.log('STEP 6: re-equipping the hat, then leaving and re-entering the world, both the hat and outfit survive');
-    await toggleFromWallet(frameA, SUNHAT_CRATE.name, 'toggle-avatar-hat', 'Take off hat');
-    await frameA.waitForFunction((hat) => {
-      const c = window.__atlasActive3D.getLocalAvatarHatColor();
-      return c && c.every((v, i) => Math.abs(v - hat[i]) < 1e-6);
-    }, expectedHat, { timeout: 5000 });
+    console.log('STEP 6: re-equipping the shoes, then leaving and re-entering the world, all three survive');
+    await toggleFromWallet(frameA, BOOTS_CRATE.name, 'toggle-avatar-shoes', 'Take off shoes');
+    await frameA.waitForFunction((shoes) => {
+      const c = window.__atlasActive3D.getLocalAvatarShoeColor();
+      return c && c.every((v, i) => Math.abs(v - shoes[i]) < 1e-6);
+    }, expectedShoes, { timeout: 5000 });
     await leaveLobbyToPlaza(frameA);
     await enterLobbyFromPlaza(frameA);
+    const shoesAfterReentry = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarShoeColor());
     const hatAfterReentry = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarHatColor());
     const colorsAfterReentry = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarColors());
-    if (!colorsMatch(hatAfterReentry, expectedHat)) throw new Error('Expected the equipped hat to survive a fresh world entry, got: ' + JSON.stringify(hatAfterReentry));
+    if (!colorsMatch(shoesAfterReentry, expectedShoes)) throw new Error('Expected the equipped shoes to survive a fresh world entry, got: ' + JSON.stringify(shoesAfterReentry));
+    if (!colorsMatch(hatAfterReentry, expectedHat)) throw new Error('Expected the equipped hat to also survive a fresh world entry, got: ' + JSON.stringify(hatAfterReentry));
     if (!colorsAfterReentry || !colorsMatch(colorsAfterReentry.shirtColor, expectedShirt) || !colorsMatch(colorsAfterReentry.pantsColor, expectedPants)) {
       throw new Error('Expected the equipped outfit to also survive a fresh world entry, got: ' + JSON.stringify(colorsAfterReentry));
     }
-    console.log('PASS: both the hat and the outfit survived a real world reentry, read back independently from the wallet');
+    console.log('PASS: the shoes, hat, and outfit all survived a real world reentry, read back independently from the wallet');
 
-    console.log('STEP 7: a second visitor sees the first visitor\'s hat, alongside their outfit, on the remote character');
+    console.log('STEP 7: a second visitor sees the first visitor\'s shoes, alongside their hat and outfit, on the remote character');
     contextB = await chromium.launchPersistentContext(dirB, { headless: false, executablePath: '/opt/pw-browsers/chromium', args: LAUNCH_ARGS });
-    const { frame: frameB } = await createIdentityAndEnterLobby(contextB, 'avatar-hat-password-b', 'B');
+    const { frame: frameB } = await createIdentityAndEnterLobby(contextB, 'avatar-shoes-password-b', 'B');
     await frameB.waitForFunction(() => window.__atlasActive3D.getRemotePlayerCount() >= 1, { timeout: 8000 });
     const idOfA = await frameB.evaluate(() => window.__atlasActive3D.getRemotePlayerIds()[0]);
-    await frameB.waitForFunction(({ id, hat, shirt, pants }) => {
+    await frameB.waitForFunction(({ id, shoes, hat, shirt, pants }) => {
       const rp = window.__atlasActive3D.getRemotePlayerRenderState(id);
-      if (!rp || !rp.hatColor || !rp.colors) return false;
+      if (!rp || !rp.shoeColor || !rp.hatColor || !rp.colors) return false;
       const close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-6);
-      return close(rp.hatColor, hat) && close(rp.colors.shirtColor, shirt) && close(rp.colors.pantsColor, pants);
-    }, { id: idOfA, hat: expectedHat, shirt: expectedShirt, pants: expectedPants }, { timeout: 8000 });
-    console.log('PASS: visitor B sees visitor A\'s remote character wearing both the hat and the outfit, over real presence broadcast');
+      return close(rp.shoeColor, shoes) && close(rp.hatColor, hat) && close(rp.colors.shirtColor, shirt) && close(rp.colors.pantsColor, pants);
+    }, { id: idOfA, shoes: expectedShoes, hat: expectedHat, shirt: expectedShirt, pants: expectedPants }, { timeout: 8000 });
+    console.log('PASS: visitor B sees visitor A\'s remote character wearing the shoes, hat, and outfit, over real presence broadcast');
 
-    console.log('STEP 8: Settings -> Player character\'s live preview reflects the currently-equipped hat and outfit, no world needed');
+    console.log('STEP 8: Settings -> Player character\'s live preview reflects the currently-equipped shoes, hat, and outfit, no world needed');
     await openSettingsScreen(frameA);
     const previewState = await frameA.evaluate(() => ({
       colors: window.__atlasCharacterPreview.getColors(),
-      hatColor: window.__atlasCharacterPreview.getHatColor()
+      hatColor: window.__atlasCharacterPreview.getHatColor(),
+      shoeColor: window.__atlasCharacterPreview.getShoeColor()
     }));
     if (!previewState.colors || !colorsMatch(previewState.colors.shirtColor, expectedShirt) || !colorsMatch(previewState.colors.pantsColor, expectedPants)) {
       throw new Error('Expected the Settings preview to show the equipped outfit, got: ' + JSON.stringify(previewState.colors));
@@ -302,10 +326,13 @@ async function closeSettingsAndWallet(frame) {
     if (!colorsMatch(previewState.hatColor, expectedHat)) {
       throw new Error('Expected the Settings preview to show the equipped hat, got: ' + JSON.stringify(previewState.hatColor));
     }
+    if (!colorsMatch(previewState.shoeColor, expectedShoes)) {
+      throw new Error('Expected the Settings preview to show the equipped shoes, got: ' + JSON.stringify(previewState.shoeColor));
+    }
     await closeSettingsAndWallet(frameA);
     console.log('PASS: the player-character preview in Settings matches exactly what\'s equipped');
 
-    console.log('\nALL AVATAR HAT CHECKS PASSED');
+    console.log('\nALL AVATAR SHOES CHECKS PASSED');
   } catch (err) {
     console.error('FAILURE:', err);
     process.exitCode = 1;

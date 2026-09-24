@@ -599,6 +599,23 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'atlas.avatar.hatColor' => '#26282c',
     ],
   ],
+  // Same reasoning as the hats above, a third independent equip slot.
+  // Mirrors issuer-server/server.js's ASSET_CATALOG entries of the same
+  // name.
+  'atlas.avatar.shoes.boots' => [
+    'name' => 'Trailblazer Boots',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.avatar.shoeColor' => '#4a3222',
+    ],
+  ],
+  'atlas.avatar.shoes.sneakers' => [
+    'name' => 'Court Sneakers',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.avatar.shoeColor' => '#e8e4dc',
+    ],
+  ],
 ];
 
 // Task #204 — the other 115 periodic-table elements (everything except

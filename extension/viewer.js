@@ -483,6 +483,9 @@ let localAvatarLookHex = null;
 // slot — a plain hex string (or null) rather than an object, since a hat
 // is only ever the one color. Kept in sync by applyAvatarHatToScene().
 let localAvatarHatHex = null;
+// Same caching reasoning again, for the third (shoes) equip slot. Kept in
+// sync by applyAvatarShoesToScene().
+let localAvatarShoeHex = null;
 
 // Settings -> Player character's live preview (MiniGLTF.previewCharacter())
 // — only exists while the Settings screen is actually open (see
@@ -517,6 +520,13 @@ async function applyAvatarHatToScene() {
   if (characterPreview && characterPreview.setHat) characterPreview.setHat(localAvatarHatHex);
 }
 
+// Same as applyAvatarHatToScene() above, for the third (shoes) slot.
+async function applyAvatarShoesToScene() {
+  localAvatarShoeHex = await AtlasWallet.getAvatarShoes();
+  if (active3D && active3D.setLocalAvatarShoes) active3D.setLocalAvatarShoes(localAvatarShoeHex);
+  if (characterPreview && characterPreview.setShoes) characterPreview.setShoes(localAvatarShoeHex);
+}
+
 function currentLocalPose() {
   if (!active3D) return null;
   const pos = active3D.camera.pos;
@@ -530,7 +540,8 @@ function currentLocalPose() {
     x: pos[0], y: active3D.getCharacterFloorY(), z: pos[2], yaw: active3D.getCharacterYaw(),
     shirtColor: (localAvatarLookHex && localAvatarLookHex.shirtColor) || null,
     pantsColor: (localAvatarLookHex && localAvatarLookHex.pantsColor) || null,
-    hatColor: localAvatarHatHex || null
+    hatColor: localAvatarHatHex || null,
+    shoeColor: localAvatarShoeHex || null
   };
 }
 
@@ -2516,6 +2527,7 @@ async function enterWorld(worldId) {
       // identity could have changed since the last time this ran.
       localAvatarLookHex = await AtlasWallet.getAvatarLook();
       localAvatarHatHex = await AtlasWallet.getAvatarHat();
+      localAvatarShoeHex = await AtlasWallet.getAvatarShoes();
 
       active3D = MiniGLTF.init(scene3dCanvas, {
         sceneData,
@@ -2609,6 +2621,8 @@ async function enterWorld(worldId) {
         localAvatarLook: localAvatarLookHex,
         // Same seeding as localAvatarLook above, for the separate hat slot.
         localAvatarHat: localAvatarHatHex,
+        // Same seeding again, for the third (shoes) slot.
+        localAvatarShoes: localAvatarShoeHex,
         // Scene asset download progress (#36) — see updateSceneLoadProgress()
         // above and loadScene()'s own comment in gltf-mini.js for why this
         // counts unique models, not placed instances.
@@ -5239,6 +5253,11 @@ function renderAssetCard(entry, container, opts) {
     const wearingThisHat = opts.equippedAvatarHatAssetId === entry.credential.id;
     actionsHtml += '<button data-action="toggle-avatar-hat" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingThisHat ? 'Take off hat' : 'Wear as my hat') + '</button>';
   }
+  // Same pattern again, for the third (shoes) equip slot.
+  if (opts.avatarShoesEnabled && AtlasWallet.avatarShoePropertiesFromAsset(asset)) {
+    const wearingTheseShoes = opts.equippedAvatarShoesAssetId === entry.credential.id;
+    actionsHtml += '<button data-action="toggle-avatar-shoes" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingTheseShoes ? 'Take off shoes' : 'Wear as my shoes') + '</button>';
+  }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   const menuHtml =
     '<div class="card-menu">' +
@@ -5494,6 +5513,7 @@ async function refreshInventoryDisplay() {
   const loadout = await AtlasWallet.getLoadout();
   const equippedAvatarAssetId = await AtlasWallet.getAvatarLookAssetId();
   const equippedAvatarHatAssetId = await AtlasWallet.getAvatarHatAssetId();
+  const equippedAvatarShoesAssetId = await AtlasWallet.getAvatarShoesAssetId();
   const risky = combatOf(currentWorld) !== 'none';
   // refreshInventoryDisplay() runs once, unawaited, at the bottom of this
   // file as soon as the script parses — well before enterWorld() has
@@ -5554,13 +5574,13 @@ async function refreshInventoryDisplay() {
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
   }
   counterpartyCollectiblesListEl.innerHTML = '';
   if (cpCollectibles.length === 0) {
     counterpartyCollectiblesListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('collectible') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no collectibles yet.') + '</div>';
   } else {
-    renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false, avatarHatEnabled: false });
+    renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false, avatarHatEnabled: false, avatarShoesEnabled: false });
   }
 
   renderDroppedItemsList(droppedHere, identity);
@@ -5572,13 +5592,13 @@ async function refreshInventoryDisplay() {
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
   }
   counterpartyDocumentsListEl.innerHTML = '';
   if (cpDocuments.length === 0) {
     counterpartyDocumentsListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no documents yet.') + '</div>';
   } else {
-    renderAssetList(cpDocuments, counterpartyDocumentsListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false, avatarHatEnabled: false });
+    renderAssetList(cpDocuments, counterpartyDocumentsListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false, avatarHatEnabled: false, avatarShoesEnabled: false });
   }
 
   const totalHeld = selfVisible.length + cpVisible.length;
@@ -6358,8 +6378,8 @@ async function openSettings() {
   if (autoLockMinutesInput) autoLockMinutesInput.value = String(await AtlasWallet.getAutoLockMinutes());
   if (walletSoundEnabledInputEl) walletSoundEnabledInputEl.checked = await AtlasWallet.getWalletSoundEnabled();
   showWalletScreen('settingsScreen');
-  // A live view of the character this identity's own equipped look/hat
-  // actually render as — reuses MiniGLTF.previewCharacter() (the same
+  // A live view of the character this identity's own equipped look/hat/
+  // shoes actually render as — reuses MiniGLTF.previewCharacter() (the same
   // shared boxes a real world's character is built from), so it stays
   // accurate without needing a world open at all. Torn down again by
   // disposeCharacterPreview() the moment this screen is left (see
@@ -6370,7 +6390,8 @@ async function openSettings() {
       characterPreview = MiniGLTF.previewCharacter(characterPreviewCanvasEl, {
         characterScale: await AtlasWallet.getCharacterScale(),
         avatarLook: await AtlasWallet.getAvatarLook(),
-        avatarHat: await AtlasWallet.getAvatarHat()
+        avatarHat: await AtlasWallet.getAvatarHat(),
+        avatarShoes: await AtlasWallet.getAvatarShoes()
       });
       window.__atlasCharacterPreview = characterPreview; // test-observability, same convention as window.__atlasActive3D
     } catch (err) {
@@ -10705,6 +10726,11 @@ function assetActionHandler(listEl, role, toRole) {
       const currentlyEquippedHat = await AtlasWallet.getAvatarHatAssetId();
       await AtlasWallet.setAvatarHat(currentlyEquippedHat === id ? null : id);
       await applyAvatarHatToScene();
+      await refreshInventoryDisplay();
+    } else if (btn.dataset.action === 'toggle-avatar-shoes') {
+      const currentlyEquippedShoes = await AtlasWallet.getAvatarShoesAssetId();
+      await AtlasWallet.setAvatarShoes(currentlyEquippedShoes === id ? null : id);
+      await applyAvatarShoesToScene();
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'split') {
       btn.disabled = true;

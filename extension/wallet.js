@@ -1248,6 +1248,51 @@ const AtlasWallet = (() => {
     return entry ? avatarHatPropertiesFromAsset(entry.credential.asset) : null; // no longer owned — graceful fallback to no hat
   }
 
+  // ---------- avatar shoes (equipped appearance, third independent slot) ----------
+  //
+  // Same trust level, storage shape, and revoked-credential fallback as
+  // avatar look/avatar hat above — a third equip slot, kept in its own
+  // storage key (atlasAvatarShoes) so it never touches, and is never
+  // touched by, whatever outfit or hat is equipped.
+  async function saveAvatarShoes(ownerPublicKey, assetId) {
+    const { atlasAvatarShoes } = await chrome.storage.local.get('atlasAvatarShoes');
+    const all = atlasAvatarShoes || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarShoes', assetId);
+    await chrome.storage.local.set({ atlasAvatarShoes: all });
+  }
+
+  async function getAvatarShoesAssetId() {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const { atlasAvatarShoes } = await chrome.storage.local.get('atlasAvatarShoes');
+    return decryptAtRestAndMigrate(identity, 'avatarShoes', (atlasAvatarShoes || {})[identity.publicKey], null, (v) => saveAvatarShoes(identity.publicKey, v));
+  }
+
+  async function setAvatarShoes(assetId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    await saveAvatarShoes(identity.publicKey, assetId || null);
+    return assetId || null;
+  }
+
+  // Pure — mirrors avatarHatPropertiesFromAsset() above, off the
+  // atlas.avatar.shoeColor key instead.
+  function avatarShoePropertiesFromAsset(asset) {
+    const props = (asset && asset.properties) || {};
+    return props['atlas.avatar.shoeColor'] || null;
+  }
+
+  async function getAvatarShoes() {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const assetId = await getAvatarShoesAssetId();
+    if (!assetId) return null;
+    const wallet = await getWallet(identity.publicKey);
+    const entry = wallet.find((e) => e.credential.id === assetId);
+    return entry ? avatarShoePropertiesFromAsset(entry.credential.asset) : null; // no longer owned — graceful fallback to no shoes
+  }
+
   // ---------- dropping items into a scene (shared — task #250) ----------
   //
   // Until now this was local-only, self-only: nothing about ownership ever
@@ -4394,6 +4439,7 @@ const AtlasWallet = (() => {
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
+    getAvatarShoes, getAvatarShoesAssetId, setAvatarShoes, avatarShoePropertiesFromAsset,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,

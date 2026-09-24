@@ -723,6 +723,27 @@ const ASSET_CATALOG = {
     properties: {
       'atlas.avatar.hatColor': '#26282c'
     }
+  },
+  // Same reasoning as the hats above (no model/thumbnail, atlas.*, own
+  // equip slot rather than a property on an existing one): shoes are a
+  // third independent slot in buildCharacter()'s geometry, alongside the
+  // outfit's torso/leg recolor and the hat, so all three can be worn at
+  // once without any of them touching the others.
+  'atlas.avatar.shoes.boots': {
+    name: 'Trailblazer Boots',
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.avatar.shoeColor': '#4a3222'
+    }
+  },
+  'atlas.avatar.shoes.sneakers': {
+    name: 'Court Sneakers',
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.avatar.shoeColor': '#e8e4dc'
+    }
   }
 };
 

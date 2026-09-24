@@ -51,6 +51,7 @@ $result = with_presence_store_locked(function (&$doc) use ($id, $body) {
         $room[$id]['shirtColor'] = presence_sanitize_color($body['shirtColor'] ?? null);
         $room[$id]['pantsColor'] = presence_sanitize_color($body['pantsColor'] ?? null);
         $room[$id]['hatColor'] = presence_sanitize_color($body['hatColor'] ?? null);
+        $room[$id]['shoeColor'] = presence_sanitize_color($body['shoeColor'] ?? null);
         if ($actuallyMoved) $room[$id]['lastActivityAt'] = presence_now_ms();
       }
     }

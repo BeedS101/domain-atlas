@@ -639,6 +639,13 @@
     // drawCharacterAt's hatColor param below); its own baked-in color here
     // is never used for that reason, but buildBox still needs one.
     const HAT_H = 0.12, HAT_SIZE = HEAD_SIZE * 1.25;
+    // Wraps the bottom of each leg — same local space as the leg itself
+    // (both hang off the same hip translate + swing rotation, so a shoe
+    // swings with its leg for free), a bit wider/longer than the leg for a
+    // shoe silhouette, and extending slightly past the leg's own foot
+    // (yMin below -LEG_LEN) for a simple sole. Only ever drawn when shoes
+    // are actually equipped (see drawCharacterAt's shoeColor param below).
+    const SHOE_H = 0.16, SHOE_W = LEG_W * 1.3, SHOE_D = LEG_D * 1.6;
     const hipY = LEG_LEN;
     const shoulderY = hipY + TORSO_H;
     const skin = [0.85, 0.68, 0.53, 1];
@@ -654,7 +661,9 @@
       armL: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
       armR: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
       legL: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, pants),
-      legR: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, pants)
+      legR: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, pants),
+      shoeL: buildBox(gl, SHOE_W, -LEG_LEN - 0.04, -LEG_LEN + SHOE_H, SHOE_D, pants),
+      shoeR: buildBox(gl, SHOE_W, -LEG_LEN - 0.04, -LEG_LEN + SHOE_H, SHOE_D, pants)
     };
   }
 
@@ -883,6 +892,8 @@
     // there's only the one color; hexToRgba01() already returns null on
     // invalid/missing input, same as resolveAvatarColors() does for looks.
     let localAvatarHatColor = hexToRgba01(opts.localAvatarHat);
+    // Third independent equip slot, same reasoning as the hat above.
+    let localAvatarShoeColor = hexToRgba01(opts.localAvatarShoes);
 
     // Other visitors currently in this same world (#66) — viewer.js owns
     // the actual presence WebSocket connection and message protocol; this
@@ -1690,7 +1701,10 @@
       // rather than drawing it in some "no hat" default color), and its
       // visibility is gated by `showHead` the same way the head itself is —
       // a hat with no head under it wouldn't make sense either.
-      const drawCharacterAt = (base, swing, showHead, colors, hatColor) => {
+      // `shoeColor` is a third independent override, gated the same way:
+      // each shoe is drawn using the exact same local-matrix expression as
+      // its leg, so it swings with the walk cycle for free.
+      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor) => {
         const shirtColor = colors && colors.shirtColor;
         const pantsColor = colors && colors.pantsColor;
         const drawPart = (localMatrix, part, colorOverride) => {
@@ -1703,10 +1717,16 @@
         drawPart(mat4Translate(0, character.hipY, 0), character.torso, shirtColor);
         drawPart(mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing)), character.armL);
         drawPart(mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing)), character.armR);
-        drawPart(mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing)), character.legL, pantsColor);
-        drawPart(mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing)), character.legR, pantsColor);
+        const legLLocal = mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing));
+        const legRLocal = mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing));
+        drawPart(legLLocal, character.legL, pantsColor);
+        drawPart(legRLocal, character.legR, pantsColor);
+        if (shoeColor) {
+          drawPart(legLLocal, character.shoeL, shoeColor);
+          drawPart(legRLocal, character.shoeR, shoeColor);
+        }
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor);
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor);
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
@@ -1730,7 +1750,7 @@
         // player's arms/legs would turn to face the mirror of wherever
         // they're actually walking.
         const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4RotateY(-rp.yaw));
-        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor); // always show the head — this is never our own first-person view
+        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor, rp.shoeColor); // always show the head — this is never our own first-person view
       });
 
       rafId = requestAnimationFrame(frame);
@@ -1890,13 +1910,17 @@
         // be reset.
         const hasHatUpdate = 'hatColor' in state;
         const hatColor = hasHatUpdate ? hexToRgba01(state.hatColor) : null;
+        // Same treatment as the hat above, for the third independent slot.
+        const hasShoeUpdate = 'shoeColor' in state;
+        const shoeColor = hasShoeUpdate ? hexToRgba01(state.shoeColor) : null;
         const existing = remotePlayers.get(id);
         if (existing) {
           existing.tx = x; existing.ty = y; existing.tz = z; existing.tyaw = yaw;
           if (hasLookUpdate) existing.colors = colors;
           if (hasHatUpdate) existing.hatColor = hatColor;
+          if (hasShoeUpdate) existing.shoeColor = shoeColor;
         } else {
-          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null });
+          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null, shoeColor: hasShoeUpdate ? shoeColor : null });
         }
       },
       removeRemotePlayer: (id) => { remotePlayers.delete(id); },
@@ -1908,7 +1932,7 @@
       // interpolation is genuinely happening frame to frame.
       getRemotePlayerRenderState: (id) => {
         const rp = remotePlayers.get(id);
-        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null } : null;
+        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null, shoeColor: rp.shoeColor || null } : null;
       },
       // Live setter for this viewer's OWN equipped look (the wallet-card
       // equip/unequip action) — same "no scene reload needed" treatment as
@@ -1919,11 +1943,15 @@
       // hat slot. Accepts the plain hex string wallet.js's getAvatarHat()
       // returns (or null/undefined to take the hat off).
       setLocalAvatarHat: (hex) => { localAvatarHatColor = hexToRgba01(hex); },
+      // Same live-update treatment, for the third (shoes) slot.
+      setLocalAvatarShoes: (hex) => { localAvatarShoeColor = hexToRgba01(hex); },
       // Debug/test hook — the actual resolved [r,g,b,a] colors currently
       // applied to the local character, or null for the default look.
       getLocalAvatarColors: () => localAvatarColors,
       // Same debug/test hook for the hat slot.
-      getLocalAvatarHatColor: () => localAvatarHatColor
+      getLocalAvatarHatColor: () => localAvatarHatColor,
+      // Same debug/test hook for the shoes slot.
+      getLocalAvatarShoeColor: () => localAvatarShoeColor
     };
   }
 
@@ -2187,10 +2215,11 @@
   // world renderer.
   //
   // opts: { characterScale, avatarLook: {shirtColor, pantsColor} | null,
-  // avatarHat: '#rrggbb' | null }. Returns { dispose(), setLook(look),
-  // setHat(hex) } — the caller (viewer.js) re-applies both live whenever
-  // the wallet-card equip/unequip actions change them, same "no reload"
-  // treatment the real 3D view already gives its own character.
+  // avatarHat: '#rrggbb' | null, avatarShoes: '#rrggbb' | null }. Returns
+  // { dispose(), setLook(look), setHat(hex), setShoes(hex) } — the caller
+  // (viewer.js) re-applies all three live whenever the wallet-card
+  // equip/unequip actions change them, same "no reload" treatment the
+  // real 3D view already gives its own character.
   function previewCharacter(canvas, opts) {
     opts = opts || {};
     const gl = canvas.getContext('webgl', { alpha: true, antialias: true }) || canvas.getContext('experimental-webgl', { alpha: true });
@@ -2202,6 +2231,7 @@
     let scale = clampCharacterScale(opts.characterScale);
     let colors = resolveAvatarColors(opts.avatarLook);
     let hatColor = hexToRgba01(opts.avatarHat);
+    let shoeColor = hexToRgba01(opts.avatarShoes);
 
     // Frame the whole standing character, same "fit to view" idea as
     // previewModel()'s bounding-radius camera, sized off the character's
@@ -2255,8 +2285,14 @@
       drawPart(base, mat4Translate(0, character.hipY, 0), character.torso, colors && colors.shirtColor, projection);
       drawPart(base, mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), character.armL, null, projection);
       drawPart(base, mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), character.armR, null, projection);
-      drawPart(base, mat4Translate(-character.hipOffsetX, character.hipY, 0), character.legL, colors && colors.pantsColor, projection);
-      drawPart(base, mat4Translate(character.hipOffsetX, character.hipY, 0), character.legR, colors && colors.pantsColor, projection);
+      const legLLocal = mat4Translate(-character.hipOffsetX, character.hipY, 0);
+      const legRLocal = mat4Translate(character.hipOffsetX, character.hipY, 0);
+      drawPart(base, legLLocal, character.legL, colors && colors.pantsColor, projection);
+      drawPart(base, legRLocal, character.legR, colors && colors.pantsColor, projection);
+      if (shoeColor) {
+        drawPart(base, legLLocal, character.shoeL, shoeColor, projection);
+        drawPart(base, legRLocal, character.shoeR, shoeColor, projection);
+      }
 
       rafId = requestAnimationFrame(frame);
     }
@@ -2269,6 +2305,8 @@
       // for the real 3D view.
       setLook(look) { colors = resolveAvatarColors(look); },
       setHat(hex) { hatColor = hexToRgba01(hex); },
+      // Same live-update treatment for the third (shoes) slot.
+      setShoes(hex) { shoeColor = hexToRgba01(hex); },
       // Same live-update treatment for the Size slider, in case this panel
       // is open while it's dragged.
       setScale(s) { scale = clampCharacterScale(s); },
@@ -2276,6 +2314,7 @@
       // getLocalAvatarHatColor on the real 3D view above.
       getColors: () => colors,
       getHatColor: () => hatColor,
+      getShoeColor: () => shoeColor,
       dispose() {
         if (lost) return;
         lost = true;

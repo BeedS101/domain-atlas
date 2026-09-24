@@ -135,9 +135,32 @@ async function openCrate(frame, crate) {
 async function equipLookFromWallet(frame, assetName) {
   await frame.locator('#walletBtn').click();
   await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
-  const card = frame.locator('#selfCollectiblesList .wallet-item', { hasText: assetName });
-  await card.locator('.card-menu-toggle').click();
-  await card.locator('button[data-action="toggle-avatar-look"]').click();
+  // Opening the wallet panel triggers routeWalletScreen's own
+  // refreshInventoryDisplay() (a full innerHTML rebuild of the self
+  // collectibles list) — the panel's 'open' class flips before that async
+  // rebuild necessarily finishes, so a "⋯" menu opened (via a Playwright
+  // click) on the pre-rebuild DOM can have its 'show' class silently wiped
+  // the instant the rebuild replaces it. Doing the whole "find the card ->
+  // open its menu -> click its action button" sequence inside one
+  // retried, synchronous poll sidesteps that: each poll either opens the
+  // menu or (once it's actually open) clicks the action in the very same
+  // synchronous tick, so a rebuild landing between two polls just gets
+  // picked up again on the next one instead of racing Playwright's own
+  // cached element handle against a DOM subtree that can be replaced out
+  // from under it.
+  await frame.waitForFunction((name) => {
+    const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
+    const c = cards.find((x) => x.textContent.includes(name));
+    if (!c) return false;
+    const toggle = c.querySelector('.card-menu-toggle');
+    const menu = c.querySelector('.card-menu-items');
+    if (!toggle || !menu) return false;
+    if (!menu.classList.contains('show')) { toggle.click(); return false; }
+    const actionBtn = c.querySelector('button[data-action="toggle-avatar-look"]');
+    if (!actionBtn) return false;
+    actionBtn.click();
+    return true;
+  }, assetName, { timeout: 10000, polling: 100 });
   await frame.waitForFunction((name) => {
     const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
     const c = cards.find((x) => x.textContent.includes(name));

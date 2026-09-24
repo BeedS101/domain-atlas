@@ -243,7 +243,7 @@ function rosterOf(room, exceptConnId) {
     if (id === exceptConnId) return;
     roster.push({
       id, name: member.name, x: member.x, y: member.y, z: member.z, yaw: member.yaw, publicKey: member.publicKey || null,
-      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null, hatColor: member.hatColor || null
+      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null, hatColor: member.hatColor || null, shoeColor: member.shoeColor || null
     });
   });
   return roster;
@@ -584,14 +584,14 @@ function removeMember(connId) {
 // already-joined connId, then broadcasts it to the room's WS members.
 // Returns false (no-op) for an unknown id or out-of-bounds/non-finite
 // coordinates — same validation either transport's move message gets.
-// `look` ({shirtColor, pantsColor, hatColor}, all optional hex strings)
-// rides alongside position — a viewer's equipped avatar look and hat
-// (extension/wallet.js's getAvatarLook()/getAvatarHat(), two independent
-// equip slots) can change mid-session the same way position does, so
-// they're broadcast the same way rather than only at join. Always
-// overwrites (to null when a caller sends neither field), same as
-// x/y/z/yaw — a move IS this member's current full pose, appearance
-// included, not a partial patch.
+// `look` ({shirtColor, pantsColor, hatColor, shoeColor}, all optional hex
+// strings) rides alongside position — a viewer's equipped avatar look,
+// hat, and shoes (extension/wallet.js's getAvatarLook()/getAvatarHat()/
+// getAvatarShoes(), three independent equip slots) can change mid-session
+// the same way position does, so they're broadcast the same way rather
+// than only at join. Always overwrites (to null when a caller sends
+// neither field), same as x/y/z/yaw — a move IS this member's current
+// full pose, appearance included, not a partial patch.
 function moveMember(connId, x, y, z, yaw, look) {
   const loc = connIndex.get(connId);
   if (!loc) return false;
@@ -602,15 +602,16 @@ function moveMember(connId, x, y, z, yaw, look) {
   const shirtColor = sanitizeColor(look && look.shirtColor);
   const pantsColor = sanitizeColor(look && look.pantsColor);
   const hatColor = sanitizeColor(look && look.hatColor);
+  const shoeColor = sanitizeColor(look && look.shoeColor);
   // Task #137's activity clock only counts a REAL change — a poll
   // member's sync tick reports its current pose every 2s regardless of
   // whether it moved at all, and that repetition shouldn't look like
   // activity (see isMemberActive() / ACTIVITY_IDLE_MS above).
   const actuallyMoved = member.x !== x || member.y !== y || member.z !== z || member.yaw !== yaw;
   member.x = x; member.y = y; member.z = z; member.yaw = yaw;
-  member.shirtColor = shirtColor; member.pantsColor = pantsColor; member.hatColor = hatColor;
+  member.shirtColor = shirtColor; member.pantsColor = pantsColor; member.hatColor = hatColor; member.shoeColor = shoeColor;
   if (actuallyMoved) member.lastActivityAt = Date.now();
-  broadcast(loc.room, connId, { type: 'moved', id: connId, x, y, z, yaw, shirtColor, pantsColor, hatColor });
+  broadcast(loc.room, connId, { type: 'moved', id: connId, x, y, z, yaw, shirtColor, pantsColor, hatColor, shoeColor });
   return true;
 }
 
@@ -899,7 +900,7 @@ function handleConnection(socket) {
         const now = Date.now();
         if (now - lastMoveAt < MOVE_MIN_INTERVAL_MS) return;
         lastMoveAt = now;
-        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor, hatColor: msg.hatColor });
+        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor, hatColor: msg.hatColor, shoeColor: msg.shoeColor });
         return;
       }
 
@@ -1130,7 +1131,7 @@ const server = http.createServer(async (req, res) => {
       const member = loc.room.get(connId);
       if (!member || member.transport !== 'poll') return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin', reason: notFoundReason });
       member.lastSeen = Date.now();
-      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor, hatColor: body.hatColor });
+      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor, hatColor: body.hatColor, shoeColor: body.shoeColor });
       // Drain any signals (friend requests etc, #67) queued for this
       // member since their last sync — this poll response IS the only
       // "push" a polling member ever gets, same reasoning as the roster
