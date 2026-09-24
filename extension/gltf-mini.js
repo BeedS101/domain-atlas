@@ -1308,16 +1308,31 @@
         })
       ));
       const loaded = urls.map((url) => modelByUrl.get(url));
+      // A loot crate's visible model is placed here as an ordinary scene
+      // object — it carries no reference back to the interactable guarding
+      // it, that's a separate entry in sceneData.interactables authored at
+      // the same position (see scene.json). lootMarkerAt() recovers that
+      // link by position match so the crate's geometry and collision box
+      // can both be dropped once opts.isMarkerAlreadyOwned says it's gone,
+      // the same predicate the E-interact loop and previewer already use,
+      // instead of an already-looted crate sitting there solid forever.
+      const interactables = sceneData.interactables || [];
+      function lootMarkerAt(position) {
+        return interactables.find((m) => m.oncePerUser &&
+          m.position[0] === position[0] && m.position[1] === position[1] && m.position[2] === position[2]) || null;
+      }
       objects.forEach((obj, i) => {
         const model = loaded[i];
         const rotY = ((obj.rotationY || 0) * Math.PI) / 180;
         const scale = obj.scale || 1;
         const placement = mat4Multiply(mat4Translate(obj.position[0], obj.position[1] || 0, obj.position[2]), mat4Multiply(mat4RotateY(rotY), mat4Scale(scale)));
+        const lootMarker = lootMarkerAt(obj.position);
         model.primitives.forEach((prim) => {
           placedPrimitives.push({
             vao: prim.vao,
             color: prim.color,
-            modelMatrix: mat4Multiply(placement, prim.nodeMatrix)
+            modelMatrix: mat4Multiply(placement, prim.nodeMatrix),
+            lootMarker
           });
         });
         // Bounding box for collision, in XZ, expanded from the model's own
@@ -1328,7 +1343,7 @@
         if (isFinite(b.min[0])) {
           const cx = obj.position[0], cz = obj.position[2];
           const hx = (b.size[0] * scale) / 2, hz = (b.size[2] * scale) / 2;
-          boundingBoxes.push({ min: [cx - hx, cz - hz], max: [cx + hx, cz + hz] });
+          boundingBoxes.push({ min: [cx - hx, cz - hz], max: [cx + hx, cz + hz], lootMarker });
         }
       });
 
@@ -1466,15 +1481,27 @@
       }
     }
 
-    function tryMove(dx, dz) {
-      const next = [camera.pos[0] + dx, camera.pos[2] + dz];
+    // Shared by tryMove() and the isPositionBlocked() debug hook below, so
+    // there's exactly one place that knows a claimed crate's box no longer
+    // blocks anything, rather than the two staying in sync by hand.
+    function isBlockedAt(x, z) {
       const PLAYER_RADIUS = 0.3;
       for (const box of boundingBoxes) {
-        if (next[0] + PLAYER_RADIUS > box.min[0] && next[0] - PLAYER_RADIUS < box.max[0] &&
-            next[1] + PLAYER_RADIUS > box.min[1] && next[1] - PLAYER_RADIUS < box.max[1]) {
-          return false;
+        // An already-claimed crate is skipped the same way it's skipped in
+        // the draw loop above — no invisible wall left where a looted box
+        // used to be.
+        if (box.lootMarker && opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(box.lootMarker)) continue;
+        if (x + PLAYER_RADIUS > box.min[0] && x - PLAYER_RADIUS < box.max[0] &&
+            z + PLAYER_RADIUS > box.min[1] && z - PLAYER_RADIUS < box.max[1]) {
+          return true;
         }
       }
+      return false;
+    }
+
+    function tryMove(dx, dz) {
+      const next = [camera.pos[0] + dx, camera.pos[2] + dz];
+      if (isBlockedAt(next[0], next[1])) return false;
       camera.pos[0] = next[0];
       camera.pos[2] = next[1];
       return true;
@@ -1690,7 +1717,14 @@
 
       if (floorPrim) bindAndDraw(floorPrim, view, projection);
       portalTriggers.forEach((tr) => { bindAndDraw(tr.ring, view, projection); bindAndDraw(tr.beacon, view, projection); });
-      placedPrimitives.forEach((prim) => bindAndDraw(prim, view, projection));
+      placedPrimitives.forEach((prim) => {
+        // See lootMarkerAt() in loadScene() — a plain furniture placement
+        // has no lootMarker at all and always draws; an already-claimed
+        // crate's is skipped here instead of drawing a box the player can
+        // no longer do anything with.
+        if (prim.lootMarker && opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(prim.lootMarker)) return;
+        bindAndDraw(prim, view, projection);
+      });
 
       // Dropped items — a slow spin plus a gentle bob (phase-offset by X so
       // several drops sitting near each other don't all bob in lockstep)
@@ -1926,6 +1960,22 @@
       // idea of what's actually in range, without re-deriving proximity
       // math the test has no access to.
       getNearbyInteractMarkers: () => lastNearbyInteractMarkers,
+      // Debug/test hooks for the loot-crate removal above — same
+      // read-the-real-internal-state convention as every other getter
+      // here, rather than asserting against rendered pixels. Matches a
+      // placed object to a class the same way lootMarkerAt() in
+      // loadScene() links them in the first place: null if no placed
+      // object is guarded by a oncePerUser marker of that class at all.
+      getLootCrateVisible: (assetClass) => {
+        const prim = placedPrimitives.find((p) => p.lootMarker && p.lootMarker.class === assetClass);
+        if (!prim) return null;
+        return !(opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(prim.lootMarker));
+      },
+      // Runs the exact same check tryMove() itself uses, against an
+      // arbitrary point, without actually moving the camera there or
+      // simulating WASD input — lets a test confirm a crate's collision
+      // box is solid before it's looted and gone once it's collected.
+      isPositionBlocked: (x, z) => isBlockedAt(x, z),
       // Dropped items visible/pickupable in this world — see setItemDrops()
       // and itemDropEntries' own declaration above for the full picture.
       // viewer.js calls this on the same poll/after-drop/after-pickup
