@@ -102,7 +102,11 @@ const COMPASS_GLB = path.resolve(__dirname, '..', 'demo-domain-a', 'assets', 'co
     }));
     if (!content.name.includes('Bronze Compass')) throw new Error('Expected "Bronze Compass" in the viewer name, got: ' + content.name);
     if (!content.meta.includes('atlas.wearable') || !content.meta.includes('localhost:8001')) throw new Error('Expected class + issuer domain in the viewer meta, got: ' + content.meta);
-    if (content.propCount !== 4) throw new Error('Expected all 4 properties shown directly (no click-to-expand toggle), got ' + content.propCount);
+    // 11 merged protocol-level fields (fungible, presentation, tradeScope,
+    // quantity, model, thumbnail, id, issuedAt, supersedes, issuer.publicKey,
+    // owner.publicKey — see mergedAssetFields() in viewer.js) plus the
+    // Bronze Compass's own 4 custom properties.
+    if (content.propCount !== 15) throw new Error('Expected all 15 properties shown directly (11 merged protocol fields + 4 custom, no click-to-expand toggle), got ' + content.propCount);
     console.log('PASS: viewer shows name/class/issuer and the full properties list, no toggle needed');
 
     console.log('STEP 2: the Bronze Compass HAS a thumbnail — the viewer shows it, and it actually loads');

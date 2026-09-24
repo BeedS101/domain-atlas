@@ -3748,6 +3748,37 @@ function formatItemProperties(properties) {
   return entries.map(([key, value]) => key + ': ' + formatPropertyValue(value)).join(' · ');
 }
 
+// Development-only: every other field on a credential/asset that has a
+// real behavioral effect but no visible label anywhere in the UI —
+// tradeScope (gates the Drop button), presentation (only ever used to
+// sort into the Collectibles/Documents tab), fungible, issuedAt, id,
+// supersedes, and the issuer/owner public keys — merged in front of the
+// free-form asset.properties dict, so nothing signed gets missed while
+// this schema is still actively changing. name/class/issuer.domain are
+// left out since they're already shown directly on every card. Meant to
+// be trimmed back down to a curated subset once the schema stabilizes.
+function mergedAssetFields(entry) {
+  const c = entry.credential;
+  const asset = c.asset;
+  return Object.assign({
+    fungible: !!asset.fungible,
+    presentation: asset.presentation || '(unset)',
+    tradeScope: asset.tradeScope || 'local (default)',
+    quantity: c.quantity,
+    model: asset.model || '(none)',
+    thumbnail: asset.thumbnail || '(none)',
+    id: c.id,
+    issuedAt: c.issuedAt,
+    supersedes: c.supersedes,
+    // Guarded rather than c.issuer.publicKey/c.owner.publicKey directly:
+    // every real minted credential has both, but this is also called
+    // against synthetic test fixtures that only set the fields their own
+    // test actually exercises (see manual-asset-viewer.js's fallback step).
+    'issuer.publicKey': c.issuer && c.issuer.publicKey,
+    'owner.publicKey': c.owner && c.owner.publicKey
+  }, asset.properties || {});
+}
+
 // Task #206 — every fungible asset in this catalog is one of the periodic-
 // table elements (or iron/gold/silver, which are just iron/gold/silver's
 // own element entries — see server.js/store.php), so by convention every
@@ -3880,17 +3911,17 @@ function renderAssetViewerContent(entry) {
   let html =
     '<div class="name">' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</div>' +
     '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + '</div>';
-  // Graceful fallback (task #150 point 6): both fields are optional per
-  // SPEC.md §5 — an issuer may set neither, so a class minted without them
-  // just skips straight to properties with no image area and no button,
-  // never a broken-image icon or a thrown error.
-  // Task #210: a placeholder area, not a real <img src="..."> — see
+  // Graceful fallback: both fields are optional per SPEC.md §5 — an
+  // issuer may set neither, so a class minted without them just skips
+  // straight to properties with no image area and no button, never a
+  // broken-image icon or a thrown error.
+  // A placeholder area, not a real <img src="..."> — see
   // loadAssetViewerThumbnail() below for why this fetches the bytes
   // itself instead of letting the browser's own HTTP cache decide.
   if (asset.thumbnail) {
     html += '<div id="assetViewerThumbnailArea"></div>';
   }
-  html += renderAssetViewerProperties(asset.properties);
+  html += renderAssetViewerProperties(mergedAssetFields(entry));
   if (asset.model) {
     html += '<button type="button" id="assetViewerShowModelBtn" data-model="' + asset.model + '">Show model</button>';
   }
@@ -5129,7 +5160,7 @@ function renderAssetCard(entry, container, opts) {
   const html =
     '<div class="name"><span>' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</span>' + menuHtml + '</div>' +
     '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + supersedesNote + '</div>' +
-    renderPropertiesToggle(asset.properties) +
+    renderPropertiesToggle(mergedAssetFields(entry)) +
     '<div class="verdict ' + (v.valid ? 'valid' : 'invalid') + '">' + (v.valid ? '✓ ' : '✗ ') + v.reason + '</div>';
   el.innerHTML = html;
   container.appendChild(el);
@@ -5707,7 +5738,7 @@ function renderHiddenAssetCard(entry, ownerLabel, container) {
   el.innerHTML =
     '<div class="name">' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</div>' +
     '<div class="meta">' + asset.class + ' · ' + ownerLabel + '</div>' +
-    renderPropertiesToggle(asset.properties) +
+    renderPropertiesToggle(mergedAssetFields(entry)) +
     '<div class="item-actions">' +
     '<button data-action="unhide" data-owner="' + ownerLabel + '" data-id="' + entry.credential.id + '">Unhide</button>' +
     '<button data-action="delete" data-owner="' + ownerLabel + '" data-id="' + entry.credential.id + '" class="danger-btn">Delete</button>' +

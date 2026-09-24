@@ -154,7 +154,11 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     const itemCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Bronze Compass' });
     const itemPropsLink = itemCard.locator('.properties-link');
     const itemPropsDetail = itemCard.locator('.properties-detail');
-    if (!(await itemPropsLink.textContent()).includes('Properties (4)')) throw new Error('Expected the item\'s properties link to read "Properties (4)" (atlas.rarity + com.example.era + com.example.material + com.example.condition)');
+    // 11 merged protocol-level fields (fungible, presentation, tradeScope,
+    // quantity, model, thumbnail, id, issuedAt, supersedes, issuer.publicKey,
+    // owner.publicKey — see mergedAssetFields()) plus this item's own 4
+    // custom properties.
+    if (!(await itemPropsLink.textContent()).includes('Properties (15)')) throw new Error('Expected the item\'s properties link to read "Properties (15)" (11 merged protocol fields + atlas.rarity + com.example.era + com.example.material + com.example.condition)');
     if (!(await itemPropsDetail.isHidden())) throw new Error('Expected the item\'s properties detail to start collapsed');
     await itemPropsLink.click();
     await frame.waitForFunction(() => {
@@ -165,9 +169,11 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
         && detail.textContent.includes('atlas.rarity: common')
         && detail.textContent.includes('com.example.era: Victorian')
         && detail.textContent.includes('com.example.material: brass')
-        && detail.textContent.includes('com.example.condition: well-worn');
+        && detail.textContent.includes('com.example.condition: well-worn')
+        && detail.textContent.includes('tradeScope: bound')
+        && detail.textContent.includes('fungible: false');
     }, { timeout: 5000 });
-    console.log('PASS: clicking the item\'s Properties link reveals all four properties');
+    console.log('PASS: clicking the item\'s Properties link reveals its custom properties plus the merged protocol-level fields');
     await itemPropsLink.click();
     await frame.waitForFunction(() => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));

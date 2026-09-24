@@ -110,10 +110,22 @@ async function projectInteractables(frame) {
     const ringCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Signet Ring' });
     await ringCard.locator('button[data-action="toggle-properties"]').click();
     const detailText = await ringCard.locator('.properties-detail').textContent();
-    if (!detailText.includes('fire resistance, silent step, luck +2')) {
-      throw new Error('Expected the array property to render as a comma-and-space-joined list, got: ' + detailText);
+    // atlas.rarity/com.example.enchantments/com.example.stats are rolled
+    // fresh on every mint (see randomRingProperties() in server.js), so
+    // read back the actual minted values instead of asserting one fixed
+    // roll, and check the array renders the way formatPropertyValue joins
+    // it (", "-separated), not JS's default Array.toString() "a,b,c".
+    const ringAsset = await frame.evaluate(async () => {
+      const identity = await AtlasWallet.getIdentity();
+      const wallet = await AtlasWallet.getWallet(identity.publicKey);
+      const entry = wallet.find((e) => e.credential.asset.class === 'atlas.wearable.ring');
+      return entry.credential.asset.properties;
+    });
+    const expectedEnchantments = ringAsset['com.example.enchantments'].join(', ');
+    if (!detailText.includes('com.example.enchantments: ' + expectedEnchantments)) {
+      throw new Error('Expected the array property to render as a comma-and-space-joined list ("' + expectedEnchantments + '"), got: ' + detailText);
     }
-    if (!detailText.includes('atlas.rarity: rare') || !detailText.includes('com.example.material: silver') || !detailText.includes('com.example.origin: Coastal Bazaar')) {
+    if (!detailText.includes('atlas.rarity: ' + ringAsset['atlas.rarity']) || !detailText.includes('com.example.material: silver') || !detailText.includes('com.example.origin: Coastal Bazaar')) {
       throw new Error('Expected the static properties to also be present: ' + detailText);
     }
     console.log('PASS: properties panel shows both static values and the array value readably ->', detailText);
