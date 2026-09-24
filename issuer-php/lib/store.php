@@ -580,6 +580,25 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'atlas.avatar.pantsColor' => '#22243a',
     ],
   ],
+  // Same reasoning as the outfits above, but a separate equip slot — a hat
+  // is its own new geometry piece in gltf-mini.js's buildCharacter(), not a
+  // recolor of the torso/legs, and wallet.js keeps it in its own storage
+  // key so a hat and an outfit can be worn together. Mirrors
+  // issuer-server/server.js's ASSET_CATALOG entries of the same name.
+  'atlas.avatar.hat.sunhat' => [
+    'name' => 'Explorer Sun Hat',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.avatar.hatColor' => '#d9a441',
+    ],
+  ],
+  'atlas.avatar.hat.cap' => [
+    'name' => 'Night Watch Cap',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => [
+      'atlas.avatar.hatColor' => '#26282c',
+    ],
+  ],
 ];
 
 // Task #204 — the other 115 periodic-table elements (everything except

@@ -114,7 +114,8 @@ function presence_roster_of($room, $exceptId) {
       'id' => $id, 'name' => $member['name'], 'x' => $member['x'], 'y' => $member['y'], 'z' => $member['z'], 'yaw' => $member['yaw'],
       'publicKey' => isset($member['publicKey']) ? $member['publicKey'] : null,
       'shirtColor' => isset($member['shirtColor']) ? $member['shirtColor'] : null,
-      'pantsColor' => isset($member['pantsColor']) ? $member['pantsColor'] : null
+      'pantsColor' => isset($member['pantsColor']) ? $member['pantsColor'] : null,
+      'hatColor' => isset($member['hatColor']) ? $member['hatColor'] : null
     ];
   }
   return $roster;

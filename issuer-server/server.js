@@ -701,6 +701,28 @@ const ASSET_CATALOG = {
       'atlas.avatar.shirtColor': '#4a3b6b',
       'atlas.avatar.pantsColor': '#22243a'
     }
+  },
+  // Same reasoning as the outfits above (no model/thumbnail, atlas.* rather
+  // than com.example.*), but a separate equip slot rather than another
+  // outfit property: a hat sits on its own new geometry piece in
+  // buildCharacter() rather than recoloring the torso/legs, and wallet.js
+  // keeps it in its own storage key so a hat and an outfit can be equipped
+  // at the same time.
+  'atlas.avatar.hat.sunhat': {
+    name: 'Explorer Sun Hat',
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.avatar.hatColor': '#d9a441'
+    }
+  },
+  'atlas.avatar.hat.cap': {
+    name: 'Night Watch Cap',
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'atlas.avatar.hatColor': '#26282c'
+    }
   }
 };
 

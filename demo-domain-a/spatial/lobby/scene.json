@@ -34,7 +34,10 @@
     { "model": "/assets/furniture/cardboardBoxClosed.glb", "position": [-2.0, 0, 1.3], "rotationY": 25 },
 
     { "model": "/assets/furniture/cardboardBoxClosed.glb", "position": [-1.0, 0, -2.0], "rotationY": 10 },
-    { "model": "/assets/furniture/cardboardBoxClosed.glb", "position": [2.0, 0, 3.0], "rotationY": 40 }
+    { "model": "/assets/furniture/cardboardBoxClosed.glb", "position": [2.0, 0, 3.0], "rotationY": 40 },
+
+    { "model": "/assets/furniture/cardboardBoxClosed.glb", "position": [2.5, 0, -1.5], "rotationY": 15 },
+    { "model": "/assets/furniture/cardboardBoxClosed.glb", "position": [-3.2, 0, -0.9], "rotationY": -20 }
   ],
   "portalMarkers": [
     { "position": [0, 0, 4.2], "radius": 0.8, "portalIndex": 0 }
@@ -43,6 +46,8 @@
     { "position": [0.3, 0, -0.8], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.trinket.pin", "oncePerUser": true },
     { "position": [-2.0, 0, 1.3], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.trinket.charm", "oncePerUser": true },
     { "position": [-1.0, 0, -2.0], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.avatar.outfit.forest", "oncePerUser": true },
-    { "position": [2.0, 0, 3.0], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.avatar.outfit.dusk", "oncePerUser": true }
+    { "position": [2.0, 0, 3.0], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.avatar.outfit.dusk", "oncePerUser": true },
+    { "position": [2.5, 0, -1.5], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.avatar.hat.sunhat", "oncePerUser": true },
+    { "position": [-3.2, 0, -0.9], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.avatar.hat.cap", "oncePerUser": true }
   ]
 }

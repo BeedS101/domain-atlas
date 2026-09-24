@@ -632,6 +632,13 @@
     const TORSO_H = 0.50, TORSO_W = 0.36, TORSO_D = 0.20;
     const HEAD_SIZE = 0.32;
     const ARM_LEN = 0.52, ARM_W = 0.13, ARM_D = 0.13;
+    // Brim-shaped box sitting flush on top of the head, in the same local
+    // space as the head (both hang off the same shoulderY translate) —
+    // yMin lines up exactly with the head's own yMax so there's no gap or
+    // overlap. Only ever drawn when a hat is actually equipped (see
+    // drawCharacterAt's hatColor param below); its own baked-in color here
+    // is never used for that reason, but buildBox still needs one.
+    const HAT_H = 0.12, HAT_SIZE = HEAD_SIZE * 1.25;
     const hipY = LEG_LEN;
     const shoulderY = hipY + TORSO_H;
     const skin = [0.85, 0.68, 0.53, 1];
@@ -643,6 +650,7 @@
       hipOffsetX: TORSO_W / 2 - LEG_W / 2 - 0.02,
       torso: buildBox(gl, TORSO_W, 0, TORSO_H, TORSO_D, shirt),
       head: buildBox(gl, HEAD_SIZE, 0, HEAD_SIZE, HEAD_SIZE, skin),
+      hat: buildBox(gl, HAT_SIZE, HEAD_SIZE, HEAD_SIZE + HAT_H, HAT_SIZE, skin),
       armL: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
       armR: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
       legL: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, pants),
@@ -868,6 +876,13 @@
     // wallet-card action), same "no scene reload needed" treatment
     // characterScale's own live setter already gets.
     let localAvatarColors = resolveAvatarColors(opts.localAvatarLook);
+    // This viewer's own equipped hat color, or null for no hat — a second,
+    // independent equip slot from the outfit above (see wallet.js's
+    // getAvatarHat()), so the two can be set/cleared without touching each
+    // other. A single resolved [r,g,b,a] array rather than an object, since
+    // there's only the one color; hexToRgba01() already returns null on
+    // invalid/missing input, same as resolveAvatarColors() does for looks.
+    let localAvatarHatColor = hexToRgba01(opts.localAvatarHat);
 
     // Other visitors currently in this same world (#66) — viewer.js owns
     // the actual presence WebSocket connection and message protocol; this
@@ -1670,20 +1685,28 @@
       // `colors` overrides just the torso/leg color — arms and head stay
       // the character's own fixed skin tone regardless of equipped look,
       // the same way a real outfit wouldn't recolor someone's hands or face.
-      const drawCharacterAt = (base, swing, showHead, colors) => {
+      // `hatColor` is a separate, independent override: the hat piece only
+      // gets drawn at all when one is equipped (null skips it entirely,
+      // rather than drawing it in some "no hat" default color), and its
+      // visibility is gated by `showHead` the same way the head itself is —
+      // a hat with no head under it wouldn't make sense either.
+      const drawCharacterAt = (base, swing, showHead, colors, hatColor) => {
         const shirtColor = colors && colors.shirtColor;
         const pantsColor = colors && colors.pantsColor;
         const drawPart = (localMatrix, part, colorOverride) => {
           bindAndDraw({ vao: part.vao, color: colorOverride || part.color, modelMatrix: mat4Multiply(base, localMatrix) }, view, projection);
         };
-        if (showHead) drawPart(mat4Translate(0, character.shoulderY, 0), character.head);
+        if (showHead) {
+          drawPart(mat4Translate(0, character.shoulderY, 0), character.head);
+          if (hatColor) drawPart(mat4Translate(0, character.shoulderY, 0), character.hat, hatColor);
+        }
         drawPart(mat4Translate(0, character.hipY, 0), character.torso, shirtColor);
         drawPart(mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing)), character.armL);
         drawPart(mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing)), character.armR);
         drawPart(mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing)), character.legL, pantsColor);
         drawPart(mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing)), character.legR, pantsColor);
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors);
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor);
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
@@ -1707,7 +1730,7 @@
         // player's arms/legs would turn to face the mirror of wherever
         // they're actually walking.
         const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4RotateY(-rp.yaw));
-        drawCharacterAt(rpBase, rpSwing, true, rp.colors); // always show the head — this is never our own first-person view
+        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor); // always show the head — this is never our own first-person view
       });
 
       rafId = requestAnimationFrame(frame);
@@ -1860,12 +1883,20 @@
         // default included.
         const hasLookUpdate = 'shirtColor' in state || 'pantsColor' in state;
         const colors = hasLookUpdate ? resolveAvatarColors({ shirtColor: state.shirtColor, pantsColor: state.pantsColor }) : null;
+        // Same "leave it alone until we actually hear otherwise" treatment
+        // as the outfit above, checked independently — a hat and an outfit
+        // are separate equip slots (see wallet.js), so one arriving without
+        // the other in a given message is normal, not a sign either should
+        // be reset.
+        const hasHatUpdate = 'hatColor' in state;
+        const hatColor = hasHatUpdate ? hexToRgba01(state.hatColor) : null;
         const existing = remotePlayers.get(id);
         if (existing) {
           existing.tx = x; existing.ty = y; existing.tz = z; existing.tyaw = yaw;
           if (hasLookUpdate) existing.colors = colors;
+          if (hasHatUpdate) existing.hatColor = hatColor;
         } else {
-          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null });
+          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null });
         }
       },
       removeRemotePlayer: (id) => { remotePlayers.delete(id); },
@@ -1877,16 +1908,22 @@
       // interpolation is genuinely happening frame to frame.
       getRemotePlayerRenderState: (id) => {
         const rp = remotePlayers.get(id);
-        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null } : null;
+        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null } : null;
       },
       // Live setter for this viewer's OWN equipped look (the wallet-card
       // equip/unequip action) — same "no scene reload needed" treatment as
       // setCharacterScale above. Accepts the same { shirtColor, pantsColor }
       // hex-string shape wallet.js's getAvatarLook() returns.
       setLocalAvatarLook: (look) => { localAvatarColors = resolveAvatarColors(look); },
+      // Same live-update treatment as setLocalAvatarLook, for the separate
+      // hat slot. Accepts the plain hex string wallet.js's getAvatarHat()
+      // returns (or null/undefined to take the hat off).
+      setLocalAvatarHat: (hex) => { localAvatarHatColor = hexToRgba01(hex); },
       // Debug/test hook — the actual resolved [r,g,b,a] colors currently
       // applied to the local character, or null for the default look.
-      getLocalAvatarColors: () => localAvatarColors
+      getLocalAvatarColors: () => localAvatarColors,
+      // Same debug/test hook for the hat slot.
+      getLocalAvatarHatColor: () => localAvatarHatColor
     };
   }
 
@@ -2136,9 +2173,123 @@
     };
   }
 
+  // ---------- player-character preview (Settings -> Player character) ----------
+  //
+  // A third, equally minimal entry point alongside previewModel() above —
+  // same reasoning, different subject: a world's full init() wants none of
+  // this either (no floor, no input, no portals), it just needs to show
+  // whichever colors/hat are currently equipped so changing them in the
+  // wallet has somewhere to visibly confirm itself, without opening a
+  // world at all. Reuses buildCharacter()/buildBox() (the same shared boxes
+  // a real world's character is built from) and writes its own tiny
+  // draw loop rather than reusing init()'s drawCharacterAt closure, which
+  // is defined inside — and reads several variables scoped to — the full
+  // world renderer.
+  //
+  // opts: { characterScale, avatarLook: {shirtColor, pantsColor} | null,
+  // avatarHat: '#rrggbb' | null }. Returns { dispose(), setLook(look),
+  // setHat(hex) } — the caller (viewer.js) re-applies both live whenever
+  // the wallet-card equip/unequip actions change them, same "no reload"
+  // treatment the real 3D view already gives its own character.
+  function previewCharacter(canvas, opts) {
+    opts = opts || {};
+    const gl = canvas.getContext('webgl', { alpha: true, antialias: true }) || canvas.getContext('experimental-webgl', { alpha: true });
+    if (!gl) throw new Error('WebGL is not available in this browser.');
+    gl.getExtension('OES_element_index_uint');
+
+    const prog = createProgram(gl);
+    const character = buildCharacter(gl);
+    let scale = clampCharacterScale(opts.characterScale);
+    let colors = resolveAvatarColors(opts.avatarLook);
+    let hatColor = hexToRgba01(opts.avatarHat);
+
+    // Frame the whole standing character, same "fit to view" idea as
+    // previewModel()'s bounding-radius camera, sized off the character's
+    // own known proportions instead of a computed bounding box.
+    const totalHeight = character.shoulderY + character.headSize;
+    const cameraDistance = totalHeight * 1.9;
+    const view = mat4View([0, totalHeight * 0.55, cameraDistance], 0, -0.08);
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.clearColor(0, 0, 0, 0); // transparent, same reasoning as previewModel() — sits inside the settings panel's own card background
+
+    let rotation = 0;
+    let rafId = null;
+    let lost = false;
+
+    function drawPart(base, localMatrix, part, colorOverride, projection) {
+      const model = mat4Multiply(base, localMatrix);
+      gl.bindBuffer(gl.ARRAY_BUFFER, part.vao.positionBuffer);
+      gl.enableVertexAttribArray(prog.attribs.position);
+      gl.vertexAttribPointer(prog.attribs.position, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, part.vao.normalBuffer);
+      gl.enableVertexAttribArray(prog.attribs.normal);
+      gl.vertexAttribPointer(prog.attribs.normal, 3, gl.FLOAT, false, 0, 0);
+      gl.uniformMatrix4fv(prog.uniforms.model, false, model);
+      gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, mat3NormalFromMat4(model));
+      gl.uniform4fv(prog.uniforms.color, colorOverride || part.color);
+      gl.drawArrays(gl.TRIANGLES, 0, part.vao.indexCount);
+    }
+
+    function frame() {
+      rafId = null;
+      if (lost) return;
+      const w = canvas.width, h = canvas.height;
+      if (w === 0 || h === 0) { rafId = requestAnimationFrame(frame); return; }
+      gl.viewport(0, 0, w, h);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+      rotation += 0.008; // slow auto-rotate, same pace as previewModel()
+
+      const projection = mat4Perspective(45 * Math.PI / 180, w / h, 0.02, cameraDistance * 20);
+      const base = mat4Multiply(mat4RotateY(rotation), mat4Scale(scale));
+
+      gl.useProgram(prog.program);
+      gl.uniformMatrix4fv(prog.uniforms.view, false, view);
+      gl.uniformMatrix4fv(prog.uniforms.projection, false, projection);
+      gl.uniform3fv(prog.uniforms.lightDir, [0.4, -0.7, -0.5]);
+      gl.uniform1f(prog.uniforms.ambient, 0.55);
+
+      drawPart(base, mat4Translate(0, character.shoulderY, 0), character.head, null, projection);
+      if (hatColor) drawPart(base, mat4Translate(0, character.shoulderY, 0), character.hat, hatColor, projection);
+      drawPart(base, mat4Translate(0, character.hipY, 0), character.torso, colors && colors.shirtColor, projection);
+      drawPart(base, mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), character.armL, null, projection);
+      drawPart(base, mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), character.armR, null, projection);
+      drawPart(base, mat4Translate(-character.hipOffsetX, character.hipY, 0), character.legL, colors && colors.pantsColor, projection);
+      drawPart(base, mat4Translate(character.hipOffsetX, character.hipY, 0), character.legR, colors && colors.pantsColor, projection);
+
+      rafId = requestAnimationFrame(frame);
+    }
+    rafId = requestAnimationFrame(frame);
+
+    return {
+      // Live-updated by viewer.js whenever the wallet-card equip/unequip
+      // actions change what's equipped while this panel happens to be open
+      // — same reasoning setLocalAvatarLook/setLocalAvatarHat already have
+      // for the real 3D view.
+      setLook(look) { colors = resolveAvatarColors(look); },
+      setHat(hex) { hatColor = hexToRgba01(hex); },
+      // Same live-update treatment for the Size slider, in case this panel
+      // is open while it's dragged.
+      setScale(s) { scale = clampCharacterScale(s); },
+      // Debug/test hooks, same convention as getLocalAvatarColors/
+      // getLocalAvatarHatColor on the real 3D view above.
+      getColors: () => colors,
+      getHatColor: () => hatColor,
+      dispose() {
+        if (lost) return;
+        lost = true;
+        if (rafId !== null) cancelAnimationFrame(rafId);
+        const loseCtx = gl.getExtension('WEBGL_lose_context');
+        if (loseCtx) loseCtx.loseContext();
+      }
+    };
+  }
+
   window.MiniGLTF = {
     init,
     previewModel,
+    previewCharacter,
     cache: {
       listBySite: listCacheBySite,
       totalBytes: cacheTotalBytes,

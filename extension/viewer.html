@@ -785,6 +785,14 @@
     display: block; margin-top: 8px; width: 100%; max-width: 240px; height: 160px;
     border-radius: 6px; background: rgba(0,0,0,0.25);
   }
+  /* Settings -> Player character's live preview (MiniGLTF.previewCharacter())
+     — same sizing/background treatment as the Asset Viewer's own model
+     canvas above, just a bit taller since it frames a standing character
+     rather than a small held item. */
+  #characterPreviewCanvas {
+    display: block; margin-top: 10px; width: 100%; max-width: 220px; height: 220px;
+    border-radius: 6px; background: rgba(0,0,0,0.25);
+  }
   /* Sibling of #assetViewerPanel, same "escape the panel's overflow clip"
      reasoning as #chatSettingsPopover's own HTML comment. */
   #assetViewerSettingsPopover {
@@ -1713,6 +1721,13 @@
             <input type="range" id="characterScaleInput" min="0.5" max="2" step="0.1" value="1" style="flex:1;">
             <span id="characterScaleValue" class="mono">1.0×</span>
           </label>
+          <!-- A live view of the character an equipped outfit/hat (see the
+               wallet card's "Wear as my look"/"Wear as my hat" actions)
+               actually renders as — filled in by viewer.js's openSettings()
+               via MiniGLTF.previewCharacter(), the same shared boxes a
+               real world's character is built from. No world needs to be
+               open for this to show something accurate. -->
+          <canvas id="characterPreviewCanvas" width="220" height="220"></canvas>
         </div>
       </div>
 

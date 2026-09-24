@@ -479,6 +479,22 @@ async function fetchPresenceStatus(domain, worldId, presenceBase) {
 // a synchronous read. Kept in sync by applyAvatarLookToScene(), the only
 // place that writes it.
 let localAvatarLookHex = null;
+// Same caching reasoning as localAvatarLookHex above, for the separate hat
+// slot — a plain hex string (or null) rather than an object, since a hat
+// is only ever the one color. Kept in sync by applyAvatarHatToScene().
+let localAvatarHatHex = null;
+
+// Settings -> Player character's live preview (MiniGLTF.previewCharacter())
+// — only exists while the Settings screen is actually open (see
+// openSettings()/disposeCharacterPreview() below), same "don't hold a
+// WebGL context open when nobody's looking at it" reasoning the Asset
+// Viewer's own hover panel already follows.
+let characterPreview = null;
+
+function disposeCharacterPreview() {
+  if (characterPreview) { characterPreview.dispose(); characterPreview = null; }
+  window.__atlasCharacterPreview = null; // test-observability, same convention as window.__atlasActive3D
+}
 
 // Re-reads this identity's equipped look (AtlasWallet.getAvatarLook()) and
 // applies it both to the local cache above (for presence broadcast) and to
@@ -491,6 +507,14 @@ let localAvatarLookHex = null;
 async function applyAvatarLookToScene() {
   localAvatarLookHex = await AtlasWallet.getAvatarLook();
   if (active3D && active3D.setLocalAvatarLook) active3D.setLocalAvatarLook(localAvatarLookHex);
+  if (characterPreview && characterPreview.setLook) characterPreview.setLook(localAvatarLookHex);
+}
+
+// Same as applyAvatarLookToScene() above, for the separate hat slot.
+async function applyAvatarHatToScene() {
+  localAvatarHatHex = await AtlasWallet.getAvatarHat();
+  if (active3D && active3D.setLocalAvatarHat) active3D.setLocalAvatarHat(localAvatarHatHex);
+  if (characterPreview && characterPreview.setHat) characterPreview.setHat(localAvatarHatHex);
 }
 
 function currentLocalPose() {
@@ -505,7 +529,8 @@ function currentLocalPose() {
   return {
     x: pos[0], y: active3D.getCharacterFloorY(), z: pos[2], yaw: active3D.getCharacterYaw(),
     shirtColor: (localAvatarLookHex && localAvatarLookHex.shirtColor) || null,
-    pantsColor: (localAvatarLookHex && localAvatarLookHex.pantsColor) || null
+    pantsColor: (localAvatarLookHex && localAvatarLookHex.pantsColor) || null,
+    hatColor: localAvatarHatHex || null
   };
 }
 
@@ -1900,6 +1925,7 @@ const importCacheStatusEl = document.getElementById('importCacheStatus');
 const clearAllCacheBtn = document.getElementById('clearAllCacheBtn');
 const characterScaleInputEl = document.getElementById('characterScaleInput');
 const characterScaleValueEl = document.getElementById('characterScaleValue');
+const characterPreviewCanvasEl = document.getElementById('characterPreviewCanvas');
 const walletSoundEnabledInputEl = document.getElementById('walletSoundEnabledInput'); // task #209
 const backFromSettingsBtn = document.getElementById('backFromSettingsBtn');
 const walletTabBar = document.getElementById('walletTabBar');
@@ -2489,6 +2515,7 @@ async function enterWorld(worldId) {
       // look, if any, has been sitting in storage the whole time), or the
       // identity could have changed since the last time this ran.
       localAvatarLookHex = await AtlasWallet.getAvatarLook();
+      localAvatarHatHex = await AtlasWallet.getAvatarHat();
 
       active3D = MiniGLTF.init(scene3dCanvas, {
         sceneData,
@@ -2580,6 +2607,8 @@ async function enterWorld(worldId) {
         // Later changes (the equip/unequip wallet-card action) go through
         // applyAvatarLookToScene()'s live setter instead of a re-init.
         localAvatarLook: localAvatarLookHex,
+        // Same seeding as localAvatarLook above, for the separate hat slot.
+        localAvatarHat: localAvatarHatHex,
         // Scene asset download progress (#36) — see updateSceneLoadProgress()
         // above and loadScene()'s own comment in gltf-mini.js for why this
         // counts unique models, not placed instances.
@@ -3542,6 +3571,10 @@ async function refreshIdentityModeControls() {
 // this browser session (isUnlocked). Exactly one of these ever shows.
 
 function showWalletScreen(id) {
+  // Leaving Settings for any other screen — tear down the player-character
+  // preview's WebGL context rather than leaving it rendering behind a
+  // hidden panel. openSettings() below creates a fresh one on the way back.
+  if (id !== 'settingsScreen') disposeCharacterPreview();
   walletScreens.forEach((el) => el.classList.toggle('active', el.id === id));
   seedRevealBox.classList.remove('show');
   // Tabs only make sense between Wallet, Social, Trade, and Settings —
@@ -5198,6 +5231,14 @@ function renderAssetCard(entry, container, opts) {
     const wearingThis = opts.equippedAvatarAssetId === entry.credential.id;
     actionsHtml += '<button data-action="toggle-avatar-look" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingThis ? 'Take off (stop wearing this look)' : 'Wear as my look') + '</button>';
   }
+  // Same pattern as the outfit look above, for the separate hat slot —
+  // opts.avatarHatEnabled/equippedAvatarHatAssetId are its own independent
+  // pair (see refreshInventoryDisplay()), so wearing a hat never affects,
+  // and is never affected by, whichever outfit is equipped.
+  if (opts.avatarHatEnabled && AtlasWallet.avatarHatPropertiesFromAsset(asset)) {
+    const wearingThisHat = opts.equippedAvatarHatAssetId === entry.credential.id;
+    actionsHtml += '<button data-action="toggle-avatar-hat" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingThisHat ? 'Take off hat' : 'Wear as my hat') + '</button>';
+  }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   const menuHtml =
     '<div class="card-menu">' +
@@ -5452,6 +5493,7 @@ async function refreshInventoryDisplay() {
   const counterparty = await AtlasWallet.getCounterparty();
   const loadout = await AtlasWallet.getLoadout();
   const equippedAvatarAssetId = await AtlasWallet.getAvatarLookAssetId();
+  const equippedAvatarHatAssetId = await AtlasWallet.getAvatarHatAssetId();
   const risky = combatOf(currentWorld) !== 'none';
   // refreshInventoryDisplay() runs once, unawaited, at the bottom of this
   // file as soon as the script parses — well before enterWorld() has
@@ -5512,13 +5554,13 @@ async function refreshInventoryDisplay() {
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId });
   }
   counterpartyCollectiblesListEl.innerHTML = '';
   if (cpCollectibles.length === 0) {
     counterpartyCollectiblesListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('collectible') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no collectibles yet.') + '</div>';
   } else {
-    renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false });
+    renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false, avatarHatEnabled: false });
   }
 
   renderDroppedItemsList(droppedHere, identity);
@@ -5530,13 +5572,13 @@ async function refreshInventoryDisplay() {
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId });
   }
   counterpartyDocumentsListEl.innerHTML = '';
   if (cpDocuments.length === 0) {
     counterpartyDocumentsListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no documents yet.') + '</div>';
   } else {
-    renderAssetList(cpDocuments, counterpartyDocumentsListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false });
+    renderAssetList(cpDocuments, counterpartyDocumentsListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false, avatarHatEnabled: false });
   }
 
   const totalHeld = selfVisible.length + cpVisible.length;
@@ -6227,6 +6269,7 @@ unlockBtn.addEventListener('click', async () => {
 
 lockWalletBtn.addEventListener('click', async () => {
   await AtlasWallet.lockIdentity();
+  disposeCharacterPreview(); // this button doesn't go through showWalletScreen, so its own dispose guard wouldn't otherwise fire
   walletPanel.classList.remove('open');
   await refreshQuickLockButtonVisibility();
   await refreshMessagingLockGate();
@@ -6315,6 +6358,26 @@ async function openSettings() {
   if (autoLockMinutesInput) autoLockMinutesInput.value = String(await AtlasWallet.getAutoLockMinutes());
   if (walletSoundEnabledInputEl) walletSoundEnabledInputEl.checked = await AtlasWallet.getWalletSoundEnabled();
   showWalletScreen('settingsScreen');
+  // A live view of the character this identity's own equipped look/hat
+  // actually render as — reuses MiniGLTF.previewCharacter() (the same
+  // shared boxes a real world's character is built from), so it stays
+  // accurate without needing a world open at all. Torn down again by
+  // disposeCharacterPreview() the moment this screen is left (see
+  // showWalletScreen()/lockWalletBtn's handler above).
+  if (characterPreviewCanvasEl) {
+    disposeCharacterPreview();
+    try {
+      characterPreview = MiniGLTF.previewCharacter(characterPreviewCanvasEl, {
+        characterScale: await AtlasWallet.getCharacterScale(),
+        avatarLook: await AtlasWallet.getAvatarLook(),
+        avatarHat: await AtlasWallet.getAvatarHat()
+      });
+      window.__atlasCharacterPreview = characterPreview; // test-observability, same convention as window.__atlasActive3D
+    } catch (err) {
+      // Best-effort, same posture as the Asset Viewer's own previewModel()
+      // failures — the rest of Settings still works without this preview.
+    }
+  }
 }
 
 // 'input' (not 'change') so it applies while dragging the slider, not just
@@ -6325,6 +6388,7 @@ characterScaleInputEl && characterScaleInputEl.addEventListener('input', async (
   const scale = await AtlasWallet.setCharacterScale(characterScaleInputEl.value);
   if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
   if (active3D && active3D.setCharacterScale) active3D.setCharacterScale(scale);
+  if (characterPreview && characterPreview.setScale) characterPreview.setScale(scale);
 });
 
 // Task #209. 'change' (not 'input') is the right event for a checkbox —
@@ -10636,6 +10700,11 @@ function assetActionHandler(listEl, role, toRole) {
       const currentlyEquipped = await AtlasWallet.getAvatarLookAssetId();
       await AtlasWallet.setAvatarLook(currentlyEquipped === id ? null : id);
       await applyAvatarLookToScene();
+      await refreshInventoryDisplay();
+    } else if (btn.dataset.action === 'toggle-avatar-hat') {
+      const currentlyEquippedHat = await AtlasWallet.getAvatarHatAssetId();
+      await AtlasWallet.setAvatarHat(currentlyEquippedHat === id ? null : id);
+      await applyAvatarHatToScene();
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'split') {
       btn.disabled = true;

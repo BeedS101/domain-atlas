@@ -1200,6 +1200,54 @@ const AtlasWallet = (() => {
     return entry ? avatarLookPropertiesFromAsset(entry.credential.asset) : null; // no longer owned — graceful fallback to the default look
   }
 
+  // ---------- avatar hat (equipped appearance, separate slot) ----------
+  //
+  // Same trust level, storage shape, and revoked-credential fallback as
+  // avatar look above — a hat is just a second independent equip slot, not
+  // a variant of the first. Kept in its own storage key (atlasAvatarHat
+  // rather than atlasAvatarLook) so equipping a hat never touches, and
+  // never gets touched by, whatever outfit is equipped: a visitor can wear
+  // both, either, or neither at once.
+  async function saveAvatarHat(ownerPublicKey, assetId) {
+    const { atlasAvatarHat } = await chrome.storage.local.get('atlasAvatarHat');
+    const all = atlasAvatarHat || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarHat', assetId);
+    await chrome.storage.local.set({ atlasAvatarHat: all });
+  }
+
+  async function getAvatarHatAssetId() {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const { atlasAvatarHat } = await chrome.storage.local.get('atlasAvatarHat');
+    return decryptAtRestAndMigrate(identity, 'avatarHat', (atlasAvatarHat || {})[identity.publicKey], null, (v) => saveAvatarHat(identity.publicKey, v));
+  }
+
+  async function setAvatarHat(assetId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    await saveAvatarHat(identity.publicKey, assetId || null);
+    return assetId || null;
+  }
+
+  // Pure — mirrors avatarLookPropertiesFromAsset() above, one key instead
+  // of a pair. Returns a plain hex string (or null), not an object, since
+  // there's only ever the one color to carry.
+  function avatarHatPropertiesFromAsset(asset) {
+    const props = (asset && asset.properties) || {};
+    return props['atlas.avatar.hatColor'] || null;
+  }
+
+  async function getAvatarHat() {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const assetId = await getAvatarHatAssetId();
+    if (!assetId) return null;
+    const wallet = await getWallet(identity.publicKey);
+    const entry = wallet.find((e) => e.credential.id === assetId);
+    return entry ? avatarHatPropertiesFromAsset(entry.credential.asset) : null; // no longer owned — graceful fallback to no hat
+  }
+
   // ---------- dropping items into a scene (shared — task #250) ----------
   //
   // Until now this was local-only, self-only: nothing about ownership ever
@@ -4345,6 +4393,7 @@ const AtlasWallet = (() => {
     splitAsset, consolidateAsset, convertAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
+    getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
