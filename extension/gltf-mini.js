@@ -926,13 +926,19 @@
     // wallet-card action), same "no scene reload needed" treatment
     // characterScale's own live setter already gets.
     let localAvatarColors = resolveAvatarColors(opts.localAvatarLook);
-    // This viewer's own equipped hat color, or null for no hat — a second,
-    // independent equip slot from the outfit above (see wallet.js's
-    // getAvatarHat()), so the two can be set/cleared without touching each
-    // other. A single resolved [r,g,b,a] array rather than an object, since
-    // there's only the one color; hexToRgba01() already returns null on
-    // invalid/missing input, same as resolveAvatarColors() does for looks.
-    let localAvatarHatColor = hexToRgba01(opts.localAvatarHat);
+    // This viewer's own equipped hat — a second, independent equip slot
+    // from the outfit above (see wallet.js's getAvatarHat()), so the two
+    // can be set/cleared without touching each other. Like the shoes below,
+    // a hat can carry more than color (a randomized-per-mint speed/jump/
+    // interact-range buff set — see wallet.js's avatarHatPropertiesFromAsset()
+    // and the randomizeProperties on the hat catalog entries), so
+    // opts.localAvatarHat is unpacked the same way opts.localAvatarShoes is.
+    // Multipliers default to 1 (no change) so an unequipped or
+    // pre-existing plain color-only hat behaves exactly as before.
+    let localAvatarHatColor = hexToRgba01(opts.localAvatarHat && opts.localAvatarHat.hatColor);
+    let localAvatarHatSpeedMultiplier = (opts.localAvatarHat && opts.localAvatarHat.speedMultiplier) || 1;
+    let localAvatarHatJumpMultiplier = (opts.localAvatarHat && opts.localAvatarHat.jumpMultiplier) || 1;
+    let localAvatarHatInteractRangeMultiplier = (opts.localAvatarHat && opts.localAvatarHat.interactRangeMultiplier) || 1;
     // Third independent equip slot, same reasoning as the hat above.
     // Unlike the hat, a shoe can carry more than color — opts.localAvatarShoes
     // is the whole { shoeColor, speedMultiplier, jumpMultiplier, visualScale }
@@ -1514,11 +1520,12 @@
       lastT = t;
       resize();
 
-      // localAvatarShoeSpeedMultiplier (1 = no bonus) applies to both walk
-      // and run at once, since they already share this one base value —
-      // an equipped shoe's atlas.avatar.shoeSpeedMultiplier just scales
-      // whichever of the two is currently in effect.
-      const speed = ((keys['ShiftLeft'] || keys['ShiftRight']) ? 4.5 : 2.4) * localAvatarShoeSpeedMultiplier;
+      // localAvatarShoeSpeedMultiplier/localAvatarHatSpeedMultiplier (1 =
+      // no bonus) both apply to walk and run at once, since those already
+      // share this one base value — an equipped shoe's and hat's own
+      // atlas.avatar.*SpeedMultiplier stack multiplicatively, since they're
+      // two separate equip slots that can both be worn at the same time.
+      const speed = ((keys['ShiftLeft'] || keys['ShiftRight']) ? 4.5 : 2.4) * localAvatarShoeSpeedMultiplier * localAvatarHatSpeedMultiplier;
       const forward = [Math.sin(camera.yaw), -Math.cos(camera.yaw)];
       const right = [Math.cos(camera.yaw), Math.sin(camera.yaw)];
       let mx = 0, mz = 0;
@@ -1560,11 +1567,12 @@
       // `!airborne` guard), so holding it down doesn't launch a second jump
       // mid-air.
       // Jump height scales with the square of launch velocity (basic
-      // projectile motion under constant GRAVITY), so a shoe's
-      // atlas.avatar.shoeJumpMultiplier — a HEIGHT multiplier — is applied
-      // as sqrt(multiplier) here to land on the actual height bonus rather
-      // than a velocity bonus that would overshoot it.
-      if (keys['Space'] && !airborne) { airborne = true; jumpVelocity = JUMP_SPEED * Math.sqrt(localAvatarShoeJumpMultiplier); }
+      // projectile motion under constant GRAVITY), so a shoe's or hat's
+      // own atlas.avatar.*JumpMultiplier — each a HEIGHT multiplier — are
+      // multiplied together first (both slots stack) and then applied as
+      // sqrt(combined) here to land on the actual combined height bonus
+      // rather than a velocity bonus that would overshoot it.
+      if (keys['Space'] && !airborne) { airborne = true; jumpVelocity = JUMP_SPEED * Math.sqrt(localAvatarShoeJumpMultiplier * localAvatarHatJumpMultiplier); }
       if (airborne) {
         jumpOffset += jumpVelocity * dt;
         jumpVelocity -= GRAVITY * dt;
@@ -1625,13 +1633,18 @@
       // selection AND whatever the Previewer ends up showing, so "the
       // previewer must ignore it" (Bruno's own words) and "E skips an
       // already-owned crate" are the same one filter, not two.
+      // localAvatarHatInteractRangeMultiplier (1 = no bonus) widens both
+      // proximity checks below — a hat's atlas.avatar.hatInteractRangeMultiplier
+      // scales the AUTHORED radius itself, so E-range and the Previewer's
+      // nearby list both reach further out with a range-buffed hat equipped,
+      // with no separate radius to keep in sync.
       const nearby = [];
       interactTriggers.forEach((trigger, idx) => {
         const dx = camera.pos[0] - trigger.position[0];
         const dz = camera.pos[2] - trigger.position[2];
         const dist = Math.hypot(dx, dz);
         const cooldownUntil = interactCooldownUntil.get(idx) || 0;
-        if (dist < trigger.radius && t >= cooldownUntil && !(opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(trigger.marker))) {
+        if (dist < trigger.radius * localAvatarHatInteractRangeMultiplier && t >= cooldownUntil && !(opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(trigger.marker))) {
           nearby.push({ idx, marker: trigger.marker, dist });
         }
       });
@@ -1649,7 +1662,7 @@
         const dz = camera.pos[2] - entry.position[2];
         const dist = Math.hypot(dx, dz);
         const cooldownUntil = interactCooldownUntil.get(dropId) || 0;
-        if (dist < entry.radius && t >= cooldownUntil) {
+        if (dist < entry.radius * localAvatarHatInteractRangeMultiplier && t >= cooldownUntil) {
           nearby.push({ idx: dropId, marker: entry.marker, dist });
         }
       });
@@ -2069,9 +2082,17 @@
       // hex-string shape wallet.js's getAvatarLook() returns.
       setLocalAvatarLook: (look) => { localAvatarColors = resolveAvatarColors(look); },
       // Same live-update treatment as setLocalAvatarLook, for the separate
-      // hat slot. Accepts the plain hex string wallet.js's getAvatarHat()
-      // returns (or null/undefined to take the hat off).
-      setLocalAvatarHat: (hex) => { localAvatarHatColor = hexToRgba01(hex); },
+      // hat slot — accepts the whole { hatColor, speedMultiplier,
+      // jumpMultiplier, interactRangeMultiplier } shape wallet.js's
+      // getAvatarHat() returns (or null/undefined to take the hat off,
+      // resetting every field back to "no bonus"), same shape as
+      // setLocalAvatarShoes() below.
+      setLocalAvatarHat: (hat) => {
+        localAvatarHatColor = hexToRgba01(hat && hat.hatColor);
+        localAvatarHatSpeedMultiplier = (hat && hat.speedMultiplier) || 1;
+        localAvatarHatJumpMultiplier = (hat && hat.jumpMultiplier) || 1;
+        localAvatarHatInteractRangeMultiplier = (hat && hat.interactRangeMultiplier) || 1;
+      },
       // Same live-update treatment, for the third (shoes) slot. Unlike
       // setLocalAvatarHat's plain hex string, this accepts the whole
       // { shoeColor, speedMultiplier, jumpMultiplier, visualScale } shape
@@ -2086,8 +2107,14 @@
       // Debug/test hook — the actual resolved [r,g,b,a] colors currently
       // applied to the local character, or null for the default look.
       getLocalAvatarColors: () => localAvatarColors,
-      // Same debug/test hook for the hat slot.
+      // Same debug/test hook for the hat slot's color.
       getLocalAvatarHatColor: () => localAvatarHatColor,
+      // Debug/test hooks for the hat slot's own gameplay buffs — all three
+      // default to 1 (no change) with nothing equipped, same convention as
+      // the shoes' own buff getters below.
+      getLocalAvatarHatSpeedMultiplier: () => localAvatarHatSpeedMultiplier,
+      getLocalAvatarHatJumpMultiplier: () => localAvatarHatJumpMultiplier,
+      getLocalAvatarHatInteractRangeMultiplier: () => localAvatarHatInteractRangeMultiplier,
       // Same debug/test hook for the shoes slot's color.
       getLocalAvatarShoeColor: () => localAvatarShoeColor,
       // Debug/test hooks for the shoes slot's gameplay buffs and visual
@@ -2358,11 +2385,11 @@
   // world renderer.
   //
   // opts: { characterScale, avatarLook: {shirtColor, pantsColor} | null,
-  // avatarHat: '#rrggbb' | null, avatarShoes: '#rrggbb' | null }. Returns
-  // { dispose(), setLook(look), setHat(hex), setShoes(hex) } — the caller
-  // (viewer.js) re-applies all three live whenever the wallet-card
-  // equip/unequip actions change them, same "no reload" treatment the
-  // real 3D view already gives its own character.
+  // avatarHat: {hatColor, ...buffs} | null, avatarShoes: {shoeColor, ...buffs} | null }.
+  // Returns { dispose(), setLook(look), setHat(hat), setShoes(shoes) } —
+  // the caller (viewer.js) re-applies all three live whenever the
+  // wallet-card equip/unequip actions change them, same "no reload"
+  // treatment the real 3D view already gives its own character.
   function previewCharacter(canvas, opts) {
     opts = opts || {};
     const gl = canvas.getContext('webgl', { alpha: true, antialias: true }) || canvas.getContext('experimental-webgl', { alpha: true });
@@ -2373,13 +2400,17 @@
     const character = buildCharacter(gl);
     let scale = clampCharacterScale(opts.characterScale);
     let colors = resolveAvatarColors(opts.avatarLook);
-    let hatColor = hexToRgba01(opts.avatarHat);
-    // Unlike avatarHat's plain hex string, opts.avatarShoes is the whole
-    // { shoeColor, speedMultiplier, jumpMultiplier, visualScale } shape
-    // wallet.js's getAvatarShoes() returns (see init()'s own
-    // localAvatarShoe* unpacking above) — this preview only ever needs
-    // color and visual scale, since speed/jump only matter to an actual
-    // moving/jumping character.
+    // Like avatarShoes below, opts.avatarHat is the whole { hatColor,
+    // speedMultiplier, jumpMultiplier, interactRangeMultiplier } shape —
+    // this preview only ever needs the color, since the buffs only matter
+    // to an actual moving/interacting character, not a rotating preview.
+    let hatColor = hexToRgba01(opts.avatarHat && opts.avatarHat.hatColor);
+    // Same idea for opts.avatarShoes — the whole { shoeColor,
+    // speedMultiplier, jumpMultiplier, visualScale } shape wallet.js's
+    // getAvatarShoes() returns (see init()'s own localAvatarShoe*
+    // unpacking above) — this preview only ever needs color and visual
+    // scale, since speed/jump only matter to an actual moving/jumping
+    // character.
     let shoeColor = hexToRgba01(opts.avatarShoes && opts.avatarShoes.shoeColor);
     let shoeScale = (opts.avatarShoes && opts.avatarShoes.visualScale) || 1;
 
@@ -2455,7 +2486,8 @@
       // — same reasoning setLocalAvatarLook/setLocalAvatarHat already have
       // for the real 3D view.
       setLook(look) { colors = resolveAvatarColors(look); },
-      setHat(hex) { hatColor = hexToRgba01(hex); },
+      // Accepts the whole hat object, same shape as setShoes() below.
+      setHat(hat) { hatColor = hexToRgba01(hat && hat.hatColor); },
       // Same live-update treatment for the third (shoes) slot — accepts
       // the whole shoes object, same as setLocalAvatarShoes() above.
       setShoes(shoes) {

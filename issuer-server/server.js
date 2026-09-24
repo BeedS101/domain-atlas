@@ -684,10 +684,16 @@ const ASSET_CATALOG = {
   // same "small shared vocabulary worth standardizing" reasoning SPEC.md
   // already gives atlas.rarity/atlas.purity, applied to a pair whose whole
   // point is being interpreted rather than just displayed.
+  // Every atlas.avatar.* class below is tradeScope: 'bound' — an equip-slot
+  // item is meant to be worn by whoever looted it, not split off into a
+  // giftable/tradeable/droppable balance the way an ordinary collectible
+  // is, same reasoning atlas.membership/atlas.badge above already apply to
+  // a relationship or a one-per-visitor giveaway.
   'atlas.avatar.outfit.forest': {
     name: 'Forest Ranger Outfit',
     fungible: false,
     presentation: 'collectible',
+    tradeScope: 'bound',
     properties: {
       'atlas.avatar.shirtColor': '#2f5d3a',
       'atlas.avatar.pantsColor': '#3b2a1e'
@@ -697,6 +703,7 @@ const ASSET_CATALOG = {
     name: 'Dusk Wanderer Outfit',
     fungible: false,
     presentation: 'collectible',
+    tradeScope: 'bound',
     properties: {
       'atlas.avatar.shirtColor': '#4a3b6b',
       'atlas.avatar.pantsColor': '#22243a'
@@ -708,21 +715,42 @@ const ASSET_CATALOG = {
   // buildCharacter() rather than recoloring the torso/legs, and wallet.js
   // keeps it in its own storage key so a hat and an outfit can be equipped
   // at the same time.
+  // atlas.avatar.hatSpeedMultiplier/hatJumpMultiplier scale the wearer's own
+  // walk/run speed and jump height, stacking with whatever shoes are ALSO
+  // equipped (a hat and shoes are separate slots — see gltf-mini.js);
+  // atlas.avatar.hatInteractRangeMultiplier widens how far away the wearer
+  // can trigger a crate/mining node's "E — <label>" prompt or pick up a
+  // dropped item. All three are randomized per mint (see randomHatProperties
+  // near RING_RARITY_TIERS above reserveSupply) rather than fixed per class
+  // like a shoe's own buffs are — the properties below are only the
+  // FALLBACK GET /atlas/asset/class's pre-mint preview shows, same
+  // "properties below play no part in an actual mint's outcome" reasoning
+  // atlas.wearable.ring's own comment gives.
   'atlas.avatar.hat.sunhat': {
     name: 'Explorer Sun Hat',
     fungible: false,
     presentation: 'collectible',
+    tradeScope: 'bound',
     properties: {
-      'atlas.avatar.hatColor': '#d9a441'
-    }
+      'atlas.avatar.hatColor': '#d9a441',
+      'atlas.avatar.hatSpeedMultiplier': 1.15,
+      'atlas.avatar.hatJumpMultiplier': 1.15,
+      'atlas.avatar.hatInteractRangeMultiplier': 1.25
+    },
+    randomizeProperties: randomHatProperties
   },
   'atlas.avatar.hat.cap': {
     name: 'Night Watch Cap',
     fungible: false,
     presentation: 'collectible',
+    tradeScope: 'bound',
     properties: {
-      'atlas.avatar.hatColor': '#26282c'
-    }
+      'atlas.avatar.hatColor': '#26282c',
+      'atlas.avatar.hatSpeedMultiplier': 1.15,
+      'atlas.avatar.hatJumpMultiplier': 1.15,
+      'atlas.avatar.hatInteractRangeMultiplier': 1.25
+    },
+    randomizeProperties: randomHatProperties
   },
   // Same reasoning as the hats above (no model/thumbnail, atlas.*, own
   // equip slot rather than a property on an existing one): shoes are a
@@ -739,6 +767,7 @@ const ASSET_CATALOG = {
     name: 'Trailblazer Boots',
     fungible: false,
     presentation: 'collectible',
+    tradeScope: 'bound',
     properties: {
       'atlas.avatar.shoeColor': '#4a3222',
       'atlas.avatar.shoeSpeedMultiplier': 1.1,
@@ -750,6 +779,7 @@ const ASSET_CATALOG = {
     name: 'Court Sneakers',
     fungible: false,
     presentation: 'collectible',
+    tradeScope: 'bound',
     properties: {
       'atlas.avatar.shoeColor': '#e8e4dc',
       'atlas.avatar.shoeSpeedMultiplier': 1.2,
@@ -1032,6 +1062,25 @@ function randomRingProperties() {
       luck: randomInt(tier.statRange[0], tier.statRange[1]),
       defense: randomInt(tier.statRange[0], tier.statRange[1])
     }
+  };
+}
+
+// Same mechanism as randomRingProperties() above (a catalog entry's own
+// randomizeProperties, consulted by mintAssetByClass() for every genuinely
+// new mint), one step simpler: no rarity tier, just three independent whole-
+// percent bonus rolls so two mints of the same hat class end up with their
+// own distinct mix rather than identical stats. Bounds are deliberately
+// modest for speed/jump (they stack with whatever shoes are ALSO equipped —
+// see gltf-mini.js) and more generous for interact range (pure utility, no
+// movement-balance concern).
+const HAT_SPEED_BONUS_PERCENT_RANGE = [5, 30];
+const HAT_JUMP_BONUS_PERCENT_RANGE = [5, 30];
+const HAT_INTERACT_RANGE_BONUS_PERCENT_RANGE = [10, 50];
+function randomHatProperties() {
+  return {
+    'atlas.avatar.hatSpeedMultiplier': 1 + randomInt(...HAT_SPEED_BONUS_PERCENT_RANGE) / 100,
+    'atlas.avatar.hatJumpMultiplier': 1 + randomInt(...HAT_JUMP_BONUS_PERCENT_RANGE) / 100,
+    'atlas.avatar.hatInteractRangeMultiplier': 1 + randomInt(...HAT_INTERACT_RANGE_BONUS_PERCENT_RANGE) / 100
   };
 }
 

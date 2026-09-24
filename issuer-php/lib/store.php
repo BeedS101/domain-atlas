@@ -564,9 +564,14 @@ const ATLAS_ASSET_CATALOG_BASE = [
   // client actually has to understand these two specific keys to render
   // anything from them. Mirrors issuer-server/server.js's ASSET_CATALOG
   // entries of the same name.
+  // Every atlas.avatar.* class below is tradeScope 'bound' — an equip-slot
+  // item is meant to be worn by whoever looted it, not split off into a
+  // giftable/tradeable/droppable balance. Mirrors issuer-server/server.js's
+  // ASSET_CATALOG.
   'atlas.avatar.outfit.forest' => [
     'name' => 'Forest Ranger Outfit',
     'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.avatar.shirtColor' => '#2f5d3a',
       'atlas.avatar.pantsColor' => '#3b2a1e',
@@ -575,6 +580,7 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.avatar.outfit.dusk' => [
     'name' => 'Dusk Wanderer Outfit',
     'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.avatar.shirtColor' => '#4a3b6b',
       'atlas.avatar.pantsColor' => '#22243a',
@@ -583,21 +589,39 @@ const ATLAS_ASSET_CATALOG_BASE = [
   // Same reasoning as the outfits above, but a separate equip slot — a hat
   // is its own new geometry piece in gltf-mini.js's buildCharacter(), not a
   // recolor of the torso/legs, and wallet.js keeps it in its own storage
-  // key so a hat and an outfit can be worn together. Mirrors
-  // issuer-server/server.js's ASSET_CATALOG entries of the same name.
+  // key so a hat and an outfit can be worn together.
+  // atlas.avatar.hatSpeedMultiplier/hatJumpMultiplier scale the wearer's own
+  // walk/run speed and jump height, stacking with whatever shoes are ALSO
+  // equipped; atlas.avatar.hatInteractRangeMultiplier widens how far away
+  // the wearer can trigger a crate/mining node's prompt or pick up a
+  // dropped item. All three are randomized per mint (see
+  // random_hat_properties() near random_ring_properties() below) rather
+  // than fixed per class — the properties below are only the fallback
+  // GET /atlas/asset/class preview shows. Mirrors issuer-server/server.js's
+  // ASSET_CATALOG entries of the same name.
   'atlas.avatar.hat.sunhat' => [
     'name' => 'Explorer Sun Hat',
     'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.avatar.hatColor' => '#d9a441',
+      'atlas.avatar.hatSpeedMultiplier' => 1.15,
+      'atlas.avatar.hatJumpMultiplier' => 1.15,
+      'atlas.avatar.hatInteractRangeMultiplier' => 1.25,
     ],
+    'randomizeProperties' => 'random_hat_properties',
   ],
   'atlas.avatar.hat.cap' => [
     'name' => 'Night Watch Cap',
     'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.avatar.hatColor' => '#26282c',
+      'atlas.avatar.hatSpeedMultiplier' => 1.15,
+      'atlas.avatar.hatJumpMultiplier' => 1.15,
+      'atlas.avatar.hatInteractRangeMultiplier' => 1.25,
     ],
+    'randomizeProperties' => 'random_hat_properties',
   ],
   // Same reasoning as the hats above, a third independent equip slot.
   // Mirrors issuer-server/server.js's ASSET_CATALOG entries of the same
@@ -611,6 +635,7 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.avatar.shoes.boots' => [
     'name' => 'Trailblazer Boots',
     'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.avatar.shoeColor' => '#4a3222',
       'atlas.avatar.shoeSpeedMultiplier' => 1.1,
@@ -621,6 +646,7 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.avatar.shoes.sneakers' => [
     'name' => 'Court Sneakers',
     'fungible' => false, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
     'properties' => [
       'atlas.avatar.shoeColor' => '#e8e4dc',
       'atlas.avatar.shoeSpeedMultiplier' => 1.2,
@@ -1396,5 +1422,23 @@ function random_ring_properties() {
       'luck' => random_int($tier['statRange'][0], $tier['statRange'][1]),
       'defense' => random_int($tier['statRange'][0], $tier['statRange'][1]),
     ],
+  ];
+}
+
+// Same mechanism as random_ring_properties() above, one step simpler: no
+// rarity tier, just three independent whole-percent bonus rolls, mirroring
+// issuer-server/server.js's randomHatProperties() exactly in shape (same
+// three property keys, same percent ranges).
+$GLOBALS['ATLAS_HAT_SPEED_BONUS_PERCENT_RANGE'] = [5, 30];
+$GLOBALS['ATLAS_HAT_JUMP_BONUS_PERCENT_RANGE'] = [5, 30];
+$GLOBALS['ATLAS_HAT_INTERACT_RANGE_BONUS_PERCENT_RANGE'] = [10, 50];
+function random_hat_properties() {
+  $speedRange = $GLOBALS['ATLAS_HAT_SPEED_BONUS_PERCENT_RANGE'];
+  $jumpRange = $GLOBALS['ATLAS_HAT_JUMP_BONUS_PERCENT_RANGE'];
+  $rangeRange = $GLOBALS['ATLAS_HAT_INTERACT_RANGE_BONUS_PERCENT_RANGE'];
+  return [
+    'atlas.avatar.hatSpeedMultiplier' => 1 + random_int($speedRange[0], $speedRange[1]) / 100,
+    'atlas.avatar.hatJumpMultiplier' => 1 + random_int($jumpRange[0], $jumpRange[1]) / 100,
+    'atlas.avatar.hatInteractRangeMultiplier' => 1 + random_int($rangeRange[0], $rangeRange[1]) / 100,
   ];
 }

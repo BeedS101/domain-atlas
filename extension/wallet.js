@@ -1230,12 +1230,23 @@ const AtlasWallet = (() => {
     return assetId || null;
   }
 
-  // Pure — mirrors avatarLookPropertiesFromAsset() above, one key instead
-  // of a pair. Returns a plain hex string (or null), not an object, since
-  // there's only ever the one color to carry.
+  // Pure — mirrors avatarShoePropertiesFromAsset() below: a hat can now
+  // carry more than color (a randomized-per-mint walk/run speed, jump
+  // height, and interact/pickup range buff — see the hat catalog entries'
+  // own randomizeProperties), so this returns the same kind of object shape
+  // rather than a bare hex string. Multipliers default to 1 (no change)
+  // when an asset doesn't define them, so an ordinary hat with no buffs
+  // still behaves exactly like a plain color-only one.
   function avatarHatPropertiesFromAsset(asset) {
     const props = (asset && asset.properties) || {};
-    return props['atlas.avatar.hatColor'] || null;
+    const hatColor = props['atlas.avatar.hatColor'] || null;
+    if (!hatColor) return null;
+    return {
+      hatColor,
+      speedMultiplier: Number(props['atlas.avatar.hatSpeedMultiplier']) || 1,
+      jumpMultiplier: Number(props['atlas.avatar.hatJumpMultiplier']) || 1,
+      interactRangeMultiplier: Number(props['atlas.avatar.hatInteractRangeMultiplier']) || 1
+    };
   }
 
   async function getAvatarHat() {
@@ -1276,13 +1287,12 @@ const AtlasWallet = (() => {
     return assetId || null;
   }
 
-  // Pure — unlike avatarHatPropertiesFromAsset()'s single hex string, a
-  // shoe can carry more than color (walk/run speed and jump-height buffs,
-  // plus a visual height scale), so this mirrors
-  // avatarLookPropertiesFromAsset()'s object shape instead. Multipliers/
-  // scale default to 1 (no change) when an asset doesn't define them, so
-  // an ordinary shoe with no buffs still behaves exactly like a plain
-  // color-only one.
+  // Pure — same object-shape reasoning as avatarHatPropertiesFromAsset()
+  // above, one field wider: a shoe also carries a visual height scale
+  // alongside its own walk/run speed and jump-height buffs, which a hat
+  // doesn't. Multipliers/scale default to 1 (no change) when an asset
+  // doesn't define them, so an ordinary shoe with no buffs still behaves
+  // exactly like a plain color-only one.
   function avatarShoePropertiesFromAsset(asset) {
     const props = (asset && asset.properties) || {};
     const shoeColor = props['atlas.avatar.shoeColor'] || null;

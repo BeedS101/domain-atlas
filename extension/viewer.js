@@ -480,14 +480,15 @@ async function fetchPresenceStatus(domain, worldId, presenceBase) {
 // place that writes it.
 let localAvatarLookHex = null;
 // Same caching reasoning as localAvatarLookHex above, for the separate hat
-// slot — a plain hex string (or null) rather than an object, since a hat
-// is only ever the one color. Kept in sync by applyAvatarHatToScene().
-let localAvatarHatHex = null;
-// Same caching reasoning again, for the third (shoes) equip slot — but
-// unlike localAvatarHatHex's single color, this holds the whole
+// slot — the whole { hatColor, speedMultiplier, jumpMultiplier,
+// interactRangeMultiplier } shape wallet.js's getAvatarHat() returns, since
+// a hat can carry more than just a color. Kept in sync by
+// applyAvatarHatToScene().
+let localAvatarHatInfo = null;
+// Same caching reasoning again, for the third (shoes) equip slot — its own
 // { shoeColor, speedMultiplier, jumpMultiplier, visualScale } shape
-// wallet.js's getAvatarShoes() returns, since a shoe can carry more than
-// just a color. Kept in sync by applyAvatarShoesToScene().
+// wallet.js's getAvatarShoes() returns. Kept in sync by
+// applyAvatarShoesToScene().
 let localAvatarShoesInfo = null;
 
 // Settings -> Player character's live preview (MiniGLTF.previewCharacter())
@@ -518,9 +519,9 @@ async function applyAvatarLookToScene() {
 
 // Same as applyAvatarLookToScene() above, for the separate hat slot.
 async function applyAvatarHatToScene() {
-  localAvatarHatHex = await AtlasWallet.getAvatarHat();
-  if (active3D && active3D.setLocalAvatarHat) active3D.setLocalAvatarHat(localAvatarHatHex);
-  if (characterPreview && characterPreview.setHat) characterPreview.setHat(localAvatarHatHex);
+  localAvatarHatInfo = await AtlasWallet.getAvatarHat();
+  if (active3D && active3D.setLocalAvatarHat) active3D.setLocalAvatarHat(localAvatarHatInfo);
+  if (characterPreview && characterPreview.setHat) characterPreview.setHat(localAvatarHatInfo);
 }
 
 // Same as applyAvatarHatToScene() above, for the third (shoes) slot.
@@ -543,12 +544,15 @@ function currentLocalPose() {
     x: pos[0], y: active3D.getCharacterFloorY(), z: pos[2], yaw: active3D.getCharacterYaw(),
     shirtColor: (localAvatarLookHex && localAvatarLookHex.shirtColor) || null,
     pantsColor: (localAvatarLookHex && localAvatarLookHex.pantsColor) || null,
-    hatColor: localAvatarHatHex || null,
+    hatColor: (localAvatarHatInfo && localAvatarHatInfo.hatColor) || null,
     shoeColor: (localAvatarShoesInfo && localAvatarShoesInfo.shoeColor) || null,
-    // Only the visual height needs to travel over presence — speed/jump
-    // multipliers only ever affect the wearer's own local controls (see
-    // gltf-mini.js's localAvatarShoeSpeedMultiplier/JumpMultiplier), never
-    // anything a remote client needs to know to render or simulate.
+    // Only visual properties need to travel over presence — a hat's or
+    // shoe's own speed/jump/interact-range buffs only ever affect the
+    // wearer's own local controls (see gltf-mini.js's
+    // localAvatarHat*/localAvatarShoe* multipliers), never anything a
+    // remote client needs to know to render or simulate. A hat's buffs
+    // don't change its geometry (unlike a shoe's visual scale), so there's
+    // no hatScale to broadcast alongside hatColor.
     shoeScale: (localAvatarShoesInfo && localAvatarShoesInfo.visualScale) || null
   };
 }
@@ -2266,7 +2270,16 @@ const messagingChatTextInputEl = document.getElementById('messagingChatTextInput
 let portalHitboxes = []; // [{sx, sy, radius, portal}]
 let itemMarkerHitboxes = []; // [{sx, sy, radius, marker}] — dropped items, 2D renderer only for now
 let interactableHitboxes = []; // [{sx, sy, radius, marker}] — scene.json-declared clickable stalls (mining, etc.), 2D renderer only
-let interactableBusy = false; // guards against a rapid double-click firing two mints at once
+// Guards against a rapid double-click firing two mints on the SAME stall.
+// Keyed per-marker (WeakSet, not a single flag) so collecting one stall
+// doesn't block interacting with a different one while the first's mint +
+// post-mint refresh work (refreshInventoryDisplay/refreshOwnedOncePerUserClassKeys/
+// refreshSubscribeButton) is still in flight — a single global flag here
+// used to silently no-op a second stall's E-press with zero side effects
+// (no mint attempt, no error, no status change) any time two stalls were
+// collected close together, which is worse now that atlas.avatar.* items
+// are tradeScope 'bound' and can't be re-acquired by trade if lost this way.
+let interactableBusyMarkers = new WeakSet();
 
 // Task #227 — "if the system detects it's a unique or one-per-user item
 // and the user already has it in the wallet, the previewer must ignore
@@ -2534,7 +2547,7 @@ async function enterWorld(worldId) {
       // look, if any, has been sitting in storage the whole time), or the
       // identity could have changed since the last time this ran.
       localAvatarLookHex = await AtlasWallet.getAvatarLook();
-      localAvatarHatHex = await AtlasWallet.getAvatarHat();
+      localAvatarHatInfo = await AtlasWallet.getAvatarHat();
       localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
 
       active3D = MiniGLTF.init(scene3dCanvas, {
@@ -2627,8 +2640,10 @@ async function enterWorld(worldId) {
         // Later changes (the equip/unequip wallet-card action) go through
         // applyAvatarLookToScene()'s live setter instead of a re-init.
         localAvatarLook: localAvatarLookHex,
-        // Same seeding as localAvatarLook above, for the separate hat slot.
-        localAvatarHat: localAvatarHatHex,
+        // Same seeding as localAvatarLook above, for the separate hat slot —
+        // the whole hat object, not just a hex string (see
+        // localAvatarHatInfo's own comment above).
+        localAvatarHat: localAvatarHatInfo,
         // Same seeding again, for the third (shoes) slot — the whole
         // shoes object, not just a hex string (see localAvatarShoesInfo's
         // own comment above).
@@ -10791,10 +10806,13 @@ droppedItemsListEl.addEventListener('click', (e) => {
 // guard exists because — unlike a portal (leaves the scene) or a dropped
 // item (removes its own marker once picked up) — a stall stays put and
 // stays clickable, so nothing else stops a fast double-click from firing
-// two mints (or two modal-opens) at once.
+// two mints (or two modal-opens) at once. It's keyed per-marker (see
+// interactableBusyMarkers above) so it only blocks a second click on THIS
+// stall — it must not also block a different stall the player reaches
+// while this one's mint and post-mint refresh are still settling.
 async function handleInteractable(marker) {
-  if (interactableBusy) return;
-  interactableBusy = true;
+  if (interactableBusyMarkers.has(marker)) return;
+  interactableBusyMarkers.add(marker);
   try {
     // Chess needs no identity at all — unlike every other interactable
     // here, it never touches the wallet, so it deliberately skips the
@@ -10869,7 +10887,7 @@ async function handleInteractable(marker) {
   } catch (err) {
     statusEl.textContent = (marker.action === 'mint' ? 'Mint failed: ' : 'Collect failed: ') + err.message;
   } finally {
-    interactableBusy = false;
+    interactableBusyMarkers.delete(marker);
   }
 }
 
