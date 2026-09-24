@@ -1,6 +1,6 @@
-// Manual check for the 3D mouse-hover cursor hint (Bruno's confirmed spec,
-// verbatim: "cursor as hint only the rest stays the same, build it now").
-// Hovering the mouse over an on-screen interactable/dropped item in a
+// Manual check for the 3D mouse-hover cursor hint: cursor as a hint only,
+// nothing else about interaction changes. Hovering the mouse over an
+// on-screen interactable/dropped item in a
 // gltf-mini-v1 (3D) world now swaps canvas.style.cursor to 'pointer', at
 // ANY distance — not gated by the proximity radius that already drives the
 // walk-up "E — <label>" prompt/Previewer. This is deliberately the ONLY
@@ -158,7 +158,7 @@ function pixelForAngle(canvasBox, aspect, angleRad) {
     if (promptWhileFarHover !== null) throw new Error('Expected no E-press prompt while merely hovering from far away, got: ' + JSON.stringify(promptWhileFarHover));
     console.log('PASS: cursor became a pointer at long range, and the E-prompt/Previewer stayed completely untouched — hover is purely a cursor hint, exactly as specced');
 
-    console.log('STEP 2: Bruno\'s feedback on the first version — the cursor lit up well before the mouse was actually over the object, because the raw walk-up radius (1.7 for this crate) was reused as-is for the hover sphere. Standing closer (so the angular math is comfortable) and looking at the crate dead-on, a mouse position 12deg off-center sits OUTSIDE the tightened hover radius (~5.8deg angular footprint after the shrink) but would have been comfortably INSIDE the old raw radius\'s ~20deg footprint — the cursor should stay put, not go pointer');
+    console.log('STEP 2: an earlier version lit the cursor up well before the mouse was actually over the object, because the raw walk-up radius (1.7 for this crate) was reused as-is for the hover sphere. Standing closer (so the angular math is comfortable) and looking at the crate dead-on, a mouse position 12deg off-center sits OUTSIDE the tightened hover radius (~5.8deg angular footprint after the shrink) but would have been comfortably INSIDE the old raw radius\'s ~20deg footprint — the cursor should stay put, not go pointer');
     await aimAt(frame, NEAR_STAND.x, NEAR_STAND.z, CRATE.position);
     await frame.waitForTimeout(100);
     const aspect = await frame.evaluate(() => { const c = document.getElementById('scene3d'); return c.width / c.height; });

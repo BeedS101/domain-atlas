@@ -788,6 +788,14 @@
     // target size, regardless of what units it was actually authored in.
     const ITEM_MODEL_TARGET_SIZE = 0.5;
 
+    // How high a dropped item floats above its drop position, plus the
+    // small vertical bob on top of that. Both the render loop and
+    // hoverCandidates() below need to agree on this exact height so the
+    // hover cursor hint lines up with what's actually drawn, rather than
+    // with the drop's raw ground-level position.
+    const ITEM_DROP_FLOAT_HEIGHT = 0.15;
+    const ITEM_DROP_BOB_AMPLITUDE = 0.05;
+
     // Camera distance (mouse scroll wheel) replaces the old discrete
     // first-/third-person toggle with one continuous zoom: 0 is exactly
     // the original first-person view (camera = eyes, nothing new added to
@@ -935,8 +943,8 @@
     // not the whole page.
     function onContextMenu(e) { e.preventDefault(); }
 
-    // Mouse-hover cursor hint for 3D interactables (Bruno's confirmed spec,
-    // verbatim: "cursor as hint only the rest stays the same"). The ONLY
+    // Mouse-hover cursor hint for 3D interactables — cursor as a hint
+    // only, nothing else about interaction changes. The ONLY
     // visible effect is canvas.style.cursor switching to 'pointer' while the
     // mouse is over an on-screen interactable or dropped item, at ANY
     // distance — not gated by the proximity radius that drives the E-prompt/
@@ -996,10 +1004,10 @@
     // system walks (interactTriggers + itemDropEntries), each reduced to
     // just a world position and radius, so a single ray test is reused
     // across both instead of a third parallel data structure.
-    // Bruno's feedback after trying the first version: the cursor was
-    // lighting up well before the mouse was actually over the rendered
-    // object. That's because the proximity `radius` these two data sources
-    // carry is a "walk up and press E" TRIGGER distance, authored with a
+    // An earlier version lit the cursor up well before the mouse was
+    // actually over the rendered object. That's because the proximity
+    // `radius` these two data sources carry is a "walk up and press E"
+    // TRIGGER distance, authored with a
     // comfortable approach margin in mind (e.g. the lobby crates' radius:
     // 1.7, around a box only about half a unit across) — never meant to
     // describe how big the thing actually looks on screen. Reusing it
@@ -1019,7 +1027,15 @@
     function hoverCandidates() {
       const list = [];
       interactTriggers.forEach((trigger) => { list.push({ position: trigger.position, radius: hoverRadiusFor(trigger.radius) }); });
-      itemDropEntries.forEach((entry) => { list.push({ position: entry.position, radius: hoverRadiusFor(entry.radius) }); });
+      itemDropEntries.forEach((entry) => {
+        // Center the hit-test sphere on the same elevated position the
+        // render loop actually draws the model at — entry.position alone
+        // is the drop's ground-level position, one ITEM_DROP_FLOAT_HEIGHT
+        // below where the model is drawn, which put the hover hit area
+        // noticeably below the visible, floating item.
+        const position = [entry.position[0], (entry.position[1] || 0) + ITEM_DROP_FLOAT_HEIGHT, entry.position[2]];
+        list.push({ position, radius: hoverRadiusFor(entry.radius) });
+      });
       return list;
     }
 
@@ -1565,10 +1581,10 @@
       // fallback marker still reads as "something's here" rather than
       // nothing at all.
       itemDropEntries.forEach((entry) => {
-        const bob = Math.sin(t * 0.0026 + entry.position[0]) * 0.08;
+        const bob = Math.sin(t * 0.0026 + entry.position[0]) * ITEM_DROP_BOB_AMPLITUDE;
         const spin = t * 0.0009;
         const placement = mat4Multiply(
-          mat4Translate(entry.position[0], (entry.position[1] || 0) + 0.35 + bob, entry.position[2]),
+          mat4Translate(entry.position[0], (entry.position[1] || 0) + ITEM_DROP_FLOAT_HEIGHT + bob, entry.position[2]),
           mat4RotateY(spin)
         );
         if (entry.primitives) {
