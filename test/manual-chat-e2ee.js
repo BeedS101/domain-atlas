@@ -1,17 +1,16 @@
-// Manual end-to-end check for task #158: per-pair chat message encryption
-// (ECDH key agreement over each identity's own P-256 keypair, static/
-// non-ratcheted, per Bruno's own "simple static key first" scope choice —
-// see the design section comment directly above wrapChatMessageForWire in
-// wallet.js for the full write-up of the wire shape, the bootstrap gap,
-// and the accepted limitations).
+// Manual end-to-end check for per-pair chat message encryption (ECDH key
+// agreement over each identity's own P-256 keypair, static/non-ratcheted
+// by design — see the design section comment directly above
+// wrapChatMessageForWire in wallet.js for the full write-up of the wire
+// shape, the bootstrap gap, and the accepted limitations).
 //
 // manual-messaging-window.js already thoroughly covers the Messaging
 // window's UI mechanics (opening, Contacts Chat/Call buttons, thread
 // list, deletion, drag/resize/opacity) and the pre-existing AT-REST
 // encryption of the LOCAL copy of a chat message. This test does NOT
-// repeat any of that. Instead it is scoped entirely to the NEW wire-level
-// claim task #158 actually makes: that the relaying domain itself can no
-// longer read chat content once a pair has exchanged keys, and that a
+// repeat any of that. Instead it is scoped entirely to the wire-level
+// claim this feature actually makes: that the relaying domain itself can
+// no longer read chat content once a pair has exchanged keys, and that a
 // forged/tampered key announcement is never trusted. To prove that, this
 // test reads the relaying domain's own on-disk mail store file directly
 // (issuer-server/domain-b-state/atlas-mail-store.json) rather than only
@@ -55,9 +54,10 @@
 //      key" — proving the signed-announcement mechanism actually closes
 //      the "relay/attacker substitutes a key" MITM gap this feature was
 //      built to close, regardless of delivery order.
-//   6. A pre-#158-style message — a plain, non-JSON string body under the
-//      same chat subject marker — still comes through as ordinary
-//      readable text (full backward compatibility, no migration needed).
+//   6. A pre-encryption-style message — a plain, non-JSON string body
+//      under the same chat subject marker — still comes through as
+//      ordinary readable text (full backward compatibility, no migration
+//      needed).
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -324,8 +324,12 @@ async function threadMessages(frame, peerPublicKey) {
       encrypted: false,
       plaintext: 'A tampered announcement, correctly bound but not really signed'
     });
-    await m.frame.evaluate((args) => AtlasWallet.sendUserMail(args.toDomain, args.pkA, args.subject, args.body, null), { toDomain: TO_DOMAIN, pkA, subject: CHAT_SUBJECT_MARKER, body: forgedImpersonation });
-    await m.frame.evaluate((args) => AtlasWallet.sendUserMail(args.toDomain, args.pkA, args.subject, args.body, null), { toDomain: TO_DOMAIN, pkA, subject: CHAT_SUBJECT_MARKER, body: forgedTampered });
+    // Raw/unwrapped send (postOfficeSendRaw, not sendUserMail): sendUserMail
+    // now always runs Mail's own e2ee wrapping (a later feature — see
+    // manual-mail-encryption.js), which would wrap these hand-crafted forged
+    // bodies a second time instead of delivering them exactly as constructed.
+    await m.frame.evaluate((args) => AtlasWallet.postOfficeSendRaw(args.toDomain, args.pkA, args.subject, args.body), { toDomain: TO_DOMAIN, pkA, subject: CHAT_SUBJECT_MARKER, body: forgedImpersonation });
+    await m.frame.evaluate((args) => AtlasWallet.postOfficeSendRaw(args.toDomain, args.pkA, args.subject, args.body), { toDomain: TO_DOMAIN, pkA, subject: CHAT_SUBJECT_MARKER, body: forgedTampered });
     // The genuine one, sent normally — a real, validly self-signed
     // announcement of Mallory's OWN real e2ee key.
     await m.frame.evaluate((args) => AtlasWallet.sendChatMessage(args.toDomain, args.pkA, args.body), { toDomain: TO_DOMAIN, pkA, body: 'Hi Alice, genuinely from Mallory.' });
@@ -342,12 +346,15 @@ async function threadMessages(frame, peerPublicKey) {
     console.log('PASS: both forged announcements were rejected and never cached (regardless of delivery order) — only Mallory\'s real, validly self-signed key was ever trusted');
     console.log('       (the two forged messages\' own PLAINTEXT still displays, same as any bootstrap message — confidentiality of a first-contact message was never this feature\'s claim; trustworthiness of the KEY it carries is, and that held)');
 
-    console.log('STEP 6: a pre-#158-style plain-string chat body (no JSON envelope at all) still comes through as ordinary readable text — full backward compatibility');
-    await b.frame.evaluate((args) => AtlasWallet.sendUserMail(args.toDomain, args.pkA, args.subject, args.body, null), { toDomain: TO_DOMAIN, pkA, subject: CHAT_SUBJECT_MARKER, body: 'Old-style plain chat message from before this feature shipped.' });
+    console.log('STEP 6: a pre-encryption-style plain-string chat body (no JSON envelope at all) still comes through as ordinary readable text — full backward compatibility');
+    // Raw/unwrapped send again (see STEP 5's own comment) — this simulates a
+    // message sent before Mail's e2ee wrapping existed, which sendUserMail
+    // itself can no longer produce.
+    await b.frame.evaluate((args) => AtlasWallet.postOfficeSendRaw(args.toDomain, args.pkA, args.subject, args.body), { toDomain: TO_DOMAIN, pkA, subject: CHAT_SUBJECT_MARKER, body: 'Old-style plain chat message from before this feature shipped.' });
     await a.frame.evaluate(() => AtlasWallet.checkAllMail());
     const aliceThreadWithBobFinal = await threadMessages(a.frame, pkB);
     if (!aliceThreadWithBobFinal.some((e) => e.body === 'Old-style plain chat message from before this feature shipped.')) {
-      throw new Error('Expected a pre-#158 plain-string body to pass through unchanged: ' + JSON.stringify(aliceThreadWithBobFinal));
+      throw new Error('Expected a pre-encryption plain-string body to pass through unchanged: ' + JSON.stringify(aliceThreadWithBobFinal));
     }
     console.log('PASS: a plain-string body (unwrapChatMessageFromWire\'s JSON.parse-catch fallback) still works, no migration needed');
 

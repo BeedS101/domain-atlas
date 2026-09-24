@@ -122,6 +122,13 @@ const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
 // with reason "superseded" (§5.3) — this store is the extra, non-public
 // piece a wallet actually needs to act on that: the full replacement
 // credential, so adopting it doesn't need a second round trip.
+// Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
+// one ECDH P-256 public key per credentialId, submitted by a visitor who
+// wants domain-to-subscriber mail addressed to that credential encrypted
+// rather than sent in the clear (see /atlas/mail/register-key). Lives next
+// to MAIL_FILE for the same reason: this is state /atlas/mail/send needs to
+// consult on every send, not a public document.
+const MAIL_ENCRYPTION_KEYS_FILE = path.join(STATE_DIR, 'atlas-mail-encryption-keys.json');
 const ASSET_UPDATES_FILE = path.join(STATE_DIR, 'atlas-asset-updates-store.json');
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // this is a roster of who subscribed (credential id + owner public key per
@@ -933,6 +940,46 @@ async function verifyDomainSignature(publicKeyB64url, payload, signatureB64url) 
   }
 }
 
+// Shown to a wallet in place of a message's real subject once its body has
+// been encrypted (see encryptMailBodyToKey below) — extension/wallet.js
+// uses this exact same literal for its own placeholder, though nothing
+// programmatic ever compares the two strings; keeping them identical is
+// just so the same words show up on both ends of this feature.
+const MAIL_ENCRYPTED_SUBJECT_PLACEHOLDER = 'Encrypted message';
+
+// Encrypts a domain-to-subscriber mail body to a registered recipient key
+// (see /atlas/mail/register-key) — ECIES-style, a fresh ephemeral ECDH
+// keypair generated per message, not the mutual per-pair negotiation
+// extension/wallet.js's own Chat/Mail Compose E2EE uses for two visitors
+// who've never met. That mechanism exists to keep a relaying domain from
+// substituting its own key in the middle; there's no equivalent risk here
+// — this domain IS the message's own author, already the thing a wallet
+// verifies via the outer message signature (verifyMailMessage, client-
+// side) before this body is ever looked at, so only the registered
+// recipient key needs trusting, and that was already proven once at
+// registration time. No persistent encryption identity needed on this end
+// at all — a fresh ephemeral keypair per message is the more conventional
+// habit anyway (nothing here needs to look the same across two messages).
+async function encryptMailBodyToKey(recipientPublicKeyJwk, plaintextObj) {
+  const ephemeral = await subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const recipientKey = await subtle.importKey('jwk', recipientPublicKeyJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const sharedBits = await subtle.deriveBits({ name: 'ECDH', public: recipientKey }, ephemeral.privateKey, 256);
+  // Same domain-separation-label-then-hash approach as extension/wallet.js's
+  // own deriveEcdhSharedKey, and the SAME label string ('atlas.mail.e2ee.v1')
+  // it uses for domain-to-subscriber mail specifically — the two ends have
+  // to agree on this or the derived AES key simply won't match.
+  const label = new TextEncoder().encode('atlas.mail.e2ee.v1');
+  const combined = new Uint8Array(sharedBits.byteLength + label.length);
+  combined.set(new Uint8Array(sharedBits), 0);
+  combined.set(label, sharedBits.byteLength);
+  const digest = await subtle.digest('SHA-256', combined);
+  const aesKey = await subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt']);
+  const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(JSON.stringify(plaintextObj)));
+  const ephemeralPublicKeyJwk = await subtle.exportKey('jwk', ephemeral.publicKey);
+  return { v: 1, ephemeralPublicKeyJwk, iv: b64url(iv), ciphertext: b64url(new Uint8Array(ciphertext)) };
+}
+
 async function loadOrCreateKeypair() {
   if (fs.existsSync(KEY_FILE)) {
     const jwk = JSON.parse(fs.readFileSync(KEY_FILE, 'utf8'));
@@ -1097,6 +1144,27 @@ function appendMail(message) {
   const doc = readMail();
   doc.messages.push(message);
   fs.writeFileSync(MAIL_FILE, JSON.stringify(doc, null, 2));
+}
+
+// Registered mail-encryption public keys — see /atlas/mail/register-key
+// for how a key gets here and MAIL_ENCRYPTION_KEYS_FILE's own comment for
+// why this lives outside .well-known. A flat object keyed by credentialId
+// rather than owner public key, matching how mail is already addressed
+// (SPEC.md §11.1) — this domain never needs to track "who currently owns
+// this credential" for its own sake, only "what key to encrypt to when
+// mailing this id," and the id is exactly what a visitor already proves
+// holding when they register one (see that endpoint).
+function readMailEncryptionKeys() {
+  if (!fs.existsSync(MAIL_ENCRYPTION_KEYS_FILE)) return { keys: {} };
+  return JSON.parse(fs.readFileSync(MAIL_ENCRYPTION_KEYS_FILE, 'utf8'));
+}
+function saveMailEncryptionKey(credentialId, publicKeyJwk) {
+  const doc = readMailEncryptionKeys();
+  doc.keys[credentialId] = publicKeyJwk;
+  fs.writeFileSync(MAIL_ENCRYPTION_KEYS_FILE, JSON.stringify(doc, null, 2));
+}
+function getMailEncryptionKey(credentialId) {
+  return readMailEncryptionKeys().keys[credentialId] || null;
 }
 
 // Asset-update store (SPEC.md §5.1.1) — read/append shape identical to
@@ -2641,6 +2709,41 @@ async function main() {
       // point of task #59 is an explicit Claim action (see
       // extension/wallet.js's claimMailGift() and viewer.js's mail card),
       // so a gift just sits attached to the message, inert, until claimed.
+      // /atlas/mail/register-key: a local-mode identity's own encryption
+      // public key, scoped to one held credential — the ahead-of-time
+      // registration domain-to-subscriber mail needs, since (unlike Chat or
+      // Mail Compose) a domain never gets a first message FROM a subscriber
+      // to bootstrap a key exchange from — see extension/wallet.js's own
+      // registerMailEncryptionKey() for the full reasoning. Requires the
+      // actual credential (verified against this domain's own key and
+      // checked against revocation, same as any other presented credential)
+      // plus a proof of currently holding ITS owner key — proof.publicKey
+      // alone is attacker-influenceable input, so it's checked against
+      // credential.owner.publicKey explicitly here, the identical MITM
+      // concern extension/wallet.js's own verifyChatE2eeKeyAnnouncement
+      // already documents for the peer-to-peer case.
+      if (req.method === 'POST' && req.url === '/atlas/mail/register-key') {
+        const { credential, payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !payload || !proof) return sendJson(res, 400, { error: 'credential, payload, and proof are required' });
+        if (!payload.credentialId || !payload.mailEncryptionPublicKeyJwk) {
+          return sendJson(res, 400, { error: 'payload.credentialId and payload.mailEncryptionPublicKeyJwk are required' });
+        }
+        if (payload.credentialId !== credential.id) {
+          return sendJson(res, 400, { error: 'payload.credentialId does not match the presented credential' });
+        }
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'this credential has been revoked' });
+        const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
+        if (!credential.owner || proof.publicKey !== credential.owner.publicKey) {
+          return sendJson(res, 400, { error: 'proof was not signed by this credential\'s own owner key' });
+        }
+        const proofOk = await verifyEnvelope(payload, proof);
+        if (!proofOk) return sendJson(res, 400, { error: 'proof signature does not check out' });
+        saveMailEncryptionKey(credential.id, payload.mailEncryptionPublicKeyJwk);
+        console.log('Mail encryption key registered for', credential.id);
+        return sendJson(res, 200, { ok: true });
+      }
+
       if (req.method === 'POST' && req.url === '/atlas/mail/send') {
         const { credentialId, subject, body, giftAssetClass, giftOwnerPublicKey, giftQuantity } = JSON.parse((await readBody(req)) || '{}');
         if (!credentialId || !subject || !body) {
@@ -2673,18 +2776,32 @@ async function main() {
           attachedAsset = await mintAssetByClass(giftOwnerPublicKey, giftAssetClass, mintQuantity, null);
         }
 
+        // This feature: when the recipient has registered an encryption
+        // key against this exact credentialId (/atlas/mail/register-key,
+        // below), subject and body travel encrypted to it instead of in
+        // the clear — attachedAsset is deliberately left untouched, since
+        // it's a complete, independently verifiable credential in its own
+        // right (SPEC.md §11.2) and claimMailGift() reads it directly as
+        // one; encrypting it would just break that. No key on file (an
+        // opted-out client, a WebAuthn-only subscriber who can't run ECDH
+        // at all, or simply hasn't checked mail yet to register one) means
+        // this behaves exactly as it always has.
+        const encryptionKey = getMailEncryptionKey(credentialId);
+        const wireSubject = encryptionKey ? MAIL_ENCRYPTED_SUBJECT_PLACEHOLDER : subject;
+        const wireBody = encryptionKey ? JSON.stringify(await encryptMailBodyToKey(encryptionKey, { subject, body })) : body;
+
         const payload = {
           id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
           credentialId,
-          subject,
-          body,
+          subject: wireSubject,
+          body: wireBody,
           ...(attachedAsset ? { attachedAsset } : {}),
           sentAt: new Date().toISOString()
         };
         const signature = await sign(payload);
         const message = { ...payload, signature };
         appendMail(message);
-        console.log('Mail sent for', credentialId, '->', subject, attachedAsset ? '(with gift: ' + attachedAsset.asset.name + ')' : '');
+        console.log('Mail sent for', credentialId, '->', subject, attachedAsset ? '(with gift: ' + attachedAsset.asset.name + ')' : '', encryptionKey ? '(encrypted)' : '');
         return sendJson(res, 200, message);
       }
 

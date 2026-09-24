@@ -8,6 +8,14 @@
 // job, or curl, not from the wallet). It doesn't check that credentialId
 // was really issued by this server — same demo-simplification level as
 // the rest of this bundle, which trusts its own caller.
+//
+// No E2E encryption here (unlike server.js's Node route): that needs an
+// ECDH key derivation PHP's openssl extension doesn't expose, and there's
+// no /atlas/mail/register-key endpoint on this side either. subject/body
+// are sent and stored the same as before — plaintext, signed but not
+// encrypted. A wallet talking to a PHP-backed domain gets the same
+// graceful fallback it already gets for a WebAuthn identity with no
+// ECDH key: no registered key on file, so nothing to encrypt against.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();

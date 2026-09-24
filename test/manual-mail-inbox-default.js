@@ -64,9 +64,13 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     if (!composeActive) throw new Error('Expected Compose to be active after clicking it');
     console.log('PASS: Compose is active after manual navigation');
 
-    console.log('STEP 3: leave Mail (Friends) and come back — should still show Compose, NOT reset to Inbox');
-    await frame.locator('#friendsSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('friendsSubscreen').classList.contains('active'), { timeout: 5000 });
+    console.log('STEP 3: leave Mail (Contacts) and come back — should still show Compose, NOT reset to Inbox');
+    // #friendsSubtabBtn/#friendsSubscreen were renamed to #contactsSubtabBtn/
+    // #contactsSubscreen when Friends became Contacts (commit 6ae2ac7) — this
+    // stray reference just never got updated; unrelated to today's change,
+    // fixed in passing, same as manual-mail.js's own identical fix.
+    await frame.locator('#contactsSubtabBtn').click();
+    await frame.waitForFunction(() => document.getElementById('contactsSubscreen').classList.contains('active'), { timeout: 5000 });
     await frame.locator('#mailSubtabBtn').click();
     await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
     const stillCompose = await frame.evaluate(() => ({

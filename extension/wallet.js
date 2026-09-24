@@ -3032,6 +3032,15 @@ const AtlasWallet = (() => {
 
   const DEFAULT_MAIL_INTERVAL_MINUTES = 30;
 
+  // In-memory only (not persisted, not encrypted-at-rest — there's nothing
+  // sensitive in "have I already told this domain about this credential's
+  // encryption key this session") de-dup for registerMailEncryptionKey's
+  // own checkAllMail call site below, so a mail check every
+  // DEFAULT_MAIL_INTERVAL_MINUTES doesn't re-POST the same key for the same
+  // credential forever — registration is idempotent either way, this just
+  // avoids the redundant network round trip.
+  const registeredMailEncryptionKeys = new Set();
+
   async function getMailSettings() {
     const { atlasMailSettings } = await chrome.storage.local.get('atlasMailSettings');
     return { intervalMinutes: DEFAULT_MAIL_INTERVAL_MINUTES, lastCheckedAt: null, ...(atlasMailSettings || {}) };
@@ -3187,7 +3196,14 @@ const AtlasWallet = (() => {
   }
 
   async function sendUserMail(toDomain, toPublicKey, subject, body, toHandle) {
-    const result = await postOfficeSendRaw(toDomain, toPublicKey, subject, body);
+    // Identity resolved BEFORE sending (same reordering sendChatMessage
+    // already does) — wrapMailForWire needs it to end-to-end encrypt the
+    // wire subject/body; postOfficeSendRaw only ever sees the wrapped
+    // envelope from here on, never the plain text.
+    const identity = await getIdentity();
+    const target = normalizeSendTarget(toPublicKey);
+    const wire = await wrapMailForWire(identity, target.publicKey, subject, body);
+    const result = await postOfficeSendRaw(toDomain, toPublicKey, wire.subject, wire.body);
 
     // Record this locally for the wallet's own Sent tab — the relaying
     // domain never hands the message back to the sender afterward (it
@@ -3195,7 +3211,6 @@ const AtlasWallet = (() => {
     // the sender would have no record of what they'd sent at all. Uses
     // the server's own id/sentAt from `result` rather than minting new
     // ones, since that IS the canonical envelope the recipient will see.
-    const identity = await getIdentity();
     if (identity && result && result.id) {
       const entries = await getSentMail(identity.publicKey);
       // Task #97: normalized to a plain public-key string for the "to"
@@ -3204,13 +3219,16 @@ const AtlasWallet = (() => {
       // set when it differs from toDomain, i.e. an actually-federated send)
       // is recorded alongside it purely for the Sent tab's own display,
       // never re-parsed back into anything.
-      const target = normalizeSendTarget(toPublicKey);
       entries.unshift({
         id: result.id,
         to: { publicKey: target.publicKey, handle: toHandle || null, recipientDomain: (target.domain && target.domain !== toDomain) ? target.domain : null },
         domain: toDomain,
-        subject: result.subject || subject,
-        body: result.body || body,
+        // Always the ORIGINAL plain subject/body, never result.subject/body
+        // — those are now whatever wrapMailForWire put on the wire (a
+        // placeholder subject and an encrypted body once a peer key is
+        // known), and this wallet's own Sent record should stay readable.
+        subject,
+        body,
         sentAt: result.sentAt || new Date().toISOString()
       });
       await saveSentMail(identity.publicKey, entries);
@@ -3637,16 +3655,21 @@ const AtlasWallet = (() => {
   // rather than importing the raw shared point straight as an AES key —
   // WebCrypto's own ECDH deriveKey path would technically allow that, but
   // hashing first is the safer, more conventional habit and costs nothing.
-  async function deriveChatE2eeSharedKey(ownPrivateKeyJwk, peerPublicKeyJwk) {
+  // `label` is what keeps Chat's derived key and Mail's own (below) distinct
+  // even when the exact same ECDH keypair produced the raw shared bits.
+  async function deriveEcdhSharedKey(ownPrivateKeyJwk, peerPublicKeyJwk, label) {
     const privateKey = await crypto.subtle.importKey('jwk', ownPrivateKeyJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']);
     const publicKey = await crypto.subtle.importKey('jwk', peerPublicKeyJwk, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
     const sharedBits = await crypto.subtle.deriveBits({ name: 'ECDH', public: publicKey }, privateKey, 256);
-    const label = new TextEncoder().encode('atlas.chat.e2ee.v1');
-    const combined = new Uint8Array(sharedBits.byteLength + label.length);
+    const labelBytes = new TextEncoder().encode(label);
+    const combined = new Uint8Array(sharedBits.byteLength + labelBytes.length);
     combined.set(new Uint8Array(sharedBits), 0);
-    combined.set(label, sharedBits.byteLength);
+    combined.set(labelBytes, sharedBits.byteLength);
     const digest = await crypto.subtle.digest('SHA-256', combined);
     return crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  }
+  function deriveChatE2eeSharedKey(ownPrivateKeyJwk, peerPublicKeyJwk) {
+    return deriveEcdhSharedKey(ownPrivateKeyJwk, peerPublicKeyJwk, 'atlas.chat.e2ee.v1');
   }
 
   // Called from sendChatMessage right before the message ever leaves this
@@ -3752,6 +3775,165 @@ const AtlasWallet = (() => {
       await setLastChatSendDomain(identity.publicKey, toDomain);
     }
     return result;
+  }
+
+  // ---------- Mail: end-to-end encryption for ordinary Post Office user
+  // mail ----------
+  //
+  // Chat's own wrap/unwrap above only ever protects a message stamped with
+  // CHAT_SUBJECT_MARKER. An ordinary Mail Compose message — a real subject
+  // line, sent through the exact same Post Office transport — got none of
+  // that: postOfficeSendRaw hands the relay a plain subject and body,
+  // readable by any relaying domain the same way a domain-to-subscriber
+  // message's plaintext body always has been (see the separate mechanism
+  // further below for that case). This closes the gap for the user-to-user
+  // case, reusing the SAME per-identity ECDH keypair Chat already generates
+  // — one encryption identity per wallet, not a second one per feature —
+  // and the same signed-key-announcement bootstrap, so a relaying domain
+  // still can't substitute its own key in place of the real sender's.
+  //
+  // Subject and body are bundled into ONE encrypted blob rather than
+  // leaving subject exposed to route around covering it — a real subject
+  // line ("Wire transfer confirmation") can be just as sensitive as the
+  // body. The OUTER, server-visible subject becomes a fixed placeholder
+  // once a peer key is known; during the one-message bootstrap (peer key
+  // not yet known), the real subject still has to travel in the clear —
+  // hiding it while the body sits unencrypted right next to it would be
+  // cosmetic, not real protection.
+  const MAIL_ENCRYPTED_SUBJECT_PLACEHOLDER = 'Encrypted message';
+
+  async function wrapMailForWire(identity, peerPublicKey, subject, body) {
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return { subject, body }; // unchanged from before this feature
+    const ownKeyPair = await getChatE2eeKeyPair(identity);
+    const signedKey = await signChatE2eeKeyAnnouncement(identity, ownKeyPair.publicKeyJwk);
+    const peerKeyJwk = await getE2eePeerPublicKey(identity, peerPublicKey);
+    const plaintext = JSON.stringify({ subject, body });
+    if (!peerKeyJwk) {
+      return { subject, body: JSON.stringify({ v: 1, key: signedKey, encrypted: false, plaintext }) };
+    }
+    const sharedKey = await deriveEcdhSharedKey(ownKeyPair.privateKeyJwk, peerKeyJwk, 'atlas.mail.e2ee.v1');
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, sharedKey, new TextEncoder().encode(plaintext));
+    return {
+      subject: MAIL_ENCRYPTED_SUBJECT_PLACEHOLDER,
+      body: JSON.stringify({ v: 1, key: signedKey, encrypted: true, iv: b64urlEncode(iv), ciphertext: b64urlEncode(new Uint8Array(ciphertext)) })
+    };
+  }
+
+  // Mirrors unwrapChatMessageFromWire's own verify-then-decrypt shape, but
+  // hands back a resolved {subject, body} pair instead of one string, and
+  // falls back to the message's own wire subject/body untouched whenever
+  // the body doesn't parse as this feature's envelope — every Mail Compose
+  // message ever sent before this shipped, or from an identity that can't
+  // do E2EE at all.
+  async function unwrapMailFromWire(identity, senderPublicKey, wireSubject, wireBody) {
+    let envelope;
+    try {
+      envelope = JSON.parse(wireBody);
+    } catch (err) {
+      return { subject: wireSubject, body: wireBody };
+    }
+    if (!envelope || envelope.v !== 1 || !envelope.key || !envelope.key.announcement) return { subject: wireSubject, body: wireBody };
+
+    const peerPublicKeyJwk = envelope.key.announcement.chatE2eePublicKeyJwk;
+    let keyIsGenuine = false;
+    if (identity && identity.mode === 'local' && identity.privateKeyJwk && peerPublicKeyJwk) {
+      keyIsGenuine = await verifyChatE2eeKeyAnnouncement(senderPublicKey, envelope.key);
+      if (keyIsGenuine) await rememberE2eePeerPublicKey(identity, senderPublicKey, peerPublicKeyJwk);
+    }
+
+    if (!envelope.encrypted) {
+      try {
+        const parsed = JSON.parse(envelope.plaintext);
+        return { subject: parsed.subject, body: parsed.body };
+      } catch (err) {
+        return { subject: wireSubject, body: '[unreadable message]' };
+      }
+    }
+
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return { subject: wireSubject, body: '[Encrypted — unlock your wallet to read]' };
+    if (!keyIsGenuine) return { subject: wireSubject, body: "[Could not verify sender's encryption key — message not shown]" };
+    try {
+      const ownKeyPair = await getChatE2eeKeyPair(identity);
+      const sharedKey = await deriveEcdhSharedKey(ownKeyPair.privateKeyJwk, peerPublicKeyJwk, 'atlas.mail.e2ee.v1');
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlDecode(envelope.iv) }, sharedKey, b64urlDecode(envelope.ciphertext));
+      const parsed = JSON.parse(new TextDecoder().decode(plaintext));
+      return { subject: parsed.subject, body: parsed.body };
+    } catch (err) {
+      return { subject: wireSubject, body: '[Could not decrypt this message]' };
+    }
+  }
+
+  // ---------- Mail: encrypting domain-to-subscriber mail ----------
+  //
+  // §11.1 mail has no bootstrap message to discover a peer key from — the
+  // domain is always the one composing and sending first, never replying
+  // to something this wallet sent. So instead of Chat/Mail Compose's
+  // mutual negotiation, a local-mode identity registers its OWN encryption
+  // public key with a domain ahead of time, scoped to one held credential
+  // (the same id domain-to-subscriber mail already addresses by), proven
+  // by presenting that exact credential plus a fresh signed proof of
+  // holding its owner key — the same possession proof §5 step 3 already
+  // requires everywhere else a credential is presented. issuer-server only
+  // stores it once that checks out, so a stranger who merely learned a
+  // credential id (mail's own "you have to already know the id" access
+  // model) can't plant a key of their own and read future mail.
+  //
+  // Reuses the SAME per-identity ECDH keypair Chat's own E2EE already
+  // generates — one encryption identity per wallet, not a third one.
+  // Nothing here handles the DECRYPT side of a domain's reply, because a
+  // domain never gets one: §11.1 mail is one-way, so there's only ever an
+  // incoming message to unwrap (see unwrapDomainMailFromWire, called from
+  // checkAllMail), never an outgoing encrypted one from this wallet.
+  //
+  // Best-effort and silent on failure — a domain that doesn't implement
+  // this endpoint yet, or is simply unreachable, just keeps sending this
+  // wallet plain (signed-only) mail, exactly as before this feature.
+  async function registerMailEncryptionKey(domain, credential) {
+    const identity = await getIdentity();
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return; // WebAuthn can't run ECDH client-side — see getChatE2eeKeyPair's own comment
+    const ownKeyPair = await getChatE2eeKeyPair(identity);
+    const payload = { credentialId: credential.id, mailEncryptionPublicKeyJwk: ownKeyPair.publicKeyJwk };
+    const proof = await signWithSelf(payload);
+    try {
+      await fetch(baseUrl(domain) + '/atlas/mail/register-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential, payload, proof })
+      });
+    } catch (err) {
+      // unreachable domain — nothing to do; the next checkAllMail() retries
+    }
+  }
+
+  // Called from checkAllMail on a domain-to-subscriber message (no
+  // `message.from` — see that loop's own branch) — the ECIES-style
+  // counterpart to unwrapMailFromWire above: no signed key announcement to
+  // verify here, because there's no third-party relay to keep honest. This
+  // domain IS the message's own author, already trusted via the outer
+  // message signature verifyMailMessage checks before this ever runs — only
+  // the registered recipient key needs trusting, and that was already
+  // proven at registration time (see registerMailEncryptionKey above).
+  async function unwrapDomainMailFromWire(identity, wireSubject, wireBody) {
+    let envelope;
+    try {
+      envelope = JSON.parse(wireBody);
+    } catch (err) {
+      return { subject: wireSubject, body: wireBody };
+    }
+    if (!envelope || envelope.v !== 1 || !envelope.ephemeralPublicKeyJwk || !envelope.iv || !envelope.ciphertext) {
+      return { subject: wireSubject, body: wireBody }; // not this feature's shape — pre-existing plain mail
+    }
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return { subject: wireSubject, body: '[Encrypted — unlock your wallet to read]' };
+    try {
+      const ownKeyPair = await getChatE2eeKeyPair(identity);
+      const sharedKey = await deriveEcdhSharedKey(ownKeyPair.privateKeyJwk, envelope.ephemeralPublicKeyJwk, 'atlas.mail.e2ee.v1');
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlDecode(envelope.iv) }, sharedKey, b64urlDecode(envelope.ciphertext));
+      const parsed = JSON.parse(new TextDecoder().decode(plaintext));
+      return { subject: parsed.subject, body: parsed.body };
+    } catch (err) {
+      return { subject: wireSubject, body: '[Could not decrypt this message]' };
+    }
   }
 
   // ---------- Chats: deletion (TODO round 2, item 3 — 2026-09-14) ----------
@@ -4350,6 +4532,11 @@ const AtlasWallet = (() => {
     // its own point of view.
     const identity = opts.identity || await getIdentity();
     if (!identity) return 0;
+    // WebAuthn can't run ECDH client-side (see getChatE2eeKeyPair's own
+    // comment) — checked once here rather than inside the registration
+    // loop below, so a WebAuthn identity's mail check doesn't pay for a
+    // no-op registerMailEncryptionKey() call per credential on every poll.
+    const canRegisterMailKey = identity.mode === 'local' && !!identity.privateKeyJwk;
 
     const assets = await getWallet(identity.publicKey);
     const byDomain = new Map(); // domain -> Set(credentialId)
@@ -4384,6 +4571,23 @@ const AtlasWallet = (() => {
     for (const [domain, idSet] of byDomain) {
       try {
         const base = baseUrl(domain);
+        // Best-effort: give this domain this identity's encryption key for
+        // every credential it might address mail to (see
+        // registerMailEncryptionKey's own comment for why domain-to-
+        // subscriber mail needs this ahead-of-time registration rather than
+        // Chat/Mail Compose's mutual bootstrap). Piggybacks on this same
+        // per-domain loop rather than a separate poll — registeredMailEncryptionKeys
+        // keeps a repeat check from re-sending it every cycle.
+        if (canRegisterMailKey) {
+          for (const credentialId of idSet) {
+            if (registeredMailEncryptionKeys.has(credentialId)) continue;
+            const entry = assets.find((e) => e.credential.id === credentialId);
+            if (entry) {
+              await registerMailEncryptionKey(domain, entry.credential);
+              registeredMailEncryptionKeys.add(credentialId);
+            }
+          }
+        }
         const res = await fetch(base + '/atlas/mail/check', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4425,7 +4629,20 @@ const AtlasWallet = (() => {
             });
             chatChanged = true;
           } else {
-            existing.push({ message: { ...message, domain }, read: false, receivedAt: new Date().toISOString() });
+            // This feature: an ordinary message's wire subject/body may be
+            // one of two encrypted shapes — a Post Office user-to-user
+            // message (message.from present, unwrapMailForWire's mutual-
+            // bootstrap mechanism) or a domain-to-subscriber message (no
+            // `from` at all, unwrapDomainMailFromWire's ECIES-to-a-
+            // registered-key mechanism) — or, for anything sent before
+            // either existed, plain text either function passes through
+            // unchanged. Resolved ONCE here, before this ever reaches local
+            // storage, same "decrypt at the wire boundary, store plain
+            // locally" shape Chat already established above.
+            const resolved = (message.from && message.from.publicKey)
+              ? await unwrapMailFromWire(identity, message.from.publicKey, message.subject, message.body)
+              : await unwrapDomainMailFromWire(identity, message.subject, message.body);
+            existing.push({ message: { ...message, subject: resolved.subject, body: resolved.body, domain }, read: false, receivedAt: new Date().toISOString() });
             newCount++;
           }
         }
@@ -4493,6 +4710,12 @@ const AtlasWallet = (() => {
     getChatThreads, getChatThreadMessages, markChatThreadRead, getChatUnreadCount, sendChatMessage,
     deleteChatThread,
     getChatE2eeKeyPair, getE2eePeerPublicKey,
+    // postOfficeSendRaw: the unwrapped send primitive sendUserMail/sendChatMessage
+    // both sit on top of. Exposed so a test can construct a raw/forged wire
+    // message directly (a legacy pre-encryption body, a tampered key
+    // announcement) — sendUserMail itself now always runs mail e2ee wrapping,
+    // so it's no longer usable as a "send exactly this" escape hatch.
+    postOfficeSendRaw,
     getLastChatSendDomain, setLastChatSendDomain,
     getMessagingWindowSettings, setMessagingWindowSettings,
     onWalletChanged
