@@ -1276,11 +1276,23 @@ const AtlasWallet = (() => {
     return assetId || null;
   }
 
-  // Pure — mirrors avatarHatPropertiesFromAsset() above, off the
-  // atlas.avatar.shoeColor key instead.
+  // Pure — unlike avatarHatPropertiesFromAsset()'s single hex string, a
+  // shoe can carry more than color (walk/run speed and jump-height buffs,
+  // plus a visual height scale), so this mirrors
+  // avatarLookPropertiesFromAsset()'s object shape instead. Multipliers/
+  // scale default to 1 (no change) when an asset doesn't define them, so
+  // an ordinary shoe with no buffs still behaves exactly like a plain
+  // color-only one.
   function avatarShoePropertiesFromAsset(asset) {
     const props = (asset && asset.properties) || {};
-    return props['atlas.avatar.shoeColor'] || null;
+    const shoeColor = props['atlas.avatar.shoeColor'] || null;
+    if (!shoeColor) return null;
+    return {
+      shoeColor,
+      speedMultiplier: Number(props['atlas.avatar.shoeSpeedMultiplier']) || 1,
+      jumpMultiplier: Number(props['atlas.avatar.shoeJumpMultiplier']) || 1,
+      visualScale: Number(props['atlas.avatar.shoeVisualScale']) || 1
+    };
   }
 
   async function getAvatarShoes() {

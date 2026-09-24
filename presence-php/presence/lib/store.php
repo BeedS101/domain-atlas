@@ -57,6 +57,16 @@ function presence_sanitize_color($v) {
   return is_string($v) ? substr($v, 0, PRESENCE_MAX_COLOR_LEN) : null;
 }
 
+// Matches presence-server.js's sanitizeScale() exactly — a shoe's visual
+// height scale (atlas.avatar.shoeVisualScale) rides alongside shoeColor;
+// this server never acts on the value, only relays it so every client
+// renders the same shoe height.
+const PRESENCE_MAX_SHOE_SCALE = 10;
+function presence_sanitize_scale($v) {
+  $n = is_numeric($v) ? (float) $v : null;
+  return ($n !== null && $n > 0 && $n <= PRESENCE_MAX_SHOE_SCALE) ? $n : null;
+}
+
 // Signal relay (Friends, #67), PHP side — same closed vocabulary as
 // presence-server.js's ALLOWED_SIGNAL_KINDS. See poll/signal.php for what
 // this is used for; this bundle is polling-only so there's no WS-vs-poll
@@ -116,7 +126,8 @@ function presence_roster_of($room, $exceptId) {
       'shirtColor' => isset($member['shirtColor']) ? $member['shirtColor'] : null,
       'pantsColor' => isset($member['pantsColor']) ? $member['pantsColor'] : null,
       'hatColor' => isset($member['hatColor']) ? $member['hatColor'] : null,
-      'shoeColor' => isset($member['shoeColor']) ? $member['shoeColor'] : null
+      'shoeColor' => isset($member['shoeColor']) ? $member['shoeColor'] : null,
+      'shoeScale' => isset($member['shoeScale']) ? $member['shoeScale'] : null
     ];
   }
   return $roster;

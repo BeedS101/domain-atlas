@@ -622,13 +622,59 @@
     };
   }
 
+  // Leg/shoe proportions are hoisted out of buildCharacter() below because
+  // buildShoePair()/getShoeGeometryForScale() need their own copies to
+  // rebuild a shoe pair independently, later, at a different height scale
+  // than the character's own default (atlas.avatar.shoeVisualScale — see
+  // wallet.js's avatarShoePropertiesFromAsset()) — keeping one shared
+  // source for them avoids the two drifting apart.
+  const LEG_LEN = 0.85, LEG_W = 0.15, LEG_D = 0.15;
+  const SHOE_H = 0.16, SHOE_W = LEG_W * 1.3, SHOE_D = LEG_D * 1.6;
+  const PANTS_COLOR = [0.17, 0.22, 0.26, 1];
+
+  // Wraps the bottom of a leg — same local space as the leg itself (both
+  // hang off the same hip translate + swing rotation, so a shoe swings
+  // with its leg for free), a bit wider/longer than the leg for a shoe
+  // silhouette, and extending slightly past the leg's own foot (yMin below
+  // -LEG_LEN) for a simple sole. heightScale (1 = buildCharacter()'s own
+  // default) only stretches/shrinks SHOE_H, anchored at the fixed sole
+  // (yMin unchanged) rather than scaled about the leg's local origin, so a
+  // shorter shoe still sits flush on the ground instead of sinking into it
+  // or floating above it.
+  function buildShoePair(gl, heightScale) {
+    const scale = (typeof heightScale === 'number' && heightScale > 0) ? heightScale : 1;
+    const yMin = -LEG_LEN - 0.04, yMax = -LEG_LEN + SHOE_H * scale;
+    return {
+      shoeL: buildBox(gl, SHOE_W, yMin, yMax, SHOE_D, PANTS_COLOR),
+      shoeR: buildBox(gl, SHOE_W, yMin, yMax, SHOE_D, PANTS_COLOR)
+    };
+  }
+
+  // Returns the {shoeL, shoeR} pair for a given atlas.avatar.shoeVisualScale,
+  // building and caching it on character.shoeGeometryCache the first time
+  // that exact scale is seen — a scene will typically only ever need a
+  // handful of distinct scale values (the catalog's own), so this stays
+  // small in practice even with several visitors wearing different shoes
+  // at once. Falls back to the character's own default (scale 1) pair,
+  // already seeded in the cache by buildCharacter() below, for a
+  // falsy/invalid scale — an item with no shoeVisualScale property at all
+  // never needs to know this cache exists.
+  function getShoeGeometryForScale(gl, character, scale) {
+    const key = (typeof scale === 'number' && scale > 0) ? scale.toFixed(3) : '1';
+    let pair = character.shoeGeometryCache.get(key);
+    if (!pair) {
+      pair = buildShoePair(gl, scale);
+      character.shoeGeometryCache.set(key, pair);
+    }
+    return pair;
+  }
+
   // Proportions are eyeballed against the default 1.6 eye height most
   // scenes start the camera at (see camera.pos below): hip+torso+most of
   // the head lands the eyes roughly inside the head box, so at camera
   // distance 0 (see cameraDistance in init()) the camera sits about where
   // a head would be without anything needing to be perfectly to-scale.
   function buildCharacter(gl) {
-    const LEG_LEN = 0.85, LEG_W = 0.15, LEG_D = 0.15;
     const TORSO_H = 0.50, TORSO_W = 0.36, TORSO_D = 0.20;
     const HEAD_SIZE = 0.32;
     const ARM_LEN = 0.52, ARM_W = 0.13, ARM_D = 0.13;
@@ -639,18 +685,11 @@
     // drawCharacterAt's hatColor param below); its own baked-in color here
     // is never used for that reason, but buildBox still needs one.
     const HAT_H = 0.12, HAT_SIZE = HEAD_SIZE * 1.25;
-    // Wraps the bottom of each leg — same local space as the leg itself
-    // (both hang off the same hip translate + swing rotation, so a shoe
-    // swings with its leg for free), a bit wider/longer than the leg for a
-    // shoe silhouette, and extending slightly past the leg's own foot
-    // (yMin below -LEG_LEN) for a simple sole. Only ever drawn when shoes
-    // are actually equipped (see drawCharacterAt's shoeColor param below).
-    const SHOE_H = 0.16, SHOE_W = LEG_W * 1.3, SHOE_D = LEG_D * 1.6;
     const hipY = LEG_LEN;
     const shoulderY = hipY + TORSO_H;
     const skin = [0.85, 0.68, 0.53, 1];
     const shirt = [0.24, 0.47, 0.40, 1];
-    const pants = [0.17, 0.22, 0.26, 1];
+    const { shoeL, shoeR } = buildShoePair(gl, 1);
     return {
       hipY, shoulderY, headSize: HEAD_SIZE,
       shoulderOffsetX: TORSO_W / 2 + ARM_W / 2 + 0.02,
@@ -660,10 +699,12 @@
       hat: buildBox(gl, HAT_SIZE, HEAD_SIZE, HEAD_SIZE + HAT_H, HAT_SIZE, skin),
       armL: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
       armR: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
-      legL: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, pants),
-      legR: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, pants),
-      shoeL: buildBox(gl, SHOE_W, -LEG_LEN - 0.04, -LEG_LEN + SHOE_H, SHOE_D, pants),
-      shoeR: buildBox(gl, SHOE_W, -LEG_LEN - 0.04, -LEG_LEN + SHOE_H, SHOE_D, pants)
+      legL: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, PANTS_COLOR),
+      legR: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, PANTS_COLOR),
+      shoeL, shoeR,
+      // Only the default (scale 1) pair is pre-built; every other scale is
+      // built lazily by getShoeGeometryForScale() above on first use.
+      shoeGeometryCache: new Map([['1', { shoeL, shoeR }]])
     };
   }
 
@@ -893,7 +934,20 @@
     // invalid/missing input, same as resolveAvatarColors() does for looks.
     let localAvatarHatColor = hexToRgba01(opts.localAvatarHat);
     // Third independent equip slot, same reasoning as the hat above.
-    let localAvatarShoeColor = hexToRgba01(opts.localAvatarShoes);
+    // Unlike the hat, a shoe can carry more than color — opts.localAvatarShoes
+    // is the whole { shoeColor, speedMultiplier, jumpMultiplier, visualScale }
+    // shape wallet.js's getAvatarShoes() returns (see
+    // avatarShoePropertiesFromAsset() there), so it's unpacked into separate
+    // local variables here: a resolved color for rendering, a walk/run speed
+    // multiplier and a jump-height multiplier applied to THIS player's own
+    // controls below, and a visual height scale applied to the shoe geometry
+    // itself (see getShoeGeometryForScale()). Multipliers/scale default to 1
+    // (no change) so an unequipped or plain color-only shoe behaves exactly
+    // as before this feature existed.
+    let localAvatarShoeColor = hexToRgba01(opts.localAvatarShoes && opts.localAvatarShoes.shoeColor);
+    let localAvatarShoeSpeedMultiplier = (opts.localAvatarShoes && opts.localAvatarShoes.speedMultiplier) || 1;
+    let localAvatarShoeJumpMultiplier = (opts.localAvatarShoes && opts.localAvatarShoes.jumpMultiplier) || 1;
+    let localAvatarShoeVisualScale = (opts.localAvatarShoes && opts.localAvatarShoes.visualScale) || 1;
 
     // Other visitors currently in this same world (#66) — viewer.js owns
     // the actual presence WebSocket connection and message protocol; this
@@ -1433,7 +1487,11 @@
       lastT = t;
       resize();
 
-      const speed = (keys['ShiftLeft'] || keys['ShiftRight']) ? 4.5 : 2.4;
+      // localAvatarShoeSpeedMultiplier (1 = no bonus) applies to both walk
+      // and run at once, since they already share this one base value —
+      // an equipped shoe's atlas.avatar.shoeSpeedMultiplier just scales
+      // whichever of the two is currently in effect.
+      const speed = ((keys['ShiftLeft'] || keys['ShiftRight']) ? 4.5 : 2.4) * localAvatarShoeSpeedMultiplier;
       const forward = [Math.sin(camera.yaw), -Math.cos(camera.yaw)];
       const right = [Math.cos(camera.yaw), Math.sin(camera.yaw)];
       let mx = 0, mz = 0;
@@ -1474,7 +1532,12 @@
       // height. Space only starts a new jump while grounded (the
       // `!airborne` guard), so holding it down doesn't launch a second jump
       // mid-air.
-      if (keys['Space'] && !airborne) { airborne = true; jumpVelocity = JUMP_SPEED; }
+      // Jump height scales with the square of launch velocity (basic
+      // projectile motion under constant GRAVITY), so a shoe's
+      // atlas.avatar.shoeJumpMultiplier — a HEIGHT multiplier — is applied
+      // as sqrt(multiplier) here to land on the actual height bonus rather
+      // than a velocity bonus that would overshoot it.
+      if (keys['Space'] && !airborne) { airborne = true; jumpVelocity = JUMP_SPEED * Math.sqrt(localAvatarShoeJumpMultiplier); }
       if (airborne) {
         jumpOffset += jumpVelocity * dt;
         jumpVelocity -= GRAVITY * dt;
@@ -1703,8 +1766,11 @@
       // a hat with no head under it wouldn't make sense either.
       // `shoeColor` is a third independent override, gated the same way:
       // each shoe is drawn using the exact same local-matrix expression as
-      // its leg, so it swings with the walk cycle for free.
-      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor) => {
+      // its leg, so it swings with the walk cycle for free. `shoeScale`
+      // picks which height variant of the shoe geometry to draw (see
+      // getShoeGeometryForScale() above) — a color-only shoe (scale 1) just
+      // reuses the character's own default pair.
+      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale) => {
         const shirtColor = colors && colors.shirtColor;
         const pantsColor = colors && colors.pantsColor;
         const drawPart = (localMatrix, part, colorOverride) => {
@@ -1722,11 +1788,12 @@
         drawPart(legLLocal, character.legL, pantsColor);
         drawPart(legRLocal, character.legR, pantsColor);
         if (shoeColor) {
-          drawPart(legLLocal, character.shoeL, shoeColor);
-          drawPart(legRLocal, character.shoeR, shoeColor);
+          const shoePair = getShoeGeometryForScale(gl, character, shoeScale);
+          drawPart(legLLocal, shoePair.shoeL, shoeColor);
+          drawPart(legRLocal, shoePair.shoeR, shoeColor);
         }
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor);
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale);
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
@@ -1750,7 +1817,7 @@
         // player's arms/legs would turn to face the mirror of wherever
         // they're actually walking.
         const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4RotateY(-rp.yaw));
-        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor, rp.shoeColor); // always show the head — this is never our own first-person view
+        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor, rp.shoeColor, rp.shoeScale); // always show the head — this is never our own first-person view
       });
 
       rafId = requestAnimationFrame(frame);
@@ -1913,14 +1980,26 @@
         // Same treatment as the hat above, for the third independent slot.
         const hasShoeUpdate = 'shoeColor' in state;
         const shoeColor = hasShoeUpdate ? hexToRgba01(state.shoeColor) : null;
+        // The visual height scale rides alongside shoeColor rather than as
+        // its own separate presence field, since the two are only ever set
+        // together (one equip action) — but it's still gated by its own
+        // "was this even mentioned" check, same reasoning as the others.
+        // Only rendering cares about this for a remote player; the
+        // speed/jump multipliers are never broadcast at all, since they
+        // only ever affect the wearer's own local controls (see
+        // localAvatarShoeSpeedMultiplier/localAvatarShoeJumpMultiplier
+        // above), not anything a remote client would need to simulate.
+        const hasShoeScaleUpdate = 'shoeScale' in state;
+        const shoeScale = hasShoeScaleUpdate ? (Number(state.shoeScale) || null) : null;
         const existing = remotePlayers.get(id);
         if (existing) {
           existing.tx = x; existing.ty = y; existing.tz = z; existing.tyaw = yaw;
           if (hasLookUpdate) existing.colors = colors;
           if (hasHatUpdate) existing.hatColor = hatColor;
           if (hasShoeUpdate) existing.shoeColor = shoeColor;
+          if (hasShoeScaleUpdate) existing.shoeScale = shoeScale;
         } else {
-          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null, shoeColor: hasShoeUpdate ? shoeColor : null });
+          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null, shoeColor: hasShoeUpdate ? shoeColor : null, shoeScale: hasShoeScaleUpdate ? shoeScale : null });
         }
       },
       removeRemotePlayer: (id) => { remotePlayers.delete(id); },
@@ -1932,7 +2011,7 @@
       // interpolation is genuinely happening frame to frame.
       getRemotePlayerRenderState: (id) => {
         const rp = remotePlayers.get(id);
-        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null, shoeColor: rp.shoeColor || null } : null;
+        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null, shoeColor: rp.shoeColor || null, shoeScale: rp.shoeScale || null } : null;
       },
       // Live setter for this viewer's OWN equipped look (the wallet-card
       // equip/unequip action) — same "no scene reload needed" treatment as
@@ -1943,15 +2022,29 @@
       // hat slot. Accepts the plain hex string wallet.js's getAvatarHat()
       // returns (or null/undefined to take the hat off).
       setLocalAvatarHat: (hex) => { localAvatarHatColor = hexToRgba01(hex); },
-      // Same live-update treatment, for the third (shoes) slot.
-      setLocalAvatarShoes: (hex) => { localAvatarShoeColor = hexToRgba01(hex); },
+      // Same live-update treatment, for the third (shoes) slot. Unlike
+      // setLocalAvatarHat's plain hex string, this accepts the whole
+      // { shoeColor, speedMultiplier, jumpMultiplier, visualScale } shape
+      // wallet.js's getAvatarShoes() returns (or null/undefined to take
+      // the shoes off, resetting every field back to "no bonus").
+      setLocalAvatarShoes: (shoes) => {
+        localAvatarShoeColor = hexToRgba01(shoes && shoes.shoeColor);
+        localAvatarShoeSpeedMultiplier = (shoes && shoes.speedMultiplier) || 1;
+        localAvatarShoeJumpMultiplier = (shoes && shoes.jumpMultiplier) || 1;
+        localAvatarShoeVisualScale = (shoes && shoes.visualScale) || 1;
+      },
       // Debug/test hook — the actual resolved [r,g,b,a] colors currently
       // applied to the local character, or null for the default look.
       getLocalAvatarColors: () => localAvatarColors,
       // Same debug/test hook for the hat slot.
       getLocalAvatarHatColor: () => localAvatarHatColor,
-      // Same debug/test hook for the shoes slot.
-      getLocalAvatarShoeColor: () => localAvatarShoeColor
+      // Same debug/test hook for the shoes slot's color.
+      getLocalAvatarShoeColor: () => localAvatarShoeColor,
+      // Debug/test hooks for the shoes slot's gameplay buffs and visual
+      // scale — all three default to 1 (no change) with nothing equipped.
+      getLocalAvatarShoeSpeedMultiplier: () => localAvatarShoeSpeedMultiplier,
+      getLocalAvatarShoeJumpMultiplier: () => localAvatarShoeJumpMultiplier,
+      getLocalAvatarShoeVisualScale: () => localAvatarShoeVisualScale
     };
   }
 
@@ -2231,7 +2324,14 @@
     let scale = clampCharacterScale(opts.characterScale);
     let colors = resolveAvatarColors(opts.avatarLook);
     let hatColor = hexToRgba01(opts.avatarHat);
-    let shoeColor = hexToRgba01(opts.avatarShoes);
+    // Unlike avatarHat's plain hex string, opts.avatarShoes is the whole
+    // { shoeColor, speedMultiplier, jumpMultiplier, visualScale } shape
+    // wallet.js's getAvatarShoes() returns (see init()'s own
+    // localAvatarShoe* unpacking above) — this preview only ever needs
+    // color and visual scale, since speed/jump only matter to an actual
+    // moving/jumping character.
+    let shoeColor = hexToRgba01(opts.avatarShoes && opts.avatarShoes.shoeColor);
+    let shoeScale = (opts.avatarShoes && opts.avatarShoes.visualScale) || 1;
 
     // Frame the whole standing character, same "fit to view" idea as
     // previewModel()'s bounding-radius camera, sized off the character's
@@ -2290,8 +2390,9 @@
       drawPart(base, legLLocal, character.legL, colors && colors.pantsColor, projection);
       drawPart(base, legRLocal, character.legR, colors && colors.pantsColor, projection);
       if (shoeColor) {
-        drawPart(base, legLLocal, character.shoeL, shoeColor, projection);
-        drawPart(base, legRLocal, character.shoeR, shoeColor, projection);
+        const shoePair = getShoeGeometryForScale(gl, character, shoeScale);
+        drawPart(base, legLLocal, shoePair.shoeL, shoeColor, projection);
+        drawPart(base, legRLocal, shoePair.shoeR, shoeColor, projection);
       }
 
       rafId = requestAnimationFrame(frame);
@@ -2305,8 +2406,12 @@
       // for the real 3D view.
       setLook(look) { colors = resolveAvatarColors(look); },
       setHat(hex) { hatColor = hexToRgba01(hex); },
-      // Same live-update treatment for the third (shoes) slot.
-      setShoes(hex) { shoeColor = hexToRgba01(hex); },
+      // Same live-update treatment for the third (shoes) slot — accepts
+      // the whole shoes object, same as setLocalAvatarShoes() above.
+      setShoes(shoes) {
+        shoeColor = hexToRgba01(shoes && shoes.shoeColor);
+        shoeScale = (shoes && shoes.visualScale) || 1;
+      },
       // Same live-update treatment for the Size slider, in case this panel
       // is open while it's dragged.
       setScale(s) { scale = clampCharacterScale(s); },
@@ -2315,6 +2420,7 @@
       getColors: () => colors,
       getHatColor: () => hatColor,
       getShoeColor: () => shoeColor,
+      getShoeVisualScale: () => shoeScale,
       dispose() {
         if (lost) return;
         lost = true;

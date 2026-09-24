@@ -602,11 +602,20 @@ const ATLAS_ASSET_CATALOG_BASE = [
   // Same reasoning as the hats above, a third independent equip slot.
   // Mirrors issuer-server/server.js's ASSET_CATALOG entries of the same
   // name.
+  // atlas.avatar.shoeSpeedMultiplier/shoeJumpMultiplier scale the wearer's
+  // own walk/run speed and jump height (a 3D scene reads these directly off
+  // whatever shoes are equipped — see gltf-mini.js); atlas.avatar.shoeVisualScale
+  // scales the rendered height of the shoe geometry itself. All three are
+  // optional and default to no change (1) when absent, same as any other
+  // atlas.* property. Mirrors issuer-server/server.js's ASSET_CATALOG.
   'atlas.avatar.shoes.boots' => [
     'name' => 'Trailblazer Boots',
     'fungible' => false, 'presentation' => 'collectible',
     'properties' => [
       'atlas.avatar.shoeColor' => '#4a3222',
+      'atlas.avatar.shoeSpeedMultiplier' => 1.1,
+      'atlas.avatar.shoeJumpMultiplier' => 1.1,
+      'atlas.avatar.shoeVisualScale' => 0.5,
     ],
   ],
   'atlas.avatar.shoes.sneakers' => [
@@ -614,6 +623,9 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'fungible' => false, 'presentation' => 'collectible',
     'properties' => [
       'atlas.avatar.shoeColor' => '#e8e4dc',
+      'atlas.avatar.shoeSpeedMultiplier' => 1.2,
+      'atlas.avatar.shoeJumpMultiplier' => 1.2,
+      'atlas.avatar.shoeVisualScale' => 0.5,
     ],
   ],
 ];

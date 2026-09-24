@@ -237,13 +237,24 @@ function isFiniteNumber(n) { return typeof n === 'number' && Number.isFinite(n);
 // real hex color.
 function sanitizeColor(v) { return typeof v === 'string' ? v.slice(0, MAX_COLOR_LEN) : null; }
 
+// Same "loose sanity, not real validation" posture as sanitizeColor above,
+// for a shoe's visual height scale (atlas.avatar.shoeVisualScale) — this
+// server never acts on the value itself, only relays it so every client
+// renders the same shoe height; the bound just keeps a malformed number
+// from reaching another client's renderer at all.
+const MAX_SHOE_SCALE = 10;
+function sanitizeScale(v) {
+  const n = Number(v);
+  return (Number.isFinite(n) && n > 0 && n <= MAX_SHOE_SCALE) ? n : null;
+}
+
 function rosterOf(room, exceptConnId) {
   const roster = [];
   room.forEach((member, id) => {
     if (id === exceptConnId) return;
     roster.push({
       id, name: member.name, x: member.x, y: member.y, z: member.z, yaw: member.yaw, publicKey: member.publicKey || null,
-      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null, hatColor: member.hatColor || null, shoeColor: member.shoeColor || null
+      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null, hatColor: member.hatColor || null, shoeColor: member.shoeColor || null, shoeScale: member.shoeScale || null
     });
   });
   return roster;
@@ -584,14 +595,18 @@ function removeMember(connId) {
 // already-joined connId, then broadcasts it to the room's WS members.
 // Returns false (no-op) for an unknown id or out-of-bounds/non-finite
 // coordinates — same validation either transport's move message gets.
-// `look` ({shirtColor, pantsColor, hatColor, shoeColor}, all optional hex
-// strings) rides alongside position — a viewer's equipped avatar look,
-// hat, and shoes (extension/wallet.js's getAvatarLook()/getAvatarHat()/
-// getAvatarShoes(), three independent equip slots) can change mid-session
-// the same way position does, so they're broadcast the same way rather
-// than only at join. Always overwrites (to null when a caller sends
-// neither field), same as x/y/z/yaw — a move IS this member's current
-// full pose, appearance included, not a partial patch.
+// `look` ({shirtColor, pantsColor, hatColor, shoeColor, shoeScale}, all
+// optional — shoeScale a number, the rest hex strings) rides alongside
+// position — a viewer's equipped avatar look, hat, and shoes
+// (extension/wallet.js's getAvatarLook()/getAvatarHat()/getAvatarShoes(),
+// three independent equip slots) can change mid-session the same way
+// position does, so they're broadcast the same way rather than only at
+// join. shoeScale is the shoe's visual height only (atlas.avatar.shoeVisualScale)
+// — the speed/jump buffs a shoe also carries never travel over presence,
+// since they only ever affect the wearer's own local controls, nothing a
+// remote client needs to know. Always overwrites (to null when a caller
+// sends neither field), same as x/y/z/yaw — a move IS this member's
+// current full pose, appearance included, not a partial patch.
 function moveMember(connId, x, y, z, yaw, look) {
   const loc = connIndex.get(connId);
   if (!loc) return false;
@@ -603,15 +618,16 @@ function moveMember(connId, x, y, z, yaw, look) {
   const pantsColor = sanitizeColor(look && look.pantsColor);
   const hatColor = sanitizeColor(look && look.hatColor);
   const shoeColor = sanitizeColor(look && look.shoeColor);
+  const shoeScale = sanitizeScale(look && look.shoeScale);
   // Task #137's activity clock only counts a REAL change — a poll
   // member's sync tick reports its current pose every 2s regardless of
   // whether it moved at all, and that repetition shouldn't look like
   // activity (see isMemberActive() / ACTIVITY_IDLE_MS above).
   const actuallyMoved = member.x !== x || member.y !== y || member.z !== z || member.yaw !== yaw;
   member.x = x; member.y = y; member.z = z; member.yaw = yaw;
-  member.shirtColor = shirtColor; member.pantsColor = pantsColor; member.hatColor = hatColor; member.shoeColor = shoeColor;
+  member.shirtColor = shirtColor; member.pantsColor = pantsColor; member.hatColor = hatColor; member.shoeColor = shoeColor; member.shoeScale = shoeScale;
   if (actuallyMoved) member.lastActivityAt = Date.now();
-  broadcast(loc.room, connId, { type: 'moved', id: connId, x, y, z, yaw, shirtColor, pantsColor, hatColor, shoeColor });
+  broadcast(loc.room, connId, { type: 'moved', id: connId, x, y, z, yaw, shirtColor, pantsColor, hatColor, shoeColor, shoeScale });
   return true;
 }
 
@@ -900,7 +916,7 @@ function handleConnection(socket) {
         const now = Date.now();
         if (now - lastMoveAt < MOVE_MIN_INTERVAL_MS) return;
         lastMoveAt = now;
-        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor, hatColor: msg.hatColor, shoeColor: msg.shoeColor });
+        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor, hatColor: msg.hatColor, shoeColor: msg.shoeColor, shoeScale: msg.shoeScale });
         return;
       }
 
@@ -1131,7 +1147,7 @@ const server = http.createServer(async (req, res) => {
       const member = loc.room.get(connId);
       if (!member || member.transport !== 'poll') return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin', reason: notFoundReason });
       member.lastSeen = Date.now();
-      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor, hatColor: body.hatColor, shoeColor: body.shoeColor });
+      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor, hatColor: body.hatColor, shoeColor: body.shoeColor, shoeScale: body.shoeScale });
       // Drain any signals (friend requests etc, #67) queued for this
       // member since their last sync — this poll response IS the only
       // "push" a polling member ever gets, same reasoning as the roster

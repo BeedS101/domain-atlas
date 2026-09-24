@@ -483,9 +483,12 @@ let localAvatarLookHex = null;
 // slot — a plain hex string (or null) rather than an object, since a hat
 // is only ever the one color. Kept in sync by applyAvatarHatToScene().
 let localAvatarHatHex = null;
-// Same caching reasoning again, for the third (shoes) equip slot. Kept in
-// sync by applyAvatarShoesToScene().
-let localAvatarShoeHex = null;
+// Same caching reasoning again, for the third (shoes) equip slot — but
+// unlike localAvatarHatHex's single color, this holds the whole
+// { shoeColor, speedMultiplier, jumpMultiplier, visualScale } shape
+// wallet.js's getAvatarShoes() returns, since a shoe can carry more than
+// just a color. Kept in sync by applyAvatarShoesToScene().
+let localAvatarShoesInfo = null;
 
 // Settings -> Player character's live preview (MiniGLTF.previewCharacter())
 // — only exists while the Settings screen is actually open (see
@@ -522,9 +525,9 @@ async function applyAvatarHatToScene() {
 
 // Same as applyAvatarHatToScene() above, for the third (shoes) slot.
 async function applyAvatarShoesToScene() {
-  localAvatarShoeHex = await AtlasWallet.getAvatarShoes();
-  if (active3D && active3D.setLocalAvatarShoes) active3D.setLocalAvatarShoes(localAvatarShoeHex);
-  if (characterPreview && characterPreview.setShoes) characterPreview.setShoes(localAvatarShoeHex);
+  localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
+  if (active3D && active3D.setLocalAvatarShoes) active3D.setLocalAvatarShoes(localAvatarShoesInfo);
+  if (characterPreview && characterPreview.setShoes) characterPreview.setShoes(localAvatarShoesInfo);
 }
 
 function currentLocalPose() {
@@ -541,7 +544,12 @@ function currentLocalPose() {
     shirtColor: (localAvatarLookHex && localAvatarLookHex.shirtColor) || null,
     pantsColor: (localAvatarLookHex && localAvatarLookHex.pantsColor) || null,
     hatColor: localAvatarHatHex || null,
-    shoeColor: localAvatarShoeHex || null
+    shoeColor: (localAvatarShoesInfo && localAvatarShoesInfo.shoeColor) || null,
+    // Only the visual height needs to travel over presence — speed/jump
+    // multipliers only ever affect the wearer's own local controls (see
+    // gltf-mini.js's localAvatarShoeSpeedMultiplier/JumpMultiplier), never
+    // anything a remote client needs to know to render or simulate.
+    shoeScale: (localAvatarShoesInfo && localAvatarShoesInfo.visualScale) || null
   };
 }
 
@@ -2527,7 +2535,7 @@ async function enterWorld(worldId) {
       // identity could have changed since the last time this ran.
       localAvatarLookHex = await AtlasWallet.getAvatarLook();
       localAvatarHatHex = await AtlasWallet.getAvatarHat();
-      localAvatarShoeHex = await AtlasWallet.getAvatarShoes();
+      localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
 
       active3D = MiniGLTF.init(scene3dCanvas, {
         sceneData,
@@ -2621,8 +2629,10 @@ async function enterWorld(worldId) {
         localAvatarLook: localAvatarLookHex,
         // Same seeding as localAvatarLook above, for the separate hat slot.
         localAvatarHat: localAvatarHatHex,
-        // Same seeding again, for the third (shoes) slot.
-        localAvatarShoes: localAvatarShoeHex,
+        // Same seeding again, for the third (shoes) slot — the whole
+        // shoes object, not just a hex string (see localAvatarShoesInfo's
+        // own comment above).
+        localAvatarShoes: localAvatarShoesInfo,
         // Scene asset download progress (#36) — see updateSceneLoadProgress()
         // above and loadScene()'s own comment in gltf-mini.js for why this
         // counts unique models, not placed instances.
