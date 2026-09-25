@@ -9,11 +9,10 @@
 // Domain B's calendar stores are genuinely independent needs two real,
 // separately-rooted instances, not two state files under one bundle.
 //
-// No signing anywhere in this test, same as its Node counterpart: GET
-// /atlas/calendar is a plain, unsigned, ungated fetch (§12.1), and POST
-// /atlas/calendar is domain-operator-authenticated with no visitor
-// signature (§12.2), the same demo-level trust atlas/mail/send.php
-// already uses.
+// GET /atlas/calendar is a plain, unsigned, ungated fetch (§12.1); POST
+// /atlas/calendar requires a signed admin proof envelope (require_admin(),
+// lib/store.php), the same as /atlas/revoke, /atlas/mail/send, and
+// /atlas/asset/reissue.
 //
 // Checks (mirroring manual-calendar-protocol.js's own five):
 //   1. A domain-wide event is added and isolated from a world-scoped read.
@@ -29,6 +28,8 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 const BUNDLE_DIR = path.resolve(__dirname, '..', 'issuer-php');
 const PORT_A = 8111; // isolated port, distinct from every other manual-*-php.js test's own port
@@ -49,6 +50,38 @@ function get(base, urlPath) {
 
 function assert(cond, message) {
   if (!cond) throw new Error('ASSERTION FAILED: ' + message);
+}
+
+function b64url(bytes) {
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Same canonicalize() shape as extension/wallet.js and issuer-server/
+// server.js's own crypto helpers — sorted-key JSON, no whitespace.
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+
+async function genIdentity() {
+  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
+  return { kp, publicKey: b64url(raw) };
+}
+
+// Mirrors extension/wallet.js's signWithSelf() — a raw-ecdsa self-signed
+// envelope, the same one verify_envelope() checks.
+async function signWithSelf(kp, publicKey, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
+  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
+}
+
+async function postAsAdmin(base, urlPath, admin, payload) {
+  const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
+  return post(base, urlPath, { payload, proof });
 }
 
 function startPhpServer(bundleDir, port) {
@@ -75,8 +108,12 @@ function startPhpServer(bundleDir, port) {
     [procA, procB] = await Promise.all([startPhpServer(bundleA, PORT_A), startPhpServer(bundleB, PORT_B)]);
     console.log('PASS: PHP dev servers up — Domain A on ' + PORT_A + ', Domain B on ' + PORT_B);
 
+    console.log('SETUP: seeding an admin identity into Domain A\'s own admin roster (Domain B never receives a write in this test)');
+    const admin = await genIdentity();
+    fs.writeFileSync(path.join(bundleA, 'lib', 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+
     console.log('STEP 1: add a domain-wide event on Domain A');
-    const domainEventRes = await post(BASE_A, '/atlas/calendar', {
+    const domainEventRes = await postAsAdmin(BASE_A, '/atlas/calendar', admin, {
       action: 'add',
       event: { title: 'Grand Opening', dateTime: '2027-01-15T18:00:00.000Z', notes: 'Domain-wide festival' }
     });
@@ -92,8 +129,8 @@ function startPhpServer(bundleDir, port) {
     assert(!otherWorldReadRes.body.events.some((e) => e.id === domainEventId), 'the domain-wide event leaked into a world-scoped read');
 
     console.log('STEP 3: add two per-world events out of chronological order, confirm sorted soonest-first');
-    const laterRes = await post(BASE_A, '/atlas/calendar', { action: 'add', worldId: WORLD, event: { title: 'Later Meetup', dateTime: '2027-03-01T12:00:00.000Z' } });
-    const soonerRes = await post(BASE_A, '/atlas/calendar', { action: 'add', worldId: WORLD, event: { title: 'Sooner Meetup', dateTime: '2027-02-01T12:00:00.000Z' } });
+    const laterRes = await postAsAdmin(BASE_A, '/atlas/calendar', admin, { action: 'add', worldId: WORLD, event: { title: 'Later Meetup', dateTime: '2027-03-01T12:00:00.000Z' } });
+    const soonerRes = await postAsAdmin(BASE_A, '/atlas/calendar', admin, { action: 'add', worldId: WORLD, event: { title: 'Sooner Meetup', dateTime: '2027-02-01T12:00:00.000Z' } });
     assert(laterRes.status === 200 && soonerRes.status === 200, 'expected both per-world adds to succeed');
     const worldReadRes = await get(BASE_A, '/atlas/calendar?world=' + encodeURIComponent(WORLD));
     assert(worldReadRes.body.worldId === WORLD, 'expected worldId echoed back to equal ' + WORLD + ', got: ' + JSON.stringify(worldReadRes.body.worldId));
@@ -102,12 +139,12 @@ function startPhpServer(bundleDir, port) {
     assert(!worldReadRes.body.events.some((e) => e.id === domainEventId), 'the world-scoped read should not include the domain-wide event');
 
     console.log('STEP 4: update the domain-wide event, then remove it — removing it again 404s');
-    const updateRes = await post(BASE_A, '/atlas/calendar', { action: 'update', event: { id: domainEventId, notes: 'Rescheduled, same day' } });
+    const updateRes = await postAsAdmin(BASE_A, '/atlas/calendar', admin, { action: 'update', event: { id: domainEventId, notes: 'Rescheduled, same day' } });
     assert(updateRes.status === 200 && updateRes.body.notes === 'Rescheduled, same day', 'expected the update to take, got: ' + JSON.stringify(updateRes.body));
     assert(updateRes.body.title === 'Grand Opening', 'update should not have touched fields it did not include');
-    const removeRes = await post(BASE_A, '/atlas/calendar', { action: 'remove', id: domainEventId });
+    const removeRes = await postAsAdmin(BASE_A, '/atlas/calendar', admin, { action: 'remove', id: domainEventId });
     assert(removeRes.status === 200 && removeRes.body.status === 'removed', 'expected a successful remove, got: ' + JSON.stringify(removeRes));
-    const removeAgainRes = await post(BASE_A, '/atlas/calendar', { action: 'remove', id: domainEventId });
+    const removeAgainRes = await postAsAdmin(BASE_A, '/atlas/calendar', admin, { action: 'remove', id: domainEventId });
     assert(removeAgainRes.status === 404, 'expected 404 removing an already-gone event, got: ' + JSON.stringify(removeAgainRes));
 
     console.log('STEP 5: Domain A and Domain B calendars are independent stores');

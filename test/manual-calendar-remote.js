@@ -1,5 +1,5 @@
 // Manual UI check for the domain calendar system's "Domain" and "Remote"
-// sub-sub-tabs (SPEC.md §12, Bruno's own request) — the wallet-side wiring
+// sub-sub-tabs (SPEC.md §12) — the wallet-side wiring
 // (extension/viewer.js's calendarDomainSubscreen/calendarRemoteSubscreen,
 // AtlasWallet.fetchDomainCalendar in wallet.js) driving the REAL extension
 // UI end to end against the real issuer-server, no mocking. The protocol
@@ -39,6 +39,9 @@
 
 const { chromium } = require('playwright');
 const path = require('path');
+const fs = require('fs');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const RUN_TAG = Date.now(); // keeps this run's seeded events distinguishable from any other run's leftovers
@@ -49,8 +52,49 @@ function post(base, urlPath, body) {
   }).then(async (r) => ({ status: r.status, body: await r.json() }));
 }
 
-async function seedEvent(base, worldId, title, dateTime) {
-  const res = await post(base, '/atlas/calendar', { action: 'add', worldId, event: { title, dateTime } });
+function b64url(bytes) {
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Same canonicalize() shape as extension/wallet.js and issuer-server/
+// server.js's own crypto helpers — sorted-key JSON, no whitespace.
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+
+async function genIdentity() {
+  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
+  return { kp, publicKey: b64url(raw) };
+}
+
+// Mirrors extension/wallet.js's signWithSelf() — a raw-ecdsa self-signed
+// envelope, the same one verifyEnvelope() on the server checks.
+async function signWithSelf(kp, publicKey, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
+  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
+}
+
+// POST /atlas/calendar now requires a registered domain admin's signature
+// (requireAdmin(), issuer-server/server.js) — this test seeds events on
+// BOTH demo domains, so the same identity is registered on both instances'
+// admin rosters, the same "plain operator-edited JSON" bootstrap a real
+// domain operator would do by hand.
+function seedAdmin(stateDir, publicKey) {
+  fs.writeFileSync(path.join(stateDir, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+}
+
+async function postAsAdmin(base, urlPath, admin, payload) {
+  const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
+  return post(base, urlPath, { payload, proof });
+}
+
+async function seedEvent(base, admin, worldId, title, dateTime) {
+  const res = await postAsAdmin(base, '/atlas/calendar', admin, { action: 'add', worldId, event: { title, dateTime } });
   if (res.status !== 200) throw new Error('Failed to seed "' + title + '" at ' + base + ': ' + JSON.stringify(res.body));
   return res.body.id;
 }
@@ -95,12 +139,17 @@ async function openCalendarModeSubtab(frame, subtabBtnId, subscreenId) {
   const launchOpts = { headless: false, executablePath: '/opt/pw-browsers/chromium', args: [`--disable-extensions-except=${EXT_PATH}`, `--load-extension=${EXT_PATH}`, '--no-sandbox'] };
   const context = await chromium.launchPersistentContext(dir, launchOpts);
   const seededIds = [];
+  let admin;
 
   try {
+    admin = await genIdentity();
+    seedAdmin(path.resolve(__dirname, '..', 'issuer-server'), admin.publicKey);
+    seedAdmin(path.resolve(__dirname, '..', 'issuer-server', 'domain-b-state'), admin.publicKey);
+
     console.log('SETUP: seed a domain-wide and a plaza-world event on Domain A, and a domain-wide event on Domain B');
-    seededIds.push({ base: 'http://localhost:8001', id: await seedEvent('http://localhost:8001', null, 'All-Domain Festival ' + RUN_TAG, '2028-06-01T18:00:00.000Z') });
-    seededIds.push({ base: 'http://localhost:8001', id: await seedEvent('http://localhost:8001', 'plaza', 'Plaza Meetup ' + RUN_TAG, '2028-05-01T12:00:00.000Z') });
-    seededIds.push({ base: 'http://localhost:8002', id: await seedEvent('http://localhost:8002', null, 'Workshop Open House ' + RUN_TAG, '2028-07-01T09:00:00.000Z') });
+    seededIds.push({ base: 'http://localhost:8001', id: await seedEvent('http://localhost:8001', admin, null, 'All-Domain Festival ' + RUN_TAG, '2028-06-01T18:00:00.000Z') });
+    seededIds.push({ base: 'http://localhost:8001', id: await seedEvent('http://localhost:8001', admin, 'plaza', 'Plaza Meetup ' + RUN_TAG, '2028-05-01T12:00:00.000Z') });
+    seededIds.push({ base: 'http://localhost:8002', id: await seedEvent('http://localhost:8002', admin, null, 'Workshop Open House ' + RUN_TAG, '2028-07-01T09:00:00.000Z') });
     console.log('PASS: seeded 3 events across the two demo domains');
 
     const { frame } = await openOverlay(context, 'Visitor');
@@ -178,7 +227,7 @@ async function openCalendarModeSubtab(frame, subtabBtnId, subscreenId) {
     process.exitCode = 1;
   } finally {
     for (const { base, id } of seededIds) {
-      try { await post(base, '/atlas/calendar', { action: 'remove', id }); } catch (err) {}
+      try { await postAsAdmin(base, '/atlas/calendar', admin, { action: 'remove', id }); } catch (err) {}
     }
     await context.close();
   }

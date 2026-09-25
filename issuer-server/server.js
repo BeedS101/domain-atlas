@@ -221,7 +221,7 @@ const PENDING_TRADES_FILE = path.join(STATE_DIR, 'atlas-pending-trades-store.jso
 // anything, not from a lock on the file itself, see removeWorldDrop's own
 // call sites in /atlas/world/drops/claim and /atlas/world/drops/relay-claim.
 const WORLD_DROPS_FILE = path.join(STATE_DIR, 'atlas-world-drops-store.json');
-// Domain calendar (SPEC.md §12, Bruno's own request): one flat list of
+// Domain calendar (SPEC.md §12): one flat list of
 // events, each tagged with the `worldId` it belongs to (`null` for the
 // domain-wide calendar), same "one file, filter on read" shape
 // PENDING_TRADES_FILE/WORLD_DROPS_FILE already use above rather than one
@@ -2918,7 +2918,7 @@ async function main() {
         return sendJson(res, 200, { messages, updates });
       }
 
-      // --- Calendar (SPEC.md §12, Bruno's own request) ---
+      // --- Calendar (SPEC.md §12) ---
       //
       // GET /atlas/calendar, optionally ?world={worldId} — ungated and
       // unsigned, same plain-HTTPS trust boundary as the manifest and
@@ -2937,17 +2937,23 @@ async function main() {
       }
 
       // POST /atlas/calendar — a real, protocol-level write endpoint
-      // (§12.2), domain-operator-authenticated with no visitor signature
-      // involved, not yet gated on the admin roster the way /atlas/mail/send
-      // and /atlas/revoke now are (requireAdmin, above) — a natural next
-      // candidate, not done because it's any less an admin action.
+      // (§12.2), admin-gated (requireAdmin(), above) the same way
+      // /atlas/revoke, /atlas/mail/send, and /atlas/asset/reissue are:
+      // publishing a domain's or world's calendar is squarely the domain
+      // operator's own action, never a visitor's, and left open it meant
+      // anyone could plant or overwrite events shown to every visitor of
+      // this domain. Wire shape is {payload: {action, worldId, event, id},
+      // proof}, the same envelope every other admin action here uses.
       // `worldId: null` (or omitted) addresses the domain-wide calendar;
       // naming a world addresses that world's own — this server does not
       // check that world's manifest entry actually has `calendar: true`
       // before accepting an event for it (see CALENDAR_FILE's own comment
       // on why).
       if (req.method === 'POST' && req.url === '/atlas/calendar') {
-        const { action, worldId, event, id } = JSON.parse((await readBody(req)) || '{}');
+        const { payload: calendarPayload, proof } = JSON.parse((await readBody(req)) || '{}');
+        const authError = await requireAdmin(calendarPayload, proof);
+        if (authError) return sendJson(res, 401, { error: authError });
+        const { action, worldId, event, id } = calendarPayload || {};
         const normalizedWorldId = worldId || null;
 
         if (action === 'add') {

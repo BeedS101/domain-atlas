@@ -15,14 +15,17 @@
 // `events` array rather than an error, same "nothing to report" posture
 // GET /atlas/trade/listings already takes for a station with nothing open.
 //
-// POST — a real, protocol-level write endpoint (§12.2), domain-operator-
-// authenticated with no visitor signature involved, not yet gated on the
-// admin roster the way atlas/mail/send.php and atlas/revoke.php now are
-// (require_admin(), lib/store.php) — a natural next candidate, not done
-// because it's any less an admin action. `worldId` null (or omitted)
-// addresses the domain-wide calendar; naming a world addresses that
-// world's own — this bundle does not check that world's manifest entry
-// actually has `calendar: true` before accepting an event for it (see
+// POST — a real, protocol-level write endpoint (§12.2), admin-gated
+// (require_admin(), lib/store.php) the same way atlas/revoke.php,
+// atlas/mail/send.php, and atlas/asset/reissue.php are: publishing a
+// domain's or world's calendar is squarely the domain operator's own
+// action, never a visitor's, and left open it meant anyone could plant or
+// overwrite events shown to every visitor of this domain. Wire shape is
+// {payload: {action, worldId, event, id}, proof}, the same envelope every
+// other admin action here uses. `worldId` null (or omitted) addresses the
+// domain-wide calendar; naming a world addresses that world's own — this
+// bundle does not check that world's manifest entry actually has
+// `calendar: true` before accepting an event for it (see
 // atlas_calendar_file()'s own comment in lib/store.php).
 require_once __DIR__ . '/../lib/bootstrap.php';
 handle_preflight();
@@ -35,15 +38,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   try {
-    $body = read_json_body();
+    $requestBody = read_json_body();
   } catch (Exception $e) {
     send_json(400, ['error' => 'invalid JSON body']);
   }
-  $action = $body['action'] ?? null;
-  $worldId = (isset($body['worldId']) && $body['worldId'] !== '') ? $body['worldId'] : null;
+  $calendarPayload = $requestBody['payload'] ?? null;
+  $proof = $requestBody['proof'] ?? null;
+  $authError = require_admin($calendarPayload, $proof);
+  if ($authError) send_json(401, ['error' => $authError]);
+
+  $action = $calendarPayload['action'] ?? null;
+  $worldId = (isset($calendarPayload['worldId']) && $calendarPayload['worldId'] !== '') ? $calendarPayload['worldId'] : null;
 
   if ($action === 'add') {
-    $event = $body['event'] ?? null;
+    $event = $calendarPayload['event'] ?? null;
     if (!is_array($event) || empty($event['title']) || empty($event['dateTime'])) {
       send_json(400, ['error' => 'event.title and event.dateTime are required']);
     }
@@ -60,7 +68,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
 
   if ($action === 'update') {
-    $event = $body['event'] ?? null;
+    $event = $calendarPayload['event'] ?? null;
     if (!is_array($event) || empty($event['id'])) send_json(400, ['error' => 'event.id is required for update']);
     $patch = [];
     foreach (['title', 'dateTime', 'endDateTime', 'notes'] as $field) {
@@ -72,7 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
 
   if ($action === 'remove') {
-    $id = $body['id'] ?? null;
+    $id = $calendarPayload['id'] ?? null;
     if (!$id) send_json(400, ['error' => 'id is required for remove']);
     $removed = remove_calendar_event($id);
     if ($removed === null) send_json(404, ['error' => 'no calendar event with that id']);

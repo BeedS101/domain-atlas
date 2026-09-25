@@ -871,49 +871,48 @@ simplifications are worth naming plainly rather than leaving implicit:
   `/atlas/asset/consolidate` (§5.4/§5.4.1), the `/atlas/trade/*` family —
   submit, listings, claim, cancel, catalog (§7), `/atlas/convert` (§7's
   currency conversion), `/atlas/world/drop`, `/atlas/world/drops`, and the
-  claim/relay-claim pair (§5.5), `/atlas/calendar` (§12),
+  claim/relay-claim pair (§5.5), `/atlas/calendar`'s `GET` side (§12),
   `/atlas/mail/check` (§11.1), and the
   `/atlas/postoffice/*` family (§8 above, SPEC.md §11.3, including
   `/relay` for §11.4 federation) — have no auth by design (beyond Post
-  Office's own self-signed-envelope checks on its self-service endpoints,
-  and `/atlas/calendar`'s `POST` side being operator-authenticated in
-  whatever way a real domain chooses), so the tests can exercise them
-  freely. The whole thing runs over plain HTTP on localhost. A real
-  deployment needs real HTTPS domains and a real access-controlled
-  issuance flow — the point here was proving the credential mechanisms
-  themselves work, not building a production issuer.
-- **Admin-gated endpoints.** `/atlas/revoke`, `/atlas/mail/send`, and
-  `/atlas/asset/reissue` are the three exceptions to the paragraph above —
-  successive slices of what's meant to grow into a real admin surface: all
-  three now require a signed proof envelope (the same §6.2 shape a trade
-  intent or Post Office send already carries) from a public key registered
-  on the domain's own admin roster (`issuer-server/atlas-admin-keys-store.
-  json`, or the equivalent PHP state file) — a wallet's public key acting
-  as the site administrator, rather than a separate username/password admin
-  system. `/atlas/mail/send` was picked as the second endpoint specifically
-  because SPEC.md §11.1 already calls sending "authenticated as the domain
-  operator, not as any visitor" — leaving it open meant anyone could get
-  this domain to sign and deliver an arbitrary message, or mint an
-  arbitrary gift asset via `giftAssetClass`, to any credential id they
-  chose. `/atlas/asset/reissue` was picked as the third for the same
-  reason: left open, anyone who could observe a credential (many are
-  publicly visible via trade listings or gifts) could silently rewrite its
-  properties or loosen/tighten its tradeScope without the owner's consent,
-  under this domain's own real signature. The roster is a plain
-  operator-edited JSON file, not a self-service endpoint (something has to
-  seed the very first admin key), so `tools/admin-revoke.js`,
+  Office's own self-signed-envelope checks on its self-service endpoints),
+  so the tests can exercise them freely. The whole thing runs over plain
+  HTTP on localhost. A real deployment needs real HTTPS domains and a real
+  access-controlled issuance flow — the point here was proving the
+  credential mechanisms themselves work, not building a production issuer.
+- **Admin-gated endpoints.** `/atlas/revoke`, `/atlas/mail/send`,
+  `/atlas/asset/reissue`, and `/atlas/calendar`'s `POST` side are the four
+  exceptions to the paragraph above — successive slices of what's meant to
+  grow into a real admin surface: all four now require a signed proof
+  envelope (the same §6.2 shape a trade intent or Post Office send already
+  carries) from a public key registered on the domain's own admin roster
+  (`issuer-server/atlas-admin-keys-store.json`, or the equivalent PHP state
+  file) — a wallet's public key acting as the site administrator, rather
+  than a separate username/password admin system. `/atlas/mail/send` was
+  picked as the second endpoint specifically because SPEC.md §11.1 already
+  calls sending "authenticated as the domain operator, not as any
+  visitor" — leaving it open meant anyone could get this domain to sign
+  and deliver an arbitrary message, or mint an arbitrary gift asset via
+  `giftAssetClass`, to any credential id they chose. `/atlas/asset/reissue`
+  was picked as the third for the same reason: left open, anyone who could
+  observe a credential (many are publicly visible via trade listings or
+  gifts) could silently rewrite its properties or loosen/tighten its
+  tradeScope without the owner's consent, under this domain's own real
+  signature. `/atlas/calendar`'s `POST` side was the fourth and closes out
+  the unambiguous candidates: left open, anyone could plant or overwrite
+  events on a domain's or world's published calendar. The roster is a
+  plain operator-edited JSON file, not a self-service endpoint (something
+  has to seed the very first admin key), so `tools/admin-revoke.js`,
   `tools/admin-mail-send.js`, and `tools/admin-reissue.js` exist to do
-  exactly that for local demo use: each creates (or reuses) a persistent
-  local admin identity on first run, registers it, and signs the call for
-  you (the test suite signs its own admin calls the same way, inline).
-  Every other endpoint listed above is still open, deliberately —
-  `/atlas/asset/issue` and `/atlas/world/drop` in particular are called
-  directly by the wallet itself for ordinary self-service requests, so
-  gating them the same way would break that flow rather than protect
-  anything; a real admin surface would need to distinguish a self-service
-  request from an operator-only mint, not gate the whole endpoint.
-  `/atlas/calendar`'s `POST` side is the natural next candidate that IS
-  unambiguously operator-only.
+  exactly that for local demo use (calendar writes are signed the same way
+  by the test suite, inline — no dedicated CLI tool yet, since nothing in
+  this demo needs to publish a calendar event outside a test). Every other
+  endpoint listed above is still open, deliberately — `/atlas/asset/issue`
+  and `/atlas/world/drop` in particular are called directly by the wallet
+  itself for ordinary self-service requests, so gating them the same way
+  would break that flow rather than protect anything; a real admin surface
+  would need to distinguish a self-service request from an operator-only
+  mint, not gate the whole endpoint.
 - The renderer is still a dependency-free `<canvas>` stand-in for what a
   production client would do with WebXR and glTF, which real browsers
   already support well, so re-implementing that wasn't the point.
