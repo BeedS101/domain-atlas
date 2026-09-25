@@ -2028,26 +2028,37 @@ async function main() {
       // common case (one fact changed) without forcing every caller to
       // resend properties it isn't touching.
       //
-      // `tradeScope` (task #250 third follow-up — Bruno's own request)
-      // patches the credential's OTHER per-instance flag: since tradeScope
-      // is baked into a credential's signed payload at mint time
-      // (mintAssetByClass's `catalogEntry.tradeScope || 'local'`), tightening
-      // a class's catalog entry to `tradeScope: 'bound'` — as this project
-      // has now done twice, for atlas.badge/atlas.trinket.pin/
-      // atlas.trinket.charm and then atlas.wearable — does NOT retroactively
-      // change any credential of that class minted before the catalog entry
-      // said so; the old credential's own signature would break if its
-      // tradeScope were edited in place, so the only honest fix is the same
-      // revoke-and-re-mint this endpoint already does for `properties`. A
-      // domain operator who finds themselves holding (or supporting a
-      // visitor who holds) a stale pre-tightening credential can call this
-      // endpoint once, e.g. via curl, to bring it in line with today's
-      // catalog — see README.md's "Fixing a stale tradeScope on an
-      // already-issued credential" section for the exact command.
+      // `tradeScope` patches the credential's OTHER per-instance flag:
+      // since tradeScope is baked into a credential's signed payload at
+      // mint time (mintAssetByClass's `catalogEntry.tradeScope || 'local'`),
+      // tightening a class's catalog entry to `tradeScope: 'bound'` does
+      // NOT retroactively change any credential of that class minted
+      // before the catalog entry said so; the old credential's own
+      // signature would break if its tradeScope were edited in place, so
+      // the only honest fix is the same revoke-and-re-mint this endpoint
+      // already does for `properties`. A domain operator who finds
+      // themselves holding (or supporting a visitor who holds) a stale
+      // pre-tightening credential can call this endpoint once to bring it
+      // in line with today's catalog — see README.md's "Fixing a stale
+      // tradeScope on an already-issued credential" section.
+      //
+      // Admin-gated (requireAdmin, above): rewriting an already-issued
+      // credential's properties or tradeScope is exactly the kind of
+      // action SPEC.md §10 puts on the domain's own side, never a
+      // visitor's — left open, anyone who could observe a credential
+      // (many are publicly visible via trade listings or gifts) could
+      // silently alter its properties or loosen/tighten its tradeScope
+      // without the owner's consent, under this domain's own real
+      // signature. Wire shape is now {payload: {credential, properties,
+      // tradeScope}, proof}, the same envelope every other admin action
+      // here uses.
       if (req.method === 'POST' && req.url === '/atlas/asset/reissue') {
-        const { credential, properties, tradeScope } = JSON.parse((await readBody(req)) || '{}');
+        const { payload: reissuePayload, proof } = JSON.parse((await readBody(req)) || '{}');
+        const authError = await requireAdmin(reissuePayload, proof);
+        if (authError) return sendJson(res, 401, { error: authError });
+        const { credential, properties, tradeScope } = reissuePayload;
         if (!credential || credential.credential !== 'domain-atlas-asset/1.0') {
-          return sendJson(res, 400, { error: 'credential must be a domain-atlas-asset/1.0 credential' });
+          return sendJson(res, 400, { error: 'payload.credential must be a domain-atlas-asset/1.0 credential' });
         }
         const hasProperties = properties !== undefined;
         const hasTradeScope = tradeScope !== undefined;

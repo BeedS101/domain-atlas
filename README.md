@@ -731,12 +731,14 @@ patches `properties`: by revoking the old credential and minting a fresh
 one with the new value applied. It only accepts a credential this domain's
 own key actually signed, and only for a non-fungible, not-already-revoked
 asset — the same restrictions the endpoint already enforces for a
-`properties` patch.
+`properties` patch. Like `/atlas/revoke` and `/atlas/mail/send`, this is now
+admin-gated (see "Admin-gated endpoints" below), so a plain unauthenticated
+curl won't work — use `tools/admin-reissue.js`, which signs the request as
+a registered admin for you:
 
 ```bash
-curl -X POST http://localhost:8001/atlas/asset/reissue \
-  -H 'Content-Type: application/json' \
-  -d '{"credential": <the holder'"'"'s full credential JSON>, "tradeScope": "bound"}'
+# holder's-credential.json is the exact credential JSON the holder currently has
+node tools/admin-reissue.js holders-credential.json --tradeScope bound
 ```
 
 The response's `newCredential` is what the holder's wallet will pick up on
@@ -880,31 +882,38 @@ simplifications are worth naming plainly rather than leaving implicit:
   deployment needs real HTTPS domains and a real access-controlled
   issuance flow — the point here was proving the credential mechanisms
   themselves work, not building a production issuer.
-- **Admin-gated endpoints.** `/atlas/revoke` and `/atlas/mail/send` are the
-  two exceptions to the paragraph above, and the first slice of what's
-  meant to grow into a real admin surface: both now require a signed proof
-  envelope (the same §6.2 shape a trade intent or Post Office send already
-  carries) from a public key registered on the domain's own admin roster
-  (`issuer-server/atlas-admin-keys-store.json`, or the equivalent PHP
-  state file) — a wallet's public key acting as the site administrator,
-  rather than a separate username/password admin system. `/atlas/mail/send`
-  was picked as the second endpoint specifically because SPEC.md §11.1
-  already calls sending "authenticated as the domain operator, not as any
-  visitor" — leaving it open meant anyone could get this domain to sign
-  and deliver an arbitrary message, or mint an arbitrary gift asset via
-  `giftAssetClass`, to any credential id they chose. The roster is a plain
+- **Admin-gated endpoints.** `/atlas/revoke`, `/atlas/mail/send`, and
+  `/atlas/asset/reissue` are the three exceptions to the paragraph above —
+  successive slices of what's meant to grow into a real admin surface: all
+  three now require a signed proof envelope (the same §6.2 shape a trade
+  intent or Post Office send already carries) from a public key registered
+  on the domain's own admin roster (`issuer-server/atlas-admin-keys-store.
+  json`, or the equivalent PHP state file) — a wallet's public key acting
+  as the site administrator, rather than a separate username/password admin
+  system. `/atlas/mail/send` was picked as the second endpoint specifically
+  because SPEC.md §11.1 already calls sending "authenticated as the domain
+  operator, not as any visitor" — leaving it open meant anyone could get
+  this domain to sign and deliver an arbitrary message, or mint an
+  arbitrary gift asset via `giftAssetClass`, to any credential id they
+  chose. `/atlas/asset/reissue` was picked as the third for the same
+  reason: left open, anyone who could observe a credential (many are
+  publicly visible via trade listings or gifts) could silently rewrite its
+  properties or loosen/tighten its tradeScope without the owner's consent,
+  under this domain's own real signature. The roster is a plain
   operator-edited JSON file, not a self-service endpoint (something has to
-  seed the very first admin key), so `tools/admin-revoke.js` exists to do
-  exactly that for local demo use: it creates a persistent local admin
-  identity on first run, registers it, and signs the revoke call for you
-  (the test suite signs its own mail sends the same way, inline). Every
-  other endpoint listed above is still open, deliberately — `/atlas/asset/
-  issue` and `/atlas/world/drop` in particular are called directly by the
-  wallet itself for ordinary self-service requests, so gating them the
-  same way would break that flow rather than protect anything; a real
-  admin surface would need to distinguish a self-service request from an
-  operator-only mint, not gate the whole endpoint. `/atlas/asset/reissue`
-  is the natural next candidate that IS unambiguously operator-only.
+  seed the very first admin key), so `tools/admin-revoke.js`,
+  `tools/admin-mail-send.js`, and `tools/admin-reissue.js` exist to do
+  exactly that for local demo use: each creates (or reuses) a persistent
+  local admin identity on first run, registers it, and signs the call for
+  you (the test suite signs its own admin calls the same way, inline).
+  Every other endpoint listed above is still open, deliberately —
+  `/atlas/asset/issue` and `/atlas/world/drop` in particular are called
+  directly by the wallet itself for ordinary self-service requests, so
+  gating them the same way would break that flow rather than protect
+  anything; a real admin surface would need to distinguish a self-service
+  request from an operator-only mint, not gate the whole endpoint.
+  `/atlas/calendar`'s `POST` side is the natural next candidate that IS
+  unambiguously operator-only.
 - The renderer is still a dependency-free `<canvas>` stand-in for what a
   production client would do with WebXR and glTF, which real browsers
   already support well, so re-implementing that wasn't the point.

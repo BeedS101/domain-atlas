@@ -11,13 +11,13 @@
 // class level (ATLAS_ASSET_CATALOG), never by reissuing one specific
 // balance.
 //
-// Input: {credential, properties, tradeScope} — the exact currently-held
-// credential being replaced, plus at least one of a patch merged onto its
-// asset.properties, or a new tradeScope. Verifies the presented credential
-// really was signed by this domain and isn't already revoked before ever
-// reissuing anything — an issuer can only ever reissue its own assets,
-// never forge an update for a credential it didn't sign in the first
-// place.
+// Input (inside `payload`, alongside a signed `proof`): {credential,
+// properties, tradeScope} — the exact currently-held credential being
+// replaced, plus at least one of a patch merged onto its asset.properties,
+// or a new tradeScope. Verifies the presented credential really was
+// signed by this domain and isn't already revoked before ever reissuing
+// anything — an issuer can only ever reissue its own assets, never forge
+// an update for a credential it didn't sign in the first place.
 //
 // `tradeScope`: since tradeScope is baked into a credential's signed
 // payload at mint time (mint_asset_by_class()'s tradeScope-defaulting
@@ -29,30 +29,38 @@
 // README.md's "Fixing a stale tradeScope on an already-issued credential"
 // section for the exact command a domain operator would run.
 //
-// This is an issuer-initiated action (the domain deciding to publish an
-// update), not owner-initiated like a split — there's no WebAuthn
-// assertion to check here, unlike /atlas/revoke, which now requires an
-// admin proof envelope (require_admin(), lib/store.php): reissue isn't
-// yet gated the same way, left as a natural next candidate once that
-// pattern is proven, not because it's any less an admin action.
+// Admin-gated (require_admin(), lib/store.php): rewriting an already-
+// issued credential's properties or tradeScope is exactly the kind of
+// action SPEC.md §10 puts on the domain's own side, never a visitor's —
+// left open, anyone who could observe a credential (many are publicly
+// visible via trade listings or gifts) could silently alter its
+// properties or loosen/tighten its tradeScope without the owner's
+// consent, under this domain's own real signature. Wire shape is now
+// {payload: {credential, properties, tradeScope}, proof}, the same
+// envelope /atlas/revoke and /atlas/mail/send already use.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
 $kp = atlas_load_keys();
 
 try {
-  $body = read_json_body();
+  $requestBody = read_json_body();
 } catch (Exception $e) {
   send_json(400, ['error' => 'invalid JSON body']);
 }
 
-$credential = $body['credential'] ?? null;
-$hasProperties = array_key_exists('properties', $body);
-$properties = $body['properties'] ?? null;
-$hasTradeScope = array_key_exists('tradeScope', $body);
-$tradeScope = $body['tradeScope'] ?? null;
+$reissuePayload = $requestBody['payload'] ?? null;
+$proof = $requestBody['proof'] ?? null;
+$authError = require_admin($reissuePayload, $proof);
+if ($authError) send_json(401, ['error' => $authError]);
+
+$credential = $reissuePayload['credential'] ?? null;
+$hasProperties = array_key_exists('properties', $reissuePayload);
+$properties = $reissuePayload['properties'] ?? null;
+$hasTradeScope = array_key_exists('tradeScope', $reissuePayload);
+$tradeScope = $reissuePayload['tradeScope'] ?? null;
 if (!is_array($credential) || ($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0') {
-  send_json(400, ['error' => 'credential must be a domain-atlas-asset/1.0 credential']);
+  send_json(400, ['error' => 'payload.credential must be a domain-atlas-asset/1.0 credential']);
 }
 if (!$hasProperties && !$hasTradeScope) {
   send_json(400, ['error' => 'at least one of properties (a patch onto asset.properties) or tradeScope is required']);

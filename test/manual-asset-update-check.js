@@ -39,8 +39,47 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const http = require('http');
+const fs = require('fs');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+const ADMIN_KEYS_FILE = path.resolve(__dirname, '..', 'issuer-server', 'atlas-admin-keys-store.json');
+
+function b64url(bytes) {
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Same canonicalize() shape as extension/wallet.js and issuer-server/
+// server.js's own crypto helpers — sorted-key JSON, no whitespace.
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+
+async function genIdentity() {
+  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
+  return { kp, publicKey: b64url(raw) };
+}
+
+// Mirrors extension/wallet.js's signWithSelf() — a raw-ecdsa self-signed
+// envelope, the same one verifyEnvelope() on the server checks.
+async function signWithSelf(kp, publicKey, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
+  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
+}
+
+// /atlas/asset/reissue now requires a registered domain admin's signature
+// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// admin roster file, the same "plain operator-edited JSON" bootstrap a
+// real domain operator would do by hand.
+function seedAdmin(publicKey) {
+  fs.writeFileSync(ADMIN_KEYS_FILE, JSON.stringify({ keys: [{ publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+}
 
 function postJson(port, urlPath, body) {
   return new Promise((resolve, reject) => {
@@ -141,10 +180,14 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('PASS: holding a real Bronze Compass ->', held1.id, '(supersedes: null, as a first minting should be)');
 
     console.log('STEP 1: issuer reissues that exact item server-side (POST /atlas/asset/reissue) — the demo/admin trigger');
-    const reissue1 = await postJson(8001, '/atlas/asset/reissue', {
+    const admin = await genIdentity();
+    seedAdmin(admin.publicKey);
+    const reissue1Payload = {
       credential: held1,
       properties: { 'com.example.condition': 'restored' }
-    });
+    };
+    const reissue1Proof = await signWithSelf(admin.kp, admin.publicKey, reissue1Payload);
+    const reissue1 = await postJson(8001, '/atlas/asset/reissue', { payload: reissue1Payload, proof: reissue1Proof });
     if (!reissue1.newCredential || reissue1.newCredential.supersedes !== held1.id) {
       throw new Error('Expected a new credential whose supersedes names the old id, got: ' + JSON.stringify(reissue1));
     }
@@ -189,10 +232,12 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('PASS: item-update badge cleared on open, same unobtrusive pattern as mail\'s own badge');
 
     console.log('STEP 5: a SECOND reissue, picked up WITHOUT clicking Check now — just by walking Plaza -> Museum -> Plaza (same domain)');
-    const reissue2 = await postJson(8001, '/atlas/asset/reissue', {
+    const reissue2Payload = {
       credential: held2,
       properties: { 'com.example.condition': 'pristine' }
-    });
+    };
+    const reissue2Proof = await signWithSelf(admin.kp, admin.publicKey, reissue2Payload);
+    const reissue2 = await postJson(8001, '/atlas/asset/reissue', { payload: reissue2Payload, proof: reissue2Proof });
     if (!reissue2.newCredential || reissue2.newCredential.supersedes !== held2.id) {
       throw new Error('Expected a second replacement whose supersedes names the second held id');
     }

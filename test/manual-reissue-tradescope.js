@@ -1,8 +1,9 @@
-// Manual check for the task #250 third follow-up: POST /atlas/asset/reissue
-// gained the ability to patch a non-fungible credential's `tradeScope`, not
-// just its `properties` (see issuer-server/server.js's own comment on this
-// route, and README.md's "Fixing a stale tradeScope on an already-issued
-// credential" section for the operator-facing story this exists to serve).
+// Manual check for a follow-up to the reissue endpoint: POST
+// /atlas/asset/reissue gained the ability to patch a non-fungible
+// credential's `tradeScope`, not just its `properties` (see
+// issuer-server/server.js's own comment on this route, and README.md's
+// "Fixing a stale tradeScope on an already-issued credential" section for
+// the operator-facing story this exists to serve).
 //
 // Why this needed building at all: tradeScope is baked into a credential's
 // signed payload at mint time (mintAssetByClass's
@@ -51,6 +52,8 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 const NODE_PORT = 8105; // isolated — distinct from every other manual-*.js test's chosen port
 const NODE_DOMAIN = 'localhost:' + NODE_PORT;
@@ -73,6 +76,44 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
   const res = await postJson(base, '/atlas/asset/issue', { ownerPublicKey, assetClass, quantity });
   if (res.status !== 200) throw new Error('Failed to issue ' + assetClass + ' at ' + base + ': ' + JSON.stringify(res.body));
   return res.body;
+}
+
+function b64url(bytes) {
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Same canonicalize() shape as extension/wallet.js and issuer-server/
+// server.js's own crypto helpers — sorted-key JSON, no whitespace.
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+
+async function genIdentity() {
+  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
+  return { kp, publicKey: b64url(raw) };
+}
+
+// Mirrors extension/wallet.js's signWithSelf() — a raw-ecdsa self-signed
+// envelope, the same one verifyEnvelope()/verify_envelope() checks on
+// either backend.
+async function signWithSelf(kp, publicKey, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
+  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
+}
+
+// /atlas/asset/reissue now requires a registered domain admin's signature
+// on both backends (requireAdmin() / require_admin()) — one identity is
+// seeded into each isolated instance's own admin roster file below, the
+// same "plain operator-edited JSON" bootstrap a real domain operator would
+// do by hand.
+async function reissueAsAdmin(base, admin, payload) {
+  const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
+  return postJson(base, '/atlas/asset/reissue', { payload, proof });
 }
 
 (async () => {
@@ -107,6 +148,12 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
 
   const NODE_BASE = 'http://localhost:' + NODE_PORT;
 
+  console.log('SETUP: seeding one admin identity into both isolated instances\' own admin rosters');
+  const admin = await genIdentity();
+  fs.writeFileSync(path.join(NODE_STATE_DIR, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+  fs.writeFileSync(path.join(PHP_BUNDLE_DIR, 'lib', 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+  console.log('PASS: admin identity seeded into both rosters');
+
   try {
     console.log('STEP 1: Node — reissuing with only tradeScope patches it, leaving existing properties untouched');
     const trophy = await issueAsset(NODE_BASE, OWNER, 'atlas.trophy.chess', 1);
@@ -114,7 +161,7 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
       throw new Error('Expected a freshly-minted trophy to start tradeScope-unset/local, got: ' + JSON.stringify(trophy.asset.tradeScope));
     }
     const originalAwardedFor = trophy.asset.properties['com.example.awardedFor'];
-    const bound = await postJson(NODE_BASE, '/atlas/asset/reissue', { credential: trophy, tradeScope: 'bound' });
+    const bound = await reissueAsAdmin(NODE_BASE, admin, { credential: trophy, tradeScope: 'bound' });
     if (bound.status !== 200) throw new Error('Expected the tradeScope-only reissue to succeed, got: ' + bound.status + ' ' + JSON.stringify(bound.body));
     const boundAsset = bound.body.newCredential.asset;
     if (boundAsset.tradeScope !== 'bound') throw new Error('Expected the reissued credential to carry tradeScope "bound", got: ' + JSON.stringify(boundAsset.tradeScope));
@@ -122,7 +169,7 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
     console.log('PASS: tradeScope patched to "bound" via reissue, properties carried through unchanged ->', bound.body.newCredential.id);
 
     console.log('STEP 2: Node — reissuing the now-bound credential further with only properties leaves its tradeScope alone');
-    const rePropped = await postJson(NODE_BASE, '/atlas/asset/reissue', { credential: bound.body.newCredential, properties: { 'com.example.awardedFor': 'Reissue-tradeScope test' } });
+    const rePropped = await reissueAsAdmin(NODE_BASE, admin, { credential: bound.body.newCredential, properties: { 'com.example.awardedFor': 'Reissue-tradeScope test' } });
     if (rePropped.status !== 200) throw new Error('Expected the properties-only reissue to succeed, got: ' + rePropped.status + ' ' + JSON.stringify(rePropped.body));
     const repropAsset = rePropped.body.newCredential.asset;
     if (repropAsset.tradeScope !== 'bound') throw new Error('Expected tradeScope to remain "bound" after a properties-only reissue, got: ' + JSON.stringify(repropAsset.tradeScope));
@@ -131,20 +178,20 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
 
     console.log('STEP 3: Node — an invalid tradeScope value is rejected, nothing reissued');
     const anotherTrophy = await issueAsset(NODE_BASE, OWNER, 'atlas.trophy.chess', 1);
-    const badScope = await postJson(NODE_BASE, '/atlas/asset/reissue', { credential: anotherTrophy, tradeScope: 'nonsense' });
+    const badScope = await reissueAsAdmin(NODE_BASE, admin, { credential: anotherTrophy, tradeScope: 'nonsense' });
     if (badScope.status !== 400 || !/local.*bound|bound.*local/i.test(badScope.body.error || '')) {
       throw new Error('Expected a clear 400 naming the valid tradeScope values, got: ' + JSON.stringify(badScope));
     }
     console.log('PASS: invalid tradeScope rejected ->', badScope.body.error);
 
     console.log('STEP 4: Node — neither properties nor tradeScope given is rejected');
-    const neither = await postJson(NODE_BASE, '/atlas/asset/reissue', { credential: anotherTrophy });
+    const neither = await reissueAsAdmin(NODE_BASE, admin, { credential: anotherTrophy });
     if (neither.status !== 400) throw new Error('Expected a 400 when neither properties nor tradeScope is given, got: ' + neither.status + ' ' + JSON.stringify(neither.body));
     console.log('PASS: reissue with no patch at all rejected ->', neither.body.error);
 
     console.log('STEP 5: Node — a fungible class cannot have its tradeScope patched either');
     const iron = await issueAsset(NODE_BASE, OWNER, 'atlas.element.iron', 10);
-    const fungibleAttempt = await postJson(NODE_BASE, '/atlas/asset/reissue', { credential: iron, tradeScope: 'bound' });
+    const fungibleAttempt = await reissueAsAdmin(NODE_BASE, admin, { credential: iron, tradeScope: 'bound' });
     if (fungibleAttempt.status !== 400 || !/non-fungible/i.test(fungibleAttempt.body.error || '')) {
       throw new Error('Expected a fungible-rejection 400, got: ' + JSON.stringify(fungibleAttempt));
     }
@@ -152,14 +199,14 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
 
     console.log('STEP 6: PHP — the same tradeScope-patch behavior on an independent issuer-php bundle');
     const phpTrophy = await issueAsset(PHP_BASE, OWNER, 'atlas.trophy.chess', 1);
-    const phpBound = await postJson(PHP_BASE, '/atlas/asset/reissue', { credential: phpTrophy, tradeScope: 'bound' });
+    const phpBound = await reissueAsAdmin(PHP_BASE, admin, { credential: phpTrophy, tradeScope: 'bound' });
     if (phpBound.status !== 200) throw new Error('Expected PHP tradeScope-only reissue to succeed, got: ' + phpBound.status + ' ' + JSON.stringify(phpBound.body));
     if (phpBound.body.newCredential.asset.tradeScope !== 'bound') throw new Error('Expected PHP reissued credential to carry tradeScope "bound", got: ' + JSON.stringify(phpBound.body.newCredential.asset.tradeScope));
-    const phpBadScope = await postJson(PHP_BASE, '/atlas/asset/reissue', { credential: phpTrophy, tradeScope: 'nonsense' });
+    const phpBadScope = await reissueAsAdmin(PHP_BASE, admin, { credential: phpTrophy, tradeScope: 'nonsense' });
     if (phpBadScope.status !== 400) throw new Error('Expected PHP to also reject an invalid tradeScope with 400, got: ' + phpBadScope.status);
     console.log('PASS: PHP matches Node for both the successful tradeScope patch and the invalid-value rejection');
 
-    console.log('\nALL REISSUE TRADESCOPE (TASK #250 THIRD FOLLOW-UP) CHECKS PASSED');
+    console.log('\nALL REISSUE TRADESCOPE CHECKS PASSED');
   } catch (err) {
     console.error('FAILURE:', err);
     process.exitCode = 1;

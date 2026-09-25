@@ -40,6 +40,47 @@
 // manual-*.js scripts.
 
 const http = require('http');
+const path = require('path');
+const fs = require('fs');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
+
+const ADMIN_KEYS_FILE = path.resolve(__dirname, '..', 'issuer-server', 'atlas-admin-keys-store.json');
+
+function b64url(bytes) {
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Same canonicalize() shape as extension/wallet.js and issuer-server/
+// server.js's own crypto helpers — sorted-key JSON, no whitespace.
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+
+async function genIdentity() {
+  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
+  return { kp, publicKey: b64url(raw) };
+}
+
+// Mirrors extension/wallet.js's signWithSelf() — a raw-ecdsa self-signed
+// envelope, the same one verifyEnvelope() on the server checks.
+async function signWithSelf(kp, publicKey, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
+  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
+}
+
+// /atlas/asset/reissue now requires a registered domain admin's signature
+// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// admin roster file, the same "plain operator-edited JSON" bootstrap a
+// real domain operator would do by hand.
+function seedAdmin(publicKey) {
+  fs.writeFileSync(ADMIN_KEYS_FILE, JSON.stringify({ keys: [{ publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+}
 
 function postJson(port, urlPath, body) {
   return new Promise((resolve, reject) => {
@@ -89,10 +130,14 @@ const OWNER = 'test-owner-public-key-serialized-assets-demo';
 
     console.log('STEP 3: reissuing one of the twenty leaves its serial/editionSize untouched');
     const target = held[2]; // serial "3"
-    const reissue = await postJson(8001, '/atlas/asset/reissue', {
+    const admin = await genIdentity();
+    seedAdmin(admin.publicKey);
+    const reissuePayload = {
       credential: target,
       properties: { 'com.example.condition': 'slightly tarnished' }
-    });
+    };
+    const reissueProof = await signWithSelf(admin.kp, admin.publicKey, reissuePayload);
+    const reissue = await postJson(8001, '/atlas/asset/reissue', { payload: reissuePayload, proof: reissueProof });
     if (reissue.status !== 200) throw new Error('Expected reissue to succeed, got: ' + reissue.status + ' ' + JSON.stringify(reissue.body));
     const newAsset = reissue.body.newCredential.asset;
     if (newAsset.properties['atlas.serial'] !== '3') throw new Error('Expected reissued credential to keep atlas.serial "3", got: ' + newAsset.properties['atlas.serial']);

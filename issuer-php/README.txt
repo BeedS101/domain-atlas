@@ -458,14 +458,30 @@ properties only ever change at the class level (edit ATLAS_ASSET_CATALOG
 in lib/store.php), never by reissuing one specific balance; the endpoint
 rejects a fungible credential with a clear error.
 
-To do this, POST to /atlas/asset/reissue with the exact credential JSON
-being replaced (the one the visitor is currently holding — get it from
-them, or from wherever you keep a record of what you've issued) and a
-`properties` object naming just the fields that changed:
+To do this, POST to /atlas/asset/reissue — but note this endpoint now
+requires a signed admin proof envelope (require_admin(), lib/store.php),
+not a bare body, same as /atlas/mail/send above: left open, anyone who
+could observe a credential (many are publicly visible via trade listings
+or gifts) could silently rewrite its properties or loosen/tighten its
+tradeScope without the owner's consent, under your domain's own real
+signature. The wire shape is {payload: {credential, properties, tradeScope},
+proof} — `credential` is the exact credential JSON being replaced (the one
+the visitor is currently holding — get it from them, or from wherever you
+keep a record of what you've issued), and at least one of `properties` (an
+object naming just the fields that changed) or `tradeScope` (`"local"` or
+`"bound"`) is required. Since a real ECDSA signature isn't something you
+can hand-type into curl, use the small Node tool this project ships for
+exactly this, the same way as admin-mail-send.js above:
 
-  curl -X POST https://your-domain/atlas/asset/reissue \
-    -H 'Content-Type: application/json' \
-    -d '{"credential": {...the current credential...}, "properties": {"com.example.condition": "restored"}}'
+  node tools/admin-reissue.js holders-credential.json --properties '{"com.example.condition": "restored"}' --print-only
+
+--print-only signs the request and prints two things: the admin public key
+to add to lib/atlas-admin-keys-store.json (same "plain operator-edited
+JSON file, edit it directly" convention as this bundle's subscriber
+roster), and the exact JSON body to curl with once that key is registered.
+(Without --print-only, the tool assumes it's talking to this project's own
+local Node demo servers and does both steps for you — not useful for a
+real remote deployment, which is why --print-only exists.)
 
 The response is `{"newCredential": {...}}` — a fresh signed credential
 with `supersedes` pointing at the old id. There's nothing further to do on
@@ -474,9 +490,7 @@ same call, and the next time that visitor's wallet checks in — either the
 existing periodic mail check, or immediately if they walk back into a
 world on this domain — it picks up the update, re-verifies the new
 credential itself, and swaps it in automatically. No admin UI for this
-either, same reasoning as /atlas/mail/send above — though unlike that
-endpoint, this one is not yet gated on a signed admin proof envelope; a
-natural next candidate, not done because it's any less an admin action.
+either, same reasoning as /atlas/mail/send above.
 
 Asset-update records are stored in lib/atlas-asset-updates-store.json,
 same "next to the private key, not under .well-known" reasoning as the
