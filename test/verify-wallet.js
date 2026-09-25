@@ -9,11 +9,50 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+const ADMIN_KEYS_FILE = path.resolve(__dirname, '..', 'issuer-server', 'atlas-admin-keys-store.json');
 
 function shot(name) {
   return path.resolve(__dirname, name);
+}
+
+function b64url(bytes) {
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Same canonicalize() shape as extension/wallet.js and issuer-server/
+// server.js's own crypto helpers — sorted-key JSON, no whitespace.
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+
+async function genIdentity() {
+  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
+  return { kp, publicKey: b64url(raw) };
+}
+
+// Mirrors extension/wallet.js's signWithSelf() — a raw-ecdsa self-signed
+// envelope, the same one verifyEnvelope() on the server checks.
+async function signWithSelf(kp, publicKey, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
+  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
+}
+
+// /atlas/revoke now requires a registered domain admin's signature
+// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// admin roster file, the same "plain operator-edited JSON" bootstrap a
+// real domain operator would do by hand, since there's no self-service
+// admin registration.
+function seedAdmin(publicKey) {
+  fs.writeFileSync(ADMIN_KEYS_FILE, JSON.stringify({ keys: [{ publicKey, addedAt: new Date().toISOString() }] }, null, 2));
 }
 
 async function projectPortals(frame) {
@@ -165,15 +204,16 @@ async function projectPortals(frame) {
 
     console.log('STEP 8: revoking the item at the issuer, then re-verifying — should now fail');
     const issuedId = exported.credentials[0].id;
-    const revokeRes = await page.evaluate(async (id) => {
-      const r = await fetch('http://localhost:8001/atlas/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, reason: 'issuer-request' })
-      });
-      return r.ok;
-    }, issuedId);
-    if (!revokeRes) throw new Error('Revoke call failed');
+    const admin = await genIdentity();
+    seedAdmin(admin.publicKey);
+    const revokePayload = { id: issuedId, reason: 'issuer-request' };
+    const revokeProof = await signWithSelf(admin.kp, admin.publicKey, revokePayload);
+    const revokeHttpRes = await fetch('http://localhost:8001/atlas/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload: revokePayload, proof: revokeProof })
+    });
+    if (!revokeHttpRes.ok) throw new Error('Revoke call failed: ' + await revokeHttpRes.text());
 
     await frame.locator('#reverifyBtn').click();
     await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === true, { timeout: 5000 }).catch(() => {});

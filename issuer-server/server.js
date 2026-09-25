@@ -171,6 +171,16 @@ const POSTOFFICE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-postoffice-members-s
 // PEER DOMAIN's relayed mail outright, regardless of which of its members
 // sent it.
 const FEDERATION_BLOCKLIST_FILE = path.join(STATE_DIR, 'atlas-federation-blocklist.json');
+// Domain admin roster: the public keys authorized to act as this domain's
+// own operator over HTTP, reusing the same visitor-identity mechanism
+// (verifyEnvelope below, SPEC.md §6.2) instead of inventing a separate
+// admin-login system. Same "plain operator-edited JSON file, not a new
+// admin-auth API surface" posture FEDERATION_BLOCKLIST_FILE already uses,
+// for the same reason: there's an unavoidable bootstrap problem (something
+// has to seed the very first admin key), so this is edited by hand rather
+// than through a self-service registration endpoint. See requireAdmin()
+// below for how a request actually gets checked against it.
+const ADMIN_KEYS_FILE = path.join(STATE_DIR, 'atlas-admin-keys-store.json');
 // Trading Station membership roster (task #144 Phase 1) — same flat-array
 // shape as POSTOFFICE_MEMBERS_FILE above, kept as its own file for the same
 // reason Post Office's is separate from the plain subscriber roster: a
@@ -876,6 +886,21 @@ async function verifyEnvelope(payload, envelope) {
   return false;
 }
 
+// Gates an admin-only action the same way any other signed action in this
+// spec is checked (verifyEnvelope above, §6.2), with one extra condition:
+// the signing key also has to appear on ADMIN_KEYS_FILE's roster, not just
+// be internally consistent. Returns an error string when the request
+// should be rejected, or null when it's authorized — callers just need to
+// check truthiness, same shape checkPresentedAsset's own callers already
+// use for their per-field validation.
+async function requireAdmin(payload, proof) {
+  if (!payload || !proof) return 'payload and proof are required';
+  const sigOk = await verifyEnvelope(payload, proof);
+  if (!sigOk) return 'admin signature does not check out';
+  if (!isAdminKey(proof.publicKey)) return 'this key is not a registered domain admin';
+  return null;
+}
+
 // Task #97 (SPEC.md §11.4): reads the operator's own federation blocklist —
 // see FEDERATION_BLOCKLIST_FILE's own comment above for what this is and
 // isn't. Missing file means nothing is blocked, same "absence is the empty
@@ -1220,6 +1245,19 @@ function appendPostOfficeMember(entry) {
 function isValidPostOfficeMember(ownerPublicKey) {
   const doc = readPostOfficeMembers();
   return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId));
+}
+
+// Domain admin roster — same "missing file means the empty case" and flat-
+// array shape every other roster in this server already uses. An entry's
+// own `revoked` flag (not the shared REVOCATIONS_FILE, which is scoped to
+// asset/membership credentials, not admin keys) is how an admin key is
+// retired without needing a separate mechanism.
+function readAdminKeys() {
+  if (!fs.existsSync(ADMIN_KEYS_FILE)) return { keys: [] };
+  return JSON.parse(fs.readFileSync(ADMIN_KEYS_FILE, 'utf8'));
+}
+function isAdminKey(publicKey) {
+  return readAdminKeys().keys.some((k) => k.publicKey === publicKey && !k.revoked);
 }
 
 // Trading Station membership roster — same read/append shape as
@@ -2048,11 +2086,20 @@ async function main() {
         return sendJson(res, 200, { newCredential });
       }
 
+      // Admin-gated (requireAdmin, above): revoking an arbitrary credential
+      // by id is the single most consequential thing this server can do on
+      // an operator's behalf, so it's the first endpoint retrofitted onto
+      // the domain admin roster rather than continuing to trust whoever can
+      // reach this process. Wire shape is now {payload: {id, reason}, proof}
+      // — the same signed-payload envelope §7's trade intents and Post
+      // Office sends already use — instead of a bare, unauthenticated body.
       if (req.method === 'POST' && req.url === '/atlas/revoke') {
-        const { id, reason } = JSON.parse((await readBody(req)) || '{}');
-        if (!id) return sendJson(res, 400, { error: 'id is required' });
-        revoke(id, reason || 'issuer-request');
-        console.log('Revoked', id);
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !payload.id) return sendJson(res, 400, { error: 'payload.id is required' });
+        const authError = await requireAdmin(payload, proof);
+        if (authError) return sendJson(res, 401, { error: authError });
+        revoke(payload.id, payload.reason || 'issuer-request');
+        console.log('Revoked', payload.id, 'by admin', proof.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { ok: true });
       }
 

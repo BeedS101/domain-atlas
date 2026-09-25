@@ -117,6 +117,39 @@ function is_domain_blocked($domain) {
   return in_array($domain, $blocked, true);
 }
 
+// Domain admin roster — mirrors issuer-server/server.js's ADMIN_KEYS_FILE.
+// The public keys authorized to act as this domain's own operator over
+// HTTP, reusing the same visitor-identity mechanism (verify_envelope
+// above) instead of a separate admin-login system. Same "plain operator-
+// edited JSON file, no admin-auth API surface to gate one" posture as
+// atlas_federation_blocklist_file() above, for the same bootstrap reason:
+// something has to seed the very first admin key by hand.
+function atlas_admin_keys_file() {
+  return __DIR__ . '/atlas-admin-keys-store.json';
+}
+function is_admin_key($publicKey) {
+  $path = atlas_admin_keys_file();
+  if (!file_exists($path)) return false;
+  $doc = json_decode(file_get_contents($path), true);
+  $keys = is_array($doc) && isset($doc['keys']) ? $doc['keys'] : [];
+  foreach ($keys as $k) {
+    if (isset($k['publicKey']) && $k['publicKey'] === $publicKey && empty($k['revoked'])) return true;
+  }
+  return false;
+}
+
+// Gates an admin-only action the same way verify_envelope() checks any
+// other signed action, with the extra condition that the signing key also
+// has to appear on the admin roster above. Returns an error string when
+// the request should be rejected, or null when it's authorized — mirrors
+// issuer-server/server.js's requireAdmin().
+function require_admin($payload, $proof) {
+  if (!is_array($payload) || !is_array($proof)) return 'payload and proof are required';
+  if (!verify_envelope($payload, $proof)) return 'admin signature does not check out';
+  if (empty($proof['publicKey']) || !is_admin_key($proof['publicKey'])) return 'this key is not a registered domain admin';
+  return null;
+}
+
 // Trading Station membership roster (task #144 Phase 1) — same flat-array
 // shape as atlas_postoffice_members_file() above, kept as its own file for
 // the same reason Post Office's is separate from the plain subscriber

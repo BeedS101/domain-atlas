@@ -101,6 +101,16 @@ function readMemberByCredentialId(credentialId) {
   return doc.members.find((m) => m.credentialId === credentialId);
 }
 
+// /atlas/revoke now requires a registered domain admin's signature
+// (requireAdmin(), issuer-server/server.js) instead of a bare
+// unauthenticated body — seeds one directly into the admin roster file,
+// the same "plain operator-edited JSON" bootstrap a real domain operator
+// would do by hand, since there's no self-service admin registration.
+const ADMIN_KEYS_FILE = path.resolve(__dirname, '..', 'issuer-server', 'domain-b-state', 'atlas-admin-keys-store.json');
+async function seedAdmin(publicKey) {
+  fs.writeFileSync(ADMIN_KEYS_FILE, JSON.stringify({ keys: [{ publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+}
+
 (async () => {
   console.log('STEP 0: two identities, both claim Domain B Post Office membership');
   const A = await genIdentity();
@@ -133,13 +143,17 @@ function readMemberByCredentialId(credentialId) {
   if (memberB.flagged !== false) throw new Error('Expected B to NOT be flagged after a single normal send, got ' + JSON.stringify(memberB));
   console.log('PASS: B is not flagged — detection is per-membership, not a global trip-wire');
 
-  console.log('STEP 4: operator revokes A\'s flagged membership via the EXISTING /atlas/revoke endpoint');
+  console.log('STEP 4: operator revokes A\'s flagged membership via the EXISTING /atlas/revoke endpoint, now signed as an admin');
+  const admin = await genIdentity();
+  await seedAdmin(admin.publicKey);
+  const revokePayload = { id: credA.id, reason: 'flagged for irregular send activity' };
+  const revokeProof = await signWithSelf(admin.kp, admin.publicKey, revokePayload);
   const revokeRes = await fetch(DOMAIN_B + '/atlas/revoke', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: credA.id, reason: 'flagged for irregular send activity' })
+    body: JSON.stringify({ payload: revokePayload, proof: revokeProof })
   });
   if (!revokeRes.ok) throw new Error('revoke failed: ' + await revokeRes.text());
-  console.log('PASS: revoke call succeeded — nothing new built for this, it\'s the same endpoint every other credential type already uses');
+  console.log('PASS: revoke call succeeded — same endpoint every other credential type already uses, now gated on a registered admin key rather than open to anyone');
 
   console.log('STEP 5: thanks to #95\'s symmetric check, revoked A can no longer send OR receive through Domain B');
   const sendAfterRevoke = await sendMail(A, B.publicKey, 'Should be rejected', 'A is revoked now');

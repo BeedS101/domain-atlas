@@ -19,22 +19,22 @@
 // never forge an update for a credential it didn't sign in the first
 // place.
 //
-// `tradeScope` (task #250 third follow-up — Bruno's own request): since
-// tradeScope is baked into a credential's signed payload at mint time
-// (mint_asset_by_class()'s tradeScope-defaulting logic), tightening a
-// class's catalog entry to tradeScope => 'bound' does NOT retroactively
-// change any credential of that class minted before the catalog entry said
-// so — the old credential's own signature would break if tradeScope were
-// edited in place, so the only honest fix is the same revoke-and-re-mint
-// this endpoint already does for `properties`. See README.md's "Fixing a
-// stale tradeScope on an already-issued credential" section for the exact
-// command a domain operator would run.
+// `tradeScope`: since tradeScope is baked into a credential's signed
+// payload at mint time (mint_asset_by_class()'s tradeScope-defaulting
+// logic), tightening a class's catalog entry to tradeScope => 'bound' does
+// NOT retroactively change any credential of that class minted before the
+// catalog entry said so — the old credential's own signature would break
+// if tradeScope were edited in place, so the only honest fix is the same
+// revoke-and-re-mint this endpoint already does for `properties`. See
+// README.md's "Fixing a stale tradeScope on an already-issued credential"
+// section for the exact command a domain operator would run.
 //
 // This is an issuer-initiated action (the domain deciding to publish an
 // update), not owner-initiated like a split — there's no WebAuthn
-// assertion to check here, same as /atlas/revoke needs none: the caller
-// of this endpoint is whoever operates the domain, not a visitor's
-// browser.
+// assertion to check here, unlike /atlas/revoke, which now requires an
+// admin proof envelope (require_admin(), lib/store.php): reissue isn't
+// yet gated the same way, left as a natural next candidate once that
+// pattern is proven, not because it's any less an admin action.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();

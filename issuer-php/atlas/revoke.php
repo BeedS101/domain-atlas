@@ -1,5 +1,13 @@
 <?php
 // POST /atlas/revoke — mirrors issuer-server/server.js's same route.
+//
+// Admin-gated (require_admin(), above): revoking an arbitrary credential
+// by id is the most consequential thing this endpoint can do on an
+// operator's behalf, so this is the first route retrofitted onto the
+// domain admin roster instead of trusting whoever can reach it. Wire
+// shape is {payload: {id, reason}, proof} — the same signed-payload
+// envelope atlas/postoffice/send.php and atlas/trade/submit.php already
+// use — instead of a bare, unauthenticated body.
 require_once __DIR__ . '/../lib/bootstrap.php';
 handle_preflight();
 require_post();
@@ -11,8 +19,10 @@ try {
   send_json(400, ['error' => 'invalid JSON body']);
 }
 
-$id = $body['id'] ?? null;
-$reason = $body['reason'] ?? 'issuer-request';
-if (!$id) send_json(400, ['error' => 'id is required']);
-atlas_revoke($id, $reason);
+$payload = $body['payload'] ?? null;
+$proof = $body['proof'] ?? null;
+if (!is_array($payload) || empty($payload['id'])) send_json(400, ['error' => 'payload.id is required']);
+$authError = require_admin($payload, $proof);
+if ($authError) send_json(401, ['error' => $authError]);
+atlas_revoke($payload['id'], $payload['reason'] ?? 'issuer-request');
 send_json(200, ['ok' => true]);

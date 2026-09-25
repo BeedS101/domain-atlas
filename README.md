@@ -132,9 +132,13 @@ curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real publi
    using nothing but that issuer's publicly fetched key.
 8. Click **Export wallet** for a real `atlas-wallet-export/1.0` JSON file.
 
-To see revocation actually work: `curl -X POST http://localhost:8001/atlas/revoke -H "Content-Type: application/json" -d '{"id":"<the credential id from the export>"}'`,
-then click **Re-verify wallet** again — the item flips to ✗, reason
-"revoked by issuer."
+To see revocation actually work: `/atlas/revoke` now requires a signed
+admin proof envelope rather than a bare id (see "Admin-gated endpoints"
+below), so a plain `curl -d '{"id":...}'` no longer does it — run
+`node tools/admin-revoke.js <the credential id from the export>` instead,
+which registers a local admin identity on first use and signs the call
+for you. Then click **Re-verify wallet** again — the item flips to ✗,
+reason "revoked by issuer."
 
 **Password identity — a real alternative to the passkey above.** Step 4's
 `Create Atlas Identity` isn't the only way to get a "self." At onboarding
@@ -613,7 +617,9 @@ subscriber roster elsewhere in this project — so seeing it means opening
 PHP state file) directly, the same way an operator already would to see
 who's a member at all. Once you've decided a flagged member deserves it,
 cutting them off needs nothing new: call the existing
-`POST /atlas/revoke` with that member's `credentialId`, and thanks to
+`POST /atlas/revoke` with that member's `credentialId` (as a registered
+domain admin — see "Admin-gated endpoints" below, or just run
+`node tools/admin-revoke.js <credentialId> --domain-b`), and thanks to
 #95's symmetric check, one call blocks them from both sending AND
 receiving through that domain at once. `test/manual-postoffice-abuse.js`
 walks the whole flow end to end — burst past the threshold, confirm the
@@ -862,7 +868,7 @@ simplifications are worth naming plainly rather than leaving implicit:
   `/atlas/asset/consolidate` (§5.4/§5.4.1), the `/atlas/trade/*` family —
   submit, listings, claim, cancel, catalog (§7), `/atlas/convert` (§7's
   currency conversion), `/atlas/world/drop`, `/atlas/world/drops`, and the
-  claim/relay-claim pair (§5.5), `/atlas/calendar` (§12), `/atlas/revoke`,
+  claim/relay-claim pair (§5.5), `/atlas/calendar` (§12),
   `/atlas/mail/send` and `/atlas/mail/check` (§11.1), and the
   `/atlas/postoffice/*` family (§8 above, SPEC.md §11.3, including
   `/relay` for §11.4 federation) — have no auth by design (beyond Post
@@ -873,6 +879,20 @@ simplifications are worth naming plainly rather than leaving implicit:
   deployment needs real HTTPS domains and a real access-controlled
   issuance flow — the point here was proving the credential mechanisms
   themselves work, not building a production issuer.
+- **Admin-gated endpoints.** `/atlas/revoke` is the one exception to the
+  paragraph above, and the first of what's meant to grow into a real
+  admin surface: it now requires a signed proof envelope (the same
+  §6.2 shape a trade intent or Post Office send already carries) from a
+  public key registered on the domain's own admin roster
+  (`issuer-server/atlas-admin-keys-store.json`, or the equivalent PHP
+  state file) — a wallet's public key acting as the site administrator,
+  rather than a separate username/password admin system. The roster is a
+  plain operator-edited JSON file, not a self-service endpoint (something
+  has to seed the very first admin key), so `tools/admin-revoke.js`
+  exists to do exactly that for local demo use: it creates a persistent
+  local admin identity on first run, registers it, and signs the revoke
+  call for you. Every other endpoint listed above is still open — this is
+  the first slice of a wider admin backend, not the whole thing.
 - The renderer is still a dependency-free `<canvas>` stand-in for what a
   production client would do with WebXR and glTF, which real browsers
   already support well, so re-implementing that wasn't the point.
