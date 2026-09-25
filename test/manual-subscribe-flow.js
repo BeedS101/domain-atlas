@@ -15,8 +15,46 @@ const { chromium } = require('playwright');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+const ADMIN_KEYS_FILE = path.resolve(__dirname, '..', 'issuer-server', 'atlas-admin-keys-store.json');
+
+function b64url(bytes) {
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Same canonicalize() shape as extension/wallet.js and issuer-server/
+// server.js's own crypto helpers — sorted-key JSON, no whitespace.
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+
+async function genIdentity() {
+  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
+  return { kp, publicKey: b64url(raw) };
+}
+
+// Mirrors extension/wallet.js's signWithSelf() — a raw-ecdsa self-signed
+// envelope, the same one verifyEnvelope() on the server checks.
+async function signWithSelf(kp, publicKey, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
+  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
+}
+
+// /atlas/mail/send now requires a registered domain admin's signature
+// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// admin roster file, the same "plain operator-edited JSON" bootstrap a
+// real domain operator would do by hand.
+function seedAdmin(publicKey) {
+  fs.writeFileSync(ADMIN_KEYS_FILE, JSON.stringify({ keys: [{ publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+}
 
 function postJson(port, urlPath, body) {
   return new Promise((resolve, reject) => {
@@ -112,11 +150,15 @@ function postJson(port, urlPath, body) {
     console.log('PASS: welcome message arrived automatically ->', welcomeText.split('\n')[0]);
 
     console.log('STEP 5: a second, manually-sent message for the same credential shows up alongside the welcome message');
-    const sent = await postJson(8001, '/atlas/mail/send', {
+    const admin = await genIdentity();
+    seedAdmin(admin.publicKey);
+    const sendPayload = {
       credentialId,
       subject: 'Thanks for subscribing',
       body: 'Real button, real membership card, real mail.'
-    });
+    };
+    const sendProof = await signWithSelf(admin.kp, admin.publicKey, sendPayload);
+    const sent = await postJson(8001, '/atlas/mail/send', { payload: sendPayload, proof: sendProof });
     if (!sent.id) throw new Error('Expected /atlas/mail/send to return a signed message, got: ' + JSON.stringify(sent));
     await frame.locator('#checkMailNowBtn').click();
     await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, { timeout: 10000 });

@@ -466,9 +466,10 @@ domain can message anyone holding one of its own credentials, addressed by
 an `atlas.membership` credential the same way requesting any other item
 does — that credential is what a domain mails against. On the issuer side,
 `/atlas/mail/send` (the demo/admin surface standing in for whatever a real
-domain's own backend would do) sends against a `credentialId`; the wallet
-picks new mail up through its existing periodic `/atlas/mail/check` loop
-alongside asset-reissue notices (§5.1.1 above).
+domain's own backend would do, now admin-gated — see "Admin-gated
+endpoints" below) sends against a `credentialId`; the wallet picks new
+mail up through its existing periodic `/atlas/mail/check` loop alongside
+asset-reissue notices (§5.1.1 above).
 
 A mail message can carry a **gift** — a fresh credential attached at send
 time, addressed to a specific visitor. A gift never joins the wallet
@@ -869,7 +870,7 @@ simplifications are worth naming plainly rather than leaving implicit:
   submit, listings, claim, cancel, catalog (§7), `/atlas/convert` (§7's
   currency conversion), `/atlas/world/drop`, `/atlas/world/drops`, and the
   claim/relay-claim pair (§5.5), `/atlas/calendar` (§12),
-  `/atlas/mail/send` and `/atlas/mail/check` (§11.1), and the
+  `/atlas/mail/check` (§11.1), and the
   `/atlas/postoffice/*` family (§8 above, SPEC.md §11.3, including
   `/relay` for §11.4 federation) — have no auth by design (beyond Post
   Office's own self-signed-envelope checks on its self-service endpoints,
@@ -879,20 +880,31 @@ simplifications are worth naming plainly rather than leaving implicit:
   deployment needs real HTTPS domains and a real access-controlled
   issuance flow — the point here was proving the credential mechanisms
   themselves work, not building a production issuer.
-- **Admin-gated endpoints.** `/atlas/revoke` is the one exception to the
-  paragraph above, and the first of what's meant to grow into a real
-  admin surface: it now requires a signed proof envelope (the same
-  §6.2 shape a trade intent or Post Office send already carries) from a
-  public key registered on the domain's own admin roster
+- **Admin-gated endpoints.** `/atlas/revoke` and `/atlas/mail/send` are the
+  two exceptions to the paragraph above, and the first slice of what's
+  meant to grow into a real admin surface: both now require a signed proof
+  envelope (the same §6.2 shape a trade intent or Post Office send already
+  carries) from a public key registered on the domain's own admin roster
   (`issuer-server/atlas-admin-keys-store.json`, or the equivalent PHP
   state file) — a wallet's public key acting as the site administrator,
-  rather than a separate username/password admin system. The roster is a
-  plain operator-edited JSON file, not a self-service endpoint (something
-  has to seed the very first admin key), so `tools/admin-revoke.js`
-  exists to do exactly that for local demo use: it creates a persistent
-  local admin identity on first run, registers it, and signs the revoke
-  call for you. Every other endpoint listed above is still open — this is
-  the first slice of a wider admin backend, not the whole thing.
+  rather than a separate username/password admin system. `/atlas/mail/send`
+  was picked as the second endpoint specifically because SPEC.md §11.1
+  already calls sending "authenticated as the domain operator, not as any
+  visitor" — leaving it open meant anyone could get this domain to sign
+  and deliver an arbitrary message, or mint an arbitrary gift asset via
+  `giftAssetClass`, to any credential id they chose. The roster is a plain
+  operator-edited JSON file, not a self-service endpoint (something has to
+  seed the very first admin key), so `tools/admin-revoke.js` exists to do
+  exactly that for local demo use: it creates a persistent local admin
+  identity on first run, registers it, and signs the revoke call for you
+  (the test suite signs its own mail sends the same way, inline). Every
+  other endpoint listed above is still open, deliberately — `/atlas/asset/
+  issue` and `/atlas/world/drop` in particular are called directly by the
+  wallet itself for ordinary self-service requests, so gating them the
+  same way would break that flow rather than protect anything; a real
+  admin surface would need to distinguish a self-service request from an
+  operator-only mint, not gate the whole endpoint. `/atlas/asset/reissue`
+  is the natural next candidate that IS unambiguously operator-only.
 - The renderer is still a dependency-free `<canvas>` stand-in for what a
   production client would do with WebXR and glTF, which real browsers
   already support well, so re-implementing that wasn't the point.

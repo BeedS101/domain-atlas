@@ -120,31 +120,39 @@ anything sent for them. There's no separate subscribe/unsubscribe
 endpoint — hiding or deleting the membership card locally in the wallet
 is what stops future mail for it.
 
-To actually send mail to a subscriber, POST to /atlas/mail/send with the
-credentialId (the membership card's `id`, visible in the wallet or in
-whatever record you keep of who requested one), a subject, and a body:
+To actually send mail to a subscriber, POST to /atlas/mail/send — but note
+this endpoint now requires a signed admin proof envelope (require_admin(),
+lib/store.php), not a bare body: SPEC.md §11.1 already calls sending
+"authenticated as the domain operator, not as any visitor," and a plain
+unauthenticated endpoint meant anyone could get your domain to sign and
+deliver an arbitrary message (or mint a gift asset, see below) to any
+credential id they chose. The wire shape is {payload: {credentialId,
+subject, body}, proof}. Since a real ECDSA signature isn't something you
+can hand-type into curl, use the small Node tool this project ships for
+exactly this — no server-side dependency, it just signs the request the
+same way a wallet would:
 
-  curl -X POST https://your-domain/atlas/mail/send \
-    -H 'Content-Type: application/json' \
-    -d '{"credentialId":"urn:atlas:asset:...","subject":"New exhibit this week","body":"..."}'
+  node tools/admin-mail-send.js "urn:atlas:asset:..." "New exhibit this week" "..." --print-only
 
-That's genuinely it — there's no admin UI for this in the bundle (same as
-the Node demo), so a small script or a one-off curl call from your own
-machine is the intended way to use it until/unless a real send interface
-gets built. The message is signed with your issuer key the same way every
-credential is, so the wallet only ever shows something that actually came
-from you.
+--print-only signs the request and prints two things: the admin public key
+to add to lib/atlas-admin-keys-store.json (same "plain operator-edited
+JSON file, edit it directly" convention as this bundle's subscriber
+roster — see below), and the exact JSON body to curl with once that key
+is registered. (Without --print-only, the tool assumes it's talking to
+this project's own local Node demo servers and does both steps for you —
+not useful for a real remote deployment, which is why --print-only exists.)
+
+The message is signed with your issuer key the same way every credential
+is, so the wallet only ever shows something that actually came from you.
 
 A message can also carry a gift: add giftAssetClass (any class in
 ATLAS_ASSET_CATALOG), giftOwnerPublicKey (who it's for — not necessarily
 the same visitor holding credentialId), and giftQuantity for a fungible
-class. mail/send.php mints that credential fresh and attaches it to the
-message as `attachedAsset` before signing, so the gift is covered by the
-same signature as the message itself:
-
-  curl -X POST https://your-domain/atlas/mail/send \
-    -H 'Content-Type: application/json' \
-    -d '{"credentialId":"urn:atlas:asset:...","subject":"A little something","body":"...","giftAssetClass":"atlas.badge","giftOwnerPublicKey":"<recipient public key>"}'
+class, inside that same payload object. mail/send.php mints that
+credential fresh and attaches it to the message as `attachedAsset` before
+signing, so the gift is covered by the same signature as the message
+itself — admin-signed the same way as a plain message, nothing extra
+needed for the gift case.
 
 The wallet never adds a gift to the recipient's holdings automatically on
 arrival the way it does an asset-reissue replacement — the mail card shows
@@ -177,9 +185,11 @@ subscriber's public key to anyone who asks, unlike /atlas/mail/send or
 /atlas/mail/check which at least require already knowing a credential id).
 To actually use the roster today — e.g. to message everyone at once —
 open lib/atlas-subscribers-store.json directly via cPanel File Manager or
-SSH and loop the credential ids into /atlas/mail/send calls yourself. A
-real "broadcast to everyone" admin feature would need proper operator
-authentication first, which nothing in this bundle has yet.
+SSH and loop the credential ids into tools/admin-mail-send.js --print-only
+calls yourself (see "Sending mail to subscribers" above). There's still no
+UI for a one-click broadcast, but the endpoint itself is no longer
+unauthenticated — it now requires a signed admin proof envelope
+(require_admin(), lib/store.php), the same as /atlas/revoke.
 
 
 Post Office — user-to-user mail (task #75/#87/#94/#95/#96, SPEC.md §11.3)
@@ -464,7 +474,9 @@ same call, and the next time that visitor's wallet checks in — either the
 existing periodic mail check, or immediately if they walk back into a
 world on this domain — it picks up the update, re-verifies the new
 credential itself, and swaps it in automatically. No admin UI for this
-either, same reasoning and same shape as /atlas/mail/send above.
+either, same reasoning as /atlas/mail/send above — though unlike that
+endpoint, this one is not yet gated on a signed admin proof envelope; a
+natural next candidate, not done because it's any less an admin action.
 
 Asset-update records are stored in lib/atlas-asset-updates-store.json,
 same "next to the private key, not under .well-known" reasoning as the

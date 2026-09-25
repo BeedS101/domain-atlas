@@ -1,13 +1,14 @@
 <?php
 // POST /atlas/mail/send — mirrors issuer-server/server.js's same route.
 //
-// This is the demo/admin side of the mail system: standing in for
-// whatever real interface a domain operator would actually use to write
-// to members (this bundle has no such interface, so a plain endpoint
-// fills in for it — you'd call this from a small admin script, a cron
-// job, or curl, not from the wallet). It doesn't check that credentialId
-// was really issued by this server — same demo-simplification level as
-// the rest of this bundle, which trusts its own caller.
+// This is the admin side of the mail system: SPEC.md §11.1 already says
+// sending is "authenticated as the domain operator, not as any visitor" —
+// require_admin() (lib/store.php) now enforces that instead of just
+// trusting whoever could reach the endpoint, which also meant anyone
+// could get this domain to sign and deliver an arbitrary message, or mint
+// an arbitrary gift asset via giftAssetClass, to any credential id they
+// chose. Wire shape is now {payload: {...the same fields as before},
+// proof} — the same envelope every other admin action here uses.
 //
 // No E2E encryption here (unlike server.js's Node route): that needs an
 // ECDH key derivation PHP's openssl extension doesn't expose, and there's
@@ -22,16 +23,21 @@ require_post();
 $kp = atlas_load_keys();
 
 try {
-  $body = read_json_body();
+  $requestBody = read_json_body();
 } catch (Exception $e) {
   send_json(400, ['error' => 'invalid JSON body']);
 }
 
-$credentialId = $body['credentialId'] ?? null;
-$subject = $body['subject'] ?? null;
-$msgBody = $body['body'] ?? null;
+$sendPayload = $requestBody['payload'] ?? null;
+$proof = $requestBody['proof'] ?? null;
+$authError = require_admin($sendPayload, $proof);
+if ($authError) send_json(401, ['error' => $authError]);
+
+$credentialId = $sendPayload['credentialId'] ?? null;
+$subject = $sendPayload['subject'] ?? null;
+$msgBody = $sendPayload['body'] ?? null;
 if (!$credentialId || !$subject || !$msgBody) {
-  send_json(400, ['error' => 'credentialId, subject, and body are required']);
+  send_json(400, ['error' => 'payload.credentialId, payload.subject, and payload.body are required']);
 }
 
 // Task #59: a message can optionally carry an attached asset gift —
@@ -44,9 +50,9 @@ if (!$credentialId || !$subject || !$msgBody) {
 // Same as the Node route, this does NOT add the gift to the recipient's
 // wallet automatically — see extension/wallet.js's claimMailGift() for
 // the explicit-Claim path that's the only way a gift is ever adopted.
-$giftAssetClass = $body['giftAssetClass'] ?? null;
-$giftOwnerPublicKey = $body['giftOwnerPublicKey'] ?? null;
-$giftQuantity = $body['giftQuantity'] ?? null;
+$giftAssetClass = $sendPayload['giftAssetClass'] ?? null;
+$giftOwnerPublicKey = $sendPayload['giftOwnerPublicKey'] ?? null;
+$giftQuantity = $sendPayload['giftQuantity'] ?? null;
 
 $attachedAsset = null;
 if ($giftAssetClass) {

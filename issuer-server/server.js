@@ -2737,11 +2737,12 @@ async function main() {
       // /atlas/mail/send is the demo/admin side of this: standing in for
       // whatever real interface a domain operator would actually use to
       // write to members (this demo has no such interface, so a plain
-      // endpoint fills in for it). It doesn't check that credentialId was
-      // really issued by this server — same demo-simplification level as
-      // the rest of this file, which trusts its own caller.
+      // endpoint fills in for it, now admin-gated — see requireAdmin above
+      // this handler). It doesn't check that credentialId was really
+      // issued by this server — same demo-simplification level as the
+      // rest of this file.
       //
-      // Task #59: a message can optionally carry an attached asset gift —
+      // A message can optionally carry an attached asset gift —
       // giftAssetClass/giftOwnerPublicKey/(giftQuantity for a fungible
       // class). When present, the gift is minted right here (same
       // ASSET_CATALOG lookup and fungible/quantity validation
@@ -2791,10 +2792,22 @@ async function main() {
         return sendJson(res, 200, { ok: true });
       }
 
+      // Admin-gated (requireAdmin, above): SPEC.md §11.1 already says
+      // sending is "authenticated as the domain operator, not as any
+      // visitor" — this was previously trusted at the network level only
+      // (whoever could reach the endpoint), which also meant anyone could
+      // get this domain to sign and deliver an arbitrary message, or mint
+      // an arbitrary gift asset via giftAssetClass, to any credential id
+      // they chose. Wire shape is now {payload: {...the same fields as
+      // before}, proof}, the same envelope every other admin action here
+      // uses.
       if (req.method === 'POST' && req.url === '/atlas/mail/send') {
-        const { credentialId, subject, body, giftAssetClass, giftOwnerPublicKey, giftQuantity } = JSON.parse((await readBody(req)) || '{}');
+        const { payload: sendPayload, proof } = JSON.parse((await readBody(req)) || '{}');
+        const authError = await requireAdmin(sendPayload, proof);
+        if (authError) return sendJson(res, 401, { error: authError });
+        const { credentialId, subject, body, giftAssetClass, giftOwnerPublicKey, giftQuantity } = sendPayload;
         if (!credentialId || !subject || !body) {
-          return sendJson(res, 400, { error: 'credentialId, subject, and body are required' });
+          return sendJson(res, 400, { error: 'payload.credentialId, payload.subject, and payload.body are required' });
         }
 
         let attachedAsset;
@@ -2914,14 +2927,14 @@ async function main() {
 
       // POST /atlas/calendar — a real, protocol-level write endpoint
       // (§12.2), domain-operator-authenticated with no visitor signature
-      // involved, following /atlas/mail/send's own precedent immediately
-      // above: this demo has no real admin interface, so a plain endpoint
-      // stands in for whatever a real deployment would actually use, and
-      // trusts its own caller the same way. `worldId: null` (or omitted)
-      // addresses the domain-wide calendar; naming a world addresses that
-      // world's own — this server does not check that world's manifest
-      // entry actually has `calendar: true` before accepting an event for
-      // it (see CALENDAR_FILE's own comment on why).
+      // involved, not yet gated on the admin roster the way /atlas/mail/send
+      // and /atlas/revoke now are (requireAdmin, above) — a natural next
+      // candidate, not done because it's any less an admin action.
+      // `worldId: null` (or omitted) addresses the domain-wide calendar;
+      // naming a world addresses that world's own — this server does not
+      // check that world's manifest entry actually has `calendar: true`
+      // before accepting an event for it (see CALENDAR_FILE's own comment
+      // on why).
       if (req.method === 'POST' && req.url === '/atlas/calendar') {
         const { action, worldId, event, id } = JSON.parse((await readBody(req)) || '{}');
         const normalizedWorldId = worldId || null;
@@ -2965,11 +2978,11 @@ async function main() {
         return sendJson(res, 400, { error: 'action must be "add", "update", or "remove"' });
       }
 
-      // --- Post Office (task #75/#87/#94, SPEC.md §11.3): user-to-user mail
-      // routed through THIS domain, distinct from /atlas/mail/send above in
-      // exactly the way that endpoint's own comment flags as the one
-      // genuinely new server surface the design needed: /atlas/mail/send
-      // trusts its own caller (the domain operator); this one has to
+      // --- Post Office (SPEC.md §11.3): user-to-user mail routed through
+      // THIS domain, distinct from /atlas/mail/send above in exactly the
+      // way that endpoint's own comment flags as the one genuinely new
+      // server surface the design needed: /atlas/mail/send authenticates
+      // the domain operator (requireAdmin, above); this one has to
       // authenticate an arbitrary stranger instead, since anyone with a
       // wallet can attempt to send here.
       //

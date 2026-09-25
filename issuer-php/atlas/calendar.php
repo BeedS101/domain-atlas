@@ -16,14 +16,14 @@
 // GET /atlas/trade/listings already takes for a station with nothing open.
 //
 // POST — a real, protocol-level write endpoint (§12.2), domain-operator-
-// authenticated with no visitor signature involved, following
-// atlas/mail/send.php's own precedent: this bundle has no real admin
-// interface, so a plain endpoint stands in for whatever a real deployment
-// would actually use, and trusts its own caller the same way. `worldId`
-// null (or omitted) addresses the domain-wide calendar; naming a world
-// addresses that world's own — this bundle does not check that world's
-// manifest entry actually has `calendar: true` before accepting an event
-// for it (see atlas_calendar_file()'s own comment in lib/store.php).
+// authenticated with no visitor signature involved, not yet gated on the
+// admin roster the way atlas/mail/send.php and atlas/revoke.php now are
+// (require_admin(), lib/store.php) — a natural next candidate, not done
+// because it's any less an admin action. `worldId` null (or omitted)
+// addresses the domain-wide calendar; naming a world addresses that
+// world's own — this bundle does not check that world's manifest entry
+// actually has `calendar: true` before accepting an event for it (see
+// atlas_calendar_file()'s own comment in lib/store.php).
 require_once __DIR__ . '/../lib/bootstrap.php';
 handle_preflight();
 

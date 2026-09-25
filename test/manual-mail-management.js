@@ -12,8 +12,47 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const http = require('http');
+const fs = require('fs');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+const ADMIN_KEYS_FILE = path.resolve(__dirname, '..', 'issuer-server', 'atlas-admin-keys-store.json');
+
+function b64url(bytes) {
+  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Same canonicalize() shape as extension/wallet.js and issuer-server/
+// server.js's own crypto helpers — sorted-key JSON, no whitespace.
+function canonicalize(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+
+async function genIdentity() {
+  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
+  return { kp, publicKey: b64url(raw) };
+}
+
+// Mirrors extension/wallet.js's signWithSelf() — a raw-ecdsa self-signed
+// envelope, the same one verifyEnvelope() on the server checks.
+async function signWithSelf(kp, publicKey, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
+  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
+}
+
+// /atlas/mail/send now requires a registered domain admin's signature
+// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// admin roster file, the same "plain operator-edited JSON" bootstrap a
+// real domain operator would do by hand.
+function seedAdmin(publicKey) {
+  fs.writeFileSync(ADMIN_KEYS_FILE, JSON.stringify({ keys: [{ publicKey, addedAt: new Date().toISOString() }] }, null, 2));
+}
 
 function postJson(port, urlPath, body) {
   return new Promise((resolve, reject) => {
@@ -65,7 +104,11 @@ function postJson(port, urlPath, body) {
       return await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.membership');
     });
     const credentialId = membership.credential.id;
-    await postJson(8001, '/atlas/mail/send', { credentialId, subject: 'Second message', body: 'Just checking mail management works.' });
+    const admin = await genIdentity();
+    seedAdmin(admin.publicKey);
+    const sendPayload = { credentialId, subject: 'Second message', body: 'Just checking mail management works.' };
+    const sendProof = await signWithSelf(admin.kp, admin.publicKey, sendPayload);
+    await postJson(8001, '/atlas/mail/send', { payload: sendPayload, proof: sendProof });
 
     await frame.locator('#socialTabBtn').click();
     await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
