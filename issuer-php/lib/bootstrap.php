@@ -694,6 +694,32 @@ function check_presented_giftable_asset($publicKeyB64url, $credential, $expected
   return null;
 }
 
+// check_presented_giftable_asset()'s own sibling for POST
+// /atlas/asset/redeem.php, deliberately looser in one respect: a bound
+// credential can't be GIVEN to anyone else, but its own holder giving it up
+// entirely is a different act, so tradeScope is never checked here. Fungible
+// is still excluded, same "non-fungible only for now" scope every other
+// single-credential action here shares. Mirrors issuer-server/server.js's
+// checkPresentedRedeemableAsset().
+function check_presented_redeemable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
+    return 'not an asset credential';
+  }
+  if (!isset($credential['owner']['publicKey']) || $credential['owner']['publicKey'] !== $expectedOwner) {
+    return 'asset does not belong to this signer';
+  }
+  if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
+    return 'asset is the wrong class';
+  }
+  if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
+    return 'asset class is fungible — this endpoint only redeems a unique item';
+  }
+  if (is_revoked($credential['id'])) return 'asset already revoked';
+  $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+  if (!$ok) return 'asset signature does not check out';
+  return null;
+}
+
 // Shared by both the same-domain claim path (atlas/world/drops/claim.php)
 // and the cross-domain relay-claim handler
 // (atlas/world/drops/relay-claim.php) — the real ownership-transfer

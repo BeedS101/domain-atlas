@@ -72,8 +72,9 @@
   <p class="tag">A two-minute, no-installation demo of Domain Atlas's credential layer.</p>
   <p class="lede">
     Click below and this page issues you two real, cryptographically signed credentials —
-    a coupon you can hand off to someone else, and a badge that's permanently yours. Both
-    keys involved are generated right here in your browser and never leave it except as a
+    a coupon you can hand off to someone else, and a badge that's permanently yours. Send
+    the coupon on, or give up either one yourself once you're done with it — both keys
+    involved are generated right here in your browser and never leave it except as a
     signature; every action below is a genuine call to this domain's own server, not a
     mockup.
   </p>
@@ -118,7 +119,9 @@
     Nothing on this page is stored in a database anywhere. Each credential you see is a
     signature from this domain over your public key and the item's own facts — verifying it
     means checking that signature, not looking anything up, exactly what Step 3 above does.
-    The coupon really moves to a new owner; the badge really can't. <a href="/">Back to the plaza</a>.
+    The coupon really moves to a new owner; the badge really can't; and redeeming either one
+    really revokes it, on the spot, one-sided — the holder's own signature is enough to ask,
+    but nothing further is required from their side once it's done. <a href="/">Back to the plaza</a>.
   </p>
 
 <script>
@@ -172,6 +175,11 @@
     const payload = { credentialId: credential.id, recipientPublicKey, action: 'transfer' };
     const proof = await signWithSelf(sender, payload);
     return postJson('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload, proof } });
+  }
+  async function redeemAsset(holder, credential) {
+    const payload = { credentialId: credential.id, action: 'redeem' };
+    const proof = await signWithSelf(holder, payload);
+    return postJson('/atlas/asset/redeem', { credential, intent: { payload, proof } });
   }
   // Same signed-payload shape and same checks as extension/wallet.js's own
   // verifyCredential() (SPEC.md §5, steps 1/2/4) — fetches this domain's
@@ -255,11 +263,13 @@
       '<h3>' + credential.asset.name + '</h3>' +
       '<div class="props">' + Object.entries(credential.asset.properties || {}).map(([k, v]) => '<div>' + k + ': ' + v + '</div>').join('') + '</div>' +
       '<button class="sendBtn">Send to a friend</button>' +
+      '<button class="redeemBtn secondary" type="button">Redeem — give it up yourself</button>' +
       '<div class="resultSlot"></div>' +
       '<details class="raw"><summary>View raw signed credential</summary><pre></pre>' +
       '<button class="fillVerifyBtn secondary" type="button">Try verifying this one independently ↓</button></details>';
     div.querySelector('pre').textContent = rawDetails(credential);
     div.querySelector('.sendBtn').addEventListener('click', () => onSendClick(cls));
+    div.querySelector('.redeemBtn').addEventListener('click', () => onRedeemClick(cls));
     div.querySelector('.fillVerifyBtn').addEventListener('click', () => fillAndVerify(credential));
     document.getElementById('youCards').appendChild(div);
   }
@@ -283,8 +293,10 @@
   async function onSendClick(cls) {
     const card = document.getElementById('you-card-' + cls);
     const btn = card.querySelector('.sendBtn');
+    const redeemBtn = card.querySelector('.redeemBtn');
     const slot = card.querySelector('.resultSlot');
     btn.disabled = true;
+    redeemBtn.disabled = true;
     slot.innerHTML = '';
 
     if (!friend) {
@@ -301,9 +313,36 @@
       delete holdings[cls];
       renderFriendCard(res.body.credential);
       btn.remove();
+      redeemBtn.remove();
     } else {
       slot.innerHTML = '<div class="result err">Can’t send this one: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
       btn.disabled = false;
+      redeemBtn.disabled = false;
+    }
+  }
+
+  async function onRedeemClick(cls) {
+    const card = document.getElementById('you-card-' + cls);
+    const sendBtn = card.querySelector('.sendBtn');
+    const redeemBtn = card.querySelector('.redeemBtn');
+    const slot = card.querySelector('.resultSlot');
+    sendBtn.disabled = true;
+    redeemBtn.disabled = true;
+    slot.innerHTML = '';
+
+    const credential = holdings[cls];
+    const res = await redeemAsset(you, credential);
+    if (res.ok) {
+      slot.innerHTML = '<div class="result ok">Redeemed — revoked on the spot. See for yourself in Step 3 below.</div>';
+      card.querySelector('.raw').remove();
+      delete holdings[cls];
+      sendBtn.remove();
+      redeemBtn.remove();
+      fillAndVerify(credential);
+    } else {
+      slot.innerHTML = '<div class="result err">Can’t redeem this one: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
+      sendBtn.disabled = false;
+      redeemBtn.disabled = false;
     }
   }
 

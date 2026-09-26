@@ -2175,6 +2175,26 @@ async function main() {
     return null;
   }
 
+  // checkPresentedGiftableAsset's own sibling for POST /atlas/asset/redeem
+  // below, deliberately looser in one respect: a bound credential can't be
+  // GIVEN to anyone else, but its own holder giving it up entirely is a
+  // different act — voiding your own membership card or badge needs no
+  // recipient and creates no question of who receives it, so tradeScope is
+  // never checked here. Fungible is still excluded, same "non-fungible only
+  // for now" scope every other single-credential action in this file
+  // shares — redeeming part of a balance would need a quantity argument
+  // this endpoint doesn't take.
+  async function checkPresentedRedeemableAsset(credential, expectedOwner, expectedClass) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
+    if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
+    if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
+    if (credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only redeems a unique item';
+    if (isRevoked(credential.id)) return 'asset already revoked';
+    const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+    if (!ok) return 'asset signature does not check out';
+    return null;
+  }
+
   // Task #250 — the actual custody change once a claim is legitimate,
   // shared by both branches of POST /atlas/world/drops/claim: the local
   // same-domain path (this domain issued the dropped credential itself)
@@ -2856,6 +2876,35 @@ async function main() {
         revoke(credential.id, 'transferred');
         console.log('Transferred', credential.asset.class, credential.id, '->', recipientPublicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { status: 'transferred', credential: received });
+      }
+
+      // POST /atlas/asset/redeem — a holder giving up their own credential,
+      // no recipient involved at all: the plainest possible revocation
+      // request, authorized by nothing but the holder's own signature over
+      // exactly that intent. Same envelope shape as transfer above, minus
+      // the recipient field; same underlying revoke() primitive every other
+      // revocation path in this file already calls, just reached through a
+      // new authorization route rather than the admin gate. Works on a
+      // bound credential too (see checkPresentedRedeemableAsset) — voiding
+      // your own membership card needs no recipient to reason about.
+      if (req.method === 'POST' && req.url === '/atlas/asset/redeem') {
+        const { credential, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !intent) return sendJson(res, 400, { error: 'credential and intent are both required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.credentialId !== credential.id || intent.payload.action !== 'redeem') {
+          return sendJson(res, 400, { error: 'intent does not authorize redeeming this credential' });
+        }
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const holderPub = intent.proof.publicKey;
+
+        const problem = await checkPresentedRedeemableAsset(credential, holderPub, credential.asset && credential.asset.class);
+        if (problem) return sendJson(res, 400, { error: problem });
+
+        revoke(credential.id, 'issuer-request');
+        console.log('Redeemed', credential.asset.class, credential.id, 'for', holderPub.slice(0, 16) + '...');
+        return sendJson(res, 200, { status: 'redeemed', id: credential.id });
       }
 
       // --- §7 trading stations (this server plays the station role — see file header) ---

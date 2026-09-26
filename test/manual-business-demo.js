@@ -35,6 +35,10 @@
 //   6. Tampering with that pasted JSON (changing the owner) before clicking
 //      Verify again correctly reports it invalid, proving the check is a
 //      real signature check and not just an id lookup.
+//   7. "Redeem — give it up yourself" on the badge (bound, so it could
+//      never be sent) succeeds anyway — redeeming needs no recipient — and
+//      the page immediately re-verifies it, now correctly reporting it
+//      revoked, closing the loop live on one page.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -134,6 +138,21 @@ function assert(cond, message) {
     assert((await verifyResult.getAttribute('class')).includes('err'), 'expected the err result styling once the owner field is tampered with');
     assert((await verifyResult.textContent()).includes("signature doesn't match"), 'expected the specific signature-mismatch reason, got: ' + (await verifyResult.textContent()));
     console.log('PASS: a tampered credential is correctly rejected —', await verifyResult.textContent());
+
+    console.log('STEP 7: redeeming the bound badge succeeds (unlike a send) and immediately re-verifies as revoked');
+    const badgeRawId = JSON.parse(await badgeCard.locator('details.raw pre').textContent()).id;
+    await badgeCard.locator('.redeemBtn').click();
+    await page.waitForFunction(() => {
+      const cards = [...document.querySelectorAll('#youCards .card')].filter((c) => c.textContent.includes('Plaza Visitor Badge'));
+      return cards[0] && cards[0].querySelector('.result.ok');
+    }, { timeout: 10000 });
+    assert((await badgeCard.locator('.result.ok').textContent()).includes('Redeemed'), 'expected a plain success message once the bound badge is redeemed');
+    assert(await badgeCard.locator('.sendBtn').count() === 0 && await badgeCard.locator('.redeemBtn').count() === 0, 'expected both action buttons gone once the badge is redeemed');
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✗ Not valid'), { timeout: 10000 });
+    const redeemVerifyText = await verifyResult.textContent();
+    assert(redeemVerifyText.includes('revoked by the issuer'), 'expected the just-redeemed badge to independently verify as revoked, got: ' + redeemVerifyText);
+    assert(JSON.parse(await page.locator('#verifyInput').inputValue()).id === badgeRawId, 'expected the auto-filled verify textarea to hold the actual redeemed badge, not a stale one');
+    console.log('PASS: a bound credential is redeemable by its own holder, and immediately re-verifies as revoked —', redeemVerifyText);
 
     console.log('\nALL BUSINESS DEMO PAGE CHECKS PASSED');
   } catch (err) {

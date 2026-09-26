@@ -9,10 +9,10 @@ one-sided and instant, nothing required from the holder's side.
 
 **[Try the credential demo live →](https://evtec.co.za/business-demo.html)**
 No install needed — issues you a real, giftable credential on the spot,
-signed by this exact server, lets you try sending it to someone else
-while a non-transferable one refuses to move, and lets you verify any
-credential's JSON yourself, entirely in your own browser, against the
-same public files any outside system could check.
+signed by this exact server. Try sending it to someone else while a
+non-transferable one refuses to move; redeem either one yourself and
+watch it fail an independent verification you run entirely in your own
+browser, against the same public files any outside system could check.
 
 The rest of this repository is the full prototype behind that one
 endpoint: a browser extension wallet, a spatial 3D client that renders
@@ -910,8 +910,22 @@ really-signed credential shows up in the friend panel, inspectable via a
 "View raw signed credential" toggle on every card — and the badge is
 refused with the server's own real rejection text, not a canned message.
 Every call this page makes is a real, unmodified hit on this domain's own
-`/atlas/asset/issue` and `/atlas/asset/transfer` endpoints; nothing about
-the demo is simulated client-side.
+`/atlas/asset/issue`, `/atlas/asset/transfer`, and `/atlas/asset/redeem`
+endpoints; nothing about the demo is simulated client-side.
+
+Giving something away and giving something up are different acts. Every
+card also has a "Redeem — give it up yourself" button: `POST
+/atlas/asset/redeem` (`{credential, intent: {payload: {credentialId,
+action: 'redeem'}, proof}}`, no recipient field at all) revokes it on the
+holder's own signature alone. Unlike a transfer, this works on the bound
+badge too — giving your own membership card up entirely raises no
+question of who receives it, so `tradeScope` is never checked here, only
+`fungible` is (same "non-fungible only for now" scope the transfer
+endpoint carries). A successful redeem calls the exact same `revoke()`
+every other revocation path in this codebase already uses — from the
+protocol's own point of view this is still the issuer revoking, just
+through an authorization path that trusts the holder's signature instead
+of the admin roster.
 
 The page also has a third step: paste any credential's raw JSON and it's
 checked entirely in the visitor's own browser, not by asking this
@@ -924,9 +938,13 @@ card's "View raw signed credential" toggle carries a "Try verifying this
 one independently" button that drops that credential's full JSON
 straight into this step. Tamper with a pasted field first (the owner,
 say) and it fails for the right reason — a real signature mismatch, not
-a lookup miss. `test/manual-business-demo.js` drives the page itself
-with a headless browser to prove all of this end to end, including both
-the genuine-and-valid and the tampered-and-rejected cases.
+a lookup miss. Redeeming the bound badge immediately re-runs this same
+step against it, so the "one-sided and instant" claim at the top of this
+document is something a visitor can actually watch happen, not just read.
+`test/manual-business-demo.js` drives the page itself with a headless
+browser to prove all of this end to end: the genuine-and-valid case, the
+tampered-and-rejected case, and a redeemed bound credential immediately
+re-verifying as revoked.
 
 ## 9. Verify it yourself
 

@@ -482,11 +482,37 @@ without spending anything — on both issuers.
 
 This is also what powers demo-domain-a/business-demo.html on the Node
 side — a standalone, extension-free page that issues a visitor a giftable
-demo coupon (atlas.demo.coupon) alongside a non-transferable badge and
-lets them try sending each to a page-local stand-in for "a friend". That
-page lives under demo-domain-a/, not this bundle, since it needs
-somewhere to be served as a static file, but the endpoint it calls behaves
-identically here.
+demo coupon (atlas.demo.coupon) alongside a non-transferable badge, lets
+them try sending each to a page-local stand-in for "a friend", redeem
+either one themselves (see below), and verify any credential's raw JSON
+independently against this domain's own public key and revocation files.
+That page lives under demo-domain-a/, not this bundle, since it needs
+somewhere to be served as a static file, but every endpoint it calls
+behaves identically here.
+
+
+Self-service redemption
+-------------------------------
+Giving something away (above) and giving something up are different acts.
+POST /atlas/asset/redeem is the second one: {credential, intent:
+{payload: {credentialId, action: 'redeem'}, proof}} — no recipient field
+at all, authorized purely by the holder's own signature. It's the same
+envelope discipline as a transfer, checked by
+check_presented_redeemable_asset() in lib/bootstrap.php, deliberately
+looser in one respect: a bound credential (a membership card, a badge)
+can never be transferred to someone else, but its own holder relinquishing
+it entirely raises no question of who receives it, so tradeScope is never
+checked here — only fungible is excluded, same "non-fungible only for
+now" scope the transfer endpoint above already carries. A successful
+redeem calls the same atlas_revoke() every other revocation path in this
+bundle already uses, reason "issuer-request" — from the protocol's own
+point of view, this is still the issuer revoking, just through an
+authorization path that trusts the holder's signature instead of the
+admin roster. test/manual-asset-redeem.js covers the successful redeem,
+replay rejection, a bound credential redeeming successfully where a
+transfer of the same credential would not, a non-owner's signature being
+rejected, a fungible balance being rejected, and a mismatched intent being
+rejected — on both issuers.
 
 
 Updating an already-issued asset
