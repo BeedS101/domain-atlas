@@ -9,8 +9,10 @@ one-sided and instant, nothing required from the holder's side.
 
 **[Try the credential demo live →](https://evtec.co.za/business-demo.html)**
 No install needed — issues you a real, giftable credential on the spot,
-signed by this exact server, and lets you try sending it to someone else
-while a non-transferable one refuses to move.
+signed by this exact server, lets you try sending it to someone else
+while a non-transferable one refuses to move, and lets you verify any
+credential's JSON yourself, entirely in your own browser, against the
+same public files any outside system could check.
 
 The rest of this repository is the full prototype behind that one
 endpoint: a browser extension wallet, a spatial 3D client that renders
@@ -909,8 +911,22 @@ really-signed credential shows up in the friend panel, inspectable via a
 refused with the server's own real rejection text, not a canned message.
 Every call this page makes is a real, unmodified hit on this domain's own
 `/atlas/asset/issue` and `/atlas/asset/transfer` endpoints; nothing about
-the demo is simulated client-side. `test/manual-business-demo.js` drives
-the page itself with a headless browser to prove exactly this end to end.
+the demo is simulated client-side.
+
+The page also has a third step: paste any credential's raw JSON and it's
+checked entirely in the visitor's own browser, not by asking this
+server "is this valid." It fetches this domain's public
+`/.well-known/atlas-key.json` and `atlas-revocations.json` directly —
+the same two files any outside system could fetch on its own — and
+re-runs the exact signature and revocation check
+`extension/wallet.js`'s own `verifyCredential()` already does. Every
+card's "View raw signed credential" toggle carries a "Try verifying this
+one independently" button that drops that credential's full JSON
+straight into this step. Tamper with a pasted field first (the owner,
+say) and it fails for the right reason — a real signature mismatch, not
+a lookup miss. `test/manual-business-demo.js` drives the page itself
+with a headless browser to prove all of this end to end, including both
+the genuine-and-valid and the tampered-and-rejected cases.
 
 ## 9. Verify it yourself
 
