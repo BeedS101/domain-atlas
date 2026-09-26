@@ -885,7 +885,7 @@ Trading Station settlement (§7, needs a mirrored counter-offer and a
 membership card) — both assume a specific context: losing something in a
 world, or negotiating a swap at a station. Neither fits the plainest case,
 "I hold this, send it straight to that public key, nothing wanted back."
-`POST /atlas/asset/transfer` covers exactly that: `{credential,
+`POST /atlas/asset/transfer` (SPEC.md §5.6) covers exactly that: `{credential,
 recipientPublicKey, intent: {payload: {credentialId, recipientPublicKey,
 action: 'transfer'}, proof}}`, authorized by nothing more than the
 holder's own signature over exactly what it authorizes — same envelope
@@ -921,7 +921,7 @@ endpoints; nothing about the demo is simulated client-side.
 
 Giving something away and giving something up are different acts. Every
 card also has a "Redeem — give it up yourself" button: `POST
-/atlas/asset/redeem` (`{credential, intent: {payload: {credentialId,
+/atlas/asset/redeem` (SPEC.md §5.7, `{credential, intent: {payload: {credentialId,
 action: 'redeem'}, proof}}`, no recipient field at all) revokes it on the
 holder's own signature alone. Unlike a transfer, this works on the bound
 badge too — giving your own membership card up entirely raises no

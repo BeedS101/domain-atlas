@@ -463,8 +463,8 @@ Loadouts' transfer-on-loss (extension/wallet.js, purely local — no domain
 call involved at all) and a Trading Station settlement above (needs a
 mirrored counter-offer and a membership card) both assume a specific
 context. Neither fits the plainest case: "I hold this, send it straight to
-that public key, nothing wanted back." POST /atlas/asset/transfer covers
-exactly that: {credential, recipientPublicKey, intent: {payload:
+that public key, nothing wanted back." POST /atlas/asset/transfer (SPEC.md
+§5.6) covers exactly that: {credential, recipientPublicKey, intent: {payload:
 {credentialId, recipientPublicKey, action: 'transfer'}, proof}},
 authorized by nothing more than the holder's own signature over exactly
 what it authorizes — the same envelope shape /atlas/trade/submit and
@@ -494,7 +494,7 @@ behaves identically here.
 Self-service redemption
 -------------------------------
 Giving something away (above) and giving something up are different acts.
-POST /atlas/asset/redeem is the second one: {credential, intent:
+POST /atlas/asset/redeem (SPEC.md §5.7) is the second one: {credential, intent:
 {payload: {credentialId, action: 'redeem'}, proof}} — no recipient field
 at all, authorized purely by the holder's own signature. It's the same
 envelope discipline as a transfer, checked by
