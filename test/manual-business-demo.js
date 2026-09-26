@@ -39,6 +39,9 @@
 //      never be sent) succeeds anyway — redeeming needs no recipient — and
 //      the page immediately re-verifies it, now correctly reporting it
 //      revoked, closing the loop live on one page.
+//   8. "Start over" clears everything back to the pre-issue state, without
+//      a page reload, and the page works normally after — a second full
+//      run-through issues and renders correctly.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -153,6 +156,17 @@ function assert(cond, message) {
     assert(redeemVerifyText.includes('revoked by the issuer'), 'expected the just-redeemed badge to independently verify as revoked, got: ' + redeemVerifyText);
     assert(JSON.parse(await page.locator('#verifyInput').inputValue()).id === badgeRawId, 'expected the auto-filled verify textarea to hold the actual redeemed badge, not a stale one');
     console.log('PASS: a bound credential is redeemable by its own holder, and immediately re-verifies as revoked —', redeemVerifyText);
+
+    console.log('STEP 8: "Start over" resets the page without a reload, and it works normally afterward');
+    await page.locator('#resetBtn').click();
+    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 0 && document.getElementById('resetBtn').style.display === 'none', { timeout: 10000 });
+    assert(!(await page.locator('#youPanel').isVisible()), 'expected the wallet panel to hide again after a reset');
+    assert(!(await page.locator('#friendPanel').isVisible()), 'expected the friend panel to hide again after a reset');
+    assert((await page.locator('#friendCards').textContent()).includes('Nothing sent yet'), 'expected the friend panel to show its empty placeholder again');
+    assert(await page.locator('#issueBtn').isEnabled(), 'expected "Get my two demo credentials" to be clickable again');
+    await page.locator('#issueBtn').click();
+    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 2, { timeout: 10000 });
+    console.log('PASS: the page resets in place and a second run-through works normally');
 
     console.log('\nALL BUSINESS DEMO PAGE CHECKS PASSED');
   } catch (err) {

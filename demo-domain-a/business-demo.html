@@ -96,6 +96,7 @@
   <div class="panel">
     <h2>Step 1 — get your demo credentials</h2>
     <button id="issueBtn">Get my two demo credentials</button>
+    <button id="resetBtn" class="secondary" type="button" style="display:none; margin-left:0.6rem;">Start over</button>
     <p id="issueStatus" class="props" style="margin-top:0.6rem;"></p>
   </div>
 
@@ -377,10 +378,34 @@
       renderYouCard(coupon);
       renderYouCard(badge);
       status.textContent = 'Done — issued to a fresh public key generated just now in this tab.';
+      document.getElementById('resetBtn').style.display = '';
     } catch (err) {
       status.textContent = 'Something went wrong: ' + err.message;
       btn.disabled = false;
     }
+  });
+
+  // Everything here lives in page-scoped JS variables (you/friend/
+  // holdings), so a second run-through previously meant reloading the
+  // whole page — fine alone, awkward mid-demo in front of someone else.
+  // This just re-runs that same reset without a network round trip.
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    you = null;
+    friend = null;
+    for (const cls of Object.keys(holdings)) delete holdings[cls];
+    document.getElementById('youCards').innerHTML = '';
+    document.getElementById('youPanel').style.display = 'none';
+    document.getElementById('friendPanel').style.display = 'none';
+    document.getElementById('friendKeyLine').textContent = '';
+    document.getElementById('friendCards').innerHTML = '<p class="friend-empty">Nothing sent yet — try "Send to a friend" above.</p>';
+    document.getElementById('verifyInput').value = '';
+    const verifyResult = document.getElementById('verifyResult');
+    verifyResult.className = '';
+    verifyResult.textContent = '';
+    document.getElementById('issueStatus').textContent = '';
+    document.getElementById('issueBtn').disabled = false;
+    document.getElementById('resetBtn').style.display = 'none';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   });
 })();
 </script>
