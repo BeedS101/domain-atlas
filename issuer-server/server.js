@@ -803,6 +803,54 @@ const ASSET_CATALOG = {
     tradeScope: 'bound',
     purchase: { priceClass: 'atlas.credit.balance', priceAmount: 3 }
   },
+  // SPEC.md §5.1's expiresAt, worked example: the Museum's ticket booth
+  // (demo-domain-a/spatial/museum/scene.json) sells this for the SAME
+  // atlas.credit.balance the cafeteria demo already uses — the point being
+  // that a completely different UI (a 3D spatial stall instead of a 2D
+  // page) spends the exact same balance class through the exact same
+  // generic /atlas/asset/purchase endpoint, no cafeteria-specific or
+  // museum-specific code anywhere in either. `expiresInMinutes: 3` is a
+  // deliberately short, sped-up stand-in for "valid for the day" — long
+  // enough to walk the ticket around and present it at the door, short
+  // enough that a visitor can watch it actually go stale in one sitting
+  // without waiting real hours. fulfilling it (POST /atlas/asset/fulfill,
+  // SPEC.md §5.9) at the door consumes it, same as a cafeteria receipt;
+  // an operator who tries to fulfill it after `expiresInMinutes` has
+  // elapsed gets checkPresentedFulfillableAsset's new expiry rejection
+  // instead, whether or not anyone ever explicitly revoked it.
+  'atlas.demo.museum.ticket': {
+    name: 'Museum Day Ticket',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    thumbnail: `https://${DOMAIN}/assets/badge.png`,
+    fungible: false,
+    presentation: 'document',
+    tradeScope: 'bound',
+    purchase: { priceClass: 'atlas.credit.balance', priceAmount: 10 },
+    expiresInMinutes: 3
+  },
+  // Test-only fixture for manual-asset-expiry.js: a real expiresAt with a
+  // sub-minute deadline, so the automated check can observe a genuine
+  // expiry within a couple of seconds instead of waiting the museum
+  // ticket's realistic 3 minutes. Not fungible, not purchasable, never
+  // referenced by any scene.json or demo page — nothing in the live demo
+  // ever mints this.
+  'atlas.test.expiring': {
+    name: 'Test Expiring Item',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    fungible: false,
+    presentation: 'document',
+    expiresInMinutes: 0.05 // 3 seconds
+  },
+  // A fungible sibling of the fixture above, for the same reason: proves
+  // expiry is wired into checkPresentedAsset (split/consolidate/trade) too,
+  // not only checkPresentedFulfillableAsset — see manual-asset-expiry.js.
+  'atlas.test.expiring.balance': {
+    name: 'Test Expiring Balance',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    fungible: true,
+    presentation: 'collectible',
+    expiresInMinutes: 0.05 // 3 seconds
+  },
   // Equippable looks: no model/thumbnail (an outfit isn't a held or
   // displayed object, just a recolor of the shared character model — see
   // extension/wallet.js's avatarLookPropertiesFromAsset() and
@@ -1265,6 +1313,23 @@ function revoke(id, reason) {
   const doc = readRevocations();
   doc.revoked.push({ id, revokedAt: new Date().toISOString(), reason });
   fs.writeFileSync(REVOCATIONS_FILE, JSON.stringify(doc, null, 2));
+}
+
+// A second, orthogonal way a credential can stop being valid, alongside
+// revocation above (SPEC.md §5.1's new optional signed `asset.expiresAt`
+// field — a museum day ticket is the worked example, but nothing here
+// knows that; any catalog entry can opt in the same way). Unlike
+// isRevoked, this never touches disk and needs no admin action, no
+// revocation-list entry, and no network round trip for a same-domain
+// check: the deadline is already sitting right there in the credential's
+// own signed payload (see mintAssetByClass's `expiresInMinutes` handling
+// below for how it gets set), so anyone holding — or checking — the
+// credential can compare it against the clock with nothing but
+// arithmetic. Absent `asset.expiresAt`, a credential never expires this
+// way at all — the field is only ever present when its class opted in.
+function isExpired(credential) {
+  const expiresAt = credential && credential.asset && credential.asset.expiresAt;
+  return typeof expiresAt === 'string' && Date.now() > new Date(expiresAt).getTime();
 }
 
 // Task #42: serialized/limited-edition support. One running total per
@@ -2049,7 +2114,21 @@ async function main() {
       // implicit default for any catalog entry that doesn't set its own
       // (see ASSET_CATALOG's own comment on atlas.wearable).
       tradeScope: catalogEntry.tradeScope || 'local',
-      ...(Object.keys(properties).length ? { properties } : {})
+      ...(Object.keys(properties).length ? { properties } : {}),
+      // SPEC.md §5.1 — a catalog entry that declares its own
+      // `expiresInMinutes` gets a fresh, signed deadline computed from
+      // THIS mint's own clock, every time (a re-mint via split/consolidate/
+      // trade/purchase-change gets a brand new window too, same as every
+      // other asset-level field here — there is deliberately no concept of
+      // an expiring credential's remaining time surviving a re-mint, since
+      // a re-mint is a fresh credential, not a continuation of the old
+      // one's countdown). Never present at all for a class that doesn't
+      // opt in — isExpired()/checkPresented*'s expiry checks and
+      // wallet.js's verifyCredential() all treat a missing expiresAt as
+      // "never expires," never as "already expired."
+      ...(typeof catalogEntry.expiresInMinutes === 'number'
+        ? { expiresAt: new Date(Date.now() + catalogEntry.expiresInMinutes * 60000).toISOString() }
+        : {})
     };
     return issueAsset(ownerPublicKey, asset, quantity, supersedes);
   }
@@ -2079,6 +2158,7 @@ async function main() {
     if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot split or consolidate a unique asset';
     if (typeof credential.quantity !== 'number' || credential.quantity < minQuantity) return 'asset has insufficient quantity';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
     return null;
@@ -2103,6 +2183,7 @@ async function main() {
     if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be traded';
     if (credential.asset.fungible !== false) return 'asset class is fungible — present it as a quantity balance, not a unique item';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
     return null;
@@ -2121,6 +2202,7 @@ async function main() {
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'membership does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'membership is the wrong class';
     if (isRevoked(credential.id)) return 'membership already revoked';
+    if (isExpired(credential)) return 'membership has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'membership signature does not check out';
     return null;
@@ -2162,6 +2244,7 @@ async function main() {
       const sigOk = await verifyDomainSignature(activeKey.publicKey, assetPayloadOf(credential), credential.signature);
       if (!sigOk) return false;
       if ((revDoc.revoked || []).some((r) => r.id === credential.id)) return false;
+      if (isExpired(credential)) return false;
       return true;
     } catch (err) {
       return false;
@@ -2195,6 +2278,7 @@ async function main() {
     if (!credential.issuer || !credential.issuer.domain) return 'asset has no issuer domain';
     if (credential.issuer.domain === DOMAIN) {
       if (isRevoked(credential.id)) return 'asset already revoked';
+      if (isExpired(credential)) return 'asset has expired';
       const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
       if (!ok) return 'asset signature does not check out';
       return null;
@@ -2224,6 +2308,7 @@ async function main() {
     if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be sent to anyone else';
     if (credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only transfers a unique item';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
     return null;
@@ -2244,6 +2329,7 @@ async function main() {
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
     if (credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only redeems a unique item';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
     return null;
@@ -2268,6 +2354,7 @@ async function main() {
     if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot spend a unique asset by quantity';
     if (typeof credential.quantity !== 'number' || credential.quantity < amount) return 'balance is insufficient for this purchase';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isExpired(credential)) return 'balance has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
     return null;
@@ -2287,6 +2374,13 @@ async function main() {
     if (!credential.issuer || credential.issuer.domain !== DOMAIN) return 'this domain did not issue this credential';
     if (!credential.asset || credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only fulfills a single held instance';
     if (isRevoked(credential.id)) return 'asset already revoked or already fulfilled';
+    // A museum day ticket (SPEC.md §5.1's expiresAt — see isExpired above)
+    // is the worked example this check exists for: a ticket presented at
+    // the door after its own deadline has passed is rejected here even
+    // though it was never explicitly revoked — the same operator-facing
+    // gate that already refuses an already-fulfilled or forged credential
+    // now also refuses one that simply timed out.
+    if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
     return null;
@@ -2937,7 +3031,18 @@ async function main() {
           fungible: entry.fungible,
           presentation: entry.presentation,
           tradeScope: entry.tradeScope || 'local',
-          ...(entry.properties && Object.keys(entry.properties).length ? { properties: entry.properties } : {})
+          ...(entry.properties && Object.keys(entry.properties).length ? { properties: entry.properties } : {}),
+          // A scene's own "purchase" interactable (see the museum ticket
+          // stall's scene.json) never hardcodes a price — it just names the
+          // class, the same "operator decides via the catalog, not the
+          // caller" principle POST /atlas/asset/purchase itself already
+          // holds to. Exposed here, on the SAME pre-mint preview endpoint,
+          // so a stall's hover tooltip can show "10 atlas.credit.balance"
+          // (and, for a class that also declares expiresInMinutes, "expires
+          // N minutes after purchase") without the client ever needing to
+          // trust a number the scene author typed in twice.
+          ...(entry.purchase ? { purchase: entry.purchase } : {}),
+          ...(typeof entry.expiresInMinutes === 'number' ? { expiresInMinutes: entry.expiresInMinutes } : {})
         });
       }
 

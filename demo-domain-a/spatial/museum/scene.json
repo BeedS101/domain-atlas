@@ -3,9 +3,15 @@
   "floor": { "size": [20, 20], "color": "#20232b" },
   "objects": [
     { "type": "box", "position": [0, 1, -5], "size": [3, 2, 0.3], "color": "#5a6bd6", "label": "Example Museum" },
-    { "type": "box", "position": [0, 0.6, -1], "size": [0.8, 1.2, 0.8], "color": "#c9a13b", "label": "Exhibit" }
+    { "type": "box", "position": [0, 0.6, -1], "size": [0.8, 1.2, 0.8], "color": "#c9a13b", "label": "Exhibit" },
+    { "type": "box", "position": [-4, 0.5, -1.4], "size": [1, 1, 1], "color": "#57a593", "label": "Ticket Booth" },
+    { "type": "box", "position": [-2.3, 0.4, -1.4], "size": [0.7, 0.8, 0.7], "color": "#c05a1f", "label": "Day Ticket" }
   ],
   "portalMarkers": [
     { "position": [0, 0, 4], "portalIndex": 0 }
+  ],
+  "interactables": [
+    { "position": [-4, 0.5, -1.4], "label": "Get Museum Credits", "action": "mint", "class": "atlas.credit.balance", "quantity": 20, "role": "self" },
+    { "position": [-2.3, 0.4, -1.4], "label": "Buy a Day Ticket", "action": "purchase", "class": "atlas.demo.museum.ticket" }
   ]
 }

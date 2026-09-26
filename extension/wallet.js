@@ -1000,6 +1000,53 @@ const AtlasWallet = (() => {
     return result;
   }
 
+  // Museum ticket stall (SPEC.md §5.8) — the first time this module itself,
+  // rather than a standalone demo page like cafeteria-demo.html, builds an
+  // owner-signed intent envelope: every other primitive above (mint, split,
+  // consolidate, convert) only ever has to present a credential, never
+  // prove authorization to spend it beyond the class's own tradeScope.
+  // Spends part (or all) of a fungible balance to acquire a different
+  // class, atomically. Looks the price up fresh via fetchAssetClassInfo()
+  // rather than trusting anything the caller passes in — the same
+  // "operator decides the price via the catalog, never the caller"
+  // discipline POST /atlas/asset/purchase itself already holds to — so a
+  // scene's own "purchase" interactable (extension/viewer.js's
+  // handleInteractable()) never has to hardcode a price of its own either.
+  async function purchaseAsset(role, issuerDomain, purchasedClass, quantity) {
+    const owner = await identityOf(role);
+    const info = await fetchAssetClassInfo(issuerDomain, purchasedClass);
+    if (!info || !info.purchase) throw new Error('This class is not for sale.');
+    const qty = quantity === undefined ? 1 : quantity;
+    const totalPrice = info.purchase.priceAmount * qty;
+    const wallet = await getWallet(owner.publicKey);
+    // Same-issuer, same-class, fungible balances only — picks the largest
+    // if more than one somehow exists (auto-consolidation normally keeps
+    // this to at most one) so a purchase never fails for want of merging
+    // balances together first.
+    const balanceCredential = wallet
+      .map((e) => e.credential)
+      .filter((c) => c.asset.class === info.purchase.priceClass && c.issuer.domain === issuerDomain && c.asset.fungible === true)
+      .sort((a, b) => b.quantity - a.quantity)[0];
+    if (!balanceCredential || balanceCredential.quantity < totalPrice) {
+      throw new Error('Not enough ' + info.purchase.priceClass + ' — need ' + totalPrice + ', have ' + (balanceCredential ? balanceCredential.quantity : 0) + '.');
+    }
+    const payload = { credentialId: balanceCredential.id, purchasedClass, quantity: qty, action: 'purchase' };
+    const proof = await signAs(role, payload);
+    const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/purchase', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential: balanceCredential, purchasedClass, quantity: qty, intent: { payload, proof } })
+    });
+    if (!res.ok) throw new Error('Purchase failed: ' + (await res.text()));
+    const result = await res.json();
+    const newWallet = wallet.filter((e) => e.credential.id !== balanceCredential.id);
+    if (result.balance) newWallet.push({ credential: result.balance, lastVerdict: await verifyCredential(result.balance) });
+    newWallet.push({ credential: result.purchased, lastVerdict: await verifyCredential(result.purchased) });
+    await saveWallet(owner.publicKey, newWallet);
+    await autoConsolidateAssetWallet(owner.publicKey);
+    return result;
+  }
+
   // The signed payload shape (SPEC.md §5): canonicalize({id, asset, owner,
   // quantity, supersedes, issuedAt}) — one shape for unique and fungible
   // assets alike, replacing the former separate itemPayloadOf/
@@ -1040,6 +1087,18 @@ const AtlasWallet = (() => {
 
       const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
       if (revoked) return { valid: false, reason: 'revoked by issuer' };
+      // SPEC.md §5.1's optional signed asset.expiresAt (the museum ticket
+      // stall's own worked example) — a second, orthogonal way a credential
+      // stops being valid, checked the same way issuer-server/server.js's
+      // own isExpired() is: pure arithmetic against the credential's own
+      // signed deadline, no extra fetch needed since it already traveled
+      // inside `credential.asset` as part of THIS verification's own
+      // signature check just above. Absent entirely for a class that never
+      // opted in, so this never fires for the vast majority of credentials.
+      const expiresAt = credential.asset && credential.asset.expiresAt;
+      if (typeof expiresAt === 'string' && Date.now() > new Date(expiresAt).getTime()) {
+        return { valid: false, reason: 'expired at ' + expiresAt };
+      }
       return { valid: true, reason: 'signature verified against issuer key; not revoked' };
     } catch (err) {
       return { valid: false, reason: 'verification error: ' + err.message };
@@ -4801,7 +4860,7 @@ const AtlasWallet = (() => {
     getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     exportFullBackup, importFullBackup,
     hideAsset, unhideAsset,
-    splitAsset, consolidateAsset, convertAsset,
+    splitAsset, consolidateAsset, convertAsset, purchaseAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,

@@ -556,6 +556,45 @@ intent, and the fulfill/replay-rejection cycle) on both issuers;
 test/manual-cafeteria-demo.js drives both pages end to end.
 
 
+Credentials that expire on their own, and a museum ticket stall
+-------------------------------------------------------------------
+Everything above needs an explicit act to stop being valid. Some things are
+only ever meant to be valid for a while regardless of anyone acting on them
+at all — a day pass, an event ticket. asset.expiresAt (SPEC.md §5.10) is a
+second, optional signed field alongside fungible/presentation/tradeScope: a
+class opts in by declaring 'expiresInMinutes' in its own catalog entry, and
+every credential minted of it (issuance, or a fresh mint following a split,
+trade, purchase, or reissue) gets a real deadline computed from that mint's
+own clock and signed into 'asset' along with everything else — see
+mint_asset_by_class()'s own 'expiresInMinutes' handling in lib/bootstrap.php.
+is_expired() (lib/store.php) sits right next to is_revoked() and is wired
+into the exact same places: check_presented_asset(), check_presented_
+unique_asset(), check_presented_membership(), check_presented_transferable_
+asset() (both the local and foreign-credential branches), check_presented_
+giftable_asset(), check_presented_redeemable_asset(), check_presented_
+spendable_asset(), and check_presented_fulfillable_asset() all reject an
+expired credential the same way they already reject a revoked one, with
+their own clear reason. There's no list to check — the deadline already
+travels inside the credential — so this costs nothing but a clock
+comparison. A class that never declares expiresInMinutes is completely
+unaffected.
+
+The Museum world (previously an empty room in demo-domain-a/spatial/museum/
+scene.json) is the worked, spatial-world example: a "Get Museum Credits"
+stall mints the same atlas.credit.balance the cafeteria demo above already
+uses, and a "Buy a Day Ticket" stall spends 10 of it on
+atlas.demo.museum.ticket, a non-fungible, bound receipt-style class that
+also declares expiresInMinutes => 3 (a realistic day pass sped up to a few
+minutes, so a visitor can watch one go stale in one sitting). Presenting the
+resulting ticket to the Admin Panel's "Fulfill a purchase" section consumes
+it at the door before its deadline passes; presenting the identical ticket
+after the deadline passes is rejected — expired, not revoked — by the exact
+same check_presented_fulfillable_asset() gate every other fulfillment
+already goes through. test/manual-asset-expiry.js covers the expiry
+mechanism itself at the HTTP layer on both issuers; test/manual-museum-
+ticket-stall.js drives the wallet extension into the Museum end to end.
+
+
 Updating an already-issued asset
 ----------------------------------
 An asset credential is signed and immutable the moment it's issued — but a

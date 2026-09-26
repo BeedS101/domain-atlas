@@ -1000,6 +1000,60 @@ demo.js` drives both pages end to end — topping up, buying down to a
 disabled buy button, fulfilling on the Admin Panel, and watching the
 receipt's own status flip live.
 
+## Credentials that expire on their own, and a museum ticket stall
+
+Everything above needs an explicit act to stop being valid — a holder
+redeeming it, an operator revoking or fulfilling it. Some things are only
+ever meant to be valid for a while regardless of anyone acting on them at
+all: a day pass, an event ticket. `asset.expiresAt` (SPEC.md §5.10) is a
+second, optional signed field alongside `asset.fungible`/`presentation`/
+`tradeScope` — a class opts in by declaring `expiresInMinutes` in its own
+catalog entry, and every credential minted of it (first issuance or a fresh
+mint following a split, trade, purchase, or reissue) gets a real deadline
+computed from that mint's own clock and signed into `asset` along with
+everything else. `isExpired()`/`is_expired()` sits right next to
+`isRevoked()`/`is_revoked()` and is wired into the exact same places: split/
+consolidate/trade, direct transfer, redemption, spending a balance via
+purchase, and fulfillment all reject an expired credential the same way
+they already reject a revoked one, with their own clear reason. Unlike
+revocation, there's no list to check — the deadline already travels inside
+the credential, so checking it costs nothing but a clock comparison, client-
+side (`extension/wallet.js`'s `verifyCredential()`) or server-side alike. A
+class that never declares `expiresInMinutes` is completely unaffected —
+every asset this project defined before this feature still never expires
+this way.
+
+The Museum world (previously an empty room in `demo-domain-a/spatial/
+museum/scene.json`) is the worked, spatial-world example: a "Get Museum
+Credits" stall mints the same `atlas.credit.balance` the cafeteria demo
+above already uses — proof that a completely different UI (a 3D stall
+instead of a 2D page) spends the identical balance class through the
+identical generic `/atlas/asset/purchase` endpoint — and a "Buy a Day
+Ticket" stall spends 10 of it on `atlas.demo.museum.ticket`, a
+non-fungible, bound receipt-style class that also declares
+`expiresInMinutes: 3` (a realistic day pass sped up to a few minutes, so a
+visitor can actually watch one go stale in one sitting rather than waiting
+real hours). Buying a ticket is also the first time a scene-declared
+interactable reaches for an owner-signed intent envelope at all — every
+prior stall in this project only ever needed the ungated `mint`/`issue`
+actions; a new `purchase` action and `AtlasWallet.purchaseAsset()`
+(`extension/wallet.js`) are what make a spatial stall able to spend a
+balance the same way `cafeteria-demo.html` already does from a 2D page.
+Presenting the resulting ticket to the Admin Panel's existing "Fulfill a
+purchase" section (SPEC.md §5.9) consumes it at the door before its
+deadline passes; presenting the identical, unmodified ticket after the
+deadline passes is rejected — expired, not revoked — by the exact same
+`checkPresentedFulfillableAsset`/`check_presented_fulfillable_asset` gate
+every other fulfillment already goes through.
+`test/manual-asset-expiry.js` covers the expiry mechanism itself at the
+HTTP layer, on both issuers, using dedicated short-lived test fixtures so
+the check doesn't have to sit through the museum ticket's own realistic
+3-minute window; `test/manual-museum-ticket-stall.js` drives the actual
+wallet extension into the Museum end to end — minting credits, buying a
+ticket from a real click on the 3D stall, spending a balance to exactly
+zero, a clear client-side rejection with nothing left to spend, and
+fulfilling the ticket on the Admin Panel before it expires.
+
 ## 9. Verify it yourself
 
 ```bash

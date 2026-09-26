@@ -430,6 +430,15 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
     $properties['atlas.editionSize'] = (string) $maxSupply;
     $asset['properties'] = $properties;
   }
+  // SPEC.md §5.1 — a catalog entry that declares its own 'expiresInMinutes'
+  // gets a fresh, signed deadline computed from THIS mint's own clock,
+  // every time (a re-mint gets a brand new window too, never a
+  // continuation of an old one's countdown — same as every other
+  // asset-level field here). Never present at all for a class that doesn't
+  // opt in. Mirrors issuer-server/server.js's mintAssetByClass().
+  if (isset($catalogEntry['expiresInMinutes'])) {
+    $asset['expiresAt'] = gmdate('Y-m-d\TH:i:s\Z', time() + (int) round($catalogEntry['expiresInMinutes'] * 60));
+  }
   return issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes);
 }
 
@@ -470,6 +479,7 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   }
   if (!isset($credential['quantity']) || $credential['quantity'] < $minQuantity) return 'asset has insufficient quantity';
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
   return null;
@@ -502,6 +512,7 @@ function check_presented_unique_asset($publicKeyB64url, $credential, $expectedOw
     return 'asset class is fungible — present it as a quantity balance, not a unique item';
   }
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
   return null;
@@ -560,6 +571,7 @@ function check_presented_membership($publicKeyB64url, $credential, $expectedOwne
     return 'membership is the wrong class';
   }
   if (is_revoked($credential['id'])) return 'membership already revoked';
+  if (is_expired($credential)) return 'membership has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'membership signature does not check out';
   return null;
@@ -608,6 +620,7 @@ function verify_foreign_asset_credential($credential) {
     foreach ($revoked as $r) {
       if (($r['id'] ?? null) === $credential['id']) return false;
     }
+    if (is_expired($credential)) return false;
     return true;
   } catch (Exception $e) {
     return false;
@@ -650,6 +663,7 @@ function check_presented_transferable_asset($publicKeyB64url, $credential, $expe
   if (empty($credential['issuer']['domain'])) return 'asset has no issuer domain';
   if ($credential['issuer']['domain'] === atlas_domain()) {
     if (is_revoked($credential['id'])) return 'asset already revoked';
+    if (is_expired($credential)) return 'asset has expired';
     $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
     if (!$ok) return 'asset signature does not check out';
     return null;
@@ -689,6 +703,7 @@ function check_presented_giftable_asset($publicKeyB64url, $credential, $expected
     return 'asset class is fungible — this endpoint only transfers a unique item';
   }
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
   return null;
@@ -715,6 +730,7 @@ function check_presented_redeemable_asset($publicKeyB64url, $credential, $expect
     return 'asset class is fungible — this endpoint only redeems a unique item';
   }
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
   return null;
@@ -743,6 +759,7 @@ function check_presented_spendable_asset($publicKeyB64url, $credential, $expecte
   }
   if (!isset($credential['quantity']) || $credential['quantity'] < $amount) return 'balance is insufficient for this purchase';
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_expired($credential)) return 'balance has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
   return null;
@@ -768,6 +785,10 @@ function check_presented_fulfillable_asset($publicKeyB64url, $credential) {
     return 'asset class is fungible — this endpoint only fulfills a single held instance';
   }
   if (is_revoked($credential['id'])) return 'asset already revoked or already fulfilled';
+  // A museum day ticket (SPEC.md §5.1's expiresAt) is the worked example
+  // this check exists for — see issuer-server/server.js's
+  // checkPresentedFulfillableAsset() for the full reasoning.
+  if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
   return null;

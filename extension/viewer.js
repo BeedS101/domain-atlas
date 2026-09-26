@@ -3040,7 +3040,10 @@ function drawInteractable(marker, originX, originY, pulse) {
   ctx.fillText(marker.label || 'Collect', base.x, cy - radius - 8);
   ctx.font = '9px system-ui, sans-serif';
   ctx.fillStyle = '#a9b8bf';
-  ctx.fillText(marker.action === 'open-chess' ? 'click to play' : 'click to collect', base.x, base.y + 22);
+  ctx.fillText(
+    marker.action === 'open-chess' ? 'click to play' : marker.action === 'purchase' ? 'click to buy' : 'click to collect',
+    base.x, base.y + 22
+  );
 
   return { sx: base.x, sy: cy, radius: radius + 14, marker };
 }
@@ -4414,8 +4417,20 @@ function renderPreviewerContent(items) {
       } else if (info === null) {
         previewerBodyEl.innerHTML = '<div class="meta">' + item.marker.class + ' (unknown class)</div>';
       } else {
-        previewerBodyEl.innerHTML = renderPreviewerItemDetail(info.name, item.marker.class, item.domain, info.thumbnail, info.properties, 'Not collected yet') +
-          '<div class="previewer-collect-hint">Click, or press E, to collect</div>';
+        // A "purchase" marker (the museum ticket stall's own worked example)
+        // gets a price/expiry note instead of the generic "Not collected
+        // yet" — info.purchase/info.expiresInMinutes come straight off
+        // GET /atlas/asset/class (see that route's own comment for why
+        // those two fields are exposed there at all), so this never
+        // hardcodes a number the scene author would have to keep in sync
+        // with the catalog by hand.
+        const note = item.marker.action === 'purchase' && info.purchase
+          ? info.purchase.priceAmount + ' ' + info.purchase.priceClass +
+            (typeof info.expiresInMinutes === 'number' ? ' · expires ' + info.expiresInMinutes + ' min after purchase' : '')
+          : 'Not collected yet';
+        const hint = item.marker.action === 'purchase' ? 'Click, or press E, to buy' : 'Click, or press E, to collect';
+        previewerBodyEl.innerHTML = renderPreviewerItemDetail(info.name, item.marker.class, item.domain, info.thumbnail, info.properties, note) +
+          '<div class="previewer-collect-hint">' + hint + '</div>';
       }
     }
     return;
@@ -10842,11 +10857,15 @@ droppedItemsListEl.addEventListener('click', (e) => {
 });
 
 // Dispatch for a clicked in-scene interactable (see the "interactables"
-// note in enterWorld). Two actions exist today: "mint" (calls
+// note in enterWorld). Four actions exist today: "mint" (calls
 // AtlasWallet.mintAsset() directly — task #211 removed the old dev-only
 // "Mine 20 iron (self)"/"Mine 10 gold (counterparty)" Settings buttons
 // that used to call the same thing, since every world's own mining
-// stalls are the real, in-scene way to reach it now) and "open-chess"
+// stalls are the real, in-scene way to reach it now), "issue" (see just
+// below), "purchase" (the museum ticket stall's own worked example — spend
+// a fungible balance to acquire a fresh asset via AtlasWallet.purchaseAsset(),
+// the first time a scene-declared stall reaches for the owner-signed intent
+// envelope every other action here never needed), and "open-chess"
 // (task #195 — opens the chess modal; see that section further down). The busy
 // guard exists because — unlike a portal (leaves the scene) or a dropped
 // item (removes its own marker once picked up) — a stall stays put and
@@ -10928,9 +10947,27 @@ async function handleInteractable(marker) {
       // pickup (compass, ring, crate) doesn't pay for a wallet-panel DOM
       // lookup it has nothing to do with.
       if (marker.class === 'atlas.membership') await refreshSubscribeButton();
+    } else if (marker.action === 'purchase') {
+      // The museum ticket stall's own worked example (SPEC.md §5.8) — unlike
+      // "mint"/"issue" above, this can genuinely fail for a reason the
+      // visitor needs to actually read (insufficient balance), not just a
+      // generic "Mint failed" — AtlasWallet.purchaseAsset() already throws a
+      // message naming exactly how much is needed and held, so it's passed
+      // straight through by the catch block below rather than paraphrased
+      // here.
+      const identity = await AtlasWallet.getIdentity();
+      if (!identity) throw new Error('Create an identity first.');
+      statusEl.textContent = 'Buying ' + (marker.label || marker.class) + '…';
+      const result = await AtlasWallet.purchaseAsset('self', manifestDomainOf(currentManifest), marker.class);
+      await refreshInventoryDisplay();
+      const expiresAt = result.purchased.asset.expiresAt;
+      statusEl.textContent = 'Bought ' + result.purchased.asset.name +
+        (expiresAt ? ' — expires ' + new Date(expiresAt).toLocaleTimeString() + '.' : '.');
     }
   } catch (err) {
-    statusEl.textContent = (marker.action === 'mint' ? 'Mint failed: ' : 'Collect failed: ') + err.message;
+    statusEl.textContent = (marker.action === 'mint' ? 'Mint failed: '
+      : marker.action === 'purchase' ? 'Purchase failed: '
+      : 'Collect failed: ') + err.message;
   } finally {
     interactableBusyMarkers.delete(marker);
   }

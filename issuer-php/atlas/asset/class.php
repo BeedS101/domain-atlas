@@ -53,4 +53,16 @@ if ($resolved === null) send_json(404, ['error' => 'unknown assetClass']);
 $resolved['model'] = $resolved['model'] ?? null;
 $resolved['thumbnail'] = $resolved['thumbnail'] ?? null;
 
+// 'purchase' and 'expiresInMinutes' are policy, not part of the signed
+// `asset` shape atlas_asset_catalog_entry() builds — they never travel on
+// a credential, so they have to be read straight off the raw catalog entry
+// here, the same way issuer-server/server.js's own route reads them
+// straight off ASSET_CATALOG[cls] rather than through mintAssetByClass's
+// asset-builder. Lets a scene's "purchase" interactable (the museum
+// ticket stall) show a live price/expiry without hardcoding either in
+// scene.json — see that route's own comment for the full reasoning.
+$rawEntry = ATLAS_ASSET_CATALOG[$cls];
+if (isset($rawEntry['purchase'])) $resolved['purchase'] = $rawEntry['purchase'];
+if (isset($rawEntry['expiresInMinutes'])) $resolved['expiresInMinutes'] = $rawEntry['expiresInMinutes'];
+
 send_json(200, $resolved);

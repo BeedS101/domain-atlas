@@ -806,6 +806,36 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
     'purchase' => ['priceClass' => 'atlas.credit.balance', 'priceAmount' => 3],
   ],
+  // SPEC.md §5.1's expiresAt, worked example: the Museum's ticket booth
+  // sells this for the SAME atlas.credit.balance the cafeteria demo already
+  // uses — a completely different UI (a 3D spatial stall, not a 2D page)
+  // spending the exact same balance class through the exact same generic
+  // purchase endpoint. 'expiresInMinutes' => 3 is a deliberately short,
+  // sped-up stand-in for "valid for the day" — long enough to walk it
+  // around and present it at the door, short enough to actually watch it
+  // go stale in one sitting. Mirrors issuer-server/server.js's
+  // ASSET_CATALOG entry of the same name.
+  'atlas.demo.museum.ticket' => [
+    'name' => 'Museum Day Ticket', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
+    'purchase' => ['priceClass' => 'atlas.credit.balance', 'priceAmount' => 10],
+    'expiresInMinutes' => 3,
+  ],
+  // Test-only fixture for manual-asset-expiry.js — mirrors issuer-server/
+  // server.js's ASSET_CATALOG entry of the same name; see that entry's own
+  // comment for why this exists.
+  'atlas.test.expiring' => [
+    'name' => 'Test Expiring Item', 'modelPath' => '/assets/badge.glb',
+    'fungible' => false, 'presentation' => 'document',
+    'expiresInMinutes' => 0.05,
+  ],
+  // A fungible sibling of the fixture above — mirrors issuer-server/
+  // server.js's ASSET_CATALOG entry of the same name.
+  'atlas.test.expiring.balance' => [
+    'name' => 'Test Expiring Balance', 'modelPath' => '/assets/compass.glb',
+    'fungible' => true, 'presentation' => 'collectible',
+    'expiresInMinutes' => 0.05,
+  ],
   // Equippable looks: no modelPath/thumbnailPath (an outfit isn't a held
   // or displayed object, just a recolor of the shared character model).
   // shirtColor/pantsColor are under atlas.*, not com.example.*, because a
@@ -1024,6 +1054,18 @@ function is_revoked($id) {
     if (isset($r['id']) && $r['id'] === $id) return true;
   }
   return false;
+}
+
+// Mirrors issuer-server/server.js's isExpired() — a second, orthogonal way
+// a credential can stop being valid, alongside revocation above (SPEC.md
+// §5.1's optional signed `asset.expiresAt`). Pure arithmetic against the
+// credential's own signed deadline, no file I/O at all — see
+// mint_asset_by_class()'s own `expiresInMinutes` handling for where that
+// deadline gets set.
+function is_expired($credential) {
+  $expiresAt = isset($credential['asset']['expiresAt']) ? $credential['asset']['expiresAt'] : null;
+  if (!is_string($expiresAt)) return false;
+  return time() > strtotime($expiresAt);
 }
 
 function atlas_revoke($id, $reason) {
