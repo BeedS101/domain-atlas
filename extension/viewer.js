@@ -3865,7 +3865,8 @@ function formatItemProperties(properties) {
 // Development-only: every other field on a credential/asset that has a
 // real behavioral effect but no visible label anywhere in the UI —
 // tradeScope (gates the Drop button), presentation (only ever used to
-// sort into the Collectibles/Documents tab), fungible, issuedAt, id,
+// sort into the Collectibles/Documents tab), fungible, issuedAt,
+// expiresAt (SPEC.md §5.10 — absent unless the class opted in), id,
 // supersedes, and the issuer/owner public keys — merged in front of the
 // free-form asset.properties dict, so nothing signed gets missed while
 // this schema is still actively changing. name/class/issuer.domain are
@@ -3883,6 +3884,7 @@ function mergedAssetFields(entry) {
     thumbnail: asset.thumbnail || '(none)',
     id: c.id,
     issuedAt: c.issuedAt,
+    expiresAt: asset.expiresAt,
     supersedes: c.supersedes,
     // Guarded rather than c.issuer.publicKey/c.owner.publicKey directly:
     // every real minted credential has both, but this is also called
