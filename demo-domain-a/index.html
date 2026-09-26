@@ -8,14 +8,40 @@
   h1{ margin-bottom: 0.3rem; }
   p.tag{ color: #6b7d87; }
   code{ background: #eee; padding: 0.15em 0.4em; border-radius: 3px; }
+  .callout{ margin-top: 2rem; padding: 1.1rem 1.3rem; border: 1px solid #dfe6ea; border-radius: 10px; background: #fbfcfd; }
+  .callout h2{ margin: 0 0 0.3rem; font-size: 1.05rem; }
+  .callout a{ color: #2a5fa8; font-weight: 600; }
+  .callout ol{ margin: 0.5rem 0 0.7rem; padding-left: 1.3rem; }
+  .callout li{ margin: 0.2rem 0; }
 </style>
 </head>
 <body>
-  <h1>Example Plaza</h1>
+  <h1>Domain Atlas Alpha Node</h1>
   <p class="tag">An ordinary web page — nothing about it looks different.</p>
   <p>This domain publishes a spatial manifest at <code>/.well-known/spatial.json</code>
-     declaring <strong>two worlds</strong> — Plaza and Museum — under one identity, plus
-     a portal out to a second, independent domain on port 8002. A Domain Atlas-aware
-     client can detect all of that and offer to render it.</p>
+     declaring <strong>five worlds</strong> — Plaza, Museum, Arena, Market, and Lobby —
+     under one identity, plus a portal out to a second, independent domain. A Domain
+     Atlas-aware client can detect all of that and offer to render it.</p>
+
+  <div class="callout">
+    <h2>Walking into these spaces needs the wallet extension</h2>
+    <p>This page looks like nothing on its own — a Domain Atlas-aware browser extension
+       is what actually detects the manifest above and offers to open a world, with a
+       wallet identity to hold whatever you pick up along the way.</p>
+    <ol>
+      <li><a href="https://github.com/BeedS101/domain-atlas">Get the extension from the GitHub repo</a> (the <code>extension/</code> folder)</li>
+      <li>In Chrome, open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>, then <strong>Load unpacked</strong> and select that folder</li>
+      <li>Reload this page — it'll offer to enter the space, and walk you through setting up a wallet identity the first time</li>
+    </ol>
+  </div>
+
+  <div class="callout">
+    <h2>This domain also issues real, signed credentials</h2>
+    <p>Separately from the spatial side above, this same domain can issue, verify,
+       and revoke cryptographically signed credentials — no extension or wallet
+       identity needed to see it work.
+       <a href="/business-demo.html">Try the credential demo →</a>
+    </p>
+  </div>
 </body>
 </html>
