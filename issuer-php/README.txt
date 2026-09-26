@@ -457,6 +457,38 @@ A reserved `"global"` value exists for a later federated-venue scenario;
 nothing in this bundle checks for it yet.
 
 
+Direct credential transfers
+-------------------------------
+Loadouts' transfer-on-loss (extension/wallet.js, purely local — no domain
+call involved at all) and a Trading Station settlement above (needs a
+mirrored counter-offer and a membership card) both assume a specific
+context. Neither fits the plainest case: "I hold this, send it straight to
+that public key, nothing wanted back." POST /atlas/asset/transfer covers
+exactly that: {credential, recipientPublicKey, intent: {payload:
+{credentialId, recipientPublicKey, action: 'transfer'}, proof}},
+authorized by nothing more than the holder's own signature over exactly
+what it authorizes — the same envelope shape /atlas/trade/submit and
+/atlas/world/drop already use for theirs. Non-fungible only for now; a
+bound credential is rejected with a plain-English reason
+(check_presented_giftable_asset() in lib/bootstrap.php), same tradeScope
+discipline every other transfer path here already enforces. The actual
+instance (serial, any per-instance properties) survives the move — it
+reuses the same transfer_unique_asset() primitive World Drops and Trading
+Station settlement already share, not a fresh catalog-derived stand-in.
+test/manual-asset-transfer.js covers the successful transfer, replay
+rejection, the bound rejection, a non-owner's signature being rejected,
+self-transfers being rejected, and a mismatched intent being rejected
+without spending anything — on both issuers.
+
+This is also what powers demo-domain-a/business-demo.html on the Node
+side — a standalone, extension-free page that issues a visitor a giftable
+demo coupon (atlas.demo.coupon) alongside a non-transferable badge and
+lets them try sending each to a page-local stand-in for "a friend". That
+page lives under demo-domain-a/, not this bundle, since it needs
+somewhere to be served as a static file, but the endpoint it calls behaves
+identically here.
+
+
 Updating an already-issued asset
 ----------------------------------
 An asset credential is signed and immutable the moment it's issued — but a

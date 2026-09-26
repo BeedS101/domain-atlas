@@ -727,6 +727,28 @@ const ASSET_CATALOG = {
       'com.example.awardedFor': 'Defeating the in-world chess bot on Hard difficulty'
     }
   },
+  // A giftable, non-collectible credential for the standalone business
+  // demo (demo-domain-a/business-demo.html): a voucher a visitor can send
+  // straight to another public key via POST /atlas/asset/transfer, next to
+  // atlas.badge as the contrasting bound example the same page issues
+  // alongside it. `presentation: 'document'` rather than 'collectible' —
+  // this is meant to be redeemed and read, not displayed on a shelf. No
+  // tradeScope override, so it defaults to 'local' (giftable/tradeable),
+  // the whole point of pairing it with a bound class in that demo. Reuses
+  // the badge model/thumbnail rather than commissioning new art, same as
+  // atlas.membership/atlas.postoffice.membership above.
+  'atlas.demo.coupon': {
+    name: '10% Off Coupon',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    thumbnail: `https://${DOMAIN}/assets/badge.png`,
+    fungible: false,
+    presentation: 'document',
+    properties: {
+      'atlas.rarity': 'common',
+      'com.example.discount': '10% off your next order',
+      'com.example.issuedFor': 'business demo'
+    }
+  },
   // Equippable looks: no model/thumbnail (an outfit isn't a held or
   // displayed object, just a recolor of the shared character model — see
   // extension/wallet.js's avatarLookPropertiesFromAsset() and
@@ -2128,6 +2150,31 @@ async function main() {
     return null;
   }
 
+  // A fourth sibling of checkPresentedUniqueAsset/checkPresentedMembership/
+  // checkPresentedTransferableAsset above, for POST /atlas/asset/transfer
+  // below: a direct, one-sided send to a named recipient, with no listing,
+  // no location, and no matching counter-offer required — unlike a Trading
+  // Station trade (needs a mirrored intent) or a World Drop (needs a world
+  // to sit in and a claimant to walk up), this is just "I hold it, send it
+  // to this exact public key." Non-fungible only for now, same restriction
+  // checkPresentedUniqueAsset already applies, and only ever checked
+  // against THIS domain's own credentials (unlike checkPresentedTransferableAsset,
+  // there is no foreign-domain branch here — nothing stops that from being
+  // added later the same way World Drops' relay-claim already shows how).
+  // Same checks as checkPresentedUniqueAsset, just worded for "send" rather
+  // than "trade" so a rejected demo visitor gets the right verb back.
+  async function checkPresentedGiftableAsset(credential, expectedOwner, expectedClass) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
+    if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
+    if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
+    if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be sent to anyone else';
+    if (credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only transfers a unique item';
+    if (isRevoked(credential.id)) return 'asset already revoked';
+    const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+    if (!ok) return 'asset signature does not check out';
+    return null;
+  }
+
   // Task #250 — the actual custody change once a claim is legitimate,
   // shared by both branches of POST /atlas/world/drops/claim: the local
   // same-domain path (this domain issued the dropped credential itself)
@@ -2775,6 +2822,40 @@ async function main() {
           tradeScope: entry.tradeScope || 'local',
           ...(entry.properties && Object.keys(entry.properties).length ? { properties: entry.properties } : {})
         });
+      }
+
+      // Direct, one-sided transfer: send a held non-fungible credential
+      // straight to a named recipient's public key, no listing posted, no
+      // matching counter-offer, no world to drop it in first — the
+      // simplest possible "give this to someone else" primitive this
+      // protocol offers, sitting alongside the heavier Trading Station
+      // (§7, needs a matched intent) and World Drops (§5.5, needs a world
+      // and a claimant to walk up) mechanisms without replacing either.
+      // Authorized the same way every other signed action here is: a small
+      // envelope over exactly the fields it authorizes, checked with
+      // verifyEnvelope, same shape /atlas/trade/submit and
+      // /atlas/world/drop already use for theirs.
+      if (req.method === 'POST' && req.url === '/atlas/asset/transfer') {
+        const { credential, recipientPublicKey, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !recipientPublicKey || !intent) return sendJson(res, 400, { error: 'credential, recipientPublicKey, and intent are all required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.credentialId !== credential.id || intent.payload.recipientPublicKey !== recipientPublicKey || intent.payload.action !== 'transfer') {
+          return sendJson(res, 400, { error: 'intent does not authorize transferring this credential to this recipient' });
+        }
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const senderPub = intent.proof.publicKey;
+
+        if (recipientPublicKey === senderPub) return sendJson(res, 400, { error: 'cannot transfer a credential to yourself' });
+
+        const problem = await checkPresentedGiftableAsset(credential, senderPub, credential.asset && credential.asset.class);
+        if (problem) return sendJson(res, 400, { error: problem });
+
+        const received = await transferUniqueAsset(recipientPublicKey, credential);
+        revoke(credential.id, 'transferred');
+        console.log('Transferred', credential.asset.class, credential.id, '->', recipientPublicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { status: 'transferred', credential: received });
       }
 
       // --- §7 trading stations (this server plays the station role — see file header) ---

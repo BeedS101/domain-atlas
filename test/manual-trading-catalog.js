@@ -22,12 +22,13 @@
 //   1. Node: GET /atlas/trade/catalog returns iron/gold/silver plus every
 //      one of task #204's 115 periodic-table elements, PLUS (task #250
 //      fourth follow-up) the two non-bound non-fungible classes
-//      (atlas.wearable.ring, atlas.trophy.chess) — 120 non-bound classes
-//      exactly, no more, no fewer. (Originally this asserted an EXACT
-//      3-class list; #204's expansion widened it to "the original 3 are
-//      present, PLUS the 115 new ones, PLUS nothing else"; the fourth
-//      follow-up widened it again to also admit non-fungible, non-bound
-//      classes — see assertCatalogShape below.)
+//      (atlas.wearable.ring, atlas.trophy.chess), PLUS the business demo's
+//      giftable atlas.demo.coupon — 121 non-bound classes exactly, no more,
+//      no fewer. (Originally this asserted an EXACT 3-class list; #204's
+//      expansion widened it to "the original 3 are present, PLUS the 115
+//      new ones, PLUS nothing else"; the fourth follow-up widened it again
+//      to also admit non-fungible, non-bound classes — see
+//      assertCatalogShape below.)
 //   2. Node: every genuinely BOUND class (atlas.membership,
 //      atlas.postoffice.membership, atlas.tradingstation.membership,
 //      atlas.wearable, atlas.badge, atlas.trinket.pin, atlas.trinket.charm)
@@ -39,7 +40,7 @@
 //   4. Node: the response is genuinely ungated — a plain GET with no
 //      identity, membership, or credential presented at all.
 //   5. PHP: issuer-php's atlas/trade/catalog.php port returns the exact
-//      same 120-class set, in the same shape, off its own independent
+//      same 121-class set, in the same shape, off its own independent
 //      ATLAS_ASSET_CATALOG (base + elements-catalog.php merge) — proving
 //      the port didn't silently drift from the Node original.
 //   6. A couple of #204's new element entries carry exchangeRate (every
@@ -72,7 +73,12 @@ const ORIGINAL_THREE = ['atlas.element.gold', 'atlas.element.iron', 'atlas.eleme
 // fixed count check plus "these are in there" is more maintainable than
 // hand-listing all 120 names here.
 const NEWLY_INCLUDED_UNIQUE_CLASSES = ['atlas.wearable.ring', 'atlas.trophy.chess'];
-const EXPECTED_TOTAL_CLASSES = 118 + NEWLY_INCLUDED_UNIQUE_CLASSES.length;
+// atlas.demo.coupon (the business demo's giftable voucher, POST
+// /atlas/asset/transfer) is a third non-bound, non-fungible class, added
+// the same way the two above were — tracked separately since it has
+// nothing to do with task #250's fourth follow-up.
+const OTHER_NON_BOUND_UNIQUE_CLASSES = ['atlas.demo.coupon'];
+const EXPECTED_TOTAL_CLASSES = 118 + NEWLY_INCLUDED_UNIQUE_CLASSES.length + OTHER_NON_BOUND_UNIQUE_CLASSES.length;
 const EXCLUDED_CLASSES = [
   'atlas.membership', 'atlas.postoffice.membership', 'atlas.tradingstation.membership',
   'atlas.wearable', 'atlas.badge', 'atlas.trinket.pin', 'atlas.trinket.charm'
@@ -90,7 +96,7 @@ function assertCatalogShape(label, classes) {
   for (const original of ORIGINAL_THREE) {
     if (!names.includes(original)) throw new Error(label + ': expected the original ' + original + ' to still be present, it was missing');
   }
-  for (const unique of NEWLY_INCLUDED_UNIQUE_CLASSES) {
+  for (const unique of NEWLY_INCLUDED_UNIQUE_CLASSES.concat(OTHER_NON_BOUND_UNIQUE_CLASSES)) {
     if (!names.includes(unique)) throw new Error(label + ': expected ' + unique + ' (non-bound, non-fungible) to now be present, it was missing');
   }
   for (const excluded of EXCLUDED_CLASSES) {
@@ -149,20 +155,20 @@ function assertCatalogShape(label, classes) {
     if (nodeRes.body.domain !== NODE_DOMAIN) throw new Error('Expected domain ' + NODE_DOMAIN + ', got ' + JSON.stringify(nodeRes.body.domain));
     console.log('PASS: 200, ungated, domain matches ->', nodeRes.body.domain);
 
-    console.log('STEP 2: Node — the original 3 fungible elements plus task #204\'s 115 periodic-table elements plus the two non-bound unique classes (120 total), no BOUND classes leaking in');
+    console.log('STEP 2: Node — the original 3 fungible elements plus task #204\'s 115 periodic-table elements plus the three non-bound unique classes (121 total), no BOUND classes leaking in');
     assertCatalogShape('Node', nodeRes.body.classes);
     console.log('PASS: Node catalog ->', nodeRes.body.classes.length, 'classes, including', JSON.stringify(ORIGINAL_THREE));
 
     console.log('STEP 3: Node — tradeScope defaults to "local" for every entry, matching mintAssetByClass\'s own `catalogEntry.tradeScope || \'local\'` convention, and every entry carries a numeric exchangeRate with exactly one isBaseCurrency: true (gold)');
-    console.log('PASS: checked inside assertCatalogShape above, for all 120 entries');
+    console.log('PASS: checked inside assertCatalogShape above, for all 121 entries');
 
-    console.log('STEP 4: PHP — GET /atlas/trade/catalog on an independent bundle copy returns the exact same 120-class set, same shape');
+    console.log('STEP 4: PHP — GET /atlas/trade/catalog on an independent bundle copy returns the exact same 121-class set, same shape');
     const phpRes = await get(PHP_BASE, '/atlas/trade/catalog');
     if (phpRes.status !== 200) throw new Error('Expected 200 from PHP\'s ungated GET, got ' + phpRes.status + ': ' + JSON.stringify(phpRes.body));
     assertCatalogShape('PHP', phpRes.body.classes);
     console.log('PASS: PHP catalog matches Node\'s ->', phpRes.body.classes.length, 'classes');
 
-    console.log('STEP 5: cross-backend parity — same names, same thumbnails (once each domain prefix is stripped), same exchangeRate, for every one of the 120 shared classes');
+    console.log('STEP 5: cross-backend parity — same names, same thumbnails (once each domain prefix is stripped), same exchangeRate, for every one of the 121 shared classes');
     const nodeByClass = new Map(nodeRes.body.classes.map((c) => [c.class, c]));
     const phpByClass = new Map(phpRes.body.classes.map((c) => [c.class, c]));
     for (const cls of nodeByClass.keys()) {
@@ -174,7 +180,7 @@ function assertCatalogShape(label, classes) {
       const phpThumbPath = p.thumbnail && p.thumbnail.replace('https://localhost:' + PHP_PORT, '');
       if (nodeThumbPath !== phpThumbPath) throw new Error('Thumbnail path mismatch for ' + cls + ': Node="' + nodeThumbPath + '" PHP="' + phpThumbPath + '"');
     }
-    console.log('PASS: Node and PHP agree on name + thumbnail path + exchangeRate for all 120 shared classes — the port did not drift from the original');
+    console.log('PASS: Node and PHP agree on name + thumbnail path + exchangeRate for all 121 shared classes — the port did not drift from the original');
 
     console.log('\nALL TRADING CATALOG (TASK #202) CHECKS PASSED');
   } catch (err) {

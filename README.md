@@ -852,6 +852,49 @@ entry, the randomized-class caveat note shows and hides correctly, and a
 property already deleted by an active patch shows up as a literal `null`
 in the pre-fill rather than being silently hidden.
 
+## Direct credential transfers, and a standalone business demo
+
+The two ways of moving a unique credential to someone else covered above —
+loadouts' transfer-on-loss (§4, purely local, no domain call at all) and a
+Trading Station settlement (§7, needs a mirrored counter-offer and a
+membership card) — both assume a specific context: losing something in a
+world, or negotiating a swap at a station. Neither fits the plainest case,
+"I hold this, send it straight to that public key, nothing wanted back."
+`POST /atlas/asset/transfer` covers exactly that: `{credential,
+recipientPublicKey, intent: {payload: {credentialId, recipientPublicKey,
+action: 'transfer'}, proof}}`, authorized by nothing more than the
+holder's own signature over exactly what it authorizes — same envelope
+shape `/atlas/trade/submit` and `/atlas/world/drop` already use for
+theirs. Non-fungible only for now; a bound credential (`atlas.wearable`,
+`atlas.badge`, any membership card) is rejected with a plain-English
+reason, same tradeScope discipline every other transfer path already
+enforces. The actual instance (serial, any per-instance properties)
+survives the move — it reuses the same `transferUniqueAsset()`/
+`transfer_unique_asset()` primitive World Drops and Trading Station
+settlement already share, not a fresh catalog-derived stand-in.
+`test/manual-asset-transfer.js` covers the successful transfer, replay
+rejection (a spent credential can't be sent again), the bound rejection,
+a non-owner's signature being rejected, self-transfers being rejected, and
+a mismatched intent being rejected without spending anything — on both
+issuers.
+
+`demo-domain-a/business-demo.html` puts this in front of someone with
+nothing installed at all: no extension, no wallet, just a page. It
+generates two throwaway ECDSA keypairs entirely in the browser tab ("you"
+and a stand-in for "your friend" — the same device the extension's own
+counterparty identity already uses for the transfer-on-loss demo, just
+reused here for a real, domain-recognized transfer instead of a purely
+local one), issues "you" a giftable coupon (`atlas.demo.coupon`) alongside
+a non-transferable badge (`atlas.badge`), and lets a visitor try sending
+each to the "friend" identity. The coupon genuinely moves — a fresh,
+really-signed credential shows up in the friend panel, inspectable via a
+"View raw signed credential" toggle on every card — and the badge is
+refused with the server's own real rejection text, not a canned message.
+Every call this page makes is a real, unmodified hit on this domain's own
+`/atlas/asset/issue` and `/atlas/asset/transfer` endpoints; nothing about
+the demo is simulated client-side. `test/manual-business-demo.js` drives
+the page itself with a headless browser to prove exactly this end to end.
+
 ## 9. Verify it yourself
 
 ```bash

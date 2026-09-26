@@ -659,6 +659,41 @@ function check_presented_transferable_asset($publicKeyB64url, $credential, $expe
   return null;
 }
 
+// A fourth sibling of check_presented_unique_asset()/
+// check_presented_membership()/check_presented_transferable_asset() above,
+// for POST /atlas/asset/transfer.php: a direct, one-sided send to a named
+// recipient, with no listing, no location, and no matching counter-offer
+// required — unlike a Trading Station trade (needs a mirrored intent) or a
+// World Drop (needs a world to sit in and a claimant to walk up), this is
+// just "I hold it, send it to this exact public key." Non-fungible only for
+// now, same restriction check_presented_unique_asset() already applies, and
+// only ever checked against THIS domain's own credentials (unlike
+// check_presented_transferable_asset(), there is no foreign-domain branch
+// here). Same checks as check_presented_unique_asset(), just worded for
+// "send" rather than "trade". Mirrors issuer-server/server.js's
+// checkPresentedGiftableAsset().
+function check_presented_giftable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
+    return 'not an asset credential';
+  }
+  if (!isset($credential['owner']['publicKey']) || $credential['owner']['publicKey'] !== $expectedOwner) {
+    return 'asset does not belong to this signer';
+  }
+  if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
+    return 'asset is the wrong class';
+  }
+  if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
+    return 'asset is bound to its owner and cannot be sent to anyone else';
+  }
+  if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
+    return 'asset class is fungible — this endpoint only transfers a unique item';
+  }
+  if (is_revoked($credential['id'])) return 'asset already revoked';
+  $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+  if (!$ok) return 'asset signature does not check out';
+  return null;
+}
+
 // Shared by both the same-domain claim path (atlas/world/drops/claim.php)
 // and the cross-domain relay-claim handler
 // (atlas/world/drops/relay-claim.php) — the real ownership-transfer

@@ -754,6 +754,25 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'com.example.awardedFor' => 'Defeating the in-world chess bot on Hard difficulty',
     ],
   ],
+  // A giftable, non-collectible credential for the standalone business
+  // demo (demo-domain-a/business-demo.html): a voucher a visitor can send
+  // straight to another public key via POST /atlas/asset/transfer, next to
+  // atlas.badge as the contrasting bound example the same page issues
+  // alongside it. 'presentation' => 'document' rather than 'collectible' —
+  // this is meant to be redeemed and read, not displayed on a shelf. No
+  // tradeScope override, so it defaults to 'local' (giftable/tradeable).
+  // Reuses the badge model/thumbnail, same as atlas.membership/
+  // atlas.postoffice.membership above. Mirrors issuer-server/server.js's
+  // ASSET_CATALOG entry of the same name.
+  'atlas.demo.coupon' => [
+    'name' => '10% Off Coupon', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => false, 'presentation' => 'document',
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.discount' => '10% off your next order',
+      'com.example.issuedFor' => 'business demo',
+    ],
+  ],
   // Equippable looks: no modelPath/thumbnailPath (an outfit isn't a held
   // or displayed object, just a recolor of the shared character model).
   // shirtColor/pantsColor are under atlas.*, not com.example.*, because a
