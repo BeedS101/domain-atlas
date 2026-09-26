@@ -65,6 +65,15 @@ What's in this folder
     postoffice/mysettings.php - POST /atlas/postoffice/mysettings (self-service: read your own mail mode/block list back)
     postoffice/handle.php    - POST /atlas/postoffice/handle      (self-service: claim/change/clear your handle — see "Handle addressing" below)
     postoffice/resolve.php   - POST /atlas/postoffice/resolve     (public: handle -> public key, single lookup, no auth needed)
+    admin/session/nonce.php  - GET  /atlas/admin/session/nonce   (issue a single-use login nonce — see "Admin session primitive" below)
+    admin/session/start.php  - POST /atlas/admin/session/start   (sign the nonce as a roster admin, get a session token back)
+    admin/session/whoami.php - POST /atlas/admin/session/whoami  (check/refresh a session token, no signature needed)
+    admin/session/logout.php - POST /atlas/admin/session/logout  (end a session token early)
+    admin/is-admin.php       - GET  /atlas/admin/is-admin  (public, boolean-only: is this key on the roster? — see "Admin panel" below)
+    admin/directory.php      - POST /atlas/admin/directory (admin-gated: subscriber + Post Office rosters, for the admin panel's own dropdowns — see "Admin panel" below)
+    admin/class-patch.php    - POST /atlas/admin/class-patch   (admin-gated: set/clear a properties+tradeScope patch for a whole non-fungible class — see "Class-wide patches" below)
+    admin/class-patches.php  - POST /atlas/admin/class-patches  (admin-gated: list every class patch currently active — see "Class-wide patches" below)
+    admin/asset-classes.php  - POST /atlas/admin/asset-classes  (admin-gated: every non-fungible class, bound or not, for the class-patch form's dropdown — see "Class-wide patches" below)
     .htaccess                - makes the URLs above work without a .php
                                 extension, matching what the extension calls
   lib/
@@ -72,14 +81,19 @@ What's in this folder
     .htaccess                - blocks direct web access to this folder
                                 (this is where the private key file lives
                                 once it's generated)
+  atlas-admin/
+    index.html               - GET /atlas-admin/  (the one-page admin
+                                console — see "Admin panel" below; a plain
+                                static file, no .htaccess needed)
 
 
 How to install on your domain (cPanel File Manager)
 -----------------------------------------------------
 1. Open File Manager, go to your site's document root (public_html, or
    wherever /.well-known/spatial.json already lives).
-2. Upload BOTH the "atlas" folder and the "lib" folder so they sit right
-   next to your existing .well-known folder — same directory level.
+2. Upload the "atlas" folder, the "lib" folder, and the "atlas-admin"
+   folder so they all sit right next to your existing .well-known folder —
+   same directory level.
 3. That's it. There's nothing to configure. The first request to any
    /atlas/... endpoint will:
      - generate a fresh ECDSA P-256 keypair and save it as
@@ -495,6 +509,232 @@ either, same reasoning as /atlas/mail/send above.
 Asset-update records are stored in lib/atlas-asset-updates-store.json,
 same "next to the private key, not under .well-known" reasoning as the
 mail store.
+
+`properties` is a merge onto whatever the credential already has, not a
+replacement — a key you don't mention is left alone. Setting a key to
+`null` is the one exception: that removes it from the credential entirely
+(the standard JSON Merge Patch convention), the only way to actually take
+a fact away rather than only ever add or overwrite one.
+
+
+Class-wide patches
+----------------------
+Reissue above fixes one already-issued credential at a time — you need the
+exact JSON the holder currently has. That doesn't scale to "everyone who
+picked up atlas.trophy.chess before I fixed the wording on it" without
+either reissuing each holder by hand or keeping a registry of who holds
+what — and this bundle deliberately keeps no such registry: it never
+records who owns which asset, it only ever re-verifies whatever a wallet
+chooses to present.
+
+POST /atlas/admin/class-patch (admin-gated, same {payload, proof} or
+{payload, token} shape as every other admin action here) sets a
+`properties` patch and/or a `tradeScope` override for an entire
+non-fungible asset CLASS, not a specific credential. The wire shape is
+{payload: {assetClass, properties, tradeScope}, proof} (or `clear: true`
+in place of properties/tradeScope to remove a class's patch entirely); at
+least one of properties or tradeScope is required otherwise. Same
+non-fungible-only restriction as reissue above — a fungible class's
+properties/tradeScope are already uniform across every balance
+(mint_asset_by_class() rebuilds them fresh from ATLAS_ASSET_CATALOG on
+every mint/split/consolidate/trade), so the endpoint rejects a fungible
+assetClass with a clear error. POST /atlas/admin/class-patches (same
+auth) lists every class patch currently active.
+
+POST /atlas/admin/asset-classes (same auth) is what feeds the admin
+panel's own class-name dropdown: every non-fungible class in
+ATLAS_ASSET_CATALOG, bound or not. It's deliberately NOT
+atlas/trade/catalog.php — that endpoint exists to advertise what can be
+traded, so it excludes a tradeScope: 'bound' class on purpose (a
+membership card or a badge can never be the thing traded), but a bound
+class is just as valid a class-patch target as a tradeable one. Each
+entry also carries the class's own base `properties` and a `randomized`
+flag (true when ATLAS_ASSET_CATALOG sets randomizeProperties for it) — the
+admin panel uses both to pre-fill the form instead of leaving the operator
+to type a patch blind: picking a class fills in its base properties/
+tradeScope merged with whatever's in an already-active patch for it (the
+patch wins, since that's the fact actually in force), and a randomized
+class gets a note that what's shown is only the shared fallback template,
+never any specific holder's actual roll.
+
+`properties` here goes through the same merge as /atlas/asset/reissue's
+own argument, including the same `null`-deletes-a-key convention — with
+one extra wrinkle specific to a class patch: setting a class patch is
+itself a patch onto whatever patch is already stored for that class (so
+a later call adding one fact doesn't erase an earlier one), and a `null`
+has to survive THAT merge as a literal stored marker rather than being
+erased the moment it's set, or the deletion would never actually reach
+anyone's credential. `merge_properties()` only ever runs where a patch is
+actually applied to a real credential (`apply_class_patch_if_stale()`,
+and /atlas/asset/reissue itself); `set_class_patch()`'s own merge onto
+the stored patch stays a plain `array_merge()` that keeps `null` verbatim.
+test/manual-properties-patch-delete.js covers exactly this — deleting a
+property via reissue, via a class patch, idempotency of a deletion
+(checking in again doesn't reissue forever), and stacking a second
+class-patch call that adds a new fact without losing an earlier deletion
+— on both issuers.
+
+Nothing already-issued is touched at the moment the patch is set. Instead,
+the next time a holder's own wallet checks in with this domain — the same
+/atlas/mail/check round trip that already delivers mail, single-credential
+reissues, and revocations — it presents whatever credential it currently
+holds for that class, this bundle notices the credential is stale against
+the active patch, and auto-reissues it on the spot exactly the way a
+manual /atlas/asset/reissue call would: revoking the old id and minting a
+signed replacement with the patch applied, which the wallet then adopts
+through its ordinary "supersede" path. This is why /atlas/mail/check's
+request body grew an optional `credentials` field alongside the existing
+`credentialIds` array: it's the wallet briefly re-presenting its own
+evidence for the ids it's asking about, not a new registry — this bundle
+still stores nothing about who holds what between requests, and never
+mints anything for a presented credential that doesn't cryptographically
+verify against this domain's own key first. A caller that only sends
+credentialIds (any older client) gets exactly the old behavior; class
+patches simply never apply to it.
+
+Class patch records are stored in lib/atlas-class-patches-store.json,
+same "next to the private key" reasoning as the other admin state files —
+and bounded by the number of classes you've ever patched, not by visitor
+or item count, unlike a per-holder registry would be.
+
+No dedicated admin UI form beyond the panel below exists for this outside
+the panel itself; see "Admin panel" below for where it lives.
+
+
+Admin session primitive
+--------------------------
+Every admin action above needed a fresh signature from a roster key — fine
+for a one-off CLI call, impractical for anything resembling a real admin
+page (you'd need the private key reachable for every click, including a
+live-updating view that polls). GET /atlas/admin/session/nonce, POST
+/atlas/admin/session/start, POST /atlas/admin/session/whoami, and POST
+/atlas/admin/session/logout add a short-lived bearer-token session on top
+of the roster, without changing what the roster means.
+
+/session/start still requires a full signed proof envelope — over a
+single-use nonce from /session/nonce, so the login itself can't be
+replayed — checked against the exact same roster require_admin() already
+enforces everywhere else in this bundle. Only once that succeeds does it
+hand back a random token (lib/atlas-admin-sessions-store.json, next to the
+other private state files), good for 30 minutes and sliding forward on
+every authenticated request that uses it (not just /whoami —
+require_admin_auth(), the shared gate every admin-gated endpoint now
+calls, treats any check as activity). /logout (or the token simply
+expiring) ends it.
+
+This is deliberately narrow: the roster is still the only thing that can
+make a key an admin, a session can't do anything a fresh signature
+couldn't, and it only ever shortens how often you have to sign, never
+widens who's authorized. atlas/revoke.php, atlas/mail/send.php,
+atlas/asset/reissue.php, and atlas/calendar.php's POST side all now accept
+{payload, token} as an alternative to {payload, proof} — the missing piece
+that makes the session actually useful for something, rather than only
+ever being able to answer "am I an admin". See "Admin panel" below for the
+page that now actually consumes it.
+
+
+Admin panel
+--------------
+atlas-admin/index.html — a one-page admin console, byte-identical to
+issuer-server/admin-panel/index.html, served at /atlas-admin/ (a plain
+static file; nothing PHP-specific about it, since it only ever calls the
+same relative /atlas/... URLs both backends already answer the same way).
+Forms for all four gated actions above, each POSTing {payload, token} —
+no signature needed per click once you're in.
+
+Getting in requires the wallet extension: its top bar grows a Admin
+button, shown only when the currently unlocked identity is on THIS
+domain's own admin roster (GET /atlas/admin/is-admin?publicKey=... — a
+cheap, ungated, boolean-only check so the button can decide whether to
+render itself without spending a real login on every page). Clicking it
+logs into (or reuses) an admin session and hands the token to this page —
+the wallet runs in an extension-origin iframe, cross-origin from this
+domain's own pages, so it can't write to this origin's sessionStorage
+directly; it postMessages the token to the extension's content script
+instead, which IS same-origin with this domain, does the actual write, and
+navigates to the exact atlas-admin/index.html filename rather than the
+bare atlas-admin/ directory — deliberately, since a real site sitting on
+top of this bundle (WordPress and most other CMSes, notably) commonly runs
+its own catch-all rewrite that only excludes an actual FILE, not just an
+actual directory, so a bare directory request can 404 there before
+Apache's own directory-index resolution ever gets a turn. Naming the file
+sidesteps that on any host — if a bare /atlas-admin/ link 404s on your
+site, that's why; the wallet's own button never hits that path.
+is-admin.php mirrors issuer-server/server.js's own /atlas/admin/is-admin
+route exactly.
+
+Locking the wallet ends every admin session it's holding, on any domain,
+at once — fire-and-forget against the server so locking stays instant,
+with the session's own 30-minute expiry as the backstop if a logout never
+lands.
+
+The panel also has an "Online now" section — who's actually here right
+now, across every world on this domain, not just one. It reads this
+domain's own .well-known/spatial.json for the world list, then queries
+each world's presence server (GET /presence/status?domain=X&world=Y — the
+same read-only endpoint the viewer's own live-visitor overlay already
+uses; the base URL comes from the manifest's own "presence" field, falling
+back to http://localhost:8004 for local dev) and totals the counts, with
+each world's roster shown underneath (name, and a truncated public key or
+"anonymous" for guests). No admin action or credential is involved in
+reading it — a separate service is being queried, not this backend. It
+loads once on login and otherwise only reloads on demand (the "Refresh"
+button) — deliberately no polling timer, so it can't fire against a page
+the admin has stepped away from.
+
+Send mail's recipient field is a credential id, not an identity. Reported
+live: an operator addressed it using their own public key, then a
+handle#domain address, expecting either to reach their own wallet — neither
+does, because this form addresses a message by the exact credential id
+whoever's supposed to receive it already holds, which mail/send.php never
+checks is real (same demo-simplification revoke.php already accepts for
+its own id). Both attempts got back a plain "Sent." with nothing to
+suggest otherwise. The panel now flags a value that doesn't even look like
+one of this domain's own ids (doesn't start with urn:atlas:) instead of
+reporting a bare success — it still sends (these endpoints don't block on
+a shape guess, only warn), but the operator now has a reason to stop and
+check the id before trusting the result.
+
+Typeable/pickable dropdowns for the fields above, not blank text boxes.
+Rather than expecting the operator to already know a credential id, world
+id, or event id by heart, Mail's recipient field and Calendar's Event id
+are <input list="...">s wired to a <datalist> — the browser's own native
+combobox, filtered to matching options as the operator types, no library
+needed. Mail's recipient field is backed by a new admin-gated endpoint,
+atlas/admin/directory.php (require_admin_auth(), same as every other admin
+action), which hands back this domain's two subscriber rosters —
+atlas.membership subscribers and Global Mail (Post Office) members, kept
+separate since they're different credential classes — each already
+filtered to currently-unrevoked credentials. atlas_subscribers_file()'s
+own long-standing comment in lib/store.php had already flagged exactly
+this as the reason no PUBLIC listing endpoint exists ("worth real operator
+authentication before ever exposing this over HTTP") — the admin session
+token is that authentication. Calendar's World id field, by contrast, is a
+plain <select> — a short, always-fully-visible list rather than a typed/
+filtered one — listing only worlds whose own manifest entry opted into a
+calendar (world.calendar === true, read from this domain's own manifest —
+no new endpoint needed) plus an always-present "— domain-wide —" option;
+picking one repopulates Event id's own <datalist> from that world's real
+events (GET /atlas/calendar?world=..., already public, refreshed again
+right after adding, updating, or removing one) and clears Event id AND
+Title/Start/End/Notes — a value left over from the PREVIOUS world could
+otherwise be submitted against the new one without the operator noticing.
+New protocol-level tests (test/manual-admin-directory-php.js) cover the
+endpoint itself.
+
+Calendar's Event id follows Action, fills the form back in, and selects
+itself on focus. Event id only means anything for update/remove — add
+always creates a fresh event, so there's nothing to pick — so it's now
+disabled whenever Action is add, and switching back to add also clears
+whatever id was left in it (a stale id sitting behind a disabled field is
+exactly the kind of thing that gets submitted by surprise if the operator
+flips Action back and forth). Once Event id is enabled, picking a real one
+there — from its own <datalist> or by typing its exact id — loads that
+event's current Title, Start, End, and Notes into the form, so update
+starts from the event's actual state instead of the operator having to
+already remember or re-look-up what's there. Focusing the field also
+selects its whole contents, the same one-keystroke-to-replace convenience
+a browser's own address bar gives a full URL.
 
 
 One real architectural difference from the Node version, worth knowing

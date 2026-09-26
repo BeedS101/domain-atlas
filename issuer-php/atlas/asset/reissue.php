@@ -19,6 +19,11 @@
 // anything — an issuer can only ever reissue its own assets, never forge
 // an update for a credential it didn't sign in the first place.
 //
+// `properties` goes through merge_properties() (lib/store.php): a key set
+// to null is removed from the result entirely rather than kept as a
+// literal null — the only way to actually take a fact away, since there
+// was previously no way to do that at all.
+//
 // `tradeScope`: since tradeScope is baked into a credential's signed
 // payload at mint time (mint_asset_by_class()'s tradeScope-defaulting
 // logic), tightening a class's catalog entry to tradeScope => 'bound' does
@@ -29,15 +34,16 @@
 // README.md's "Fixing a stale tradeScope on an already-issued credential"
 // section for the exact command a domain operator would run.
 //
-// Admin-gated (require_admin(), lib/store.php): rewriting an already-
+// Admin-gated (require_admin_auth(), lib/store.php): rewriting an already-
 // issued credential's properties or tradeScope is exactly the kind of
 // action SPEC.md §10 puts on the domain's own side, never a visitor's —
 // left open, anyone who could observe a credential (many are publicly
 // visible via trade listings or gifts) could silently alter its
 // properties or loosen/tighten its tradeScope without the owner's
-// consent, under this domain's own real signature. Wire shape is now
-// {payload: {credential, properties, tradeScope}, proof}, the same
-// envelope /atlas/revoke and /atlas/mail/send already use.
+// consent, under this domain's own real signature. Wire shape is
+// {payload: {credential, properties, tradeScope}, proof} or {payload,
+// token}, the same envelope /atlas/revoke and /atlas/mail/send already
+// use.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
@@ -51,8 +57,9 @@ try {
 
 $reissuePayload = $requestBody['payload'] ?? null;
 $proof = $requestBody['proof'] ?? null;
-$authError = require_admin($reissuePayload, $proof);
-if ($authError) send_json(401, ['error' => $authError]);
+$token = $requestBody['token'] ?? null;
+$auth = require_admin_auth($reissuePayload, $proof, $token);
+if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
 
 $credential = $reissuePayload['credential'] ?? null;
 $hasProperties = array_key_exists('properties', $reissuePayload);
@@ -84,7 +91,7 @@ if (!$sigOk) send_json(400, ['error' => "credential signature does not check out
 
 $newAsset = $credential['asset'];
 if ($hasTradeScope) $newAsset['tradeScope'] = $tradeScope;
-if ($hasProperties) $newAsset['properties'] = array_merge($newAsset['properties'] ?? [], $properties);
+if ($hasProperties) $newAsset['properties'] = merge_properties($newAsset['properties'] ?? [], $properties);
 $newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id']);
 
 // Same ordering guarantee §5.4's split/consolidate already give: the new

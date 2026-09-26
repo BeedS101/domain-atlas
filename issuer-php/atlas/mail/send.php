@@ -3,12 +3,13 @@
 //
 // This is the admin side of the mail system: SPEC.md §11.1 already says
 // sending is "authenticated as the domain operator, not as any visitor" —
-// require_admin() (lib/store.php) now enforces that instead of just
+// require_admin_auth() (lib/store.php) enforces that instead of just
 // trusting whoever could reach the endpoint, which also meant anyone
 // could get this domain to sign and deliver an arbitrary message, or mint
 // an arbitrary gift asset via giftAssetClass, to any credential id they
-// chose. Wire shape is now {payload: {...the same fields as before},
-// proof} — the same envelope every other admin action here uses.
+// chose. Wire shape is {payload: {...the same fields as before}, proof}
+// or {payload, token} — the same envelope every other admin action here
+// uses.
 //
 // No E2E encryption here (unlike server.js's Node route): that needs an
 // ECDH key derivation PHP's openssl extension doesn't expose, and there's
@@ -30,8 +31,9 @@ try {
 
 $sendPayload = $requestBody['payload'] ?? null;
 $proof = $requestBody['proof'] ?? null;
-$authError = require_admin($sendPayload, $proof);
-if ($authError) send_json(401, ['error' => $authError]);
+$token = $requestBody['token'] ?? null;
+$auth = require_admin_auth($sendPayload, $proof, $token);
+if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
 
 $credentialId = $sendPayload['credentialId'] ?? null;
 $subject = $sendPayload['subject'] ?? null;

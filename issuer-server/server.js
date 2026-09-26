@@ -59,7 +59,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { webcrypto } = require('crypto');
+const { webcrypto, timingSafeEqual } = require('crypto');
 const { subtle } = webcrypto;
 
 // All three of these are overridable by environment variable so the same
@@ -78,6 +78,14 @@ const { subtle } = webcrypto;
 const DEMO_DOMAIN_A = process.env.ATLAS_DOCROOT
   ? path.resolve(process.env.ATLAS_DOCROOT)
   : path.resolve(__dirname, '..', 'demo-domain-a');
+// The admin panel (extension/viewer.js's 🛡️ Admin button hands off a
+// session token and lands here — see content.js's 'domain-atlas-admin-
+// handoff' listener) ships WITH the issuer software, not with any one
+// domain's own site content, so it's served from a fixed folder next to
+// this file rather than from ATLAS_DOCROOT — every domain running this
+// backend gets it at the same /atlas-admin/ path for free, unmodified.
+// The identical file also lives at issuer-php/atlas-admin/index.html.
+const ADMIN_PANEL_DIR = path.resolve(__dirname, 'admin-panel');
 // ATLAS_STATE_DIR — where the private key and every server-process-only
 // state file below (mail, subscribers, postoffice members, asset updates,
 // serial counters) actually live. Defaults to __dirname (this file's own
@@ -131,6 +139,18 @@ const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
 const MAIL_ENCRYPTION_KEYS_FILE = path.join(STATE_DIR, 'atlas-mail-encryption-keys.json');
 const ASSET_UPDATES_FILE = path.join(STATE_DIR, 'atlas-asset-updates-store.json');
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
+// one entry per asset CLASS an operator has ever patched (POST
+// /atlas/admin/class-patch), never one per item or per holder: a bulk
+// alternative to reissuing each holder's credential by hand, letting an
+// operator set a fact once for a whole non-fungible class (fixing a
+// mistake, correcting an over/underpowered roll, tightening a
+// tradeScope) and having every CURRENT holder's own wallet pick it up
+// automatically on its own next check-in — see applyClassPatchIfStale()
+// below. Bounded by how many distinct classes ever get touched (at most
+// the size of ASSET_CATALOG), never by how many visitors or items exist,
+// so this can't grow the way a per-item ledger would.
+const CLASS_PATCHES_FILE = path.join(STATE_DIR, 'atlas-class-patches-store.json');
+// Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // this is a roster of who subscribed (credential id + owner public key per
 // atlas.membership issuance), not something to expose at a URL anyone can
 // guess. There's no listing/broadcast endpoint reading this yet — it exists
@@ -173,14 +193,29 @@ const POSTOFFICE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-postoffice-members-s
 const FEDERATION_BLOCKLIST_FILE = path.join(STATE_DIR, 'atlas-federation-blocklist.json');
 // Domain admin roster: the public keys authorized to act as this domain's
 // own operator over HTTP, reusing the same visitor-identity mechanism
-// (verifyEnvelope below, SPEC.md §6.2) instead of inventing a separate
-// admin-login system. Same "plain operator-edited JSON file, not a new
-// admin-auth API surface" posture FEDERATION_BLOCKLIST_FILE already uses,
-// for the same reason: there's an unavoidable bootstrap problem (something
-// has to seed the very first admin key), so this is edited by hand rather
-// than through a self-service registration endpoint. See requireAdmin()
-// below for how a request actually gets checked against it.
+// (verifyEnvelope below, SPEC.md §6.2) rather than a separate admin
+// username/password system. Same "plain operator-edited JSON file, not a
+// new admin-auth API surface" posture FEDERATION_BLOCKLIST_FILE already
+// uses, for the same reason: there's an unavoidable bootstrap problem
+// (something has to seed the very first admin key), so this is edited by
+// hand rather than through a self-service registration endpoint. See
+// requireAdmin() below for how a request actually gets checked against
+// it, and the admin session layer just below for the short-lived bearer
+// token a roster key can trade one signature for.
 const ADMIN_KEYS_FILE = path.join(STATE_DIR, 'atlas-admin-keys-store.json');
+// Short-lived admin session layer on top of the roster above: the roster
+// stays the one source of truth for who's an admin — nothing here can
+// make a non-roster key an admin — but re-signing every click with an
+// ECDSA key gets impractical for something like a live-updating admin
+// page, so a session lets a roster key sign in ONCE (over a fresh nonce,
+// so the login itself can't be replayed) and use a random bearer token
+// for everything after that, until it's logged out or the token times
+// out. See issueAdminNonce/consumeAdminNonce and createAdminSession/
+// touchAdminSession/deleteAdminSession below.
+const ADMIN_NONCES_FILE = path.join(STATE_DIR, 'atlas-admin-nonces-store.json');
+const ADMIN_SESSIONS_FILE = path.join(STATE_DIR, 'atlas-admin-sessions-store.json');
+const ADMIN_NONCE_TTL_MS = 2 * 60 * 1000; // long enough to sign and post, short enough a stale one is worthless
+const ADMIN_SESSION_TTL_MS = 30 * 60 * 1000; // slides forward on every check — see touchAdminSession
 // Trading Station membership roster (task #144 Phase 1) — same flat-array
 // shape as POSTOFFICE_MEMBERS_FILE above, kept as its own file for the same
 // reason Post Office's is separate from the plain subscriber roster: a
@@ -901,6 +936,119 @@ async function requireAdmin(payload, proof) {
   return null;
 }
 
+// Random, single-use, short-lived challenge a roster key signs over to
+// start a session (ADMIN_SESSIONS_FILE below) — without it, a captured
+// login request could just be replayed forever. Pruning expired entries
+// happens lazily on read/write here rather than on a timer, same "one
+// file, filter on read" convention PENDING_TRADES_FILE/WORLD_DROPS_FILE
+// already use.
+function readAdminNonces() {
+  if (!fs.existsSync(ADMIN_NONCES_FILE)) return { nonces: [] };
+  return JSON.parse(fs.readFileSync(ADMIN_NONCES_FILE, 'utf8'));
+}
+function writeAdminNonces(doc) {
+  fs.writeFileSync(ADMIN_NONCES_FILE, JSON.stringify(doc, null, 2));
+}
+function issueAdminNonce() {
+  const now = Date.now();
+  const doc = readAdminNonces();
+  doc.nonces = doc.nonces.filter((n) => n.expiresAt > now);
+  const nonce = b64url(webcrypto.getRandomValues(new Uint8Array(24)));
+  doc.nonces.push({ nonce, expiresAt: now + ADMIN_NONCE_TTL_MS });
+  writeAdminNonces(doc);
+  return nonce;
+}
+// Single-use: a nonce is deleted the moment it's successfully consumed, so
+// the exact same login request can never be replayed even within its own
+// TTL window. A failed attempt (bad signature, key not on the roster)
+// deliberately does NOT burn the nonce — there's nothing to gain from
+// invalidating it early, and it means a genuine admin whose first attempt
+// glitched isn't forced to fetch a fresh one.
+function consumeAdminNonce(nonce) {
+  const now = Date.now();
+  const doc = readAdminNonces();
+  const idx = doc.nonces.findIndex((n) => n.nonce === nonce && n.expiresAt > now);
+  if (idx === -1) { doc.nonces = doc.nonces.filter((n) => n.expiresAt > now); writeAdminNonces(doc); return false; }
+  doc.nonces.splice(idx, 1);
+  doc.nonces = doc.nonces.filter((n) => n.expiresAt > now);
+  writeAdminNonces(doc);
+  return true;
+}
+
+function readAdminSessions() {
+  if (!fs.existsSync(ADMIN_SESSIONS_FILE)) return { sessions: [] };
+  return JSON.parse(fs.readFileSync(ADMIN_SESSIONS_FILE, 'utf8'));
+}
+function writeAdminSessions(doc) {
+  fs.writeFileSync(ADMIN_SESSIONS_FILE, JSON.stringify(doc, null, 2));
+}
+function createAdminSession(publicKey) {
+  const now = Date.now();
+  const doc = readAdminSessions();
+  doc.sessions = doc.sessions.filter((s) => s.expiresAt > now);
+  const token = b64url(webcrypto.getRandomValues(new Uint8Array(32)));
+  const expiresAt = now + ADMIN_SESSION_TTL_MS;
+  doc.sessions.push({ token, publicKey, expiresAt });
+  writeAdminSessions(doc);
+  return { token, expiresAt };
+}
+// Constant-time compare so a session token can't be singled out any faster
+// by timing how quickly a near-miss fails — the token is 32 random bytes,
+// so this only really matters at "many attempts against many stored
+// sessions" scale, but it costs nothing to do properly.
+function tokensEqual(a, b) {
+  const bufA = Buffer.from(String(a || ''), 'utf8');
+  const bufB = Buffer.from(String(b || ''), 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+// Validates a session token and slides its expiry forward on every
+// successful check — an admin actively using the page never gets logged
+// out mid-session, but an abandoned tab's token still dies on its own.
+// Returns the session's public key, or null if the token doesn't match any
+// live session.
+function touchAdminSession(token) {
+  const now = Date.now();
+  const doc = readAdminSessions();
+  const session = typeof token === 'string' ? doc.sessions.find((s) => s.expiresAt > now && tokensEqual(s.token, token)) : null;
+  doc.sessions = doc.sessions.filter((s) => s.expiresAt > now);
+  if (!session) { writeAdminSessions(doc); return null; }
+  session.expiresAt = now + ADMIN_SESSION_TTL_MS;
+  writeAdminSessions(doc);
+  return session.publicKey;
+}
+// Logout is idempotent and looks the same whether or not the token was
+// ever valid — nothing here should let a caller distinguish "wrong token"
+// from "already logged out."
+function deleteAdminSession(token) {
+  const now = Date.now();
+  const doc = readAdminSessions();
+  doc.sessions = doc.sessions.filter((s) => s.expiresAt > now && !(typeof token === 'string' && tokensEqual(s.token, token)));
+  writeAdminSessions(doc);
+}
+
+// The authorization check every admin-gated route below actually uses:
+// EITHER a fresh signed proof envelope (requireAdmin above) OR an active
+// session token (touchAdminSession) — the session layer's whole reason to
+// exist, so a page holding a token can act as admin without the visitor's
+// ECDSA key needing to be reachable for every click. A token, when given,
+// takes priority and is checked on its own; payload/proof are only
+// consulted when no token was sent, so a request never needs to carry
+// both. Using a valid token here also slides its expiry forward, same as
+// /whoami — any authenticated action counts as activity, not just an
+// explicit status check. Returns { error } when the request should be
+// rejected, or { publicKey } when it's authorized.
+async function requireAdminAuth(payload, proof, token) {
+  if (typeof token === 'string' && token) {
+    const publicKey = touchAdminSession(token);
+    if (!publicKey) return { error: 'session is missing, unknown, or expired' };
+    return { publicKey };
+  }
+  const error = await requireAdmin(payload, proof);
+  if (error) return { error };
+  return { publicKey: proof.publicKey };
+}
+
 // Task #97 (SPEC.md §11.4): reads the operator's own federation blocklist —
 // see FEDERATION_BLOCKLIST_FILE's own comment above for what this is and
 // isn't. Missing file means nothing is blocked, same "absence is the empty
@@ -1205,6 +1353,93 @@ function appendAssetUpdate(update) {
   const doc = readAssetUpdates();
   doc.updates.push(update);
   fs.writeFileSync(ASSET_UPDATES_FILE, JSON.stringify(doc, null, 2));
+}
+
+// Merges `patch` onto `target` (never mutates either): a key set to any
+// value but `null` is added/overwritten same as a plain object spread, and
+// a key set to `null` is removed from the result entirely rather than
+// being kept as a literal null — the standard JSON Merge Patch convention
+// (RFC 7386), adopted here so there's finally a way to actually take a
+// property away rather than only ever add or overwrite one. Used wherever
+// a properties patch is applied to REAL asset data — a class patch onto a
+// credential's properties (applyClassPatchIfStale below), and /atlas/
+// asset/reissue's own `properties` argument — so `null` means "delete
+// this" in both places a patch actually takes effect. No existing
+// property here has any legitimate reason to actually BE null, so this
+// doesn't take anything away from what could be expressed before.
+//
+// Deliberately NOT used by setClassPatch()'s own merge of a new call onto
+// an already-stored patch, just below: a stored patch has to keep a `null`
+// entry as a literal delete MARKER (something to apply to a credential
+// later), not have that key erased from the patch the moment it's set —
+// erasing it there would silently forget the deletion was ever asked for,
+// which is exactly the bug this function's docs above almost shipped with.
+function mergeProperties(target, patch) {
+  const result = { ...(target || {}) };
+  for (const key of Object.keys(patch || {})) {
+    if (patch[key] === null) delete result[key];
+    else result[key] = patch[key];
+  }
+  return result;
+}
+
+// Class-patch store (see CLASS_PATCHES_FILE's own comment) — keyed by
+// asset class, not by item or holder. `patches[cls]` is `{properties?,
+// tradeScope?, updatedAt}`; `properties` is itself a patch, merged onto
+// whatever a holder's credential already has (same merge-not-replace
+// shape /atlas/asset/reissue's own `properties` argument already uses),
+// so setting one fact doesn't clobber another set earlier.
+function readClassPatches() {
+  if (!fs.existsSync(CLASS_PATCHES_FILE)) return { patches: {} };
+  return JSON.parse(fs.readFileSync(CLASS_PATCHES_FILE, 'utf8'));
+}
+function classPatchOf(cls) {
+  return readClassPatches().patches[cls] || null;
+}
+function setClassPatch(cls, { properties, tradeScope }) {
+  const doc = readClassPatches();
+  const existing = doc.patches[cls] || {};
+  // Plain spread, NOT mergeProperties() — a `null` here has to survive
+  // into the stored patch as a literal delete marker, not be erased from
+  // it right away. mergeProperties() only ever runs where a patch is
+  // actually applied to a real credential's properties, further down.
+  const nextProperties = properties ? { ...(existing.properties || {}), ...properties } : existing.properties;
+  const nextTradeScope = tradeScope !== undefined ? tradeScope : existing.tradeScope;
+  const merged = {
+    ...(nextProperties ? { properties: nextProperties } : {}),
+    ...(nextTradeScope !== undefined ? { tradeScope: nextTradeScope } : {}),
+    updatedAt: new Date().toISOString()
+  };
+  doc.patches[cls] = merged;
+  fs.writeFileSync(CLASS_PATCHES_FILE, JSON.stringify(doc, null, 2));
+  return merged;
+}
+function clearClassPatch(cls) {
+  const doc = readClassPatches();
+  delete doc.patches[cls];
+  fs.writeFileSync(CLASS_PATCHES_FILE, JSON.stringify(doc, null, 2));
+}
+// True if `credential` disagrees with `patch` on any field the patch
+// actually sets — the trigger applyClassPatchIfStale() below acts on.
+// JSON.stringify comparison rather than `===` since a property's value
+// can itself be an object/array (e.g. a stats bag), not just a scalar. A
+// `null` entry (mergeProperties' delete marker) is stale exactly when the
+// key is still actually present — once it's gone, checking again must
+// stop reporting stale, or a deleted property would reissue forever.
+function isCredentialStaleAgainstClassPatch(credential, patch) {
+  if (patch.tradeScope !== undefined && credential.asset.tradeScope !== patch.tradeScope) return true;
+  if (patch.properties) {
+    const current = credential.asset.properties || {};
+    for (const key of Object.keys(patch.properties)) {
+      const patchValue = patch.properties[key];
+      if (patchValue === null) {
+        if (Object.prototype.hasOwnProperty.call(current, key)) return true;
+      } else if (JSON.stringify(current[key]) !== JSON.stringify(patchValue)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 // Subscriber roster: one entry per atlas.membership credential ever issued.
@@ -1535,6 +1770,34 @@ function serveStatic(req, res) {
   });
 }
 
+// GET/HEAD /atlas-admin, /atlas-admin/, or /atlas-admin/index.html — the
+// one-page admin panel bundled with this server (ADMIN_PANEL_DIR above),
+// always index.html regardless of which of those three the request named:
+// the page is entirely self-contained (inline CSS/JS, no sub-resources),
+// so there's no second file any request here could ever legitimately want.
+// content.js links to the explicit /atlas-admin/index.html rather than the
+// bare directory — a real site often runs its own catch-all rewrite (a
+// CMS's "anything not a real file goes to my own router" rule, say) that
+// can 404 a bare directory request before Apache's own directory-index
+// resolution gets a turn, even though the same rewrite leaves an actual
+// file alone — but the bare paths still work here too, matching what
+// PHP's static /atlas-admin/index.html file already does unconditionally.
+// Matched before serveStatic's ATLAS_DOCROOT fallback so a domain's own
+// docroot content can never shadow it.
+function serveAdminPanel(req, res) {
+  const filePath = path.join(ADMIN_PANEL_DIR, 'index.html');
+  fs.readFile(filePath, (err, data) => {
+    if (err) { res.writeHead(404); return res.end('Not found'); }
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': String(data.length),
+      'Access-Control-Allow-Origin': '*'
+    });
+    if (req.method === 'HEAD') return res.end();
+    res.end(data);
+  });
+}
+
 async function main() {
   const { privateKey, publicKeyB64url } = await loadOrCreateKeypair();
   ensureWellKnownFiles(publicKeyB64url);
@@ -1608,6 +1871,46 @@ async function main() {
       id: credential.id, asset: credential.asset, owner: credential.owner,
       quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
     };
+  }
+
+  // Auto-applies a class-wide patch (POST /atlas/admin/class-patch, see
+  // CLASS_PATCHES_FILE's own comment) to ONE specific holder's credential
+  // the moment they check in with it (/atlas/mail/check below), instead of
+  // requiring the operator to already know who holds one. This domain
+  // keeps no registry of who holds what — re-verifying the credential the
+  // wallet itself just presented is the ONLY way to know it's real before
+  // minting a replacement for its owner, the same trust posture every
+  // other endpoint here already uses for a presented credential.
+  // Non-fungible only, same reasoning /atlas/asset/reissue already gives:
+  // a fungible class's properties/tradeScope are already uniform across
+  // every balance (mintAssetByClass rebuilds them fresh from ASSET_CATALOG
+  // on every mint/split/consolidate/trade), so there's nothing for a class
+  // patch to override there. Returns the same {id, status, reason,
+  // newCredential} shape a manual reissue already produces (or null if
+  // nothing needed to change), so /atlas/mail/check can hand it back
+  // through the exact `updates` array wallet.js's processAssetUpdates
+  // already knows how to adopt — no wallet-side change needed at all.
+  async function applyClassPatchIfStale(credential) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return null;
+    if (!credential.asset || credential.asset.fungible !== false) return null;
+    if (!credential.issuer || credential.issuer.domain !== DOMAIN) return null;
+    const patch = classPatchOf(credential.asset.class);
+    if (!patch || !isCredentialStaleAgainstClassPatch(credential, patch)) return null;
+    if (isRevoked(credential.id)) return null; // already handled by /atlas/mail/check's own revocation check — defensive only
+    const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+    if (!sigOk) return null; // never act on anything that isn't genuinely this domain's own signed credential
+
+    const newAsset = {
+      ...credential.asset,
+      ...(patch.tradeScope !== undefined ? { tradeScope: patch.tradeScope } : {}),
+      ...(patch.properties ? { properties: mergeProperties(credential.asset.properties, patch.properties) } : {})
+    };
+    const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
+    revoke(credential.id, 'class-patch');
+    const update = { id: credential.id, status: 'superseded', reason: 'class-patch', newCredential };
+    appendAssetUpdate(update);
+    console.log('Auto-reissued (class patch)', credential.asset.name, credential.id, '->', newCredential.id);
+    return update;
   }
 
   // Builds `asset` fresh from ASSET_CATALOG[cls] and signs it via
@@ -2011,6 +2314,90 @@ async function main() {
         return sendJson(res, 200, credential);
       }
 
+      // --- Admin session (short-lived bearer token layered on the roster
+      // above — see ADMIN_NONCES_FILE/ADMIN_SESSIONS_FILE's own comment for
+      // why) ---
+      //
+      // GET /atlas/admin/session/nonce — ungated. Handing out a nonce to
+      // anyone who asks is harmless: it's worthless without a roster key's
+      // signature over it, same "the endpoint's existence isn't the
+      // secret" posture every other write endpoint here already has before
+      // requireAdmin runs.
+      if (req.method === 'GET' && req.url === '/atlas/admin/session/nonce') {
+        return sendJson(res, 200, { nonce: issueAdminNonce() });
+      }
+
+      // POST /atlas/admin/session/start — {payload: {nonce}, proof}, the
+      // same envelope every other admin action here uses, just signing a
+      // fresh nonce instead of an action. Trades one real signature for a
+      // session token good for ADMIN_SESSION_TTL_MS (slides forward on
+      // each /whoami check — see touchAdminSession).
+      if (req.method === 'POST' && req.url === '/atlas/admin/session/start') {
+        const { payload: loginPayload, proof } = JSON.parse((await readBody(req)) || '{}');
+        const authError = await requireAdmin(loginPayload, proof);
+        if (authError) return sendJson(res, 401, { error: authError });
+        if (typeof loginPayload.nonce !== 'string' || !consumeAdminNonce(loginPayload.nonce)) {
+          return sendJson(res, 401, { error: 'nonce is missing, unknown, already used, or expired' });
+        }
+        const { token, expiresAt } = createAdminSession(proof.publicKey);
+        return sendJson(res, 200, { token, expiresAt });
+      }
+
+      // POST /atlas/admin/session/whoami — {token}, no signature. The
+      // bearer token itself IS the credential once a session exists —
+      // that's the whole point of not re-signing every request.
+      if (req.method === 'POST' && req.url === '/atlas/admin/session/whoami') {
+        const { token } = JSON.parse((await readBody(req)) || '{}');
+        const publicKey = touchAdminSession(token);
+        if (!publicKey) return sendJson(res, 401, { error: 'session is missing, unknown, or expired' });
+        return sendJson(res, 200, { publicKey });
+      }
+
+      // POST /atlas/admin/session/logout — {token}. Always 200 regardless
+      // of whether the token was ever valid, deliberately — see
+      // deleteAdminSession's own comment on why.
+      if (req.method === 'POST' && req.url === '/atlas/admin/session/logout') {
+        const { token } = JSON.parse((await readBody(req)) || '{}');
+        if (typeof token === 'string') deleteAdminSession(token);
+        return sendJson(res, 200, { status: 'logged out' });
+      }
+
+      // GET /atlas/admin/is-admin?publicKey=... — ungated, boolean-only.
+      // Lets a wallet decide whether to show its own "Admin" entry point
+      // for the identity it currently has active, without a full sign-a-
+      // nonce round trip just to render a button. Confirms membership of
+      // ONE presented key rather than exposing the roster itself (which
+      // stays unreachable directly — see ADMIN_KEYS_FILE's own comment) —
+      // no worse an information leak than every other "is this specific
+      // key/id valid" check already on this server (mail check, trade
+      // catalog lookups, and so on).
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/admin/is-admin') {
+        const publicKey = new URLSearchParams(req.url.split('?')[1] || '').get('publicKey');
+        return sendJson(res, 200, { isAdmin: !!publicKey && isAdminKey(publicKey) });
+      }
+
+      // POST /atlas/admin/directory — admin-gated (requireAdminAuth, same
+      // as every other admin action). SUBSCRIBERS_FILE's own comment
+      // above already anticipated this exact use ("so the operator can
+      // ... message everyone by hand later ... worth real operator
+      // authentication before ever exposing this over HTTP") — a session
+      // token is that authentication. Hands back both rosters this domain
+      // keeps (atlas.membership subscribers and Global Mail/Post Office
+      // members — two different credential classes, kept as separate
+      // lists rather than merged so the admin panel can label them), each
+      // filtered to currently-unrevoked credentials only: a revoked
+      // credential id is exactly the kind of dead-end address the mail
+      // form's own recipient warning (see /atlas/mail/send above) exists
+      // to catch, so there's no reason to offer one as a suggestion here.
+      if (req.method === 'POST' && req.url === '/atlas/admin/directory') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const subscribers = readSubscribers().subscribers.filter((s) => !isRevoked(s.credentialId));
+        const postOfficeMembers = readPostOfficeMembers().members.filter((m) => !isRevoked(m.credentialId));
+        return sendJson(res, 200, { subscribers, postOfficeMembers });
+      }
+
       // §5.1.1 reissue — a domain-initiated replacement for an asset it
       // already issued, carrying updated `asset` state (properties, most
       // often, and now optionally tradeScope — see below). Non-fungible
@@ -2026,7 +2413,10 @@ async function main() {
       // `properties` here is a patch merged over the existing
       // asset.properties bag, not a full replacement — convenient for the
       // common case (one fact changed) without forcing every caller to
-      // resend properties it isn't touching.
+      // resend properties it isn't touching. A key set to `null` is
+      // removed from the result entirely rather than kept as a literal
+      // null (mergeProperties above) — the only way to actually take a
+      // fact away, since there was previously no way to do that at all.
       //
       // `tradeScope` patches the credential's OTHER per-instance flag:
       // since tradeScope is baked into a credential's signed payload at
@@ -2042,20 +2432,20 @@ async function main() {
       // in line with today's catalog — see README.md's "Fixing a stale
       // tradeScope on an already-issued credential" section.
       //
-      // Admin-gated (requireAdmin, above): rewriting an already-issued
+      // Admin-gated (requireAdminAuth, above): rewriting an already-issued
       // credential's properties or tradeScope is exactly the kind of
       // action SPEC.md §10 puts on the domain's own side, never a
       // visitor's — left open, anyone who could observe a credential
       // (many are publicly visible via trade listings or gifts) could
       // silently alter its properties or loosen/tighten its tradeScope
       // without the owner's consent, under this domain's own real
-      // signature. Wire shape is now {payload: {credential, properties,
-      // tradeScope}, proof}, the same envelope every other admin action
-      // here uses.
+      // signature. Wire shape is {payload: {credential, properties,
+      // tradeScope}, proof} or {payload, token}, the same envelope every
+      // other admin action here uses.
       if (req.method === 'POST' && req.url === '/atlas/asset/reissue') {
-        const { payload: reissuePayload, proof } = JSON.parse((await readBody(req)) || '{}');
-        const authError = await requireAdmin(reissuePayload, proof);
-        if (authError) return sendJson(res, 401, { error: authError });
+        const { payload: reissuePayload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(reissuePayload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
         const { credential, properties, tradeScope } = reissuePayload;
         if (!credential || credential.credential !== 'domain-atlas-asset/1.0') {
           return sendJson(res, 400, { error: 'payload.credential must be a domain-atlas-asset/1.0 credential' });
@@ -2084,7 +2474,7 @@ async function main() {
         const newAsset = {
           ...credential.asset,
           ...(hasTradeScope ? { tradeScope } : {}),
-          ...(hasProperties ? { properties: { ...(credential.asset.properties || {}), ...properties } } : {})
+          ...(hasProperties ? { properties: mergeProperties(credential.asset.properties, properties) } : {})
         };
         const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
         // Same ordering guarantee §5.4's split/consolidate already give:
@@ -2097,20 +2487,130 @@ async function main() {
         return sendJson(res, 200, { newCredential });
       }
 
-      // Admin-gated (requireAdmin, above): revoking an arbitrary credential
-      // by id is the single most consequential thing this server can do on
-      // an operator's behalf, so it's the first endpoint retrofitted onto
-      // the domain admin roster rather than continuing to trust whoever can
-      // reach this process. Wire shape is now {payload: {id, reason}, proof}
-      // — the same signed-payload envelope §7's trade intents and Post
-      // Office sends already use — instead of a bare, unauthenticated body.
+      // Admin-gated (requireAdminAuth, same as every other admin action):
+      // the bulk alternative to the single-credential reissue just above —
+      // sets (or clears) a fact for an entire non-fungible CLASS at once,
+      // rather than the operator reissuing every current holder's
+      // credential by hand. This never touches an already-issued
+      // credential directly: it only records the patch (CLASS_PATCHES_FILE
+      // — one entry per class ever touched, never one per item or holder),
+      // and each holder's own wallet picks it up automatically the next
+      // time it checks in with this domain (see applyClassPatchIfStale()
+      // and /atlas/mail/check's own comment) — the same mail check-in
+      // cycle that already delivers ordinary mail and revocations. `clear`
+      // removes a class's patch entirely rather than setting one; nothing
+      // already-applied to a holder is undone by that (there's nothing to
+      // undo it FROM without reissuing again), it just stops correcting
+      // future check-ins against that class. Same non-fungible-only
+      // restriction /atlas/asset/reissue gives above: a fungible class's
+      // properties/tradeScope are already uniform across every balance
+      // (mintAssetByClass rebuilds them fresh from ASSET_CATALOG on every
+      // mint/split/consolidate/trade), so there's nothing a class patch
+      // could override there that isn't already true everywhere.
+      // `properties` here goes through mergeProperties() the same as
+      // /atlas/asset/reissue's own argument — a key set to `null` removes
+      // that fact from every credential this patch touches, rather than
+      // leaving it stuck at a literal null, and (since setClassPatch()
+      // itself merges a new call onto whatever patch is already stored)
+      // removes that key's own earlier override from the stored patch too.
+      if (req.method === 'POST' && req.url === '/atlas/admin/class-patch') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { assetClass, properties, tradeScope, clear } = payload || {};
+        const catalogEntry = ASSET_CATALOG[assetClass];
+        if (!catalogEntry) return sendJson(res, 400, { error: 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ASSET_CATALOG in issuer-server/server.js for the full list.' });
+        if (catalogEntry.fungible) {
+          return sendJson(res, 400, { error: "class patches only apply to a non-fungible class — a fungible class's properties/tradeScope are already uniform across every balance (SPEC.md §5.1)" });
+        }
+        if (clear) {
+          clearClassPatch(assetClass);
+          console.log('Cleared class patch for', assetClass);
+          return sendJson(res, 200, { assetClass, patch: null });
+        }
+        const hasProperties = properties !== undefined;
+        const hasTradeScope = tradeScope !== undefined;
+        if (!hasProperties && !hasTradeScope) {
+          return sendJson(res, 400, { error: 'at least one of properties (a patch onto asset.properties), tradeScope, or clear is required' });
+        }
+        if (hasProperties && (typeof properties !== 'object' || properties === null || Array.isArray(properties))) {
+          return sendJson(res, 400, { error: 'properties, when given, must be a patch object onto asset.properties' });
+        }
+        if (hasTradeScope && tradeScope !== 'local' && tradeScope !== 'bound') {
+          return sendJson(res, 400, { error: "tradeScope, when given, must be 'local' or 'bound'" });
+        }
+        const patch = setClassPatch(assetClass, { properties, tradeScope });
+        console.log('Set class patch for', assetClass, '->', JSON.stringify(patch));
+        return sendJson(res, 200, { assetClass, patch });
+      }
+
+      // Admin-gated (requireAdminAuth, same as every other admin action):
+      // every class an operator has ever patched (never one per item or
+      // holder — see CLASS_PATCHES_FILE's own comment), so the admin panel
+      // can show what's currently active and let the operator edit or
+      // clear one instead of guessing from memory what's already set.
+      if (req.method === 'POST' && req.url === '/atlas/admin/class-patches') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        return sendJson(res, 200, { patches: readClassPatches().patches });
+      }
+
+      // Admin-gated (requireAdminAuth, above), for the class-patch form's
+      // own dropdown: every non-fungible class in ASSET_CATALOG, bound or
+      // not. GET /atlas/trade/catalog deliberately excludes a bound class
+      // (it can never be the THING traded — see its own comment above), but
+      // a bound class is still a perfectly valid class-patch target — a
+      // badge or membership card can carry a wrong fact same as anything
+      // else — so this can't just reuse that public list. Gating it behind
+      // admin auth (rather than adding a second public endpoint) is what
+      // makes exposing bound classes here fine: nothing here reveals who
+      // holds one, only the same static catalog config /atlas/trade/catalog
+      // already publishes for the non-bound subset.
+      if (req.method === 'POST' && req.url === '/atlas/admin/asset-classes') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        // `properties`/`randomized` (new) let the class-patch form pre-fill
+        // itself instead of asking the operator to type a patch blind: the
+        // catalog's own base `properties` are exactly what an untouched
+        // credential of this class actually has (merged with any already-
+        // active class patch client-side, since that's the accurate "what
+        // holders see right now" picture once one exists). `randomized`
+        // flags a class whose actual per-instance values are rolled at mint
+        // time (randomizeProperties, e.g. the Signet Ring/hats) — for those,
+        // the catalog's `properties` are only ever the shared fallback
+        // template, never any specific holder's real roll, so the panel
+        // shows a caveat rather than implying this is what everyone has.
+        const classes = Object.keys(ASSET_CATALOG)
+          .filter((cls) => ASSET_CATALOG[cls].fungible === false)
+          .map((cls) => ({
+            class: cls,
+            name: ASSET_CATALOG[cls].name,
+            tradeScope: ASSET_CATALOG[cls].tradeScope || 'local',
+            properties: ASSET_CATALOG[cls].properties || {},
+            randomized: !!ASSET_CATALOG[cls].randomizeProperties
+          }));
+        return sendJson(res, 200, { classes });
+      }
+
+      // Admin-gated (requireAdminAuth, above): revoking an arbitrary
+      // credential by id is the single most consequential thing this
+      // server can do on an operator's behalf, so it's the first endpoint
+      // retrofitted onto the domain admin roster rather than continuing to
+      // trust whoever can reach this process. Wire shape is
+      // {payload: {id, reason}, proof} — the same signed-payload envelope
+      // §7's trade intents and Post Office sends already use — instead of
+      // a bare, unauthenticated body; a session `token` (see the admin
+      // session endpoints) works in place of proof, for a page that's
+      // already logged in rather than signing every click fresh.
       if (req.method === 'POST' && req.url === '/atlas/revoke') {
-        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
         if (!payload || !payload.id) return sendJson(res, 400, { error: 'payload.id is required' });
-        const authError = await requireAdmin(payload, proof);
-        if (authError) return sendJson(res, 401, { error: authError });
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
         revoke(payload.id, payload.reason || 'issuer-request');
-        console.log('Revoked', payload.id, 'by admin', proof.publicKey.slice(0, 16) + '...');
+        console.log('Revoked', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { ok: true });
       }
 
@@ -2748,7 +3248,7 @@ async function main() {
       // /atlas/mail/send is the demo/admin side of this: standing in for
       // whatever real interface a domain operator would actually use to
       // write to members (this demo has no such interface, so a plain
-      // endpoint fills in for it, now admin-gated — see requireAdmin above
+      // endpoint fills in for it, admin-gated — see requireAdminAuth above
       // this handler). It doesn't check that credentialId was really
       // issued by this server — same demo-simplification level as the
       // rest of this file.
@@ -2803,19 +3303,19 @@ async function main() {
         return sendJson(res, 200, { ok: true });
       }
 
-      // Admin-gated (requireAdmin, above): SPEC.md §11.1 already says
+      // Admin-gated (requireAdminAuth, above): SPEC.md §11.1 already says
       // sending is "authenticated as the domain operator, not as any
       // visitor" — this was previously trusted at the network level only
       // (whoever could reach the endpoint), which also meant anyone could
       // get this domain to sign and deliver an arbitrary message, or mint
       // an arbitrary gift asset via giftAssetClass, to any credential id
-      // they chose. Wire shape is now {payload: {...the same fields as
-      // before}, proof}, the same envelope every other admin action here
-      // uses.
+      // they chose. Wire shape is {payload: {...the same fields as
+      // before}, proof} or {payload, token}, the same envelope every other
+      // admin action here uses.
       if (req.method === 'POST' && req.url === '/atlas/mail/send') {
-        const { payload: sendPayload, proof } = JSON.parse((await readBody(req)) || '{}');
-        const authError = await requireAdmin(sendPayload, proof);
-        if (authError) return sendJson(res, 401, { error: authError });
+        const { payload: sendPayload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(sendPayload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
         const { credentialId, subject, body, giftAssetClass, giftOwnerPublicKey, giftQuantity } = sendPayload;
         if (!credentialId || !subject || !body) {
           return sendJson(res, 400, { error: 'payload.credentialId, payload.subject, and payload.body are required' });
@@ -2897,13 +3397,26 @@ async function main() {
       // network response is. Ids that are still perfectly valid get no
       // entry at all, same lean-response reasoning as `messages` above
       // only ever containing what's actually new.
+      //
+      // `credentials` (optional, additive — a caller that only sends
+      // `credentialIds` gets exactly the old behavior): the wallet's own
+      // current copy of whichever of those ids it still wants to ask
+      // about. Lets this same request also catch a class-wide patch (POST
+      // /atlas/admin/class-patch) that's moved past what a specific
+      // credential says, without this domain ever keeping a registry of
+      // who holds what — see applyClassPatchIfStale()'s own comment. Only
+      // consulted for an id that isn't already revoked or superseded;
+      // never trusted for anything until its own signature checks out.
       if (req.method === 'POST' && req.url === '/atlas/mail/check') {
-        const { credentialIds } = JSON.parse((await readBody(req)) || '{}');
+        const { credentialIds, credentials } = JSON.parse((await readBody(req)) || '{}');
         if (!Array.isArray(credentialIds) || credentialIds.length === 0) {
           return sendJson(res, 400, { error: 'credentialIds must be a non-empty array' });
         }
         const wanted = new Set(credentialIds);
         const messages = readMail().messages.filter((m) => wanted.has(m.credentialId));
+
+        const presentedById = new Map();
+        (Array.isArray(credentials) ? credentials : []).forEach((c) => { if (c && c.id) presentedById.set(c.id, c); });
 
         const assetUpdates = readAssetUpdates().updates;
         const revoked = readRevocations().revoked;
@@ -2912,7 +3425,12 @@ async function main() {
           const supersession = assetUpdates.find((u) => u.id === id);
           if (supersession) { updates.push(supersession); continue; }
           const revocation = revoked.find((r) => r.id === id);
-          if (revocation) updates.push({ id, status: 'revoked', reason: revocation.reason });
+          if (revocation) { updates.push({ id, status: 'revoked', reason: revocation.reason }); continue; }
+          const presented = presentedById.get(id);
+          if (presented) {
+            const applied = await applyClassPatchIfStale(presented);
+            if (applied) updates.push(applied);
+          }
         }
 
         return sendJson(res, 200, { messages, updates });
@@ -2937,22 +3455,22 @@ async function main() {
       }
 
       // POST /atlas/calendar — a real, protocol-level write endpoint
-      // (§12.2), admin-gated (requireAdmin(), above) the same way
+      // (§12.2), admin-gated (requireAdminAuth(), above) the same way
       // /atlas/revoke, /atlas/mail/send, and /atlas/asset/reissue are:
       // publishing a domain's or world's calendar is squarely the domain
       // operator's own action, never a visitor's, and left open it meant
       // anyone could plant or overwrite events shown to every visitor of
       // this domain. Wire shape is {payload: {action, worldId, event, id},
-      // proof}, the same envelope every other admin action here uses.
-      // `worldId: null` (or omitted) addresses the domain-wide calendar;
-      // naming a world addresses that world's own — this server does not
-      // check that world's manifest entry actually has `calendar: true`
-      // before accepting an event for it (see CALENDAR_FILE's own comment
-      // on why).
+      // proof} or {payload, token}, the same envelope every other admin
+      // action here uses. `worldId: null` (or omitted) addresses the
+      // domain-wide calendar; naming a world addresses that world's own —
+      // this server does not check that world's manifest entry actually
+      // has `calendar: true` before accepting an event for it (see
+      // CALENDAR_FILE's own comment on why).
       if (req.method === 'POST' && req.url === '/atlas/calendar') {
-        const { payload: calendarPayload, proof } = JSON.parse((await readBody(req)) || '{}');
-        const authError = await requireAdmin(calendarPayload, proof);
-        if (authError) return sendJson(res, 401, { error: authError });
+        const { payload: calendarPayload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(calendarPayload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
         const { action, worldId, event, id } = calendarPayload || {};
         const normalizedWorldId = worldId || null;
 
@@ -2999,7 +3517,7 @@ async function main() {
       // THIS domain, distinct from /atlas/mail/send above in exactly the
       // way that endpoint's own comment flags as the one genuinely new
       // server surface the design needed: /atlas/mail/send authenticates
-      // the domain operator (requireAdmin, above); this one has to
+      // the domain operator (requireAdminAuth, above); this one has to
       // authenticate an arbitrary stranger instead, since anyone with a
       // wallet can attempt to send here.
       //
@@ -3399,6 +3917,11 @@ async function main() {
         const member = findMemberByHandle(doc, handle);
         if (!member) return sendJson(res, 404, { error: 'no one at this Post Office has registered that handle' });
         return sendJson(res, 200, { ok: true, publicKey: member.ownerPublicKey, handle: member.handle });
+      }
+
+      if ((req.method === 'GET' || req.method === 'HEAD') &&
+          (req.url === '/atlas-admin' || req.url === '/atlas-admin/' || req.url === '/atlas-admin/index.html')) {
+        return serveAdminPanel(req, res);
       }
 
       if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);

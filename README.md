@@ -745,6 +745,112 @@ The response's `newCredential` is what the holder's wallet will pick up on
 its next `/atlas/mail/check` (reissue notices arrive the same way any other
 asset-update notice does — see §8 above) or on request. `properties` and
 `tradeScope` can be patched together in one call if both need updating.
+`properties` is a merge onto whatever the credential already has, not a
+replacement — a key you don't mention is left alone. Setting a key to
+`null` is the one exception: that removes it from the credential entirely
+(the standard JSON Merge Patch convention), the only way to actually take
+a fact away rather than only ever add or overwrite one.
+
+## Class-wide patches: correcting every current holder at once
+
+`/atlas/asset/reissue` above fixes one already-issued credential at a
+time — you need the exact JSON the holder currently has. That's fine for
+a one-off correction, but it doesn't scale to "everyone who picked up
+`atlas.trophy.chess` before I fixed the wording on it" without either
+reissuing each holder by hand or keeping a registry of who holds what —
+and this project deliberately keeps no such registry: the domain never
+records who owns which asset, it only ever re-verifies whatever a wallet
+chooses to present.
+
+`POST /atlas/admin/class-patch` (admin-gated, same wire shape as every
+other admin action) sets a `properties` patch and/or a `tradeScope`
+override for an entire non-fungible asset **class**, not a specific
+credential. The Admin Panel's "Class-wide patch" section (below the
+existing Reissue form) is the normal way to set or clear one, with a
+searchable dropdown of every non-fungible class this domain has —
+`POST /atlas/admin/asset-classes` (admin-gated, new), deliberately NOT
+`GET /atlas/trade/catalog`: that endpoint exists to advertise what can be
+traded, so it excludes a `tradeScope: 'bound'` class on purpose (a
+membership card or a badge can never be the thing traded) — but a bound
+class is just as valid a patch target as a tradeable one, so the dropdown
+needed its own, admin-only list rather than reusing the public one.
+
+Picking a class from that dropdown pre-fills the properties and tradeScope
+fields with what that class's credentials actually look like right now,
+rather than leaving them blank — the catalog's own base `properties`,
+merged with whatever's in an already-active patch for that class (which
+takes priority, since that's the fact actually in force once one exists).
+Editing from a real starting point rather than a blank textarea is the
+whole point: typing a patch blind is exactly how a key gets misspelled or
+a fact gets overwritten with the wrong value by accident. Only what's
+actually changed matters when the form is submitted, since a class patch
+always merges into a credential's existing properties rather than
+replacing them outright — a property left out of the box is untouched,
+not cleared. A class whose real values are rolled per instance at mint
+time (`randomizeProperties`, e.g. the Signet Ring or a hat's bonus stats)
+shows an extra note: what's pre-filled there is only the shared fallback
+template, never any specific holder's actual roll — there's no single
+"current" value to show for those, only the same template every mint
+starts from before its own roll.
+
+Nothing already-issued is touched at the moment the patch is set: instead,
+the next time a holder's own wallet checks in with this domain — the same
+`/atlas/mail/check` round trip that already delivers mail, single-credential
+reissues, and revocations — it presents whatever credential it currently
+holds for that class, the domain notices the credential is stale against
+the active patch, and auto-reissues it on the spot exactly the way a
+manual `/atlas/asset/reissue` call would: revoking the old id and minting
+a signed replacement with the patch applied, which the wallet then adopts
+through its ordinary, already-tested "supersede" path.
+
+This is why the wallet's check-in request grew an optional `credentials`
+field alongside the existing `credentialIds` array: it's the wallet
+briefly re-presenting its own evidence for the ids it's asking about, not
+a new registry — the domain still stores nothing about who holds what
+between requests, and never mints anything for a presented credential
+that doesn't cryptographically verify against this domain's own key
+first. A caller that only sends `credentialIds` (any older client, or the
+handful of test scripts predating this feature) gets exactly the old
+behavior; class patches simply never apply to it.
+
+A class patch only applies to a non-fungible class — a fungible class's
+`properties`/`tradeScope` are already uniform across every balance
+(`mintAssetByClass` rebuilds them fresh from `ASSET_CATALOG` on every
+mint/split/consolidate/trade), so there's nothing a patch could override
+there that isn't already true everywhere.
+
+`properties` here goes through the same merge as `/atlas/asset/reissue`'s
+own argument, including the same `null`-deletes-a-key convention — with
+one extra wrinkle specific to a class patch: setting a class patch is
+itself a patch onto whatever patch is already stored for that class
+(so a later call adding one fact doesn't erase an earlier one), and a
+`null` has to survive THAT merge as a literal stored marker rather than
+being erased the moment it's set, or the deletion would never actually
+reach anyone's credential. `mergeProperties()`/`merge_properties()` only
+ever runs where a patch is actually applied to a real credential
+(`applyClassPatchIfStale()`/`apply_class_patch_if_stale()`, and
+`/atlas/asset/reissue` itself); `setClassPatch()`/`set_class_patch()`'s
+own merge onto the stored patch stays a plain merge that keeps `null`
+verbatim. `test/manual-properties-patch-delete.js` covers exactly this —
+deleting a property via reissue, via a class patch, idempotency of a
+deletion (checking in again doesn't reissue forever), and stacking a
+second class-patch call that adds a new fact without losing an earlier
+deletion — on both issuers.
+
+`test/manual-class-wide-reissue.js` covers the mechanism end to end on
+both issuers: the auto-apply itself, idempotency (checking in twice
+doesn't reissue twice), the additive-only wire compatibility, rejecting a
+credential whose signature doesn't check out, clearing a patch, the
+fungible-class rejection, and `/atlas/admin/asset-classes` listing a
+bound class alongside a tradeable one while staying admin-gated itself.
+`test/manual-admin-class-patch-prefill.js` drives the real admin panel
+page directly (a real session token dropped into `sessionStorage`, same
+shape the wallet's own login handoff writes there) to prove the pre-fill
+itself: a patched class shows the catalog default merged with the active
+patch, an unpatched bound class pre-fills straight from its own catalog
+entry, the randomized-class caveat note shows and hides correctly, and a
+property already deleted by an active patch shows up as a literal `null`
+in the pre-fill rather than being silently hidden.
 
 ## 9. Verify it yourself
 
@@ -883,12 +989,13 @@ simplifications are worth naming plainly rather than leaving implicit:
 - **Admin-gated endpoints.** `/atlas/revoke`, `/atlas/mail/send`,
   `/atlas/asset/reissue`, and `/atlas/calendar`'s `POST` side are the four
   exceptions to the paragraph above — successive slices of what's meant to
-  grow into a real admin surface: all four now require a signed proof
-  envelope (the same §6.2 shape a trade intent or Post Office send already
-  carries) from a public key registered on the domain's own admin roster
-  (`issuer-server/atlas-admin-keys-store.json`, or the equivalent PHP state
-  file) — a wallet's public key acting as the site administrator, rather
-  than a separate username/password admin system. `/atlas/mail/send` was
+  grow into a real admin surface: all four now require either a signed
+  proof envelope (the same §6.2 shape a trade intent or Post Office send
+  already carries) or an active session token from the admin session
+  primitive below, from a public key registered on the domain's own admin
+  roster (`issuer-server/atlas-admin-keys-store.json`, or the equivalent
+  PHP state file) — a wallet's public key acting as the site administrator,
+  rather than a separate username/password admin system. `/atlas/mail/send` was
   picked as the second endpoint specifically because SPEC.md §11.1 already
   calls sending "authenticated as the domain operator, not as any
   visitor" — leaving it open meant anyone could get this domain to sign
@@ -913,6 +1020,155 @@ simplifications are worth naming plainly rather than leaving implicit:
   would break that flow rather than protect anything; a real admin surface
   would need to distinguish a self-service request from an operator-only
   mint, not gate the whole endpoint.
+- **Admin session primitive.** Re-signing every click with an ECDSA key
+  works fine for a one-off CLI call, but gets impractical for anything
+  resembling a real admin page — you'd need the key reachable for every
+  request, including a live-updating view that polls. `GET /atlas/admin/
+  session/nonce`, `POST /atlas/admin/session/start`, `POST /atlas/admin/
+  session/whoami`, and `POST /atlas/admin/session/logout` add a short-lived
+  bearer-token session on top of the roster above, without changing what
+  the roster means: `/session/start` still requires a full signed proof
+  envelope — over a single-use nonce from `/session/nonce`, so the login
+  itself can't be replayed — checked against the exact same roster
+  `requireAdmin()` already enforces everywhere else. Only once that
+  succeeds does it hand back a random token, good for 30 minutes and
+  sliding forward on every authenticated request that uses it (not just
+  `/whoami` — `requireAdminAuth()`/`require_admin_auth()`, the shared gate
+  every admin-gated endpoint now calls, treats any check as activity), so
+  an admin page can stay logged in through a session of clicking around
+  without a fresh signature per request. `/logout` (or the token simply
+  expiring) ends it. This is the project's first real session state —
+  everywhere else here trusts a signature over the specific action, not an
+  ambient login — so it's kept deliberately narrow: the roster is still the
+  only thing that can make a key an admin, a session can't do anything a
+  fresh signature couldn't, and it only ever shortens how often you have to
+  sign, never widens who's authorized. `/atlas/revoke`, `/atlas/mail/send`,
+  `/atlas/asset/reissue`, and `/atlas/calendar`'s `POST` side all now accept
+  `{payload, token}` as an alternative to `{payload, proof}` — the missing
+  piece that makes the session actually useful for something, rather than
+  only ever being able to answer "am I an admin". Tested at the HTTP layer
+  directly (`test/manual-admin-session.js`/`manual-admin-session-php.js` for
+  the primitive itself, `test/manual-admin-session-actions.js`/
+  `manual-admin-session-actions-php.js` for the four endpoints consuming a
+  token) — see "Admin panel" just below for the actual page that now
+  consumes it.
+- **Admin panel.** The wallet's top bar grows a 🛡️ Admin button, shown only
+  when the currently unlocked identity is on the CURRENT domain's own admin
+  roster (`GET /atlas/admin/is-admin?publicKey=...` — a cheap, ungated,
+  boolean-only check so a button can decide whether to render itself
+  without spending a real login on every domain landing;
+  `AtlasWallet.isAdminForDomain()`). Clicking it logs into (or reuses) that
+  domain's admin session (`AtlasWallet.adminLoginForDomain()`, the same
+  nonce/sign/start flow above) and hands the resulting token off to a
+  one-page admin panel bundled with the issuer software itself
+  (`issuer-server/admin-panel/index.html`, and the byte-identical
+  `issuer-php/atlas-admin/index.html`, both served at `/atlas-admin/`) —
+  forms for every gated action (revoke, reissue, class-wide patch, mail
+  send, calendar), each calling its endpoint with `{payload, token}`, no
+  signature needed per click.
+  The handoff itself is the interesting part: the wallet lives in an
+  extension-origin iframe, cross-origin from the domain's own pages, so it
+  can't put the token in that origin's `sessionStorage` directly, and a
+  token in the URL would leak into browser history and any server access
+  log along the way. Instead the iframe `postMessage`s
+  `{type: 'domain-atlas-admin-handoff', domain, token, expiresAt}` to
+  `content.js` (same pattern the close button and tab title already use to
+  reach back into the host page) — which checks `event.source` against the
+  overlay iframe specifically before trusting it, unlike the older
+  close/title messages, because this one carries a live credential — and
+  content.js, running same-origin with the domain, writes it into
+  `sessionStorage` and navigates there itself. It navigates to the exact
+  `/atlas-admin/index.html` filename rather than the bare `/atlas-admin/`
+  directory, deliberately: a real site sitting on top of this (WordPress
+  and most other CMSes, notably) commonly runs its own catch-all rewrite
+  that only excludes an actual FILE, not just an actual directory, so a
+  bare directory request can 404 there before Apache's own directory-index
+  resolution ever gets a turn — naming the file sidesteps that on any host.
+  Both backends also still answer the bare directory paths for anyone who
+  links to `/atlas-admin/` by hand.
+  Locking the wallet (either button, or auto-lock) ends every cached admin
+  session at once (`AtlasWallet`'s `lockIdentity()` now also calls
+  `endAllAdminSessions()`) — fire-and-forget against the server so locking
+  stays instant, with `ADMIN_SESSION_TTL_MS` as the backstop if a logout
+  never lands. Tested end to end in a real Chrome instance driving the
+  actual extension (`test/manual-admin-panel.js`): button visibility,
+  login, the cross-origin handoff, "Online now" reflecting a real presence
+  join, and one full admin action (revoke) through the real page, not a
+  mock of any of it.
+- **Online now.** The admin panel's own section for "who's actually here
+  right now" across the WHOLE domain, not just one world. It reads the
+  domain's own `/.well-known/spatial.json` for the world list, then queries
+  each world's presence server (`GET /presence/status?domain=X&world=Y`,
+  the same read-only endpoint the viewer's live-visitor overlay already
+  uses; the base URL comes from the manifest's `presence` field, falling
+  back to `http://localhost:8004` for local dev — the same default
+  `extension/viewer.js` itself falls back to) and totals the counts,
+  rendering each world's roster (name, and a truncated public key or
+  "anonymous" for guests). No admin action or credential is involved in
+  reading it — it's a live aggregation across a genuinely separate service.
+  It loads once on login and otherwise only reloads on demand (the
+  "Refresh" button) — deliberately no polling timer, so it can't fire
+  against a page the admin has stepped away from.
+- **Mail's recipient field is a credential id, not an identity.** Reported
+  live: an operator addressed "Send mail" using their own public key, then
+  a `handle#domain` address, expecting either to reach their own wallet —
+  neither does, because this form addresses a message by the exact
+  credential id whoever's supposed to receive it already holds (SPEC.md
+  §11.1), which `/atlas/mail/send` never checks is real (same
+  demo-simplification `/atlas/revoke` already accepts for its own id).
+  Both attempts got back a plain "Sent." with nothing to suggest otherwise.
+  The panel now flags a value that doesn't even look like one of this
+  domain's own ids (doesn't start with `urn:atlas:`) instead of reporting
+  a bare success — still sends it (this domain's endpoints don't block on
+  a shape guess, only warn), but the operator now has a reason to stop and
+  check the id before trusting the result.
+- **Typeable/pickable dropdowns for the fields above, not blank text
+  boxes.** Rather than expecting the operator to already know a credential
+  id, world id, or event id by heart:
+  Mail's recipient field is now an `<input list="...">` wired to a
+  `<datalist>` — the browser's own native combobox, filtered to matching
+  options as the operator types, no library needed — backed by a new
+  admin-gated endpoint, `POST /atlas/admin/directory` (`requireAdminAuth`,
+  same as every other admin action), which hands back this domain's two
+  subscriber rosters — `atlas.membership` subscribers and Global Mail
+  (Post Office) members, kept separate since they're different credential
+  classes — each already filtered to currently-unrevoked credentials, so a
+  dead-end id is never offered as a suggestion in the first place.
+  `SUBSCRIBERS_FILE`'s own long-standing comment in server.js had already
+  flagged exactly this as the reason no PUBLIC listing endpoint exists
+  ("worth real operator authentication before ever exposing this over
+  HTTP") — the admin session token is that authentication, so this is the
+  first thing to actually read that roster over the network.
+  Calendar's World id field, by contrast, is a plain `<select>` (task-
+  requested — a short, always-fully-visible list rather than a typed/
+  filtered one), listing only worlds whose own manifest entry opted into a
+  calendar (`world.calendar === true`, read from this domain's own
+  manifest — no new endpoint needed) plus an always-present "— domain-wide
+  —" option; picking one repopulates Event id's own `<datalist>` from that
+  world's real events (`GET /atlas/calendar?world=...`, already public,
+  refreshed again right after adding, updating, or removing one) and
+  clears Event id AND Title/Start/End/Notes — a value left over from the
+  PREVIOUS world could otherwise be submitted against the new one without
+  the operator noticing.
+  New protocol-level tests (`test/manual-admin-directory.js`/
+  `-php.js`) cover the endpoint itself — both rosters starting empty,
+  populating independently without cross-listing, a revoked subscriber
+  dropping out, and the usual no-auth rejection; `manual-admin-panel.js`'s
+  own STEP 7 drives the actual dropdowns end to end in a real browser.
+- **Calendar's Event id follows Action, fills the form back in, and
+  selects itself on focus.** Event id only means anything for
+  `update`/`remove` — `add` always creates a fresh event, so there's
+  nothing to pick — so it's now disabled whenever Action is `add`, and
+  switching back to `add` also clears whatever id was left in it (a stale
+  id sitting behind a disabled field is exactly the kind of thing that
+  gets submitted by surprise if the operator flips Action back and forth).
+  Once Event id is enabled, picking a real one there — from its own
+  `<datalist>` or by typing its exact id — loads that event's current
+  Title, Start, End, and Notes into the form, so `update` starts from the
+  event's actual state instead of the operator having to already remember
+  or re-look-up what's there. Focusing the field also selects its whole
+  contents, the same one-keystroke-to-replace convenience a browser's own
+  address bar gives a full URL.
 - The renderer is still a dependency-free `<canvas>` stand-in for what a
   production client would do with WebXR and glTF, which real browsers
   already support well, so re-implementing that wasn't the point.

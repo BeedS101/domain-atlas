@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Domain Atlas — Admin</title>
+<!--
+  This page is bundled with the issuer software itself (Node's
+  issuer-server/admin-panel/ and the identical PHP copy at
+  issuer-php/atlas-admin/), not written per-domain — every domain running
+  either backend gets this for free at /atlas-admin/. Every admin ACTION
+  here calls a relative /atlas/... URL, which both backends answer
+  identically, so the same file works unmodified against either one — the
+  one exception is "Online now" below, which calls the domain's own
+  separate presence server (named in the manifest's own `presence` field),
+  a cross-origin request by nature since that's a different service.
+
+  It never asks for a password or a private key: the only way in is a
+  session token handed off by the wallet extension's own "Admin" button
+  (see extension/viewer.js's admin button handler and extension/
+  content.js's 'domain-atlas-admin-handoff' listener) after it already
+  proved this identity is on the domain's admin roster by signing a
+  challenge with the wallet's own key. This page just reads that token
+  back out of sessionStorage — nothing here can log anyone in on its own.
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: #0f171b; color: #d7e0e4;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 18px 24px; background: #16232a; border-bottom: 1px solid #2c3c44;
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+  }
+  header h1 { font-size: 17px; margin: 0; color: #f2c98d; }
+  header .who { font-size: 12px; color: #9fb0b8; }
+  header button {
+    background: #2c3c44; color: #d7e0e4; border: 1px solid #3c4e57; border-radius: 6px;
+    padding: 6px 12px; cursor: pointer; font-size: 12px;
+  }
+  header button:hover { background: #3c4e57; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px; }
+  #loggedOutNotice { text-align: center; padding: 60px 20px; color: #9fb0b8; }
+  #loggedOutNotice a { color: #f2c98d; }
+  section.panel {
+    background: #16232a; border: 1px solid #2c3c44; border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 18px;
+  }
+  section.panel h2 { margin: 0 0 4px; font-size: 15px; color: #f2c98d; }
+  section.panel .hint { font-size: 12px; color: #9fb0b8; margin: 0 0 14px; }
+  label { display: block; font-size: 12px; color: #9fb0b8; margin: 10px 0 4px; }
+  input[type="text"], textarea, select {
+    width: 100%; background: #0f171b; color: #d7e0e4; border: 1px solid #2c3c44;
+    border-radius: 6px; padding: 8px 10px; font: inherit;
+  }
+  textarea { min-height: 70px; resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  section.panel button.submit {
+    margin-top: 14px; background: #c05a1f; color: #fff6ef; border: none;
+    border-radius: 6px; padding: 8px 16px; font-weight: 600; cursor: pointer;
+  }
+  section.panel button.submit:disabled { opacity: 0.6; cursor: default; }
+  input[type="text"]:disabled { opacity: 0.5; cursor: not-allowed; }
+  section.panel button.submit:hover:not(:disabled) { background: #d5691f; }
+  .result { margin-top: 10px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .result.ok { color: #8fd19e; }
+  .result.err { color: #e08a8a; }
+  #hidden-while-logged-out { display: none; }
+  .online-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .online-header button {
+    background: #2c3c44; color: #d7e0e4; border: 1px solid #3c4e57; border-radius: 6px;
+    padding: 5px 10px; cursor: pointer; font-size: 12px;
+  }
+  .online-header button:hover { background: #3c4e57; }
+  .online-total strong { color: #8fd19e; }
+  .world-roster { margin-top: 14px; }
+  .world-roster h3 { margin: 0 0 6px; font-size: 13px; color: #d7e0e4; font-weight: 600; }
+  .world-roster ul { list-style: none; margin: 0; padding: 0; }
+  .world-roster li { padding: 4px 0; font-size: 12px; color: #9fb0b8; border-bottom: 1px solid #202f36; }
+  .world-roster li:last-child { border-bottom: none; }
+  .world-roster .visitor-name { color: #d7e0e4; }
+  .world-roster li.empty { font-style: italic; color: #6c7d85; }
+  #onlineError { color: #e08a8a; font-size: 12px; margin-top: 8px; }
+  .class-patch-list { margin-top: 14px; }
+  .class-patch-list h3 { margin: 0 0 6px; font-size: 13px; color: #d7e0e4; font-weight: 600; }
+  .class-patch-list ul { list-style: none; margin: 0; padding: 0; }
+  .class-patch-list li { padding: 6px 0; font-size: 12px; color: #9fb0b8; border-bottom: 1px solid #202f36; }
+  .class-patch-list li:last-child { border-bottom: none; }
+  .class-patch-list .class-patch-name { color: #d7e0e4; font-family: ui-monospace, monospace; }
+  .class-patch-list li.empty { font-style: italic; color: #6c7d85; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>🛡️ Domain Atlas — Admin</h1>
+    <span class="who" id="whoDisplay"></span>
+    <button id="logoutBtn" type="button" style="display: none;">Log out</button>
+  </header>
+
+  <main>
+    <div id="loggedOutNotice">
+      Not logged in as this domain's admin.<br>
+      Open the wallet on this site and click its <strong>🛡️ Admin</strong> button.
+      <br><br><a href="/">← Back to the site</a>
+    </div>
+
+    <div id="hidden-while-logged-out">
+      <section class="panel" id="onlinePanel">
+        <h2>Online now</h2>
+        <p class="hint">Live presence across every world this domain declares (GET /presence/status, one call per world) — the underlying data isn't itself gated, any visitor's own client already sees a nearby roster; this just aggregates all of it into one operator view. Refreshes automatically every 5 seconds while this page is open.</p>
+        <div class="online-header">
+          <div class="online-total">Total online: <strong id="onlineTotal">—</strong></div>
+          <button type="button" id="onlineRefreshBtn">Refresh now</button>
+        </div>
+        <div id="onlineWorlds"></div>
+        <div id="onlineError"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Revoke a credential</h2>
+        <p class="hint">Immediately invalidates a credential by id (POST /atlas/revoke). Cannot be undone.</p>
+        <label for="revokeId">Credential id</label>
+        <input type="text" id="revokeId" placeholder="urn:atlas:asset:...">
+        <label for="revokeReason">Reason (optional)</label>
+        <input type="text" id="revokeReason" placeholder="issuer-request">
+        <button class="submit" id="revokeBtn" type="button">Revoke</button>
+        <div class="result" id="revokeResult"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Reissue an asset</h2>
+        <p class="hint">Rewrites an already-issued non-fungible credential's properties and/or tradeScope, superseding it with a new one (POST /atlas/asset/reissue). Paste the exact credential currently held. Properties merge onto what's already there — a key left out is untouched, and a key set to null is removed entirely rather than kept as a literal null.</p>
+        <label for="reissueCredential">Credential JSON</label>
+        <textarea id="reissueCredential" placeholder='{"credential":"domain-atlas-asset/1.0", ...}'></textarea>
+        <div class="row">
+          <div>
+            <label for="reissueProperties">Properties patch (optional JSON)</label>
+            <textarea id="reissueProperties" placeholder='{"engraved": "..."}'></textarea>
+          </div>
+          <div>
+            <label for="reissueTradeScope">tradeScope (optional)</label>
+            <select id="reissueTradeScope">
+              <option value="">— leave unchanged —</option>
+              <option value="local">local</option>
+              <option value="bound">bound</option>
+            </select>
+          </div>
+        </div>
+        <button class="submit" id="reissueBtn" type="button">Reissue</button>
+        <div class="result" id="reissueResult"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Class-wide patch</h2>
+        <p class="hint">Sets a fact for an entire non-fungible asset CLASS at once (POST /atlas/admin/class-patch), instead of reissuing every current holder's credential by hand — useful for fixing a mistake or correcting an over/underpowered roll across everyone who has one. Nothing already-issued changes right away: each holder's own wallet picks the patch up automatically the next time it checks in with this domain (the same check-in that already delivers mail and revocations), so there's no roster of who currently holds one kept here.</p>
+        <label for="classPatchClass">Asset class</label>
+        <input type="text" id="classPatchClass" list="classPatchClassOptions" placeholder="atlas.trophy.chess — start typing to search this domain's non-fungible classes">
+        <datalist id="classPatchClassOptions"></datalist>
+        <p class="hint" id="classPatchRandomNote" style="display:none">This class rolls random per-item stats at mint time — the properties below are only the shared fallback template, not any specific holder's actual roll. A patch still applies the same way to whatever each holder's own credential currently has.</p>
+        <p class="hint">Picking a class above pre-fills its current properties and tradeScope (its own active patch, if it has one, otherwise its plain catalog defaults) so you're editing what's actually there rather than guessing. Only what you change matters — a property left out of the box below is left untouched, not cleared, since this always merges in what you type. To remove a property entirely, set it to null rather than deleting its line.</p>
+        <div class="row">
+          <div>
+            <label for="classPatchProperties">Properties patch (JSON)</label>
+            <textarea id="classPatchProperties" placeholder='{"com.example.awardedFor": "..."}'></textarea>
+          </div>
+          <div>
+            <label for="classPatchTradeScope">tradeScope</label>
+            <select id="classPatchTradeScope">
+              <option value="">— leave unchanged —</option>
+              <option value="local">local</option>
+              <option value="bound">bound</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <button class="submit" id="classPatchBtn" type="button">Set patch</button>
+          <button class="submit" id="classPatchClearBtn" type="button">Clear patch for this class</button>
+        </div>
+        <div class="result" id="classPatchResult"></div>
+        <div id="classPatchCurrent"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Send mail</h2>
+        <p class="hint">Signs and delivers a message to whoever holds the named credential (POST /atlas/mail/send), optionally attaching a freshly minted gift asset. This is addressed by credential id, NOT by public key or handle — paste the exact id of a credential the recipient's wallet already holds (find it in their wallet's own item list, or from an id an Issue/Reissue call returned). This domain doesn't check that the id is real, so a wrong or made-up id will still say "Sent." but nobody will actually receive anything.</p>
+        <label for="mailCredentialId">Recipient's credential id</label>
+        <input type="text" id="mailCredentialId" list="mailRecipientOptions" placeholder="urn:atlas:asset:... (not a public key or a handle) — start typing to search this domain's subscribers">
+        <datalist id="mailRecipientOptions"></datalist>
+        <label for="mailSubject">Subject</label>
+        <input type="text" id="mailSubject">
+        <label for="mailBody">Body</label>
+        <textarea id="mailBody"></textarea>
+        <div class="row">
+          <div>
+            <label for="mailGiftAssetClass">Gift asset class (optional)</label>
+            <input type="text" id="mailGiftAssetClass" placeholder="atlas.trophy.chess">
+          </div>
+          <div>
+            <label for="mailGiftOwnerPublicKey">Gift owner public key</label>
+            <input type="text" id="mailGiftOwnerPublicKey" placeholder="required if a gift class is set">
+          </div>
+          <div>
+            <label for="mailGiftQuantity">Gift quantity</label>
+            <input type="text" id="mailGiftQuantity" placeholder="fungible only">
+          </div>
+        </div>
+        <button class="submit" id="mailBtn" type="button">Send</button>
+        <div class="result" id="mailResult"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Calendar</h2>
+        <p class="hint">Publishes to this domain's (or one world's) calendar (POST /atlas/calendar).</p>
+        <div class="row">
+          <div>
+            <label for="calendarAction">Action</label>
+            <select id="calendarAction">
+              <option value="add">add</option>
+              <option value="update">update</option>
+              <option value="remove">remove</option>
+            </select>
+          </div>
+          <div>
+            <label for="calendarWorldId">World id</label>
+            <select id="calendarWorldId">
+              <option value="">— domain-wide —</option>
+            </select>
+          </div>
+        </div>
+        <label for="calendarEventId">Event id (required for update/remove — disabled for add)</label>
+        <input type="text" id="calendarEventId" list="calendarEventOptions" disabled placeholder="urn:atlas:calendar:... — populated from the World id above; picking one fills in the fields below">
+        <datalist id="calendarEventOptions"></datalist>
+        <label for="calendarTitle">Title (add/update)</label>
+        <input type="text" id="calendarTitle">
+        <div class="row">
+          <div>
+            <label for="calendarDateTime">Start (ISO 8601, add/update)</label>
+            <input type="text" id="calendarDateTime" placeholder="2026-10-01T18:00:00Z">
+          </div>
+          <div>
+            <label for="calendarEndDateTime">End (optional)</label>
+            <input type="text" id="calendarEndDateTime">
+          </div>
+        </div>
+        <label for="calendarNotes">Notes (optional)</label>
+        <input type="text" id="calendarNotes">
+        <button class="submit" id="calendarBtn" type="button">Submit</button>
+        <div class="result" id="calendarResult"></div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    // ---------- session ----------
+    // Written by content.js right before navigating here (see its
+    // 'domain-atlas-admin-handoff' listener) — never anything this page
+    // itself can create. {token, expiresAt}.
+    const SESSION_KEY = 'atlasAdminSession';
+
+    function readSession() {
+      try {
+        const raw = sessionStorage.getItem(SESSION_KEY);
+        if (!raw) return null;
+        const session = JSON.parse(raw);
+        if (!session || typeof session.token !== 'string') return null;
+        return session;
+      } catch (err) {
+        return null;
+      }
+    }
+    function clearSession() {
+      try { sessionStorage.removeItem(SESSION_KEY); } catch (err) {}
+    }
+
+    async function postJson(url, body) {
+      const res = await fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
+      });
+      const json = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, body: json };
+    }
+
+    let session = readSession();
+
+    // ---------- online now ----------
+    // Aggregates presence-server's own GET /presence/status?domain=...&
+    // world=... (one call per world this domain's manifest declares) into
+    // a single view — see the page's own top comment for why this is the
+    // one cross-origin call here. manifest.presence names the presence
+    // server's base URL; falls back to localhost:8004, the same local-dev
+    // default extension/viewer.js's own presence connection uses, for
+    // parity when testing against the demo servers.
+    // Manual refresh only (the "Refresh" button, plus once on login) — no
+    // polling timer, so this never fires against a page the admin has
+    // stepped away from.
+    const PRESENCE_DEFAULT_BASE = 'http://localhost:8004';
+
+    async function refreshOnlineNow() {
+      const totalEl = document.getElementById('onlineTotal');
+      const worldsEl = document.getElementById('onlineWorlds');
+      const errorEl = document.getElementById('onlineError');
+      try {
+        const manifestRes = await fetch('/.well-known/spatial.json', { cache: 'no-store' });
+        if (!manifestRes.ok) throw new Error("could not read this domain's own manifest");
+        const manifest = await manifestRes.json();
+        const worlds = Array.isArray(manifest.worlds) ? manifest.worlds : [];
+        const presenceBase = String(manifest.presence || PRESENCE_DEFAULT_BASE).replace(/\/$/, '');
+        let total = 0;
+        worldsEl.innerHTML = '';
+        for (const world of worlds) {
+          const res = await fetch(presenceBase + '/presence/status?domain=' + encodeURIComponent(manifest.domain) + '&world=' + encodeURIComponent(world.id));
+          const body = res.ok ? await res.json() : { count: 0, roster: [] };
+          total += body.count || 0;
+
+          const section = document.createElement('div');
+          section.className = 'world-roster';
+          const heading = document.createElement('h3');
+          heading.textContent = world.name + ' (' + (body.count || 0) + ')';
+          section.appendChild(heading);
+          const list = document.createElement('ul');
+          if (!body.roster || body.roster.length === 0) {
+            const li = document.createElement('li');
+            li.className = 'empty';
+            li.textContent = 'No one here right now.';
+            list.appendChild(li);
+          } else {
+            body.roster.forEach((visitor) => {
+              const li = document.createElement('li');
+              const nameSpan = document.createElement('span');
+              nameSpan.className = 'visitor-name';
+              nameSpan.textContent = visitor.name || 'Visitor';
+              li.appendChild(nameSpan);
+              li.appendChild(document.createTextNode(visitor.publicKey ? ' — ' + visitor.publicKey.slice(0, 16) + '…' : ' — anonymous'));
+              list.appendChild(li);
+            });
+          }
+          section.appendChild(list);
+          worldsEl.appendChild(section);
+        }
+        totalEl.textContent = String(total);
+        errorEl.textContent = '';
+      } catch (err) {
+        errorEl.textContent = 'Could not load presence: ' + err.message;
+      }
+    }
+
+    document.getElementById('onlineRefreshBtn').addEventListener('click', refreshOnlineNow);
+
+    async function verifySessionOrShowLoggedOut() {
+      const loggedOutNotice = document.getElementById('loggedOutNotice');
+      const main = document.getElementById('hidden-while-logged-out');
+      const whoDisplay = document.getElementById('whoDisplay');
+      const logoutBtn = document.getElementById('logoutBtn');
+
+      if (!session) {
+        loggedOutNotice.style.display = '';
+        main.style.display = 'none';
+        logoutBtn.style.display = 'none';
+        return;
+      }
+      // Re-checks with the server rather than trusting the locally-cached
+      // expiresAt alone — the session could have been logged out or expire
+      // server-side between the handoff and this page actually loading.
+      const whoami = await postJson('/atlas/admin/session/whoami', { token: session.token });
+      if (!whoami.ok) {
+        clearSession();
+        session = null;
+        loggedOutNotice.style.display = '';
+        main.style.display = 'none';
+        logoutBtn.style.display = 'none';
+        return;
+      }
+      loggedOutNotice.style.display = 'none';
+      main.style.display = 'block';
+      logoutBtn.style.display = '';
+      whoDisplay.textContent = 'Admin: ' + whoami.body.publicKey.slice(0, 20) + '…';
+      refreshOnlineNow();
+      refreshClassPatchClassOptions();
+      refreshClassPatches();
+      refreshMailDirectory();
+      refreshCalendarWorldOptions();
+      refreshCalendarEventOptions();
+    }
+
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+      if (session) await postJson('/atlas/admin/session/logout', { token: session.token }).catch(() => {});
+      clearSession();
+      location.href = '/';
+    });
+
+    function showResult(el, ok, text) {
+      el.className = 'result ' + (ok ? 'ok' : 'err');
+      el.textContent = text;
+    }
+
+    // ---------- revoke ----------
+    document.getElementById('revokeBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('revokeBtn');
+      const result = document.getElementById('revokeResult');
+      const id = document.getElementById('revokeId').value.trim();
+      const reason = document.getElementById('revokeReason').value.trim();
+      if (!id) return showResult(result, false, 'Credential id is required.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/revoke', { payload: { id, reason: reason || undefined }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Revoked.' : (res.body.error || 'Revoke failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- reissue ----------
+    document.getElementById('reissueBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('reissueBtn');
+      const result = document.getElementById('reissueResult');
+      let credential, properties;
+      try {
+        credential = JSON.parse(document.getElementById('reissueCredential').value);
+      } catch (err) {
+        return showResult(result, false, 'Credential JSON does not parse: ' + err.message);
+      }
+      const propertiesRaw = document.getElementById('reissueProperties').value.trim();
+      if (propertiesRaw) {
+        try {
+          properties = JSON.parse(propertiesRaw);
+        } catch (err) {
+          return showResult(result, false, 'Properties patch does not parse: ' + err.message);
+        }
+      }
+      const tradeScope = document.getElementById('reissueTradeScope').value || undefined;
+      if (!properties && !tradeScope) return showResult(result, false, 'Provide a properties patch, a tradeScope, or both.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/asset/reissue', { payload: { credential, properties, tradeScope }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Reissued -> ' + res.body.newCredential.id : (res.body.error || 'Reissue failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- class-wide patch ----------
+    // Suggests every non-fungible class this domain has (POST /atlas/admin/
+    // asset-classes, new) — bound or not, unlike GET /atlas/trade/catalog's
+    // deliberately tradeable-only list, since a bound class (a membership
+    // card, a badge) is just as valid a patch target as a tradeable one.
+    // The field stays free-typed rather than a closed dropdown regardless,
+    // in case the admin already knows a class name this list doesn't cover.
+    // assetClasses (kept around, same reasoning as classPatches below) is
+    // what lets picking a class pre-fill its actual current properties/
+    // tradeScope instead of leaving the operator to type a patch blind.
+    let assetClasses = {};
+    async function refreshClassPatchClassOptions() {
+      const list = document.getElementById('classPatchClassOptions');
+      if (!list || !session) return;
+      const res = await postJson('/atlas/admin/asset-classes', { token: session.token });
+      if (!res.ok) return;
+      assetClasses = {};
+      list.innerHTML = '';
+      (res.body.classes || []).forEach((c) => {
+        assetClasses[c.class] = c;
+        const opt = document.createElement('option');
+        opt.value = c.class;
+        opt.label = c.name + (c.tradeScope === 'bound' ? ' (bound)' : '');
+        list.appendChild(opt);
+      });
+    }
+
+    // Every class this operator has ever patched (POST /atlas/admin/
+    // class-patches, new) — shown below the form so the operator can see
+    // what's already active, and kept around (classPatches) so typing a
+    // known class name preloads its current patch instead of starting
+    // blank. This list is bounded by how many classes ever get touched,
+    // never by how many visitors or items exist.
+    let classPatches = {};
+    async function refreshClassPatches() {
+      const container = document.getElementById('classPatchCurrent');
+      if (!container || !session) return;
+      const res = await postJson('/atlas/admin/class-patches', { token: session.token });
+      if (!res.ok) return; // best-effort — the form still works without this
+      classPatches = res.body.patches || {};
+      const classes = Object.keys(classPatches);
+      const items = classes.length
+        ? classes.map((cls) => {
+            const patch = classPatches[cls];
+            const parts = [];
+            if (patch.properties) parts.push('properties ' + JSON.stringify(patch.properties));
+            if (patch.tradeScope) parts.push('tradeScope: ' + patch.tradeScope);
+            return '<li><span class="class-patch-name">' + cls + '</span> — ' + parts.join(', ') + '</li>';
+          }).join('')
+        : '<li class="empty">None set.</li>';
+      container.innerHTML = '<div class="class-patch-list"><h3>Active class patches</h3><ul>' + items + '</ul></div>';
+    }
+
+    // Picking a known class (typed exactly, or from the suggestions)
+    // pre-fills the form with what that class's credentials actually look
+    // like right now: the catalog's own base properties/tradeScope, with
+    // any already-active class patch merged on top (a patch takes priority
+    // over the catalog default, since that's the fact actually in force).
+    // Editing from a real starting point instead of a blank textarea is the
+    // whole point — typing a patch blind is exactly how a key gets
+    // misspelled or a fact gets overwritten with the wrong value by mistake.
+    document.getElementById('classPatchClass').addEventListener('input', () => {
+      const cls = document.getElementById('classPatchClass').value.trim();
+      const catalogEntry = assetClasses[cls];
+      const patch = classPatches[cls];
+      const effectiveProperties = { ...(catalogEntry ? catalogEntry.properties : {}), ...((patch && patch.properties) || {}) };
+      document.getElementById('classPatchProperties').value = Object.keys(effectiveProperties).length ? JSON.stringify(effectiveProperties, null, 2) : '';
+      document.getElementById('classPatchTradeScope').value = (patch && patch.tradeScope) || (catalogEntry && catalogEntry.tradeScope) || '';
+      document.getElementById('classPatchRandomNote').style.display = catalogEntry && catalogEntry.randomized ? '' : 'none';
+    });
+
+    document.getElementById('classPatchBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('classPatchBtn');
+      const result = document.getElementById('classPatchResult');
+      const assetClass = document.getElementById('classPatchClass').value.trim();
+      if (!assetClass) return showResult(result, false, 'Asset class is required.');
+      let properties;
+      const propertiesRaw = document.getElementById('classPatchProperties').value.trim();
+      if (propertiesRaw) {
+        try {
+          properties = JSON.parse(propertiesRaw);
+        } catch (err) {
+          return showResult(result, false, 'Properties patch does not parse: ' + err.message);
+        }
+      }
+      const tradeScope = document.getElementById('classPatchTradeScope').value || undefined;
+      if (!properties && !tradeScope) return showResult(result, false, 'Provide a properties patch, a tradeScope, or both.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/admin/class-patch', { payload: { assetClass, properties, tradeScope }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Patch set for ' + assetClass + ' — every current holder picks it up on their own next check-in.' : (res.body.error || 'Setting the patch failed.'));
+        if (res.ok) await refreshClassPatches();
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('classPatchClearBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('classPatchClearBtn');
+      const result = document.getElementById('classPatchResult');
+      const assetClass = document.getElementById('classPatchClass').value.trim();
+      if (!assetClass) return showResult(result, false, 'Asset class is required.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/admin/class-patch', { payload: { assetClass, clear: true }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Patch cleared for ' + assetClass + '.' : (res.body.error || 'Clearing the patch failed.'));
+        if (res.ok) {
+          document.getElementById('classPatchProperties').value = '';
+          document.getElementById('classPatchTradeScope').value = '';
+          await refreshClassPatches();
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- mail ----------
+    // Populates the recipient field's <datalist> from POST /atlas/admin/
+    // directory (subscribers + Post Office members, revoked ones already
+    // excluded server-side) so the operator can find a real, currently-
+    // reachable credential id by typing a name/handle/key fragment instead
+    // of guessing one — the browser's own datalist filtering narrows the
+    // suggestions as they type, no extra JS needed for that part. Loaded
+    // once at login, same "no polling timer" posture as Online Now — a
+    // subscriber who joins mid-session just won't be suggested until the
+    // next login, which is a fine trade for not re-fetching this on every
+    // keystroke.
+    async function refreshMailDirectory() {
+      const list = document.getElementById('mailRecipientOptions');
+      if (!list || !session) return;
+      const res = await postJson('/atlas/admin/directory', { token: session.token });
+      if (!res.ok) return; // best-effort — the field still works by hand if this fails
+      list.innerHTML = '';
+      const addOption = (credentialId, label) => {
+        const opt = document.createElement('option');
+        opt.value = credentialId;
+        opt.label = label;
+        list.appendChild(opt);
+      };
+      (res.body.subscribers || []).forEach((s) => {
+        addOption(s.credentialId, 'Subscriber ' + s.ownerPublicKey.slice(0, 16) + '…');
+      });
+      (res.body.postOfficeMembers || []).forEach((m) => {
+        addOption(m.credentialId, (m.handle ? m.handle + ' — ' : '') + 'Post Office ' + m.ownerPublicKey.slice(0, 16) + '…');
+      });
+    }
+
+    document.getElementById('mailBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('mailBtn');
+      const result = document.getElementById('mailResult');
+      const credentialId = document.getElementById('mailCredentialId').value.trim();
+      const subject = document.getElementById('mailSubject').value.trim();
+      const body = document.getElementById('mailBody').value.trim();
+      if (!credentialId || !subject || !body) return showResult(result, false, 'Credential id, subject, and body are all required.');
+      const giftAssetClass = document.getElementById('mailGiftAssetClass').value.trim() || undefined;
+      const giftOwnerPublicKey = document.getElementById('mailGiftOwnerPublicKey').value.trim() || undefined;
+      const giftQuantityRaw = document.getElementById('mailGiftQuantity').value.trim();
+      const giftQuantity = giftQuantityRaw ? Number(giftQuantityRaw) : undefined;
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/mail/send', {
+          payload: { credentialId, subject, body, giftAssetClass, giftOwnerPublicKey, giftQuantity },
+          token: session.token
+        });
+        // This domain never checks that credentialId is real (see the hint
+        // above this form) — a public key or a "name#domain" handle both
+        // get the same 200 "Sent" a genuine id would, then go nowhere,
+        // silently. This is just a shape check (does it look like one of
+        // this domain's own ids?), not a real existence check, but it's
+        // enough to catch the two mistakes those addresses actually are.
+        const looksLikeCredentialId = /^urn:atlas:/.test(credentialId);
+        let message = res.ok ? 'Sent.' : (res.body.error || 'Send failed.');
+        if (res.ok && !looksLikeCredentialId) {
+          message += ' But "' + credentialId + '" doesn\'t look like a credential id (expected something like urn:atlas:asset:...) — if that was a public key or a handle, nobody actually holds this as a credential id, so nothing will really arrive.';
+        }
+        showResult(result, res.ok && looksLikeCredentialId, message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- calendar ----------
+    // World id is a plain <select> (task-requested — the operator picks
+    // from a short, always-fully-visible list rather than typing/
+    // filtering) listing only worlds that opted into a calendar
+    // (manifest world.calendar === true), read from this domain's own
+    // .well-known/spatial.json — the same public document Online Now
+    // already reads for its own world list — plus the always-present
+    // "— domain-wide —" option (value ""). POST /atlas/calendar itself
+    // doesn't enforce this opt-in (see its own comment in server.js for
+    // why), so a domain that later adds worlds without calendar: true
+    // just won't offer them here, not a hard restriction on the wire.
+    async function refreshCalendarWorldOptions() {
+      const select = document.getElementById('calendarWorldId');
+      if (!select) return;
+      const previousValue = select.value;
+      try {
+        const res = await fetch('/.well-known/spatial.json', { cache: 'no-store' });
+        if (!res.ok) return;
+        const manifest = await res.json();
+        const worlds = (Array.isArray(manifest.worlds) ? manifest.worlds : []).filter((w) => w.calendar === true);
+        select.innerHTML = '';
+        const domainWide = document.createElement('option');
+        domainWide.value = '';
+        domainWide.textContent = '— domain-wide —';
+        select.appendChild(domainWide);
+        worlds.forEach((w) => {
+          const opt = document.createElement('option');
+          opt.value = w.id;
+          opt.textContent = w.name || w.id;
+          select.appendChild(opt);
+        });
+        // Restores the prior selection if it's still offered, same
+        // "don't silently reset the operator's own choice" courtesy the
+        // Post Office domain dropdown in extension/viewer.js already uses
+        // when its own options list refreshes underneath it.
+        if ([...select.options].some((o) => o.value === previousValue)) select.value = previousValue;
+      } catch (err) {}
+    }
+
+    // Event id's own <datalist>: whatever GET /atlas/calendar (ungated,
+    // same trust level as the manifest itself) already has for whichever
+    // world is currently selected in World id — blank meaning the
+    // domain-wide calendar. calendarEventsById is the same fetch's events
+    // keyed by id, kept around so picking one in the field below can fill
+    // in the rest of the form without a second round trip.
+    let calendarEventsById = new Map();
+    async function refreshCalendarEventOptions() {
+      const list = document.getElementById('calendarEventOptions');
+      if (!list) return;
+      const worldId = document.getElementById('calendarWorldId').value;
+      try {
+        const res = await fetch('/atlas/calendar' + (worldId ? '?world=' + encodeURIComponent(worldId) : ''), { cache: 'no-store' });
+        if (!res.ok) return;
+        const body = await res.json();
+        list.innerHTML = '';
+        calendarEventsById = new Map();
+        (body.events || []).forEach((e) => {
+          calendarEventsById.set(e.id, e);
+          const opt = document.createElement('option');
+          opt.value = e.id;
+          opt.label = e.title + ' — ' + e.dateTime;
+          list.appendChild(opt);
+        });
+      } catch (err) {}
+    }
+    // Changing World id refetches Event id's own options for the newly
+    // selected world, AND clears everything below it (Event id, Title,
+    // Start, End, Notes) — a value left over from the PREVIOUS world could
+    // otherwise be submitted against the new one without the operator
+    // noticing (an event id from world A silently updated/removed while
+    // World id now reads world B).
+    document.getElementById('calendarWorldId').addEventListener('change', () => {
+      document.getElementById('calendarEventId').value = '';
+      document.getElementById('calendarTitle').value = '';
+      document.getElementById('calendarDateTime').value = '';
+      document.getElementById('calendarEndDateTime').value = '';
+      document.getElementById('calendarNotes').value = '';
+      refreshCalendarEventOptions();
+    });
+
+    // Event id is only meaningful for update/remove — add always creates
+    // a fresh event, so there's nothing to pick. Cleared on switching to
+    // add so a stale id from a previous update/remove can't linger behind
+    // a disabled field and be submitted by surprise if the operator
+    // switches back.
+    function updateCalendarEventIdAvailability() {
+      const eventIdInput = document.getElementById('calendarEventId');
+      const isAdd = document.getElementById('calendarAction').value === 'add';
+      eventIdInput.disabled = isAdd;
+      if (isAdd) eventIdInput.value = '';
+    }
+    document.getElementById('calendarAction').addEventListener('change', updateCalendarEventIdAvailability);
+    updateCalendarEventIdAvailability();
+
+    // Picking a known event (from the datalist, or by typing its exact id)
+    // loads its current Title/Start/End/Notes into the form below, so
+    // update doesn't require already knowing — or retyping — what's there.
+    document.getElementById('calendarEventId').addEventListener('input', () => {
+      const event = calendarEventsById.get(document.getElementById('calendarEventId').value.trim());
+      if (!event) return;
+      document.getElementById('calendarTitle').value = event.title || '';
+      document.getElementById('calendarDateTime').value = event.dateTime || '';
+      document.getElementById('calendarEndDateTime').value = event.endDateTime || '';
+      document.getElementById('calendarNotes').value = event.notes || '';
+    });
+    // Focusing Event id selects its whole contents, so replacing a
+    // populated id (from clicking into the field, or tabbing in) is one
+    // keystroke instead of a manual select-all first.
+    document.getElementById('calendarEventId').addEventListener('focus', (ev) => ev.target.select());
+
+    document.getElementById('calendarBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('calendarBtn');
+      const result = document.getElementById('calendarResult');
+      const action = document.getElementById('calendarAction').value;
+      const worldId = document.getElementById('calendarWorldId').value.trim() || undefined;
+      const id = document.getElementById('calendarEventId').value.trim();
+      let payload;
+      if (action === 'remove') {
+        if (!id) return showResult(result, false, 'Event id is required to remove one.');
+        payload = { action, worldId, id };
+      } else {
+        const title = document.getElementById('calendarTitle').value.trim();
+        const dateTime = document.getElementById('calendarDateTime').value.trim();
+        const endDateTime = document.getElementById('calendarEndDateTime').value.trim() || undefined;
+        const notes = document.getElementById('calendarNotes').value.trim() || undefined;
+        if (action === 'update' && !id) return showResult(result, false, 'Event id is required to update one.');
+        if (action === 'add' && (!title || !dateTime)) return showResult(result, false, 'Title and start time are required to add an event.');
+        payload = { action, worldId, event: { id: id || undefined, title: title || undefined, dateTime: dateTime || undefined, endDateTime, notes } };
+      }
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/calendar', { payload, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Done -> ' + JSON.stringify(res.body) : (res.body.error || 'Calendar action failed.'));
+        // Keep the Event id suggestions current in case another action
+        // follows right after in the same session — cheap either way.
+        if (res.ok) await refreshCalendarEventOptions();
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    verifySessionOrShowLoggedOut();
+  </script>
+</body>
+</html>

@@ -16,17 +16,17 @@
 // GET /atlas/trade/listings already takes for a station with nothing open.
 //
 // POST — a real, protocol-level write endpoint (§12.2), admin-gated
-// (require_admin(), lib/store.php) the same way atlas/revoke.php,
+// (require_admin_auth(), lib/store.php) the same way atlas/revoke.php,
 // atlas/mail/send.php, and atlas/asset/reissue.php are: publishing a
 // domain's or world's calendar is squarely the domain operator's own
 // action, never a visitor's, and left open it meant anyone could plant or
 // overwrite events shown to every visitor of this domain. Wire shape is
-// {payload: {action, worldId, event, id}, proof}, the same envelope every
-// other admin action here uses. `worldId` null (or omitted) addresses the
-// domain-wide calendar; naming a world addresses that world's own — this
-// bundle does not check that world's manifest entry actually has
-// `calendar: true` before accepting an event for it (see
-// atlas_calendar_file()'s own comment in lib/store.php).
+// {payload: {action, worldId, event, id}, proof} or {payload, token}, the
+// same envelope every other admin action here uses. `worldId` null (or
+// omitted) addresses the domain-wide calendar; naming a world addresses
+// that world's own — this bundle does not check that world's manifest
+// entry actually has `calendar: true` before accepting an event for it
+// (see atlas_calendar_file()'s own comment in lib/store.php).
 require_once __DIR__ . '/../lib/bootstrap.php';
 handle_preflight();
 
@@ -44,8 +44,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
   $calendarPayload = $requestBody['payload'] ?? null;
   $proof = $requestBody['proof'] ?? null;
-  $authError = require_admin($calendarPayload, $proof);
-  if ($authError) send_json(401, ['error' => $authError]);
+  $token = $requestBody['token'] ?? null;
+  $auth = require_admin_auth($calendarPayload, $proof, $token);
+  if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
 
   $action = $calendarPayload['action'] ?? null;
   $worldId = (isset($calendarPayload['worldId']) && $calendarPayload['worldId'] !== '') ? $calendarPayload['worldId'] : null;

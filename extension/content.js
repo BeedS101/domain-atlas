@@ -314,6 +314,41 @@
     if (event.data && typeof event.data === 'object' && event.data.type === 'domain-atlas-title') {
       if (originalDocumentTitle === null) originalDocumentTitle = document.title;
       document.title = String(event.data.title);
+      return;
+    }
+    // The other half of viewer.js's 🛡️ Admin button: that iframe is
+    // cross-origin from this page (extension origin vs. the domain's own),
+    // so it can't put anything into THIS origin's storage directly, and a
+    // token in the URL would leak into browser history and any server
+    // access log along the way. It hands the token off here instead, and
+    // this page — same origin as the admin panel it's about to open — puts
+    // it in sessionStorage and navigates there.
+    //
+    // event.source is checked against the overlay iframe specifically
+    // (unlike 'domain-atlas-close'/'domain-atlas-title' above, which are
+    // harmless no matter who sends them) because this message carries a
+    // live bearer credential: only the wallet this page itself opened
+    // should ever be able to plant one.
+    if (event.data && typeof event.data === 'object' && event.data.type === 'domain-atlas-admin-handoff') {
+      const overlay = document.getElementById('domain-atlas-overlay');
+      if (!overlay || event.source !== overlay.contentWindow) return;
+      const { domain, token, expiresAt } = event.data;
+      if (typeof domain !== 'string' || typeof token !== 'string' || location.host !== domain) return;
+      try {
+        sessionStorage.setItem('atlasAdminSession', JSON.stringify({ token, expiresAt }));
+      } catch (err) {
+        // sessionStorage unavailable (a locked-down privacy mode, say) —
+        // the admin panel will just show its logged-out state instead of
+        // silently pretending this worked.
+      }
+      // The explicit filename, not the bare directory — a real site often
+      // has its own catch-all rewrite in front of this one (a CMS's own
+      // "anything not a real file goes to my own router" rule, say), which
+      // can 404 a bare /atlas-admin/ request before Apache's own
+      // directory-index resolution ever gets a turn, even though the exact
+      // same rewrite correctly leaves an actual file alone. Naming the file
+      // sidesteps that ambiguity entirely, on any host.
+      location.href = '/atlas-admin/index.html';
     }
   });
 })();

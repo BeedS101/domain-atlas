@@ -422,6 +422,7 @@ const AtlasWallet = (() => {
   }
 
   async function lockIdentity() {
+    await endAllAdminSessions();
     await chrome.storage.session.remove('atlasUnlockedIdentity');
   }
 
@@ -485,6 +486,117 @@ const AtlasWallet = (() => {
     const challenge = { nonce: b64urlEncode(crypto.getRandomValues(new Uint8Array(32)).buffer), purpose: 'present-identity' };
     const envelope = await signWithSelf(challenge);
     return verifySignedPayload(challenge, envelope);
+  }
+
+  // ---------- admin session (per domain) ----------
+  //
+  // Client side of the admin session primitive (issuer-server/server.js's
+  // GET/POST /atlas/admin/session/*, and the equivalent PHP routes) — logs
+  // this identity into whichever domain's admin roster it's on, without
+  // needing a fresh signature for every admin action afterward. Sessions
+  // are cached per domain in chrome.storage.session under
+  // atlasAdminSessions ({ [domain]: { token, expiresAt, publicKey } }) —
+  // the same storage area, and the same "cleared when the browser session
+  // ends" lifetime, atlasUnlockedIdentity above already uses, plus an
+  // explicit teardown on lock (see endAllAdminSessions, wired into
+  // lockIdentity below) so an admin session never outlives the identity
+  // that opened it.
+  async function getAdminSessionsMap() {
+    const { atlasAdminSessions } = await chrome.storage.session.get('atlasAdminSessions');
+    return atlasAdminSessions || {};
+  }
+
+  // A cheap, ungated read (GET /atlas/admin/is-admin) — lets a caller
+  // decide whether to show an "Admin" entry point for the identity
+  // currently active, without spending a real login round trip (a signed
+  // nonce, a session token) just to render a button. Fails closed (false)
+  // on any error — an unreachable domain or an older issuer without this
+  // route should hide the button, not surface a confusing failure.
+  async function isAdminForDomain(domain) {
+    const identity = await getIdentity();
+    if (!identity) return false;
+    try {
+      const res = await fetch(baseUrl(domain) + '/atlas/admin/is-admin?publicKey=' + encodeURIComponent(identity.publicKey));
+      if (!res.ok) return false;
+      const body = await res.json();
+      return !!body.isAdmin;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Returns a still-valid cached session for this domain, scoped to
+  // whichever identity is active right now — a session cached under a
+  // different public key (an identity switch without an intervening lock)
+  // is treated as absent rather than handed back, same as one that's
+  // simply expired.
+  async function getAdminSessionFor(domain) {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const session = (await getAdminSessionsMap())[domain];
+    if (!session || session.publicKey !== identity.publicKey || session.expiresAt <= Date.now()) return null;
+    return { token: session.token, expiresAt: session.expiresAt };
+  }
+
+  // The real login: GET a single-use nonce, sign it (works for either
+  // identity mode — signWithSelf already covers WebAuthn), POST it to
+  // /session/start, cache the resulting token. Reuses an already-valid
+  // cached session instead of re-logging in on every call, so clicking
+  // "Admin" again mid-session doesn't force a fresh signature.
+  async function adminLoginForDomain(domain) {
+    const cached = await getAdminSessionFor(domain);
+    if (cached) return cached;
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const nonceRes = await fetch(baseUrl(domain) + '/atlas/admin/session/nonce');
+    if (!nonceRes.ok) throw new Error('Could not reach ' + domain + ' to start an admin session.');
+    const { nonce } = await nonceRes.json();
+    const proof = await signWithSelf({ nonce });
+    const startRes = await fetch(baseUrl(domain) + '/atlas/admin/session/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload: { nonce }, proof })
+    });
+    const body = await startRes.json();
+    if (!startRes.ok) throw new Error(body.error || 'Admin login was rejected.');
+    const sessions = await getAdminSessionsMap();
+    sessions[domain] = { token: body.token, expiresAt: body.expiresAt, publicKey: identity.publicKey };
+    await chrome.storage.session.set({ atlasAdminSessions: sessions });
+    return { token: body.token, expiresAt: body.expiresAt };
+  }
+
+  // Explicit single-domain logout — best-effort against the server (an
+  // unreachable domain shouldn't block forgetting the token locally) and
+  // idempotent (calling it with nothing cached is a harmless no-op).
+  async function adminLogoutForDomain(domain) {
+    const sessions = await getAdminSessionsMap();
+    const session = sessions[domain];
+    if (!session) return;
+    delete sessions[domain];
+    await chrome.storage.session.set({ atlasAdminSessions: sessions });
+    try {
+      await fetch(baseUrl(domain) + '/atlas/admin/session/logout', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: session.token })
+      });
+    } catch (err) {
+      // best-effort — the token simply expires on its own otherwise
+    }
+  }
+
+  // Ends every cached admin session at once — what lockIdentity() below
+  // calls, so "lock the wallet" really does act like "log out of admin
+  // everywhere" rather than leaving a token quietly valid until it expires
+  // on its own. Deliberately does NOT await the network calls: locking has
+  // to be instant (the quick-lock button in the toolbar promises exactly
+  // that), not stalled behind a round trip to every domain this wallet
+  // happens to hold an admin session with — each logout is fired and left
+  // to land or not, and ADMIN_SESSION_TTL_MS is the backstop either way.
+  async function endAllAdminSessions() {
+    const sessions = await getAdminSessionsMap();
+    for (const domain of Object.keys(sessions)) {
+      fetch(baseUrl(domain) + '/atlas/admin/session/logout', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: sessions[domain].token })
+      }).catch((err) => {});
+    }
+    await chrome.storage.session.remove('atlasAdminSessions');
   }
 
   // Exporting re-derives from the LOCAL encrypted blob and requires the
@@ -4588,10 +4700,24 @@ const AtlasWallet = (() => {
             }
           }
         }
+        // `credentials` (alongside the bare ids `credentialIds` already
+        // carried): this wallet's own current copy of each one, from
+        // `assets` above — nothing new to fetch, it's already in hand.
+        // Lets the domain catch a class-wide patch an operator set (POST
+        // /atlas/admin/class-patch) that's moved past what THIS specific
+        // credential says, without the domain ever having to keep its own
+        // record of who holds what — see issuer-server/server.js's
+        // applyClassPatchIfStale() for the other half of this. Adopting
+        // whatever comes back still goes through processAssetUpdates'
+        // own full re-verification below, exactly like any other
+        // supersession notice.
         const res = await fetch(base + '/atlas/mail/check', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ credentialIds: Array.from(idSet) })
+          body: JSON.stringify({
+            credentialIds: Array.from(idSet),
+            credentials: assets.filter((e) => idSet.has(e.credential.id)).map((e) => e.credential)
+          })
         });
         const { messages, updates } = await res.json();
         for (const message of (messages || [])) {
@@ -4668,6 +4794,7 @@ const AtlasWallet = (() => {
   return {
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
     exportIdentity, importIdentity, presentIdentity,
+    isAdminForDomain, adminLoginForDomain, adminLogoutForDomain,
     getIdentityMode, setIdentityMode, hasLocalIdentity, hasWebAuthnIdentity,
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
     getCounterparty, createCounterparty,

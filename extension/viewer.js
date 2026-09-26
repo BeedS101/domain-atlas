@@ -1700,6 +1700,7 @@ const walletBtn = document.getElementById('walletBtn');
 const walletBadge = document.getElementById('walletBadge');
 const walletPanel = document.getElementById('walletPanel');
 const quickLockWalletBtn = document.getElementById('quickLockWalletBtn');
+const adminBtn = document.getElementById('adminBtn');
 
 // Social tab (#61/#67): Mail, Contacts, Favorites as three sub-screens of
 // one top-level tab — see showWalletScreen()/showSocialSubtab() below for
@@ -2432,6 +2433,7 @@ async function enterWorld(worldId) {
   await refreshTradingStationJoinButton();
   await refreshRemoteTradeStationOptions();
   await refreshMyPublicKeyDisplay();
+  await refreshAdminButtonVisibility();
   refreshWorldGates();
 
   // SPEC.md §3.6.1 — a key-anchored world (no manifest.domain) gets the
@@ -3568,6 +3570,7 @@ async function refreshIdentityDisplay() {
 
   await refreshIdentityModeControls();
   await refreshQuickLockButtonVisibility();
+  await refreshAdminButtonVisibility();
 }
 
 // The active "self" mechanism can be either the local password identity or
@@ -6318,6 +6321,7 @@ lockWalletBtn.addEventListener('click', async () => {
   walletPanel.classList.remove('open');
   await refreshQuickLockButtonVisibility();
   await refreshMessagingLockGate();
+  await refreshAdminButtonVisibility();
   refreshChatIdentity(); // same immediate reflection as the unlock path above — locking should drop back to anonymous chat right away
 });
 
@@ -6333,6 +6337,46 @@ async function refreshQuickLockButtonVisibility() {
   if (!quickLockWalletBtn) return;
   quickLockWalletBtn.style.display = (await AtlasWallet.isUnlocked()) ? '' : 'none';
 }
+
+// Shown only when the active identity is unlocked, standing in a real
+// (non-key-anchored) domain, AND that domain's own admin roster lists this
+// identity's public key — AtlasWallet.isAdminForDomain fails closed (false)
+// on an unreachable domain or an older issuer without the /is-admin route,
+// same posture as everything else here. Called wherever the active
+// identity or the current domain can change: enterWorld() (every domain
+// landing) and refreshIdentityDisplay() (unlock/lock/identity-switch
+// without a domain change).
+async function refreshAdminButtonVisibility() {
+  if (!adminBtn) return;
+  const domain = currentManifest ? manifestDomainOf(currentManifest) : null;
+  if (!domain || !(await AtlasWallet.isUnlocked())) { adminBtn.style.display = 'none'; return; }
+  adminBtn.style.display = (await AtlasWallet.isAdminForDomain(domain)) ? '' : 'none';
+}
+
+// Admin button click: log into (or reuse) this domain's admin session,
+// then hand the token to content.js — never to this iframe's own UI — for
+// the same reason closing the overlay and setting the tab title already go
+// through postMessage: this iframe is cross-origin from the domain's own
+// pages, so it can't put anything into that origin's storage directly, and
+// a token in the URL would leak into browser history and server logs.
+// content.js stashes it in the HOST page's own sessionStorage and
+// navigates there — see its own comment on the 'domain-atlas-admin-
+// handoff' message for the other half of this.
+adminBtn && adminBtn.addEventListener('click', async () => {
+  const domain = currentManifest ? manifestDomainOf(currentManifest) : null;
+  if (!domain) return;
+  adminBtn.disabled = true;
+  statusEl.textContent = 'Starting admin session…';
+  try {
+    const { token, expiresAt } = await AtlasWallet.adminLoginForDomain(domain);
+    window.parent.postMessage({ type: 'domain-atlas-admin-handoff', domain, token, expiresAt }, '*');
+    statusEl.textContent = '';
+  } catch (err) {
+    statusEl.textContent = 'Admin login failed: ' + err.message;
+  } finally {
+    adminBtn.disabled = false;
+  }
+});
 
 // Task #111 TODO round 1, item 1 (2026-09-14): the Messaging button/window
 // are gated behind an unlocked wallet — deliberately stricter than
@@ -6361,6 +6405,7 @@ quickLockWalletBtn && quickLockWalletBtn.addEventListener('click', async () => {
   await AtlasWallet.lockIdentity();
   await refreshQuickLockButtonVisibility();
   await refreshMessagingLockGate();
+  await refreshAdminButtonVisibility();
   refreshChatIdentity(); // same immediate reflection the other two lock/unlock paths get
   // If the wallet panel happens to be open to a screen that only makes
   // sense unlocked (mainWalletScreen, say), route it to wherever locking
@@ -11008,6 +11053,7 @@ setInterval(async () => {
   await AtlasWallet.lockIdentity();
   await refreshQuickLockButtonVisibility();
   await refreshMessagingLockGate();
+  await refreshAdminButtonVisibility();
   refreshChatIdentity(); // an auto-lock should drop chat back to anonymous immediately too, same as the manual lock paths
   // Same re-routing the two manual lock buttons already trigger (Settings'
   // Lock wallet, and the top-bar Quick lock) — if the panel's open to a

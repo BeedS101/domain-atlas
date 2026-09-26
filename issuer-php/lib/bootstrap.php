@@ -311,6 +311,41 @@ function asset_payload_of($credential) {
   ];
 }
 
+// Auto-applies a class-wide patch (POST /atlas/admin/class-patch.php, see
+// atlas_class_patches_file()'s own comment) to ONE specific holder's
+// credential the moment they check in with it (atlas/mail/check.php),
+// instead of requiring the operator to already know who holds one. This
+// bundle keeps no registry of who holds what — re-verifying the
+// credential the wallet itself just presented is the ONLY way to know
+// it's real before minting a replacement for its owner, the same trust
+// posture every other endpoint here already uses for a presented
+// credential. Non-fungible only, same reasoning atlas/asset/reissue.php
+// already gives. Returns the same {id, status, reason, newCredential}
+// shape a manual reissue already produces (or null if nothing needed to
+// change), so atlas/mail/check.php can hand it back through the exact
+// `updates` array wallet.js's processAssetUpdates already knows how to
+// adopt — no wallet-side change needed beyond what it already sends.
+// Mirrors issuer-server/server.js's applyClassPatchIfStale().
+function apply_class_patch_if_stale($privateKey, $publicKeyB64url, $credential) {
+  if (!is_array($credential) || ($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0') return null;
+  if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) return null;
+  if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !== atlas_domain()) return null;
+  $patch = class_patch_of($credential['asset']['class']);
+  if (!$patch || !is_credential_stale_against_class_patch($credential, $patch)) return null;
+  if (is_revoked($credential['id'])) return null; // already handled by atlas/mail/check.php's own revocation check — defensive only
+  $sigOk = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+  if (!$sigOk) return null; // never act on anything that isn't genuinely this domain's own signed credential
+
+  $newAsset = $credential['asset'];
+  if (isset($patch['tradeScope'])) $newAsset['tradeScope'] = $patch['tradeScope'];
+  if (isset($patch['properties'])) $newAsset['properties'] = merge_properties($newAsset['properties'] ?? [], $patch['properties']);
+  $newCredential = issue_asset($privateKey, $publicKeyB64url, $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id']);
+  atlas_revoke($credential['id'], 'class-patch');
+  $update = ['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'class-patch', 'newCredential' => $newCredential];
+  append_asset_update($update);
+  return $update;
+}
+
 // The one issuance path for every asset credential this bundle signs —
 // unique (fungible: false, quantity always 1) and fungible (quantity any
 // positive integer) alike (SPEC.md §5). Shared by atlas/asset/issue.php

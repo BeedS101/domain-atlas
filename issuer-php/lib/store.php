@@ -67,6 +67,20 @@ function atlas_asset_updates_file() {
   return __DIR__ . '/atlas-asset-updates-store.json';
 }
 
+// Same "not web-reachable" reasoning as atlas_mail_file() above — one
+// entry per asset CLASS an operator has ever patched (POST /atlas/admin/
+// class-patch), never one per item or per holder: a bulk alternative to
+// reissuing each holder's credential by hand, letting an operator set a
+// fact once for a whole non-fungible class and having every CURRENT
+// holder's own wallet pick it up automatically on its own next check-in —
+// see apply_class_patch_if_stale() in lib/bootstrap.php. Bounded by how
+// many distinct classes ever get touched (at most the size of
+// ATLAS_ASSET_CATALOG), never by how many visitors or items exist.
+// Mirrors issuer-server/server.js's CLASS_PATCHES_FILE.
+function atlas_class_patches_file() {
+  return __DIR__ . '/atlas-class-patches-store.json';
+}
+
 // A roster of who subscribed (credential id + owner public key per
 // atlas.membership issuance) — same "not web-reachable" reasoning as
 // atlas_mail_file() above, since this is a list of subscriber public keys,
@@ -120,10 +134,12 @@ function is_domain_blocked($domain) {
 // Domain admin roster — mirrors issuer-server/server.js's ADMIN_KEYS_FILE.
 // The public keys authorized to act as this domain's own operator over
 // HTTP, reusing the same visitor-identity mechanism (verify_envelope
-// above) instead of a separate admin-login system. Same "plain operator-
-// edited JSON file, no admin-auth API surface to gate one" posture as
-// atlas_federation_blocklist_file() above, for the same bootstrap reason:
-// something has to seed the very first admin key by hand.
+// above) rather than a separate admin username/password system. Same
+// "plain operator-edited JSON file, no admin-auth API surface to gate one"
+// posture as atlas_federation_blocklist_file() above, for the same
+// bootstrap reason: something has to seed the very first admin key by
+// hand. See the admin session layer just below for the short-lived bearer
+// token a roster key can trade one signature for.
 function atlas_admin_keys_file() {
   return __DIR__ . '/atlas-admin-keys-store.json';
 }
@@ -148,6 +164,153 @@ function require_admin($payload, $proof) {
   if (!verify_envelope($payload, $proof)) return 'admin signature does not check out';
   if (empty($proof['publicKey']) || !is_admin_key($proof['publicKey'])) return 'this key is not a registered domain admin';
   return null;
+}
+
+// Short-lived admin session layer on top of the roster above — mirrors
+// issuer-server/server.js's ADMIN_NONCES_FILE/ADMIN_SESSIONS_FILE. The
+// roster stays the one source of truth for who's an admin; this just lets
+// a roster key sign in ONCE (over a fresh nonce, so the login itself can't
+// be replayed) and use a random bearer token for everything after that,
+// instead of re-signing every request with its ECDSA key. Same
+// flock-guarded read/modify/write shape as the pending-trades and calendar
+// stores above — unlike the roster file (hand-edited, never written by a
+// request), nonces and sessions ARE written by concurrent HTTP requests,
+// so a plain read-then-write would race.
+function atlas_admin_nonces_file() {
+  return __DIR__ . '/atlas-admin-nonces-store.json';
+}
+function atlas_admin_sessions_file() {
+  return __DIR__ . '/atlas-admin-sessions-store.json';
+}
+const ATLAS_ADMIN_NONCE_TTL_MS = 120000; // 2 minutes, in ms — long enough to sign and post, short enough a stale one is worthless
+const ATLAS_ADMIN_SESSION_TTL_MS = 1800000; // 30 minutes, in ms — slides forward on every check, see touch_admin_session()
+
+function issue_admin_nonce() {
+  $fh = fopen(atlas_admin_nonces_file(), 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['nonces'])) $doc = ['nonces' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $doc['nonces'] = array_values(array_filter($doc['nonces'], function ($n) use ($nowMs) { return ($n['expiresAt'] ?? 0) > $nowMs; }));
+  $nonce = b64url_encode(random_bytes(24));
+  $doc['nonces'][] = ['nonce' => $nonce, 'expiresAt' => $nowMs + ATLAS_ADMIN_NONCE_TTL_MS];
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $nonce;
+}
+// Single-use: removed the moment it's successfully consumed, same
+// reasoning as issuer-server/server.js's consumeAdminNonce() — a failed
+// attempt (bad signature, key not on the roster) does not burn the nonce.
+function consume_admin_nonce($nonce) {
+  $fh = fopen(atlas_admin_nonces_file(), 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['nonces'])) $doc = ['nonces' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $found = false;
+  $remaining = [];
+  foreach ($doc['nonces'] as $n) {
+    if (($n['expiresAt'] ?? 0) <= $nowMs) continue;
+    if (!$found && is_string($nonce) && ($n['nonce'] ?? null) === $nonce) { $found = true; continue; }
+    $remaining[] = $n;
+  }
+  $doc['nonces'] = $remaining;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
+}
+
+function create_admin_session($publicKey) {
+  $fh = fopen(atlas_admin_sessions_file(), 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['sessions'])) $doc = ['sessions' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $doc['sessions'] = array_values(array_filter($doc['sessions'], function ($s) use ($nowMs) { return ($s['expiresAt'] ?? 0) > $nowMs; }));
+  $token = b64url_encode(random_bytes(32));
+  $expiresAt = $nowMs + ATLAS_ADMIN_SESSION_TTL_MS;
+  $doc['sessions'][] = ['token' => $token, 'publicKey' => $publicKey, 'expiresAt' => $expiresAt];
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['token' => $token, 'expiresAt' => $expiresAt];
+}
+// Validates a token and slides its expiry forward on every successful
+// check, same reasoning as issuer-server/server.js's touchAdminSession().
+// hash_equals() keeps the comparison constant-time.
+function touch_admin_session($token) {
+  $fh = fopen(atlas_admin_sessions_file(), 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['sessions'])) $doc = ['sessions' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $publicKey = null;
+  $remaining = [];
+  foreach ($doc['sessions'] as $s) {
+    if (($s['expiresAt'] ?? 0) <= $nowMs) continue;
+    if ($publicKey === null && is_string($token) && hash_equals((string) ($s['token'] ?? ''), $token)) {
+      $publicKey = $s['publicKey'];
+      $s['expiresAt'] = $nowMs + ATLAS_ADMIN_SESSION_TTL_MS;
+    }
+    $remaining[] = $s;
+  }
+  $doc['sessions'] = $remaining;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $publicKey;
+}
+// Idempotent and constant-shape whether or not the token was ever valid —
+// same reasoning as issuer-server/server.js's deleteAdminSession().
+function delete_admin_session($token) {
+  $fh = fopen(atlas_admin_sessions_file(), 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['sessions'])) $doc = ['sessions' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $doc['sessions'] = array_values(array_filter($doc['sessions'], function ($s) use ($nowMs, $token) {
+    if (($s['expiresAt'] ?? 0) <= $nowMs) return false;
+    if (is_string($token) && hash_equals((string) ($s['token'] ?? ''), $token)) return false;
+    return true;
+  }));
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// Unifies the two ways an admin action can now be authorized: EITHER a
+// fresh signed proof envelope (require_admin() above) OR an active session
+// token from the primitive above. A token, when present, takes priority —
+// checking it also slides the session's expiry forward (touch_admin_session()),
+// so any authenticated action counts as activity, not just a /whoami check.
+// Returns ['error' => ...] or ['publicKey' => ...], mirroring
+// issuer-server/server.js's requireAdminAuth().
+function require_admin_auth($payload, $proof, $token) {
+  if (is_string($token) && $token !== '') {
+    $publicKey = touch_admin_session($token);
+    if ($publicKey === null) return ['error' => 'session is missing, unknown, or expired'];
+    return ['publicKey' => $publicKey];
+  }
+  $error = require_admin($payload, $proof);
+  if ($error) return ['error' => $error];
+  return ['publicKey' => $proof['publicKey']];
 }
 
 // Trading Station membership roster (task #144 Phase 1) — same flat-array
@@ -884,6 +1047,122 @@ function append_asset_update($update) {
   fflush($fh);
   flock($fh, LOCK_UN);
   fclose($fh);
+}
+
+// Merges $patch onto $target (never mutates either): a key set to any
+// value but null is added/overwritten same as array_merge, and a key set
+// to null is removed from the result entirely rather than kept as a
+// literal null — the standard JSON Merge Patch convention (RFC 7386),
+// adopted here so there's finally a way to actually take a property away
+// rather than only ever add or overwrite one. Used wherever a properties
+// patch is applied to REAL asset data — a class patch onto a credential's
+// properties (apply_class_patch_if_stale(), lib/bootstrap.php), and
+// atlas/asset/reissue.php's own `properties` argument — so null means
+// "delete this" in both places a patch actually takes effect.
+//
+// Deliberately NOT used by set_class_patch()'s own merge of a new call
+// onto an already-stored patch, just below: a stored patch has to keep a
+// null entry as a literal delete MARKER (something to apply to a
+// credential later), not have that key erased from the patch the moment
+// it's set. Mirrors issuer-server/server.js's mergeProperties().
+function merge_properties($target, $patch) {
+  $result = is_array($target) ? $target : [];
+  foreach (($patch ?? []) as $key => $value) {
+    if ($value === null) unset($result[$key]);
+    else $result[$key] = $value;
+  }
+  return $result;
+}
+
+// ---------- class patches (same flock-guarded shape as mail above,
+// keyed by asset class rather than by item or holder) ----------
+
+function read_class_patches() {
+  $fh = fopen(atlas_class_patches_file(), 'c+');
+  if ($fh === false) return ['patches' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['patches' => []];
+}
+
+function class_patch_of($cls) {
+  $doc = read_class_patches();
+  return isset($doc['patches'][$cls]) ? $doc['patches'][$cls] : null;
+}
+
+// `properties` is itself a patch, merged onto whatever was already set for
+// this class (same merge-not-replace shape atlas/asset/reissue.php's own
+// `properties` argument already uses), so setting one fact doesn't clobber
+// another set earlier. `tradeScope`, when given, replaces the stored value
+// outright (a scalar, nothing to merge).
+function set_class_patch($cls, $properties, $tradeScope) {
+  $file = atlas_class_patches_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['patches' => []];
+  $existing = isset($doc['patches'][$cls]) ? $doc['patches'][$cls] : [];
+  $merged = [];
+  // array_merge, NOT merge_properties() — a null here has to survive into
+  // the stored patch as a literal delete marker, not be erased from it
+  // right away. merge_properties() only ever runs where a patch is
+  // actually applied to a real credential's properties.
+  $nextProperties = $properties !== null ? array_merge(isset($existing['properties']) ? $existing['properties'] : [], $properties) : (isset($existing['properties']) ? $existing['properties'] : null);
+  $nextTradeScope = $tradeScope !== null ? $tradeScope : (isset($existing['tradeScope']) ? $existing['tradeScope'] : null);
+  if ($nextProperties !== null) $merged['properties'] = $nextProperties;
+  if ($nextTradeScope !== null) $merged['tradeScope'] = $nextTradeScope;
+  $merged['updatedAt'] = iso_now();
+  $doc['patches'][$cls] = $merged;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $merged;
+}
+
+function clear_class_patch($cls) {
+  $file = atlas_class_patches_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['patches' => []];
+  unset($doc['patches'][$cls]);
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// True if $credential disagrees with $patch on any field the patch
+// actually sets. JSON-encode comparison rather than === since a
+// property's value can itself be an array (e.g. a stats bag), not just a
+// scalar. A null entry (merge_properties' delete marker) is stale exactly
+// when the key is still actually present — once it's gone, checking again
+// must stop reporting stale, or a deleted property would reissue forever.
+// Mirrors issuer-server/server.js's isCredentialStaleAgainstClassPatch().
+function is_credential_stale_against_class_patch($credential, $patch) {
+  if (isset($patch['tradeScope']) && (!isset($credential['asset']['tradeScope']) || $credential['asset']['tradeScope'] !== $patch['tradeScope'])) return true;
+  if (isset($patch['properties'])) {
+    $current = isset($credential['asset']['properties']) ? $credential['asset']['properties'] : [];
+    foreach ($patch['properties'] as $key => $value) {
+      if ($value === null) {
+        if (array_key_exists($key, $current)) return true;
+      } else {
+        $currentValue = isset($current[$key]) ? $current[$key] : null;
+        if (json_encode($currentValue) !== json_encode($value)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // ---------- subscribers (same flock-guarded shape as mail above) ----------

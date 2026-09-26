@@ -1072,6 +1072,12 @@
     <div id="controls">
       <span id="status"></span>
       <button id="walletBtn" type="button">🎒 Wallet<span id="walletBadge"></span></button>
+      <!-- Shown only when the currently active identity is on the current
+           domain's own admin roster — see refreshAdminButtonVisibility()
+           in viewer.js. Clicking it starts (or reuses) an admin session
+           for this domain and hands the token to the domain's own admin
+           panel page, never to this iframe's own UI. -->
+      <button id="adminBtn" type="button" style="display: none;" title="Open this domain's admin panel">🛡️ Admin</button>
       <!-- Messaging window (task #111 first slice) — a separate, freely
            draggable/resizable window from the wallet panel and the
            in-world chat widget, opened/closed here the same "toggle a
