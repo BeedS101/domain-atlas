@@ -952,6 +952,54 @@ browser to prove all of this end to end: the genuine-and-valid case, the
 tampered-and-rejected case, and a redeemed bound credential immediately
 re-verifying as revoked.
 
+## Buying something with a balance, and a worked cafeteria example
+
+Every mechanism above moves a credential that already exists. None of them
+cover acquiring something NEW by spending part of a balance a visitor
+already holds — a plain purchase, the same shape whether what's sold is a
+menu item, an item in a spatial world's shop, or anything else a domain
+decides to price this way. `POST /atlas/asset/purchase` (SPEC.md §5.8)
+covers it: a class becomes purchasable the moment its own catalog entry
+declares a price (`purchase: {priceClass, priceAmount}`), and the endpoint
+debits a presented balance of that class by `priceAmount × quantity` while
+minting the purchased class fresh, atomically — the purchased asset is
+minted *first*, so a sold-out or otherwise-failing class never touches the
+buyer's balance at all. Authorized by the balance owner's own signature
+(the same intent envelope `/atlas/asset/transfer` and `/atlas/asset/redeem`
+already use) — spending your own balance is the buyer's call, not the
+operator's. A bound balance (locked to its owner, never giftable or
+tradeable) can still be spent this way; the same "no recipient to reason
+about" logic already lets a bound credential be redeemed outright.
+
+`POST /atlas/asset/fulfill` (SPEC.md §5.9) is the closing act for anything
+meant to be handed over once and only once: admin-gated (the same
+`requireAdminAuth`/`require_admin_auth` every other operator action
+already uses), it confirms a presented credential is genuine and unspent,
+then revokes it with a new reason code, `"fulfilled"` — the mirror image of
+redeem's holder-authorized revocation, this time attested by the operator
+instead of the holder.
+
+`demo-domain-a/cafeteria-demo.html` is one worked example, not a special
+case the protocol knows about: a parent or organization tops up a
+student's `atlas.credit.balance` (a fungible, bound spendable balance,
+minted via the same ungated `/atlas/asset/issue` every other class here
+already uses — standing up real payment custody is explicitly out of
+scope for a protocol reference implementation), the student spends part of
+it on a small menu (`atlas.demo.cafeteria.sandwich`/`.juice`/`.snack`,
+each just a catalog entry with its own price), and each purchase mints a
+receipt credential. The receipt's full raw JSON is meant to be taken to
+the Admin Panel's new "Fulfill a purchase" section — the operator
+confirming it and handing over the order — and a "Check status" button on
+the cafeteria page re-reads this domain's own public revocation list to
+show whether that's happened yet, live, no extra API needed.
+`test/manual-asset-purchase.js` covers the endpoint itself at the HTTP
+layer (atomic debit-and-mint, insufficient balance, wrong currency, a
+non-purchasable class, non-fungible quantity, a mismatched intent, and the
+fulfill/replay-rejection cycle) on both issuers; `test/manual-cafeteria-
+demo.js` drives both pages end to end — topping up, buying down to a
+disabled buy button, fulfilling on the Admin Panel, and watching the
+receipt's own status flip live.
+
 ## 9. Verify it yourself
 
 ```bash

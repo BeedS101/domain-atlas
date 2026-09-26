@@ -773,6 +773,39 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'com.example.issuedFor' => 'business demo',
     ],
   ],
+  // SPEC.md §5.8's spendable balance, for the cafeteria-demo.html example.
+  // 'tradeScope' => 'bound' — a top-up is meant to be spent by whoever it
+  // was minted for, not gifted, traded, or consolidated away;
+  // check_presented_spendable_asset() deliberately does not check
+  // tradeScope, the same "spending your own balance raises no recipient
+  // question" reasoning check_presented_redeemable_asset() already applies
+  // to redeeming a bound credential whole. Mirrors issuer-server/server.js's
+  // ASSET_CATALOG entry of the same name.
+  'atlas.credit.balance' => [
+    'name' => 'Spending Balance', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => true, 'presentation' => 'collectible',
+    'tradeScope' => 'bound',
+  ],
+  // Three purchasable classes for the same example — each is just another
+  // catalog entry with its own 'purchase' => ['priceClass', 'priceAmount'],
+  // nothing about atlas/asset/purchase.php itself knows or cares that these
+  // happen to be food. Mirrors issuer-server/server.js's ASSET_CATALOG
+  // entries of the same names.
+  'atlas.demo.cafeteria.sandwich' => [
+    'name' => 'Sandwich', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
+    'purchase' => ['priceClass' => 'atlas.credit.balance', 'priceAmount' => 5],
+  ],
+  'atlas.demo.cafeteria.juice' => [
+    'name' => 'Juice', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
+    'purchase' => ['priceClass' => 'atlas.credit.balance', 'priceAmount' => 2],
+  ],
+  'atlas.demo.cafeteria.snack' => [
+    'name' => 'Snack Bar', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
+    'purchase' => ['priceClass' => 'atlas.credit.balance', 'priceAmount' => 3],
+  ],
   // Equippable looks: no modelPath/thumbnailPath (an outfit isn't a held
   // or displayed object, just a recolor of the shared character model).
   // shirtColor/pantsColor are under atlas.*, not com.example.*, because a

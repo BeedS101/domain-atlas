@@ -749,6 +749,60 @@ const ASSET_CATALOG = {
       'com.example.issuedFor': 'business demo'
     }
   },
+  // SPEC.md §5.8's spendable balance, for the cafeteria-demo.html example
+  // (and any other example built the same way — the class itself has no
+  // idea what it's eventually spent on). tradeScope: 'bound' — a top-up is
+  // meant to be spent by whoever it was minted for, not gifted, traded, or
+  // consolidated away (checkPresentedAsset/checkPresentedGiftableAsset both
+  // reject 'bound' outright); checkPresentedSpendableAsset deliberately
+  // does NOT check tradeScope, the same "spending your own balance raises
+  // no recipient question" reasoning checkPresentedRedeemableAsset already
+  // applies to redeeming a bound credential whole. A real deployment tops
+  // this up however it verifies real payment happened first — this demo
+  // reuses the same ungated /atlas/asset/issue every other class here
+  // already mints through, since standing up actual payment custody is
+  // explicitly out of scope for a protocol reference implementation.
+  'atlas.credit.balance': {
+    name: 'Spending Balance',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: true,
+    presentation: 'collectible',
+    tradeScope: 'bound'
+  },
+  // Three purchasable classes for the same example — each is just another
+  // catalog entry with its own `purchase: {priceClass, priceAmount}`,
+  // nothing about /atlas/asset/purchase itself knows or cares that these
+  // happen to be food. tradeScope: 'bound' for the same reason a receipt
+  // is meant for whoever paid for it, not a giftable collectible; fulfilled
+  // (POST /atlas/asset/fulfill, SPEC.md §5.9) once collected.
+  'atlas.demo.cafeteria.sandwich': {
+    name: 'Sandwich',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: false,
+    presentation: 'document',
+    tradeScope: 'bound',
+    purchase: { priceClass: 'atlas.credit.balance', priceAmount: 5 }
+  },
+  'atlas.demo.cafeteria.juice': {
+    name: 'Juice',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: false,
+    presentation: 'document',
+    tradeScope: 'bound',
+    purchase: { priceClass: 'atlas.credit.balance', priceAmount: 2 }
+  },
+  'atlas.demo.cafeteria.snack': {
+    name: 'Snack Bar',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: false,
+    presentation: 'document',
+    tradeScope: 'bound',
+    purchase: { priceClass: 'atlas.credit.balance', priceAmount: 3 }
+  },
   // Equippable looks: no model/thumbnail (an outfit isn't a held or
   // displayed object, just a recolor of the shared character model — see
   // extension/wallet.js's avatarLookPropertiesFromAsset() and
@@ -2195,6 +2249,49 @@ async function main() {
     return null;
   }
 
+  // A fifth sibling of checkPresentedAsset/checkPresentedRedeemableAsset
+  // above, for POST /atlas/asset/purchase below: spending part (or all) of
+  // a fungible balance to acquire something else. Unlike checkPresentedAsset
+  // (used by split/consolidate/trade), a bound balance is NOT rejected here
+  // — spending your own balance down has no recipient to reason about, the
+  // same "your own credential's fate, your own signature" logic
+  // checkPresentedRedeemableAsset already applies to redeeming a bound
+  // credential outright, just for a quantity instead of the whole thing.
+  // `amount` plays the role checkPresentedAsset's fixed minQuantity of 1
+  // (a whole-unit action) doesn't need — the caller names how much this
+  // purchase costs, derived from the catalog's own price, never from
+  // anything the presented credential or the request itself claims.
+  async function checkPresentedSpendableAsset(credential, expectedOwner, expectedClass, amount) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
+    if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
+    if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class to pay with';
+    if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot spend a unique asset by quantity';
+    if (typeof credential.quantity !== 'number' || credential.quantity < amount) return 'balance is insufficient for this purchase';
+    if (isRevoked(credential.id)) return 'asset already revoked';
+    const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+    if (!ok) return 'asset signature does not check out';
+    return null;
+  }
+
+  // checkPresentedRedeemableAsset's sibling for POST /atlas/asset/fulfill
+  // below: an operator confirming a held credential is genuine and unspent
+  // before handing over whatever it represents, then consuming it the same
+  // act. Unlike every checkPresented*Asset above, `expectedOwner` is never
+  // checked — the operator isn't claiming to BE the owner, only verifying
+  // what's being presented to them is real, so ownership is read off the
+  // credential itself rather than matched against a signer. Non-fungible
+  // only, same "one specific instance handed over" scope
+  // checkPresentedRedeemableAsset already applies to redemption.
+  async function checkPresentedFulfillableAsset(credential) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
+    if (!credential.issuer || credential.issuer.domain !== DOMAIN) return 'this domain did not issue this credential';
+    if (!credential.asset || credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only fulfills a single held instance';
+    if (isRevoked(credential.id)) return 'asset already revoked or already fulfilled';
+    const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+    if (!ok) return 'asset signature does not check out';
+    return null;
+  }
+
   // Task #250 — the actual custody change once a claim is legitimate,
   // shared by both branches of POST /atlas/world/drops/claim: the local
   // same-domain path (this domain issued the dropped credential itself)
@@ -2905,6 +3002,88 @@ async function main() {
         revoke(credential.id, 'issuer-request');
         console.log('Redeemed', credential.asset.class, credential.id, 'for', holderPub.slice(0, 16) + '...');
         return sendJson(res, 200, { status: 'redeemed', id: credential.id });
+      }
+
+      // POST /atlas/asset/purchase (SPEC.md §5.8) — spend a fungible balance
+      // to acquire a fresh asset of a different class, atomically: the
+      // presented balance is debited and the acquired asset is minted in
+      // the same act, so there's never a window where a buyer is charged
+      // with nothing to show for it, or holds something nobody paid for.
+      // Deliberately generic — `purchasedClass` can be any catalog entry
+      // that opts in with its own `purchase: {priceClass, priceAmount}`,
+      // chosen by the domain operator, never the caller, so the same
+      // endpoint sells anything a catalog entry decides to sell, with no
+      // per-shop code of its own. Same intent envelope as transfer/redeem
+      // above — the current owner's own signature is what authorizes
+      // spending their own balance, the same authority redeem already
+      // trusts a holder with over their own credential's fate.
+      //
+      // The purchased asset is minted FIRST, before the balance is touched
+      // at all: if `purchasedClass` turns out to be sold out (a catalog
+      // entry with its own maxSupply — see mintAssetByClass/reserveSupply)
+      // or otherwise fails to mint, the thrown error reaches this route's
+      // caller (the try/catch wrapping the whole request) before the
+      // buyer's balance is debited by even one unit.
+      if (req.method === 'POST' && req.url === '/atlas/asset/purchase') {
+        const { credential, purchasedClass, quantity, intent } = JSON.parse((await readBody(req)) || '{}');
+        const qty = quantity === undefined ? 1 : quantity;
+        if (!credential || !purchasedClass || !intent) {
+          return sendJson(res, 400, { error: 'credential, purchasedClass, and intent are all required' });
+        }
+        if (!Number.isInteger(qty) || qty <= 0) return sendJson(res, 400, { error: 'quantity, when given, must be a positive integer' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.credentialId !== credential.id || intent.payload.purchasedClass !== purchasedClass ||
+            intent.payload.quantity !== qty || intent.payload.action !== 'purchase') {
+          return sendJson(res, 400, { error: 'intent does not authorize purchasing this class/quantity with this balance' });
+        }
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const buyerPub = intent.proof.publicKey;
+
+        const catalogEntry = ASSET_CATALOG[purchasedClass];
+        if (!catalogEntry || !catalogEntry.purchase) return sendJson(res, 400, { error: 'this class is not for sale' });
+        if (catalogEntry.fungible !== true && qty !== 1) {
+          return sendJson(res, 400, { error: 'a non-fungible purchase is always quantity 1 — this class is not fungible' });
+        }
+
+        const totalPrice = catalogEntry.purchase.priceAmount * qty;
+        const problem = await checkPresentedSpendableAsset(credential, buyerPub, catalogEntry.purchase.priceClass, totalPrice);
+        if (problem) return sendJson(res, 400, { error: problem });
+
+        const purchased = await mintAssetByClass(buyerPub, purchasedClass, qty, null);
+        const remainderQty = credential.quantity - totalPrice;
+        const balance = remainderQty > 0
+          ? await mintAssetByClass(buyerPub, catalogEntry.purchase.priceClass, remainderQty, credential.id)
+          : null;
+        revoke(credential.id, 'superseded');
+        console.log('Purchased', qty, purchasedClass, 'for', totalPrice, catalogEntry.purchase.priceClass, '-', buyerPub.slice(0, 16) + '...');
+        return sendJson(res, 200, { balance, purchased });
+      }
+
+      // POST /atlas/asset/fulfill (SPEC.md §5.9) — an operator confirming a
+      // held credential is genuine and unspent, then consuming it in the
+      // same act: the natural close to whatever /atlas/asset/purchase (or
+      // any other issuance path) started, for anything meant to be handed
+      // over once and only once. Admin-gated (requireAdminAuth, same as
+      // every other operator action in this file) — the presented
+      // credential proves what it is, but only the domain's own operator
+      // decides it's actually been handed over, the same asymmetry §5.7's
+      // redeem (holder-authorized) already has against §5.3's revoke
+      // (operator-authorized) for the exact same underlying primitive.
+      if (req.method === 'POST' && req.url === '/atlas/asset/fulfill') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !payload.credential) return sendJson(res, 400, { error: 'payload.credential is required' });
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+
+        const { credential } = payload;
+        const problem = await checkPresentedFulfillableAsset(credential);
+        if (problem) return sendJson(res, 400, { error: problem });
+
+        revoke(credential.id, 'fulfilled');
+        console.log('Fulfilled', credential.asset.class, credential.id, 'for', credential.owner.publicKey.slice(0, 16) + '...', 'by admin', auth.publicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { status: 'fulfilled', id: credential.id, asset: credential.asset, owner: credential.owner });
       }
 
       // --- §7 trading stations (this server plays the station role — see file header) ---

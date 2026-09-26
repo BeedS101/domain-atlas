@@ -153,6 +153,15 @@
       </section>
 
       <section class="panel">
+        <h2>Fulfill a purchase</h2>
+        <p class="hint">Confirms a held credential is genuine and unspent, then consumes it in the same act (POST /atlas/asset/fulfill) — the hand-over step for anything acquired via POST /atlas/asset/purchase, or any other credential meant to be presented once and only once. Paste the exact credential the visitor is presenting.</p>
+        <label for="fulfillCredential">Credential JSON</label>
+        <textarea id="fulfillCredential" placeholder='{"credential":"domain-atlas-asset/1.0", ...}'></textarea>
+        <button class="submit" id="fulfillBtn" type="button">Fulfill</button>
+        <div class="result" id="fulfillResult"></div>
+      </section>
+
+      <section class="panel">
         <h2>Class-wide patch</h2>
         <p class="hint">Sets a fact for an entire non-fungible asset CLASS at once (POST /atlas/admin/class-patch), instead of reissuing every current holder's credential by hand — useful for fixing a mistake or correcting an over/underpowered roll across everyone who has one. Nothing already-issued changes right away: each holder's own wallet picks the patch up automatically the next time it checks in with this domain (the same check-in that already delivers mail and revocations), so there's no roster of who currently holds one kept here.</p>
         <label for="classPatchClass">Asset class</label>
@@ -435,6 +444,25 @@
       try {
         const res = await postJson('/atlas/asset/reissue', { payload: { credential, properties, tradeScope }, token: session.token });
         showResult(result, res.ok, res.ok ? 'Reissued -> ' + res.body.newCredential.id : (res.body.error || 'Reissue failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- fulfill ----------
+    document.getElementById('fulfillBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('fulfillBtn');
+      const result = document.getElementById('fulfillResult');
+      let credential;
+      try {
+        credential = JSON.parse(document.getElementById('fulfillCredential').value);
+      } catch (err) {
+        return showResult(result, false, 'Credential JSON does not parse: ' + err.message);
+      }
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/asset/fulfill', { payload: { credential }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Fulfilled -> ' + res.body.asset.name + ' for ' + res.body.owner.publicKey.slice(0, 20) + '…' : (res.body.error || 'Fulfill failed.'));
       } finally {
         btn.disabled = false;
       }

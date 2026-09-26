@@ -515,6 +515,47 @@ rejected, a fungible balance being rejected, and a mismatched intent being
 rejected — on both issuers.
 
 
+Buying something with a balance, and fulfillment
+-------------------------------------------------
+None of the mechanisms above cover acquiring something NEW by spending
+part of a balance a visitor already holds. POST /atlas/asset/purchase
+(SPEC.md §5.8) covers it: a class becomes purchasable the moment its own
+catalog entry declares a price (purchase => ['priceClass', 'priceAmount']),
+and the endpoint debits a presented balance of that class by
+priceAmount x quantity while minting the purchased class fresh, atomically
+— check_presented_spendable_asset() in lib/bootstrap.php validates the
+presented balance the same way check_presented_asset() does for a split,
+except a bound balance is NOT rejected (spending your own balance raises
+no recipient question, the same reasoning check_presented_redeemable_
+asset() already applies to redemption). The purchased asset is minted
+FIRST, before the balance is touched at all, so a sold-out or otherwise-
+failing purchasedClass never debits anything. Authorized by the balance
+owner's own signature, the same intent envelope transfer/redeem above
+already use.
+
+POST /atlas/asset/fulfill (SPEC.md §5.9) is the closing act for anything
+meant to be handed over once and only once: admin-gated
+(require_admin_auth(), the same gate revoke.php/reissue.php already use),
+it confirms a presented credential is genuine and unspent
+(check_presented_fulfillable_asset()), then revokes it with a new reason
+code, "fulfilled" — the mirror image of redeem's holder-authorized
+revocation, this time attested by the operator instead of the holder.
+
+demo-domain-a/cafeteria-demo.html is one worked example built on top of
+this, not a special case the protocol knows about: a parent tops up a
+student's atlas.credit.balance (fungible, bound, minted via the same
+ungated /atlas/asset/issue every other class here already uses), the
+student spends it on a small menu (atlas.demo.cafeteria.sandwich/.juice/
+.snack, each just another catalog entry with its own price), and each
+purchase's receipt is later fulfilled on the Admin Panel's new "Fulfill a
+purchase" section — the same admin-panel/index.html this bundle already
+serves identically to the Node one. test/manual-asset-purchase.js covers
+the endpoint itself (atomic debit-and-mint, insufficient balance, wrong
+currency, a non-purchasable class, non-fungible quantity, a mismatched
+intent, and the fulfill/replay-rejection cycle) on both issuers;
+test/manual-cafeteria-demo.js drives both pages end to end.
+
+
 Updating an already-issued asset
 ----------------------------------
 An asset credential is signed and immutable the moment it's issued — but a

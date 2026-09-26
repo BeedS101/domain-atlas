@@ -720,6 +720,59 @@ function check_presented_redeemable_asset($publicKeyB64url, $credential, $expect
   return null;
 }
 
+// A fifth sibling of check_presented_asset()/check_presented_redeemable_
+// asset() above, for POST /atlas/asset/purchase.php: spending part (or all)
+// of a fungible balance to acquire something else. A bound balance is NOT
+// rejected here, unlike check_presented_asset() — spending your own balance
+// down has no recipient to reason about, the same logic
+// check_presented_redeemable_asset() already applies to redeeming a bound
+// credential outright, just for a quantity instead of the whole thing.
+// Mirrors issuer-server/server.js's checkPresentedSpendableAsset().
+function check_presented_spendable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass, $amount) {
+  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
+    return 'not an asset credential';
+  }
+  if (!isset($credential['owner']['publicKey']) || $credential['owner']['publicKey'] !== $expectedOwner) {
+    return 'asset does not belong to this signer';
+  }
+  if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
+    return 'asset is the wrong class to pay with';
+  }
+  if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== true) {
+    return 'asset class is not fungible — cannot spend a unique asset by quantity';
+  }
+  if (!isset($credential['quantity']) || $credential['quantity'] < $amount) return 'balance is insufficient for this purchase';
+  if (is_revoked($credential['id'])) return 'asset already revoked';
+  $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+  if (!$ok) return 'asset signature does not check out';
+  return null;
+}
+
+// check_presented_redeemable_asset()'s sibling for POST
+// /atlas/asset/fulfill.php: an operator confirming a held credential is
+// genuine and unspent before handing over whatever it represents, then
+// consuming it the same act. $expectedOwner is never checked — the
+// operator isn't claiming to BE the owner, only verifying what's being
+// presented to them is real. Non-fungible only, same "one specific
+// instance handed over" scope check_presented_redeemable_asset() already
+// applies to redemption. Mirrors issuer-server/server.js's
+// checkPresentedFulfillableAsset().
+function check_presented_fulfillable_asset($publicKeyB64url, $credential) {
+  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
+    return 'not an asset credential';
+  }
+  if (empty($credential['issuer']['domain']) || $credential['issuer']['domain'] !== atlas_domain()) {
+    return 'this domain did not issue this credential';
+  }
+  if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
+    return 'asset class is fungible — this endpoint only fulfills a single held instance';
+  }
+  if (is_revoked($credential['id'])) return 'asset already revoked or already fulfilled';
+  $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
+  if (!$ok) return 'asset signature does not check out';
+  return null;
+}
+
 // Shared by both the same-domain claim path (atlas/world/drops/claim.php)
 // and the cross-domain relay-claim handler
 // (atlas/world/drops/relay-claim.php) — the real ownership-transfer

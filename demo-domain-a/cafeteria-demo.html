@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Cafeteria Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .cards { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+  @media (max-width: 620px) { .cards { grid-template-columns: 1fr; } }
+  .card {
+    border: 1px solid var(--line); border-radius: 9px; padding: 1rem; background: #fbfcfd;
+    display: flex; flex-direction: column; gap: 0.55rem;
+  }
+  .card h3 { margin: 0; font-size: 1rem; }
+  .price { font-size: 0.85rem; color: var(--muted); }
+  .badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
+    text-transform: uppercase; padding: 0.15em 0.55em; border-radius: 999px; width: fit-content;
+  }
+  .badge.awaiting { background: #eee; color: var(--muted); }
+  .badge.collected { background: var(--green-bg); color: var(--green); }
+  .props { font-size: 0.86rem; color: var(--muted); }
+  .props div { margin: 0.1rem 0; }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.2rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  details.raw { font-size: 0.8rem; margin-top: 0.1rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  input[type="number"] { font: inherit; }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>Buy something with a balance</h1>
+  <p class="tag">A worked example of SPEC.md §5.8 (purchasing) and §5.9 (fulfillment).</p>
+  <p class="lede">
+    A parent or organization tops up a student's spendable balance, the student spends part
+    of it on something from a small menu, and gets a signed receipt to present at pickup.
+    Every step below is a real call to this domain's own server — the balance and the
+    receipts are genuine credentials, not a mockup.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this actually demonstrates</h2>
+    <p>
+      <code>POST /atlas/asset/purchase</code> has no idea it's selling food — a class becomes
+      purchasable the moment a catalog entry declares its own price, and the identical
+      endpoint would sell an item in a spatial world's shop the same way, with no code of
+      its own for either case. This page is one worked example of a generic mechanism, not
+      a cafeteria-specific feature.
+    </p>
+  </div>
+
+  <div class="panel" id="setupPanel">
+    <h2>Step 1 — set up a student wallet</h2>
+    <button id="setupBtn" type="button">Create a demo student wallet</button>
+    <button id="resetBtn" class="secondary" type="button" style="display:none; margin-left:0.6rem;">Start over</button>
+    <p class="props" id="setupStatus"></p>
+  </div>
+
+  <div class="panel" id="parentPanel" style="display:none;">
+    <h2>Step 2 — a parent (or the organization) tops up the balance</h2>
+    <p class="props" style="margin-top:0;">
+      Mints spendable balance straight into the student's wallet
+      (<code>POST /atlas/asset/issue</code>, merged with any existing balance via
+      <code>POST /atlas/asset/consolidate</code>). A real deployment only runs this once
+      actual payment has cleared; this demo mints it freely, the same "no real payment
+      custody" limitation every class in this reference implementation already has.
+    </p>
+    <div>
+      <input type="number" id="topUpAmount" value="10" min="1" style="width:5rem; padding:0.4rem; border:1px solid var(--line); border-radius:6px;">
+      <button id="topUpBtn" type="button">Top up</button>
+    </div>
+    <p id="topUpStatus"></p>
+  </div>
+
+  <div class="panel" id="studentPanel" style="display:none;">
+    <h2>Step 3 — the student spends it</h2>
+    <p class="props" style="margin-top:0;">Balance: <strong id="balanceAmount">0</strong> credits</p>
+    <div class="cards" id="menuCards"></div>
+    <p id="buyStatus"></p>
+  </div>
+
+  <div class="panel" id="receiptsPanel" style="display:none;">
+    <h2>Step 4 — collect at the counter</h2>
+    <p class="props" style="margin-top:0;">
+      Each purchase above minted a receipt credential the student presents at pickup. Take
+      one's raw JSON to the <a href="/atlas-admin/" target="_blank" rel="noopener">Admin
+      Panel</a>'s "Fulfill a purchase" section — the operator confirming it's genuine and
+      hasn't already been collected, then handing over the order
+      (<code>POST /atlas/asset/fulfill</code>). "Check status" below re-reads this domain's
+      own public revocation list, the same file anyone could fetch directly, to show whether
+      that's happened yet.
+    </p>
+    <div id="receiptCards"></div>
+  </div>
+
+  <p class="footnote">
+    Nothing on this page is stored in a database anywhere beyond the credentials themselves.
+    The balance is bound to the student's own key — it can be spent, never gifted or traded
+    away — and a receipt, once fulfilled, is revoked the same one-sided way a redeemed
+    credential is: the operator's own signature is enough, nothing further is required from
+    the student's side. <a href="/">Back to the plaza</a> · <a href="/business-demo.html">Credential demo</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+
+  const MENU = [
+    { cls: 'atlas.demo.cafeteria.sandwich', name: 'Sandwich', price: 5 },
+    { cls: 'atlas.demo.cafeteria.juice', name: 'Juice', price: 2 },
+    { cls: 'atlas.demo.cafeteria.snack', name: 'Snack Bar', price: 3 }
+  ];
+  const BALANCE_CLASS = 'atlas.credit.balance';
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  // Same shape as issuer-server/server.js's canonicalize() — sorted-key
+  // JSON, no whitespace. Has to match byte-for-byte or the server's own
+  // signature check fails.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function issueAsset(ownerPublicKey, assetClass, quantity) {
+    const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass, quantity });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
+    return res.body;
+  }
+  async function consolidateBalances(credentials) {
+    const res = await postJson('/atlas/asset/consolidate', { credentials });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'consolidate failed');
+    return res.body;
+  }
+  async function purchaseAsset(buyer, balanceCredential, purchasedClass, quantity) {
+    const payload = { credentialId: balanceCredential.id, purchasedClass, quantity, action: 'purchase' };
+    const proof = await signWithSelf(buyer, payload);
+    return postJson('/atlas/asset/purchase', { credential: balanceCredential, purchasedClass, quantity, intent: { payload, proof } });
+  }
+  async function isFulfilled(credentialId) {
+    const revDoc = await fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }));
+    return (revDoc.revoked || []).some((r) => r.id === credentialId);
+  }
+
+  let student = null;
+  let balance = null; // current balance credential, or null once fully spent
+
+  // Unlike business-demo.html's own rawDetails() (a shortened, human-glance
+  // summary — that page hands the real in-memory credential straight to its
+  // own verify step, never round-tripping it through this display), this
+  // one is meant to be copy-pasted whole into the Admin Panel's "Fulfill a
+  // purchase" textarea, so it has to be the complete, real, verifiable
+  // credential — truncating the owner key or signature here would make
+  // every receipt un-fulfillable.
+  function rawDetails(credential) {
+    return JSON.stringify(credential, null, 2);
+  }
+
+  function renderBalance() {
+    document.getElementById('balanceAmount').textContent = balance ? balance.quantity : 0;
+    MENU.forEach((item) => {
+      const btn = document.getElementById('buy-' + item.cls);
+      if (btn) btn.disabled = !balance || balance.quantity < item.price;
+    });
+  }
+
+  function renderMenu() {
+    const container = document.getElementById('menuCards');
+    container.innerHTML = '';
+    MENU.forEach((item) => {
+      const div = document.createElement('div');
+      div.className = 'card';
+      div.innerHTML =
+        '<h3>' + item.name + '</h3>' +
+        '<div class="price">' + item.price + ' credits</div>' +
+        '<button id="buy-' + item.cls + '" type="button">Buy</button>';
+      div.querySelector('button').addEventListener('click', () => onBuyClick(item));
+      container.appendChild(div);
+    });
+  }
+
+  function renderReceiptCard(credential, itemName) {
+    document.getElementById('receiptsPanel').style.display = '';
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML =
+      '<span class="badge awaiting">Awaiting collection</span>' +
+      '<h3>' + itemName + '</h3>' +
+      '<button class="statusBtn secondary" type="button">Check status</button>' +
+      '<details class="raw"><summary>View raw signed credential (for the Admin Panel)</summary><pre></pre></details>';
+    div.querySelector('pre').textContent = rawDetails(credential);
+    div.querySelector('.statusBtn').addEventListener('click', async () => {
+      const fulfilled = await isFulfilled(credential.id);
+      const badge = div.querySelector('.badge');
+      if (fulfilled) {
+        badge.className = 'badge collected';
+        badge.textContent = 'Collected ✓';
+      }
+    });
+    document.getElementById('receiptCards').appendChild(div);
+  }
+
+  async function onBuyClick(item) {
+    const status = document.getElementById('buyStatus');
+    status.className = '';
+    status.textContent = '';
+    if (!balance || balance.quantity < item.price) return;
+    try {
+      const res = await purchaseAsset(student, balance, item.cls, 1);
+      if (!res.ok) throw new Error((res.body && res.body.error) || 'purchase failed');
+      balance = res.body.balance; // null once the balance is spent to exactly zero
+      renderBalance();
+      renderReceiptCard(res.body.purchased, item.name);
+      status.className = 'result ok';
+      status.textContent = 'Bought 1× ' + item.name + '.';
+    } catch (err) {
+      status.className = 'result err';
+      status.textContent = err.message;
+    }
+  }
+
+  document.getElementById('setupBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('setupBtn');
+    const status = document.getElementById('setupStatus');
+    btn.disabled = true;
+    try {
+      student = await genIdentity();
+      status.textContent = 'Student wallet ready: ' + student.publicKey.slice(0, 20) + '…';
+      document.getElementById('parentPanel').style.display = '';
+      document.getElementById('studentPanel').style.display = '';
+      document.getElementById('resetBtn').style.display = '';
+      renderMenu();
+      renderBalance();
+      btn.style.display = 'none';
+    } catch (err) {
+      status.textContent = err.message;
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('topUpBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('topUpBtn');
+    const status = document.getElementById('topUpStatus');
+    const amount = parseInt(document.getElementById('topUpAmount').value, 10);
+    if (!Number.isInteger(amount) || amount <= 0) {
+      status.className = 'result err';
+      status.textContent = 'Enter a positive whole number.';
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const minted = await issueAsset(student.publicKey, BALANCE_CLASS, amount);
+      balance = balance ? await consolidateBalances([balance, minted]) : minted;
+      renderBalance();
+      status.className = 'result ok';
+      status.textContent = 'Topped up ' + amount + ' credits — balance now ' + balance.quantity + '.';
+    } catch (err) {
+      status.className = 'result err';
+      status.textContent = err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('resetBtn').addEventListener('click', () => location.reload());
+})();
+</script>
+</body>
+</html>
