@@ -1,6 +1,23 @@
-# Domain Atlas — prototype (v1.22)
+# Domain Atlas
 
-A working proof that the mechanisms in `SPEC.md` are real. A browser
+An open protocol for issuing, verifying, and revoking cryptographically
+signed credentials — memberships, tickets, staff badges, loyalty
+vouchers — without a central database of who holds what. A business
+signs a credential straight into someone's wallet; verifying it later
+means checking a signature, not looking anything up, and revoking it is
+one-sided and instant, nothing required from the holder's side.
+
+**[Try the credential demo live →](https://evtec.co.za/business-demo.html)**
+No install needed — issues you a real, giftable credential on the spot,
+signed by this exact server, and lets you try sending it to someone else
+while a non-transferable one refuses to move.
+
+The rest of this repository is the full prototype behind that one
+endpoint: a browser extension wallet, a spatial 3D client that renders
+issued items as visible objects in a virtual world (one illustrative
+client the protocol happens to have, not a requirement of it), and the
+reference issuer server/PHP port powering both. What follows is a
+working proof that the mechanisms in `SPEC.md` are real. A browser
 extension reads a domain's manifest, renders whichever worlds it declares,
 and lets you walk through three genuinely different kinds of portal — one
 that swaps worlds inside a single domain with no network round-trip, one
