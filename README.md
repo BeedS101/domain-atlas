@@ -14,6 +14,12 @@ non-transferable one refuses to move; redeem either one yourself and
 watch it fail an independent verification you run entirely in your own
 browser, against the same public files any outside system could check.
 
+![The live credential demo: issuing a coupon and a badge, sending the coupon to a friend, and independently verifying the received copy as valid](docs/business-demo-screenshot.png)
+
+*(`node tools/generate-business-demo-screenshot.js` regenerates the image
+above against an isolated instance, for whenever the demo page's look or
+flow changes enough to make it stale.)*
+
 The rest of this repository is the full prototype behind that one
 endpoint: a browser extension wallet, a spatial 3D client that renders
 issued items as visible objects in a virtual world (one illustrative
