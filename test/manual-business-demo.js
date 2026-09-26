@@ -28,6 +28,13 @@
 //      nothing added to the friend panel for it.
 //   4. The "View raw signed credential" detail genuinely reflects the real
 //      issued credential (matching id/class), not placeholder text.
+//   5. "Try verifying this one independently" on the still-held badge fills
+//      Step 3's textarea with its full credential JSON and reports it
+//      valid — checked client-side against the domain's own published
+//      .well-known key/revocation files, not a server "yes/no" call.
+//   6. Tampering with that pasted JSON (changing the owner) before clicking
+//      Verify again correctly reports it invalid, proving the check is a
+//      real signature check and not just an id lookup.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -109,6 +116,24 @@ function assert(cond, message) {
     assert(await page.locator('#friendCards .card', { hasText: 'Plaza Visitor Badge' }).count() === 0, 'expected nothing to land in the friend panel for a rejected transfer');
     assert(await page.locator('#youCards .card', { hasText: 'Plaza Visitor Badge' }).count() === 1, 'expected the badge to remain exactly where it was');
     console.log('PASS: the badge stays put, rejected with the real plain-English reason:', badgeErrorText.replace('Can’t send this one: ', ''));
+
+    console.log('STEP 5: "Try verifying this one independently" reports the still-held badge valid');
+    await badgeCard.locator('details.raw summary').click(); // expand the <details> to reveal the button inside it
+    await badgeCard.locator('.fillVerifyBtn').click();
+    const verifyResult = page.locator('#verifyResult');
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    assert((await verifyResult.getAttribute('class')).includes('ok'), 'expected the ok result styling on a genuinely valid credential');
+    console.log('PASS: independently verified as valid —', await verifyResult.textContent());
+
+    console.log('STEP 6: tampering with the pasted JSON before re-verifying correctly fails');
+    const tampered = JSON.parse(await page.locator('#verifyInput').inputValue());
+    tampered.owner = { ...tampered.owner, publicKey: tampered.owner.publicKey.slice(0, -4) + 'xxxx' };
+    await page.locator('#verifyInput').fill(JSON.stringify(tampered, null, 2));
+    await page.locator('#verifyBtn').click();
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✗ Not valid'), { timeout: 10000 });
+    assert((await verifyResult.getAttribute('class')).includes('err'), 'expected the err result styling once the owner field is tampered with');
+    assert((await verifyResult.textContent()).includes("signature doesn't match"), 'expected the specific signature-mismatch reason, got: ' + (await verifyResult.textContent()));
+    console.log('PASS: a tampered credential is correctly rejected —', await verifyResult.textContent());
 
     console.log('\nALL BUSINESS DEMO PAGE CHECKS PASSED');
   } catch (err) {

@@ -58,6 +58,11 @@
   }
   .friend-panel { min-height: 3rem; }
   .friend-empty { color: var(--muted); font-size: 0.9rem; font-style: italic; }
+  .fillVerifyBtn { display: block; margin-top: 0.55rem; font-size: 0.8rem; padding: 0.4rem 0.8rem; }
+  textarea#verifyInput {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.7rem; resize: vertical;
+  }
   .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
   a { color: var(--accent); }
 </style>
@@ -92,11 +97,28 @@
     </div>
   </div>
 
+  <div class="panel" id="verifyPanel">
+    <h2>Step 3 — verify any credential, independently</h2>
+    <p class="props" style="margin-top:0;">
+      Paste a credential's raw JSON below and check it. This runs entirely in your own
+      browser: it fetches this domain's public key and revocation list — the same two
+      public files anyone, including your own systems, could fetch directly — then
+      checks the signature and looks the id up in the revocation list. Nothing here
+      trusts this page; try changing a field above (the <code>owner</code>, say) before
+      verifying, and watch it fail.
+    </p>
+    <textarea id="verifyInput" rows="8" placeholder='Paste a credential&#8217;s raw JSON here, or click &#8220;Try verifying this one&#8221; on a card above.'></textarea>
+    <div style="margin-top:0.6rem;">
+      <button id="verifyBtn" type="button">Verify</button>
+    </div>
+    <div id="verifyResult"></div>
+  </div>
+
   <p class="footnote">
     Nothing on this page is stored in a database anywhere. Each credential you see is a
     signature from this domain over your public key and the item's own facts — verifying it
-    means checking that signature, not looking anything up. The coupon really moves to a new
-    owner; the badge really can't. <a href="/">Back to the plaza</a>.
+    means checking that signature, not looking anything up, exactly what Step 3 above does.
+    The coupon really moves to a new owner; the badge really can't. <a href="/">Back to the plaza</a>.
   </p>
 
 <script>
@@ -151,6 +173,61 @@
     const proof = await signWithSelf(sender, payload);
     return postJson('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload, proof } });
   }
+  // Same signed-payload shape and same checks as extension/wallet.js's own
+  // verifyCredential() (SPEC.md §5, steps 1/2/4) — fetches this domain's
+  // public .well-known files directly rather than asking the server "is
+  // this valid", so the result reflects only what anyone else could check
+  // for themselves, not this page's say-so.
+  async function verifyCredentialIndependently(credential) {
+    const [keyDoc, revDoc] = await Promise.all([
+      fetch('/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json()),
+      fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
+    ]);
+    const issuedAt = new Date(credential.issuedAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
+    });
+    if (!activeKey) return { valid: false, reason: 'issuer key was not valid at issuedAt' };
+    const payload = {
+      id: credential.id, asset: credential.asset, owner: credential.owner,
+      quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
+    };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match the issuer's key" };
+    const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
+    if (revoked) return { valid: false, reason: 'revoked by the issuer' };
+    return { valid: true, reason: "signature verified against the issuer's current key; not revoked" };
+  }
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    let credential;
+    try {
+      credential = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    try {
+      const verdict = await verifyCredentialIndependently(credential);
+      resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+      resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = 'Could not verify: ' + err.message;
+    }
+  }
+  function fillAndVerify(credential) {
+    document.getElementById('verifyInput').value = JSON.stringify(credential, null, 2);
+    document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    runVerify();
+  }
 
   let you = null;
   let friend = null;
@@ -179,9 +256,11 @@
       '<div class="props">' + Object.entries(credential.asset.properties || {}).map(([k, v]) => '<div>' + k + ': ' + v + '</div>').join('') + '</div>' +
       '<button class="sendBtn">Send to a friend</button>' +
       '<div class="resultSlot"></div>' +
-      '<details class="raw"><summary>View raw signed credential</summary><pre></pre></details>';
+      '<details class="raw"><summary>View raw signed credential</summary><pre></pre>' +
+      '<button class="fillVerifyBtn secondary" type="button">Try verifying this one independently ↓</button></details>';
     div.querySelector('pre').textContent = rawDetails(credential);
     div.querySelector('.sendBtn').addEventListener('click', () => onSendClick(cls));
+    div.querySelector('.fillVerifyBtn').addEventListener('click', () => fillAndVerify(credential));
     document.getElementById('youCards').appendChild(div);
   }
 
@@ -194,8 +273,10 @@
       '<span class="badge received">Received</span>' +
       '<h3>' + credential.asset.name + '</h3>' +
       '<div class="props">' + Object.entries(credential.asset.properties || {}).map(([k, v]) => '<div>' + k + ': ' + v + '</div>').join('') + '</div>' +
-      '<details class="raw"><summary>View raw signed credential</summary><pre></pre></details>';
+      '<details class="raw"><summary>View raw signed credential</summary><pre></pre>' +
+      '<button class="fillVerifyBtn secondary" type="button">Try verifying this one independently ↓</button></details>';
     div.querySelector('pre').textContent = rawDetails(credential);
+    div.querySelector('.fillVerifyBtn').addEventListener('click', () => fillAndVerify(credential));
     document.getElementById('friendCards').appendChild(div);
   }
 
@@ -225,6 +306,8 @@
       btn.disabled = false;
     }
   }
+
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
 
   document.getElementById('issueBtn').addEventListener('click', async () => {
     const btn = document.getElementById('issueBtn');
