@@ -15,16 +15,18 @@
 //
 // Checks:
 //   1. Before opening the overlay, the host page's title is its own
-//      ("Example Plaza", from demo-domain-a/index.html's <title>).
+//      ("Domain Atlas Alpha Node", from demo-domain-a/index.html's
+//      <title>) — deliberately a different string from the world name
+//      below, so this test can't accidentally pass by comparing a title
+//      against itself.
 //   2. Opening the overlay and landing at Plaza sets the REAL host-page tab
 //      title to "localhost:8001: Example Plaza".
 //   3. Walking Plaza -> Arena updates the title to
 //      "localhost:8001: Example Arena" — proves every world-entry landing
 //      re-sends the message, not just the very first one.
 //   4. Closing the overlay restores the host page's title to exactly what
-//      it was before the overlay was ever opened ("Example Plaza" — same
-//      string as the page's own <title>, not coincidentally identical to
-//      the world name above).
+//      it was before the overlay was ever opened ("Domain Atlas Alpha
+//      Node" — the page's own <title>, unrelated to the world names above).
 //   5. Re-opening the overlay captures a FRESH original and sets the title
 //      again correctly (proves the remembered-original variable resets to
 //      null on close rather than going stale).
@@ -80,7 +82,7 @@ async function waitForPortal(frame, predicate, description, timeoutMs = 8000) {
 
     console.log('STEP 1: before opening the overlay, the host page has its own title');
     const originalTitle = await page.title();
-    if (originalTitle !== 'Example Plaza') throw new Error('Expected host page\'s own title "Example Plaza" before any overlay, got: ' + JSON.stringify(originalTitle));
+    if (originalTitle !== 'Domain Atlas Alpha Node') throw new Error('Expected host page\'s own title "Domain Atlas Alpha Node" before any overlay, got: ' + JSON.stringify(originalTitle));
     console.log('PASS: host page title is its own, "' + originalTitle + '"');
 
     console.log('STEP 2: opening the overlay at Plaza sets the REAL tab title via postMessage');
