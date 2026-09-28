@@ -1,22 +1,30 @@
-// Coverage for the one narrower gap README.md still tracked after SPEC.md
-// §3.5 landed: the 3D gltf-mini-v1 renderer had no distinct visual of its
-// own for a key-anchored portal (§3.6) — only the 2D procedural-v1 renderer
-// did, since no demo content ever put one in a 3D world to exercise it.
+// Coverage for the one narrower gap README.md tracked after SPEC.md §3.5
+// landed: the 3D gltf-mini-v1 renderer had no distinct visual of its own
+// for a key-anchored portal (§3.6) — only the 2D procedural-v1 renderer
+// did. gltf-mini.js's buildPortalRing/buildPortalBeacon now take a
+// three-way kind ('same-domain'/'cross-domain'/'key') instead of a
+// same-domain/cross-domain boolean, matching the 2D renderer's own
+// portalPalette() exactly, and a new debug/test hook,
+// getPortalTriggerKind(), reads the real resolved kind for a given
+// portalIndex the same way every other gltf-mini.js test hook reads real
+// internal state instead of rendered pixels.
 //
-// Adds a second Lobby portal (portalIndex 1, alongside the existing
-// same-domain "Back to the Plaza" at index 0) pointing at the same
-// keyworld/spatial.json Unlisted Atrium the Plaza's own key-anchored portal
-// already uses, and reworks gltf-mini.js's buildPortalRing/buildPortalBeacon
-// from a same-domain/cross-domain boolean into a three-way kind
-// ('same-domain'/'cross-domain'/'key'), matching the 2D renderer's own
-// portalPalette() exactly. A new debug/test hook, getPortalTriggerKind(),
-// reads the real resolved kind for a given portalIndex the same way every
-// other gltf-mini.js test hook reads real internal state instead of
-// rendered pixels.
+// The actual demo-domain-a Lobby does NOT carry a key-anchored portal of
+// its own — one was tried and pulled back out, since a portal sitting in
+// the middle of the room read as clutter with no real narrative reason to
+// be there (Plaza's own 2D key-anchored portal already demos the concept
+// for visitors). So this test builds its own throwaway copy of
+// demo-domain-a instead, with a second Lobby portal added ONLY to that
+// isolated copy's own spatial.json/scene.json — same "copy demo-domain-a
+// into an isolated docroot" pattern manual-warranty-demo.js and its
+// siblings already use — so the real 3D rendering code still gets
+// exercised end to end without permanently living in the shared demo
+// content.
 //
 // Checks:
 //   1. Both Lobby portals resolve to the right kind: index 0 (world, same
-//      domain) -> 'same-domain', index 1 (key) -> 'key'.
+//      domain) -> 'same-domain', index 1 (key, injected for this test) ->
+//      'key'.
 //   2. Regression: walking into the ordinary same-domain portal's radius
 //      still auto-enters Plaza with no disclosure of any kind — the kind
 //      rework didn't touch that path's behavior, only its color.
@@ -30,15 +38,6 @@
 //      a 2D click's re-click).
 //   6. "Enter anyway" actually enters — no domain shown, persistent amber
 //      badge, exactly as the 2D entry path already does.
-//
-// Spins up its own throwaway issuer-server instance on port 8001 (isolated
-// state dir) using the real demo-domain-a docroot, same pattern as
-// manual-per-page-anchor.js — port 8001 specifically because
-// demo-domain-a/.well-known/spatial.json (and the keyworld manifest it
-// points at) hardcode that port. Only safe to run standalone.
-//
-// Not part of the permanent suite, same reasoning as the other
-// manual-*.js scripts.
 
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -47,12 +46,15 @@ const os = require('os');
 const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
-const PORT = 8001; // must match demo-domain-a/.well-known/spatial.json's hardcoded "domain" — see file header
+const PORT = 8150; // isolated — distinct from every other manual-*.js test's chosen port
 const DOMAIN = 'localhost:' + PORT;
-const REAL_MANIFEST = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'demo-domain-a', 'keyworld', 'spatial.json'), 'utf8'));
-const REAL_IDENTITY_KEY = REAL_MANIFEST.identityKey;
+const DOCROOT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-3d-key-portal-docroot-'));
 const STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-3d-key-portal-state-'));
 const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-3d-key-portal-profile-'));
+
+const KEYWORLD_MANIFEST_PATH = path.join(DOCROOT_DIR, 'keyworld', 'spatial.json');
+const MAIN_MANIFEST_PATH = path.join(DOCROOT_DIR, '.well-known', 'spatial.json');
+const LOBBY_SCENE_PATH = path.join(DOCROOT_DIR, 'spatial', 'lobby', 'scene.json');
 
 function placeLabelText(frame) {
   return frame.evaluate(() => document.getElementById('placeLabel').textContent);
@@ -80,10 +82,29 @@ async function teleportTo(frame, position) {
 }
 
 (async () => {
-  console.log('SETUP: starting a throwaway issuer-server instance on port ' + PORT + ' (real demo-domain-a docroot, isolated state dir)');
+  console.log('SETUP: copying demo-domain-a into an isolated docroot and adding a Lobby key-anchored portal only there');
+  fs.cpSync(path.resolve(__dirname, '..', 'demo-domain-a'), DOCROOT_DIR, { recursive: true });
+  const realIdentityKey = JSON.parse(fs.readFileSync(KEYWORLD_MANIFEST_PATH, 'utf8')).identityKey;
+
+  const mainManifest = JSON.parse(fs.readFileSync(MAIN_MANIFEST_PATH, 'utf8'));
+  mainManifest.domain = DOMAIN; // keep the manifest's own declared domain honest for this isolated port
+  const lobbyWorld = mainManifest.worlds.find((w) => w.id === 'lobby');
+  lobbyWorld.portals.push({
+    kind: 'key',
+    identityKey: realIdentityKey,
+    manifest: 'http://' + DOMAIN + '/keyworld/spatial.json',
+    label: 'Step into the Unlisted Atrium'
+  });
+  fs.writeFileSync(MAIN_MANIFEST_PATH, JSON.stringify(mainManifest, null, 2));
+
+  const lobbyScene = JSON.parse(fs.readFileSync(LOBBY_SCENE_PATH, 'utf8'));
+  lobbyScene.portalMarkers.push({ position: [1.6, 0, -0.2], radius: 0.8, portalIndex: 1 });
+  fs.writeFileSync(LOBBY_SCENE_PATH, JSON.stringify(lobbyScene, null, 2));
+
+  console.log('SETUP: starting a throwaway issuer-server instance on port ' + PORT + ' (isolated docroot, isolated state dir)');
   const serverProc = spawn('node', ['issuer-server/server.js'], {
     cwd: path.resolve(__dirname, '..'),
-    env: { ...process.env, PORT: String(PORT), ATLAS_DOMAIN: DOMAIN, ATLAS_STATE_DIR: STATE_DIR },
+    env: { ...process.env, PORT: String(PORT), ATLAS_DOMAIN: DOMAIN, ATLAS_STATE_DIR: STATE_DIR, ATLAS_DOCROOT: DOCROOT_DIR },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   await new Promise((resolve, reject) => {
@@ -91,7 +112,7 @@ async function teleportTo(frame, position) {
     serverProc.stdout.on('data', (d) => { if (d.toString().includes('listening')) { clearTimeout(timer); resolve(); } });
     serverProc.on('exit', (code) => reject(new Error('issuer-server exited early with code ' + code)));
   });
-  console.log('PASS: isolated issuer-server up on port ' + PORT);
+  console.log('PASS: isolated issuer-server up on port ' + PORT + ', serving the isolated demo-domain-a copy');
 
   let context;
   try {
@@ -115,7 +136,7 @@ async function teleportTo(frame, position) {
     const kind0 = await frame.evaluate(() => window.__atlasActive3D.getPortalTriggerKind(0));
     const kind1 = await frame.evaluate(() => window.__atlasActive3D.getPortalTriggerKind(1));
     if (kind0 !== 'same-domain') throw new Error('Expected portal 0 (Back to the Plaza) to resolve to "same-domain", got: ' + kind0);
-    if (kind1 !== 'key') throw new Error('Expected portal 1 (Unlisted Atrium) to resolve to "key", got: ' + kind1);
+    if (kind1 !== 'key') throw new Error('Expected portal 1 (the test-injected Unlisted Atrium portal) to resolve to "key", got: ' + kind1);
     console.log('PASS: portal 0 -> same-domain, portal 1 -> key');
 
     console.log('STEP 2 (regression): walking into the ordinary same-domain portal still auto-enters Plaza, no disclosure');
@@ -133,7 +154,7 @@ async function teleportTo(frame, position) {
     await waitFor(frame, () => document.getElementById('keyAnchorModal').classList.contains('active'), 'the key-anchored disclosure modal to open');
     if (!(await placeLabelText(frame)).includes('Example Lobby')) throw new Error('Expected to still be in the Lobby while the disclosure is open');
     const fingerprint = await frame.evaluate(() => document.getElementById('keyAnchorFingerprint').textContent);
-    if (fingerprint !== REAL_IDENTITY_KEY) throw new Error('Expected the disclosure to show the real identityKey, got: ' + fingerprint);
+    if (fingerprint !== realIdentityKey) throw new Error('Expected the disclosure to show the real identityKey, got: ' + fingerprint);
     console.log('PASS: walking into a 3D key-anchored portal opens the same real disclosure as the 2D path, before entering anything');
 
     console.log('STEP 4: "Stay here" closes the disclosure with no world change');
@@ -166,6 +187,7 @@ async function teleportTo(frame, position) {
   } finally {
     if (context) await context.close().catch(() => {});
     serverProc.kill();
+    try { fs.rmSync(DOCROOT_DIR, { recursive: true, force: true }); } catch (err) {}
     try { fs.rmSync(STATE_DIR, { recursive: true, force: true }); } catch (err) {}
     try { fs.rmSync(PROFILE_DIR, { recursive: true, force: true }); } catch (err) {}
   }

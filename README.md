@@ -148,11 +148,7 @@ curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real publi
    it doesn't protect against; "Enter anyway" drops you into the Unlisted
    Atrium, marked the whole time you're there with an amber badge instead
    of a domain name. Its own portal back to Plaza is an ordinary teal
-   cross-domain one — leaving needs no special mechanism of its own. The
-   Lobby (the one 3D `gltf-mini-v1` world) has its own key-anchored portal
-   to the same Unlisted Atrium, with the identical amber ring/beacon —
-   walk into it (there's no hover or click in 3D, just proximity) and the
-   same real disclosure opens before you're let in, same as above.
+   cross-domain one — leaving needs no special mechanism of its own.
 4. Click **Create Atlas Identity** — a real `navigator.credentials.create()`
    call, your device's own passkey prompt, a genuine keypair. It's now
    persisted, not thrown away when you close the panel.
@@ -1645,9 +1641,15 @@ codebase. The one narrower gap noted here previously is closed too: the 3D
 `buildPortalRing`/`buildPortalBeacon`) is a three-way `same-domain`/
 `cross-domain`/`key` kind now, matching the 2D renderer's own
 `portalPalette()` exactly, instead of the old same-domain/cross-domain
-boolean a `kind: "key"` portal used to fall through unmarked. The Lobby's
-`scene.json` gained a second portal to demo it — the same Unlisted Atrium
-its Plaza counterpart already leads to — and a `getPortalTriggerKind()`
-debug hook lets a test confirm a portal actually resolved to the right kind
-without reading rendered pixels back off the canvas (see "Try it" above and
-`test/manual-3d-key-anchored-portal.js`).
+boolean a `kind: "key"` portal used to fall through unmarked, and a new
+`getPortalTriggerKind()` debug hook lets a test confirm a portal actually
+resolved to the right kind without reading rendered pixels back off the
+canvas. The Lobby itself doesn't carry a key-anchored portal of its own —
+one was tried and pulled back out, since a portal sitting in the middle of
+the room was clutter with no real narrative reason to be there when Plaza's
+own 2D key-anchored portal already demos the concept for visitors — so
+`test/manual-3d-key-anchored-portal.js` exercises the 3D code path against
+its own throwaway copy of `demo-domain-a` with a second Lobby portal added
+only to that isolated copy (same "copy into an isolated docroot" pattern
+`test/manual-warranty-demo.js` and its siblings already use), rather than
+against the shared demo content.

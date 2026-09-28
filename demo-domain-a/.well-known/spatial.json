@@ -145,13 +145,7 @@
         "capabilities": { "building": "none", "vehicles": false, "combat": "none", "landOwnership": false }
       },
       "portals": [
-        { "kind": "world", "to": "plaza", "label": "Back to the Plaza" },
-        {
-          "kind": "key",
-          "identityKey": "BImEaR461J9_IRSc6ZbYpG8A5b2_22vvSX91ERBcelUYsl5fvNhDEPWjnZTQW3Qrv_8DSnzx94-Ou6l1gONjgxQ",
-          "manifest": "http://localhost:8001/keyworld/spatial.json",
-          "label": "Step into the Unlisted Atrium"
-        }
+        { "kind": "world", "to": "plaza", "label": "Back to the Plaza" }
       ]
     }
   ],
