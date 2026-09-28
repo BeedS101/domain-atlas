@@ -118,13 +118,13 @@
   <div class="panel" id="receiptsPanel" style="display:none;">
     <h2>Step 4 — collect at the counter</h2>
     <p class="props" style="margin-top:0;">
-      Each purchase above minted a receipt credential the student presents at pickup. Take
-      one's raw JSON to the <a href="/atlas-admin/" target="_blank" rel="noopener">Admin
-      Panel</a>'s "Fulfill a purchase" section — the operator confirming it's genuine and
-      hasn't already been collected, then handing over the order
-      (<code>POST /atlas/asset/fulfill</code>). "Check status" below re-reads this domain's
-      own public revocation list, the same file anyone could fetch directly, to show whether
-      that's happened yet.
+      Each purchase above minted a receipt credential the student presents at pickup. Click
+      "Collect" and this page plays the counter itself — confirming the receipt is genuine
+      and unspent, then handing it over in the same act
+      (<code>POST /atlas/asset/fulfill</code>'s self-serve sibling, restricted to this
+      menu's three classes so it can't touch anything else). "Check status" re-reads this
+      domain's own public revocation list, the same file anyone could fetch directly, to
+      confirm that actually happened.
     </p>
     <div id="receiptCards"></div>
   </div>
@@ -198,17 +198,18 @@
     const revDoc = await fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }));
     return (revDoc.revoked || []).some((r) => r.id === credentialId);
   }
+  async function fulfillAsset(credential) {
+    const res = await postJson('/atlas/demo/cafeteria/fulfill', { credential });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'fulfill failed');
+    return res.body;
+  }
 
   let student = null;
   let balance = null; // current balance credential, or null once fully spent
 
   // Unlike business-demo.html's own rawDetails() (a shortened, human-glance
-  // summary — that page hands the real in-memory credential straight to its
-  // own verify step, never round-tripping it through this display), this
-  // one is meant to be copy-pasted whole into the Admin Panel's "Fulfill a
-  // purchase" textarea, so it has to be the complete, real, verifiable
-  // credential — truncating the owner key or signature here would make
-  // every receipt un-fulfillable.
+  // summary), this one shows the complete, real, verifiable credential —
+  // the exact object "Collect" below hands to /atlas/demo/cafeteria/fulfill.
   function rawDetails(credential) {
     return JSON.stringify(credential, null, 2);
   }
@@ -243,15 +244,38 @@
     div.innerHTML =
       '<span class="badge awaiting">Awaiting collection</span>' +
       '<h3>' + itemName + '</h3>' +
+      '<button class="collectBtn" type="button">Collect</button>' +
       '<button class="statusBtn secondary" type="button">Check status</button>' +
-      '<details class="raw"><summary>View raw signed credential (for the Admin Panel)</summary><pre></pre></details>';
+      '<p class="collectStatus result"></p>' +
+      '<details class="raw"><summary>View raw signed credential</summary><pre></pre></details>';
     div.querySelector('pre').textContent = rawDetails(credential);
+    div.querySelector('.collectBtn').addEventListener('click', async () => {
+      const collectBtn = div.querySelector('.collectBtn');
+      const collectStatus = div.querySelector('.collectStatus');
+      collectBtn.disabled = true;
+      collectStatus.className = 'result';
+      collectStatus.textContent = 'Collecting…';
+      try {
+        await fulfillAsset(credential);
+        const badge = div.querySelector('.badge');
+        badge.className = 'badge collected';
+        badge.textContent = 'Collected ✓';
+        collectStatus.className = 'result ok';
+        collectStatus.textContent = 'Handed over at the counter.';
+        collectBtn.style.display = 'none';
+      } catch (err) {
+        collectStatus.className = 'result err';
+        collectStatus.textContent = 'Could not collect: ' + err.message;
+        collectBtn.disabled = false;
+      }
+    });
     div.querySelector('.statusBtn').addEventListener('click', async () => {
       const fulfilled = await isFulfilled(credential.id);
       const badge = div.querySelector('.badge');
       if (fulfilled) {
         badge.className = 'badge collected';
         badge.textContent = 'Collected ✓';
+        div.querySelector('.collectBtn').style.display = 'none';
       }
     });
     document.getElementById('receiptCards').appendChild(div);

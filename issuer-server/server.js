@@ -1022,6 +1022,19 @@ const ASSET_CATALOG = {
 // with no per-endpoint changes needed.
 Object.assign(ASSET_CATALOG, require('./elements-catalog')(DOMAIN));
 
+// Hardcoded allow-lists for the self-serve /atlas/demo/* routes below —
+// each one lets a standalone demo page play a role (factory, retailer,
+// canteen counter, revoking service) that would ordinarily need a real
+// admin login, but only ever for its own page's own toy class, never
+// anything else in ASSET_CATALOG. See those routes' own comments.
+const DEMO_WARRANTY_CLASS = 'atlas.demo.warranty.certificate';
+const DEMO_LOGIN_BADGE_CLASS = 'atlas.demo.login.badge';
+const DEMO_CAFETERIA_FULFILLABLE_CLASSES = [
+  'atlas.demo.cafeteria.sandwich',
+  'atlas.demo.cafeteria.juice',
+  'atlas.demo.cafeteria.snack'
+];
+
 const MIME = {
   '.html': 'text/html', '.js': 'application/javascript', '.json': 'application/json',
   '.png': 'image/png', '.svg': 'image/svg+xml', '.css': 'text/css', '.glb': 'model/gltf-binary'
@@ -2701,6 +2714,104 @@ async function main() {
         const credential = await mintAssetByClass(ownerPublicKey, assetClass, mintQuantity, null, properties);
         console.log('Admin-minted', mintQuantity, credential.asset.name, 'to', ownerPublicKey.slice(0, 16) + '...', 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, credential);
+      }
+
+      // --- Self-serve demo endpoints (no admin auth at all) ---
+      //
+      // A few standalone demo pages tell a story with more than one real
+      // party in it (a factory, a retailer, a canteen counter), where one
+      // side is ordinarily an authenticated operator — exactly what
+      // requireAdminAuth exists to gate above. A solo visitor to one of
+      // those pages has no admin login of their own, and shouldn't need
+      // one just to see the story through: this domain's actual admin
+      // roster and Admin Panel stay exactly as gated as ever. Each route
+      // below does what its admin-gated sibling does, same checks, minus
+      // the auth — but is hardcoded to touch only its own page's own toy
+      // class, never anything else in ASSET_CATALOG, so none of it can be
+      // pointed at a class that actually matters.
+
+      // POST /atlas/demo/warranty/mint — self-serve sibling of
+      // POST /atlas/asset/mint above, hardcoded to DEMO_WARRANTY_CLASS.
+      // Plays "the factory" for warranty-demo.html's step 1.
+      if (req.method === 'POST' && req.url === '/atlas/demo/warranty/mint') {
+        const { ownerPublicKey, properties } = JSON.parse((await readBody(req)) || '{}');
+        if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
+        if (properties !== undefined && (typeof properties !== 'object' || properties === null || Array.isArray(properties))) {
+          return sendJson(res, 400, { error: "properties, when given, must be a patch object onto the class's own base properties" });
+        }
+        const credential = await mintAssetByClass(ownerPublicKey, DEMO_WARRANTY_CLASS, 1, null, properties);
+        console.log('Demo-minted warranty certificate to', ownerPublicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, credential);
+      }
+
+      // POST /atlas/demo/warranty/stamp-sale — self-serve sibling of
+      // POST /atlas/asset/reissue, hardcoded to DEMO_WARRANTY_CLASS —
+      // same revoke-old/mint-new mechanics reissue itself uses. Plays "the
+      // retailer" for warranty-demo.html's step 2.
+      if (req.method === 'POST' && req.url === '/atlas/demo/warranty/stamp-sale') {
+        const { credential, properties } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || credential.credential !== 'domain-atlas-asset/1.0') {
+          return sendJson(res, 400, { error: 'credential must be a domain-atlas-asset/1.0 credential' });
+        }
+        if (!credential.asset || credential.asset.class !== DEMO_WARRANTY_CLASS) {
+          return sendJson(res, 400, { error: 'this endpoint only stamps a ' + DEMO_WARRANTY_CLASS + ' credential' });
+        }
+        if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
+          return sendJson(res, 400, { error: 'properties (a patch onto asset.properties) is required' });
+        }
+        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'credential was not issued by this domain' });
+        }
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
+        const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
+
+        const newAsset = { ...credential.asset, properties: mergeProperties(credential.asset.properties, properties) };
+        const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
+        revoke(credential.id, 'superseded');
+        appendAssetUpdate({ id: credential.id, status: 'superseded', reason: 'superseded', newCredential });
+        console.log('Demo-stamped sale on', credential.id, '->', newCredential.id);
+        return sendJson(res, 200, { newCredential });
+      }
+
+      // POST /atlas/demo/cafeteria/fulfill — self-serve sibling of
+      // POST /atlas/asset/fulfill, hardcoded to
+      // DEMO_CAFETERIA_FULFILLABLE_CLASSES. Plays "the counter" for
+      // cafeteria-demo.html's step 4.
+      if (req.method === 'POST' && req.url === '/atlas/demo/cafeteria/fulfill') {
+        const { credential } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
+        if (!DEMO_CAFETERIA_FULFILLABLE_CLASSES.includes(credential.asset.class)) {
+          return sendJson(res, 400, { error: 'this endpoint only fulfills ' + DEMO_CAFETERIA_FULFILLABLE_CLASSES.join(', ') });
+        }
+        const problem = await checkPresentedFulfillableAsset(credential);
+        if (problem) return sendJson(res, 400, { error: problem });
+        revoke(credential.id, 'fulfilled');
+        console.log('Demo-fulfilled', credential.asset.class, credential.id, 'for', credential.owner.publicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { status: 'fulfilled', id: credential.id, asset: credential.asset, owner: credential.owner });
+      }
+
+      // POST /atlas/demo/login/revoke — self-serve sibling of POST
+      // /atlas/revoke, hardcoded to DEMO_LOGIN_BADGE_CLASS. Lets
+      // login-demo.html's optional "see revocation take effect live" step
+      // run without an admin login — a genuine revoke against this
+      // domain's own revocation list, just narrowed to a class with
+      // nothing real at stake.
+      if (req.method === 'POST' && req.url === '/atlas/demo/login/revoke') {
+        const { credential } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
+        if (credential.asset.class !== DEMO_LOGIN_BADGE_CLASS) {
+          return sendJson(res, 400, { error: 'this endpoint only revokes ' + DEMO_LOGIN_BADGE_CLASS });
+        }
+        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'this domain did not issue this credential' });
+        }
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
+        const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
+        revoke(credential.id, 'demo-self-serve');
+        console.log('Demo-revoked', credential.id);
+        return sendJson(res, 200, { ok: true });
       }
 
       // --- Admin session (short-lived bearer token layered on the roster

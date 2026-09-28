@@ -1,20 +1,16 @@
 // End-to-end check for demo-domain-a/cafeteria-demo.html — the worked
 // example of SPEC.md §5.8 (purchasing) and §5.9 (fulfillment): a parent
 // tops up a student's spendable balance, the student spends part of it on
-// menu items, and each purchase's receipt is later fulfilled by an
-// operator on the admin panel (issuer-server/admin-panel/index.html's new
-// "Fulfill a purchase" section). test/manual-asset-purchase.js already
-// proves the underlying endpoints at the HTTP layer — this test is what
-// the two PAGES do with them, end to end, across both.
+// menu items, and each purchase's receipt is fulfilled right on this same
+// page — no admin panel or operator login needed (POST
+// /atlas/demo/cafeteria/fulfill, the self-serve sibling of the real
+// admin-gated /atlas/asset/fulfill, hardcoded to this menu's three
+// classes). test/manual-asset-purchase.js and test/manual-demo-self-serve.js
+// already prove the underlying endpoints at the HTTP layer — this test is
+// what the PAGE does with them, end to end.
 //
-// Drives both pages directly with a headless browser (neither needs the
-// wallet extension). The admin panel's own login is normally a wallet-
-// extension handoff (manual-admin-panel.js already proves that plumbing);
-// this test skips it by starting a real session the same protocol way
-// (nonce/sign/start, as manual-admin-session.js proves) and seeding
-// sessionStorage with the resulting token before the panel loads, so the
-// panel is exercised as a genuinely logged-in operator without needing the
-// extension at all.
+// Drives the page directly with a headless browser (it needs no wallet
+// extension).
 //
 // Checks:
 //   1. Creating a student wallet reveals the top-up and menu panels.
@@ -23,12 +19,12 @@
 //      "Awaiting collection" receipt card with the item's real raw JSON.
 //   4. Buying the juice (price 2) drops the balance to 3, disabling the
 //      sandwich button (would need 5) but leaving the snack (3) enabled.
-//   5. Pasting the sandwich receipt's raw JSON into the admin panel's
-//      "Fulfill a purchase" section and clicking Fulfill succeeds.
-//   6. Back on the cafeteria page, "Check status" on that same receipt
-//      flips its badge to "Collected ✓"; the juice receipt's own "Check
-//      status" still reports "Awaiting collection" — proving the check is
-//      per-credential, not a blanket refresh.
+//   5. Clicking "Collect" on the sandwich receipt fulfills it right on this
+//      page and flips its badge to "Collected ✓" — the juice receipt's own
+//      badge stays "Awaiting collection", proving this is per-credential.
+//   6. "Check status" on the now-collected sandwich receipt still reports
+//      Collected — reading the same fact back from this domain's own
+//      public revocation list, independently of the page's own state.
 //   7. "Start over" resets the page back to Step 1.
 //
 // Not part of the permanent suite, same reasoning as the other
@@ -39,8 +35,6 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { webcrypto } = require('crypto');
-const { subtle } = webcrypto;
 
 const NODE_PORT = 8133; // isolated — distinct from every other manual-*.js test's chosen port
 const NODE_DOMAIN = 'localhost:' + NODE_PORT;
@@ -51,40 +45,6 @@ const NODE_DOCROOT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-cafeteria-
 
 function assert(cond, message) {
   if (!cond) throw new Error('ASSERTION FAILED: ' + message);
-}
-function b64url(bytes) {
-  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-function canonicalize(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
-  const keys = Object.keys(value).sort();
-  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
-}
-async function genIdentity() {
-  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
-  return { kp, publicKey: b64url(raw) };
-}
-async function signWithSelf(kp, publicKey, payload) {
-  const data = new TextEncoder().encode(canonicalize(payload));
-  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
-  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
-}
-async function postJson(urlPath, body) {
-  const res = await fetch(NODE_BASE + urlPath, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-  return { status: res.status, body: await res.json() };
-}
-// Real nonce/sign/start round trip (same as manual-admin-session.js) — a
-// genuine session token, not a fabricated one, just obtained without the
-// wallet extension's own UI in the way.
-async function startAdminSession(admin) {
-  const nonce = (await fetch(NODE_BASE + '/atlas/admin/session/nonce').then((r) => r.json())).nonce;
-  const payload = { nonce };
-  const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
-  const res = await postJson('/atlas/admin/session/start', { payload, proof });
-  if (res.status !== 200) throw new Error('admin login failed: ' + JSON.stringify(res.body));
-  return res.body.token;
 }
 
 (async () => {
@@ -110,12 +70,6 @@ async function startAdminSession(admin) {
 
   let browser;
   try {
-    console.log('SETUP: registering an admin identity and starting a real session for it');
-    const admin = await genIdentity();
-    fs.writeFileSync(path.join(NODE_STATE_DIR, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
-    const adminToken = await startAdminSession(admin);
-    console.log('PASS: admin session token obtained ->', adminToken.slice(0, 16) + '...');
-
     browser = await chromium.launch({ headless: true, executablePath: '/opt/pw-browsers/chromium' });
     const page = await browser.newPage();
     await page.goto(NODE_BASE + '/cafeteria-demo.html', { waitUntil: 'load' });
@@ -155,35 +109,21 @@ async function startAdminSession(admin) {
     const juiceCard = page.locator('#receiptCards .card', { hasText: 'Juice' });
     console.log('PASS: balance -> 3, buy buttons reflect what\'s actually affordable, juice receipt rendered');
 
-    console.log('STEP 5: fulfilling the sandwich receipt on the admin panel (session seeded directly, no extension needed)');
-    const adminPage = await browser.newPage();
-    await adminPage.context().addInitScript((token) => {
-      sessionStorage.setItem('atlasAdminSession', JSON.stringify({ token, expiresAt: Date.now() + 5 * 60 * 1000 }));
-    }, adminToken);
-    await adminPage.goto(NODE_BASE + '/atlas-admin/', { waitUntil: 'load' });
-    await adminPage.waitForFunction(() => document.getElementById('hidden-while-logged-out').style.display !== 'none', null, { timeout: 10000 });
-    await adminPage.fill('#fulfillCredential', sandwichRaw);
-    await adminPage.locator('#fulfillBtn').click();
-    await adminPage.waitForFunction(() => {
-      const el = document.getElementById('fulfillResult');
-      return el && el.textContent.includes('Fulfilled');
-    }, null, { timeout: 10000 });
-    const fulfillResultText = await adminPage.locator('#fulfillResult').textContent();
-    assert(fulfillResultText.includes('Sandwich'), 'expected the fulfill result to name the item, got: ' + fulfillResultText);
-    console.log('PASS: admin panel fulfilled the sandwich receipt ->', fulfillResultText);
-
-    console.log('STEP 6: back on the cafeteria page, "Check status" flips the sandwich receipt to Collected, leaving the juice receipt untouched');
-    await sandwichCard.locator('.statusBtn').click();
+    console.log('STEP 5: clicking "Collect" on the sandwich receipt fulfills it right on this page, with no admin panel involved');
+    await sandwichCard.locator('.collectBtn').click();
     await page.waitForFunction(() => {
       const cards = [...document.querySelectorAll('#receiptCards .card')];
       const card = cards.find((c) => c.textContent.includes('Sandwich'));
       return card && card.querySelector('.badge.collected');
     }, null, { timeout: 10000 });
-    console.log('PASS: sandwich receipt shows Collected ✓ after checking status');
-    await juiceCard.locator('.statusBtn').click();
+    assert(await juiceCard.locator('.badge.awaiting').count() === 1, 'expected the juice receipt to still show Awaiting collection — it was never collected');
+    console.log('PASS: sandwich receipt shows Collected ✓ immediately, juice receipt untouched');
+
+    console.log('STEP 6: "Check status" on the now-collected sandwich receipt still reports Collected, read back from the public revocation list');
+    await sandwichCard.locator('.statusBtn').click();
     await page.waitForTimeout(500);
-    assert(await juiceCard.locator('.badge.awaiting').count() === 1, 'expected the juice receipt to still show Awaiting collection — it was never fulfilled');
-    console.log('PASS: the juice receipt (never fulfilled) still correctly reports Awaiting collection');
+    assert(await sandwichCard.locator('.badge.collected').count() === 1, 'expected the sandwich receipt to still show Collected after re-checking status independently');
+    console.log('PASS: "Check status" confirms the same fact from this domain\'s own public revocation list');
 
     console.log('STEP 7: "Start over" resets the page back to Step 1');
     await page.locator('#resetBtn').click();

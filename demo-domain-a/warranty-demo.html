@@ -39,6 +39,10 @@
     display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
     padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; resize: vertical;
   }
+  input[type="text"], input[type="date"], input[type="number"] {
+    display: block; width: 100%; font: inherit; font-size: 0.9rem;
+    padding: 0.5rem 0.65rem; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 0.3rem;
+  }
   .keyline {
     font-family: ui-monospace, monospace; font-size: 0.78rem; background: #eef1f3; padding: 0.5rem 0.65rem;
     border-radius: 6px; word-break: break-all; margin: 0.4rem 0;
@@ -80,9 +84,13 @@
     warranty clock is running — for however many owners the product passes through next.
     Selling it secondhand doesn't reset anything or need anyone's permission from the
     factory: the same certificate, with its original serial number and sale date intact,
-    simply changes hands. Minting and stamping are real operator actions in
-    <a href="/atlas-admin/" target="_blank" rel="noopener">this domain's Admin Panel</a> —
-    this page plays the part of whoever currently owns the product.
+    simply changes hands. In a real deployment, minting and stamping would be authenticated
+    operator actions — a factory login, a retailer login — the way
+    <a href="/atlas-admin/" target="_blank" rel="noopener">this domain's Admin Panel</a>
+    models them for a real operator. This page plays both parts for you, one click at a
+    time, so you can see the whole chain without needing an operator login of your own —
+    transferring ownership below is the one step a real product owner would actually do
+    themselves.
   </p>
 
   <div class="panel pitch">
@@ -110,19 +118,16 @@
   <div class="panel" id="mintPanel">
     <h2>Step 1 of 4 — the factory mints a certificate</h2>
     <p class="props" style="margin-top:0;">
-      A real factory authenticates before assigning a serial number — this reference
-      implementation doesn't have a factory login of its own, so play that part yourself
-      in the Admin Panel's <strong>Mint an asset</strong> section: owner public key is the
-      one above, asset class is <code>atlas.demo.warranty.certificate</code>, and a
-      properties patch such as <code>{"com.example.serialNumber": "SN-0001"}</code>.
-      Paste what it hands back below.
+      A real factory authenticates once, at manufacture time, before assigning a serial
+      number. Pick whatever serial you like — this page mints the certificate straight to
+      the identity above, playing the factory's part for you.
     </p>
-    <label for="mintImport">Minted certificate JSON</label>
-    <textarea id="mintImport" rows="6" placeholder='{"credential":"domain-atlas-asset/1.0", ...}'></textarea>
+    <label for="serialInput">Serial number</label>
+    <input type="text" id="serialInput" value="SN-0001">
     <div style="margin-top:0.6rem;">
-      <button type="button" id="mintImportBtn">Import</button>
+      <button type="button" id="mintBtn">Mint certificate</button>
     </div>
-    <div id="mintImportResult"></div>
+    <div id="mintResult"></div>
   </div>
 
   <div class="panel" id="cardPanel" style="display:none;">
@@ -133,19 +138,21 @@
   <div class="panel" id="reissuePanel" style="display:none;">
     <h2>Step 2 of 4 — the retailer stamps the sale</h2>
     <p class="props" style="margin-top:0;">
-      Paste the exact certificate JSON shown above into the Admin Panel's existing
-      <strong>Reissue an asset</strong> section, with a properties patch such as
-      <code>{"com.example.saleDate": "2026-09-28", "com.example.warrantyMonths": 24, "com.example.retailer": "Example Retailer"}</code>.
-      Paste the <code>newCredential</code> it returns below — this is the same generic
-      reissue mechanism the museum exhibit's info card and a mistagged item's tradeScope
-      already use elsewhere on this site, just stamping different facts.
+      Fill in a sale date, a warranty length, and the retailer's name — this page stamps
+      them onto the certificate for you, the same generic reissue mechanism the museum
+      exhibit's info card and a mistagged item's tradeScope already use elsewhere on this
+      site, just playing the retailer's part in one click.
     </p>
-    <label for="reissueImport">Reissued certificate JSON</label>
-    <textarea id="reissueImport" rows="6" placeholder='{"credential":"domain-atlas-asset/1.0", ...}'></textarea>
+    <label for="saleDateInput">Sale date</label>
+    <input type="date" id="saleDateInput">
+    <label for="warrantyMonthsInput">Warranty length (months)</label>
+    <input type="number" id="warrantyMonthsInput" value="24" min="1">
+    <label for="retailerInput">Retailer name</label>
+    <input type="text" id="retailerInput" value="Example Retailer">
     <div style="margin-top:0.6rem;">
-      <button type="button" id="reissueImportBtn">Import</button>
+      <button type="button" id="stampBtn">Stamp the sale</button>
     </div>
-    <div id="reissueImportResult"></div>
+    <div id="stampResult"></div>
   </div>
 
   <div class="panel" id="transferPanel" style="display:none;">
@@ -184,7 +191,6 @@
 (function () {
   'use strict';
   const subtle = crypto.subtle;
-  const WARRANTY_CLASS = 'atlas.demo.warranty.certificate';
 
   function b64urlEncode(bytes) {
     let bin = '';
@@ -319,65 +325,74 @@
     }
   });
 
-  document.getElementById('mintImportBtn').addEventListener('click', () => {
-    const result = document.getElementById('mintImportResult');
-    let credential;
+  document.getElementById('mintBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('mintBtn');
+    const result = document.getElementById('mintResult');
+    const serial = document.getElementById('serialInput').value.trim();
+    if (!serial) {
+      result.className = 'result err';
+      result.textContent = 'Enter a serial number first.';
+      return;
+    }
+    btn.disabled = true;
+    result.className = 'result pending';
+    result.textContent = 'Minting…';
     try {
-      credential = JSON.parse(document.getElementById('mintImport').value);
+      const res = await postJson('/atlas/demo/warranty/mint', {
+        ownerPublicKey: you.publicKey,
+        properties: { 'com.example.serialNumber': serial }
+      });
+      if (!res.ok) throw new Error((res.body && res.body.error) || 'mint failed');
+      currentCredential = res.body;
+      currentHolder = you;
+      result.className = 'result ok';
+      result.textContent = 'Minted — certificate ' + currentCredential.id + '.';
+      renderCard();
+      document.getElementById('resetBtn').style.display = '';
+      document.getElementById('reissuePanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) {
       result.className = 'result err';
-      result.textContent = "That's not valid JSON: " + err.message;
-      return;
+      result.textContent = 'Could not mint: ' + err.message;
+    } finally {
+      btn.disabled = false;
     }
-    if (!credential || credential.credential !== 'domain-atlas-asset/1.0' || !credential.asset) {
-      result.className = 'result err';
-      result.textContent = "That doesn't look like a signed credential.";
-      return;
-    }
-    if (credential.asset.class !== WARRANTY_CLASS) {
-      result.className = 'result err';
-      result.textContent = 'Expected a ' + WARRANTY_CLASS + ' credential, got ' + credential.asset.class + '.';
-      return;
-    }
-    if (!credential.owner || credential.owner.publicKey !== you.publicKey) {
-      result.className = 'result err';
-      result.textContent = "This certificate wasn't minted to your public key above — copy it exactly and try minting again.";
-      return;
-    }
-    currentCredential = credential;
-    currentHolder = you;
-    result.className = 'result ok';
-    result.textContent = 'Imported — certificate ' + credential.id + '.';
-    renderCard();
-    document.getElementById('resetBtn').style.display = '';
-    document.getElementById('reissuePanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
-  document.getElementById('reissueImportBtn').addEventListener('click', () => {
-    const result = document.getElementById('reissueImportResult');
-    let credential;
+  document.getElementById('stampBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('stampBtn');
+    const result = document.getElementById('stampResult');
+    const saleDate = document.getElementById('saleDateInput').value;
+    const warrantyMonths = Number(document.getElementById('warrantyMonthsInput').value);
+    const retailer = document.getElementById('retailerInput').value.trim();
+    if (!saleDate || !warrantyMonths || !retailer) {
+      result.className = 'result err';
+      result.textContent = 'Fill in a sale date, a warranty length, and a retailer name.';
+      return;
+    }
+    btn.disabled = true;
+    result.className = 'result pending';
+    result.textContent = 'Stamping…';
     try {
-      credential = JSON.parse(document.getElementById('reissueImport').value);
+      const res = await postJson('/atlas/demo/warranty/stamp-sale', {
+        credential: currentCredential,
+        properties: {
+          'com.example.saleDate': saleDate,
+          'com.example.warrantyMonths': warrantyMonths,
+          'com.example.retailer': retailer
+        }
+      });
+      if (!res.ok) throw new Error((res.body && res.body.error) || 'stamp failed');
+      currentCredential = res.body.newCredential;
+      result.className = 'result ok';
+      result.textContent = 'Sale stamped on ' + currentCredential.id + '.';
+      renderCard();
+      document.getElementById('transferPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (err) {
       result.className = 'result err';
-      result.textContent = "That's not valid JSON: " + err.message;
-      return;
+      result.textContent = 'Could not stamp the sale: ' + err.message;
+    } finally {
+      btn.disabled = false;
     }
-    if (!credential || credential.credential !== 'domain-atlas-asset/1.0' || credential.asset.class !== WARRANTY_CLASS) {
-      result.className = 'result err';
-      result.textContent = "That doesn't look like a reissued " + WARRANTY_CLASS + ' credential.';
-      return;
-    }
-    if (!credential.owner || credential.owner.publicKey !== currentHolder.publicKey) {
-      result.className = 'result err';
-      result.textContent = 'This reissued certificate belongs to a different owner than the one currently held here.';
-      return;
-    }
-    currentCredential = credential;
-    result.className = 'result ok';
-    result.textContent = 'Imported — sale stamped on ' + credential.id + '.';
-    renderCard();
-    document.getElementById('transferPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
   document.getElementById('transferBtn').addEventListener('click', async () => {
@@ -435,6 +450,7 @@
   (async () => {
     you = await genIdentity();
     document.getElementById('yourPublicKey').textContent = you.publicKey;
+    document.getElementById('saleDateInput').value = new Date().toISOString().slice(0, 10);
   })();
 })();
 </script>

@@ -13,12 +13,12 @@
 //      factor at all.
 //   3. The right password proceeds automatically to a successful second
 //      factor, showing the exact credential name the server reported.
-//   4. The "see revocation take effect live" callout appears with the
-//      credential's own id, matching the one just issued.
-//   5. Revoking that id (as an admin, over HTTP — standing in for using
-//      the real admin panel in another tab) and clicking "Try signing in
-//      again" fails the second factor with the server's own reason, while
-//      the password step is never re-asked.
+//   4. The "see revocation take effect live" callout appears with a
+//      "Revoke my credential" button.
+//   5. Clicking that button revokes the credential right on this page (no
+//      admin panel involved), and clicking "Try signing in again" then
+//      fails the second factor with the server's own reason, while the
+//      password step is never re-asked.
 //   6. "Start over" resets back to the pre-enrollment view, and a second
 //      full run-through (fresh identity, fresh credential) succeeds.
 //
@@ -30,8 +30,6 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { webcrypto } = require('crypto');
-const { subtle } = webcrypto;
 
 const NODE_PORT = 8139; // isolated — distinct from every other manual-*.js test's chosen port
 const NODE_DOMAIN = 'localhost:' + NODE_PORT;
@@ -42,35 +40,6 @@ const NODE_DOCROOT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-login-page
 
 function assert(cond, message) {
   if (!cond) throw new Error('ASSERTION FAILED: ' + message);
-}
-function b64url(bytes) {
-  return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-async function genIdentity() {
-  const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
-  return { kp, publicKey: b64url(raw) };
-}
-function canonicalize(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
-  const keys = Object.keys(value).sort();
-  return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
-}
-async function signWithSelf(kp, publicKey, payload) {
-  const data = new TextEncoder().encode(canonicalize(payload));
-  const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data));
-  return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
-}
-function postJson(base, urlPath, body) {
-  return fetch(base + urlPath, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
-  }).then(async (r) => ({ status: r.status, body: await r.json() }));
-}
-async function revokeAsAdmin(base, admin, id) {
-  const payload = { id };
-  const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
-  return postJson(base, '/atlas/revoke', { payload, proof });
 }
 
 (async () => {
@@ -93,10 +62,6 @@ async function revokeAsAdmin(base, admin, id) {
     nodeProc.on('exit', (code) => reject(new Error('issuer-server exited early with code ' + code)));
   });
   console.log('PASS: isolated issuer-server up on port ' + NODE_PORT + ', serving the isolated demo-domain-a copy');
-
-  console.log('SETUP: registering an admin key on the isolated Node roster (stands in for the real admin panel)');
-  const admin = await genIdentity();
-  fs.writeFileSync(path.join(NODE_STATE_DIR, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
 
   let browser;
   try {
@@ -130,13 +95,14 @@ async function revokeAsAdmin(base, admin, id) {
     assert((await page.locator('#factorResult').getAttribute('class')).includes('ok'), 'expected the ok result styling on a genuine second-factor success');
     console.log('PASS: second factor succeeds and reports the real credential name —', successText);
 
-    console.log('STEP 4: the revocation callout shows the credential\'s own id');
+    console.log('STEP 4: the revocation callout shows a "Revoke my credential" button');
     assert(await page.locator('#revokeCallout').isVisible(), 'expected the "see revocation take effect live" callout to appear on success');
-    console.log('PASS: revocation callout is visible, pointing at id', rawCredential.id);
+    assert(await page.locator('#revokeBtn').isVisible(), 'expected a self-serve revoke button, not an admin-panel link');
+    console.log('PASS: revocation callout is visible, offering a self-serve revoke for id', rawCredential.id);
 
-    console.log('STEP 5: revoking that id (standing in for the real admin panel) fails the very next second-factor attempt, with no password re-ask');
-    const revokeRes = await revokeAsAdmin(NODE_BASE, admin, rawCredential.id);
-    assert(revokeRes.status === 200 && revokeRes.body.ok === true, 'expected the admin revoke to succeed, got: ' + JSON.stringify(revokeRes.body));
+    console.log('STEP 5: clicking "Revoke my credential" (no admin panel involved) fails the very next second-factor attempt, with no password re-ask');
+    await page.locator('#revokeBtn').click();
+    await page.waitForFunction(() => (document.getElementById('revokeStatus').textContent || '').startsWith('Revoked'), { timeout: 10000 });
     assert(!(await page.locator('#usernameInput').isVisible()) || (await page.locator('#usernameInput').isDisabled()), 'expected the password fields to stay as they were, not reappear for re-entry');
     await page.locator('#retryFactorBtn').click();
     await page.waitForFunction(() => (document.getElementById('factorResult').textContent || '').startsWith('✗ Second factor failed'), { timeout: 10000 });

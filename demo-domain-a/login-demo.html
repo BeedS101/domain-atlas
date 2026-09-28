@@ -67,8 +67,8 @@
     it changes — instead of a one-time code from your phone, this page presents a real,
     cryptographically signed credential this domain issued you, and signs a fresh
     one-time challenge with the same key the credential names as its owner. Revoke that
-    credential from the admin panel — no password reset involved — and the second factor
-    starts failing immediately, on the very next attempt. Both keys involved are generated
+    credential — no password reset involved — and the second factor starts failing
+    immediately, on the very next attempt. Both keys involved are generated
     right here in your browser and never leave it except as a signature; every request
     below is a genuine call to this domain's own server, not a mockup.
   </p>
@@ -122,12 +122,14 @@
   <div class="panel callout" id="revokeCallout" style="display:none;">
     <h2 style="margin-top:0;">See revocation take effect live</h2>
     <p>
-      Open this domain's <a href="/atlas-admin/" target="_blank" rel="noopener">admin panel</a>,
-      paste this credential's id — shown above and below — into "Revoke a credential," and
-      revoke it. Then come back here and click "Try signing in again" without reloading
-      this page: the same password step still succeeds, but the second factor now fails,
-      on the spot, with no separate step to invalidate anything else.
+      In a real deployment, revoking a credential is something only the issuing service
+      does — this button plays that part for you. Click it, then click "Try signing in
+      again" without reloading this page: the same password step still succeeds, but the
+      second factor now fails, on the spot, with no separate step to invalidate anything
+      else.
     </p>
+    <button type="button" id="revokeBtn">Revoke my credential</button>
+    <p id="revokeStatus" class="step-status"></p>
   </div>
 
   <p class="footnote">
@@ -176,6 +178,11 @@
   async function issueAsset(ownerPublicKey, assetClass) {
     const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass });
     if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
+    return res.body;
+  }
+  async function revokeCredential(credential) {
+    const res = await postJson('/atlas/demo/login/revoke', { credential });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'revoke failed');
     return res.body;
   }
 
@@ -248,6 +255,20 @@
     }
   });
 
+  document.getElementById('revokeBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('revokeBtn');
+    const status = document.getElementById('revokeStatus');
+    btn.disabled = true;
+    status.textContent = 'Revoking…';
+    try {
+      await revokeCredential(loginCredential);
+      status.textContent = 'Revoked ' + loginCredential.id + ' — now click "Try signing in again" above.';
+    } catch (err) {
+      status.textContent = 'Could not revoke: ' + err.message;
+      btn.disabled = false;
+    }
+  });
+
   document.getElementById('passwordForm').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const status = document.getElementById('passwordStatus');
@@ -289,6 +310,8 @@
     document.getElementById('factorResult').textContent = '';
     document.getElementById('factorActions').innerHTML = '';
     document.getElementById('revokeCallout').style.display = 'none';
+    document.getElementById('revokeBtn').disabled = false;
+    document.getElementById('revokeStatus').textContent = '';
     document.getElementById('resetBtn').style.display = 'none';
     window.scrollTo({ top: 0, behavior: 'smooth' });
   });

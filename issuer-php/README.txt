@@ -546,14 +546,19 @@ this, not a special case the protocol knows about: a parent tops up a
 student's atlas.credit.balance (fungible, bound, minted via the same
 ungated /atlas/asset/issue every other class here already uses), the
 student spends it on a small menu (atlas.demo.cafeteria.sandwich/.juice/
-.snack, each just another catalog entry with its own price), and each
-purchase's receipt is later fulfilled on the Admin Panel's new "Fulfill a
-purchase" section — the same admin-panel/index.html this bundle already
-serves identically to the Node one. test/manual-asset-purchase.js covers
-the endpoint itself (atomic debit-and-mint, insufficient balance, wrong
+.snack, each just another catalog entry with its own price), and clicking
+"Collect" fulfills the receipt right on the same page — no operator login
+needed. POST /atlas/demo/cafeteria/fulfill (atlas/demo/cafeteria/
+fulfill.php) is a self-serve sibling of the admin-gated
+/atlas/asset/fulfill above: the identical check-then-revoke, minus the
+auth, hardcoded to only ever touch this menu's own three classes — a
+live-site visitor has no way to become an admin, so this lets them play
+"the counter" themselves. test/manual-asset-purchase.js covers the real
+admin-gated endpoint (atomic debit-and-mint, insufficient balance, wrong
 currency, a non-purchasable class, non-fungible quantity, a mismatched
 intent, and the fulfill/replay-rejection cycle) on both issuers;
-test/manual-cafeteria-demo.js drives both pages end to end.
+test/manual-demo-self-serve.js covers the self-serve sibling's own
+class-scoping; test/manual-cafeteria-demo.js drives the page end to end.
 
 
 Credentials that expire on their own, and a museum ticket stall
@@ -627,15 +632,20 @@ The page itself never touches the extension — like business-demo.html, it
 generates a throwaway keypair right in the tab, issues its own login
 credential to it, and fakes only the password half (any username, a fixed
 demo password) before running the genuine nonce/sign/verify round trip for
-real. Its "see revocation take effect live" callout is a deliberate
-cross-demo moment: paste the shown credential id into the Admin Panel's
-existing "Revoke a credential" field, revoke it there, then click "Try
-signing in again" back on the login page — no reload, same tab, same
-already-cached credential — and watch the identical password step still
-succeed while the second factor now fails, on the spot.
+real. Its "see revocation take effect live" callout revokes the credential
+right on the page: POST /atlas/demo/login/revoke (atlas/demo/login/
+revoke.php) is a self-serve sibling of the admin-gated POST /atlas/revoke,
+doing the same genuine revoke, minus the auth, hardcoded to only ever
+touch atlas.demo.login.badge — a live-site visitor has no admin login to
+revoke it with otherwise. Clicking it, then "Try signing in again" back on
+the same tab with the same already-cached credential, shows the identical
+password step still succeed while the second factor now fails, on the
+spot.
 test/manual-login-demo.js covers /atlas/login/nonce and
 /atlas/login/verify themselves at the HTTP layer on both issuers; test/
-manual-login-demo-page.js drives the actual page end to end.
+manual-demo-self-serve.js covers the self-serve revoke route's own
+class-scoping; test/manual-login-demo-page.js drives the actual page end
+to end.
 
 
 A warranty that travels with the product
@@ -669,32 +679,47 @@ asset" right below it), and tools/admin-mint.js is the CLI companion for a
 real deployment, sharing the same local admin identity file
 admin-reissue.js/admin-revoke.js already use.
 
-The retailer's stamp is the EXISTING, already-generic
+A live-site visitor has no way to become an admin, though, so the demo
+page itself doesn't call that admin-gated route at all: POST
+/atlas/demo/warranty/mint (atlas/demo/warranty/mint.php) is a self-serve
+sibling doing the identical mint-with-properties, minus the auth,
+hardcoded to only ever mint atlas.demo.warranty.certificate — it plays
+"the factory" for whoever's visiting.
+
+The retailer's stamp is built on the EXISTING, already-generic
 atlas/asset/reissue.php (SPEC.md §5.1.1) — no new mechanism at all, just a
 properties patch of saleDate/warrantyMonths/retailer instead of a museum
-exhibit's info card. This is also where a real protocol boundary shows up
-plainly: only the domain that minted a credential can ever reissue it, so
-"the retailer stamps the sale" has to mean an authorized role on the SAME
-domain as the factory (an authorized dealer login using the manufacturer's
-own system) — a genuinely separate retailer domain could never rewrite a
-fact the factory's domain signed, by design. Warranty status itself is
-deliberately NOT the protocol's own asset.expiresAt: that field also
-blocks TRANSFERRING a credential once its deadline passes (SPEC.md §5.10,
-check_presented_giftable_asset()'s own is_expired() check), which is
-backwards for a warranty — you should still be able to sell a product
-whose warranty lapsed, it just shows expired. Instead,
-com.example.saleDate/warrantyMonths are plain signed properties, and
-"active" vs. "expired" is date arithmetic anyone can run themselves off
-two open facts, with no real waiting required to see either outcome.
+exhibit's info card — and for the same reason as minting, the page calls a
+self-serve sibling instead: POST /atlas/demo/warranty/stamp-sale
+(atlas/demo/warranty/stamp-sale.php) does the identical revoke-old/mint-new
+reissue, minus the auth, hardcoded to atlas.demo.warranty.certificate only,
+playing "the retailer" so a solo visitor sees both halves of the story
+with no operator login of their own. In a real deployment both steps
+would be genuinely gated — this is also where a real protocol boundary
+shows up plainly: only the domain that minted a credential can ever
+reissue it, so "the retailer stamps the sale" has to mean an authorized
+role on the SAME domain as the factory (an authorized dealer login using
+the manufacturer's own system) — a genuinely separate retailer domain
+could never rewrite a fact the factory's domain signed, by design.
+Warranty status itself is deliberately NOT the protocol's own
+asset.expiresAt: that field also blocks TRANSFERRING a credential once its
+deadline passes (SPEC.md §5.10, check_presented_giftable_asset()'s own
+is_expired() check), which is backwards for a warranty — you should still
+be able to sell a product whose warranty lapsed, it just shows expired.
+Instead, com.example.saleDate/warrantyMonths are plain signed properties,
+and "active" vs. "expired" is date arithmetic anyone can run themselves
+off two open facts, with no real waiting required to see either outcome.
 
 Ownership changing hands needed nothing new at all: transfer_unique_asset()
 — built earlier for a Signet Ring's randomly-rolled per-instance stats —
 already carries a non-fungible credential's EXACT current 'asset' state,
 serial number and every stamped warranty fact included, to a fresh owner
 via POST /atlas/asset/transfer, rather than rebuilding it fresh from the
-catalog. test/manual-asset-mint.js covers the new endpoint itself at the
-HTTP layer on both issuers; test/manual-warranty-demo.js drives the actual
-page end to end.
+catalog. test/manual-asset-mint.js covers the real admin-gated endpoint at
+the HTTP layer on both issuers; test/manual-demo-self-serve.js covers the
+self-serve mint and stamp-sale siblings' own class-scoping, and confirms
+the real admin-gated routes stay just as gated; test/manual-warranty-
+demo.js drives the actual page end to end.
 
 
 Updating an already-issued asset
