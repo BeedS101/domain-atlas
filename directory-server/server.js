@@ -205,7 +205,11 @@ function validateManifestShape(manifest) {
   if (!Array.isArray(manifest.worlds)) return 'missing "worlds" array';
   const hasDomain = typeof manifest.domain === 'string' && manifest.domain;
   const hasKey = typeof manifest.identityKey === 'string' && manifest.identityKey;
-  if (hasDomain === hasKey) return 'manifest must have exactly one of "domain" or "identityKey"';
+  // SPEC.md §3.7: a domain-anchored manifest MAY also carry identityKey (plus
+  // signature) as an optional pin — that's domain AND identityKey together,
+  // not exactly-one. The only shape that's actually invalid is neither: a
+  // manifest anchored by nothing at all.
+  if (!hasDomain && !hasKey) return 'manifest must have at least one of "domain" or "identityKey"';
   return null;
 }
 
@@ -229,6 +233,21 @@ async function crawlOne(url) {
       if (!valid) throw new Error('key-anchored manifest signature does not verify against its own identityKey');
     }
 
+    // SPEC.md §3.7: a domain-anchored manifest MAY additionally pin an
+    // identityKey, signed the same way a key-anchored manifest is (same
+    // canonicalization, same verifyKeyAnchoredManifest helper — it never
+    // actually checks for the absence of "domain", so it's reusable as-is).
+    // A pin that fails to verify is NOT a reason to reject the whole
+    // manifest — the domain's ordinary trust for indexing purposes doesn't
+    // depend on this optional extra signal, so a broken pin is simply
+    // dropped/ignored rather than treated as a crawl failure (§3.7: "not a
+    // replacement... never a hard-block").
+    let pinnedIdentityKey = null;
+    if (anchorType === 'domain' && typeof manifest.identityKey === 'string' && manifest.identityKey) {
+      const pinOk = await verifyKeyAnchoredManifest(manifest);
+      if (pinOk) pinnedIdentityKey = manifest.identityKey;
+    }
+
     // Drop this manifest's previously-indexed worlds before re-adding —
     // a world that was discoverable last crawl and isn't anymore (or was
     // renamed/removed) shouldn't linger just because indexing is additive
@@ -247,7 +266,11 @@ async function crawlOne(url) {
         worldKey,
         anchorType,
         domain: anchorType === 'domain' ? anchorKey : null,
-        identityKey: anchorType === 'key' ? anchorKey : null,
+        // Also populated for a domain-anchored world carrying a validly-
+        // signed §3.7 pin — lets any /search consumer spot domains sharing
+        // the same operator identity purely by comparing this field,
+        // exactly like it already does for key-anchored worlds.
+        identityKey: anchorType === 'key' ? anchorKey : pinnedIdentityKey,
         worldId: world.id,
         name: world.name,
         ownerName: (manifest.owner && manifest.owner.name) || null,

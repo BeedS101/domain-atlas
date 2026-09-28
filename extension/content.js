@@ -21,16 +21,118 @@
       // unreachable or not JSON — silently do nothing
     });
 
+  // ---------- SPEC.md §3.7 — optional domain identity pinning ----------
+  //
+  // This content script runs in the host page's isolated world, with no
+  // access to wallet.js's AtlasWallet (that only loads inside the
+  // extension's own iframe, a separate execution context — see the
+  // "web_accessible_resources" comment on viewer.html). So the small set of
+  // crypto helpers it needs are duplicated here rather than shared, the
+  // same convention this project already uses for canonicalize()/
+  // b64urlDecode() across wallet.js, directory-server/server.js, and
+  // issuer-server/server.js — byte-for-byte identical canonicalization is
+  // what makes a signature verify the same way everywhere, not a shared
+  // module.
+  function b64urlDecode(str) {
+    str = str.replace(/-/g, '+').replace(/_/g, '/');
+    while (str.length % 4) str += '=';
+    const bin = atob(str);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  // Identical verification to wallet.js's verifyKeyAnchoredManifest — §3.7
+  // reuses §3.6's algorithm unchanged ("canonicalize the manifest with
+  // signature removed, verify against identityKey"), it just applies it to
+  // a manifest that also happens to carry a domain.
+  async function verifyManifestSignature(manifest) {
+    if (typeof manifest.signature !== 'string' || !manifest.signature) return false;
+    if (typeof manifest.identityKey !== 'string' || !manifest.identityKey) return false;
+    const { signature, ...unsigned } = manifest;
+    try {
+      const publicKey = await crypto.subtle.importKey('raw', b64urlDecode(manifest.identityKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+      const data = new TextEncoder().encode(canonicalize(unsigned));
+      return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(signature), data);
+    } catch {
+      return false;
+    }
+  }
+
+  // Was this public key ever listed in the domain's own atlas-key.json
+  // history (SPEC.md §5.3), even a since-rotated-out entry? A "yes" makes a
+  // changed identityKey an ordinary, expected rotation; a "no" is the real
+  // anomaly signal. Network failure reads as "no rotation record found" —
+  // the same fail-closed-to-disclosure posture §3.7 asks for, never a
+  // reason to suppress a warning that would otherwise fire.
+  async function wasKeyEverPublished(publicKey) {
+    try {
+      const res = await fetch(location.origin + '/.well-known/atlas-key.json', { cache: 'no-store' });
+      if (!res.ok) return false;
+      const doc = await res.json();
+      return Array.isArray(doc.keys) && doc.keys.some((k) => k.publicKey === publicKey);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Checks a domain-anchored manifest's optional identity pin against
+  // whatever this browser last saw for this domain (chrome.storage.local —
+  // same persistence tier atlasIdentity already uses, since this needs to
+  // survive across browser sessions, not just this tab). Returns null when
+  // there's nothing to disclose (no pin present, a broken/unverifiable pin,
+  // a first sighting, or an unchanged/rotated key), or
+  // { previousKey, newKey } when a changed key has no rotation record
+  // anywhere — the one case §3.7 says should "disclose plainly," never
+  // hard-block (explicitly not §3.6.1's mandatory modal, and explicitly not
+  // HTTP Public Key Pinning's all-or-nothing lockout).
+  async function checkDomainIdentityPin(manifest) {
+    if (typeof manifest.domain !== 'string' || !manifest.domain) return null;
+    if (typeof manifest.identityKey !== 'string' || typeof manifest.signature !== 'string') return null;
+    const sigOk = await verifyManifestSignature(manifest);
+    if (!sigOk) return null; // a broken/garbage pin is never remembered as if it were real
+
+    const domain = manifest.domain;
+    let pins;
+    try {
+      const { atlasPinnedIdentities } = await chrome.storage.local.get('atlasPinnedIdentities');
+      pins = atlasPinnedIdentities || {};
+    } catch (err) {
+      return null; // storage unavailable — nothing to compare against, so nothing to disclose
+    }
+    const remembered = pins[domain];
+
+    if (!remembered) {
+      pins[domain] = { identityKey: manifest.identityKey, firstSeenAt: new Date().toISOString() };
+      try { await chrome.storage.local.set({ atlasPinnedIdentities: pins }); } catch (err) {}
+      return null; // first visit — nothing to compare against yet
+    }
+    if (remembered.identityKey === manifest.identityKey) return null; // unchanged — silent
+
+    const rotated = await wasKeyEverPublished(remembered.identityKey);
+    const previousKey = remembered.identityKey;
+    pins[domain] = { identityKey: manifest.identityKey, firstSeenAt: remembered.firstSeenAt };
+    try { await chrome.storage.local.set({ atlasPinnedIdentities: pins }); } catch (err) {}
+    if (rotated) return null; // an ordinary, expected rotation — quietly updated, no disclosure
+
+    return { previousKey, newKey: manifest.identityKey };
+  }
+
   function injectButton(manifest, defaultWorld, manifestUrl) {
     const worldCount = manifest.worlds.length;
-    const label = worldCount > 1
-      ? `🧭 Enter Space: ${defaultWorld.name} (+${worldCount - 1} more)`
-      : `🧭 Enter Space: ${defaultWorld.name}`;
+    const baseLabel = worldCount > 1
+      ? `Enter Space: ${defaultWorld.name} (+${worldCount - 1} more)`
+      : `Enter Space: ${defaultWorld.name}`;
 
     const btn = document.createElement('button');
     btn.id = 'domain-atlas-enter-btn';
     btn.type = 'button';
-    btn.textContent = label;
+    btn.textContent = '🧭 ' + baseLabel;
     Object.assign(btn.style, {
       position: 'fixed',
       right: '20px',
@@ -49,7 +151,23 @@
     btn.addEventListener('click', () => openOverlay(manifestUrl));
     document.documentElement.appendChild(btn);
 
-    attachInfoTooltip(btn, manifest, defaultWorld);
+    const tooltip = attachInfoTooltip(btn, manifest, defaultWorld);
+
+    // SPEC.md §3.7: resolves asynchronously, well after the button is
+    // already up — the same "enrich after initial render" pattern
+    // fetchParticipantCount()/computeDownloadSize() already use inside the
+    // tooltip itself. Never blocks or delays the button, and a domain with
+    // nothing to disclose (no pin, or an unchanged/rotated one — the
+    // overwhelming common case) leaves the button exactly as it was. This
+    // is deliberately NOT §3.6.1's mandatory disclosure modal: a label
+    // prefix, a color change, and a tooltip line a visitor can plainly see
+    // without necessarily requiring a click — never a lockout.
+    checkDomainIdentityPin(manifest).then((warning) => {
+      if (!warning) return;
+      btn.textContent = '⚠ ' + baseLabel;
+      btn.style.background = '#a4351f';
+      tooltip.setIdentityWarning(warning);
+    }).catch(() => {});
   }
 
   // ---------- hover-tooltip info panel (task #65) ----------
@@ -213,6 +331,12 @@
     const genre = (world.profile && world.profile.genre) || 'unspecified';
     const scale = (world.profile && world.profile.scale) || 'unspecified';
 
+    // SPEC.md §3.7 — set at most once, by injectButton's async
+    // checkDomainIdentityPin() call, well after this tooltip already
+    // exists. null for the overwhelming common case (no pin, or nothing
+    // anomalous to report).
+    let identityWarning = null;
+
     function render({ participants, size }) {
       const lines = [
         '<div style="font-weight:600;margin-bottom:4px;">' + escapeHtml(world.name) + '</div>',
@@ -223,6 +347,14 @@
       ];
       if (worldCount > 1) {
         lines.push('<div style="margin-top:4px;color:#c9c2b8;">+' + (worldCount - 1) + ' more space' + (worldCount - 1 === 1 ? '' : 's') + ' at this domain</div>');
+      }
+      if (identityWarning) {
+        lines.push(
+          '<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.15);color:#ffb199;">' +
+          '⚠ This domain\'s pinned identity key changed since your last visit, with no rotation record on file. ' +
+          'It may be a routine key rotation the domain didn\'t document, or it may not be — nothing here blocks you, just worth knowing.' +
+          '</div>'
+        );
       }
       panel.innerHTML = lines.join('');
     }
@@ -257,6 +389,17 @@
     btn.addEventListener('mouseleave', () => {
       panel.style.display = 'none';
     });
+
+    return {
+      // Called (at most once) by injectButton once its async identity-pin
+      // check resolves. Re-renders immediately if the panel happens to
+      // already be open; otherwise the next mouseenter picks it up via the
+      // closed-over identityWarning value.
+      setIdentityWarning(warning) {
+        identityWarning = warning;
+        if (panel.style.display === 'block') render(shown);
+      }
+    };
   }
 
   function openOverlay(startManifestUrl) {

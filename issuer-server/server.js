@@ -1396,6 +1396,48 @@ function ensureWellKnownFiles(publicKeyB64url) {
   }
 }
 
+// SPEC.md §3.7 — optional domain identity pinning, opt-in via the
+// ATLAS_PIN_MANIFEST_IDENTITY env var. Computed ONCE here, at boot, and
+// cached in memory rather than written back into the tracked spatial.json
+// file: that file is hand-authored, git-tracked content, while this
+// server's signing key is ephemeral (loadOrCreateKeypair() above generates
+// a fresh one whenever KEY_FILE is missing) — a signature baked into the
+// tracked file would only ever verify against whichever key that ONE
+// sandbox/deployment instance happened to generate, going stale on every
+// fresh checkout or test run. This mirrors how atlas-key.json itself is
+// already pure derived state, rewritten fresh every boot by
+// ensureWellKnownFiles() — except cached in memory here rather than written
+// to disk, since spatial.json (unlike atlas-key.json) is substantial
+// hand-authored content this server has no business overwriting on disk.
+//
+// A domain that never sets this env var serves spatial.json byte-identical
+// to the tracked file, completely unchanged — SPEC.md §3.7 is explicit that
+// "a client/domain that ignores this section entirely loses nothing."
+let pinnedManifestBuffer = null;
+async function preparePinnedManifest(sign, publicKeyB64url) {
+  if (!process.env.ATLAS_PIN_MANIFEST_IDENTITY) return;
+  const spatialPath = path.join(DEMO_DOMAIN_A, '.well-known', 'spatial.json');
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(spatialPath, 'utf8'));
+  } catch (err) {
+    console.log('ATLAS_PIN_MANIFEST_IDENTITY is set, but .well-known/spatial.json could not be read — skipping (' + err.message + ')');
+    return;
+  }
+  if (typeof manifest.domain !== 'string' || !manifest.domain) {
+    console.log('ATLAS_PIN_MANIFEST_IDENTITY is set, but spatial.json has no "domain" field — §3.7 pinning only applies to a domain-anchored manifest, skipping');
+    return;
+  }
+  // Same shape a client's verifyManifestSignature (content.js) checks:
+  // canonicalize the manifest WITH identityKey added and signature absent,
+  // sign that, then attach the signature.
+  const unsigned = { ...manifest, identityKey: publicKeyB64url };
+  const signature = await sign(unsigned);
+  const pinned = { ...unsigned, signature };
+  pinnedManifestBuffer = Buffer.from(JSON.stringify(pinned, null, 2));
+  console.log('Domain identity pinning enabled — serving a signed .well-known/spatial.json (SPEC.md §3.7)');
+}
+
 function readRevocations() {
   return JSON.parse(fs.readFileSync(REVOCATIONS_FILE, 'utf8'));
 }
@@ -1965,6 +2007,22 @@ function sendJson(res, status, obj) {
 function serveStatic(req, res) {
   let urlPath = decodeURIComponent(req.url.split('?')[0]);
   if (urlPath === '/') urlPath = '/index.html';
+  // SPEC.md §3.7: when domain identity pinning is enabled, this exact path
+  // is served from the in-memory signed copy instead of the tracked file on
+  // disk — bypassing the mtime/If-Modified-Since machinery below entirely,
+  // since the signed buffer has no file of its own to stat. Every other
+  // path (and this same path when pinning is disabled) falls through to the
+  // ordinary disk-backed serving unchanged.
+  if (pinnedManifestBuffer && urlPath === '/.well-known/spatial.json') {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': String(pinnedManifestBuffer.length),
+      'Access-Control-Allow-Origin': '*'
+    };
+    res.writeHead(200, headers);
+    if (req.method === 'HEAD') return res.end();
+    return res.end(pinnedManifestBuffer);
+  }
   const filePath = path.join(DEMO_DOMAIN_A, urlPath);
   if (!filePath.startsWith(DEMO_DOMAIN_A)) { res.writeHead(403); return res.end('Forbidden'); }
   fs.stat(filePath, (statErr, stat) => {
@@ -2042,6 +2100,8 @@ async function main() {
     const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, data);
     return b64url(sig);
   }
+
+  await preparePinnedManifest(sign, publicKeyB64url);
 
   // Verifies an asset credential this issuer itself signed — used before
   // trusting a balance presented back to us for a reissue, split,

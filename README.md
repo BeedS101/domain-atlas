@@ -90,13 +90,22 @@ Domain A needs the real issuer server (Node, zero npm dependencies — there
 is nothing to `npm install`):
 
 ```bash
-node issuer-server/server.js
+ATLAS_PIN_MANIFEST_IDENTITY=1 node issuer-server/server.js
 ```
 
 The first run generates a real ECDSA P-256 keypair, writes the public half
 to `demo-domain-a/.well-known/atlas-key.json`, and keeps the private half
 in `issuer-server/issuer-private-key.jwk.json` (git-ignored — never commit
 this file). Every run after that reuses the same key.
+
+`ATLAS_PIN_MANIFEST_IDENTITY` turns on SPEC.md §3.7 (optional domain
+identity pinning, see "Try it" below) for this domain only — domain B below
+runs unpinned, so you can see both cases side by side. It's a one-off
+env-var prefix, not an exported shell variable, precisely so it can't
+accidentally leak into some other `node issuer-server/server.js` a test
+script spawns later in the same shell. Leave it off entirely and
+`.well-known/spatial.json` is served byte-identical to the file on disk —
+SPEC.md is explicit that a domain ignoring this section loses nothing.
 
 **Domain B is now a real issuer too**, not a plain static server — task
 #75/#87's Post Office needs it to actually mint credentials and sign mail.
@@ -164,6 +173,43 @@ below), so a plain `curl -d '{"id":...}'` no longer does it — run
 which registers a local admin identity on first use and signs the call
 for you. Then click **Re-verify wallet** again — the item flips to ✗,
 reason "revoked by issuer."
+
+**Domain identity pinning (§3.7) — the other optional identity layer,
+separate from key-anchored worlds above.** §3.6's key-anchored Unlisted
+Atrium (step 3) trusts a manifest with NO domain at all, purely by its own
+signature; §3.7 goes the other way — an ORDINARY domain-anchored manifest
+MAY additionally pin an `identityKey` + `signature` naming who's actually
+behind it, so a returning visitor's browser can notice if that identity
+quietly changes later. Example Plaza runs with this turned on (see "Serve
+the two demo domains" above), so on your very first visit the extension
+silently remembers its current key in `chrome.storage.local` — you won't
+see anything, on purpose: an ordinary first visit and every ordinary return
+visit are supposed to look identical, nothing like §3.6.1's mandatory
+disclosure. The one time you'll actually see something is if this domain's
+key changes with no rotation record anywhere it publishes (its own
+`.well-known/atlas-key.json` key history, §5.3). Reproduce it yourself:
+stop the server, delete `issuer-server/issuer-private-key.jwk.json`, and
+restart — the very next visit prefixes the Enter button with a **⚠**,
+recolors it, and adds a plain-language warning line to its hover tooltip.
+Deliberately never a blocking modal and never a lockout — explicitly not
+§3.6.1's mandatory disclosure, and explicitly not HTTP Public Key Pinning's
+own infamous "reasonable key rotation permanently locks visitors out"
+failure mode. A key that changes but IS still listed in the domain's own
+published key history is treated as an ordinary, expected rotation and
+stays silent, pin quietly updated. `test/manual-domain-identity-pin.js`
+exercises the whole thing for real — first visit, unchanged key, a
+recorded rotation, an undocumented one, and a manifest whose pin fails its
+own signature check (ignored outright, never remembered as if it were
+real). The mechanism itself is `preparePinnedManifest()`
+(`issuer-server/server.js`) — signed once at boot and served from memory,
+never written back into the tracked `spatial.json` file (that file's
+content is hand-authored and lives in git; the signing key is an ephemeral
+per-instance one, so a signature baked into tracked source would go stale
+on every fresh checkout). PHP has no server-boot moment to hook, and serves
+`.well-known/spatial.json` as a plain static file with no PHP in front of
+it at all — so its equivalent is a deploy-time script instead of a runtime
+one: run `php lib/sign-manifest.php` once (see `issuer-php/README.txt`) any
+time you edit your real manifest, and it signs that file in place.
 
 **Password identity — a real alternative to the passkey above.** Step 4's
 `Create Atlas Identity` isn't the only way to get a "self." At onboarding
@@ -342,6 +388,15 @@ interval (60s by default; override with `DIRECTORY_CRAWL_INTERVAL_MS`), so
 a world that changes its name, genre, or `discoverable` flag is picked up
 on its next scheduled pass, not instantly — the same eventual consistency
 a real search index has with the live web.
+
+A domain-anchored manifest that also carries a validly-signed §3.7 identity
+pin gets that `identityKey` copied straight onto its indexed worlds' own
+`identityKey` field in `/search` results (previously populated only for
+key-anchored worlds) — a broken or unverifiable pin is simply dropped, not
+a reason to refuse the whole manifest. SPEC.md notes the same `identityKey`
+showing up on several different domains' manifests is a signal they share
+an operator; any consumer of `/search` can now spot that just by comparing
+this one field, no new endpoint needed.
 
 ## 6. Try multiplayer presence
 
@@ -1531,12 +1586,20 @@ verifies one (`AtlasWallet.verifyKeyAnchoredManifest` in `wallet.js`,
 mirroring the directory server's own algorithm exactly), refuses it
 outright on a key mismatch or a bad signature, and shows the real,
 non-dismissible disclosure §3.6.1 requires before ever rendering one (see
-"Try it" above, step 3, and `test/manual-key-anchored-world.js`). The
-remaining deliberate exception is §3.5 and §3.7 (per-page anchors and
-optional domain identity pinning) — neither has any implementation
-anywhere in this codebase yet. That's a real gap, not an oversight worth
-glossing over — if you're picking up this codebase to extend it, that's
-the actual unimplemented slice of the spec. (One narrower gap inside the
-implemented slice: the 3D renderer has no distinct visual of its own for a
+"Try it" above, step 3, and `test/manual-key-anchored-world.js`). §3.7
+(optional domain identity pinning) is implemented now too — the extension
+notices and non-blockingly discloses an undocumented identity-key change on
+a domain-anchored manifest (see "Try it" above, and
+`test/manual-domain-identity-pin.js`), `directory-server/server.js` no
+longer wrongly rejects a manifest carrying both `domain` and `identityKey`
+together (it used to require exactly one), and both issuer backends can
+produce a pinned manifest — Node at boot (`ATLAS_PIN_MANIFEST_IDENTITY`),
+PHP via a deploy-time script (`issuer-php/lib/sign-manifest.php`, see
+`test/manual-domain-identity-pin-php.js`). The remaining deliberate
+exception is §3.5 (per-page anchors) — it has no implementation anywhere in
+this codebase yet. That's a real gap, not an oversight worth glossing
+over — if you're picking up this codebase to extend it, that's the actual
+unimplemented slice of the spec. (One narrower gap inside the implemented
+slice: the 3D renderer has no distinct visual of its own for a
 key-anchored portal yet — only the 2D `procedural-v1` renderer does, which
 is what every demo content uses for one today.)

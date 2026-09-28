@@ -1013,3 +1013,45 @@ site or small demo would ever see (parsing a small EC key costs
 microseconds), so it's not something worth trying to work around — just
 flagging it so the difference is understood rather than mysterious if you
 ever go looking at how this compares to the Node version.
+
+
+Optional domain identity pinning (SPEC.md section 3.7)
+--------------------------------------------------------------------------
+An ordinary domain-anchored .well-known/spatial.json MAY additionally
+carry an identityKey + signature naming who's actually behind it, so a
+returning visitor's browser can notice later if that identity quietly
+changes. The Node server does this dynamically: it signs the manifest once
+at boot (when ATLAS_PIN_MANIFEST_IDENTITY is set) and serves the signed
+copy from memory, never touching the tracked spatial.json file on disk.
+
+PHP can't do that the same way, for two compounding reasons: there's no
+"server boot" moment to hook (see the architectural difference above —
+every request starts fresh), and .well-known/spatial.json is served as a
+plain static file straight by the webserver, with no PHP script sitting in
+front of it at all to intercept. So this is a deploy-time step here
+instead of a runtime one:
+
+    php lib/sign-manifest.php [/path/to/.well-known/spatial.json]
+
+Run it once, by hand (or wire it into a deploy script), any time you've
+created or edited your site's real spatial.json. It reads that file,
+signs it with this domain's own persisted key (the exact key
+.well-known/atlas-key.json already publishes — it calls the same
+load_or_create_keypair()/ensure_well_known_files() this bundle's other
+endpoints use), and rewrites the file in place with identityKey +
+signature added. With no path argument it defaults to
+.well-known/spatial.json right next to wherever you dropped this bundle
+(the same folder ensure_well_known_files() already treats as your docroot).
+Re-running it after editing the manifest's own content re-signs fresh
+every time — it never accumulates a stale signature left over from a
+previous run, and a manifest with no "domain" field is refused outright
+(this only applies to a domain-anchored manifest; a key-anchored one,
+SPEC.md section 3.6, is a different mechanism entirely and doesn't use
+this script).
+
+Skip this entirely and spatial.json stays exactly what you wrote — SPEC.md
+is explicit that a domain ignoring this section loses nothing. When a
+visitor's browser does notice a changed identityKey with no rotation
+record in your published atlas-key.json history, it's a plain, non-
+blocking disclosure (a label and color change plus a tooltip line) —
+never a blocking modal, never a lockout.
