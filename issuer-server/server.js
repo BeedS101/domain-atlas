@@ -113,6 +113,18 @@ fs.mkdirSync(STATE_DIR, { recursive: true });
 const KEY_FILE = path.join(STATE_DIR, 'issuer-private-key.jwk.json');
 const PUBLIC_KEY_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-key.json');
 const REVOCATIONS_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-revocations.json');
+// SPEC.md §5.11 — a second, independent keypair this SAME domain also
+// generates and publishes, used only for third-party attestations, never
+// for anything issue_asset() above issues. Genuinely separate from
+// KEY_FILE/PUBLIC_KEY_FILE — attestation-demo.html's "independent reviewer"
+// signs with this key, not the one that issues the filing it reviews — so
+// the demo works standalone on a single deployed domain instead of needing
+// a literal second domain reachable somewhere else. A real deployment is
+// free to put this role on an actual separate domain instead (that domain
+// would just publish its own ordinary atlas-key.json); this is this demo's
+// own single-domain stand-in for one.
+const REVIEWER_KEY_FILE = path.join(STATE_DIR, 'reviewer-private-key.jwk.json');
+const REVIEWER_PUBLIC_KEY_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-reviewer-key.json');
 // Deliberately NOT under .well-known (which is served as plain static
 // files, world-readable to anyone who knows the URL) — mail is looked up
 // through the /atlas/mail/check endpoint instead, which at least requires
@@ -267,6 +279,12 @@ const PENDING_TRADES_FILE = path.join(STATE_DIR, 'atlas-pending-trades-store.jso
 // anything, not from a lock on the file itself, see removeWorldDrop's own
 // call sites in /atlas/world/drops/claim and /atlas/world/drops/relay-claim.
 const WORLD_DROPS_FILE = path.join(STATE_DIR, 'atlas-world-drops-store.json');
+// Third-party attestations (SPEC.md §5.11): one flat store of every
+// attestation THIS domain has issued — this file only ever holds this
+// domain's own signed opinions about assets, never a mirror of anything
+// another domain has said. Same plain-read-write shape as WORLD_DROPS_FILE
+// above, for the same "single-threaded Node here" reason.
+const ATTESTATIONS_FILE = path.join(STATE_DIR, 'atlas-attestations-store.json');
 // Domain calendar (SPEC.md §12): one flat list of
 // events, each tagged with the `worldId` it belongs to (`null` for the
 // domain-wide calendar), same "one file, filter on read" shape
@@ -876,6 +894,23 @@ const ASSET_CATALOG = {
     fungible: false,
     presentation: 'document'
   },
+  // demo-domain-a/attestation-demo.html (SPEC.md §5.11): the asset a
+  // completely separate domain then independently attests to. Nothing
+  // about this class is special — it's an ordinary document credential,
+  // the same shape a license, filing, or registration would take in a
+  // real deployment. No tradeScope override: giftable/transferable by
+  // default is fine here, and irrelevant to the point of the demo either
+  // way, since an attestation names an asset by id regardless of who ends
+  // up holding it later.
+  'atlas.demo.attestation.filing': {
+    name: 'Business Filing',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    fungible: false,
+    presentation: 'document',
+    properties: {
+      'com.example.filingType': 'Annual Compliance Filing'
+    }
+  },
   // Test-only fixture for manual-asset-expiry.js: a real expiresAt with a
   // sub-minute deadline, so the automated check can observe a genuine
   // expiry within a couple of seconds instead of waiting the museum
@@ -1034,6 +1069,19 @@ const DEMO_CAFETERIA_FULFILLABLE_CLASSES = [
   'atlas.demo.cafeteria.juice',
   'atlas.demo.cafeteria.snack'
 ];
+const DEMO_ATTESTATION_FILING_CLASS = 'atlas.demo.attestation.filing';
+
+// Fixed claim text an attestation-demo.html visitor can request FROM the
+// second, independent domain playing "the reviewer" (SPEC.md §5.11) — a
+// short allow-list rather than free text, the same "hardcoded to its own
+// toy" discipline every other self-serve /atlas/demo/* route already
+// applies, so this domain's real signing key never ends up on arbitrary
+// caller-supplied text.
+const DEMO_ATTESTATION_CLAIMS = {
+  reviewed: 'Independently reviewed on the date shown, and found to be in order.',
+  'in-good-standing': 'Currently in good standing with this reviewer.',
+  certified: "Certified as meeting this reviewer's own compliance standard."
+};
 
 const MIME = {
   '.html': 'text/html', '.js': 'application/javascript', '.json': 'application/json',
@@ -1394,6 +1442,42 @@ function ensureWellKnownFiles(publicKeyB64url) {
   if (!fs.existsSync(REVOCATIONS_FILE)) {
     fs.writeFileSync(REVOCATIONS_FILE, JSON.stringify({ revoked: [] }, null, 2));
   }
+}
+
+// SPEC.md §5.11's single-domain stand-in for "a second, independent
+// identity" — see REVIEWER_KEY_FILE's own comment above. Same shape as
+// loadOrCreateKeypair()/ensureWellKnownFiles() just above, deliberately
+// duplicated rather than parameterized: these two keys serve genuinely
+// different roles (issuing assets vs. attesting to ones this domain didn't
+// issue) and keeping them as two plainly-named, independent code paths
+// makes it obvious at a glance that a compromise of one says nothing about
+// the other.
+async function loadOrCreateReviewerKeypair() {
+  if (fs.existsSync(REVIEWER_KEY_FILE)) {
+    const jwk = JSON.parse(fs.readFileSync(REVIEWER_KEY_FILE, 'utf8'));
+    const privateKey = await subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+    const publicJwk = { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y };
+    const publicKey = await subtle.importKey('jwk', publicJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, []);
+    const rawPublic = await subtle.exportKey('raw', publicKey);
+    return { privateKey, publicKeyB64url: b64url(rawPublic) };
+  }
+  console.log('No reviewer key found — generating a new ECDSA P-256 keypair (first run only)...');
+  const pair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const jwk = await subtle.exportKey('jwk', pair.privateKey);
+  fs.writeFileSync(REVIEWER_KEY_FILE, JSON.stringify(jwk, null, 2));
+  const rawPublic = await subtle.exportKey('raw', pair.publicKey);
+  return { privateKey: pair.privateKey, publicKeyB64url: b64url(rawPublic) };
+}
+
+function ensureReviewerWellKnownFile(publicKeyB64url) {
+  fs.mkdirSync(path.join(DEMO_DOMAIN_A, '.well-known'), { recursive: true });
+  const keyDoc = { keys: [{ publicKey: publicKeyB64url, validFrom: new Date().toISOString(), validUntil: null }] };
+  fs.writeFileSync(REVIEWER_PUBLIC_KEY_FILE, JSON.stringify(keyDoc, null, 2));
+  // No separate revocation file: an attestation's id still lives on this
+  // same domain's one REVOCATIONS_FILE (ids are UUIDs, so there's no
+  // collision risk with an asset id) — SPEC.md §5.11 only requires that
+  // revoking an attestation not touch the asset it's about, not that the
+  // attesting identity keep a wholly separate ledger file.
 }
 
 // SPEC.md §3.7 — optional domain identity pinning, opt-in via the
@@ -1849,6 +1933,21 @@ function removeWorldDrop(dropId) {
   return found;
 }
 
+// Third-party attestations (SPEC.md §5.11) — same plain read/append shape
+// as WORLD_DROPS_FILE above; no remove, since an attestation only ever
+// stops being valid by revocation (readRevocations/isRevoked, same list
+// every other credential id already uses), never by being deleted out from
+// under a client that might still be showing it.
+function readAttestations() {
+  if (!fs.existsSync(ATTESTATIONS_FILE)) return { attestations: [] };
+  return JSON.parse(fs.readFileSync(ATTESTATIONS_FILE, 'utf8'));
+}
+function appendAttestation(entry) {
+  const doc = readAttestations();
+  doc.attestations.push(entry);
+  fs.writeFileSync(ATTESTATIONS_FILE, JSON.stringify(doc, null, 2));
+}
+
 // Domain calendar (SPEC.md §12) — same plain read/append/update/remove
 // shape as PENDING_TRADES_FILE/WORLD_DROPS_FILE above. readCalendarEvents
 // is the one GET /atlas/calendar actually calls: filtered to one
@@ -2095,9 +2194,25 @@ async function main() {
   ensureWellKnownFiles(publicKeyB64url);
   console.log('Issuer public key (atlas-key.json):', publicKeyB64url.slice(0, 24) + '...');
 
+  const { privateKey: reviewerPrivateKey, publicKeyB64url: reviewerPublicKeyB64url } = await loadOrCreateReviewerKeypair();
+  ensureReviewerWellKnownFile(reviewerPublicKeyB64url);
+  console.log('Independent reviewer key (atlas-reviewer-key.json):', reviewerPublicKeyB64url.slice(0, 24) + '...');
+
   async function sign(payload) {
     const data = new TextEncoder().encode(canonicalize(payload));
     const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, data);
+    return b64url(sig);
+  }
+
+  // SPEC.md §5.11 — signs with the SECOND keypair above, never the one
+  // sign() just used. This is the one line that actually makes the
+  // attestation demo's "independent reviewer" independent: a filing signed
+  // by `sign()` and an attestation about it signed by `signAsReviewer()`
+  // check out against two different published keys, even though both
+  // happen to live on the same running domain.
+  async function signAsReviewer(payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, reviewerPrivateKey, data);
     return b64url(sig);
   }
 
@@ -2109,6 +2224,16 @@ async function main() {
   // published key; here we already have it in memory.
   async function verifyOwnCredentialSignature(credential, payload) {
     const pub = await subtle.importKey('raw', fromB64url(publicKeyB64url), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const data = new TextEncoder().encode(canonicalize(payload));
+    return subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, fromB64url(credential.signature), data);
+  }
+
+  // verifyOwnCredentialSignature()'s sibling for the reviewer key — used
+  // before honoring a self-serve attestation revoke, the same "never act on
+  // anything that isn't genuinely our own signature" posture, just checked
+  // against reviewerPublicKeyB64url instead of publicKeyB64url.
+  async function verifyOwnReviewerSignature(credential, payload) {
+    const pub = await subtle.importKey('raw', fromB64url(reviewerPublicKeyB64url), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
     const data = new TextEncoder().encode(canonicalize(payload));
     return subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, fromB64url(credential.signature), data);
   }
@@ -2134,6 +2259,40 @@ async function main() {
     };
     const signature = await sign(payload);
     return { credential: 'domain-atlas-asset/1.0', ...payload, issuer: { domain: DOMAIN, publicKey: publicKeyB64url }, signature };
+  }
+
+  // SPEC.md §5.11 — signs THIS domain's own attestation about an asset it
+  // did not issue, using the SECOND, independent key above (signAsReviewer,
+  // never sign()) — `issuer.publicKey` here is reviewerPublicKeyB64url, not
+  // the key issueAsset() uses, so a client verifying this credential fetches
+  // atlas-reviewer-key.json rather than atlas-key.json and genuinely cannot
+  // reuse the filing's own key to check it. `subjectIssuerDomain` is taken
+  // as given, not verified here: this function only ever produces the
+  // attesting identity's own signed opinion, the same way issueAsset()
+  // above never checks whether an owner's public key is "real" — verifying
+  // subject.assetId against subject.issuerDomain's own key (SPEC.md §5.11
+  // step 4) is a separate, independent check a verifying client makes for
+  // itself, not something the attesting identity can (or needs to) confirm
+  // before signing.
+  async function issueAttestation(subjectAssetId, subjectIssuerDomain, claim) {
+    const payload = {
+      id: 'urn:atlas:attestation:' + webcrypto.randomUUID(),
+      subject: { assetId: subjectAssetId, issuerDomain: subjectIssuerDomain },
+      claim,
+      issuedAt: new Date().toISOString()
+    };
+    const signature = await signAsReviewer(payload);
+    const credential = { credential: 'domain-atlas-attestation/1.0', ...payload, issuer: { domain: DOMAIN, publicKey: reviewerPublicKeyB64url }, signature };
+    appendAttestation(credential);
+    return credential;
+  }
+
+  // The signed payload shape for a third-party attestation (SPEC.md §5.11:
+  // canonicalize({id, subject, claim, issuedAt})) — the attestation
+  // equivalent of assetPayloadOf() below, used to re-verify one of THIS
+  // domain's own already-issued attestations before revoking it.
+  function attestationPayloadOf(credential) {
+    return { id: credential.id, subject: credential.subject, claim: credential.claim, issuedAt: credential.issuedAt };
   }
 
   // Task #250 fourth follow-up — transfers a NON-fungible credential to a
@@ -2871,6 +3030,76 @@ async function main() {
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
         revoke(credential.id, 'demo-self-serve');
         console.log('Demo-revoked', credential.id);
+        return sendJson(res, 200, { ok: true });
+      }
+
+      // POST /atlas/demo/attestation/issue (SPEC.md §5.11) — self-serve
+      // sibling of a real attestation-issuing flow, which this spec
+      // deliberately leaves to domain-operator authentication (see §5.11's
+      // own closing paragraph). A live-site visitor to attestation-demo.html
+      // has no such login, so — same "plays the privileged role" reasoning
+      // as every other /atlas/demo/* route above — this lets THIS domain's
+      // own running instance stand in as "the independent reviewer" for
+      // whichever asset the page shows it, restricted to a short fixed set
+      // of claim texts (DEMO_ATTESTATION_CLAIMS) so a visitor can never get
+      // this domain's real signing key onto arbitrary text. Deliberately
+      // does NOT require the subject asset to have been issued by this same
+      // domain — the entire point of §5.11 is attesting to something the
+      // signer did not issue. issueAttestation() signs with this domain's
+      // SECOND, independent key (never the one that issues the filing), so
+      // attestation-demo.html can call this same-origin instead of needing
+      // a genuinely separate second domain reachable somewhere else — see
+      // REVIEWER_KEY_FILE's own comment near the top of this file.
+      if (req.method === 'POST' && req.url === '/atlas/demo/attestation/issue') {
+        const { subjectAssetId, subjectIssuerDomain, claim } = JSON.parse((await readBody(req)) || '{}');
+        if (!subjectAssetId || !subjectIssuerDomain) {
+          return sendJson(res, 400, { error: 'subjectAssetId and subjectIssuerDomain are both required' });
+        }
+        if (!Object.prototype.hasOwnProperty.call(DEMO_ATTESTATION_CLAIMS, claim)) {
+          return sendJson(res, 400, { error: 'claim must be one of: ' + Object.keys(DEMO_ATTESTATION_CLAIMS).join(', ') });
+        }
+        const credential = await issueAttestation(subjectAssetId, subjectIssuerDomain, DEMO_ATTESTATION_CLAIMS[claim]);
+        console.log('Demo-attested (' + claim + ') on', subjectAssetId, 'issued by', subjectIssuerDomain);
+        return sendJson(res, 200, { attestation: credential });
+      }
+
+      // GET /atlas/attestation/list?assetId=... (SPEC.md §5.11) — real,
+      // protocol-level, and deliberately ungated: same "read is open"
+      // reasoning as GET /atlas/world/drops and GET /atlas/trade/listings
+      // above — an attestation only ever reveals what its own issuer
+      // already chose to make public by signing and publishing it. Lists
+      // every attestation THIS domain itself has issued about the named
+      // asset id — a client wanting the full picture asks every domain it
+      // knows might have an opinion, the same domain-local discovery
+      // §5.11 itself is explicit about not standardizing further.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/attestation/list') {
+        const assetId = new URLSearchParams(req.url.split('?')[1] || '').get('assetId');
+        if (!assetId) return sendJson(res, 400, { error: 'assetId is required' });
+        const attestations = readAttestations().attestations.filter((a) => a.subject.assetId === assetId);
+        return sendJson(res, 200, { domain: DOMAIN, assetId, attestations });
+      }
+
+      // POST /atlas/demo/attestation/revoke — self-serve sibling of POST
+      // /atlas/revoke, restricted to an id this domain's own attestation
+      // store actually issued (readAttestations(), not an arbitrary id) —
+      // the attestation equivalent of DEMO_LOGIN_BADGE_CLASS's own
+      // narrowing above, just scoped by "did this domain really sign this"
+      // instead of by class, since an attestation has no class at all.
+      // Demonstrates SPEC.md §5.11's own point that an attestation is
+      // revoked on the ATTESTING identity's own schedule, independent of
+      // whatever happens to the underlying asset. Checked against the
+      // reviewer key (verifyOwnReviewerSignature), not the main issuer key —
+      // an attestation was never signed by the latter.
+      if (req.method === 'POST' && req.url === '/atlas/demo/attestation/revoke') {
+        const { id } = JSON.parse((await readBody(req)) || '{}');
+        if (!id) return sendJson(res, 400, { error: 'id is required' });
+        const credential = readAttestations().attestations.find((a) => a.id === id);
+        if (!credential) return sendJson(res, 400, { error: 'this domain has no attestation with that id' });
+        if (isRevoked(id)) return sendJson(res, 400, { error: 'attestation is already revoked' });
+        const sigOk = await verifyOwnReviewerSignature(credential, attestationPayloadOf(credential));
+        if (!sigOk) return sendJson(res, 400, { error: "attestation signature does not check out against this domain's reviewer key" });
+        revoke(id, 'demo-self-serve');
+        console.log('Demo-revoked attestation', id);
         return sendJson(res, 200, { ok: true });
       }
 

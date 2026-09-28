@@ -1055,3 +1055,64 @@ visitor's browser does notice a changed identityKey with no rotation
 record in your published atlas-key.json history, it's a plain, non-
 blocking disclosure (a label and color change plus a tooltip line) —
 never a blocking modal, never a lockout.
+
+
+An independent reviewer, with no custody at all (SPEC.md section 5.11)
+--------------------------------------------------------------------------
+Everything above involving more than one party (the warranty demo's
+factory/retailer, above) needed both roles on the SAME domain, because only
+the domain that minted a credential can ever change it. Third-party
+attestations are a different case again: a signer with no part in issuing
+an asset signs its own statement about it and never touches it — an
+independent review, a certification, a standing check — with no
+relationship, cooperation, or custody needed from whoever issued the thing
+being reviewed. This is a new credential, `domain-atlas-attestation/1.0`,
+not a variant of the asset credential above; see SPEC.md section 5.11 for
+the full shape and its own four-step verification.
+
+Two real, protocol-level endpoints: GET /atlas/attestation/list?assetId=...
+(atlas/attestation/list.php) is ungated, same "read is open" reasoning as
+atlas/world/drops/index.php above — it lists every attestation THIS domain
+has issued about the named asset id. Issuing one is deliberately NOT a
+public protocol endpoint, the same posture atlas/mail/send.php and
+lib/sign-manifest.php above already take (SPEC.md section 5.11 is explicit
+that authenticating whoever asks a domain to sign an attestation is left to
+the domain operator, out of scope for the spec itself).
+
+A live-site visitor has no way to become that authenticated operator,
+though, so demo-domain-a/attestation-demo.html doesn't call a real
+protocol-gated route at all: POST /atlas/demo/attestation/issue
+(atlas/demo/attestation/issue.php) is a self-serve sibling, minus the auth,
+restricted to a short fixed set of claim texts
+(atlas_demo_attestation_claims() in lib/store.php) so a visitor can never
+get this domain's real signing key onto arbitrary text — it plays "the
+independent reviewer" for whoever's visiting. POST
+/atlas/demo/attestation/revoke (atlas/demo/attestation/revoke.php) is the
+same idea for revoking one, restricted to an id this domain's own
+attestation store actually issued rather than to one hardcoded class (an
+attestation has no class at all) — demonstrating live that an attestation
+is revoked on the ATTESTING identity's own schedule, completely independent
+of whatever happens to the underlying asset.
+
+Rather than needing a genuinely separate second domain to show the point,
+this domain also generates and publishes a SECOND, independent keypair —
+atlas_reviewer_key_file()/atlas_reviewer_public_key_file() in lib/store.php,
+published at .well-known/atlas-reviewer-key.json — used only by
+issue_attestation() above, never by anything that issues an asset. The
+filing is signed by this domain's ordinary key; the attestation about it is
+signed by this second, entirely separate key, so verifying one from the
+other genuinely means fetching and checking a different published file, not
+just trusting a different domain name that happens to say the same thing.
+A deployment is still free to put the reviewer role on an actual separate
+domain instead (that domain would just publish its own ordinary
+atlas-key.json, the same shape the bundled demo world's Neighbor Workshop
+portal already depends on for a real second domain) — this bundle's own
+single-domain stand-in is only what makes the demo page work without one.
+Attestation storage lives in lib/atlas-attestations-store.json, same "next
+to the private key, not under .well-known" reasoning as every other store
+in this bundle; the reviewer's own private key lives right next to it as
+reviewer-private-key.pem. test/manual-attestation-demo.js drives the actual
+page end to end, same "real headless browser, own isolated instance"
+reasoning as every other manual-*.js UI test in this project, against one
+real running instance of issuer-server/server.js (the Node counterpart this
+bundle mirrors) — no second instance needed any more.

@@ -43,6 +43,22 @@ function atlas_revocations_file() {
   return atlas_docroot() . '/.well-known/atlas-revocations.json';
 }
 
+// SPEC.md §5.11 — a second, independent keypair this SAME domain also
+// generates and publishes, used only for third-party attestations, never
+// for anything issue_asset() issues. Mirrors issuer-server/server.js's
+// REVIEWER_KEY_FILE/REVIEWER_PUBLIC_KEY_FILE — see that file's own comment
+// for why this exists: it lets attestation-demo.html's "independent
+// reviewer" work on a single deployed domain instead of needing a literal
+// second domain reachable somewhere else. Lives in lib/, same
+// not-web-reachable reasoning as atlas_key_file() above.
+function atlas_reviewer_key_file() {
+  return __DIR__ . '/reviewer-private-key.pem';
+}
+
+function atlas_reviewer_public_key_file() {
+  return atlas_docroot() . '/.well-known/atlas-reviewer-key.json';
+}
+
 // Deliberately NOT under .well-known (which is served as plain static
 // files, world-readable to anyone who knows the URL, same as
 // atlas-revocations.json above needs to be) — mail is looked up through
@@ -449,6 +465,56 @@ function append_world_drop($entry) {
   fflush($fh);
   flock($fh, LOCK_UN);
   fclose($fh);
+}
+
+// Third-party attestations (SPEC.md §5.11) — same plain flock()-guarded
+// read/append shape as read_world_drops()/append_world_drop() above.
+// Mirrors issuer-server/server.js's ATTESTATIONS_FILE/readAttestations()/
+// appendAttestation(). No remove function: an attestation only ever stops
+// being valid by revocation (is_revoked(), the same list every other
+// credential id already uses), never by being deleted out from under a
+// client that might still be showing it.
+function atlas_attestations_file() {
+  return __DIR__ . '/atlas-attestations-store.json';
+}
+function read_attestations() {
+  $fh = fopen(atlas_attestations_file(), 'c+');
+  if ($fh === false) return ['attestations' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['attestations' => []];
+}
+function append_attestation($entry) {
+  $file = atlas_attestations_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['attestations' => []];
+  $doc['attestations'][] = $entry;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// Fixed claim text an attestation-demo.html visitor can request FROM the
+// second, independent domain playing "the reviewer" (SPEC.md §5.11) — a
+// short allow-list rather than free text, same discipline every other
+// self-serve atlas/demo/*.php route already applies, so this domain's
+// real signing key never ends up on arbitrary caller-supplied text.
+// Mirrors issuer-server/server.js's DEMO_ATTESTATION_CLAIMS.
+function atlas_demo_attestation_claims() {
+  return [
+    'reviewed' => 'Independently reviewed on the date shown, and found to be in order.',
+    'in-good-standing' => 'Currently in good standing with this reviewer.',
+    'certified' => "Certified as meeting this reviewer's own compliance standard.",
+  ];
 }
 
 // Reservation-by-removal (task #250's concurrency mechanism, same as
@@ -900,6 +966,15 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'name' => 'Warranty Certificate', 'modelPath' => '/assets/badge.glb',
     'fungible' => false, 'presentation' => 'document',
   ],
+  // demo-domain-a/attestation-demo.html (SPEC.md §5.11) — the asset a
+  // completely separate domain then independently attests to. An ordinary
+  // document credential, nothing special about the class itself. Mirrors
+  // issuer-server/server.js's ASSET_CATALOG entry of the same name.
+  'atlas.demo.attestation.filing' => [
+    'name' => 'Business Filing', 'modelPath' => '/assets/badge.glb',
+    'fungible' => false, 'presentation' => 'document',
+    'properties' => ['com.example.filingType' => 'Annual Compliance Filing'],
+  ],
   // Test-only fixture for manual-asset-expiry.js — mirrors issuer-server/
   // server.js's ASSET_CATALOG entry of the same name; see that entry's own
   // comment for why this exists.
@@ -1111,6 +1186,55 @@ function ensure_well_known_files($publicKeyB64url) {
   if (!file_exists($revFile)) {
     file_put_contents($revFile, json_encode(['revoked' => []], JSON_PRETTY_PRINT), LOCK_EX);
   }
+}
+
+// SPEC.md §5.11's single-domain stand-in for "a second, independent
+// identity" — see atlas_reviewer_key_file()'s own comment above. Same shape
+// as load_or_create_keypair() just above, deliberately duplicated rather
+// than parameterized, mirroring issuer-server/server.js's
+// loadOrCreateReviewerKeypair(): these two keys serve genuinely different
+// roles and keeping them as two plainly-named, independent code paths makes
+// that obvious at a glance.
+function load_or_create_reviewer_keypair() {
+  $keyFile = atlas_reviewer_key_file();
+  if (file_exists($keyFile)) {
+    $pem = file_get_contents($keyFile);
+    $priv = openssl_pkey_get_private($pem);
+    if ($priv === false) throw new Exception('could not load reviewer private key: ' . openssl_error_string());
+  } else {
+    $priv = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
+    if ($priv === false) throw new Exception('could not generate reviewer keypair: ' . openssl_error_string());
+    openssl_pkey_export($priv, $pem);
+    file_put_contents($keyFile, $pem, LOCK_EX);
+    @chmod($keyFile, 0600);
+  }
+  $details = openssl_pkey_get_details($priv);
+  if (!isset($details['ec']['x']) || !isset($details['ec']['y'])) {
+    throw new Exception('reviewer key is not a valid EC key');
+  }
+  $x = str_pad($details['ec']['x'], 32, "\x00", STR_PAD_LEFT);
+  $y = str_pad($details['ec']['y'], 32, "\x00", STR_PAD_LEFT);
+  $rawPoint = "\x04" . $x . $y;
+  return ['privateKey' => $priv, 'publicKeyB64url' => b64url_encode($rawPoint)];
+}
+
+function ensure_reviewer_well_known_file($publicKeyB64url) {
+  @mkdir(atlas_docroot() . '/.well-known', 0755, true);
+  $keyFile = atlas_reviewer_public_key_file();
+  $keyDoc = ['keys' => [['publicKey' => $publicKeyB64url, 'validFrom' => gmdate('Y-m-d\TH:i:s\Z'), 'validUntil' => null]]];
+  $needsWrite = true;
+  if (file_exists($keyFile)) {
+    $existing = json_decode(file_get_contents($keyFile), true);
+    if (is_array($existing) && isset($existing['keys'][0]['publicKey']) && $existing['keys'][0]['publicKey'] === $publicKeyB64url) {
+      $needsWrite = false;
+    }
+  }
+  if ($needsWrite) {
+    file_put_contents($keyFile, json_encode($keyDoc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX);
+  }
+  // No separate revocation file: an attestation's id still lives on this
+  // same domain's one atlas_revocations_file() (ids are UUIDs, so there's
+  // no collision risk with an asset id).
 }
 
 // ---------- revocations (flock-guarded — unlike the single-threaded Node

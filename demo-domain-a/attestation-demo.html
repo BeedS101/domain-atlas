@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Attestation Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .claimRow { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
+  .card {
+    border: 1px solid var(--line); border-radius: 9px; padding: 1rem; background: #fbfcfd;
+    display: flex; flex-direction: column; gap: 0.55rem; margin-top: 1rem;
+  }
+  .card h3 { margin: 0; font-size: 1rem; }
+  .badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
+    text-transform: uppercase; padding: 0.15em 0.55em; border-radius: 999px; width: fit-content;
+  }
+  .badge.subject { background: #eee; color: var(--muted); }
+  .badge.attester { background: var(--accent-bg); color: var(--accent); }
+  .badge.revoked { background: var(--red-bg); color: var(--red); }
+  .props { font-size: 0.86rem; color: var(--muted); }
+  .props div { margin: 0.1rem 0; }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.2rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  details.raw { font-size: 0.8rem; margin-top: 0.1rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  .fillVerifyBtn { display: block; margin-top: 0.55rem; font-size: 0.8rem; padding: 0.4rem 0.8rem; }
+  textarea#verifyInput {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.7rem; resize: vertical;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>An independent reviewer, live</h1>
+  <p class="tag">A two-minute, no-installation demo of Domain Atlas's third-party attestations (SPEC.md §5.11).</p>
+  <p class="lede">
+    Click below and this page issues you a real, signed filing — an ordinary document credential
+    from this domain. Then this same domain's SECOND, independent key — generated once, published
+    separately, and never used to issue anything else here — signs its own opinion about that exact
+    filing, standing in for an independent reviewer or auditor: it never touches, holds, or needs
+    permission from the key that issued it. Everything below is genuine signing and genuine
+    independent verification against two separately-published keys, not a mockup. (The protocol
+    works exactly the same way across two genuinely separate domains — see the footnote below.)
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this looks like for a real business</h2>
+    <p>
+      Swap "filing" for a license, a certification, or an insurance policy, and swap "reviewer"
+      for a regulator, an auditor, or a certifying body. Each one signs its own claim, with its
+      own key, checkable by anyone — and can withdraw its own opinion on its own schedule,
+      without needing to touch, hold, or ask permission from whoever issued the thing it's
+      talking about.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Step 1 — get a demo filing</h2>
+    <p class="props" style="margin-top:0;">Issued by <code id="issuerDomainLine">this domain</code>.</p>
+    <button id="issueBtn">Get my demo filing</button>
+    <button id="resetBtn" class="secondary" type="button" style="display:none; margin-left:0.6rem;">Start over</button>
+    <p id="issueStatus" class="props" style="margin-top:0.6rem;"></p>
+    <div id="filingCardSlot"></div>
+  </div>
+
+  <div class="panel" id="attestPanel" style="display:none;">
+    <h2>Step 2 — have an independent reviewer look at it</h2>
+    <p class="props" style="margin-top:0;">
+      This calls <code id="reviewerDomainLine"></code> — this same domain's second,
+      independent key, published separately at
+      <code>.well-known/atlas-reviewer-key.json</code> and never used to issue the filing
+      above. A real deployment could just as easily put this role on a genuinely separate
+      domain instead (a regulator's own site, say) — verification works identically either
+      way; this demo keeps both identities on one running server so there's nothing else to
+      stand up to try it.
+    </p>
+    <div class="claimRow">
+      <button class="claimBtn" data-claim="reviewed" type="button">Mark "Reviewed"</button>
+      <button class="claimBtn" data-claim="in-good-standing" type="button">Mark "In good standing"</button>
+      <button class="claimBtn" data-claim="certified" type="button">Mark "Certified"</button>
+    </div>
+    <p id="attestStatus" class="props" style="margin-top:0.6rem;"></p>
+    <div id="attestationCards"></div>
+  </div>
+
+  <div class="panel" id="verifyPanel">
+    <h2>Step 3 — verify any credential, independently</h2>
+    <p class="props" style="margin-top:0;">
+      Paste a credential's raw JSON below and check it — the filing above, or the attestation
+      about it. This runs entirely in your own browser: it fetches the SIGNING key's own
+      published file and this domain's revocation list directly — <code>atlas-key.json</code>
+      for the filing, <code>atlas-reviewer-key.json</code> for the attestation, two different
+      keys published at two different paths — then checks the signature and looks the id up in
+      the revocation list. Nothing here trusts this page; try changing a field above (the
+      <code>claim</code>, say) before verifying, and watch it fail.
+    </p>
+    <textarea id="verifyInput" rows="8" placeholder='Paste a credential&#8217;s raw JSON here, or click &#8220;Try verifying this one&#8221; on a card above.'></textarea>
+    <div style="margin-top:0.6rem;">
+      <button id="verifyBtn" type="button">Verify</button>
+    </div>
+    <div id="verifyResult"></div>
+  </div>
+
+  <p class="footnote">
+    Nothing on this page is stored in a database anywhere. The filing and the attestation are two
+    separate signatures — from two separate keys, over two separate payloads — revoking one never
+    touches the other, and neither key was involved in producing the other's signature at all.
+    The reviewer's identity here is a second key this domain publishes at
+    <code>.well-known/atlas-reviewer-key.json</code>, generated once, on first use, and never
+    reused for anything this domain itself issues — genuinely a different key, independently
+    fetchable and revocable, without needing a second domain deployed anywhere. Nothing stops a
+    real deployment putting this role on an actual separate domain instead (its own ordinary
+    <code>.well-known/atlas-key.json</code>, the same shape the Lobby's Neighbor Workshop portal
+    already relies on for a genuinely separate second domain) — the verification above works
+    identically either way; this demo just keeps both identities on one running server so it
+    works standalone, with nothing else to deploy. <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+  // No REVIEWER_BASE any more — the reviewer's identity is this same
+  // domain's second key (see the footnote above), so every call below is
+  // same-origin. A deployment that instead puts the reviewer on a
+  // genuinely separate domain would set this back to that domain's own
+  // base URL and adjust issueAttestation()/revokeAttestation() below to use it.
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64urlDecode(str) {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  // Same shape as issuer-server/server.js's canonicalize() and
+  // extension/wallet.js's own copy — sorted-key JSON, no whitespace.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function issueAsset(ownerPublicKey, assetClass) {
+    const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
+    return res.body;
+  }
+  async function issueAttestation(subjectAssetId, subjectIssuerDomain, claim) {
+    return postJson('/atlas/demo/attestation/issue', { subjectAssetId, subjectIssuerDomain, claim });
+  }
+  async function revokeAttestation(id) {
+    return postJson('/atlas/demo/attestation/revoke', { id });
+  }
+
+  // Fetches the signing key's own published file + this domain's revocation
+  // list and checks a credential against them directly — the same public
+  // files anyone, including a real auditor's own systems, could fetch
+  // themselves. Handles both credential shapes this page deals with:
+  // SPEC.md §5's domain-atlas-asset/1.0 (signed by the key that issues
+  // filings, published at atlas-key.json) and SPEC.md §5.11's
+  // domain-atlas-attestation/1.0 (signed by this domain's SECOND,
+  // independent reviewer key, published separately at
+  // atlas-reviewer-key.json — see the footnote at the bottom of the page).
+  // A deployment that puts the reviewer on a genuinely separate domain
+  // would instead fetch that domain's own ordinary atlas-key.json; this
+  // demo's own single-domain stand-in is what needs the second file name.
+  async function verifyCredentialIndependently(credential) {
+    if (!credential || typeof credential !== 'object') return { valid: false, reason: 'not an object' };
+    let signerDomain, payload, keyFile;
+    if (credential.credential === 'domain-atlas-asset/1.0') {
+      signerDomain = credential.issuer && credential.issuer.domain;
+      keyFile = 'atlas-key.json';
+      payload = {
+        id: credential.id, asset: credential.asset, owner: credential.owner,
+        quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
+      };
+    } else if (credential.credential === 'domain-atlas-attestation/1.0') {
+      signerDomain = credential.issuer && credential.issuer.domain;
+      keyFile = 'atlas-reviewer-key.json';
+      payload = { id: credential.id, subject: credential.subject, claim: credential.claim, issuedAt: credential.issuedAt };
+    } else {
+      return { valid: false, reason: 'unrecognized credential type' };
+    }
+    if (!signerDomain) return { valid: false, reason: 'credential has no issuer domain' };
+    const base = 'http://' + signerDomain;
+    const [keyDoc, revDoc] = await Promise.all([
+      fetch(base + '/.well-known/' + keyFile, { cache: 'no-store' }).then((r) => r.json()),
+      fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
+    ]);
+    const issuedAt = new Date(credential.issuedAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
+    });
+    const keyLabel = signerDomain + (keyFile === 'atlas-reviewer-key.json' ? "'s reviewer key" : "'s key");
+    if (!activeKey) return { valid: false, reason: keyLabel + ' was not valid at issuedAt' };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match " + keyLabel };
+    const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
+    if (revoked) return { valid: false, reason: 'revoked by ' + keyLabel };
+    return { valid: true, reason: 'signature verified against ' + keyLabel + ' (currently valid); not revoked' };
+  }
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    let credential;
+    try {
+      credential = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    try {
+      const verdict = await verifyCredentialIndependently(credential);
+      resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+      resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = 'Could not verify: ' + err.message;
+    }
+  }
+  function fillAndVerify(credential) {
+    document.getElementById('verifyInput').value = JSON.stringify(credential, null, 2);
+    document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    runVerify();
+  }
+
+  let you = null;
+  let filing = null;
+
+  function rawDetails(credential) {
+    if (credential.credential === 'domain-atlas-asset/1.0') {
+      return JSON.stringify({
+        id: credential.id, owner: credential.owner.publicKey.slice(0, 20) + '…',
+        issuer: credential.issuer.domain, issuerKey: credential.issuer.publicKey.slice(0, 20) + '…',
+        signature: credential.signature.slice(0, 24) + '…', asset: credential.asset
+      }, null, 2);
+    }
+    // For an attestation, issuerKey is deliberately shown too — it's the
+    // easiest way to see, right in the raw JSON, that this is a genuinely
+    // different key from the filing's own issuerKey above, even though
+    // `issuer.domain` reads the same for both on this single-domain demo.
+    return JSON.stringify({
+      id: credential.id, subject: credential.subject, claim: credential.claim,
+      issuer: credential.issuer.domain, issuerKey: credential.issuer.publicKey.slice(0, 20) + '…',
+      signature: credential.signature.slice(0, 24) + '…'
+    }, null, 2);
+  }
+
+  function renderFilingCard(credential) {
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML =
+      '<span class="badge subject">Issued by ' + credential.issuer.domain + '</span>' +
+      '<h3>' + credential.asset.name + '</h3>' +
+      '<div class="props">' + Object.entries(credential.asset.properties || {}).map(([k, v]) => '<div>' + k + ': ' + v + '</div>').join('') + '</div>' +
+      '<details class="raw"><summary>View raw signed filing</summary><pre></pre>' +
+      '<button class="fillVerifyBtn secondary" type="button">Try verifying this one independently ↓</button></details>';
+    div.querySelector('pre').textContent = rawDetails(credential);
+    div.querySelector('.fillVerifyBtn').addEventListener('click', () => fillAndVerify(credential));
+    document.getElementById('filingCardSlot').appendChild(div);
+  }
+
+  function renderAttestationCard(credential) {
+    const div = document.createElement('div');
+    div.id = 'attestation-' + credential.id;
+    div.className = 'card';
+    div.innerHTML =
+      '<span class="badge attester">Independently attested by ' + credential.issuer.domain + '’s reviewer key</span>' +
+      '<h3>' + credential.claim + '</h3>' +
+      '<div class="props">Issued ' + credential.issuedAt + '</div>' +
+      '<button class="revokeAttBtn secondary" type="button">Revoke this attestation (reviewer changes their mind)</button>' +
+      '<div class="resultSlot"></div>' +
+      '<details class="raw"><summary>View raw signed attestation</summary><pre></pre>' +
+      '<button class="fillVerifyBtn secondary" type="button">Try verifying this one independently ↓</button></details>';
+    div.querySelector('pre').textContent = rawDetails(credential);
+    div.querySelector('.fillVerifyBtn').addEventListener('click', () => fillAndVerify(credential));
+    div.querySelector('.revokeAttBtn').addEventListener('click', () => onRevokeAttestation(credential, div));
+    document.getElementById('attestationCards').appendChild(div);
+  }
+
+  async function onRevokeAttestation(credential, div) {
+    const btn = div.querySelector('.revokeAttBtn');
+    const slot = div.querySelector('.resultSlot');
+    btn.disabled = true;
+    const res = await revokeAttestation(credential.id);
+    if (res.ok) {
+      slot.innerHTML = '<div class="result ok">Revoked by the reviewer — the filing itself is untouched. Try verifying this attestation again below.</div>';
+      div.querySelector('.badge').outerHTML = '<span class="badge revoked">Revoked by ' + credential.issuer.domain + '’s reviewer key</span>';
+      btn.remove();
+      fillAndVerify(credential);
+    } else {
+      slot.innerHTML = '<div class="result err">Could not revoke: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
+      btn.disabled = false;
+    }
+  }
+
+  document.getElementById('issuerDomainLine').textContent = window.location.host;
+  document.getElementById('reviewerDomainLine').textContent = window.location.host + '’s reviewer key';
+
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
+
+  document.getElementById('issueBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('issueBtn');
+    const status = document.getElementById('issueStatus');
+    btn.disabled = true;
+    status.textContent = 'Generating a keypair and requesting your demo filing…';
+    try {
+      you = await genIdentity();
+      filing = await issueAsset(you.publicKey, 'atlas.demo.attestation.filing');
+      renderFilingCard(filing);
+      status.textContent = 'Done — issued to a fresh public key generated just now in this tab.';
+      document.getElementById('resetBtn').style.display = '';
+      document.getElementById('attestPanel').style.display = '';
+    } catch (err) {
+      status.textContent = 'Something went wrong: ' + err.message;
+      btn.disabled = false;
+    }
+  });
+
+  document.querySelectorAll('.claimBtn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const status = document.getElementById('attestStatus');
+      document.querySelectorAll('.claimBtn').forEach((b) => { b.disabled = true; });
+      status.textContent = 'Asking the independent reviewer key to review this filing…';
+      const res = await issueAttestation(filing.id, filing.issuer.domain, btn.dataset.claim);
+      if (res.ok) {
+        status.textContent = 'Done — signed by ' + res.body.attestation.issuer.domain + "’s reviewer key, never used to issue the filing above.";
+        renderAttestationCard(res.body.attestation);
+      } else {
+        status.innerHTML = '<div class="result err">Could not get an attestation: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
+      }
+      document.querySelectorAll('.claimBtn').forEach((b) => { b.disabled = false; });
+    });
+  });
+
+  // Everything here lives in page-scoped JS variables (you/filing), so a
+  // second run-through previously meant reloading the whole page — fine
+  // alone, awkward mid-demo in front of someone else. This just re-runs
+  // that same reset without a network round trip.
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    you = null;
+    filing = null;
+    document.getElementById('filingCardSlot').innerHTML = '';
+    document.getElementById('attestationCards').innerHTML = '';
+    document.getElementById('attestPanel').style.display = 'none';
+    document.getElementById('attestStatus').textContent = '';
+    document.getElementById('verifyInput').value = '';
+    const verifyResult = document.getElementById('verifyResult');
+    verifyResult.className = '';
+    verifyResult.textContent = '';
+    document.getElementById('issueStatus').textContent = '';
+    document.getElementById('issueBtn').disabled = false;
+    document.getElementById('resetBtn').style.display = 'none';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+</script>
+</body>
+</html>

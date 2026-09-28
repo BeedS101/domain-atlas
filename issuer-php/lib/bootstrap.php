@@ -125,6 +125,16 @@ function atlas_load_keys() {
   return $kp;
 }
 
+// SPEC.md §5.11 — loads (or generates, on first request ever) this same
+// domain's SECOND, independent keypair, used only for third-party
+// attestations. Mirrors atlas_load_keys() above; see
+// atlas_reviewer_key_file()'s own comment in store.php for why this exists.
+function atlas_load_reviewer_keys() {
+  $kp = load_or_create_reviewer_keypair();
+  ensure_reviewer_well_known_file($kp['publicKeyB64url']);
+  return $kp;
+}
+
 function atlas_is_positive_int($v) {
   if (is_int($v)) return $v > 0;
   if (is_float($v)) return $v == (int) $v && $v > 0;
@@ -371,6 +381,45 @@ function issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $qu
     $payload,
     ['issuer' => ['domain' => atlas_domain(), 'publicKey' => $publicKeyB64url], 'signature' => $signature]
   );
+}
+
+// SPEC.md §5.11 — signs THIS domain's own attestation about an asset it
+// did not issue. Callers pass this domain's SECOND, independent keypair
+// (atlas_load_reviewer_keys()), never the main issuing one — see that
+// function's own comment. `$subjectIssuerDomain` is taken as given, not
+// verified here: this function only ever produces the attesting identity's
+// own signed opinion, the same way issue_asset() above never checks whether
+// an owner's public key is "real" — verifying subject.assetId against
+// subject.issuerDomain's own key (SPEC.md §5.11 step 4) is a separate,
+// independent check a verifying client makes for itself. Mirrors
+// issuer-server/server.js's issueAttestation().
+function issue_attestation($privateKey, $publicKeyB64url, $subjectAssetId, $subjectIssuerDomain, $claim) {
+  $payload = [
+    'id' => 'urn:atlas:attestation:' . atlas_uuid(),
+    'subject' => ['assetId' => $subjectAssetId, 'issuerDomain' => $subjectIssuerDomain],
+    'claim' => $claim,
+    'issuedAt' => iso_now(),
+  ];
+  $signature = atlas_sign($privateKey, $payload);
+  $credential = array_merge(
+    ['credential' => 'domain-atlas-attestation/1.0'],
+    $payload,
+    ['issuer' => ['domain' => atlas_domain(), 'publicKey' => $publicKeyB64url], 'signature' => $signature]
+  );
+  append_attestation($credential);
+  return $credential;
+}
+
+// The signed payload shape for a third-party attestation (SPEC.md §5.11:
+// canonicalize({id, subject, claim, issuedAt})) — the attestation
+// equivalent of asset_payload_of() above, used to re-verify one of this
+// domain's own already-issued attestations before revoking it. Mirrors
+// issuer-server/server.js's attestationPayloadOf().
+function attestation_payload_of($credential) {
+  return [
+    'id' => $credential['id'], 'subject' => $credential['subject'],
+    'claim' => $credential['claim'], 'issuedAt' => $credential['issuedAt'],
+  ];
 }
 
 // Builds `asset` fresh from ATLAS_ASSET_CATALOG (via
