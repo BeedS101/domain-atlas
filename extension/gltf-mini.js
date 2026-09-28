@@ -508,9 +508,28 @@
     };
   }
 
+  // Ring/beacon color by portal kind — same three-way split SPEC.md §3.6.1
+  // gives the 2D renderer's own portalPalette() (viewer.js): teal for an
+  // ordinary cross-domain trust boundary, orange for a same-domain world
+  // swap, and this amber reserved for a key-anchored portal ('key') —
+  // trusted only by its own signature, never an ordinary crossing, so it
+  // gets the same warning color the key-anchored entry disclosure and the
+  // 2D renderer's own amber marker already use, not a shade of either
+  // routine color.
+  function portalRingColor(kind) {
+    if (kind === 'cross-domain') return [0.34, 0.65, 0.58, 1];
+    if (kind === 'key') return [0.88, 0.72, 0.30, 1];
+    return [0.88, 0.54, 0.30, 1];
+  }
+  function portalBeaconColor(kind) {
+    if (kind === 'cross-domain') return [0.30, 0.56, 0.50, 1];
+    if (kind === 'key') return [0.77, 0.63, 0.26, 1];
+    return [0.76, 0.47, 0.27, 1];
+  }
+
   // A small glowing ring to mark a portal's location, generated as a flat
   // ring of triangles — same "no external asset needed" spirit as the floor.
-  function buildPortalRing(gl, radius, segments, isCrossDomain) {
+  function buildPortalRing(gl, radius, segments, kind) {
     const positions = [];
     const normals = [];
     const inner = radius * 0.82;
@@ -521,7 +540,7 @@
       const verts = [p(a0, inner), p(a0, radius), p(a1, radius), p(a0, inner), p(a1, radius), p(a1, inner)];
       verts.forEach((v) => { positions.push(...v); normals.push(0, 1, 0); });
     }
-    const color = isCrossDomain ? [0.34, 0.65, 0.58, 1] : [0.88, 0.54, 0.30, 1];
+    const color = portalRingColor(kind);
     return {
       color,
       modelMatrix: mat4Identity(),
@@ -543,7 +562,7 @@
   // classic "billboard cross" trick — so there's always a tall, roughly
   // person-height glow to catch the eye from across the room, not just a
   // floor decal you have to be looking almost straight down at.
-  function buildPortalBeacon(gl, radius, isCrossDomain) {
+  function buildPortalBeacon(gl, radius, kind) {
     const positions = [];
     const normals = [];
     const h = 2.0; // tall enough to read over most furniture, well above eye height
@@ -562,7 +581,7 @@
     // tradeoff), so this draws fully opaque regardless of alpha — the
     // color is intentionally a bit dimmer than the floor ring's so a
     // solid vertical cross doesn't read as a wall.
-    const color = isCrossDomain ? [0.30, 0.56, 0.50, 1] : [0.76, 0.47, 0.27, 1];
+    const color = portalBeaconColor(kind);
     return {
       color,
       modelMatrix: mat4Identity(),
@@ -1354,7 +1373,7 @@
       });
 
       portalTriggers = (sceneData.portalMarkers || []).map((m) => {
-        const isCrossDomain = opts.isCrossDomainPortal(m.portalIndex);
+        const kind = opts.portalKind(m.portalIndex);
         // buildPortalRing/buildPortalBeacon both generate geometry centered
         // on the local origin — this translate is what actually places
         // them at the marker's configured position. Without it (this was
@@ -1364,11 +1383,11 @@
         // visible marker and the actual walk-in trigger zone could be
         // nowhere near each other.
         const placement = mat4Translate(m.position[0], m.position[1] || 0, m.position[2]);
-        const ring = buildPortalRing(gl, m.radius || 1.2, 24, isCrossDomain);
-        const beacon = buildPortalBeacon(gl, m.radius || 1.2, isCrossDomain);
+        const ring = buildPortalRing(gl, m.radius || 1.2, 24, kind);
+        const beacon = buildPortalBeacon(gl, m.radius || 1.2, kind);
         ring.modelMatrix = placement;
         beacon.modelMatrix = placement;
-        return { position: m.position, radius: m.radius || 1.2, portalIndex: m.portalIndex, ring, beacon };
+        return { position: m.position, radius: m.radius || 1.2, portalIndex: m.portalIndex, kind, ring, beacon };
       });
 
       // No geometry of its own (unlike a portal's ring/beacon) — the crate
@@ -2013,6 +2032,16 @@
       getItemDropScale: (dropId) => {
         const entry = itemDropEntries.get(dropId);
         return entry && entry.primitives ? entry.scale : null;
+      },
+      // SPEC.md §3.6.1 — same debug/test-hook convention as every getter
+      // above: lets a test confirm a portal actually got the right
+      // 'same-domain'/'cross-domain'/'key' look (see portalRingColor()/
+      // portalBeaconColor()) by reading the real value opts.portalKind()
+      // resolved for it, rather than reading rendered pixels back off the
+      // canvas. null if no portal marker with that index exists.
+      getPortalTriggerKind: (portalIndex) => {
+        const trigger = portalTriggers.find((t) => t.portalIndex === portalIndex);
+        return trigger ? trigger.kind : null;
       },
       // ---------- presence (#66) ----------
       // viewer.js owns the actual WebSocket connection and join/move/left

@@ -2582,16 +2582,18 @@ async function enterWorld(worldId, anchorId) {
         // this particular visit happened to land through.
         sceneData: anchor ? { ...sceneData, camera: { ...(sceneData.camera || {}), start: anchor.position } } : sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
-        // NOTE (SPEC.md §3.6): only a binary same-domain/cross-domain
-        // distinction exists in the 3D renderer today — a `kind: 'key'`
-        // portal (followPortal()'s new branch, 2D-only so far) would fall
-        // through to the "same domain" (false) color here rather than get
-        // its own look. Not exercised by this round's demo content (the
-        // 3D Lobby has no key-anchored portal), so left as a known gap for
-        // whenever a 3D key-anchored portal is actually built, rather than
-        // reworking buildPortalRing/buildPortalBeacon's boolean signature
-        // for a case nothing currently uses.
-        isCrossDomainPortal: (portalIndex) => !!(world.portals[portalIndex] && world.portals[portalIndex].kind === 'domain'),
+        // SPEC.md §3.6.1 — a three-way portal kind, matching the 2D
+        // renderer's own portalPalette() exactly: 'key' (trusted only by
+        // its signature, no domain at all) gets its own amber look, never
+        // lumped in with an ordinary same-domain ('world') or cross-domain
+        // ('domain') crossing. gltf-mini.js's buildPortalRing/
+        // buildPortalBeacon read this the same way portalPalette() does.
+        portalKind: (portalIndex) => {
+          const portal = world.portals[portalIndex];
+          if (portal && portal.kind === 'key') return 'key';
+          if (portal && portal.kind === 'domain') return 'cross-domain';
+          return 'same-domain';
+        },
         onPortalEnter: (portalIndex) => followPortal(world.portals[portalIndex]),
         // Task #208 — same handleInteractable() the 2D renderer's click
         // handler already calls for the market's mining stalls (see
