@@ -206,6 +206,19 @@
     return postJson('/atlas/demo/attestation/revoke', { id });
   }
 
+  // Same http(s)-scheme-by-hostname convention extension/wallet.js's own
+  // baseUrl() and issuer-server/server.js's own baseUrl() already use — a
+  // real deployed domain (this demo included, once it's live anywhere but
+  // localhost) is fetched over https, never http: hardcoding http:// here
+  // is exactly what made this page's own verify step fail with a plain
+  // "Failed to fetch" once loaded over https on a real domain — a browser
+  // refuses that as mixed content and never even sends the request.
+  function baseUrl(domain) {
+    if (domain.startsWith('http')) return domain.replace(/\/$/, '');
+    const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(domain);
+    return ((isLocalHost ? 'http://' : 'https://') + domain).replace(/\/$/, '');
+  }
+
   // Fetches the signing key's own published file + this domain's revocation
   // list and checks a credential against them directly — the same public
   // files anyone, including a real auditor's own systems, could fetch
@@ -236,7 +249,7 @@
       return { valid: false, reason: 'unrecognized credential type' };
     }
     if (!signerDomain) return { valid: false, reason: 'credential has no issuer domain' };
-    const base = 'http://' + signerDomain;
+    const base = baseUrl(signerDomain);
     const [keyDoc, revDoc] = await Promise.all([
       fetch(base + '/.well-known/' + keyFile, { cache: 'no-store' }).then((r) => r.json()),
       fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
