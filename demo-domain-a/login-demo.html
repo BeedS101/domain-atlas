@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Login Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  .panel.callout { background: #fff8e6; border-color: #d8a90f; }
+  .panel.callout p { margin: 0.4rem 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  label { display: block; font-size: 0.86rem; font-weight: 600; margin: 0.7rem 0 0.25rem; }
+  input[type="text"], input[type="password"] {
+    font: inherit; width: 100%; max-width: 320px; padding: 0.5rem 0.65rem; border: 1px solid var(--line);
+    border-radius: 6px;
+  }
+  .hint { font-size: 0.8rem; color: var(--muted); margin: 0.2rem 0 0; }
+  .props { font-size: 0.86rem; color: var(--muted); }
+  .props div { margin: 0.1rem 0; }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.7rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .result.pending { background: var(--accent-bg); color: var(--accent); }
+  .step-status { font-size: 0.86rem; color: var(--muted); margin-top: 0.6rem; }
+  details.raw { font-size: 0.8rem; margin-top: 0.8rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>Log in, with a credential as the second factor</h1>
+  <p class="tag">A two-minute, no-installation demo of credential-based two-factor sign-in.</p>
+  <p class="lede">
+    Step 1 looks like an ordinary sign-in form: a username and a password. Step 2 is where
+    it changes — instead of a one-time code from your phone, this page presents a real,
+    cryptographically signed credential this domain issued you, and signs a fresh
+    one-time challenge with the same key the credential names as its owner. Revoke that
+    credential from the admin panel — no password reset involved — and the second factor
+    starts failing immediately, on the very next attempt. Both keys involved are generated
+    right here in your browser and never leave it except as a signature; every request
+    below is a genuine call to this domain's own server, not a mockup.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this looks like for a real login</h2>
+    <p>
+      Swap the demo credential for a real one — a company-issued device pass, a
+      membership card, a staff badge — and this is passwordless-adjacent 2FA where the
+      "device" is provable and individually revocable, without a shared secret (a TOTP
+      seed, a backup code) sitting on either side that could leak. Deactivating one
+      person's access is exactly as targeted as revoking one credential id.
+    </p>
+  </div>
+
+  <div class="panel" id="enrollPanel">
+    <h2>Step 1 of 3 — create your demo account</h2>
+    <p class="props" style="margin-top:0;">
+      Generates a wallet keypair in this tab and issues it a login credential from this
+      domain — the credential your password step below will need a second factor from.
+    </p>
+    <button id="enrollBtn">Set up my demo account</button>
+    <p id="enrollStatus" class="step-status"></p>
+    <details class="raw" id="credentialDetails" style="display:none;">
+      <summary>View raw signed login credential</summary>
+      <pre id="credentialRaw"></pre>
+    </details>
+  </div>
+
+  <div class="panel" id="passwordPanel" style="display:none;">
+    <h2>Step 2 of 3 — sign in</h2>
+    <form id="passwordForm">
+      <label for="usernameInput">Username</label>
+      <input type="text" id="usernameInput" placeholder="anything works" autocomplete="username">
+      <label for="passwordInput">Password</label>
+      <input type="password" id="passwordInput" autocomplete="current-password">
+      <p class="hint">Demo password: <code>atlas123</code> — this step alone proves nothing; it's just the familiar half.</p>
+      <div style="margin-top:0.9rem;">
+        <button type="submit" id="signInBtn">Sign in</button>
+      </div>
+    </form>
+    <p id="passwordStatus" class="step-status"></p>
+  </div>
+
+  <div class="panel" id="factorPanel" style="display:none;">
+    <h2>Step 3 of 3 — confirm with your Domain Atlas credential</h2>
+    <div id="factorResult"></div>
+    <div id="factorActions" style="margin-top:0.8rem;"></div>
+  </div>
+
+  <div class="panel callout" id="revokeCallout" style="display:none;">
+    <h2 style="margin-top:0;">See revocation take effect live</h2>
+    <p>
+      Open this domain's <a href="/atlas-admin/" target="_blank" rel="noopener">admin panel</a>,
+      paste this credential's id — shown above and below — into "Revoke a credential," and
+      revoke it. Then come back here and click "Try signing in again" without reloading
+      this page: the same password step still succeeds, but the second factor now fails,
+      on the spot, with no separate step to invalidate anything else.
+    </p>
+  </div>
+
+  <p class="footnote">
+    Nothing on this page is stored in a database anywhere, and reloading it starts a fresh
+    demo account from scratch. <button id="resetBtn" class="secondary" type="button" style="display:none;">Start over</button>
+    <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+  const DEMO_PASSWORD = 'atlas123';
+  const LOGIN_CLASS = 'atlas.demo.login.badge';
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  // Same shape as issuer-server/server.js's canonicalize() and
+  // extension/wallet.js's own copy — sorted-key JSON, no whitespace. Has to
+  // match byte-for-byte or the server's own signature check fails.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function issueAsset(ownerPublicKey, assetClass) {
+    const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
+    return res.body;
+  }
+
+  let you = null;             // {kp, publicKey} — this tab's throwaway identity
+  let loginCredential = null; // the atlas.demo.login.badge credential
+
+  function rawCredentialDetails(credential) {
+    return JSON.stringify({
+      id: credential.id,
+      owner: credential.owner.publicKey.slice(0, 24) + '…',
+      issuer: credential.issuer.domain,
+      asset: credential.asset
+    }, null, 2);
+  }
+
+  // The actual second factor: a fresh nonce, signed with the same key
+  // loginCredential names as owner, presented alongside the credential
+  // itself. Split out from the sign-in submit handler so "Try signing in
+  // again" (after a revoke, or after any other failure) can re-run just
+  // this step without re-asking for the password.
+  async function attemptSecondFactor() {
+    const resultEl = document.getElementById('factorResult');
+    const actionsEl = document.getElementById('factorActions');
+    resultEl.className = 'result pending';
+    resultEl.textContent = 'Waiting for your Domain Atlas credential to confirm…';
+    actionsEl.innerHTML = '';
+    try {
+      const nonceRes = await fetch('/atlas/login/nonce');
+      if (!nonceRes.ok) throw new Error('could not reach this domain for a login challenge');
+      const { nonce } = await nonceRes.json();
+      const payload = { nonce, action: 'login' };
+      const proof = await signWithSelf(you, payload);
+      const res = await postJson('/atlas/login/verify', { credential: loginCredential, intent: { payload, proof } });
+      if (res.ok) {
+        resultEl.className = 'result ok';
+        resultEl.textContent = '✓ Welcome — signed in as ' + res.body.ownerPublicKey.slice(0, 20) + '… using ' + res.body.name + '.';
+        actionsEl.innerHTML = '<button type="button" id="retryFactorBtn" class="secondary">Try signing in again</button>';
+        document.getElementById('revokeCallout').style.display = '';
+      } else {
+        resultEl.className = 'result err';
+        resultEl.textContent = '✗ Second factor failed — ' + ((res.body && res.body.error) || 'unknown error') + '.';
+        actionsEl.innerHTML = '<button type="button" id="retryFactorBtn" class="secondary">Try again</button>';
+      }
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = '✗ Could not complete the second factor: ' + err.message;
+      actionsEl.innerHTML = '<button type="button" id="retryFactorBtn" class="secondary">Try again</button>';
+    }
+    const retryBtn = document.getElementById('retryFactorBtn');
+    if (retryBtn) retryBtn.addEventListener('click', attemptSecondFactor);
+  }
+
+  document.getElementById('enrollBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('enrollBtn');
+    const status = document.getElementById('enrollStatus');
+    btn.disabled = true;
+    status.textContent = 'Generating a wallet keypair and issuing your login credential…';
+    try {
+      you = await genIdentity();
+      loginCredential = await issueAsset(you.publicKey, LOGIN_CLASS);
+      status.textContent = 'Done — issued to a fresh public key generated just now in this tab.';
+      document.getElementById('credentialDetails').style.display = '';
+      document.getElementById('credentialRaw').textContent = rawCredentialDetails(loginCredential);
+      document.getElementById('passwordPanel').style.display = '';
+      document.getElementById('resetBtn').style.display = '';
+      document.getElementById('passwordPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (err) {
+      status.textContent = 'Something went wrong: ' + err.message;
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('passwordForm').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const status = document.getElementById('passwordStatus');
+    const username = document.getElementById('usernameInput').value.trim();
+    const password = document.getElementById('passwordInput').value;
+    if (!username) { status.textContent = 'Enter a username (any value works for this demo).'; return; }
+    if (password !== DEMO_PASSWORD) { status.textContent = 'Wrong password — try "atlas123".'; return; }
+
+    document.getElementById('signInBtn').disabled = true;
+    document.getElementById('usernameInput').disabled = true;
+    document.getElementById('passwordInput').disabled = true;
+    status.textContent = 'Password verified. Confirming with your Domain Atlas credential…';
+    document.getElementById('factorPanel').style.display = '';
+    document.getElementById('factorPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Deliberate pacing, not a network wait: makes the two factors read as
+    // two distinct steps instead of one instant round trip.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    await attemptSecondFactor();
+  });
+
+  // Everything here lives in page-scoped JS variables (you/loginCredential),
+  // so a second run-through means generating a brand new identity and a
+  // brand new credential rather than reusing the old (possibly just-revoked)
+  // one — the clean way to demo enrollment again without reloading the tab.
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    you = null;
+    loginCredential = null;
+    document.getElementById('enrollBtn').disabled = false;
+    document.getElementById('enrollStatus').textContent = '';
+    document.getElementById('credentialDetails').style.display = 'none';
+    document.getElementById('passwordPanel').style.display = 'none';
+    document.getElementById('passwordForm').reset();
+    document.getElementById('usernameInput').disabled = false;
+    document.getElementById('passwordInput').disabled = false;
+    document.getElementById('signInBtn').disabled = false;
+    document.getElementById('passwordStatus').textContent = '';
+    document.getElementById('factorPanel').style.display = 'none';
+    document.getElementById('factorResult').className = '';
+    document.getElementById('factorResult').textContent = '';
+    document.getElementById('factorActions').innerHTML = '';
+    document.getElementById('revokeCallout').style.display = 'none';
+    document.getElementById('resetBtn').style.display = 'none';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+</script>
+</body>
+</html>

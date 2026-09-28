@@ -216,6 +216,17 @@ const ADMIN_NONCES_FILE = path.join(STATE_DIR, 'atlas-admin-nonces-store.json');
 const ADMIN_SESSIONS_FILE = path.join(STATE_DIR, 'atlas-admin-sessions-store.json');
 const ADMIN_NONCE_TTL_MS = 2 * 60 * 1000; // long enough to sign and post, short enough a stale one is worthless
 const ADMIN_SESSION_TTL_MS = 30 * 60 * 1000; // slides forward on every check — see touchAdminSession
+// Demo login (credential-based second factor, demo-domain-a/login-demo.html):
+// same single-use-nonce shape as the admin login above, but with no session
+// layer on top — a "login" here is just proving, fresh each time, that the
+// signer currently holds an unrevoked atlas.demo.login.badge. There's no
+// roster to check against either: unlike admin, anyone can hold this class
+// (it's handed out by the ordinary, ungated /atlas/asset/issue), so holding
+// a live, unrevoked one — checked at the moment of signing, not cached — IS
+// the authorization. See issueLoginNonce/consumeLoginNonce and
+// checkPresentedLoginBadge below.
+const LOGIN_NONCES_FILE = path.join(STATE_DIR, 'atlas-login-nonces-store.json');
+const LOGIN_NONCE_TTL_MS = 2 * 60 * 1000;
 // Trading Station membership roster (task #144 Phase 1) — same flat-array
 // shape as POSTOFFICE_MEMBERS_FILE above, kept as its own file for the same
 // reason Post Office's is separate from the plain subscriber roster: a
@@ -828,6 +839,20 @@ const ASSET_CATALOG = {
     purchase: { priceClass: 'atlas.credit.balance', priceAmount: 10 },
     expiresInMinutes: 3
   },
+  // demo-domain-a/login-demo.html's second factor: an ordinary credential
+  // from the ungated /atlas/asset/issue, presented and signed over a fresh
+  // nonce at every sign-in (see POST /atlas/login/verify above). No
+  // expiresInMinutes here on purpose — the interesting failure mode for a
+  // login credential is being revoked (a lost or compromised device), not
+  // going stale on a timer, and the museum ticket already covers the
+  // timer-based case.
+  'atlas.demo.login.badge': {
+    name: 'Demo Login Credential',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    fungible: false,
+    presentation: 'document',
+    tradeScope: 'bound'
+  },
   // Test-only fixture for manual-asset-expiry.js: a real expiresAt with a
   // sub-minute deadline, so the automated check can observe a genuine
   // expiry within a couple of seconds instead of waiting the museum
@@ -1096,6 +1121,38 @@ function consumeAdminNonce(nonce) {
   doc.nonces.splice(idx, 1);
   doc.nonces = doc.nonces.filter((n) => n.expiresAt > now);
   writeAdminNonces(doc);
+  return true;
+}
+
+// Same single-use-nonce mechanics as issueAdminNonce/consumeAdminNonce
+// above, kept in a separate file rather than shared: an admin nonce and a
+// demo-login nonce authorize completely different things, and conflating
+// their stores would make it possible to accidentally consume one as the
+// other.
+function readLoginNonces() {
+  if (!fs.existsSync(LOGIN_NONCES_FILE)) return { nonces: [] };
+  return JSON.parse(fs.readFileSync(LOGIN_NONCES_FILE, 'utf8'));
+}
+function writeLoginNonces(doc) {
+  fs.writeFileSync(LOGIN_NONCES_FILE, JSON.stringify(doc, null, 2));
+}
+function issueLoginNonce() {
+  const now = Date.now();
+  const doc = readLoginNonces();
+  doc.nonces = doc.nonces.filter((n) => n.expiresAt > now);
+  const nonce = b64url(webcrypto.getRandomValues(new Uint8Array(24)));
+  doc.nonces.push({ nonce, expiresAt: now + LOGIN_NONCE_TTL_MS });
+  writeLoginNonces(doc);
+  return nonce;
+}
+function consumeLoginNonce(nonce) {
+  const now = Date.now();
+  const doc = readLoginNonces();
+  const idx = doc.nonces.findIndex((n) => n.nonce === nonce && n.expiresAt > now);
+  if (idx === -1) { doc.nonces = doc.nonces.filter((n) => n.expiresAt > now); writeLoginNonces(doc); return false; }
+  doc.nonces.splice(idx, 1);
+  doc.nonces = doc.nonces.filter((n) => n.expiresAt > now);
+  writeLoginNonces(doc);
   return true;
 }
 
@@ -2654,6 +2711,40 @@ async function main() {
         const subscribers = readSubscribers().subscribers.filter((s) => !isRevoked(s.credentialId));
         const postOfficeMembers = readPostOfficeMembers().members.filter((m) => !isRevoked(m.credentialId));
         return sendJson(res, 200, { subscribers, postOfficeMembers });
+      }
+
+      // --- Demo login (demo-domain-a/login-demo.html): a normal-looking
+      // password step, then a real second factor — presenting and signing
+      // with an atlas.demo.login.badge (an ordinary, ungated credential
+      // from /atlas/asset/issue). GET the nonce, sign {nonce, action:
+      // 'login'} with the same key the badge names as owner, POST both
+      // here. No session token comes back: each sign-in re-proves the
+      // badge is held and unrevoked at that exact moment, which is also
+      // what makes revoking it from the admin panel take effect
+      // immediately, without anything to separately invalidate. ---
+      if (req.method === 'GET' && req.url === '/atlas/login/nonce') {
+        return sendJson(res, 200, { nonce: issueLoginNonce() });
+      }
+
+      if (req.method === 'POST' && req.url === '/atlas/login/verify') {
+        const { credential, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !intent) return sendJson(res, 400, { error: 'credential and intent are both required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (typeof intent.payload.nonce !== 'string' || intent.payload.action !== 'login') {
+          return sendJson(res, 400, { error: 'intent does not authorize a login with this nonce' });
+        }
+        // Signature checked before the nonce is burned, same order (and
+        // same reasoning) as admin login: a bad signature shouldn't cost
+        // the caller their nonce and force a fresh GET just to retry.
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 401, { error: 'login signature does not check out' });
+        if (!consumeLoginNonce(intent.payload.nonce)) {
+          return sendJson(res, 401, { error: 'nonce is missing, unknown, already used, or expired' });
+        }
+        const signerPub = intent.proof.publicKey;
+        const problem = await checkPresentedMembership(credential, signerPub, 'atlas.demo.login.badge');
+        if (problem) return sendJson(res, 401, { error: problem });
+        return sendJson(res, 200, { ok: true, ownerPublicKey: signerPub, name: credential.asset.name });
       }
 
       // §5.1.1 reissue — a domain-initiated replacement for an asset it

@@ -228,6 +228,58 @@ function consume_admin_nonce($nonce) {
   return $found;
 }
 
+// Demo login (atlas-admin/../login-demo.html): same single-use-nonce
+// mechanics as issue_admin_nonce()/consume_admin_nonce() above, kept in a
+// separate file rather than shared — an admin nonce and a demo-login nonce
+// authorize completely different things, and there's no roster check here
+// at all: holding a live, unrevoked atlas.demo.login.badge (an ordinary,
+// ungated credential) IS the authorization, checked fresh at sign-in time
+// by check_presented_membership().
+function atlas_login_nonces_file() {
+  return __DIR__ . '/atlas-login-nonces-store.json';
+}
+const ATLAS_LOGIN_NONCE_TTL_MS = 120000;
+
+function issue_login_nonce() {
+  $fh = fopen(atlas_login_nonces_file(), 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['nonces'])) $doc = ['nonces' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $doc['nonces'] = array_values(array_filter($doc['nonces'], function ($n) use ($nowMs) { return ($n['expiresAt'] ?? 0) > $nowMs; }));
+  $nonce = b64url_encode(random_bytes(24));
+  $doc['nonces'][] = ['nonce' => $nonce, 'expiresAt' => $nowMs + ATLAS_LOGIN_NONCE_TTL_MS];
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $nonce;
+}
+function consume_login_nonce($nonce) {
+  $fh = fopen(atlas_login_nonces_file(), 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['nonces'])) $doc = ['nonces' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $found = false;
+  $remaining = [];
+  foreach ($doc['nonces'] as $n) {
+    if (($n['expiresAt'] ?? 0) <= $nowMs) continue;
+    if (!$found && is_string($nonce) && ($n['nonce'] ?? null) === $nonce) { $found = true; continue; }
+    $remaining[] = $n;
+  }
+  $doc['nonces'] = $remaining;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
+}
+
 function create_admin_session($publicKey) {
   $fh = fopen(atlas_admin_sessions_file(), 'c+');
   flock($fh, LOCK_EX);
@@ -820,6 +872,16 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
     'purchase' => ['priceClass' => 'atlas.credit.balance', 'priceAmount' => 10],
     'expiresInMinutes' => 3,
+  ],
+  // demo-domain-a/login-demo.html's second factor: an ordinary credential
+  // from the ungated /atlas/asset/issue, presented and signed over a fresh
+  // nonce at every sign-in. No expiresInMinutes on purpose — the
+  // interesting failure mode for a login credential is being revoked (a
+  // lost or compromised device), not going stale on a timer. Mirrors
+  // issuer-server/server.js's ASSET_CATALOG entry of the same name.
+  'atlas.demo.login.badge' => [
+    'name' => 'Demo Login Credential', 'modelPath' => '/assets/badge.glb',
+    'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
   ],
   // Test-only fixture for manual-asset-expiry.js — mirrors issuer-server/
   // server.js's ASSET_CATALOG entry of the same name; see that entry's own

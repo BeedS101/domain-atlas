@@ -1054,6 +1054,55 @@ ticket from a real click on the 3D stall, spending a balance to exactly
 zero, a clear client-side rejection with nothing left to spend, and
 fulfilling the ticket on the Admin Panel before it expires.
 
+## A credential as a login's second factor
+
+Nothing above touches authentication — every demo so far issues,
+verifies, or revokes a credential the visitor already has in hand.
+`demo-domain-a/login-demo.html` uses one to gate something instead: an
+ordinary-looking username/password step, then a real second factor before
+sign-in completes. No new protocol primitive is involved — it's the same
+"present a credential, sign a fresh nonce with the key it names as owner"
+shape `POST /atlas/admin/session/start` already uses for the Admin Panel's
+own login, aimed at an ordinary end user instead of an operator, and with
+no roster to check against: holding a live, unrevoked
+`atlas.demo.login.badge` (an ordinary, ungated credential from
+`/atlas/asset/issue`) *is* the authorization, re-checked from scratch on
+every attempt via `checkPresentedMembership`/`check_presented_membership`
+— the same generic class-agnostic check `/atlas/trade/submit` already
+uses for a Trading Station membership card.
+
+`GET /atlas/login/nonce` hands out a single-use, short-lived challenge
+(mirroring `issueAdminNonce`/`issue_admin_nonce`, in its own separate
+nonce store so a login nonce and an admin nonce can never be confused for
+each other); `POST /atlas/login/verify` takes the presented credential
+plus a signed `{nonce, action: 'login'}` envelope, checks the signature
+before ever burning the nonce (so a bad attempt doesn't cost a legitimate
+retry its nonce), then requires the credential to be the right class,
+unexpired, unrevoked, and genuinely owned by the signer — returning the
+server's own plain-English reason on any failure. No session token comes
+back either way: every sign-in re-proves the credential is held and
+unrevoked at that exact instant, which is also what makes revoking it
+take effect immediately, with nothing else to separately invalidate.
+
+The page itself never touches the extension — like `business-demo.html`,
+it generates a throwaway keypair right in the tab, issues its own login
+credential to it, and fakes only the password half (any username, a fixed
+demo password) before running the genuine nonce/sign/verify round trip for
+real. Its "see revocation take effect live" callout is a deliberate
+cross-demo moment: paste the shown credential id into the Admin Panel's
+existing "Revoke a credential" field, revoke it there, then click "Try
+signing in again" back on the login page — no reload, same tab, same
+already-cached credential — and watch the identical password step still
+succeed while the second factor now fails, on the spot.
+`test/manual-login-demo.js` covers `/atlas/login/nonce` and
+`/atlas/login/verify` themselves at the HTTP layer on both issuers (a
+clean sign-in, nonce replay rejection, wrong credential class, a
+non-owner signature, and the revoke-then-fail sequence);
+`test/manual-login-demo-page.js` drives the actual page end to end —
+enrolling, a rejected wrong password, a successful second factor, the
+revocation callout, revoking and retrying, and a full "Start over"
+run-through with a fresh credential.
+
 ## 9. Verify it yourself
 
 ```bash
