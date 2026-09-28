@@ -1103,6 +1103,76 @@ enrolling, a rejected wrong password, a successful second factor, the
 revocation callout, revoking and retrying, and a full "Start over"
 run-through with a fresh credential.
 
+## A warranty that travels with the product
+
+`demo-domain-a/warranty-demo.html` follows one credential through a
+factory-to-retailer-to-owner chain: a manufacturer mints a certificate
+carrying a real serial number, a retailer stamps the actual sale date onto
+it when it's sold, and from that moment a warranty clock is running — one
+that keeps ticking through however many resales the product goes through
+next, with no factory involvement required for any of them.
+
+Getting a real serial number onto a specific unit needed one new piece:
+`/atlas/asset/issue`'s self-serve mint has no way to carry per-instance
+data — every unit of a class comes out with identical properties — which
+is fine for a throwaway museum ticket but wrong for a fact only the
+factory should be able to set. `POST /atlas/asset/mint` is the
+admin-gated sibling that closes that gap: same shape as
+`/atlas/asset/issue`, but authenticated (`requireAdminAuth`/
+`require_admin_auth`, the same gate `/atlas/asset/reissue` already uses)
+and able to carry an initial `properties` patch, merged onto the class's
+own catalog defaults the same way reissue's own patch already merges
+(`mergeProperties`/`merge_properties`) — a factory stamping
+`{"com.example.serialNumber": "SN-0001"}` at the moment of minting, not
+something a self-serve visitor could fake. It deliberately skips every
+side effect the self-serve endpoint has (subscriber/Post Office/Trading
+Station roster logging, the holding-cap check) — this route mints one
+specific instance on an operator's authority, it isn't a visitor joining
+something. `mintAssetByClass`/`mint_asset_by_class` grew one new optional
+parameter for this (an initial-properties override); every one of its
+dozen-plus other call sites passes nothing and is completely unaffected.
+The Admin Panel gets a matching generic "Mint an asset" section
+(mirroring "Reissue an asset" right below it), and `tools/admin-mint.js`
+is the CLI companion for a real deployment, sharing the same local admin
+identity file `admin-reissue.js`/`admin-revoke.js` already use.
+
+The retailer's stamp is the *existing*, already-generic
+`/atlas/asset/reissue` (SPEC.md §5.1.1) — no new mechanism at all, just a
+properties patch of `saleDate`/`warrantyMonths`/`retailer` instead of a
+museum exhibit's info card. This is also where a real protocol boundary
+shows up plainly: only the domain that minted a credential can ever
+reissue it, so "the retailer stamps the sale" has to mean an authorized
+role on the *same* domain as the factory (an authorized dealer login
+using the manufacturer's own system) — a genuinely separate retailer
+domain could never rewrite a fact the factory's domain signed, by design.
+Warranty status itself is deliberately NOT the protocol's own
+`asset.expiresAt`: that field also blocks *transferring* a credential once
+its deadline passes (SPEC.md §5.10, `checkPresentedGiftableAsset`'s own
+`isExpired()` check), which is backwards for a warranty — you should still
+be able to sell a product whose warranty lapsed, it just shows expired.
+Instead, `com.example.saleDate`/`warrantyMonths` are plain signed
+properties, and "active" vs. "expired" is date arithmetic anyone can run
+themselves off two open facts, with no real waiting required to see either
+outcome (unlike the museum ticket's real-time expiry, checking whether a
+date has already passed is instant regardless of how far off it is).
+
+Ownership changing hands needed nothing new at all: `transferUniqueAsset()`
+— built earlier for a Signet Ring's randomly-rolled per-instance stats —
+already carries a non-fungible credential's *exact* current `asset` state,
+serial number and every stamped warranty fact included, to a fresh owner
+via `POST /atlas/asset/transfer`, rather than rebuilding it fresh from the
+catalog the way a fungible re-mint correctly does. The warranty demo is
+simply the first thing in this project to lean on that guarantee for a
+whole chain of successive resales instead of a single hand-off.
+`test/manual-asset-mint.js` covers the new endpoint itself at the HTTP
+layer on both issuers (admin-gating, the properties merge, an unknown
+class, a bad properties value, fungible/non-fungible quantity rules, and
+that the self-serve endpoint is unaffected); `test/manual-warranty-demo.js`
+drives the actual page end to end — a rejected wrong-owner import, a
+minted certificate rendering its serial number, a stamped sale flipping
+the status to Active, a further stamp flipping it to Expired, a genuine
+transfer preserving every fact, and independent verification.
+
 ## 9. Verify it yourself
 
 ```bash

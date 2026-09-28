@@ -130,6 +130,27 @@
       </section>
 
       <section class="panel">
+        <h2>Mint an asset</h2>
+        <p class="hint">Mints a brand-new credential with its own starting facts (POST /atlas/asset/mint) — the authenticated sibling of a visitor's own self-serve mint, for when a specific instance needs a fact only this domain should be able to set (a factory's real serial number, say) rather than every unit of a class coming out identical. Properties merge onto the class's own catalog defaults, same merge rules as Reissue below.</p>
+        <label for="mintOwnerPublicKey">Owner public key</label>
+        <input type="text" id="mintOwnerPublicKey" placeholder="base64url-encoded public key">
+        <div class="row">
+          <div>
+            <label for="mintAssetClass">Asset class</label>
+            <input type="text" id="mintAssetClass" placeholder="atlas.demo.warranty.certificate">
+          </div>
+          <div>
+            <label for="mintQuantity">Quantity (fungible only, optional)</label>
+            <input type="text" id="mintQuantity" placeholder="1">
+          </div>
+        </div>
+        <label for="mintProperties">Properties patch (optional JSON)</label>
+        <textarea id="mintProperties" placeholder='{"com.example.serialNumber": "SN-0001"}'></textarea>
+        <button class="submit" id="mintBtn" type="button">Mint</button>
+        <div class="result" id="mintResult"></div>
+      </section>
+
+      <section class="panel">
         <h2>Reissue an asset</h2>
         <p class="hint">Rewrites an already-issued non-fungible credential's properties and/or tradeScope, superseding it with a new one (POST /atlas/asset/reissue). Paste the exact credential currently held. Properties merge onto what's already there — a key left out is untouched, and a key set to null is removed entirely rather than kept as a literal null.</p>
         <label for="reissueCredential">Credential JSON</label>
@@ -415,6 +436,35 @@
       try {
         const res = await postJson('/atlas/revoke', { payload: { id, reason: reason || undefined }, token: session.token });
         showResult(result, res.ok, res.ok ? 'Revoked.' : (res.body.error || 'Revoke failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- mint ----------
+    document.getElementById('mintBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('mintBtn');
+      const result = document.getElementById('mintResult');
+      const ownerPublicKey = document.getElementById('mintOwnerPublicKey').value.trim();
+      const assetClass = document.getElementById('mintAssetClass').value.trim();
+      if (!ownerPublicKey) return showResult(result, false, 'Owner public key is required.');
+      if (!assetClass) return showResult(result, false, 'Asset class is required.');
+      const quantityRaw = document.getElementById('mintQuantity').value.trim();
+      const quantity = quantityRaw ? Number(quantityRaw) : undefined;
+      if (quantityRaw && !Number.isInteger(quantity)) return showResult(result, false, 'Quantity, when given, must be a whole number.');
+      let properties;
+      const propertiesRaw = document.getElementById('mintProperties').value.trim();
+      if (propertiesRaw) {
+        try {
+          properties = JSON.parse(propertiesRaw);
+        } catch (err) {
+          return showResult(result, false, 'Properties patch does not parse: ' + err.message);
+        }
+      }
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/asset/mint', { payload: { ownerPublicKey, assetClass, quantity, properties }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Minted -> ' + res.body.id : (res.body.error || 'Mint failed.'));
       } finally {
         btn.disabled = false;
       }

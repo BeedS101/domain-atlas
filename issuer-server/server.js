@@ -853,6 +853,29 @@ const ASSET_CATALOG = {
     presentation: 'document',
     tradeScope: 'bound'
   },
+  // demo-domain-a/warranty-demo.html: one certificate per physical unit,
+  // minted via the admin-gated POST /atlas/asset/mint above so the
+  // factory's own serial number (`com.example.serialNumber`, a properties
+  // patch at mint time — never a base property here, since every unit's
+  // is different) is an authenticated fact, not something a self-serve
+  // mint could fake. `com.example.saleDate`/`warrantyMonths`/`retailer`
+  // are added later, in one /atlas/asset/reissue call, when a retailer
+  // (another operator on this same domain) stamps the actual sale — see
+  // that route's own comment for why a *different* domain could never do
+  // this stamping itself. No tradeScope override, unlike every other
+  // bound demo document above: a warranty is meant to follow the product
+  // through /atlas/asset/transfer to a new owner, so it stays at the
+  // 'local' (giftable) default on purpose. No expiresInMinutes either —
+  // "expired" here is read off the stamped saleDate/warrantyMonths
+  // properties by whoever's looking, not enforced by isExpired(), since
+  // that would also block transferring a product whose warranty already
+  // lapsed, which is exactly backwards for a used-goods resale.
+  'atlas.demo.warranty.certificate': {
+    name: 'Warranty Certificate',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    fungible: false,
+    presentation: 'document'
+  },
   // Test-only fixture for manual-asset-expiry.js: a real expiresAt with a
   // sub-minute deadline, so the automated check can observe a genuine
   // expiry within a couple of seconds instead of waiting the museum
@@ -2120,7 +2143,13 @@ async function main() {
   // it patches an existing credential's own `asset` snapshot instead,
   // since a non-fungible asset's properties are deliberately per-instance
   // rather than per-class (SPEC.md §5.1.1).
-  async function mintAssetByClass(ownerPublicKey, cls, quantity, supersedes) {
+  // `initialProperties`, when given, is a patch merged onto whatever
+  // properties this mint would otherwise carry (mergeProperties — same
+  // merge-not-replace semantics /atlas/asset/reissue's own `properties`
+  // patch already uses). Only POST /atlas/asset/mint ever passes this;
+  // every other call site leaves it undefined, which merges nothing and
+  // changes no existing behavior at all.
+  async function mintAssetByClass(ownerPublicKey, cls, quantity, supersedes, initialProperties) {
     const catalogEntry = ASSET_CATALOG[cls];
     if (!catalogEntry) throw new Error('unknown asset class: ' + cls);
 
@@ -2153,11 +2182,11 @@ async function main() {
     const randomizedProperties = supersedes === null && typeof catalogEntry.randomizeProperties === 'function'
       ? catalogEntry.randomizeProperties()
       : null;
-    const properties = {
+    const properties = mergeProperties({
       ...baseProperties,
       ...(randomizedProperties || {}),
       ...(catalogEntry.serialized ? { 'atlas.serial': String(serial), 'atlas.editionSize': String(catalogEntry.maxSupply) } : {})
-    };
+    }, initialProperties);
 
     const asset = {
       name: catalogEntry.name, class: cls, model: catalogEntry.model,
@@ -2626,6 +2655,51 @@ async function main() {
           console.log('Trading Station member logged + welcome mail queued for', credential.id);
         }
 
+        return sendJson(res, 200, credential);
+      }
+
+      // POST /atlas/asset/mint — admin-gated sibling of the ungated
+      // /atlas/asset/issue above: an authenticated operator minting a
+      // credential with its own explicit starting facts (a factory
+      // stamping a real serial number onto a certificate at manufacture
+      // time, say), rather than every unit of a class coming out
+      // identical the way a self-serve mint's does. `payload.properties`,
+      // when given, merges onto the catalog's own base properties the
+      // same way /atlas/asset/reissue's own `properties` patch already
+      // does — a key left out keeps the catalog default, a key set to
+      // null removes it. Deliberately skips every self-serve side effect
+      // /atlas/asset/issue has (subscriber/Post Office/Trading Station
+      // roster logging, the holdingCap check) — this route is for an
+      // operator minting a specific instance of a class on someone's
+      // behalf, not a visitor joining something or mining their own
+      // supply, and those two things shouldn't be conflated.
+      if (req.method === 'POST' && req.url === '/atlas/asset/mint') {
+        const { payload: mintPayload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(mintPayload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        if (!mintPayload || !mintPayload.ownerPublicKey) return sendJson(res, 400, { error: 'payload.ownerPublicKey is required' });
+        const { ownerPublicKey, assetClass, quantity, properties } = mintPayload;
+        const catalogEntry = ASSET_CATALOG[assetClass];
+        if (!catalogEntry) {
+          return sendJson(res, 400, { error: 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ASSET_CATALOG in issuer-server/server.js (plus issuer-server/elements-catalog.js) for the full list.' });
+        }
+        if (properties !== undefined && (typeof properties !== 'object' || properties === null || Array.isArray(properties))) {
+          return sendJson(res, 400, { error: "properties, when given, must be a patch object onto the class's own base properties" });
+        }
+        let mintQuantity;
+        if (catalogEntry.fungible) {
+          mintQuantity = quantity === undefined ? 1 : quantity;
+          if (!Number.isInteger(mintQuantity) || mintQuantity <= 0) {
+            return sendJson(res, 400, { error: 'quantity must be a positive integer for a fungible assetClass' });
+          }
+        } else {
+          if (quantity !== undefined && quantity !== null && quantity !== 1) {
+            return sendJson(res, 400, { error: 'quantity must be 1 (or omitted) for a non-fungible assetClass' });
+          }
+          mintQuantity = 1;
+        }
+        const credential = await mintAssetByClass(ownerPublicKey, assetClass, mintQuantity, null, properties);
+        console.log('Admin-minted', mintQuantity, credential.asset.name, 'to', ownerPublicKey.slice(0, 16) + '...', 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, credential);
       }
 

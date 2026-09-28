@@ -383,7 +383,13 @@ function issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $qu
 // credential's own `asset` snapshot instead, since a non-fungible asset's
 // properties are deliberately per-instance rather than per-class
 // (SPEC.md §5.1.1). Mirrors issuer-server/server.js's mintAssetByClass().
-function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cls, $quantity, $supersedes) {
+// $initialProperties, when given, is a patch merged onto whatever
+// properties this mint would otherwise carry (merge_properties() — same
+// merge-not-replace semantics atlas/asset/reissue.php's own 'properties'
+// patch already uses). Only atlas/asset/mint.php ever passes this; every
+// other call site omits it, which merges nothing and changes no existing
+// behavior at all. Mirrors issuer-server/server.js's mintAssetByClass().
+function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cls, $quantity, $supersedes, $initialProperties = null) {
   if (!isset(ATLAS_ASSET_CATALOG[$cls])) throw new Exception('unknown asset class: ' . $cls);
   $catalogEntry = ATLAS_ASSET_CATALOG[$cls];
 
@@ -429,6 +435,11 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
     $properties['atlas.serial'] = (string) $serial;
     $properties['atlas.editionSize'] = (string) $maxSupply;
     $asset['properties'] = $properties;
+  }
+  if ($initialProperties !== null) {
+    $mergedProperties = merge_properties(isset($asset['properties']) ? $asset['properties'] : [], $initialProperties);
+    if (!empty($mergedProperties)) $asset['properties'] = $mergedProperties;
+    else unset($asset['properties']);
   }
   // SPEC.md §5.1 — a catalog entry that declares its own 'expiresInMinutes'
   // gets a fresh, signed deadline computed from THIS mint's own clock,

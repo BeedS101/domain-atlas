@@ -638,6 +638,65 @@ test/manual-login-demo.js covers /atlas/login/nonce and
 manual-login-demo-page.js drives the actual page end to end.
 
 
+A warranty that travels with the product
+-------------------------------------------------------------------
+demo-domain-a/warranty-demo.html follows one credential through a
+factory-to-retailer-to-owner chain: a manufacturer mints a certificate
+carrying a real serial number, a retailer stamps the actual sale date onto
+it when it's sold, and from that moment a warranty clock is running — one
+that keeps ticking through however many resales the product goes through
+next, with no factory involvement required for any of them.
+
+Getting a real serial number onto a specific unit needed one new piece:
+atlas/asset/issue.php's self-serve mint has no way to carry per-instance
+data — every unit of a class comes out with identical properties. POST
+/atlas/asset/mint (atlas/asset/mint.php) is the admin-gated sibling that
+closes that gap: same shape as issue.php, but authenticated
+(require_admin_auth(), the same gate atlas/asset/reissue.php already uses)
+and able to carry an initial 'properties' patch, merged onto the class's
+own catalog defaults the same way reissue's own patch already merges
+(merge_properties()) — a factory stamping
+{"com.example.serialNumber": "SN-0001"} at the moment of minting, not
+something a self-serve visitor could fake. It deliberately skips every
+side effect issue.php has (subscriber/Post Office/Trading Station roster
+logging, the holding-cap check) — this route mints one specific instance
+on an operator's authority, it isn't a visitor joining something.
+mint_asset_by_class() grew one new optional parameter for this (an
+initial-properties override, defaulting to null); every one of its other
+call sites passes nothing and is completely unaffected. The Admin Panel
+gets a matching generic "Mint an asset" section (mirroring "Reissue an
+asset" right below it), and tools/admin-mint.js is the CLI companion for a
+real deployment, sharing the same local admin identity file
+admin-reissue.js/admin-revoke.js already use.
+
+The retailer's stamp is the EXISTING, already-generic
+atlas/asset/reissue.php (SPEC.md §5.1.1) — no new mechanism at all, just a
+properties patch of saleDate/warrantyMonths/retailer instead of a museum
+exhibit's info card. This is also where a real protocol boundary shows up
+plainly: only the domain that minted a credential can ever reissue it, so
+"the retailer stamps the sale" has to mean an authorized role on the SAME
+domain as the factory (an authorized dealer login using the manufacturer's
+own system) — a genuinely separate retailer domain could never rewrite a
+fact the factory's domain signed, by design. Warranty status itself is
+deliberately NOT the protocol's own asset.expiresAt: that field also
+blocks TRANSFERRING a credential once its deadline passes (SPEC.md §5.10,
+check_presented_giftable_asset()'s own is_expired() check), which is
+backwards for a warranty — you should still be able to sell a product
+whose warranty lapsed, it just shows expired. Instead,
+com.example.saleDate/warrantyMonths are plain signed properties, and
+"active" vs. "expired" is date arithmetic anyone can run themselves off
+two open facts, with no real waiting required to see either outcome.
+
+Ownership changing hands needed nothing new at all: transfer_unique_asset()
+— built earlier for a Signet Ring's randomly-rolled per-instance stats —
+already carries a non-fungible credential's EXACT current 'asset' state,
+serial number and every stamped warranty fact included, to a fresh owner
+via POST /atlas/asset/transfer, rather than rebuilding it fresh from the
+catalog. test/manual-asset-mint.js covers the new endpoint itself at the
+HTTP layer on both issuers; test/manual-warranty-demo.js drives the actual
+page end to end.
+
+
 Updating an already-issued asset
 ----------------------------------
 An asset credential is signed and immutable the moment it's issued — but a

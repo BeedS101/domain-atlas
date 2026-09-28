@@ -883,6 +883,23 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'name' => 'Demo Login Credential', 'modelPath' => '/assets/badge.glb',
     'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
   ],
+  // demo-domain-a/warranty-demo.html: one certificate per physical unit,
+  // minted via the admin-gated POST /atlas/asset/mint so the factory's own
+  // serial number is an authenticated fact, not something a self-serve
+  // mint could fake. Sale-date/warranty-length/retailer facts are added
+  // later, in one /atlas/asset/reissue call, when a retailer (another
+  // operator on this same domain) stamps the actual sale. No tradeScope
+  // override — a warranty is meant to follow the product through
+  // /atlas/asset/transfer to a new owner, so it stays at the 'local'
+  // default. No expiresInMinutes either — "expired" is read off the
+  // stamped properties by whoever's looking, not enforced by is_expired(),
+  // since that would also block transferring a product whose warranty
+  // already lapsed. Mirrors issuer-server/server.js's ASSET_CATALOG entry
+  // of the same name.
+  'atlas.demo.warranty.certificate' => [
+    'name' => 'Warranty Certificate', 'modelPath' => '/assets/badge.glb',
+    'fungible' => false, 'presentation' => 'document',
+  ],
   // Test-only fixture for manual-asset-expiry.js — mirrors issuer-server/
   // server.js's ASSET_CATALOG entry of the same name; see that entry's own
   // comment for why this exists.
