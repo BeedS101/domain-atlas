@@ -27,6 +27,14 @@
     overflow-y: auto; overflow-wrap: anywhere; padding-right: 4px;
   }
   #placeLabel .domain { color: #a9b8bf; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; margin-left: 8px; }
+  /* SPEC.md §3.5 — appended only when this visit actually landed through a
+     named anchor (a page's own <link rel="spatial">), never a permanent
+     part of a world's own label the way .domain is. Same blue family as
+     the 2D renderer's own drawAnchorMarker() "you are here" pin, so the
+     label and the in-scene marker read as the same feature. Plain text
+     styling, not a pill/badge like .keyAnchorBadge below — an anchor is a
+     precision improvement, never a trust signal of its own. */
+  #placeLabel .anchorLabel { color: #7a9ee0; font-size: 12px; margin-left: 6px; }
   #controls { display: flex; align-items: center; gap: 10px; }
   button {
     font-family: inherit; font-size: 13px; cursor: pointer;

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Why We Keep a Reading Nook — Example Lobby</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<!-- SPEC.md §3.5 — same opt-in tag as compass-listing.html, pointed at a
+     different world and a different anchor. "lobby:reading-nook" names a
+     spot inside the domain's existing Lobby world (see
+     spatial/lobby/scene.json's "anchors" array) — the only demo world
+     rendered in 3D, so entering from here exercises the camera-spawn
+     override rather than the 2D marker used by the Plaza example. -->
+<link rel="spatial" href="/.well-known/spatial.json#lobby:reading-nook">
+<style>
+  body{ font-family: -apple-system, Segoe UI, sans-serif; max-width: 640px; margin: 4rem auto; padding: 0 1.5rem; color: #14212c; line-height: 1.6; }
+  h1{ margin-bottom: 0.3rem; }
+  p.tag{ color: #6b7d87; }
+  code{ background: #eee; padding: 0.15em 0.4em; border-radius: 3px; }
+  .callout{ margin-top: 2rem; padding: 1.1rem 1.3rem; border: 1px solid #dfe6ea; border-radius: 10px; background: #fbfcfd; }
+  .callout h2{ margin: 0 0 0.3rem; font-size: 1.05rem; }
+  .callout a{ color: #2a5fa8; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Why We Keep a Reading Nook</h1>
+  <p class="tag">A short post about the corner of the Lobby by the bookcase.</p>
+  <p>Most of what happens in the Lobby is people passing through — the loot
+     crates get all the attention. But the bookcase corner is where the
+     actual reading happens, and this post is about that corner specifically,
+     not the Lobby as a whole.</p>
+  <p>A blog post is exactly the kind of page SPEC.md §3.5 was written for:
+     ordinary text content that happens to be about one small place inside a
+     much bigger space, with no reason to make visitors find that place
+     themselves.</p>
+
+  <div class="callout">
+    <h2>This page spawns you at the nook, not at the Lobby's front door</h2>
+    <p>The <a href="/">home page</a> and every other Lobby link on this site
+       drop a visitor at the Lobby's ordinary entry point, camera and all.
+       This page names <code>lobby:reading-nook</code>, a specific named
+       anchor inside that same Lobby world (SPEC.md §3.5) — so a Domain
+       Atlas-aware browser extension entering from here starts the camera
+       right at the reading nook instead, with a <strong>📍</strong> marker
+       on the Enter button to show it. Enter from the
+       <a href="/">home page</a> afterward and compare the starting view.</p>
+  </div>
+</body>
+</html>

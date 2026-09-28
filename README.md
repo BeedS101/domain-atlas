@@ -174,6 +174,36 @@ which registers a local admin identity on first use and signs the call
 for you. Then click **Re-verify wallet** again — the item flips to ✗,
 reason "revoked by issuer."
 
+**Per-page discovery and anchors (§3.5) — a plain page pointing at one exact
+spot instead of the domain's front door.** Everything above enters through
+Example Plaza's own default entry point, because `index.html` never says
+otherwise. Two other pages on the same domain do:
+`http://localhost:8001/compass-listing.html` and
+`http://localhost:8001/blog-post.html`. Each has exactly one addition in its
+`<head>` — a `<link rel="spatial" href="/.well-known/spatial.json#worldId
+[:anchorId]">` tag, the same "one `<link>` tag" pattern
+`rel="alternate"`/Open Graph already use — naming a specific anchor inside a
+world this domain already declared, not a new space of its own. Visit
+either one and the Enter button itself changes: a small **📍** suffix, and
+its hover tooltip now names exactly where it leads ("Links to: Compass
+Stall" / "Links to: Reading Nook") on top of the usual capability summary.
+Click it and you land at that exact point rather than the ordinary entry:
+the Plaza page drops you at the Compass Stall with a "you are here" pin
+drawn right into the scene (the 2D renderer has no camera to move, so the
+anchor becomes a marker instead); the Lobby page — the one demo world
+rendered in 3D — actually spawns your camera at the reading nook, not the
+Lobby's usual starting spot. Reload the plain home page afterward and
+compare: same worlds, same extension, ordinary entry point this time. A
+page naming a dead or renamed anchor (or just a world, no anchor at all)
+degrades gracefully to that world's normal entry — an anchor is purely
+additive, never required, and "this costs nothing at the trust layer" the
+same way §3.1 already promises: identity and asset trust still follow the
+domain boundary, never an anchor or a world.
+`test/manual-per-page-anchor.js` exercises the whole thing — the button
+marker and tooltip, both the 2D-marker and 3D-camera-override landings, the
+ordinary no-`<link>` regression case, a world-only fragment, and a dead
+anchor id.
+
 **Domain identity pinning (§3.7) — the other optional identity layer,
 separate from key-anchored worlds above.** §3.6's key-anchored Unlisted
 Atrium (step 3) trusts a manifest with NO domain at all, purely by its own
@@ -1595,11 +1625,18 @@ longer wrongly rejects a manifest carrying both `domain` and `identityKey`
 together (it used to require exactly one), and both issuer backends can
 produce a pinned manifest — Node at boot (`ATLAS_PIN_MANIFEST_IDENTITY`),
 PHP via a deploy-time script (`issuer-php/lib/sign-manifest.php`, see
-`test/manual-domain-identity-pin-php.js`). The remaining deliberate
-exception is §3.5 (per-page anchors) — it has no implementation anywhere in
-this codebase yet. That's a real gap, not an oversight worth glossing
-over — if you're picking up this codebase to extend it, that's the actual
-unimplemented slice of the spec. (One narrower gap inside the implemented
-slice: the 3D renderer has no distinct visual of its own for a
-key-anchored portal yet — only the 2D `procedural-v1` renderer does, which
-is what every demo content uses for one today.)
+`test/manual-domain-identity-pin-php.js`). §3.5 (per-page discovery and
+anchors) is implemented now too — a page's own `<link rel="spatial">` tag
+(`extension/content.js`) can name a specific world and, optionally, a named
+anchor inside it (`scene.json`'s own `anchors` array), and both
+`extension/viewer.js` renderers honor it on entry: a "you are here" marker
+for the 2D `procedural-v1` renderer, a real camera-spawn override for the
+3D `gltf-mini-v1` one (see "Try it" above and
+`test/manual-per-page-anchor.js`; the two new demo pages are
+`demo-domain-a/compass-listing.html` and `demo-domain-a/blog-post.html`).
+That was the last deliberate exception this file tracked — there is no
+longer a section of `SPEC.md` with no implementation anywhere in this
+codebase. (One narrower gap remains inside the implemented slice: the 3D
+renderer has no distinct visual of its own for a key-anchored portal yet —
+only the 2D `procedural-v1` renderer does, which is what every demo content
+uses for one today.)

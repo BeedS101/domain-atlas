@@ -21,5 +21,9 @@
     { "position": [4, 0.5, -2], "label": "Merchant's Signet Ring", "action": "issue", "class": "atlas.wearable.ring", "oncePerUser": true },
     { "position": [0, 0.4, 2], "label": "Play Chess", "action": "open-chess" },
     { "position": [0, 0.5, -3.5], "label": "Subscription Card", "action": "issue", "class": "atlas.membership", "oncePerUser": true }
+  ],
+  "anchors": [
+    { "id": "compass-stall", "position": [-4, 0, -2], "label": "Compass Stall" },
+    { "id": "ring-stall", "position": [4, 0, -2], "label": "Ring Stall" }
   ]
 }

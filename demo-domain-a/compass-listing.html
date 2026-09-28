@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Bronze Compass — Example Plaza</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<!-- SPEC.md §3.5 — the one <link> tag a page needs to opt in to per-page
+     discovery. "plaza:compass-stall" names a specific anchor (see
+     spatial/plaza/scene.json's own "anchors" array) inside the domain's
+     already-declared Plaza world — not a new, disconnected space of this
+     page's own. A Domain Atlas-aware client checks for this tag before
+     falling back to the domain-wide manifest's defaultWorld; anything else
+     (a browser without the extension, a search engine, a screen reader)
+     simply never notices it's here at all. -->
+<link rel="spatial" href="/.well-known/spatial.json#plaza:compass-stall">
+<style>
+  body{ font-family: -apple-system, Segoe UI, sans-serif; max-width: 640px; margin: 4rem auto; padding: 0 1.5rem; color: #14212c; line-height: 1.6; }
+  h1{ margin-bottom: 0.3rem; }
+  p.tag{ color: #6b7d87; }
+  .price{ font-size: 1.4rem; font-weight: 600; color: #2c7568; margin: 0.6rem 0; }
+  code{ background: #eee; padding: 0.15em 0.4em; border-radius: 3px; }
+  .callout{ margin-top: 2rem; padding: 1.1rem 1.3rem; border: 1px solid #dfe6ea; border-radius: 10px; background: #fbfcfd; }
+  .callout h2{ margin: 0 0 0.3rem; font-size: 1.05rem; }
+  .callout a{ color: #2a5fa8; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Bronze Compass</h1>
+  <p class="tag">A wearable, on display at the Compass Stall in Example Plaza.</p>
+  <p class="price">1 per visitor — free sample</p>
+  <p>A plain, ordinary-looking product page — nothing about the markup above
+     looks unusual to a browser that isn't looking for it. But this specific
+     page names a specific place: the exact stall this compass is actually
+     sold from, not just "this domain has a Plaza somewhere."</p>
+
+  <div class="callout">
+    <h2>This page points at one exact spot, not the domain's front door</h2>
+    <p>Every other page on this site (the <a href="/">home page</a>, the
+       other demos below) drops a visitor at Example Plaza's own default
+       entry point. This page is different — it names
+       <code>plaza:compass-stall</code>, a specific named anchor inside that
+       same Plaza world (SPEC.md §3.5), so a Domain Atlas-aware browser
+       extension entering from here lands right at the Compass Stall
+       instead, with a small <strong>📍</strong> marker on the Enter button
+       and in the scene itself to show it. Reload the plain
+       <a href="/">home page</a> afterward and compare — same world, same
+       extension, ordinary entry point this time.</p>
+  </div>
+</body>
+</html>

@@ -2385,10 +2385,14 @@ closeBtn.addEventListener('click', () => window.parent.postMessage('domain-atlas
 
 function startParams() {
   const params = new URLSearchParams(window.location.search);
-  return { manifest: params.get('manifest'), world: params.get('world') };
+  // SPEC.md §3.5 — 'anchor' names a specific waypoint inside 'world',
+  // set by content.js's openOverlay() only when the page that opened this
+  // overlay had its own <link rel="spatial"> naming one. Absent for every
+  // ordinary "this domain's front door" entry, exactly as before.
+  return { manifest: params.get('manifest'), world: params.get('world'), anchor: params.get('anchor') };
 }
 
-async function loadManifest(manifestUrl, worldId) {
+async function loadManifest(manifestUrl, worldId, anchorId) {
   statusEl.textContent = 'Fetching manifest…';
   const res = await fetch(manifestUrl, { cache: 'no-store' });
   const manifest = await res.json();
@@ -2403,7 +2407,11 @@ async function loadManifest(manifestUrl, worldId) {
   currentManifest = manifest;
   currentManifestUrl = manifestUrl;
   currentOrigin = new URL(manifestUrl).origin;
-  await enterWorld(targetWorldId);
+  // anchorId only actually applies when it named a point inside the world
+  // this landed on — a stale/mismatched anchor for some OTHER world (which
+  // can't happen via content.js's own pairing today, but loadManifest() is
+  // a general entry point) is silently dropped rather than misapplied.
+  await enterWorld(targetWorldId, targetWorld.id === targetWorldId ? anchorId : null);
 }
 
 function show3DCanvas(active) {
@@ -2421,7 +2429,7 @@ function show3DCanvas(active) {
   scene3dInteractHint.classList.remove('active');
 }
 
-async function enterWorld(worldId) {
+async function enterWorld(worldId, anchorId) {
   portalHitboxes = [];
   await refreshOwnedOncePerUserClassKeys(); // task #227 — fresh snapshot before this world's own hover/proximity checks can run against it
   const manifest = currentManifest;
@@ -2528,6 +2536,19 @@ async function enterWorld(worldId) {
       // walk up to, only the "Dropped in this world" list's Pick up button.
       window.__atlasScene = { floor: sceneData.floor || { size: [10, 10], color: '#1b2830' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
 
+      // SPEC.md §3.5 — a named anchor overrides this scene's own default
+      // spawn (sceneData.camera.start below) with the specific point a
+      // page's <link rel="spatial"> asked for. A dead/mismatched anchor id
+      // (removed from the scene, a typo, or simply none given) resolves to
+      // null and this world spawns exactly as it always has — the anchor
+      // is purely additive, never required.
+      const anchor = anchorId && Array.isArray(sceneData.anchors)
+        ? (sceneData.anchors.find((a) => a.id === anchorId) || null)
+        : null;
+      if (anchor) {
+        placeLabel.innerHTML += ' <span class="anchorLabel">📍 ' + (anchor.label || anchor.id) + '</span>';
+      }
+
       // Task #227 — onInteractPrompt below fires every single animation
       // frame (gltf-mini.js's own proximity check runs in its render loop,
       // unconditionally, whether or not anything actually changed since the
@@ -2553,7 +2574,13 @@ async function enterWorld(worldId) {
       localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
 
       active3D = MiniGLTF.init(scene3dCanvas, {
-        sceneData,
+        // gltf-mini.js reads sceneData.camera.start once, at init time, as
+        // this world's spawn point (see its own camera const) — overriding
+        // just that one field, rather than mutating sceneData in place,
+        // keeps window.__atlasScene/history state above showing the
+        // scene's real declared content untouched by which anchor (if any)
+        // this particular visit happened to land through.
+        sceneData: anchor ? { ...sceneData, camera: { ...(sceneData.camera || {}), start: anchor.position } } : sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
         // NOTE (SPEC.md §3.6): only a binary same-domain/cross-domain
         // distinction exists in the 3D renderer today — a `kind: 'key'`
@@ -2707,6 +2734,19 @@ async function enterWorld(worldId) {
     const sceneRes = await fetch(sceneUrl, { cache: 'no-store' });
     const scene = await sceneRes.json();
 
+    // SPEC.md §3.5 — same anchor resolution as the 3D branch above, but
+    // the 2D renderer has no camera to reposition (it's always a fixed
+    // full-scene overview) — instead this becomes a "you are here" marker
+    // (see drawAnchorMarker()) drawn into the always-visible scene, the
+    // nearest equivalent of "dropping the visitor at a point" this
+    // renderer actually has.
+    const anchor = anchorId && Array.isArray(scene.anchors)
+      ? (scene.anchors.find((a) => a.id === anchorId) || null)
+      : null;
+    if (anchor) {
+      placeLabel.innerHTML += ' <span class="anchorLabel">📍 ' + (anchor.label || anchor.id) + '</span>';
+    }
+
     window.__atlasScene = {
       floor: scene.floor || { size: [10, 10], color: '#1b2830' },
       objects: scene.objects || [],
@@ -2720,7 +2760,8 @@ async function enterWorld(worldId) {
       // manifest cross-reference needed since every field a mint needs
       // (class, quantity, which identity mines it) lives right in
       // scene.json. See handleInteractable() for what "action" values do.
-      interactables: scene.interactables || []
+      interactables: scene.interactables || [],
+      activeAnchor: anchor
     };
     await refreshSceneItemMarkers();
 
@@ -3048,6 +3089,44 @@ function drawInteractable(marker, originX, originY, pulse) {
   return { sx: base.x, sy: cy, radius: radius + 14, marker };
 }
 
+// SPEC.md §3.5 — a "you are here" marker for the one named anchor THIS
+// visit actually landed through (window.__atlasScene.activeAnchor, set
+// once in enterWorld()'s 2D branch) — never for a scene's other
+// declared-but-unvisited anchors, and never clickable (it's a landing
+// indicator, not a destination or an action). A distinct color from every
+// other marker on purpose: not a place to go (portal, amber/teal), not a
+// place to act (interactable, teal glow), not a thing to carry (item,
+// amber glow) — a small blue pin, the same visual family a map app uses
+// for "here."
+function drawAnchorMarker(anchor, originX, originY, pulse) {
+  const [x, y, z] = anchor.position;
+  const bob = Math.sin(pulse * 1.4) * 3;
+  const base = project(x, y || 0, z, originX, originY);
+  const cy = base.y - 24 - bob;
+  const radius = 8;
+
+  ctx.beginPath();
+  ctx.moveTo(base.x, base.y);
+  ctx.lineTo(base.x - 5, cy + radius - 2);
+  ctx.lineTo(base.x + 5, cy + radius - 2);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(122,158,224,0.5)';
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(base.x, cy, radius, 0, Math.PI * 2);
+  ctx.fillStyle = '#7a9ee0';
+  ctx.shadowColor = '#7a9ee0';
+  ctx.shadowBlur = 14;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.fillStyle = '#7a9ee0';
+  ctx.textAlign = 'center';
+  ctx.fillText('📍 ' + (anchor.label || anchor.id), base.x, cy - radius - 8);
+}
+
 // The inverse of project() at ground level (y=0) — turns a canvas click
 // back into the world (x, z) under the cursor, so "drop it here" in the 2D
 // renderer can mean an actual chosen spot rather than one fixed location.
@@ -3077,7 +3156,12 @@ function render(t) {
       ...scene.objects.map((o) => ({ kind: 'box', obj: o, depth: o.position[0] + o.position[2] })),
       ...scene.portalMarkers.map((m) => ({ kind: 'portal', obj: m, depth: m.position[0] + m.position[2] })),
       ...(scene.itemMarkers || []).map((m) => ({ kind: 'item', obj: m, depth: m.position[0] + m.position[2] })),
-      ...(scene.interactables || []).map((m) => ({ kind: 'interactable', obj: m, depth: m.position[0] + m.position[2] }))
+      ...(scene.interactables || []).map((m) => ({ kind: 'interactable', obj: m, depth: m.position[0] + m.position[2] })),
+      // SPEC.md §3.5 — at most one of these, ever (the anchor THIS visit
+      // actually landed through, if any) — see drawAnchorMarker()'s own
+      // comment for why it's a separate kind rather than folded into
+      // interactables.
+      ...(scene.activeAnchor ? [{ kind: 'anchor', obj: scene.activeAnchor, depth: scene.activeAnchor.position[0] + scene.activeAnchor.position[2] }] : [])
     ].sort((a, b) => a.depth - b.depth);
 
     const pulse = t / 260;
@@ -3090,6 +3174,8 @@ function render(t) {
       } else if (d.kind === 'item') {
         const hitbox = drawItemMarker(d.obj, originX, originY, pulse);
         itemMarkerHitboxes.push(hitbox);
+      } else if (d.kind === 'anchor') {
+        drawAnchorMarker(d.obj, originX, originY, pulse); // non-interactive — no hitbox to collect
       } else {
         const hitbox = drawInteractable(d.obj, originX, originY, pulse);
         interactableHitboxes.push(hitbox);
@@ -11111,11 +11197,18 @@ refreshChatSendability();
 
 const start = startParams();
 if (start.manifest) {
-  loadManifest(start.manifest).then(() => {
-    if (start.world && start.world !== currentManifest.defaultWorld) {
-      return enterWorld(start.world);
-    }
-  }).then(() => {
+  // Previously this always loaded the manifest's own defaultWorld first,
+  // then made a SECOND, separate enterWorld(start.world) call when the URL
+  // named a different one — which meant that second call's target world
+  // never actually went through ensureIdentityForEntry() at all (only the
+  // defaultWorld it fetched past on the way there did). loadManifest()
+  // already takes a worldId and gates the RIGHT target correctly (see its
+  // own comment on task #63), so passing start.world/start.anchor straight
+  // through here does the right thing in one entry instead of two, and
+  // closes that gap as a side effect — worth doing now specifically
+  // because SPEC.md §3.5 is what actually starts populating start.world/
+  // start.anchor from a real page link rather than leaving them unused.
+  loadManifest(start.manifest, start.world, start.anchor).then(() => {
     requestAnimationFrame(render);
   });
 } else {

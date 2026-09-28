@@ -1,9 +1,43 @@
 // Domain Atlas — content script
 // Detects a spatial manifest on the current origin and, if found, offers to
 // render the world it declares (v1.0: a manifest may declare several worlds
-// under `worlds[]`; the button opens whichever one `defaultWorld` names).
+// under `worlds[]`; the button opens whichever one `defaultWorld` names,
+// unless SPEC.md §3.5 below names something more specific).
 (function () {
-  const manifestUrl = location.origin + '/.well-known/spatial.json';
+  const domainManifestUrl = location.origin + '/.well-known/spatial.json';
+
+  // SPEC.md §3.5 — per-page discovery and anchors. A page opts in with one
+  // <link rel="spatial" href="/.well-known/spatial.json#worldId[:anchorId]">
+  // tag in its own <head> — the same "one <link> tag" pattern
+  // rel="alternate"/Open Graph already use for per-page metadata. This
+  // content script checks the CURRENT PAGE for that tag before falling
+  // back to the domain-wide manifest and its defaultWorld: precision when a
+  // page offers it, the exact existing behavior when it doesn't. The href
+  // itself is resolved like any other link (relative or absolute both
+  // work), so pageTarget below falls back to the domain-wide manifest url
+  // when there's no tag at all, and to that tag's own manifest url — not
+  // necessarily this page's own origin's — when there is one.
+  let manifestUrl = domainManifestUrl;
+  let pageTarget = null; // { worldId, anchorId } named by the page's own tag, or null
+  const spatialLink = document.querySelector('link[rel="spatial"]');
+  if (spatialLink && spatialLink.getAttribute('href')) {
+    try {
+      const linkUrl = new URL(spatialLink.getAttribute('href'), location.href);
+      manifestUrl = linkUrl.origin + linkUrl.pathname;
+      if (linkUrl.hash.length > 1) {
+        const fragment = linkUrl.hash.slice(1); // drop the leading '#'
+        const colonAt = fragment.indexOf(':');
+        const worldId = colonAt === -1 ? fragment : fragment.slice(0, colonAt);
+        const anchorId = colonAt === -1 ? null : fragment.slice(colonAt + 1);
+        if (worldId) pageTarget = { worldId, anchorId };
+      }
+    } catch (err) {
+      // A malformed href is the same as no tag at all — fall through to
+      // the domain-wide manifest/defaultWorld exactly as if this page
+      // never opted in.
+      manifestUrl = domainManifestUrl;
+    }
+  }
 
   fetch(manifestUrl, { cache: 'no-store' })
     .then((res) => (res.ok ? res.json() : null))
@@ -14,8 +48,15 @@
       if (!Array.isArray(manifest.worlds) || manifest.worlds.length === 0) {
         return; // malformed manifest, nothing to enter
       }
-      const defaultWorld = manifest.worlds.find((w) => w.id === manifest.defaultWorld) || manifest.worlds[0];
-      injectButton(manifest, defaultWorld, manifestUrl);
+      // A page-named world that doesn't actually exist in this manifest
+      // (a stale link, a typo) falls back to the ordinary default —
+      // exactly "the existing behavior when it doesn't [opt in]," same as
+      // never having the tag at all.
+      const targetWorld = (pageTarget && manifest.worlds.find((w) => w.id === pageTarget.worldId))
+        || manifest.worlds.find((w) => w.id === manifest.defaultWorld)
+        || manifest.worlds[0];
+      const anchorId = (pageTarget && pageTarget.worldId === targetWorld.id) ? pageTarget.anchorId : null;
+      injectButton(manifest, targetWorld, manifestUrl, anchorId);
     })
     .catch(() => {
       // unreachable or not JSON — silently do nothing
@@ -123,16 +164,23 @@
     return { previousKey, newKey: manifest.identityKey };
   }
 
-  function injectButton(manifest, defaultWorld, manifestUrl) {
+  function injectButton(manifest, targetWorld, manifestUrl, anchorId) {
     const worldCount = manifest.worlds.length;
     const baseLabel = worldCount > 1
-      ? `Enter Space: ${defaultWorld.name} (+${worldCount - 1} more)`
-      : `Enter Space: ${defaultWorld.name}`;
+      ? `Enter Space: ${targetWorld.name} (+${worldCount - 1} more)`
+      : `Enter Space: ${targetWorld.name}`;
+    // SPEC.md §3.5 — a small, constant marker that this button was aimed by
+    // the PAGE at a specific point, not just "this domain's front door."
+    // Deliberately a plain suffix, not a warning-style prefix (that's
+    // §3.7's ⚠ below) — an anchor is a precision improvement, never a
+    // trust signal of its own (§3.5's own closing line: "this costs
+    // nothing at the trust layer").
+    const displayLabel = baseLabel + (anchorId ? ' 📍' : '');
 
     const btn = document.createElement('button');
     btn.id = 'domain-atlas-enter-btn';
     btn.type = 'button';
-    btn.textContent = '🧭 ' + baseLabel;
+    btn.textContent = '🧭 ' + displayLabel;
     Object.assign(btn.style, {
       position: 'fixed',
       right: '20px',
@@ -148,10 +196,10 @@
       cursor: 'pointer',
       boxShadow: '0 4px 14px rgba(0,0,0,0.35)'
     });
-    btn.addEventListener('click', () => openOverlay(manifestUrl));
+    btn.addEventListener('click', () => openOverlay(manifestUrl, targetWorld.id, anchorId));
     document.documentElement.appendChild(btn);
 
-    const tooltip = attachInfoTooltip(btn, manifest, defaultWorld);
+    const tooltip = attachInfoTooltip(btn, manifest, targetWorld, anchorId);
 
     // SPEC.md §3.7: resolves asynchronously, well after the button is
     // already up — the same "enrich after initial render" pattern
@@ -164,7 +212,7 @@
     // without necessarily requiring a click — never a lockout.
     checkDomainIdentityPin(manifest).then((warning) => {
       if (!warning) return;
-      btn.textContent = '⚠ ' + baseLabel;
+      btn.textContent = '⚠ ' + displayLabel;
       btn.style.background = '#a4351f';
       tooltip.setIdentityWarning(warning);
     }).catch(() => {});
@@ -172,8 +220,11 @@
 
   // ---------- hover-tooltip info panel (task #65) ----------
   //
-  // Detail for the DEFAULT world only (the one the button itself enters) —
-  // a manifest's other worlds aren't reachable without opening the overlay
+  // Detail for whichever world the button itself actually enters — the
+  // manifest's own defaultWorld normally, or a more specific one a page's
+  // own SPEC.md §3.5 <link rel="spatial"> named instead — never every
+  // world the manifest declares; a manifest's OTHER worlds aren't reachable
+  // without opening the overlay
   // anyway, so probing all of them here would multiply the network cost of
   // a hover for information most hovers will never need. "+N more worlds"
   // is still shown so the button's own "(+N more)" label isn't a dead end.
@@ -265,6 +316,37 @@
     }
   }
 
+  // SPEC.md §3.5 — resolves a page-named anchor id to the scene's own
+  // label for it ("Aisle 12 — Hardware"), so the tooltip can say exactly
+  // where this page's own <link rel="spatial"> points, not just which
+  // world. Fetched lazily on hover, same "enrich after initial render"
+  // reasoning as fetchParticipantCount/computeDownloadSize just above and
+  // below — most page loads are never hovered at all, so there's no reason
+  // to spend this fetch on every single one. A dead anchor id (removed
+  // from the scene since the page was written, a typo) simply resolves to
+  // null — the tooltip already omits the line entirely when this is null,
+  // same graceful-degradation the viewer itself gives an unmatched anchor.
+  const anchorLabelCache = new Map(); // `${sceneUrl}#${anchorId}` -> Promise<string|null>
+  async function fetchAnchorLabel(world, anchorId) {
+    if (!anchorId || !world.entry || !world.entry.scene) return null;
+    const sceneUrl = location.origin + world.entry.scene;
+    const cacheKey = sceneUrl + '#' + anchorId;
+    if (anchorLabelCache.has(cacheKey)) return anchorLabelCache.get(cacheKey);
+    const promise = (async () => {
+      try {
+        const res = await fetch(sceneUrl, { cache: 'no-store' });
+        if (!res.ok) return null;
+        const scene = await res.json();
+        const anchor = Array.isArray(scene.anchors) ? scene.anchors.find((a) => a.id === anchorId) : null;
+        return anchor ? (anchor.label || anchor.id) : null;
+      } catch (err) {
+        return null;
+      }
+    })();
+    anchorLabelCache.set(cacheKey, promise);
+    return promise;
+  }
+
   // Total download size, gltf-mini-v1 worlds only — a procedural-v1 world
   // (every demo world except the Lobby) has nothing to download at all, so
   // there's no size worth computing or showing for one. Sums HEAD
@@ -304,7 +386,7 @@
     return promise;
   }
 
-  function attachInfoTooltip(btn, manifest, world) {
+  function attachInfoTooltip(btn, manifest, world, anchorId) {
     const panel = document.createElement('div');
     panel.id = 'domain-atlas-info-tooltip';
     Object.assign(panel.style, {
@@ -337,7 +419,7 @@
     // anomalous to report).
     let identityWarning = null;
 
-    function render({ participants, size }) {
+    function render({ participants, size, anchorLabel }) {
       const lines = [
         '<div style="font-weight:600;margin-bottom:4px;">' + escapeHtml(world.name) + '</div>',
         '<div>Genre: ' + escapeHtml(genre) + ' · Scale: ' + escapeHtml(scale) + '</div>',
@@ -345,6 +427,13 @@
         '<div>👥 Live now: ' + (participants === undefined ? '…' : (participants === null ? 'unavailable' : participants)) + '</div>',
         '<div>📦 Download size: ' + sizeText(size) + '</div>'
       ];
+      // SPEC.md §3.5 — only shown once the lazy fetchAnchorLabel() lookup
+      // above actually resolves to a real label; a dead/removed anchor id
+      // (resolves to null) leaves this line out entirely rather than
+      // showing a raw id or a placeholder that never fills in.
+      if (anchorId && anchorLabel) {
+        lines.push('<div style="margin-top:4px;color:#9fb8e0;">📍 Links to: ' + escapeHtml(anchorLabel) + '</div>');
+      }
       if (worldCount > 1) {
         lines.push('<div style="margin-top:4px;color:#c9c2b8;">+' + (worldCount - 1) + ' more space' + (worldCount - 1 === 1 ? '' : 's') + ' at this domain</div>');
       }
@@ -370,10 +459,10 @@
       return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
-    let shown = { participants: undefined, size: undefined };
+    let shown = { participants: undefined, size: undefined, anchorLabel: undefined };
 
     btn.addEventListener('mouseenter', () => {
-      shown = { participants: undefined, size: undefined };
+      shown = { participants: undefined, size: undefined, anchorLabel: undefined };
       render(shown);
       panel.style.display = 'block';
 
@@ -385,6 +474,12 @@
         shown = { ...shown, size };
         if (panel.style.display === 'block') render(shown);
       });
+      if (anchorId) {
+        fetchAnchorLabel(world, anchorId).then((anchorLabel) => {
+          shown = { ...shown, anchorLabel };
+          if (panel.style.display === 'block') render(shown);
+        });
+      }
     });
     btn.addEventListener('mouseleave', () => {
       panel.style.display = 'none';
@@ -402,13 +497,20 @@
     };
   }
 
-  function openOverlay(startManifestUrl) {
+  function openOverlay(startManifestUrl, worldId, anchorId) {
     const existing = document.getElementById('domain-atlas-overlay');
     if (existing) existing.remove();
 
     const iframe = document.createElement('iframe');
     iframe.id = 'domain-atlas-overlay';
-    iframe.src = chrome.runtime.getURL('viewer.html') + '?manifest=' + encodeURIComponent(startManifestUrl);
+    let src = chrome.runtime.getURL('viewer.html') + '?manifest=' + encodeURIComponent(startManifestUrl);
+    if (worldId) src += '&world=' + encodeURIComponent(worldId);
+    // SPEC.md §3.5 — the specific named point this page's own <link
+    // rel="spatial"> pointed at, if any; viewer.js's startParams()/
+    // enterWorld() are what actually act on it (placing the visitor there
+    // instead of the world's ordinary entry point).
+    if (anchorId) src += '&anchor=' + encodeURIComponent(anchorId);
+    iframe.src = src;
     // The viewer is a cross-origin (extension) iframe, so WebAuthn is
     // blocked by default Permissions Policy unless explicitly delegated —
     // this is what actually lets the identity/wallet ceremonies run.
