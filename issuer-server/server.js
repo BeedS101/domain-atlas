@@ -298,6 +298,23 @@ const ATTESTATIONS_FILE = path.join(STATE_DIR, 'atlas-attestations-store.json');
 // documents for the (unrelated, undocumented-in-SPEC.md) chat opt-in;
 // the manifest is what a client reads to decide whether to ask at all.
 const CALENDAR_FILE = path.join(STATE_DIR, 'atlas-calendar-store.json');
+// K-of-N treasury approvals (bank-demo.html): one flat store of pending
+// and settled approval requests. Same plain-read-write shape as
+// ATTESTATIONS_FILE above, for the same "single-threaded Node here"
+// reason (issuer-php's mirror flock()s it). Deliberately does NOT back
+// the approver roster with a persistent, revocable membership credential
+// the way a real deployment should (see the design note this followed) —
+// each request simply names its own authorized public keys inline. A
+// real deployment would check signers against a durable, revocable
+// roster instead; that's the one place this demo trades realism for
+// staying self-contained in one page, same trade-off attestation-demo.html
+// already makes with its own reviewer identity.
+const BANK_APPROVALS_FILE = path.join(STATE_DIR, 'atlas-bank-approvals-store.json');
+const BANK_APPROVAL_TTL_MS = 60 * 60 * 1000; // an hour is plenty for one demo walkthrough
+const BANK_APPROVAL_MIN_APPROVERS = 2;
+const BANK_APPROVAL_MAX_APPROVERS = 10;
+const BANK_APPROVAL_MAX_AMOUNT = 1000000;
+const DEMO_BANK_ASSET_CLASS = 'atlas.credit.balance'; // the existing spendable-balance class, reused rather than minting a second one
 // Post Office abuse detection (task #96): how many sends within how large
 // a rolling window counts as "irregular" enough to auto-flag a membership
 // for the operator's attention — see recordPostOfficeSend() below. Tunable
@@ -1948,6 +1965,40 @@ function appendAttestation(entry) {
   fs.writeFileSync(ATTESTATIONS_FILE, JSON.stringify(doc, null, 2));
 }
 
+// K-of-N treasury approvals (bank-demo.html) — same "one file, filter
+// expired entries on read" shape as PENDING_TRADES_FILE/WORLD_DROPS_FILE.
+function readBankApprovals() {
+  if (!fs.existsSync(BANK_APPROVALS_FILE)) return { approvals: [] };
+  const doc = JSON.parse(fs.readFileSync(BANK_APPROVALS_FILE, 'utf8'));
+  const now = Date.now();
+  doc.approvals = doc.approvals.filter((a) => a.status !== 'pending' || new Date(a.expiresAt).getTime() > now);
+  return doc;
+}
+function writeBankApprovals(doc) {
+  fs.writeFileSync(BANK_APPROVALS_FILE, JSON.stringify(doc, null, 2));
+}
+function findBankApproval(id) {
+  return readBankApprovals().approvals.find((a) => a.id === id) || null;
+}
+function saveBankApproval(approval) {
+  const doc = readBankApprovals();
+  const idx = doc.approvals.findIndex((a) => a.id === approval.id);
+  if (idx === -1) doc.approvals.push(approval);
+  else doc.approvals[idx] = approval;
+  writeBankApprovals(doc);
+}
+// The exact bytes every approver signs (SPEC.md §6.2's canonical-payload
+// mechanism, verifyEnvelope() above) — just the request's own id and its
+// action, nothing else. Deliberately excludes approvers/requiredApprovals/
+// signatures/status: those can change (another signature arriving) without
+// changing what's actually being authorized, and a signer's own client
+// re-derives this from a fresh GET of the pending request rather than
+// trusting a payload string handed to it by whoever created the request —
+// the WYSIWYS property this whole mechanism depends on.
+function bankApprovalPayloadOf(approval) {
+  return { id: approval.id, action: approval.action };
+}
+
 // Domain calendar (SPEC.md §12) — same plain read/append/update/remove
 // shape as PENDING_TRADES_FILE/WORLD_DROPS_FILE above. readCalendarEvents
 // is the one GET /atlas/calendar actually calls: filtered to one
@@ -3101,6 +3152,99 @@ async function main() {
         revoke(id, 'demo-self-serve');
         console.log('Demo-revoked attestation', id);
         return sendJson(res, 200, { ok: true });
+      }
+
+      // POST /atlas/demo/bank/request-approval — bank-demo.html's K-of-N
+      // treasury-transfer walkthrough. Creating a request is deliberately
+      // ungated (same "harmless to hand out, worthless without a roster
+      // key's signature" posture admin nonces already have above) — it
+      // only ever records what's being proposed, never moves anything by
+      // itself. `approvers` names the exact public keys authorized to sign
+      // THIS request; see BANK_APPROVALS_FILE's own comment on why that's
+      // inline here rather than backed by a persistent roster credential.
+      if (req.method === 'POST' && req.url === '/atlas/demo/bank/request-approval') {
+        const { approvers, requiredApprovals, toPublicKey, amount, memo } = JSON.parse((await readBody(req)) || '{}');
+        if (!Array.isArray(approvers) || new Set(approvers).size !== approvers.length) {
+          return sendJson(res, 400, { error: 'approvers must be an array of distinct public keys' });
+        }
+        if (approvers.length < BANK_APPROVAL_MIN_APPROVERS || approvers.length > BANK_APPROVAL_MAX_APPROVERS) {
+          return sendJson(res, 400, { error: 'approvers must list between ' + BANK_APPROVAL_MIN_APPROVERS + ' and ' + BANK_APPROVAL_MAX_APPROVERS + ' keys' });
+        }
+        if (!Number.isInteger(requiredApprovals) || requiredApprovals < 2 || requiredApprovals > approvers.length) {
+          return sendJson(res, 400, { error: 'requiredApprovals must be an integer between 2 and the number of approvers' });
+        }
+        if (!toPublicKey) return sendJson(res, 400, { error: 'toPublicKey is required' });
+        if (!Number.isInteger(amount) || amount < 1 || amount > BANK_APPROVAL_MAX_AMOUNT) {
+          return sendJson(res, 400, { error: 'amount must be a positive integer up to ' + BANK_APPROVAL_MAX_AMOUNT });
+        }
+        const now = new Date();
+        const approval = {
+          id: 'urn:atlas:bank-approval:' + webcrypto.randomUUID(),
+          action: { type: 'treasury-transfer', toPublicKey, assetClass: DEMO_BANK_ASSET_CLASS, amount, memo: typeof memo === 'string' ? memo.slice(0, 200) : '' },
+          approvers,
+          requiredApprovals,
+          signatures: [],
+          status: 'pending',
+          executedCredentialId: null,
+          createdAt: now.toISOString(),
+          expiresAt: new Date(now.getTime() + BANK_APPROVAL_TTL_MS).toISOString()
+        };
+        saveBankApproval(approval);
+        console.log('Demo bank: requested treasury transfer', approval.id, '(' + requiredApprovals + '-of-' + approvers.length + ')');
+        return sendJson(res, 200, { approval });
+      }
+
+      // GET /atlas/demo/bank/approval?id=... — ungated, same "read is
+      // open" reasoning as every other status/discovery read in this file.
+      // This is the one call every approver's own client is expected to
+      // make for itself before signing: fetching the canonical `action`
+      // straight from here, never accepting it as relayed by whoever
+      // assembled the request, is what makes the signature below mean
+      // anything (see bankApprovalPayloadOf's own comment — WYSIWYS).
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/demo/bank/approval') {
+        const id = new URLSearchParams(req.url.split('?')[1] || '').get('id');
+        if (!id) return sendJson(res, 400, { error: 'id is required' });
+        const approval = findBankApproval(id);
+        if (!approval) return sendJson(res, 404, { error: 'no such approval request (or it already expired)' });
+        return sendJson(res, 200, { approval });
+      }
+
+      // POST /atlas/demo/bank/approval/sign — one approver's own signature
+      // over exactly {id, action} (bankApprovalPayloadOf), verified the
+      // same way every other signed action in this spec is (verifyEnvelope,
+      // §6.2) plus one extra condition mirroring requireAdmin's roster
+      // check: the signing key has to be one of THIS request's own named
+      // approvers. Idempotent on a repeat signature from the same key
+      // (returns the unchanged current state rather than erroring) since
+      // nothing about signing the identical payload twice should count
+      // twice toward the threshold. Executes the transfer — a real mint
+      // through the same issueAsset() every other demo class already
+      // mints through — the instant the threshold is reached, in the same
+      // request that pushed it over, so there's never a moment where a
+      // fully-approved request sits unexecuted.
+      if (req.method === 'POST' && req.url === '/atlas/demo/bank/approval/sign') {
+        const { id, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!id || !proof) return sendJson(res, 400, { error: 'id and proof are both required' });
+        const approval = findBankApproval(id);
+        if (!approval) return sendJson(res, 404, { error: 'no such approval request (or it already expired)' });
+        if (approval.status !== 'pending') return sendJson(res, 400, { error: 'this request is already ' + approval.status });
+        if (!approval.approvers.includes(proof.publicKey)) {
+          return sendJson(res, 400, { error: 'this key is not an authorized approver for this request' });
+        }
+        if (approval.signatures.some((s) => s.publicKey === proof.publicKey)) {
+          return sendJson(res, 200, { approval }); // already signed — idempotent, not an error
+        }
+        const sigOk = await verifyEnvelope(bankApprovalPayloadOf(approval), proof);
+        if (!sigOk) return sendJson(res, 400, { error: 'approval signature does not check out' });
+        approval.signatures.push({ publicKey: proof.publicKey, signerRole: proof.signerRole, signature: proof.signature, signedAt: new Date().toISOString() });
+        if (approval.signatures.length >= approval.requiredApprovals) {
+          const credential = await mintAssetByClass(approval.action.toPublicKey, approval.action.assetClass, approval.action.amount, null);
+          approval.status = 'executed';
+          approval.executedCredentialId = credential.id;
+          console.log('Demo bank: treasury transfer', approval.id, 'executed —', credential.id);
+        }
+        saveBankApproval(approval);
+        return sendJson(res, 200, { approval });
       }
 
       // --- Admin session (short-lived bearer token layered on the roster

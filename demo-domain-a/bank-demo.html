@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Treasury Approval Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb; --amber: #96650f; --amber-bg: #fbf1de;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button.tamper { border-color: var(--amber); background: #fff; color: var(--amber); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.7rem 0 0.3rem; }
+  input[type="number"], input[type="text"] {
+    width: 100%; font: inherit; font-size: 0.95rem; padding: 0.5rem 0.6rem;
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
+  .officers { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.7rem; margin-top: 0.8rem; }
+  .officer {
+    border: 1px solid var(--line); border-radius: 9px; padding: 0.8rem 0.9rem; background: #fbfcfd;
+    display: flex; flex-direction: column; gap: 0.4rem;
+  }
+  .officer h3 { margin: 0; font-size: 0.95rem; }
+  .officer .key { font-size: 0.72rem; color: var(--muted); word-break: break-all; }
+  .officer .state { font-size: 0.8rem; }
+  .officer .state.signed { color: var(--green); }
+  .officer .state.waiting { color: var(--muted); }
+  .progress { font-size: 0.9rem; margin: 0.8rem 0 0; }
+  .progress .bar { height: 8px; border-radius: 999px; background: #eef1f3; margin-top: 0.4rem; overflow: hidden; }
+  .progress .fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+  .result { font-size: 0.86rem; padding: 0.55rem 0.7rem; border-radius: 6px; margin-top: 0.6rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .result.warn { background: var(--amber-bg); color: var(--amber); }
+  details.raw { font-size: 0.8rem; margin-top: 0.6rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>A transfer that needs two signatures, not one</h1>
+  <p class="tag">A two-minute, no-installation demo of K-of-N multi-party approval, built entirely on Domain Atlas's existing signed-payload mechanism (SPEC.md §6.2).</p>
+  <p class="lede">
+    Click below and this page generates three independent keypairs, standing in for three bank officers, plus a
+    fourth for whoever's receiving the transfer. Requesting a transfer creates a real pending record on this
+    domain's own server — nothing executes yet. Only once <strong>two of the three</strong> officers each
+    independently fetch the exact request and sign it does the transfer actually happen: a real credential, minted
+    live by this domain, exactly the same mint every other demo class on this site already uses. One signature
+    alone is provably not enough, and a signature over anything other than the real request is provably rejected —
+    try the "forge a signature" button below to see that for yourself.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this looks like for a real organization</h2>
+    <p>
+      Swap "bank officer" for a company director, a treasury team member, or a co-signer on a shared account —
+      the same control real corporate treasuries already use for wire approvals ("dual control," the four-eyes
+      principle), done with signatures instead of a bank's own internal workflow tooling. Removing an officer who's
+      left the company would use the exact same revocation mechanism every other credential in this protocol
+      already has — no separate access-control system needed alongside it.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Step 1 — set up the demo bank</h2>
+    <p class="props" style="margin-top:0;">Generates three officer keypairs and one recipient keypair, all in this tab.</p>
+    <button id="setupBtn">Set up the demo bank</button>
+    <button id="resetBtn" class="secondary" type="button" style="display:none; margin-left:0.6rem;">Start over</button>
+    <div class="officers" id="officerCards" style="display:none;"></div>
+  </div>
+
+  <div class="panel" id="requestPanel" style="display:none;">
+    <h2>Step 2 — request a treasury transfer</h2>
+    <p class="props" style="margin-top:0;">Requires 2 of the 3 officers above to approve before it executes.</p>
+    <label for="amountInput">Amount</label>
+    <input type="number" id="amountInput" min="1" max="1000000" value="500">
+    <label for="memoInput">Memo (optional)</label>
+    <input type="text" id="memoInput" maxlength="200" placeholder="e.g. Payroll batch #4">
+    <div class="row">
+      <button id="requestBtn" type="button">Request transfer</button>
+    </div>
+    <div id="requestStatus"></div>
+  </div>
+
+  <div class="panel" id="approvePanel" style="display:none;">
+    <h2>Step 3 — approve as each officer</h2>
+    <p class="props" style="margin-top:0;">
+      Each button below independently fetches the pending request fresh from the server and signs exactly that —
+      never a value cached from step 2 — the same way a genuinely separate officer's own device would. This is
+      what makes the signature mean anything: a compromised or dishonest requester showing different officers
+      different amounts would still fail here, since every signer checks the server's own record for itself.
+    </p>
+    <div class="row" id="approveButtons"></div>
+    <div class="row" style="margin-top:0.9rem;">
+      <button id="tamperBtn" type="button" class="tamper">Try forging officer 3's signature over a different amount</button>
+    </div>
+    <div class="progress">
+      <span id="progressText"></span>
+      <div class="bar"><div class="fill" id="progressFill" style="width:0%;"></div></div>
+    </div>
+    <div id="approveStatus"></div>
+    <details class="raw" id="rawDetails" style="display:none;">
+      <summary>View raw pending request</summary>
+      <pre id="rawPre"></pre>
+    </details>
+  </div>
+
+  <p class="footnote">
+    Nothing here is faked to make the demo work: the mint on execution is a genuine signed credential from this
+    domain, verifiable the same way every other asset on this site is (fetch <code>.well-known/atlas-key.json</code>,
+    check the signature, check the revocation list). Two things this demo deliberately simplifies, stated plainly
+    rather than glossed over: the three officer keys live in one browser tab instead of three separate devices
+    (same single-page trick <a href="attestation-demo.html">the attestation demo</a> uses for its own second
+    identity — the protocol works identically across genuinely separate devices, this just keeps the walkthrough to
+    one page), and the list of who's authorized to approve is named directly on each request rather than backed by
+    a persistent, revocable membership credential the way a real deployment should use — see this page's own
+    source and the issuer's server-side comments for the reasoning on both. <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  // Same shape as issuer-server/server.js's canonicalize() and
+  // extension/wallet.js's own copy — sorted-key JSON, no whitespace.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signRaw(kp, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: kp.__publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function getJson(url) {
+    const res = await fetch(url, { cache: 'no-store' });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+
+  let officers = []; // [{kp, publicKey}, ...]
+  let recipient = null;
+  let approvalId = null;
+
+  function shortKey(pk) { return pk.slice(0, 18) + '…'; }
+
+  function renderOfficerCards() {
+    const wrap = document.getElementById('officerCards');
+    wrap.innerHTML = '';
+    officers.forEach((o, i) => {
+      const div = document.createElement('div');
+      div.className = 'officer';
+      div.id = 'officerCard-' + i;
+      div.innerHTML = '<h3>Officer ' + String.fromCharCode(65 + i) + '</h3><div class="key">' + shortKey(o.publicKey) + '</div><div class="state waiting" id="officerState-' + i + '">Not signed yet</div>';
+      wrap.appendChild(div);
+    });
+    wrap.style.display = '';
+  }
+
+  function markOfficerSigned(i) {
+    const el = document.getElementById('officerState-' + i);
+    if (el) { el.textContent = 'Signed ✓'; el.className = 'state signed'; }
+  }
+
+  function renderApproveButtons() {
+    const wrap = document.getElementById('approveButtons');
+    wrap.innerHTML = '';
+    officers.forEach((o, i) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Approve as Officer ' + String.fromCharCode(65 + i);
+      btn.addEventListener('click', () => onApprove(i, btn));
+      wrap.appendChild(btn);
+    });
+  }
+
+  function updateProgress(approval) {
+    const need = approval.requiredApprovals, have = approval.signatures.length, total = officers.length;
+    document.getElementById('progressText').textContent =
+      approval.status === 'executed'
+        ? 'Executed — ' + have + ' of ' + total + ' officers signed (needed ' + need + ')'
+        : have + ' of ' + need + ' required signatures (out of ' + total + ' officers)';
+    document.getElementById('progressFill').style.width = Math.min(100, Math.round((have / need) * 100)) + '%';
+    document.getElementById('rawDetails').style.display = '';
+    document.getElementById('rawPre').textContent = JSON.stringify(approval, null, 2);
+  }
+
+  async function onApprove(i, btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('approveStatus');
+    statusEl.innerHTML = '';
+    try {
+      // WYSIWYS: fetch the canonical request fresh from the server right
+      // now, rather than trusting anything cached from step 2 — see the
+      // panel's own explanatory paragraph above.
+      const fetched = await getJson('/atlas/demo/bank/approval?id=' + encodeURIComponent(approvalId));
+      if (!fetched.ok) throw new Error(fetched.body.error || 'could not fetch the pending request');
+      const payload = { id: fetched.body.approval.id, action: fetched.body.approval.action };
+      const kp = officers[i].kp;
+      kp.__publicKey = officers[i].publicKey;
+      const proof = await signRaw(kp, payload);
+      const res = await postJson('/atlas/demo/bank/approval/sign', { id: approvalId, proof });
+      if (!res.ok) {
+        statusEl.innerHTML = '<div class="result err">Could not sign: ' + res.body.error + '</div>';
+        btn.disabled = false;
+        return;
+      }
+      markOfficerSigned(i);
+      updateProgress(res.body.approval);
+      if (res.body.approval.status === 'executed') {
+        statusEl.innerHTML = '<div class="result ok">Threshold reached — transfer executed. Minted credential: ' + res.body.approval.executedCredentialId + '</div>';
+        document.querySelectorAll('#approveButtons button').forEach((b) => { b.disabled = true; });
+      } else {
+        statusEl.innerHTML = '<div class="result ok">Signed. Waiting on ' + (res.body.approval.requiredApprovals - res.body.approval.signatures.length) + ' more.</div>';
+      }
+    } catch (err) {
+      statusEl.innerHTML = '<div class="result err">' + err.message + '</div>';
+      btn.disabled = false;
+    }
+  }
+
+  document.getElementById('setupBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('setupBtn');
+    btn.disabled = true;
+    officers = [await genIdentity(), await genIdentity(), await genIdentity()];
+    recipient = await genIdentity();
+    renderOfficerCards();
+    document.getElementById('requestPanel').style.display = '';
+    document.getElementById('resetBtn').style.display = '';
+  });
+
+  document.getElementById('requestBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('requestBtn');
+    const status = document.getElementById('requestStatus');
+    btn.disabled = true;
+    status.textContent = 'Creating the pending request…';
+    const amount = parseInt(document.getElementById('amountInput').value, 10);
+    const memo = document.getElementById('memoInput').value;
+    const res = await postJson('/atlas/demo/bank/request-approval', {
+      approvers: officers.map((o) => o.publicKey),
+      requiredApprovals: 2,
+      toPublicKey: recipient.publicKey,
+      amount, memo
+    });
+    if (!res.ok) {
+      status.innerHTML = '<div class="result err">Could not create the request: ' + res.body.error + '</div>';
+      btn.disabled = false;
+      return;
+    }
+    approvalId = res.body.approval.id;
+    status.innerHTML = '<div class="result ok">Pending — id ' + approvalId + '</div>';
+    renderApproveButtons();
+    updateProgress(res.body.approval);
+    document.getElementById('approvePanel').style.display = '';
+  });
+
+  document.getElementById('tamperBtn').addEventListener('click', async () => {
+    const statusEl = document.getElementById('approveStatus');
+    statusEl.textContent = 'Fetching the real request, then signing a DIFFERENT amount with officer 3’s key…';
+    const fetched = await getJson('/atlas/demo/bank/approval?id=' + encodeURIComponent(approvalId));
+    if (!fetched.ok) { statusEl.innerHTML = '<div class="result err">' + fetched.body.error + '</div>'; return; }
+    const tamperedPayload = { id: fetched.body.approval.id, action: { ...fetched.body.approval.action, amount: (fetched.body.approval.action.amount || 0) + 999999 } };
+    const kp = officers[2].kp;
+    kp.__publicKey = officers[2].publicKey;
+    const proof = await signRaw(kp, tamperedPayload);
+    const res = await postJson('/atlas/demo/bank/approval/sign', { id: approvalId, proof });
+    statusEl.innerHTML = res.ok
+      ? '<div class="result err">Unexpected: the tampered signature was accepted.</div>'
+      : '<div class="result warn">Rejected, as it should be — ' + res.body.error + '. Officer 3’s real key signed a different amount than the one actually on file, so it doesn’t check out against the request the server is holding.</div>';
+  });
+
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    officers = [];
+    recipient = null;
+    approvalId = null;
+    document.getElementById('officerCards').style.display = 'none';
+    document.getElementById('officerCards').innerHTML = '';
+    document.getElementById('requestPanel').style.display = 'none';
+    document.getElementById('requestStatus').innerHTML = '';
+    document.getElementById('approvePanel').style.display = 'none';
+    document.getElementById('approveStatus').innerHTML = '';
+    document.getElementById('approveButtons').innerHTML = '';
+    document.getElementById('rawDetails').style.display = 'none';
+    document.getElementById('progressFill').style.width = '0%';
+    document.getElementById('progressText').textContent = '';
+    document.getElementById('setupBtn').disabled = false;
+    document.getElementById('resetBtn').style.display = 'none';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+</script>
+</body>
+</html>

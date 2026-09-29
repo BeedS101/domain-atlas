@@ -1116,3 +1116,47 @@ page end to end, same "real headless browser, own isolated instance"
 reasoning as every other manual-*.js UI test in this project, against one
 real running instance of issuer-server/server.js (the Node counterpart this
 bundle mirrors) — no second instance needed any more.
+
+
+K-of-N treasury approval (bank-demo.html)
+-------------------------------------------
+A transfer that needs two officers' signatures, not one — the multisig/
+dual-control pattern real corporate treasuries already use for wire
+approvals, built entirely on the signed-payload mechanism SPEC.md section
+6.2 already defines (verify_envelope() in lib/bootstrap.php), no new
+cryptography. Three endpoints: POST /atlas/demo/bank/request-approval
+(atlas/demo/bank/request-approval.php) records a pending transfer —
+deliberately ungated, since creating one moves nothing by itself, only
+reaching the threshold does. GET /atlas/demo/bank/approval?id=...
+(atlas/demo/bank/approval/index.php, NOT a sibling approval.php next to
+that directory — same real Apache-vs-php-router collision this bundle
+already walked back once for atlas/world/drops/index.php, see that file's
+own comment) is what every approver's own client is expected to fetch
+fresh before signing — this is the whole demo's WYSIWYS property: a
+signature only means something if the signer independently confirms what
+they're actually signing, rather than trusting whatever the requester's
+own page showed them. POST /atlas/demo/bank/approval/sign
+(atlas/demo/bank/approval/sign.php) checks the signing key is one of the
+request's own named approvers, verifies the signature against exactly
+{id, action}, and — the instant a request's signature count reaches its
+own requiredApprovals — mints the transfer for real via
+mint_asset_by_class(), the same mint every other demo class in this
+bundle already uses.
+
+The one place this demo deliberately simplifies rather than building the
+whole thing: who's authorized to approve is named directly on each
+request (an array of public keys) rather than backed by a persistent,
+revocable membership credential the way a real deployment should use —
+see sign_bank_approval()'s own comment in lib/store.php. Storage lives in
+lib/atlas-bank-approvals-store.json, same "next to the private key, not
+under .well-known" reasoning as every other store in this bundle, but
+unlike most of those it genuinely needs its flock()-guarded read-modify-
+write (sign_bank_approval() in lib/store.php) rather than two separate
+locked reads and writes — two officers signing at nearly the same moment
+is exactly the case that would otherwise race and silently drop one
+signature. test/manual-bank-approval.js drives the actual page end to
+end, plus a companion test/manual-bank-approval-php.js exercising the raw
+HTTP layer directly (including a genuine concurrent-signing race), same
+"isolated instance, own port" reasoning as every other manual-*.js test —
+against a running instance of issuer-server/server.js and this bundle
+respectively.

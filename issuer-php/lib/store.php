@@ -503,6 +503,164 @@ function append_attestation($entry) {
   fclose($fh);
 }
 
+// K-of-N treasury approvals (bank-demo.html) — mirrors
+// issuer-server/server.js's BANK_APPROVALS_FILE/readBankApprovals()/
+// saveBankApproval(). Unlike that single-threaded Node store, this one
+// needs the same flock-guarded read/modify/write shape as the admin
+// nonces/sessions above: two officers signing at nearly the same moment
+// is exactly the case a plain read-then-write would race on PHP's
+// multi-process model. Deliberately does NOT back the approver roster
+// with a persistent, revocable membership credential the way a real
+// deployment should — each request simply names its own authorized
+// public keys inline; see the Node store's own comment for the full
+// reasoning.
+const ATLAS_BANK_APPROVAL_TTL_MS = 3600000; // an hour, in ms — plenty for one demo walkthrough
+const ATLAS_BANK_APPROVAL_MIN_APPROVERS = 2;
+const ATLAS_BANK_APPROVAL_MAX_APPROVERS = 10;
+const ATLAS_BANK_APPROVAL_MAX_AMOUNT = 1000000;
+const ATLAS_DEMO_BANK_ASSET_CLASS = 'atlas.credit.balance'; // the existing spendable-balance class, reused rather than minting a second one
+
+function atlas_bank_approvals_file() {
+  return __DIR__ . '/atlas-bank-approvals-store.json';
+}
+// Read-only view, expired pending entries filtered out — same "one file,
+// filter on read" convention as read_pending_trades(). A plain shared-lock
+// read is safe here even though writers use an exclusive lock elsewhere:
+// nothing here mutates the file.
+function read_bank_approvals() {
+  $fh = fopen(atlas_bank_approvals_file(), 'c+');
+  if ($fh === false) return ['approvals' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc) || !isset($doc['approvals'])) $doc = ['approvals' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $doc['approvals'] = array_values(array_filter($doc['approvals'], function ($a) use ($nowMs) {
+    return ($a['status'] ?? 'pending') !== 'pending' || strtotime($a['expiresAt']) * 1000 > $nowMs;
+  }));
+  return $doc;
+}
+function find_bank_approval($id) {
+  foreach (read_bank_approvals()['approvals'] as $a) {
+    if ($a['id'] === $id) return $a;
+  }
+  return null;
+}
+// Upserts one approval under an exclusive lock held across the whole
+// read-modify-write — the actual concurrency guard POST
+// /atlas/demo/bank/approval/sign depends on: two officers' signatures
+// arriving as two nearly-simultaneous requests must never both read the
+// same pre-signature state and each write back only their own addition,
+// silently dropping one.
+function save_bank_approval($approval) {
+  $file = atlas_bank_approvals_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['approvals'])) $doc = ['approvals' => []];
+  $found = false;
+  foreach ($doc['approvals'] as $i => $a) {
+    if ($a['id'] === $approval['id']) { $doc['approvals'][$i] = $approval; $found = true; break; }
+  }
+  if (!$found) $doc['approvals'][] = $approval;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+// The exact bytes every approver signs (SPEC.md §6.2's canonical-payload
+// mechanism, verify_envelope() in bootstrap.php) — mirrors
+// issuer-server/server.js's bankApprovalPayloadOf(). See that function's
+// own comment for why this excludes everything but id/action — WYSIWYS.
+function bank_approval_payload_of($approval) {
+  return ['id' => $approval['id'], 'action' => $approval['action']];
+}
+
+// The actual concurrency-sensitive operation — everything from "find this
+// request" through "write the new signature (and mint, if it just
+// crossed the threshold) back" happens under ONE lock held for the whole
+// sequence, unlike find_bank_approval()/save_bank_approval() above (each
+// its own separate lock, fine for a plain read or an already-fully-formed
+// write, but exactly what would race here: two officers' signatures
+// arriving as nearly-simultaneous requests must never both read the same
+// pre-signature state and each write back only their own addition,
+// silently dropping one). Returns ['error' => '...'] or ['approval' =>
+// the current/updated record] — atlas/demo/bank/approval/sign.php just
+// turns that straight into the HTTP response.
+function sign_bank_approval($id, $proof) {
+  $file = atlas_bank_approvals_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['approvals'])) $doc = ['approvals' => []];
+
+  $nowMs = (int) round(microtime(true) * 1000);
+  $idx = null;
+  foreach ($doc['approvals'] as $i => $a) {
+    if ($a['id'] !== $id) continue;
+    if (($a['status'] ?? 'pending') === 'pending' && strtotime($a['expiresAt']) * 1000 <= $nowMs) break; // expired — treat as not found, same as read_bank_approvals()'s filter
+    $idx = $i;
+    break;
+  }
+  if ($idx === null) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'no such approval request (or it already expired)'];
+  }
+
+  $approval = $doc['approvals'][$idx];
+  if ($approval['status'] !== 'pending') {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'this request is already ' . $approval['status']];
+  }
+  if (!in_array($proof['publicKey'] ?? null, $approval['approvers'], true)) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'this key is not an authorized approver for this request'];
+  }
+  foreach ($approval['signatures'] as $s) {
+    if ($s['publicKey'] === $proof['publicKey']) {
+      flock($fh, LOCK_UN);
+      fclose($fh);
+      return ['approval' => $approval]; // already signed — idempotent, not an error
+    }
+  }
+
+  $sigOk = verify_envelope(bank_approval_payload_of($approval), $proof);
+  if (!$sigOk) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'approval signature does not check out'];
+  }
+
+  $approval['signatures'][] = [
+    'publicKey' => $proof['publicKey'],
+    'signerRole' => $proof['signerRole'],
+    'signature' => $proof['signature'],
+    'signedAt' => iso_now(),
+  ];
+  if (count($approval['signatures']) >= $approval['requiredApprovals']) {
+    $kp = atlas_load_keys();
+    $credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $approval['action']['toPublicKey'], $approval['action']['assetClass'], $approval['action']['amount'], null);
+    $approval['status'] = 'executed';
+    $approval['executedCredentialId'] = $credential['id'];
+  }
+  $doc['approvals'][$idx] = $approval;
+
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['approval' => $approval];
+}
+
 // Fixed claim text an attestation-demo.html visitor can request FROM the
 // second, independent domain playing "the reviewer" (SPEC.md §5.11) — a
 // short allow-list rather than free text, same discipline every other
