@@ -1931,6 +1931,16 @@ const fullBackupExportSeedInput = document.getElementById('fullBackupExportSeedI
 const exportFullBackupBtn = document.getElementById('exportFullBackupBtn');
 const fullBackupExportStatusEl = document.getElementById('fullBackupExportStatus');
 const restoreFullBackupBtn = document.getElementById('restoreFullBackupBtn');
+const autoBackupLocalSection = document.getElementById('autoBackupLocalSection');
+const autoBackupWebAuthnNote = document.getElementById('autoBackupWebAuthnNote');
+const autoBackupStatusLine = document.getElementById('autoBackupStatusLine');
+const autoBackupSetupBtn = document.getElementById('autoBackupSetupBtn');
+const autoBackupReconnectBtn = document.getElementById('autoBackupReconnectBtn');
+const autoBackupTurnOffBtn = document.getElementById('autoBackupTurnOffBtn');
+const autoBackupRestoreFileInput = document.getElementById('autoBackupRestoreFileInput');
+const autoBackupRestorePasswordInput = document.getElementById('autoBackupRestorePasswordInput');
+const autoBackupRestoreBtn = document.getElementById('autoBackupRestoreBtn');
+const autoBackupRestoreStatusEl = document.getElementById('autoBackupRestoreStatus');
 const exportStatusEl = document.getElementById('exportStatus');
 const exportBtn = document.getElementById('exportBtn');
 const importWalletBtn = document.getElementById('importWalletBtn');
@@ -3696,6 +3706,45 @@ async function refreshIdentityModeControls() {
   // in wallet.js.
   fullBackupLocalSection.style.display = mode === 'webauthn' ? 'none' : '';
   fullBackupWebAuthnNote.style.display = mode === 'webauthn' ? '' : 'none';
+  // Same reasoning again — automatic backup replicates the same payload
+  // Full backup does, so it's gated the same way.
+  autoBackupLocalSection.style.display = mode === 'webauthn' ? 'none' : '';
+  autoBackupWebAuthnNote.style.display = mode === 'webauthn' ? '' : 'none';
+}
+
+// Reflects wallet.js's atlasAutoBackupSettings onto the Settings panel:
+// which buttons make sense (nothing set up yet vs. running vs. lapsed) and
+// a plain-language status line. Called on opening Settings and again
+// whenever chrome.storage.onChanged reports that key changed — including
+// from the debounced write this same session's own wallet.js triggers on
+// every meaningful change, and from backup-setup.html's separate top-level
+// tab turning it on in the first place (see that page's own comment for
+// why it doesn't message this one directly).
+async function refreshAutoBackupDisplay() {
+  if (!autoBackupStatusLine) return;
+  const settings = await AtlasWallet.getAutoBackupSettings();
+  if (!settings || !settings.enabled) {
+    autoBackupStatusLine.textContent = 'Not set up on this device.';
+    autoBackupSetupBtn.style.display = '';
+    autoBackupSetupBtn.textContent = 'Set up automatic backup';
+    autoBackupReconnectBtn.style.display = 'none';
+    autoBackupTurnOffBtn.style.display = 'none';
+    return;
+  }
+  if (settings.lapsed) {
+    autoBackupStatusLine.textContent = 'Paused — ' + (settings.lastError || 'backup file access needs to be reconnected') +
+      (settings.lastWrittenAt ? ' (last saved ' + new Date(settings.lastWrittenAt).toLocaleString() + ')' : '');
+    autoBackupSetupBtn.style.display = 'none';
+    autoBackupReconnectBtn.style.display = '';
+    autoBackupTurnOffBtn.style.display = '';
+    return;
+  }
+  autoBackupStatusLine.textContent = settings.lastWrittenAt
+    ? 'On — last saved ' + new Date(settings.lastWrittenAt).toLocaleString() + ' to "' + (settings.fileName || 'your chosen file') + '".'
+    : 'On — saving for the first time shortly.';
+  autoBackupSetupBtn.style.display = 'none';
+  autoBackupReconnectBtn.style.display = 'none';
+  autoBackupTurnOffBtn.style.display = '';
 }
 
 // ---------- wallet panel screen routing ----------
@@ -6175,6 +6224,15 @@ document.addEventListener('keydown', (e) => {
 });
 
 chrome.storage.onChanged.addListener(async (changes, areaName) => {
+  if (areaName === 'local' && changes.atlasAutoBackupSettings) {
+    // Fires from this same session's own debounced write (wallet.js), and
+    // from backup-setup.html's separate top-level tab turning replication
+    // on/off in the first place — that page has no window.opener and never
+    // messages this one directly (see its own top comment), so this
+    // storage listener is genuinely the only way this panel notices either
+    // one happened.
+    await refreshAutoBackupDisplay();
+  }
   if (areaName === 'session' && changes.atlasUnlockedIdentity) {
     await refreshIdentityDisplay();
     // Task #111 TODO round 1, item 1: the Messaging button/window are
@@ -6545,6 +6603,7 @@ async function openSettings() {
   await refreshHiddenAssetsDisplay();
   await refreshCacheDisplay();
   await refreshChatAdminDisplay();
+  await refreshAutoBackupDisplay();
   if (characterScaleInputEl) {
     const scale = await AtlasWallet.getCharacterScale();
     characterScaleInputEl.value = String(scale);
@@ -10338,6 +10397,82 @@ exportFullBackupBtn.addEventListener('click', async () => {
     fullBackupExportStatusEl.textContent = 'Export failed: ' + err.message;
   } finally {
     exportFullBackupBtn.disabled = false;
+  }
+});
+
+// Opens backup-setup.html as a real top-level window — chrome.windows.create()
+// rather than window.open(), same reasoning as identity-popup.js's own
+// comment (real chrome.storage/chrome.runtime bindings) — and necessary
+// here for a second reason too: the File System Access API's picker
+// methods refuse to run inside this settings panel's own cross-origin
+// iframe at all, see wallet.js's "automatic encrypted local backup
+// replication" section for the full explanation. No message is expected
+// back from that window; refreshAutoBackupDisplay() picks up whatever it
+// did via the chrome.storage.onChanged listener above.
+autoBackupSetupBtn.addEventListener('click', () => {
+  chrome.windows.create({ url: chrome.runtime.getURL('backup-setup.html'), type: 'popup', width: 480, height: 640 });
+});
+
+autoBackupReconnectBtn.addEventListener('click', async () => {
+  autoBackupReconnectBtn.disabled = true;
+  try {
+    await AtlasWallet.reconnectAutoBackupPermission();
+    await refreshAutoBackupDisplay();
+  } catch (err) {
+    autoBackupStatusLine.textContent = 'Could not reconnect: ' + err.message;
+  } finally {
+    autoBackupReconnectBtn.disabled = false;
+  }
+});
+
+autoBackupTurnOffBtn.addEventListener('click', async () => {
+  autoBackupTurnOffBtn.disabled = true;
+  try {
+    await AtlasWallet.turnOffAutoBackup();
+    await refreshAutoBackupDisplay();
+  } finally {
+    autoBackupTurnOffBtn.disabled = false;
+  }
+});
+
+let pendingAutoBackupRestoreFile = null;
+autoBackupRestoreFileInput.addEventListener('change', async () => {
+  pendingAutoBackupRestoreFile = null;
+  const file = autoBackupRestoreFileInput.files && autoBackupRestoreFileInput.files[0];
+  if (!file) return;
+  try {
+    pendingAutoBackupRestoreFile = JSON.parse(await file.text());
+    autoBackupRestoreStatusEl.textContent = 'File loaded — enter its password.';
+  } catch (err) {
+    autoBackupRestoreStatusEl.textContent = 'Could not read that file: ' + err.message;
+  }
+});
+
+autoBackupRestoreBtn.addEventListener('click', async () => {
+  if (!pendingAutoBackupRestoreFile) {
+    autoBackupRestoreStatusEl.textContent = 'Choose a backup file first.';
+    return;
+  }
+  autoBackupRestoreBtn.disabled = true;
+  autoBackupRestoreStatusEl.textContent = 'Decrypting…';
+  try {
+    await AtlasWallet.restoreFromAutoBackupFile(pendingAutoBackupRestoreFile, autoBackupRestorePasswordInput.value);
+    autoBackupRestorePasswordInput.value = '';
+    autoBackupRestoreStatusEl.textContent = 'Restored — identity and data replaced on this device.';
+    showWalletScreen('mainWalletScreen');
+    await refreshIdentityDisplay();
+    await refreshInventoryDisplay();
+    await refreshOwnedOncePerUserClassKeys();
+    await AtlasWallet.checkAllMail();
+    await refreshMailDisplay();
+    await refreshMessagingDisplay();
+    await refreshChatModerationCache();
+    renderChatMessages();
+    refreshChatIdentity();
+  } catch (err) {
+    autoBackupRestoreStatusEl.textContent = err.message;
+  } finally {
+    autoBackupRestoreBtn.disabled = false;
   }
 });
 

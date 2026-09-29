@@ -236,7 +236,23 @@ const AtlasWallet = (() => {
   // specific count, and it should always be whatever that blob's own
   // `kdfIterations` field says (or KDF_ITERATIONS_LEGACY if the field is
   // absent), never assumed.
-  async function deriveAesKey(secrets, saltBytes, iterations) {
+  //
+  // `extractable` defaults to false (every pre-existing call site omits it
+  // and keeps getting a key that can only ever be used, never read back out
+  // — the right default for anything protecting the identity blob itself).
+  // The one exception, added for automatic backup replication: the
+  // password-derived key that encrypts the auto-backup file has to survive
+  // being cached across a debounce window in chrome.storage.session (see
+  // that feature's own comments further down), and a CryptoKey object
+  // itself does not actually round-trip through chrome.storage.session
+  // usably (verified directly — it comes back looking like a key but fails
+  // every subtle.* call with "parameter is not of type CryptoKey"; that
+  // storage layer does not give CryptoKey the structured-clone treatment
+  // the Web Crypto spec allows for, at least not in the way this extension
+  // needs). Exporting the raw bytes once, right after deriving, and
+  // re-importing them at write time is the workaround — see
+  // cacheAutoBackupSessionKey() below.
+  async function deriveAesKey(secrets, saltBytes, iterations, extractable) {
     const digests = await Promise.all(secrets.map((s) =>
       crypto.subtle.digest('SHA-256', new TextEncoder().encode(s || ''))
     ));
@@ -247,7 +263,7 @@ const AtlasWallet = (() => {
       { name: 'PBKDF2', salt: saltBytes, iterations: iterations || KDF_ITERATIONS_CURRENT, hash: 'SHA-256' },
       baseKey,
       { name: 'AES-GCM', length: 256 },
-      false,
+      !!extractable,
       ['encrypt', 'decrypt']
     );
   }
@@ -361,6 +377,10 @@ const AtlasWallet = (() => {
     });
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     await chrome.storage.local.set({ atlasIdentityMode: 'local' });
+    // No-op today — automatic backup can't be enabled before an identity
+    // exists — but harmless and future-proof to call unconditionally, same
+    // as every other place this session sets atlasUnlockedIdentity.
+    await cacheAutoBackupSessionKey(password);
 
     const seedPhrase = generateSeedPhrase();
     return { publicKey, seedPhrase };
@@ -418,12 +438,18 @@ const AtlasWallet = (() => {
 
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     await chrome.storage.local.set({ atlasIdentityMode: 'local' });
+    // Refreshes the automatic-backup session key for this unlock — see
+    // that feature's own top comment for why it has to be re-derived here
+    // rather than kept from some earlier session. A no-op if auto-backup
+    // was never set up on this device.
+    await cacheAutoBackupSessionKey(password);
     return { publicKey };
   }
 
   async function lockIdentity() {
     await endAllAdminSessions();
     await chrome.storage.session.remove('atlasUnlockedIdentity');
+    await clearAutoBackupSessionKey();
   }
 
   // Same trust rule as exportIdentity below: re-derives from the LOCAL
@@ -465,6 +491,28 @@ const AtlasWallet = (() => {
     });
     // The session-cached unlocked identity (publicKey/privateKeyJwk) is
     // still correct — same keypair — so no need to re-unlock.
+
+    // If automatic backup replication is set up on this device, the file
+    // it's been writing is encrypted under a key derived from the OLD
+    // password — left as-is, it would silently become undecryptable with
+    // the new one. Re-key it now, the same "this is the safest possible
+    // moment, we already have proof of both passwords" reasoning
+    // unlockIdentity's own KDF migration above uses. Best-effort: a
+    // password change should never fail or roll back because of a backup
+    // file write, and the debounced write path will catch it up again on
+    // the very next data change even if this fails.
+    try {
+      const settings = await getAutoBackupSettings();
+      if (settings && settings.enabled) {
+        const identity = await getIdentity();
+        const blob = await buildAutoBackupBlob(identity, newPassword); // mints a fresh salt
+        await setAutoBackupSettings({ salt: blob.salt, kdfIterations: blob.kdfIterations });
+        await cacheAutoBackupSessionKey(newPassword);
+        scheduleAutoBackupWrite();
+      }
+    } catch (err) {
+      // Best-effort — see comment above.
+    }
   }
 
   async function signWithSelf(payload) {
@@ -672,6 +720,10 @@ const AtlasWallet = (() => {
     });
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     await chrome.storage.local.set({ atlasIdentityMode: 'local' });
+    // See unlockIdentity's own comment — same reasoning, this is also a
+    // moment where a local identity becomes newly active under a known
+    // password.
+    await cacheAutoBackupSessionKey(password);
     return { publicKey };
   }
 
@@ -2969,30 +3021,13 @@ const AtlasWallet = (() => {
   // layer instead of by each store's own per-identity key. This is far
   // less code and far less likely to silently mis-handle one of those
   // migration edge cases than reimplementing storage access from scratch.
-  async function exportFullBackup(password, seedPhrase) {
-    const identity = await getIdentity();
-    if (!identity || identity.mode !== 'local') {
-      throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
-    }
-    if (!seedPhrase || normalizeSeedPhrase(seedPhrase).split(' ').length < 4) {
-      throw new Error('Enter the full seed phrase you were shown when you created this identity.');
-    }
-
-    // Re-verify the password against the LOCAL encrypted blob rather than
-    // trusting that the wallet happens to be unlocked this session — same
-    // reasoning as exportIdentity() above, just for a file that carries
-    // far more than the identity alone.
-    const { atlasIdentity } = await chrome.storage.local.get('atlasIdentity');
-    if (!atlasIdentity) throw new Error('No local identity set up on this device yet.');
-    const localSalt = new Uint8Array(b64urlDecode(atlasIdentity.salt));
-    const localIv = new Uint8Array(b64urlDecode(atlasIdentity.iv));
-    const localKey = await deriveAesKey([password], localSalt, atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY);
-    try {
-      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: localIv }, localKey, b64urlDecode(atlasIdentity.ciphertext));
-    } catch (err) {
-      throw new Error('Incorrect password.');
-    }
-
+  // Assembles the exact same {identity, data, settings} shape both
+  // exportFullBackup (below) and the automatic backup replication feature
+  // (further down this file) protect — factored out so there's only ONE
+  // place that knows which ~15 data families a full backup covers. Calls
+  // the SAME getX() getters the UI already uses (see this section's
+  // original comment above for why), never a raw storage read.
+  async function buildBackupPayload(identity) {
     const owner = identity.publicKey;
     const [
       wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
@@ -3038,7 +3073,7 @@ const AtlasWallet = (() => {
       'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes'
     ]);
 
-    const payload = {
+    return {
       identity: { publicKey: identity.publicKey, privateKeyJwk: identity.privateKeyJwk },
       data: {
         wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
@@ -3053,56 +3088,32 @@ const AtlasWallet = (() => {
       },
       settings: settingsRaw
     };
-
-    const exportSalt = crypto.getRandomValues(new Uint8Array(16));
-    const exportIv = crypto.getRandomValues(new Uint8Array(12));
-    const exportKey = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], exportSalt);
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: exportIv }, exportKey, new TextEncoder().encode(JSON.stringify(payload))
-    );
-    return {
-      format: 'atlas-full-backup/1.0',
-      salt: b64urlEncode(exportSalt.buffer),
-      iv: b64urlEncode(exportIv.buffer),
-      ciphertext: b64urlEncode(ciphertext),
-      kdfIterations: KDF_ITERATIONS_CURRENT,
-      exportedAt: new Date().toISOString()
-    };
   }
 
-  // The counterpart to exportFullBackup() above. Decrypting the file IS
-  // the authentication check (same one-shot "success or failure on the
-  // whole pair at once" posture as importIdentity()) — there's no partial
-  // credit for getting the password right and the seed phrase wrong, or
-  // vice versa. On success this both restores the identity (re-encrypted
-  // locally under the password alone, exactly like importIdentity()) AND
-  // repopulates every data family from the backup via the same saveX()
-  // setters normal use goes through, so each one gets freshly encrypted
-  // under the restored identity's own key on THIS device — never a raw
-  // copy of whatever ciphertext the original device happened to have.
-  async function importFullBackup(fileData, password, seedPhrase) {
-    if (!fileData || fileData.format !== 'atlas-full-backup/1.0') throw new Error('Not an Atlas full backup file.');
-    const salt = new Uint8Array(b64urlDecode(fileData.salt));
-    const iv = new Uint8Array(b64urlDecode(fileData.iv));
-    const key = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], salt, fileData.kdfIterations || KDF_ITERATIONS_LEGACY);
-    let payload;
-    try {
-      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(fileData.ciphertext));
-      payload = JSON.parse(new TextDecoder().decode(plaintext));
-    } catch (err) {
-      throw new Error('Incorrect password or seed phrase.');
-    }
+  // The counterpart to buildBackupPayload() above — restores every family
+  // it assembled back into local storage via the SAME saveX() setters
+  // normal use goes through (see this section's original comment for why),
+  // so each one gets freshly encrypted under whichever identity is active
+  // on THIS device, never a raw copy of another device's ciphertext.
+  // Shared by importFullBackup (below) and the automatic-backup restore
+  // path (further down this file) — identical restore semantics either
+  // way, only how the outer file got decrypted differs between them.
+  async function applyBackupPayload(payload, localUnlockPassword) {
     if (!payload || !payload.identity || !payload.identity.publicKey || !payload.identity.privateKeyJwk) {
       throw new Error('This backup file is missing its identity — it may be corrupted.');
     }
-
     const { publicKey, privateKeyJwk } = payload.identity;
 
     // Restore the identity itself first — everything else below is keyed
     // to it. Same local re-encrypt + session-activate as importIdentity().
+    // localUnlockPassword is the password the person will use to unlock
+    // THIS device going forward — for importFullBackup that's the same
+    // password that unlocked the backup file itself (a single secret
+    // doing double duty); the automatic-backup restore path below passes
+    // its own equivalent through the same way.
     const localSalt = crypto.getRandomValues(new Uint8Array(16));
     const localIv = crypto.getRandomValues(new Uint8Array(12));
-    const localKey = await deriveAesKey([password], localSalt);
+    const localKey = await deriveAesKey([localUnlockPassword], localSalt);
     const localPlaintext = new TextEncoder().encode(JSON.stringify({ publicKey, privateKeyJwk }));
     const localCiphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: localIv }, localKey, localPlaintext);
     await chrome.storage.local.set({
@@ -3119,6 +3130,29 @@ const AtlasWallet = (() => {
     await chrome.storage.local.set({ atlasIdentityMode: 'local' });
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     const identity = { mode: 'local', publicKey, privateKeyJwk };
+
+    // Automatic backup, if any, is per-device AND per-identity (the file
+    // handle in IndexedDB, and the salt/settings pointing at it, are keyed
+    // to whichever identity set it up) — atlasAutoBackupSettings is
+    // deliberately not one of the keys buildBackupPayload reads, so it's
+    // never carried IN the backup payload itself: a FileSystemFileHandle
+    // chosen on one device means nothing on another, so each device sets
+    // its own automatic backup destination up independently. A restore
+    // onto a device that already had auto-backup configured for a
+    // DIFFERENT identity would otherwise leave stale settings claiming
+    // it's still "on" for an identity that's no longer active, with every
+    // future write silently skipped by the identity-mismatch check in
+    // writeAutoBackupNow — turning it off explicitly here means the
+    // Settings panel tells the truth instead of quietly lying.
+    const existingAutoBackup = await getAutoBackupSettings();
+    if (existingAutoBackup && existingAutoBackup.ownerPublicKey && existingAutoBackup.ownerPublicKey !== publicKey) {
+      await turnOffAutoBackup();
+    } else {
+      // Same identity restored onto the same device it was already set up
+      // on (or nothing was ever set up) — safe to just refresh the cached
+      // key under whatever password unlocks this device now.
+      await cacheAutoBackupSessionKey(localUnlockPassword);
+    }
 
     const owner = publicKey;
     const d = payload.data || {};
@@ -3185,6 +3219,463 @@ const AtlasWallet = (() => {
     if (Object.keys(settingsToSet).length) await chrome.storage.local.set(settingsToSet);
 
     return { publicKey };
+  }
+
+  async function exportFullBackup(password, seedPhrase) {
+    const identity = await getIdentity();
+    if (!identity || identity.mode !== 'local') {
+      throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
+    }
+    if (!seedPhrase || normalizeSeedPhrase(seedPhrase).split(' ').length < 4) {
+      throw new Error('Enter the full seed phrase you were shown when you created this identity.');
+    }
+
+    // Re-verify the password against the LOCAL encrypted blob rather than
+    // trusting that the wallet happens to be unlocked this session — same
+    // reasoning as exportIdentity() above, just for a file that carries
+    // far more than the identity alone.
+    const { atlasIdentity } = await chrome.storage.local.get('atlasIdentity');
+    if (!atlasIdentity) throw new Error('No local identity set up on this device yet.');
+    const localSalt = new Uint8Array(b64urlDecode(atlasIdentity.salt));
+    const localIv = new Uint8Array(b64urlDecode(atlasIdentity.iv));
+    const localKey = await deriveAesKey([password], localSalt, atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY);
+    try {
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: localIv }, localKey, b64urlDecode(atlasIdentity.ciphertext));
+    } catch (err) {
+      throw new Error('Incorrect password.');
+    }
+
+    const payload = await buildBackupPayload(identity);
+
+    const exportSalt = crypto.getRandomValues(new Uint8Array(16));
+    const exportIv = crypto.getRandomValues(new Uint8Array(12));
+    const exportKey = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], exportSalt);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: exportIv }, exportKey, new TextEncoder().encode(JSON.stringify(payload))
+    );
+    return {
+      format: 'atlas-full-backup/1.0',
+      salt: b64urlEncode(exportSalt.buffer),
+      iv: b64urlEncode(exportIv.buffer),
+      ciphertext: b64urlEncode(ciphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT,
+      exportedAt: new Date().toISOString()
+    };
+  }
+
+  // The counterpart to exportFullBackup() above. Decrypting the file IS
+  // the authentication check (same one-shot "success or failure on the
+  // whole pair at once" posture as importIdentity()) — there's no partial
+  // credit for getting the password right and the seed phrase wrong, or
+  // vice versa. On success this both restores the identity (re-encrypted
+  // locally under the password alone, exactly like importIdentity()) AND
+  // repopulates every data family from the backup via the same saveX()
+  // setters normal use goes through, so each one gets freshly encrypted
+  // under the restored identity's own key on THIS device — never a raw
+  // copy of whatever ciphertext the original device happened to have.
+  async function importFullBackup(fileData, password, seedPhrase) {
+    if (!fileData || fileData.format !== 'atlas-full-backup/1.0') throw new Error('Not an Atlas full backup file.');
+    const salt = new Uint8Array(b64urlDecode(fileData.salt));
+    const iv = new Uint8Array(b64urlDecode(fileData.iv));
+    const key = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], salt, fileData.kdfIterations || KDF_ITERATIONS_LEGACY);
+    let payload;
+    try {
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(fileData.ciphertext));
+      payload = JSON.parse(new TextDecoder().decode(plaintext));
+    } catch (err) {
+      throw new Error('Incorrect password or seed phrase.');
+    }
+    return applyBackupPayload(payload, password);
+  }
+
+  // ---------- automatic encrypted local backup replication ----------
+  //
+  // exportFullBackup/importFullBackup above are deliberate, occasional,
+  // hands-on actions — someone has to remember to run one. Uninstalling
+  // the extension (or clearing browser data, or losing the device) without
+  // ever having done that loses everything: the identity AND every
+  // credential it holds, with no server-side "what does this public key
+  // currently hold" registry anywhere to recover it from (this protocol is
+  // deliberately bearer-style — see SPEC.md §6). This feature closes that
+  // gap by keeping a SEPARATE encrypted copy of the same full-backup
+  // payload continuously up to date on the person's own filesystem, via
+  // the File System Access API: one ordinary permission prompt, granted
+  // once, then silent in-place rewrites on every meaningful change after
+  // that — no `chrome.downloads`-style repeated download prompts.
+  //
+  // Three requirements for this, all load-bearing, not nice-to-haves:
+  // explain what's about to happen BEFORE the native picker appears,
+  // plainly state what's lost if the person declines, and never write
+  // anything to that file unencrypted. See extension/backup-setup.html for
+  // where the first two are actually shown to the person — this file only
+  // has the third, plus the mechanics.
+  //
+  // ARCHITECTURE NOTE — why this isn't just a button in this panel: the
+  // Settings screen this code otherwise lives behind runs inside a
+  // cross-origin (chrome-extension://) iframe embedded in the host page
+  // (see content.js's openOverlay()). The File System Access API's picker
+  // methods (showSaveFilePicker et al.) refuse to run in a cross-origin
+  // nested browsing context at all — there's no Permissions-Policy
+  // delegation for it the way iframe.allow covers WebAuthn above. So the
+  // actual picker has to run from a genuine top-level extension page,
+  // exactly the same problem (and the same fix) identity-popup.html
+  // already solved for WebAuthn passkey creation — see backup-setup.html/
+  // backup-setup.js, opened via chrome.windows.create() from viewer.js.
+  // Both pages share this same chrome-extension:// origin, so IndexedDB
+  // (below) is exactly how the handle chosen over there reaches the write
+  // logic that actually runs here, inside the iframe, on every change.
+  //
+  // ENCRYPTION KEY DESIGN — why this is password-only, not password+seed
+  // like exportFullBackup, and why it isn't just "whatever key the wallet
+  // already has in memory": two real constraints collided here.
+  //   1. The file has to be decryptable by someone who has ONLY their
+  //      password after a total loss — that rules out deriving the key
+  //      from the live private key material cached in chrome.storage.
+  //      session while unlocked (atlasUnlockedIdentity): that key is
+  //      exactly what a restore is trying to get BACK, so encrypting the
+  //      recovery file with it would be circular — decrypting the backup
+  //      would require already having the thing the backup exists to
+  //      recover.
+  //   2. Automatic writes have to happen with no further prompts, which
+  //      rules out the seed phrase (shown once at creation, never stored
+  //      anywhere, and re-asking for it on every silent write is exactly
+  //      the repeated-prompt UX this whole feature exists to avoid) and
+  //      rules out re-asking for the password every time too. The
+  //      resolution: derive a purpose-scoped AES key from the password
+  //      ALONE once per unlock (see cacheAutoBackupSessionKey below), and
+  //      cache it in chrome.storage.session — same lifetime as
+  //      atlasUnlockedIdentity, cleared on lock, re-derived on next
+  //      unlock, never persisted to disk in derived form. This is single-
+  //      factor, weaker than exportFullBackup's deliberate two-factor
+  //      design — an honest tradeoff, not an oversight — but it matches
+  //      requirement 3's actual bar ("never less protected than what's
+  //      already sitting in chrome.storage.local today"): the local
+  //      atlasIdentity blob itself is ALSO only password-protected.
+  //   Deriving a CryptoKey with extractable:true (see deriveAesKey's own
+  //   comment above) and exporting its raw bytes to a string is what makes
+  //   the caching in chrome.storage.session possible at all — a CryptoKey
+  //   object was tried directly and confirmed NOT to survive that specific
+  //   storage layer intact (see deriveAesKey's comment for the error this
+  //   produced).
+
+  const AUTO_BACKUP_FORMAT = 'atlas-auto-backup/1.0';
+  const AUTO_BACKUP_DB_NAME = 'atlas-auto-backup';
+  const AUTO_BACKUP_DB_STORE = 'handles';
+  const AUTO_BACKUP_WRITE_DEBOUNCE_MS = 4000;
+
+  function openAutoBackupDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(AUTO_BACKUP_DB_NAME, 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore(AUTO_BACKUP_DB_STORE); };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  // FileSystemFileHandle objects are real, structured-clonable browser
+  // objects that Chromium specifically supports persisting in IndexedDB —
+  // they can NOT live in chrome.storage (that API is JSON-only, and the
+  // handle isn't JSON-serializable at all). This is the one piece of state
+  // in this whole feature that has to go through IndexedDB rather than
+  // chrome.storage; everything else (settings, the derived session key)
+  // stays in chrome.storage for consistency with the rest of this file.
+  async function idbSetAutoBackupHandle(ownerPublicKey, handle) {
+    const db = await openAutoBackupDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(AUTO_BACKUP_DB_STORE, 'readwrite');
+      tx.objectStore(AUTO_BACKUP_DB_STORE).put(handle, ownerPublicKey);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  }
+
+  async function idbGetAutoBackupHandle(ownerPublicKey) {
+    const db = await openAutoBackupDb();
+    const handle = await new Promise((resolve, reject) => {
+      const tx = db.transaction(AUTO_BACKUP_DB_STORE, 'readonly');
+      const req = tx.objectStore(AUTO_BACKUP_DB_STORE).get(ownerPublicKey);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    return handle;
+  }
+
+  async function idbDeleteAutoBackupHandle(ownerPublicKey) {
+    const db = await openAutoBackupDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(AUTO_BACKUP_DB_STORE, 'readwrite');
+      tx.objectStore(AUTO_BACKUP_DB_STORE).delete(ownerPublicKey);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  }
+
+  // atlasAutoBackupSettings shape: { ownerPublicKey, enabled, fileName,
+  // salt, kdfIterations, lastWrittenAt, lastError, lapsed }. null/absent
+  // means "never set up on this device." Never holds the file handle
+  // itself (see IndexedDB helpers above) or anything secret — salt is a
+  // KDF parameter, not a key, same as every other salt in this file.
+  async function getAutoBackupSettings() {
+    const { atlasAutoBackupSettings } = await chrome.storage.local.get('atlasAutoBackupSettings');
+    return atlasAutoBackupSettings || null;
+  }
+
+  async function setAutoBackupSettings(patch) {
+    const current = (await getAutoBackupSettings()) || {};
+    const merged = { ...current, ...patch };
+    await chrome.storage.local.set({ atlasAutoBackupSettings: merged });
+    return merged;
+  }
+
+  // See this section's own top comment for why this key is password-only
+  // and cached rather than re-derived on every write. A no-op whenever
+  // auto-backup isn't enabled, so it's safe to call unconditionally from
+  // every place the wallet unlocks (below) without an extra "is this even
+  // turned on" check at each call site.
+  async function cacheAutoBackupSessionKey(password) {
+    const settings = await getAutoBackupSettings();
+    if (!settings || !settings.enabled || !settings.salt) return;
+    const saltBytes = new Uint8Array(b64urlDecode(settings.salt));
+    const key = await deriveAesKey([password], saltBytes, settings.kdfIterations || KDF_ITERATIONS_CURRENT, true);
+    const raw = await crypto.subtle.exportKey('raw', key);
+    await chrome.storage.session.set({ atlasAutoBackupSessionKey: b64urlEncode(raw) });
+  }
+
+  async function clearAutoBackupSessionKey() {
+    await chrome.storage.session.remove('atlasAutoBackupSessionKey');
+  }
+
+  // Pure encryption step, shared between buildAutoBackupBlob (fresh
+  // password, used at setup time and by tests) and writeAutoBackupNow
+  // (cached raw session key, used for every silent write after that). A
+  // fresh random IV every call — this key is reused across many writes
+  // over the file's lifetime, so reusing an IV too is the one mistake
+  // AES-GCM can't tolerate.
+  async function encryptAutoBackupJson(payloadObj, rawKeyBytes, saltB64, kdfIterations, publicKey) {
+    const key = await crypto.subtle.importKey('raw', rawKeyBytes, 'AES-GCM', false, ['encrypt']);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(payloadObj))
+    );
+    return {
+      format: AUTO_BACKUP_FORMAT,
+      publicKey,
+      salt: saltB64,
+      iv: b64urlEncode(iv.buffer),
+      ciphertext: b64urlEncode(ciphertext),
+      kdfIterations,
+      writtenAt: new Date().toISOString()
+    };
+  }
+
+  // Derives straight from the password rather than any cached session
+  // key — used by setUpAutoBackup() for the very first write (mints a
+  // fresh salt) and by changePassword (re-keys under an existing salt so
+  // the file stays readable with the new password). Also the test-
+  // friendly entry point: a full encrypt round trip with no File System
+  // Access API or IndexedDB involved at all, same "exercise the crypto
+  // directly" approach manual-full-backup.js already takes with
+  // exportFullBackup/importFullBackup.
+  async function buildAutoBackupBlob(identity, password, existingSaltB64) {
+    if (!identity || identity.mode !== 'local') {
+      throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
+    }
+    const saltBytes = existingSaltB64 ? new Uint8Array(b64urlDecode(existingSaltB64)) : crypto.getRandomValues(new Uint8Array(16));
+    const saltB64 = existingSaltB64 || b64urlEncode(saltBytes.buffer);
+    const key = await deriveAesKey([password], saltBytes, KDF_ITERATIONS_CURRENT, true);
+    const rawKeyBytes = await crypto.subtle.exportKey('raw', key);
+    const payload = await buildBackupPayload(identity);
+    return encryptAutoBackupJson(payload, rawKeyBytes, saltB64, KDF_ITERATIONS_CURRENT, identity.publicKey);
+  }
+
+  // Called once, from backup-setup.html, right after the person picks a
+  // file and this page has verified they actually know the current
+  // password (see that page's own comment for why re-verifying here
+  // matters — granting a device a standing "silently write my whole
+  // wallet here forever" capability is exactly the kind of action worth
+  // that friction). Performs the first real write itself so the person
+  // gets immediate confirmation it worked, rather than waiting for the
+  // debounce timer on whatever change happens to come next.
+  async function setUpAutoBackup(fileHandle, password) {
+    const identity = await getIdentity();
+    if (!identity || identity.mode !== 'local') {
+      throw new Error('Unlock a local password identity first — a WebAuthn identity’s private key never leaves the authenticator, so it can’t be included in a backup.');
+    }
+    const { atlasIdentity } = await chrome.storage.local.get('atlasIdentity');
+    if (!atlasIdentity) throw new Error('No local identity set up on this device yet.');
+    const localSalt = new Uint8Array(b64urlDecode(atlasIdentity.salt));
+    const localIv = new Uint8Array(b64urlDecode(atlasIdentity.iv));
+    const localKey = await deriveAesKey([password], localSalt, atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY);
+    try {
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: localIv }, localKey, b64urlDecode(atlasIdentity.ciphertext));
+    } catch (err) {
+      throw new Error('Incorrect password.');
+    }
+
+    const blob = await buildAutoBackupBlob(identity, password);
+    await idbSetAutoBackupHandle(identity.publicKey, fileHandle);
+    await setAutoBackupSettings({
+      ownerPublicKey: identity.publicKey,
+      enabled: true,
+      fileName: fileHandle.name || null,
+      salt: blob.salt,
+      kdfIterations: blob.kdfIterations,
+      lastWrittenAt: null,
+      lastError: null,
+      lapsed: false
+    });
+    await cacheAutoBackupSessionKey(password);
+
+    const writable = await fileHandle.createWritable();
+    await writable.write(JSON.stringify(blob));
+    await writable.close();
+    await setAutoBackupSettings({ lastWrittenAt: new Date().toISOString() });
+    return { ok: true, fileName: fileHandle.name || null };
+  }
+
+  // Turns replication off. Deliberately does NOT touch the file itself —
+  // it's the person's own file at that point (and may be the only surviving
+  // copy of something), so leaving it alone and just stopping future writes
+  // is the safer default; they can delete it themselves if they want to.
+  async function turnOffAutoBackup() {
+    const settings = await getAutoBackupSettings();
+    if (settings && settings.ownerPublicKey) {
+      try { await idbDeleteAutoBackupHandle(settings.ownerPublicKey); } catch (err) { /* best-effort cleanup */ }
+    }
+    await setAutoBackupSettings({ enabled: false, lapsed: false, lastError: null });
+    await clearAutoBackupSessionKey();
+  }
+
+  // The actual silent write — called after the debounce timer below
+  // settles, and once immediately by reconnectAutoBackupPermission() after
+  // permission is re-granted. Never throws: every failure mode here is
+  // something that should show up as status text next time the person
+  // opens Settings, not an unhandled rejection in a change-triggered
+  // background write nobody's watching for it.
+  async function writeAutoBackupNow() {
+    try {
+      const settings = await getAutoBackupSettings();
+      if (!settings || !settings.enabled) return { skipped: true, reason: 'not enabled' };
+
+      const identity = await getIdentity();
+      if (!identity || identity.mode !== 'local' || identity.publicKey !== settings.ownerPublicKey) {
+        // Locked, or a different identity is active than the one this
+        // device's auto-backup was set up for — nothing safe to write.
+        return { skipped: true, reason: 'wallet locked or a different identity is active' };
+      }
+
+      const { atlasAutoBackupSessionKey } = await chrome.storage.session.get('atlasAutoBackupSessionKey');
+      if (!atlasAutoBackupSessionKey) {
+        // Enabled, unlocked, but no key cached this session — can happen
+        // right after enabling auto-backup mid-session on a build that
+        // predates this cache, or after a chrome.storage.session eviction.
+        // Re-derive is impossible without the password; this resolves
+        // itself on the next real unlock, which always calls
+        // cacheAutoBackupSessionKey().
+        return { skipped: true, reason: 'backup key not cached this session — resumes after next unlock' };
+      }
+
+      const handle = await idbGetAutoBackupHandle(identity.publicKey);
+      if (!handle) {
+        await setAutoBackupSettings({ lapsed: true, lastError: 'No backup file location saved on this device — set automatic backup up again.' });
+        return { skipped: true, reason: 'no handle in IndexedDB' };
+      }
+
+      // Requirement: notice a lapsed permission rather than let the person
+      // believe backups are still running when they've quietly stopped.
+      // Deliberately does NOT call handle.requestPermission() here — that
+      // can require a fresh user gesture in some implementations, and this
+      // write is very often running with none (triggered by a background
+      // mail check, not a click) — see reconnectAutoBackupPermission()
+      // below for the version that's always called from a real click.
+      const perm = await handle.queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') {
+        await setAutoBackupSettings({ lapsed: true, lastError: 'Backup file access was revoked in the browser — reconnect it from Settings.' });
+        return { skipped: true, reason: 'permission not granted' };
+      }
+
+      const payload = await buildBackupPayload(identity);
+      const rawKeyBytes = b64urlDecode(atlasAutoBackupSessionKey);
+      const blob = await encryptAutoBackupJson(payload, rawKeyBytes, settings.salt, settings.kdfIterations || KDF_ITERATIONS_CURRENT, identity.publicKey);
+
+      const writable = await handle.createWritable();
+      await writable.write(JSON.stringify(blob));
+      await writable.close();
+      await setAutoBackupSettings({ lastWrittenAt: new Date().toISOString(), lastError: null, lapsed: false });
+      return { ok: true };
+    } catch (err) {
+      try { await setAutoBackupSettings({ lastError: err.message, lapsed: false }); } catch (err2) { /* best-effort */ }
+      return { skipped: true, reason: err.message };
+    }
+  }
+
+  // Must be called from a real click handler — see writeAutoBackupNow's
+  // own comment for why it can't just call this itself once it notices a
+  // lapse. The "reconnect" button in Settings is that click handler.
+  async function reconnectAutoBackupPermission() {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const handle = await idbGetAutoBackupHandle(identity.publicKey);
+    if (!handle) throw new Error('No backup file is saved on this device — set automatic backup up again.');
+    const perm = await handle.requestPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') throw new Error('Permission was not granted.');
+    await setAutoBackupSettings({ lapsed: false, lastError: null });
+    return writeAutoBackupNow();
+  }
+
+  // The restore counterpart — password-only, matching how the file was
+  // encrypted (see this section's top comment). Reuses applyBackupPayload,
+  // the exact same restore logic importFullBackup uses, so a restore from
+  // an automatic backup file behaves identically to a restore from a
+  // manually-exported one once the outer file is decrypted.
+  async function restoreFromAutoBackupFile(fileData, password) {
+    if (!fileData || fileData.format !== AUTO_BACKUP_FORMAT) throw new Error('Not an Atlas automatic backup file.');
+    const saltBytes = new Uint8Array(b64urlDecode(fileData.salt));
+    const iv = new Uint8Array(b64urlDecode(fileData.iv));
+    const key = await deriveAesKey([password], saltBytes, fileData.kdfIterations || KDF_ITERATIONS_CURRENT);
+    let payload;
+    try {
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(fileData.ciphertext));
+      payload = JSON.parse(new TextDecoder().decode(plaintext));
+    } catch (err) {
+      throw new Error('Incorrect password.');
+    }
+    return applyBackupPayload(payload, password);
+  }
+
+  // Debounced trigger: a short pause after the last change settles, not a
+  // write on every single one (see this feature's design notes on why —
+  // a heavily-used wallet could otherwise mean a lot of disk writes for no
+  // real benefit). Scheduled from the chrome.storage.onChanged listener
+  // below, which fires for literally any local-storage change from
+  // anywhere in this extension — simpler and more future-proof than
+  // threading a notify call through every individual saveX() function
+  // buildBackupPayload happens to read from today.
+  let autoBackupDebounceTimer = null;
+  function scheduleAutoBackupWrite() {
+    if (autoBackupDebounceTimer) clearTimeout(autoBackupDebounceTimer);
+    autoBackupDebounceTimer = setTimeout(() => {
+      autoBackupDebounceTimer = null;
+      writeAutoBackupNow();
+    }, AUTO_BACKUP_WRITE_DEBOUNCE_MS);
+  }
+
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      // Self-write guard: writeAutoBackupNow's own bookkeeping touches
+      // exactly one key (atlasAutoBackupSettings) and nothing else. If
+      // that's the ONLY key that just changed, this change notification
+      // was almost certainly caused by a backup write completing, not a
+      // new change that itself needs backing up — without this guard, a
+      // completed write would schedule another write, forever.
+      const changedKeys = Object.keys(changes);
+      if (changedKeys.length === 1 && changedKeys[0] === 'atlasAutoBackupSettings') return;
+      scheduleAutoBackupWrite();
+    });
   }
 
   // ---------- mail (correspondence tied to a held credential) ----------
@@ -4859,6 +5350,8 @@ const AtlasWallet = (() => {
     getCounterparty, createCounterparty,
     getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     exportFullBackup, importFullBackup,
+    getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
+    writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Automatic Wallet Backup</title>
+<style>
+  html, body { margin: 0; min-height: 100%; background: #0e161b; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Segoe UI, sans-serif; color: #e7edef;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100%; padding: 28px 24px; text-align: center;
+  }
+  .wrap { max-width: 420px; }
+  h1 { font-size: 17px; margin: 0 0 14px; }
+  p { font-size: 13px; color: #a9b8bf; line-height: 1.55; margin: 0 0 14px; text-align: left; }
+  p.risk { color: #e0b04c; }
+  .tip { font-size: 12px; color: #7c9aa6; background: #10222a; border: 1px solid #1c3540; border-radius: 8px; padding: 10px 12px; text-align: left; margin: 0 0 18px; }
+  label { display: block; font-size: 12px; color: #a9b8bf; text-align: left; margin: 0 0 6px; }
+  input[type="password"] {
+    width: 100%; font-family: inherit; font-size: 14px; color: #e7edef;
+    background: #141f26; border: 1px solid #2a3f49; border-radius: 8px;
+    padding: 10px 12px; margin: 0 0 18px;
+  }
+  .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  button {
+    font-family: inherit; font-size: 14px; cursor: pointer;
+    border-radius: 999px; padding: 12px 20px; border: 1px solid #57ab9b;
+    background: #141f26; color: #57a593;
+  }
+  button:hover { background: #1a2932; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.secondary { border-color: #3a4a52; color: #a9b8bf; }
+  #status { font-size: 12px; color: #a9b8bf; margin-top: 16px; min-height: 16px; white-space: pre-line; }
+  #status.error { color: #e08a4c; }
+  #status.ok { color: #57a593; }
+  #setupScreen.hidden, #blockedScreen.hidden, #doneScreen.hidden { display: none; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="setupScreen">
+      <h1>Turn on automatic wallet backup</h1>
+      <p>
+        This opens as its own tab on purpose — the browser's file picker
+        only works from a real top-level page, not from a panel embedded
+        inside another site.
+      </p>
+      <p>
+        Clicking "Choose backup file location" below will open your
+        browser's own, ordinary file save dialog. Pick (or create) a file
+        there once, and from then on this extension will silently keep
+        that file up to date every time something meaningful changes in
+        your wallet — no further prompts, no repeated downloads.
+      </p>
+      <p class="risk">
+        If you skip this: uninstalling the extension, clearing your
+        browser data, or losing this device will lose your identity and
+        everything it holds, for good, unless you've separately made a
+        manual export (Settings → Full backup) or have another recovery
+        method set up.
+      </p>
+      <div class="tip">
+        Tip: if you'd like this backup to also survive losing this device
+        entirely, choose a location inside a folder your cloud storage app
+        already keeps in sync — OneDrive, Google Drive, iCloud Drive,
+        Dropbox, or similar. That sync app will then carry a copy off this
+        device automatically, with nothing extra to set up here.
+      </div>
+      <label for="confirmPasswordInput">Confirm your wallet password to continue</label>
+      <input type="password" id="confirmPasswordInput" autocomplete="off" placeholder="Wallet password">
+      <div class="row">
+        <button id="chooseFileBtn" type="button">Choose backup file location</button>
+        <button id="skipBtn" type="button" class="secondary">Not now</button>
+      </div>
+      <div id="status"></div>
+    </div>
+
+    <div id="blockedScreen" class="hidden">
+      <h1>Unlock your wallet first</h1>
+      <p>Automatic backup can only be set up for an already-unlocked local
+        password identity. Go back to the wallet panel, unlock it, then
+        reopen this from Settings.</p>
+    </div>
+
+    <div id="doneScreen" class="hidden">
+      <h1>Automatic backup is on</h1>
+      <p id="doneText"></p>
+      <div class="row"><button id="closeBtn" type="button">Close this tab</button></div>
+    </div>
+  </div>
+
+  <script src="wallet.js"></script>
+  <script src="backup-setup.js"></script>
+</body>
+</html>

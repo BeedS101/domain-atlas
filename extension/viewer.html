@@ -1645,6 +1645,42 @@
         </div>
       </div>
 
+      <!-- Automatic encrypted local backup replication: unlike Identity
+           backup / Full backup above (deliberate, occasional, hands-on
+           exports), this keeps a SEPARATE encrypted copy of the same full-
+           backup payload silently up to date on the person's own
+           filesystem, via the File System Access API — one ordinary
+           permission prompt, granted once, then silent in-place rewrites
+           on every meaningful change after that. See wallet.js's own
+           "automatic encrypted local backup replication" section for the
+           full design reasoning (why it's password-only, why the actual
+           file picker has to run from backup-setup.html's own top-level
+           tab rather than a button right here). -->
+      <div class="settings-category" data-category="auto-backup">
+        <button type="button" class="settings-category-toggle"><span>Automatic backup</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div id="autoBackupLocalSection">
+            <div class="empty-note">Keeps an encrypted copy of your full backup up to date on your own computer automatically, once you set a file location — no further prompts after that.</div>
+            <div id="autoBackupStatusLine" class="mono" style="margin-top:8px;">Not set up on this device.</div>
+            <div class="btn-col" style="margin-top:8px;">
+              <button id="autoBackupSetupBtn" type="button">Set up automatic backup</button>
+              <button id="autoBackupReconnectBtn" type="button" style="display:none;">Reconnect backup file access</button>
+              <button id="autoBackupTurnOffBtn" type="button" class="btn-secondary" style="display:none;">Turn off automatic backup</button>
+            </div>
+            <div style="margin-top:16px;">
+              <div class="subhead">Restore from an automatic backup file</div>
+              <input type="file" id="autoBackupRestoreFileInput" accept="application/json">
+              <input type="password" id="autoBackupRestorePasswordInput" placeholder="Password">
+              <div class="btn-col">
+                <button id="autoBackupRestoreBtn" type="button">Restore this file</button>
+              </div>
+              <div id="autoBackupRestoreStatus" class="mono"></div>
+            </div>
+          </div>
+          <div id="autoBackupWebAuthnNote" class="empty-note" style="display:none;">Passkey identities can't be included in an automatic backup either, same reason as Identity backup and Full backup above — the private key never leaves the authenticator.</div>
+        </div>
+      </div>
+
       <!-- Deliberately a separate, lower-stakes flow from Identity backup
            above: this moves public credentials (what you own), not the
            private key (who you are) — no password needed, see wallet.js's
