@@ -1283,6 +1283,68 @@ involved, stamping a sale to flip the status to Active, a further stamp
 flipping it to Expired, a genuine transfer preserving every fact, and
 independent verification.
 
+## A transfer that needs more than one signature
+
+`demo-domain-a/bank-demo.html` demos K-of-N multi-party approval: a
+treasury transfer that only ever executes once enough of a named group of
+officers sign off, never on any single signature alone — the same
+dual-control principle real treasury/wire-approval workflows already use.
+No new cryptography or credential type is involved: it's the same
+signed-payload mechanism `verifyEnvelope`/`verify_envelope` (SPEC.md §6.2)
+already checks on every other signed action in this project, run against a
+plain `{id, action}` payload instead of a credential presentation.
+
+`POST /atlas/demo/bank/request-approval` records a pending transfer:
+who's allowed to approve it (`approvers`, an array of public keys named
+directly on the request), how many of them actually have to sign
+(`requiredApprovals`), and what it moves once they do (`toPublicKey`,
+`amount`, an optional `memo`) — always against the same
+`atlas.credit.balance` (a fungible, bound spendable balance) the
+cafeteria demo already uses, no new asset class invented for this.
+Creating one is deliberately ungated, the same "harmless to hand out,
+worthless without a real signature" posture the admin session nonce
+route already has — it only ever records what's proposed, never moves
+anything by itself.
+
+`GET /atlas/demo/bank/approval?id=...` is the one call every approver's
+own client is expected to make for itself before signing anything:
+fetching the canonical `{id, action}` straight from the server, never
+trusting whatever the page that assembled the request claims it says.
+That's the whole point of What You See Is What You Sign — a signature
+only means something if the signer independently confirmed what they
+were actually signing, rather than trusting a value someone else
+relayed to them. `POST /atlas/demo/bank/approval/sign` takes one
+officer's own signature over exactly that payload, checks the signing
+key is one of the request's own named approvers, and — the instant a
+request's signature count reaches its own `requiredApprovals` — mints
+the transfer for real via `mintAssetByClass`/`mint_asset_by_class`, the
+same mint every other demo class here already goes through.
+
+The PHP port needed one genuine fix that Node's single-threaded event
+loop never has to think about: two officers signing at nearly the same
+moment is a real race under PHP's multi-process model, so
+`sign_bank_approval()` (`issuer-php/lib/store.php`) holds one `flock()`
+across the entire find/validate/mutate/mint/write sequence rather than
+two separate locked steps, which would otherwise let one signature
+silently overwrite the other. The one place this demo deliberately
+simplifies rather than building the whole thing: who's authorized to
+approve is named directly on each request instead of backed by a
+persistent, revocable membership credential the way a real deployment
+should use.
+
+The page itself follows the same standalone, extension-free shape as
+`attestation-demo.html` and its siblings — three officer keypairs and a
+recipient keypair generated right in the tab, no wallet involved — and
+includes a "forge a signature" button that signs a *tampered* amount
+with a real officer's real key and submits it, showing the rejection
+live: proof this is a genuine signature-over-the-exact-payload check,
+not a lookup of whether a given key signed *something*.
+`test/manual-bank-approval.js` drives the page itself end to end;
+`test/manual-bank-approval-php.js` exercises the raw HTTP layer directly
+against the PHP port, including a genuine three-simultaneous-signers
+race proving the `flock()` fix holds under real concurrent signing, not
+just in theory.
+
 ## 9. Verify it yourself
 
 ```bash
