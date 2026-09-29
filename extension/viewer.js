@@ -11481,6 +11481,21 @@ function markActivity() { lastActivityTime = Date.now(); }
   window.addEventListener(type, markActivity, { passive: true });
 });
 
+// ---------- suppress the browser's own right-click menu ----------
+//
+// Nothing in the wallet panel or the 2D scene canvas does anything with a
+// right click — this just stops the browser's own "Inspect"/"Reload"/"Save
+// image as" menu from popping up over what's meant to read as a
+// self-contained app. The 3D scene/asset previewer already disables its
+// own separately (gltf-mini.js's onContextMenu), for the same reason.
+// Skips inputs and textareas so right-click paste and spellcheck
+// suggestions keep working in the seed phrase box, password fields, and
+// the chat message box — the one place a visitor might actually want it.
+window.addEventListener('contextmenu', (e) => {
+  if (e.target.closest('input, textarea')) return;
+  e.preventDefault();
+});
+
 // Checked periodically rather than with one setTimeout per configured
 // timeout, so a changed setting (saveAutoLockMinutesBtn above) just takes
 // effect on this loop's next pass — same reasoning restartMailCheckLoop
