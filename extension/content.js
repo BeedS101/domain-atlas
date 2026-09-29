@@ -497,6 +497,34 @@
     };
   }
 
+  // The overlay iframe visually covers the whole viewport (position: fixed;
+  // inset: 0), but a native scrollbar is part of the browser's own window
+  // chrome, not the page's stacking context — nothing inside the page can
+  // draw over it. Left alone, the host page underneath stays scrollable by
+  // mouse wheel for as long as the overlay is open, showing a scrollbar
+  // that has nothing to do with the wallet or the world inside it. Locking
+  // scroll on the host page's own root elements while the overlay is open
+  // removes it; hostScrollLocked guards against a re-open (openOverlay can
+  // run again while one is already showing) recapturing 'hidden' as if it
+  // were the page's original value.
+  let hostScrollLocked = false;
+  let originalHtmlOverflow = '';
+  let originalBodyOverflow = '';
+  function lockHostPageScroll() {
+    if (hostScrollLocked) return;
+    originalHtmlOverflow = document.documentElement.style.overflow;
+    originalBodyOverflow = document.body.style.overflow;
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.overflow = 'hidden';
+    hostScrollLocked = true;
+  }
+  function unlockHostPageScroll() {
+    if (!hostScrollLocked) return;
+    document.documentElement.style.overflow = originalHtmlOverflow;
+    document.body.style.overflow = originalBodyOverflow;
+    hostScrollLocked = false;
+  }
+
   function openOverlay(startManifestUrl, worldId, anchorId) {
     const existing = document.getElementById('domain-atlas-overlay');
     if (existing) existing.remove();
@@ -529,6 +557,7 @@
       zIndex: 2147483647
     });
     document.documentElement.appendChild(iframe);
+    lockHostPageScroll();
   }
 
   // The viewer runs in an extension-origin iframe, cross-origin from the host
@@ -550,6 +579,7 @@
     if (event.data === 'domain-atlas-close') {
       const overlay = document.getElementById('domain-atlas-overlay');
       if (overlay) overlay.remove();
+      unlockHostPageScroll();
       if (originalDocumentTitle !== null) {
         document.title = originalDocumentTitle;
         originalDocumentTitle = null;
