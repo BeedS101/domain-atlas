@@ -385,6 +385,7 @@ const AtlasWallet = (() => {
     // correctly handles the case where this identity is replacing an
     // earlier one that still has a stale sync backup enabled).
     await reconcileIdentitySyncBackupOnIdentityChange(atlasIdentityBlob);
+    await logActivity('identity', 'Identity created');
 
     const seedPhrase = generateSeedPhrase();
     return { publicKey, seedPhrase };
@@ -449,6 +450,12 @@ const AtlasWallet = (() => {
     // rather than kept from some earlier session. A no-op if auto-backup
     // was never set up on this device.
     await cacheAutoBackupSessionKey(password);
+    // Deliberately NOT logged to the wallet activity log (further down
+    // this file) — an ordinary unlock happens every browser session and would
+    // drown out everything else in the feed. The KDF-migration re-encrypt
+    // just above is silent for the same reason: it's a transparent
+    // security upgrade to an existing identity, not a new event the person
+    // did anything about.
     return { publicKey };
   }
 
@@ -499,6 +506,7 @@ const AtlasWallet = (() => {
     // and needs the same refresh or it silently stops matching what
     // unlocks this device.
     await reconcileIdentitySyncBackupOnIdentityChange(reencryptedIdentityBlob);
+    await logActivity('identity', 'Wallet password changed');
     // The session-cached unlocked identity (publicKey/privateKeyJwk) is
     // still correct — same keypair — so no need to re-unlock.
 
@@ -684,6 +692,7 @@ const AtlasWallet = (() => {
     const exportKey = await deriveAesKey([password, normalizeSeedPhrase(seedPhrase)], exportSalt);
     const exportPlaintext = new TextEncoder().encode(JSON.stringify({ publicKey, privateKeyJwk }));
     const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: exportIv }, exportKey, exportPlaintext);
+    await logActivity('identity', 'Identity exported to a backup file');
     return {
       format: 'atlas-identity-export/1.0',
       salt: b64urlEncode(exportSalt.buffer),
@@ -738,6 +747,7 @@ const AtlasWallet = (() => {
     // (turns sync backup off rather than silently overwriting) instead of
     // a blind mirror.
     await reconcileIdentitySyncBackupOnIdentityChange(importedIdentityBlob);
+    await logActivity('identity', 'Identity imported from a backup file');
     return { publicKey };
   }
 
@@ -776,6 +786,7 @@ const AtlasWallet = (() => {
     };
     await chrome.storage.local.set({ atlasWebAuthnIdentity: identity });
     await chrome.storage.local.set({ atlasIdentityMode: 'webauthn' });
+    await logActivity('identity', 'Passkey identity created');
     return identity;
   }
 
@@ -1035,6 +1046,7 @@ const AtlasWallet = (() => {
     wallet.push({ credential, lastVerdict: verdict });
     await saveWallet(owner.publicKey, wallet);
     await autoConsolidateAssetWallet(owner.publicKey);
+    await logActivity('asset', 'Minted ' + (quantity !== undefined ? quantity + ' ' : '') + assetClass + ' from ' + issuerDomain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
     return { credential, verdict };
   }
 
@@ -1063,6 +1075,7 @@ const AtlasWallet = (() => {
     wallet.push({ credential: result.received, lastVerdict: await verifyCredential(result.received) });
     await saveWallet(owner.publicKey, wallet);
     await autoConsolidateAssetWallet(owner.publicKey);
+    await logActivity('asset', 'Converted ' + spendAmount + ' ' + credential.asset.class + ' into ' + toClass + ' at ' + credential.issuer.domain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
     return result;
   }
 
@@ -1110,6 +1123,7 @@ const AtlasWallet = (() => {
     newWallet.push({ credential: result.purchased, lastVerdict: await verifyCredential(result.purchased) });
     await saveWallet(owner.publicKey, newWallet);
     await autoConsolidateAssetWallet(owner.publicKey);
+    await logActivity('asset', 'Purchased ' + qty + ' ' + purchasedClass + ' from ' + issuerDomain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
     return result;
   }
 
@@ -1203,9 +1217,16 @@ const AtlasWallet = (() => {
   // tracking) — the credential itself, wherever else a copy of it exists,
   // is unaffected. Also drops it from the loadout, in case it was loaded.
   async function deleteAsset(ownerPublicKey, credentialId) {
-    const wallet = (await getWallet(ownerPublicKey)).filter((e) => e.credential.id !== credentialId);
+    const before = await getWallet(ownerPublicKey);
+    const deleted = before.find((e) => e.credential.id === credentialId);
+    const wallet = before.filter((e) => e.credential.id !== credentialId);
     await saveWallet(ownerPublicKey, wallet);
     await unloadItem(credentialId);
+    if (deleted) {
+      const identity = await getIdentity();
+      const who = (identity && identity.publicKey === ownerPublicKey) ? '' : ' (counterparty test identity)';
+      await logActivity('asset', 'Deleted ' + deleted.credential.asset.class + ' from wallet' + who);
+    }
   }
 
   // Hiding is the non-destructive counterpart to deleteAsset above: the
@@ -1262,6 +1283,17 @@ const AtlasWallet = (() => {
     await saveWallet(toOwner.publicKey, toWallet);
     await autoConsolidateAssetWallet(toOwner.publicKey);
 
+    let splitLogText;
+    if (role === 'self' && toRole === 'self') {
+      splitLogText = 'Split ' + sendAmount + ' ' + credential.asset.class + ' within your own wallet';
+    } else if (role === 'self') {
+      splitLogText = 'Sent ' + sendAmount + ' ' + credential.asset.class + ' to the counterparty test identity';
+    } else if (toRole === 'self') {
+      splitLogText = 'Received ' + sendAmount + ' ' + credential.asset.class + ' from the counterparty test identity';
+    } else {
+      splitLogText = 'Split ' + sendAmount + ' ' + credential.asset.class + ' between counterparty test identities';
+    }
+    await logActivity('asset', splitLogText);
     return { sent, remainder };
   }
 
@@ -1292,13 +1324,21 @@ const AtlasWallet = (() => {
     return merged;
   }
 
-  // Manual entry point — the "Consolidate" button in the UI.
+  // Manual entry point — the "Consolidate" button in the UI. Logged here,
+  // not inside mergeAssetGroup() above — that shared primitive is also
+  // called silently by autoConsolidateAssetWallet's own housekeeping after
+  // nearly every asset-gaining action, and that path deliberately stays
+  // out of the activity log (see its own comment: "genuinely just
+  // housekeeping"). This is the one call site where consolidating is a
+  // deliberate action the person actually took.
   async function consolidateAsset(role, credentials) {
     if (!credentials || credentials.length < 2) {
       throw new Error('Pick at least two balances of the same class and issuer to consolidate.');
     }
     const owner = await identityOf(role);
-    return mergeAssetGroup(owner.publicKey, credentials);
+    const merged = await mergeAssetGroup(owner.publicKey, credentials);
+    await logActivity('asset', 'Consolidated ' + credentials.length + ' balances of ' + credentials[0].asset.class + ' into one' + (role === 'counterparty' ? ' (counterparty test identity)' : ''));
+    return merged;
   }
 
   // Automatic entry point — called after anything that can leave a wallet
@@ -1634,6 +1674,7 @@ const AtlasWallet = (() => {
     // Visually it's no longer "carried" once it's sitting in the scene —
     // keep the loadout list honest, same as hiding an item already does.
     await unloadItem(credential.id);
+    await logActivity('asset', 'Dropped ' + credential.asset.class + ' in ' + worldDomain + '/' + world);
     return result;
   }
 
@@ -1670,6 +1711,7 @@ const AtlasWallet = (() => {
     wallet.push({ credential, lastVerdict: await verifyCredential(credential) });
     await saveWallet(identity.publicKey, wallet);
     await autoConsolidateAssetWallet(identity.publicKey);
+    await logActivity('asset', 'Picked up ' + credential.asset.class + ' in ' + worldDomain);
     return credential;
   }
 
@@ -1711,6 +1753,7 @@ const AtlasWallet = (() => {
     await saveWallet(counterparty.publicKey, cpWallet);
 
     await unloadItem(itemCredential.id);
+    await logActivity('asset', 'Lost ' + itemCredential.asset.class + ' to the counterparty test identity (PvP demo)');
     return transfer;
   }
 
@@ -1767,6 +1810,7 @@ const AtlasWallet = (() => {
       status: 'pending'
     });
     await saveSubmittedTrades(owner.publicKey, records);
+    await logActivity('trade', 'Listed a trade at ' + issuerDomain + ': ' + offer.quantity + ' ' + offer.class + ' for ' + want.quantity + ' ' + want.class);
     return result;
   }
 
@@ -1893,6 +1937,7 @@ const AtlasWallet = (() => {
     wallet.push({ credential: result.received, lastVerdict: await verifyCredential(result.received) });
     await saveWallet(owner.publicKey, wallet);
     await autoConsolidateAssetWallet(owner.publicKey);
+    await logActivity('trade', 'Claimed a trade at ' + issuerDomain + ': received ' + listing.offer.quantity + ' ' + listing.offer.class + ' for ' + listing.want.quantity + ' ' + listing.want.class);
     return result;
   }
 
@@ -1920,6 +1965,7 @@ const AtlasWallet = (() => {
       record.status = 'canceled';
       record.canceledAt = new Date().toISOString();
       await saveSubmittedTrades(owner.publicKey, records);
+      await logActivity('trade', 'Cancelled a trade listing at ' + issuerDomain + ': ' + record.offer.quantity + ' ' + record.offer.class + ' for ' + record.want.quantity + ' ' + record.want.class);
     }
     return result;
   }
@@ -3047,7 +3093,7 @@ const AtlasWallet = (() => {
       wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
       friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
       mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
-      chatE2eeKeyPair, chatE2eePeerKeys
+      chatE2eeKeyPair, chatE2eePeerKeys, activityLog
     ] = await Promise.all([
       // Task #250: dropped items no longer have a local-only "still
       // secretly mine" state to back up — a drop now genuinely leaves this
@@ -3061,7 +3107,10 @@ const AtlasWallet = (() => {
       // decrypt this identity's past end-to-end-encrypted chat threads
       // (the shared secret is tied to this exact keypair) and forgetting
       // every peer key this identity had already verified.
-      getChatE2eeKeyPair(identity), getE2eePeerKeysForOwner(identity)
+      getChatE2eeKeyPair(identity), getE2eePeerKeysForOwner(identity),
+      // The activity log is a data family like any other above: a restore
+      // should bring someone's history back with it, not reset it.
+      getActivityLog()
     ]);
 
     // Low-sensitivity per-owner bookkeeping that was never wrapped in
@@ -3093,7 +3142,7 @@ const AtlasWallet = (() => {
         wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
         friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
         mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
-        chatE2eeKeyPair, chatE2eePeerKeys,
+        chatE2eeKeyPair, chatE2eePeerKeys, activityLog,
         deletedMailIds: (deletedMailIdsAll.atlasDeletedMailIds || {})[owner] || [],
         deletedChatIds: (deletedChatIdsAll.atlasDeletedChatIds || {})[owner] || [],
         lastChatSendDomain: (lastChatSendDomainAll.atlasLastChatSendDomain || {})[owner] || null,
@@ -3112,7 +3161,7 @@ const AtlasWallet = (() => {
   // Shared by importFullBackup (below) and the automatic-backup restore
   // path (further down this file) — identical restore semantics either
   // way, only how the outer file got decrypted differs between them.
-  async function applyBackupPayload(payload, localUnlockPassword) {
+  async function applyBackupPayload(payload, localUnlockPassword, restoreSourceLabel) {
     if (!payload || !payload.identity || !payload.identity.publicKey || !payload.identity.privateKeyJwk) {
       throw new Error('This backup file is missing its identity — it may be corrupted.');
     }
@@ -3163,7 +3212,7 @@ const AtlasWallet = (() => {
     // Settings panel tells the truth instead of quietly lying.
     const existingAutoBackup = await getAutoBackupSettings();
     if (existingAutoBackup && existingAutoBackup.ownerPublicKey && existingAutoBackup.ownerPublicKey !== publicKey) {
-      await turnOffAutoBackup();
+      await turnOffAutoBackup(true);
     } else {
       // Same identity restored onto the same device it was already set up
       // on (or nothing was ever set up) — safe to just refresh the cached
@@ -3202,7 +3251,10 @@ const AtlasWallet = (() => {
       // unencrypted first message again) with everyone it already
       // verified a key for.
       ...(d.chatE2eeKeyPair ? [saveChatE2eeKeyPair(owner, d.chatE2eeKeyPair)] : []),
-      saveE2eePeerKeysForOwner(owner, d.chatE2eePeerKeys || {})
+      saveE2eePeerKeysForOwner(owner, d.chatE2eePeerKeys || {}),
+      // Carries the restored identity's own activity history back in, same
+      // as every other data family here, rather than starting blank.
+      saveActivityLog(owner, d.activityLog || [])
     ]);
 
     // Low-sensitivity bookkeeping — restored as a raw per-owner slot
@@ -3235,6 +3287,10 @@ const AtlasWallet = (() => {
       .forEach((k) => { if (s[k] !== undefined) settingsToSet[k] = s[k]; });
     if (Object.keys(settingsToSet).length) await chrome.storage.local.set(settingsToSet);
 
+    // Logged AFTER the activity log itself was just overwritten by the
+    // restore above (d.activityLog), so this becomes the newest entry on
+    // top of the restored history rather than being wiped by it.
+    await logActivity('backup', 'Restored full wallet backup from ' + (restoreSourceLabel || 'a backup file'));
     return { publicKey };
   }
 
@@ -3270,6 +3326,7 @@ const AtlasWallet = (() => {
     const ciphertext = await crypto.subtle.encrypt(
       { name: 'AES-GCM', iv: exportIv }, exportKey, new TextEncoder().encode(JSON.stringify(payload))
     );
+    await logActivity('backup', 'Full wallet backup exported to a file');
     return {
       format: 'atlas-full-backup/1.0',
       salt: b64urlEncode(exportSalt.buffer),
@@ -3302,7 +3359,7 @@ const AtlasWallet = (() => {
     } catch (err) {
       throw new Error('Incorrect password or seed phrase.');
     }
-    return applyBackupPayload(payload, password);
+    return applyBackupPayload(payload, password, 'a backup file');
   }
 
   // ---------- automatic encrypted local backup replication ----------
@@ -3575,6 +3632,7 @@ const AtlasWallet = (() => {
     await writable.write(JSON.stringify(blob));
     await writable.close();
     await setAutoBackupSettings({ lastWrittenAt: new Date().toISOString() });
+    await logActivity('backup', 'Automatic local backup turned on');
     return { ok: true, fileName: fileHandle.name || null };
   }
 
@@ -3582,13 +3640,21 @@ const AtlasWallet = (() => {
   // it's the person's own file at that point (and may be the only surviving
   // copy of something), so leaving it alone and just stopping future writes
   // is the safer default; they can delete it themselves if they want to.
-  async function turnOffAutoBackup() {
+  async function turnOffAutoBackup(skipLog) {
     const settings = await getAutoBackupSettings();
+    const wasOn = !!(settings && settings.enabled);
     if (settings && settings.ownerPublicKey) {
       try { await idbDeleteAutoBackupHandle(settings.ownerPublicKey); } catch (err) { /* best-effort cleanup */ }
     }
     await setAutoBackupSettings({ enabled: false, lapsed: false, lastError: null });
     await clearAutoBackupSessionKey();
+    // Only log a real, standalone transition — not applyBackupPayload's own
+    // identity-mismatch safety-net call (skipLog: true there), which fires
+    // BEFORE that restore's own saveActivityLog() runs and would otherwise
+    // just get overwritten by it; that restore's own "Restored full wallet
+    // backup" entry already covers this as a side effect. Also not a call
+    // against a device where this was never on in the first place.
+    if (wasOn && !skipLog) await logActivity('backup', 'Automatic local backup turned off');
   }
 
   // The actual silent write — called after the debounce timer below
@@ -3693,7 +3759,7 @@ const AtlasWallet = (() => {
     } catch (err) {
       throw new Error('Incorrect password.');
     }
-    return applyBackupPayload(payload, password);
+    return applyBackupPayload(payload, password, 'the automatic backup file');
   }
 
   // Debounced trigger: a short pause after the last change settles, not a
@@ -3838,7 +3904,11 @@ const AtlasWallet = (() => {
       if (!atlasIdentitySyncBackupEnabled) return;
       const { atlasIdentitySyncBackup } = await chrome.storage.sync.get('atlasIdentitySyncBackup');
       if (atlasIdentitySyncBackup && atlasIdentitySyncBackup.publicKey && atlasIdentitySyncBackup.publicKey !== atlasIdentityBlob.publicKey) {
-        await disableIdentitySyncBackup();
+        // skipLog: true — this can fire from inside applyBackupPayload,
+        // BEFORE that restore's own saveActivityLog() runs; logging here
+        // would just get overwritten by it. That restore's own "Restored
+        // full wallet backup" entry already covers this as a side effect.
+        await disableIdentitySyncBackup(true);
         return;
       }
       await mirrorIdentityToSyncBackup(atlasIdentityBlob);
@@ -3874,6 +3944,7 @@ const AtlasWallet = (() => {
     }
     await chrome.storage.local.set({ atlasIdentitySyncBackupEnabled: true });
     await chrome.storage.sync.set({ atlasIdentitySyncBackup: atlasIdentity });
+    await logActivity('backup', 'Identity sync turned on (Chrome sync)');
     return { ok: true };
   }
 
@@ -3886,9 +3957,10 @@ const AtlasWallet = (() => {
   // there's no "my only copy" case for it the way there can be for a
   // local file, since this is always a mirror of something also encrypted
   // locally right now.
-  async function disableIdentitySyncBackup() {
+  async function disableIdentitySyncBackup(skipLog) {
     await chrome.storage.local.set({ atlasIdentitySyncBackupEnabled: false });
     try { await chrome.storage.sync.remove('atlasIdentitySyncBackup'); } catch (err) { /* best-effort */ }
+    if (!skipLog) await logActivity('backup', 'Identity sync turned off');
   }
 
   // Checked from the onboarding screen on a device with no local identity
@@ -3933,7 +4005,88 @@ const AtlasWallet = (() => {
     });
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     await cacheAutoBackupSessionKey(password);
+    await logActivity('identity', 'Identity restored from Chrome sync');
     return { publicKey };
+  }
+
+  // ---------- wallet activity log ----------
+  //
+  // A single per-identity feed of "things that happened in this wallet" —
+  // asset mints/trades/transfers and identity/security events (password
+  // changes, imports, backup/sync turned on or off) — so there's one place
+  // to look back at instead of piecing it together from Inventory counts
+  // and Trade history. Deliberately scoped to that: it does NOT duplicate
+  // Mail or Chat (both already have their own list views), the raw
+  // submitted-trades ledger (getSubmittedTrades), or purely social
+  // bookkeeping like Friends/Contacts — this is a narration layer over
+  // wallet/identity/security events specifically, not a second copy of
+  // every list this file already keeps. Each call site below decides for
+  // itself whether an action is worth a line here.
+  //
+  // Same encrypted-at-rest, per-identity storage shape as Friends/Recent
+  // worlds above (storeName 'activityLog'), and included in
+  // buildBackupPayload/applyBackupPayload like any other data family, so a
+  // restored wallet keeps its history instead of starting blank. Capped at
+  // MAX_ACTIVITY_LOG_ENTRIES (oldest entries fall off the end) so a
+  // long-lived wallet's log can't grow without bound.
+  //
+  // logActivity() itself is best-effort (its own try/catch below swallows
+  // everything — it can never reject), so every call site simply
+  // `await`s it: that keeps entries in strict chronological order and
+  // avoids racing a caller that reads the log again right away (e.g. right
+  // after minting, before switching to the Activity log view), without
+  // risking a logging hiccup ever surfacing as a thrown error against the
+  // real action it's describing.
+  const MAX_ACTIVITY_LOG_ENTRIES = 300;
+
+  async function saveActivityLog(ownerPublicKey, list) {
+    const { atlasActivityLog } = await chrome.storage.local.get('atlasActivityLog');
+    const all = (atlasActivityLog && typeof atlasActivityLog === 'object' && !Array.isArray(atlasActivityLog)) ? atlasActivityLog : {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'activityLog', list);
+    await chrome.storage.local.set({ atlasActivityLog: all });
+  }
+
+  // Newest first. No `ownerPublicKey` parameter, same as getFriends()/
+  // getRecentWorlds() above — always the CURRENTLY unlocked identity, never
+  // a different one, so there's no way to read another identity's log
+  // without its password.
+  async function getActivityLog() {
+    const identity = await getIdentity();
+    if (!identity) return [];
+    const { atlasActivityLog } = await chrome.storage.local.get('atlasActivityLog');
+    const stored = (atlasActivityLog || {})[identity.publicKey];
+    return decryptAtRestAndMigrate(identity, 'activityLog', stored, [], (v) => saveActivityLog(identity.publicKey, v));
+  }
+
+  // `type` is a coarse tag ('identity', 'backup', 'asset', 'trade') for any
+  // future filtering/iconography — not surfaced anywhere yet, just kept
+  // alongside `text` so it doesn't have to be re-derived later. `meta` is
+  // an optional plain object with whatever structured detail the call site
+  // has handy (issuer domain, asset class, amounts) — again not rendered
+  // today, but cheap to keep for a future "show details" affordance.
+  async function logActivity(type, text, meta) {
+    try {
+      const identity = await getIdentity();
+      if (!identity) return; // nothing to attribute this to — silently skip
+      let list = await getActivityLog();
+      list.unshift({
+        id: 'act-' + Date.now().toString(36) + '-' + b64urlEncode(crypto.getRandomValues(new Uint8Array(6)).buffer),
+        type, text,
+        at: new Date().toISOString(),
+        meta: meta || null
+      });
+      list = list.slice(0, MAX_ACTIVITY_LOG_ENTRIES);
+      await saveActivityLog(identity.publicKey, list);
+    } catch (err) {
+      // best-effort — see this section's own top comment
+    }
+  }
+
+  async function clearActivityLog() {
+    const identity = await getIdentity();
+    if (!identity) return;
+    await saveActivityLog(identity.publicKey, []);
   }
 
   // ---------- mail (correspondence tied to a held credential) ----------
@@ -5612,6 +5765,7 @@ const AtlasWallet = (() => {
     writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,
     getIdentitySyncBackupSettings, enableIdentitySyncBackup, disableIdentitySyncBackup,
     hasSyncedIdentityAvailable, restoreIdentityFromSync,
+    getActivityLog, clearActivityLog,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,

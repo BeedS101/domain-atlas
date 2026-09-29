@@ -1963,6 +1963,9 @@ const hiddenAssetsListEl = document.getElementById('hiddenAssetsList');
 const chatMutedUsersListEl = document.getElementById('chatMutedUsersList');
 const chatBlockedUsersListEl = document.getElementById('chatBlockedUsersList');
 const recentWorldsListEl = document.getElementById('recentWorldsList');
+const activityLogListEl = document.getElementById('activityLogList');
+const clearActivityLogBtn = document.getElementById('clearActivityLogBtn');
+const clearActivityLogStatusEl = document.getElementById('clearActivityLogStatus');
 const cacheTotalLineEl = document.getElementById('cacheTotalLine');
 const cacheSitesListEl = document.getElementById('cacheSitesList');
 const exportCacheBtn = document.getElementById('exportCacheBtn');
@@ -5866,6 +5869,7 @@ async function refreshInventoryDisplay() {
 
   await refreshHiddenAssetsDisplay();
   await refreshRecentWorldsDisplay();
+  await refreshActivityLogDisplay();
   await refreshAssetUpdatesBadge();
 }
 
@@ -6246,6 +6250,42 @@ recentWorldsListEl && recentWorldsListEl.addEventListener('click', async (e) => 
   const btn = e.target.closest('button');
   if (!btn || btn.dataset.action !== 'travel') return;
   await travelToRecentWorld(btn.dataset.manifest, btn.dataset.world);
+});
+
+// ---------- activity log (Wallet -> "Activity log") ----------
+//
+// A read-only, most-recent-first feed — see wallet.js's own "wallet
+// activity log" section for what is and isn't logged and why. Same
+// info-card look as Recent worlds just above, minus any action button
+// (there's nothing to click through to — this is a narration, not a link
+// to a place).
+function renderActivityLogEntry(entry, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.innerHTML =
+    '<div class="name">' + escapeHtml(entry.text) + '</div>' +
+    '<div class="meta">' + new Date(entry.at).toLocaleString() + '</div>';
+  container.appendChild(el);
+}
+
+async function refreshActivityLogDisplay() {
+  if (!activityLogListEl) return;
+  const list = await AtlasWallet.getActivityLog();
+  activityLogListEl.innerHTML = '';
+  if (list.length === 0) {
+    activityLogListEl.innerHTML = '<div class="empty-note">Nothing logged yet.</div>';
+    return;
+  }
+  list.forEach((entry) => renderActivityLogEntry(entry, activityLogListEl));
+}
+
+clearActivityLogBtn && clearActivityLogBtn.addEventListener('click', async () => {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  if (!confirm('Clear the activity log? This cannot be undone.')) return;
+  await AtlasWallet.clearActivityLog();
+  clearActivityLogStatusEl.textContent = 'Cleared.';
+  await refreshActivityLogDisplay();
 });
 
 

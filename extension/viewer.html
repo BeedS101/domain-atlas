@@ -1903,6 +1903,28 @@
         </div>
       </div>
 
+      <!-- Wallet activity log: a single running feed of "things that
+           happened in this wallet" — asset mints/trades/transfers and
+           identity/security events (password changes, imports, backup/sync
+           turned on or off) — so there's one place to look back at instead
+           of piecing it together from Inventory counts and Trade history.
+           Deliberately does NOT duplicate Mail or Chat (both already have
+           their own list views) or the raw submitted-trades ledger (Trade
+           tab) — this is a human-readable narration layer on top, not a
+           second copy of any of that data. See wallet.js's own "wallet
+           activity log" section for exactly what is and isn't logged. -->
+      <div class="settings-category" data-category="activity-log">
+        <button type="button" class="settings-category-toggle"><span>Activity log</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="empty-note">What's happened in this wallet, most recent first. Purely local — nothing here is sent anywhere.</div>
+          <div id="activityLogList" class="item-list" style="margin-top:8px;"></div>
+          <div class="btn-col" style="margin-top:8px;">
+            <button id="clearActivityLogBtn" type="button" class="btn-secondary">Clear log</button>
+          </div>
+          <div id="clearActivityLogStatus" class="mono"></div>
+        </div>
+      </div>
+
       <!-- Inventory (task #44): the former separate "Items" and
            "Resources" accordions merged into one section, since both now
            hold the same underlying credential type (domain-atlas-asset/1.0)
