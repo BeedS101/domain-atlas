@@ -1936,6 +1936,7 @@ const autoBackupWebAuthnNote = document.getElementById('autoBackupWebAuthnNote')
 const autoBackupStatusLine = document.getElementById('autoBackupStatusLine');
 const autoBackupSetupBtn = document.getElementById('autoBackupSetupBtn');
 const autoBackupReconnectBtn = document.getElementById('autoBackupReconnectBtn');
+const autoBackupReopenWindowBtn = document.getElementById('autoBackupReopenWindowBtn');
 const autoBackupTurnOffBtn = document.getElementById('autoBackupTurnOffBtn');
 const autoBackupRestoreFileInput = document.getElementById('autoBackupRestoreFileInput');
 const autoBackupRestorePasswordInput = document.getElementById('autoBackupRestorePasswordInput');
@@ -3728,6 +3729,7 @@ async function refreshAutoBackupDisplay() {
     autoBackupSetupBtn.style.display = '';
     autoBackupSetupBtn.textContent = 'Set up automatic backup';
     autoBackupReconnectBtn.style.display = 'none';
+    autoBackupReopenWindowBtn.style.display = 'none';
     autoBackupTurnOffBtn.style.display = 'none';
     return;
   }
@@ -3736,6 +3738,22 @@ async function refreshAutoBackupDisplay() {
       (settings.lastWrittenAt ? ' (last saved ' + new Date(settings.lastWrittenAt).toLocaleString() + ')' : '');
     autoBackupSetupBtn.style.display = 'none';
     autoBackupReconnectBtn.style.display = '';
+    autoBackupReopenWindowBtn.style.display = 'none';
+    autoBackupTurnOffBtn.style.display = '';
+    return;
+  }
+  // A real write only ever happens from backup-setup.html's own tab (see
+  // wallet.js's IS_AUTO_BACKUP_WRITER_CONTEXT) — closing that tab doesn't
+  // trip "lapsed" (nothing failed; nothing even tried), so it needs its
+  // own check here rather than silently reading as "On" forever from the
+  // last time it happened to be open.
+  const windowOpen = await AtlasWallet.isAutoBackupWriterWindowOpen();
+  if (!windowOpen) {
+    autoBackupStatusLine.textContent = 'On, but the backup window isn’t open right now — changes won’t be saved until you reopen it.' +
+      (settings.lastWrittenAt ? ' (last saved ' + new Date(settings.lastWrittenAt).toLocaleString() + ')' : '');
+    autoBackupSetupBtn.style.display = 'none';
+    autoBackupReconnectBtn.style.display = 'none';
+    autoBackupReopenWindowBtn.style.display = '';
     autoBackupTurnOffBtn.style.display = '';
     return;
   }
@@ -3744,6 +3762,7 @@ async function refreshAutoBackupDisplay() {
     : 'On — saving for the first time shortly.';
   autoBackupSetupBtn.style.display = 'none';
   autoBackupReconnectBtn.style.display = 'none';
+  autoBackupReopenWindowBtn.style.display = 'none';
   autoBackupTurnOffBtn.style.display = '';
 }
 
@@ -10403,27 +10422,34 @@ exportFullBackupBtn.addEventListener('click', async () => {
 // Opens backup-setup.html as a real top-level window — chrome.windows.create()
 // rather than window.open(), same reasoning as identity-popup.js's own
 // comment (real chrome.storage/chrome.runtime bindings) — and necessary
-// here for a second reason too: the File System Access API's picker
-// methods refuse to run inside this settings panel's own cross-origin
-// iframe at all, see wallet.js's "automatic encrypted local backup
-// replication" section for the full explanation. No message is expected
-// back from that window; refreshAutoBackupDisplay() picks up whatever it
-// did via the chrome.storage.onChanged listener above.
-autoBackupSetupBtn.addEventListener('click', () => {
+// here for a second reason too: the File System Access API's picker AND
+// permission methods both refuse to run inside this settings panel's own
+// cross-origin iframe at all, see wallet.js's "automatic encrypted local
+// backup replication" section for the full explanation (this is also why
+// Reconnect and Reopen below just open the same window rather than
+// calling AtlasWallet.reconnectAutoBackupPermission() directly from here
+// the way an earlier version of this button did — that call is
+// guaranteed to throw a SecurityError from this context). No message is
+// expected back from that window; refreshAutoBackupDisplay() picks up
+// whatever it did via the chrome.storage.onChanged listener above, or via
+// its heartbeat once the window is open and left that way.
+function openBackupSetupWindow() {
   chrome.windows.create({ url: chrome.runtime.getURL('backup-setup.html'), type: 'popup', width: 480, height: 640 });
-});
+}
 
-autoBackupReconnectBtn.addEventListener('click', async () => {
-  autoBackupReconnectBtn.disabled = true;
-  try {
-    await AtlasWallet.reconnectAutoBackupPermission();
-    await refreshAutoBackupDisplay();
-  } catch (err) {
-    autoBackupStatusLine.textContent = 'Could not reconnect: ' + err.message;
-  } finally {
-    autoBackupReconnectBtn.disabled = false;
-  }
-});
+autoBackupSetupBtn.addEventListener('click', openBackupSetupWindow);
+
+// Reconnecting requestPermission() has the exact same top-level-origin
+// requirement as the picker methods (confirmed against the WICG File
+// System Access spec), so this can't be done from the iframe either —
+// backup-setup.html detects the lapsed/needs-reconnect state itself on
+// load and shows its own reconnect screen with a real click handler.
+autoBackupReconnectBtn.addEventListener('click', openBackupSetupWindow);
+
+// The window being closed doesn't set "lapsed" (nothing failed — nothing
+// even ran), so this is a separate action from Reconnect: it just needs
+// the tab open again, not a new permission grant.
+autoBackupReopenWindowBtn.addEventListener('click', openBackupSetupWindow);
 
 autoBackupTurnOffBtn.addEventListener('click', async () => {
   autoBackupTurnOffBtn.disabled = true;

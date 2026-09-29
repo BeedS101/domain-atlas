@@ -1,35 +1,59 @@
-// Runs the automatic-backup consent/picker flow from a real top-level
+// Runs the automatic-backup consent/picker flow — and now also the
+// ongoing "keep this open" and reconnect flows — from a real top-level
 // extension window instead of the cross-origin iframe the rest of the
-// wallet panel lives in — see wallet.js's own top comment on the
+// wallet panel lives in. See wallet.js's own top comment on the
 // "automatic encrypted local backup replication" section for why the File
-// System Access API's picker methods specifically require that (there is
-// no Permissions-Policy delegation for it the way iframe.allow covers
-// WebAuthn). Opened via chrome.windows.create() from viewer.js, same
-// pattern identity-popup.js already established — no window.opener, no
-// postMessage back; viewer.js instead notices the change via
-// chrome.storage.onChanged, which works regardless of how this window was
-// opened, and this window's own status area is all the feedback the
-// person needs before closing it.
+// System Access API's picker and permission methods specifically require
+// a real top-level page (there is no Permissions-Policy delegation for it
+// the way iframe.allow covers WebAuthn) — and why, as a direct
+// consequence, this same window has to stay open for every later silent
+// write too, not just the first one: wallet.js's IS_AUTO_BACKUP_WRITER_CONTEXT
+// gates real writes to exactly this page. Opened via chrome.windows.create()
+// from viewer.js, same pattern identity-popup.js already established — no
+// window.opener, no postMessage back; viewer.js instead notices changes via
+// chrome.storage.onChanged and this page's own heartbeat, which both work
+// regardless of how this window was opened.
 
 const setupScreen = document.getElementById('setupScreen');
 const blockedScreen = document.getElementById('blockedScreen');
+const reconnectScreen = document.getElementById('reconnectScreen');
 const doneScreen = document.getElementById('doneScreen');
 const confirmPasswordInput = document.getElementById('confirmPasswordInput');
 const chooseFileBtn = document.getElementById('chooseFileBtn');
 const skipBtn = document.getElementById('skipBtn');
 const statusEl = document.getElementById('status');
+const doneTitle = document.getElementById('doneTitle');
 const doneText = document.getElementById('doneText');
+const minimizeBtn = document.getElementById('minimizeBtn');
 const closeBtn = document.getElementById('closeBtn');
+const reconnectBtn = document.getElementById('reconnectBtn');
+const reconnectReasonText = document.getElementById('reconnectReasonText');
+const reconnectStatusEl = document.getElementById('reconnectStatus');
 
-function setStatus(message, cls) {
-  statusEl.className = cls || '';
-  statusEl.textContent = message || '';
+function showOnly(screen) {
+  for (const el of [setupScreen, blockedScreen, reconnectScreen, doneScreen]) {
+    if (el) el.classList.toggle('hidden', el !== screen);
+  }
+}
+
+function setStatus(message, cls, target) {
+  const el = target || statusEl;
+  if (!el) return;
+  el.className = cls || '';
+  el.textContent = message || '';
+}
+
+function showKeepOpenScreen(fileName) {
+  showOnly(doneScreen);
+  doneTitle.textContent = 'Automatic backup is on';
+  doneText.textContent = fileName
+    ? 'Saving to "' + fileName + '". It stays up to date on its own from here.'
+    : 'It stays up to date on its own from here.';
 }
 
 (async () => {
   if (!window.showSaveFilePicker) {
-    setupScreen.classList.add('hidden');
-    blockedScreen.classList.remove('hidden');
+    showOnly(blockedScreen);
     blockedScreen.querySelector('h1').textContent = 'Not supported in this browser';
     blockedScreen.querySelector('p').textContent =
       'Automatic backup needs the File System Access API, which this browser build doesn’t offer. ' +
@@ -38,10 +62,24 @@ function setStatus(message, cls) {
   }
   const identity = await AtlasWallet.getIdentity();
   if (!identity || identity.mode !== 'local') {
-    setupScreen.classList.add('hidden');
-    blockedScreen.classList.remove('hidden');
+    showOnly(blockedScreen);
     return;
   }
+
+  // Reopened from Settings (Setup, Reconnect, or Reopen all point here) —
+  // route straight to whatever screen matches the current state instead
+  // of always starting from the consent screen again.
+  const settings = await AtlasWallet.getAutoBackupSettings();
+  if (settings && settings.enabled) {
+    if (settings.lapsed) {
+      showOnly(reconnectScreen);
+      reconnectReasonText.textContent = settings.lastError || 'Backup file access was revoked in the browser.';
+    } else {
+      showKeepOpenScreen(settings.fileName);
+    }
+    return;
+  }
+  showOnly(setupScreen);
 })();
 
 skipBtn.addEventListener('click', () => {
@@ -76,15 +114,35 @@ chooseFileBtn.addEventListener('click', async () => {
   setStatus('Turning on automatic backup…');
   try {
     const result = await AtlasWallet.setUpAutoBackup(handle, password);
-    setupScreen.classList.add('hidden');
-    doneScreen.classList.remove('hidden');
-    doneText.textContent = 'Saving to "' + (result.fileName || handle.name) +
-      '". It will stay up to date on its own from now on — you can close this tab.';
+    showKeepOpenScreen(result.fileName || handle.name);
   } catch (err) {
     chooseFileBtn.disabled = false;
     skipBtn.disabled = false;
     setStatus(err.message, 'error');
   }
+});
+
+// Unlike writeAutoBackupNow()'s own reconnect path, this one genuinely
+// runs from a real click in the correct top-level context, so it's the
+// one place requestPermission() is expected to actually succeed.
+reconnectBtn.addEventListener('click', async () => {
+  reconnectBtn.disabled = true;
+  setStatus('Reconnecting…', null, reconnectStatusEl);
+  try {
+    await AtlasWallet.reconnectAutoBackupPermission();
+    const settings = await AtlasWallet.getAutoBackupSettings();
+    showKeepOpenScreen(settings && settings.fileName);
+  } catch (err) {
+    reconnectBtn.disabled = false;
+    setStatus('Could not reconnect: ' + err.message, 'error', reconnectStatusEl);
+  }
+});
+
+minimizeBtn.addEventListener('click', () => {
+  if (!chrome.windows || !chrome.windows.getCurrent) { window.blur(); return; }
+  chrome.windows.getCurrent((win) => {
+    if (win && win.id !== undefined) chrome.windows.update(win.id, { state: 'minimized' });
+  });
 });
 
 closeBtn.addEventListener('click', () => window.close());

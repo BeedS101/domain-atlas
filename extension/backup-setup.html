@@ -31,10 +31,11 @@
   button:hover { background: #1a2932; }
   button:disabled { opacity: 0.5; cursor: default; }
   button.secondary { border-color: #3a4a52; color: #a9b8bf; }
-  #status { font-size: 12px; color: #a9b8bf; margin-top: 16px; min-height: 16px; white-space: pre-line; }
-  #status.error { color: #e08a4c; }
-  #status.ok { color: #57a593; }
-  #setupScreen.hidden, #blockedScreen.hidden, #doneScreen.hidden { display: none; }
+  #status, #reconnectStatus { font-size: 12px; color: #a9b8bf; margin-top: 16px; min-height: 16px; white-space: pre-line; }
+  #status.error, #reconnectStatus.error { color: #e08a4c; }
+  #status.ok, #reconnectStatus.ok { color: #57a593; }
+  .pill { display: inline-block; font-size: 11px; color: #57a593; background: #10222a; border: 1px solid #1c3540; border-radius: 999px; padding: 3px 10px; margin-bottom: 12px; }
+  #setupScreen.hidden, #blockedScreen.hidden, #doneScreen.hidden, #reconnectScreen.hidden { display: none; }
 </style>
 </head>
 <body>
@@ -60,6 +61,15 @@
         manual export (Settings → Full backup) or have another recovery
         method set up.
       </p>
+      <p class="risk">
+        One more thing this needs, for a technical reason: the actual
+        silent writes can only happen from this window itself, not from
+        the wallet panel you opened this from. So this window needs to
+        stay open after setup — minimized is completely fine — for
+        automatic backup to keep working. Closing it pauses backups until
+        you reopen it from Settings; nothing is lost by that, it just
+        stops updating until you do.
+      </p>
       <div class="tip">
         Tip: if you'd like this backup to also survive losing this device
         entirely, choose a location inside a folder your cloud storage app
@@ -83,10 +93,30 @@
         reopen this from Settings.</p>
     </div>
 
+    <div id="reconnectScreen" class="hidden">
+      <span class="pill">Automatic backup</span>
+      <h1>Backup file access needs to be reconnected</h1>
+      <p id="reconnectReasonText"></p>
+      <p>This happens sometimes after a browser restart or a permissions
+        change — it doesn't affect any backup already saved. Click below
+        to reconnect; the browser may show its own one-time confirmation.</p>
+      <div class="row">
+        <button id="reconnectBtn" type="button">Reconnect backup file access</button>
+      </div>
+      <div id="reconnectStatus"></div>
+    </div>
+
     <div id="doneScreen" class="hidden">
-      <h1>Automatic backup is on</h1>
+      <span class="pill">Automatic backup</span>
+      <h1 id="doneTitle">Automatic backup is on</h1>
       <p id="doneText"></p>
-      <div class="row"><button id="closeBtn" type="button">Close this tab</button></div>
+      <p class="risk">Keep this window open — minimizing is fine — so it
+        can keep saving. Closing it pauses automatic backup until you
+        reopen it from Settings.</p>
+      <div class="row">
+        <button id="minimizeBtn" type="button">Minimize this window</button>
+        <button id="closeBtn" type="button" class="secondary">Close anyway</button>
+      </div>
     </div>
   </div>
 

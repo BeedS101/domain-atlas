@@ -3363,6 +3363,31 @@ const AtlasWallet = (() => {
   const AUTO_BACKUP_DB_STORE = 'handles';
   const AUTO_BACKUP_WRITE_DEBOUNCE_MS = 4000;
 
+  // wallet.js loads into three different top-level-or-iframe contexts
+  // (viewer.html's cross-origin iframe, identity-popup.html,
+  // backup-setup.html), and every one of them gets this exact same
+  // chrome.storage.onChanged-triggered write pipeline for free. That's a
+  // problem specifically for the File System Access permission this
+  // feature depends on: per spec, a handle's permission is scoped to the
+  // environment that requested it, and queryPermission()/requestPermission()
+  // both check that the calling context's origin equals its own top-level
+  // origin. The permission is granted from backup-setup.html (a real
+  // top-level extension page, chrome-extension://<id>) — so only a write
+  // attempted from that exact page can ever succeed. A write attempted
+  // from viewer.html's iframe is embedded inside whatever arbitrary site
+  // the wallet is open on, so its top-level origin is that site's origin,
+  // not the extension's — queryPermission() there reliably reports
+  // anything but 'granted', no matter how recently permission was
+  // actually given. Letting every context's copy of writeAutoBackupNow()
+  // race on every change would mean the iframe's doomed attempt and
+  // backup-setup.html's real one both write to atlasAutoBackupSettings,
+  // and whichever finishes last decides the visible status — a confusing
+  // flicker between "working" and "lapsed" for no functional reason. So
+  // this flag gates writeAutoBackupNow() to backup-setup.html only; every
+  // other context no-ops immediately, before touching any settings at
+  // all, and leaves the status exactly as backup-setup.html last set it.
+  const IS_AUTO_BACKUP_WRITER_CONTEXT = typeof location !== 'undefined' && /(^|\/)backup-setup\.html$/.test(location.pathname);
+
   function openAutoBackupDb() {
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(AUTO_BACKUP_DB_NAME, 1);
@@ -3556,6 +3581,14 @@ const AtlasWallet = (() => {
   // opens Settings, not an unhandled rejection in a change-triggered
   // background write nobody's watching for it.
   async function writeAutoBackupNow() {
+    // See IS_AUTO_BACKUP_WRITER_CONTEXT's own comment above: only
+    // backup-setup.html's copy of this function is allowed to actually
+    // attempt a write. Every other context (viewer.html's iframe,
+    // identity-popup.html) is guaranteed to fail the permission check
+    // anyway, so it no-ops here first, before reading or touching
+    // anything, rather than racing backup-setup.html's real attempt and
+    // fighting over atlasAutoBackupSettings.
+    if (!IS_AUTO_BACKUP_WRITER_CONTEXT) return { skipped: true, reason: 'not the auto-backup writer context' };
     try {
       const settings = await getAutoBackupSettings();
       if (!settings || !settings.enabled) return { skipped: true, reason: 'not enabled' };
@@ -3676,6 +3709,48 @@ const AtlasWallet = (() => {
       if (changedKeys.length === 1 && changedKeys[0] === 'atlasAutoBackupSettings') return;
       scheduleAutoBackupWrite();
     });
+  }
+
+  // backup-setup.html is the only context writeAutoBackupNow() ever
+  // actually runs in (see IS_AUTO_BACKUP_WRITER_CONTEXT above) — which
+  // means simply closing that window silently stops all future backups
+  // without ever tripping the "lapsed" permission check: nothing failed,
+  // nothing even tried. That's exactly the kind of silent gap that led to
+  // this session's original bug report ("I dropped an item and didn't
+  // see an update"), just for a different underlying reason, so it needs
+  // its own visible signal rather than becoming a second silent failure
+  // mode. This context stamps a heartbeat into settings on a short
+  // interval whenever auto-backup is enabled; viewer.js (and
+  // backup-setup.html itself, on reopen) treat a heartbeat older than a
+  // few missed intervals as "this window isn't open right now" and offer
+  // a button to reopen it. Self-write-guarded the same way every other
+  // settings-only write here is (see the listener just above) — a
+  // heartbeat touching only atlasAutoBackupSettings never re-triggers a
+  // real backup write.
+  const AUTO_BACKUP_HEARTBEAT_INTERVAL_MS = 15000;
+  if (IS_AUTO_BACKUP_WRITER_CONTEXT) {
+    const beatAutoBackupHeartbeat = async () => {
+      try {
+        const settings = await getAutoBackupSettings();
+        if (settings && settings.enabled) {
+          await setAutoBackupSettings({ writerHeartbeatAt: new Date().toISOString() });
+        }
+      } catch (err) { /* best-effort — a missed heartbeat just reads as "window closed" a bit early */ }
+    };
+    beatAutoBackupHeartbeat();
+    setInterval(beatAutoBackupHeartbeat, AUTO_BACKUP_HEARTBEAT_INTERVAL_MS);
+  }
+
+  // Convenience for UI callers (viewer.js's Settings panel, and
+  // backup-setup.html itself on reopen): combines the raw settings with
+  // the "is the writer window actually open right now" heuristic in one
+  // place, so the staleness threshold lives in exactly one spot rather
+  // than being duplicated at every call site that needs to ask.
+  const AUTO_BACKUP_HEARTBEAT_STALE_AFTER_MS = AUTO_BACKUP_HEARTBEAT_INTERVAL_MS * 3;
+  async function isAutoBackupWriterWindowOpen() {
+    const settings = await getAutoBackupSettings();
+    if (!settings || !settings.enabled || !settings.writerHeartbeatAt) return false;
+    return (Date.now() - new Date(settings.writerHeartbeatAt).getTime()) < AUTO_BACKUP_HEARTBEAT_STALE_AFTER_MS;
   }
 
   // ---------- mail (correspondence tied to a held credential) ----------
@@ -5351,7 +5426,7 @@ const AtlasWallet = (() => {
     getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     exportFullBackup, importFullBackup,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
-    writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob,
+    writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,

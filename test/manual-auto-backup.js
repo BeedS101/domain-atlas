@@ -163,7 +163,7 @@ function assert(cond, message) {
     assert(settingsAfterRestore === null, 'restoring a backup should not have invented auto-backup settings on this device: ' + JSON.stringify(settingsAfterRestore));
     console.log('PASS: getAutoBackupSettings() is still null after a restore — nothing device-specific leaked in from the payload');
 
-    console.log('STEP 8: changePassword() re-keys an already-enabled auto-backup and the debounced write notices there is no file yet');
+    console.log('STEP 8: changePassword() re-keys an already-enabled auto-backup, and this context (viewer.html\'s iframe) is gated OUT of actually writing');
     const changePasswordResult = await frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       // Simulate "auto-backup was already set up on this device" without
@@ -189,17 +189,37 @@ function assert(cond, message) {
       const before = await AtlasWallet.getAutoBackupSettings();
       await AtlasWallet.changePassword('auto-backup-test-password-1', 'auto-backup-test-password-2');
       const afterChange = await AtlasWallet.getAutoBackupSettings();
-      // The debounced write fires ~4s after the triggering change; wait it
-      // out so the "no handle exists" branch of writeAutoBackupNow() has
-      // actually run, not just been scheduled.
+      // This test runs entirely inside viewer.html's iframe (the only way
+      // Playwright can drive this demo), which is NOT the designated
+      // auto-backup writer context (see wallet.js's IS_AUTO_BACKUP_WRITER_CONTEXT
+      // — only backup-setup.html is). So a direct call here should no-op
+      // immediately, touching no settings at all, rather than reaching the
+      // "no handle in IndexedDB" branch the way it would have before that
+      // gate existed.
+      const directResult = await AtlasWallet.writeAutoBackupNow();
+      // Also wait out the normal ~4s debounce from changePassword()'s own
+      // triggering change, to confirm the scheduled write is equally
+      // gated out, not just a direct call.
       await new Promise((resolve) => setTimeout(resolve, 5500));
       const afterDebounce = await AtlasWallet.getAutoBackupSettings();
-      return { beforeSalt: before.salt, afterChangeSalt: afterChange.salt, afterDebounce };
+      return { beforeSalt: before.salt, afterChangeSalt: afterChange.salt, afterChange, directResult, afterDebounce };
     });
     assert(changePasswordResult.afterChangeSalt !== changePasswordResult.beforeSalt, 'changePassword() should have minted a fresh auto-backup salt, got the same one back');
-    assert(changePasswordResult.afterDebounce.lapsed === true, 'expected the debounced write to notice no file handle exists yet and mark the backup lapsed, got: ' + JSON.stringify(changePasswordResult.afterDebounce));
-    assert(typeof changePasswordResult.afterDebounce.lastError === 'string' && changePasswordResult.afterDebounce.lastError.length > 0, 'expected a plain-language lastError explaining the lapse');
-    console.log('PASS: changePassword() re-keyed the salt immediately, and the debounced write correctly noticed no backup file exists yet ->', changePasswordResult.afterDebounce.lastError);
+    assert(changePasswordResult.directResult.skipped === true && changePasswordResult.directResult.reason === 'not the auto-backup writer context', 'expected writeAutoBackupNow() to be gated out from viewer.html\'s iframe, got: ' + JSON.stringify(changePasswordResult.directResult));
+    assert(changePasswordResult.afterDebounce.lapsed === false, 'expected the gated-out context to leave "lapsed" alone rather than setting it, got: ' + JSON.stringify(changePasswordResult.afterDebounce));
+    assert(changePasswordResult.afterDebounce.lastError === null, 'expected the gated-out context to touch no settings at all, got lastError: ' + JSON.stringify(changePasswordResult.afterDebounce.lastError));
+    assert(changePasswordResult.afterDebounce.salt === changePasswordResult.afterChange.salt, 'expected settings to be completely untouched by the gated-out debounced write');
+    console.log('PASS: changePassword() re-keyed the salt immediately, and this non-writer context correctly no-ops on write attempts instead of racing backup-setup.html');
+
+    console.log('STEP 9: backup-setup.html IS the writer context — a direct call there proceeds past the gate (and fails for the mundane reason that no real file handle exists in this headless test)');
+    const overlaySrc = await page.evaluate(() => document.getElementById('domain-atlas-overlay').src);
+    const extensionId = new URL(overlaySrc).host;
+    const setupPage = await context.newPage();
+    await setupPage.goto(`chrome-extension://${extensionId}/backup-setup.html`, { waitUntil: 'load' });
+    const writerContextResult = await setupPage.evaluate(async () => AtlasWallet.writeAutoBackupNow());
+    assert(writerContextResult.skipped === true && writerContextResult.reason === 'no handle in IndexedDB', 'expected backup-setup.html to pass the writer-context gate and reach the "no handle" branch, got: ' + JSON.stringify(writerContextResult));
+    await setupPage.close();
+    console.log('PASS: backup-setup.html is correctly treated as the one real writer context —', writerContextResult.reason);
 
     console.log('\nALL AUTOMATIC BACKUP LOGIC CHECKS PASSED');
   } catch (err) {
