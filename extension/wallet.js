@@ -364,23 +364,27 @@ const AtlasWallet = (() => {
     const key = await deriveAesKey([password], salt);
     const plaintext = new TextEncoder().encode(JSON.stringify({ publicKey, privateKeyJwk }));
     const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
-    await chrome.storage.local.set({
-      atlasIdentity: {
-        format: 'atlas-identity-local/1.0',
-        publicKey,
-        salt: b64urlEncode(salt.buffer),
-        iv: b64urlEncode(iv.buffer),
-        ciphertext: b64urlEncode(ciphertext),
-        kdfIterations: KDF_ITERATIONS_CURRENT,
-        createdAt: new Date().toISOString()
-      }
-    });
+    const atlasIdentityBlob = {
+      format: 'atlas-identity-local/1.0',
+      publicKey,
+      salt: b64urlEncode(salt.buffer),
+      iv: b64urlEncode(iv.buffer),
+      ciphertext: b64urlEncode(ciphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT,
+      createdAt: new Date().toISOString()
+    };
+    await chrome.storage.local.set({ atlasIdentity: atlasIdentityBlob });
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     await chrome.storage.local.set({ atlasIdentityMode: 'local' });
     // No-op today — automatic backup can't be enabled before an identity
     // exists — but harmless and future-proof to call unconditionally, same
     // as every other place this session sets atlasUnlockedIdentity.
     await cacheAutoBackupSessionKey(password);
+    // Same reasoning — identity sync can't be enabled yet either, on a
+    // brand-new identity, but harmless/future-proof to call anyway (and
+    // correctly handles the case where this identity is replacing an
+    // earlier one that still has a stale sync backup enabled).
+    await reconcileIdentitySyncBackupOnIdentityChange(atlasIdentityBlob);
 
     const seedPhrase = generateSeedPhrase();
     return { publicKey, seedPhrase };
@@ -422,15 +426,17 @@ const AtlasWallet = (() => {
         const newIv = crypto.getRandomValues(new Uint8Array(12));
         const newKey = await deriveAesKey([password], newSalt);
         const newCiphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: newIv }, newKey, plaintext);
-        await chrome.storage.local.set({
-          atlasIdentity: {
-            ...atlasIdentity,
-            salt: b64urlEncode(newSalt.buffer),
-            iv: b64urlEncode(newIv.buffer),
-            ciphertext: b64urlEncode(newCiphertext),
-            kdfIterations: KDF_ITERATIONS_CURRENT
-          }
-        });
+        const migratedIdentityBlob = {
+          ...atlasIdentity,
+          salt: b64urlEncode(newSalt.buffer),
+          iv: b64urlEncode(newIv.buffer),
+          ciphertext: b64urlEncode(newCiphertext),
+          kdfIterations: KDF_ITERATIONS_CURRENT
+        };
+        await chrome.storage.local.set({ atlasIdentity: migratedIdentityBlob });
+        // Keeps a synced copy (if enabled) under the same fresh salt/iv,
+        // rather than leaving it one KDF migration behind this device.
+        await reconcileIdentitySyncBackupOnIdentityChange(migratedIdentityBlob);
       } catch (err) {
         // Best-effort — the unlock itself already succeeded either way.
       }
@@ -480,15 +486,19 @@ const AtlasWallet = (() => {
     const newIv = crypto.getRandomValues(new Uint8Array(12));
     const newKey = await deriveAesKey([newPassword], newSalt);
     const newCiphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: newIv }, newKey, plaintext);
-    await chrome.storage.local.set({
-      atlasIdentity: {
-        ...atlasIdentity,
-        salt: b64urlEncode(newSalt.buffer),
-        iv: b64urlEncode(newIv.buffer),
-        ciphertext: b64urlEncode(newCiphertext),
-        kdfIterations: KDF_ITERATIONS_CURRENT
-      }
-    });
+    const reencryptedIdentityBlob = {
+      ...atlasIdentity,
+      salt: b64urlEncode(newSalt.buffer),
+      iv: b64urlEncode(newIv.buffer),
+      ciphertext: b64urlEncode(newCiphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT
+    };
+    await chrome.storage.local.set({ atlasIdentity: reencryptedIdentityBlob });
+    // Same reasoning as the auto-backup re-key just below: a synced
+    // identity copy (if enabled) is encrypted under the OLD password too,
+    // and needs the same refresh or it silently stops matching what
+    // unlocks this device.
+    await reconcileIdentitySyncBackupOnIdentityChange(reencryptedIdentityBlob);
     // The session-cached unlocked identity (publicKey/privateKeyJwk) is
     // still correct — same keypair — so no need to re-unlock.
 
@@ -707,23 +717,27 @@ const AtlasWallet = (() => {
     const localKey = await deriveAesKey([password], localSalt);
     const localPlaintext = new TextEncoder().encode(JSON.stringify({ publicKey, privateKeyJwk }));
     const localCiphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: localIv }, localKey, localPlaintext);
-    await chrome.storage.local.set({
-      atlasIdentity: {
-        format: 'atlas-identity-local/1.0',
-        publicKey,
-        salt: b64urlEncode(localSalt.buffer),
-        iv: b64urlEncode(localIv.buffer),
-        ciphertext: b64urlEncode(localCiphertext),
-        kdfIterations: KDF_ITERATIONS_CURRENT,
-        createdAt: new Date().toISOString()
-      }
-    });
+    const importedIdentityBlob = {
+      format: 'atlas-identity-local/1.0',
+      publicKey,
+      salt: b64urlEncode(localSalt.buffer),
+      iv: b64urlEncode(localIv.buffer),
+      ciphertext: b64urlEncode(localCiphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT,
+      createdAt: new Date().toISOString()
+    };
+    await chrome.storage.local.set({ atlasIdentity: importedIdentityBlob });
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     await chrome.storage.local.set({ atlasIdentityMode: 'local' });
     // See unlockIdentity's own comment — same reasoning, this is also a
     // moment where a local identity becomes newly active under a known
     // password.
     await cacheAutoBackupSessionKey(password);
+    // An imported identity may well be DIFFERENT from whatever this
+    // device previously had synced — reconcile handles that mismatch
+    // (turns sync backup off rather than silently overwriting) instead of
+    // a blind mirror.
+    await reconcileIdentitySyncBackupOnIdentityChange(importedIdentityBlob);
     return { publicKey };
   }
 
@@ -3116,20 +3130,23 @@ const AtlasWallet = (() => {
     const localKey = await deriveAesKey([localUnlockPassword], localSalt);
     const localPlaintext = new TextEncoder().encode(JSON.stringify({ publicKey, privateKeyJwk }));
     const localCiphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: localIv }, localKey, localPlaintext);
-    await chrome.storage.local.set({
-      atlasIdentity: {
-        format: 'atlas-identity-local/1.0',
-        publicKey,
-        salt: b64urlEncode(localSalt.buffer),
-        iv: b64urlEncode(localIv.buffer),
-        ciphertext: b64urlEncode(localCiphertext),
-        kdfIterations: KDF_ITERATIONS_CURRENT,
-        createdAt: new Date().toISOString()
-      }
-    });
+    const restoredIdentityBlob = {
+      format: 'atlas-identity-local/1.0',
+      publicKey,
+      salt: b64urlEncode(localSalt.buffer),
+      iv: b64urlEncode(localIv.buffer),
+      ciphertext: b64urlEncode(localCiphertext),
+      kdfIterations: KDF_ITERATIONS_CURRENT,
+      createdAt: new Date().toISOString()
+    };
+    await chrome.storage.local.set({ atlasIdentity: restoredIdentityBlob });
     await chrome.storage.local.set({ atlasIdentityMode: 'local' });
     await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
     const identity = { mode: 'local', publicKey, privateKeyJwk };
+    // Same mismatch-safe reconcile as importIdentity() — a full-backup or
+    // auto-backup restore can just as easily bring a different identity
+    // active on this device than whatever it had synced before.
+    await reconcileIdentitySyncBackupOnIdentityChange(restoredIdentityBlob);
 
     // Automatic backup, if any, is per-device AND per-identity (the file
     // handle in IndexedDB, and the salt/settings pointing at it, are keyed
@@ -3751,6 +3768,172 @@ const AtlasWallet = (() => {
     const settings = await getAutoBackupSettings();
     if (!settings || !settings.enabled || !settings.writerHeartbeatAt) return false;
     return (Date.now() - new Date(settings.writerHeartbeatAt).getTime()) < AUTO_BACKUP_HEARTBEAT_STALE_AFTER_MS;
+  }
+
+  // ---------- identity sync via chrome.storage.sync ----------
+  //
+  // A second, much smaller automatic-recovery channel alongside the
+  // automatic FULL backup above — this one only ever carries the identity
+  // itself (the same already-encrypted `atlasIdentity` blob every local
+  // password identity is already stored as), mirrored into
+  // chrome.storage.sync so it rides along with the person's Chrome
+  // account. Deliberately NOT a replacement for the file-based full
+  // backup above — it's scoped to just the signing key on purpose:
+  //
+  //   1. Size: chrome.storage.sync caps a single item at 8KB and the
+  //      whole extension at ~100KB total. The atlasIdentity blob (a P-256
+  //      JWK plus a small amount of AES-GCM overhead) comfortably fits;
+  //      the FULL payload (mail, chat, trades, everything else
+  //      buildBackupPayload collects) would not, reliably, for an
+  //      actively-used wallet — no attempt is made to squeeze it in.
+  //   2. No browser-storage headaches at all: unlike the File System
+  //      Access-based backup above, chrome.storage.sync has no top-level-
+  //      origin restriction and needs no dedicated window to stay open —
+  //      it works identically from this same iframe context. The only
+  //      real tradeoff is trust: this data now also passes through
+  //      Google's own sync infrastructure, encrypted the same way, but on
+  //      infrastructure the person doesn't run themselves — worth being
+  //      opt-in for that reason alone, never on by default.
+  //   3. Restoring it only ever recovers the identity, not any data —
+  //      the exact same scope importIdentity() already has (see its own
+  //      comment). A full data restore still means the file-based
+  //      backup/restore above, or exportFullBackup/importFullBackup.
+  //
+  // The blob mirrored here is bit-for-bit whatever's currently in
+  // chrome.storage.local's `atlasIdentity` key — no separate encryption
+  // scheme to design or maintain, since that blob is already
+  // password-protected AES-GCM ciphertext. mirrorIdentityToSyncBackup()
+  // is called from every place this file writes a fresh atlasIdentity
+  // blob (createIdentity, unlockIdentity's KDF-migration rewrite,
+  // changePassword, importIdentity, applyBackupPayload) so the synced
+  // copy always reflects whichever identity + password is actually
+  // active on this device, whenever the person has opted in.
+  async function mirrorIdentityToSyncBackup(atlasIdentityBlob) {
+    try {
+      const { atlasIdentitySyncBackupEnabled } = await chrome.storage.local.get('atlasIdentitySyncBackupEnabled');
+      if (!atlasIdentitySyncBackupEnabled) return;
+      await chrome.storage.sync.set({ atlasIdentitySyncBackup: atlasIdentityBlob });
+    } catch (err) {
+      // Best-effort, same posture as every other auxiliary backup write in
+      // this file — quota exhaustion or a sync hiccup shouldn't block
+      // whatever main operation (create/unlock/change password/import)
+      // triggered this mirror.
+    }
+  }
+
+  // The safer entry point for the actual call sites: mirrorIdentityToSyncBackup()
+  // above assumes the blob it's given is a fresh copy of the SAME identity
+  // that's already synced (true for createIdentity/unlockIdentity's KDF
+  // migration/changePassword, where the publicKey never changes, only the
+  // encryption around it) — but importIdentity() and applyBackupPayload()
+  // can bring a GENUINELY DIFFERENT identity active on this device. Blindly
+  // mirroring in that case would silently overwrite someone else's (or an
+  // earlier identity's) only synced copy with an unrelated one. Same
+  // mismatch posture applyBackupPayload already uses for the file-based
+  // auto-backup: turn this off rather than silently clobber, so Settings
+  // stays honest about what's actually being kept in sync.
+  async function reconcileIdentitySyncBackupOnIdentityChange(atlasIdentityBlob) {
+    try {
+      const { atlasIdentitySyncBackupEnabled } = await chrome.storage.local.get('atlasIdentitySyncBackupEnabled');
+      if (!atlasIdentitySyncBackupEnabled) return;
+      const { atlasIdentitySyncBackup } = await chrome.storage.sync.get('atlasIdentitySyncBackup');
+      if (atlasIdentitySyncBackup && atlasIdentitySyncBackup.publicKey && atlasIdentitySyncBackup.publicKey !== atlasIdentityBlob.publicKey) {
+        await disableIdentitySyncBackup();
+        return;
+      }
+      await mirrorIdentityToSyncBackup(atlasIdentityBlob);
+    } catch (err) {
+      // Best-effort — never blocks the import/restore that triggered this.
+    }
+  }
+
+  async function getIdentitySyncBackupSettings() {
+    const { atlasIdentitySyncBackupEnabled } = await chrome.storage.local.get('atlasIdentitySyncBackupEnabled');
+    return { enabled: !!atlasIdentitySyncBackupEnabled };
+  }
+
+  // Same "prove you know it, even though the wallet's already unlocked"
+  // posture exportIdentity/setUpAutoBackup already use — re-derives from
+  // the LOCAL encrypted blob under the given password rather than
+  // trusting the session cache, so turning this on always requires the
+  // real current password, not just an unlocked session.
+  async function enableIdentitySyncBackup(password) {
+    if (await getIdentityMode() !== 'local') {
+      throw new Error('Only available for password identities — a passkey\'s private key never leaves the authenticator, so there\'s nothing to sync.');
+    }
+    const { atlasIdentity } = await chrome.storage.local.get('atlasIdentity');
+    if (!atlasIdentity) throw new Error('No identity set up on this device yet.');
+    const salt = new Uint8Array(b64urlDecode(atlasIdentity.salt));
+    const iv = new Uint8Array(b64urlDecode(atlasIdentity.iv));
+    const iterations = atlasIdentity.kdfIterations || KDF_ITERATIONS_LEGACY;
+    const key = await deriveAesKey([password], salt, iterations);
+    try {
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(atlasIdentity.ciphertext));
+    } catch (err) {
+      throw new Error('Incorrect password.');
+    }
+    await chrome.storage.local.set({ atlasIdentitySyncBackupEnabled: true });
+    await chrome.storage.sync.set({ atlasIdentitySyncBackup: atlasIdentity });
+    return { ok: true };
+  }
+
+  // Deliberately does NOT touch the synced copy's ability to be read back
+  // by leaving it in place — it removes it outright, unlike the local
+  // file backup's turnOffAutoBackup() (which leaves the file alone since
+  // it might be the person's only surviving copy). The difference: a
+  // synced blob living on in the person's Chrome account after they
+  // explicitly turned this off would be a surprise, not a safety net —
+  // there's no "my only copy" case for it the way there can be for a
+  // local file, since this is always a mirror of something also encrypted
+  // locally right now.
+  async function disableIdentitySyncBackup() {
+    await chrome.storage.local.set({ atlasIdentitySyncBackupEnabled: false });
+    try { await chrome.storage.sync.remove('atlasIdentitySyncBackup'); } catch (err) { /* best-effort */ }
+  }
+
+  // Checked from the onboarding screen on a device with no local identity
+  // yet, to offer "restore synced identity" alongside the existing
+  // create/import/passkey choices.
+  async function hasSyncedIdentityAvailable() {
+    try {
+      const { atlasIdentitySyncBackup } = await chrome.storage.sync.get('atlasIdentitySyncBackup');
+      return !!(atlasIdentitySyncBackup && atlasIdentitySyncBackup.ciphertext);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // The restore counterpart — same scope as importIdentity() (identity
+  // only, no wallet/mail/trades/etc.), same decrypt logic as
+  // unlockIdentity(), just reading the blob from chrome.storage.sync
+  // instead of an uploaded file and this device's chrome.storage.local
+  // instead of an already-unlocked one. Re-uses the synced blob as-is for
+  // this device's own local atlasIdentity — it's already correctly
+  // encrypted under this exact password, no need to re-encrypt under a
+  // fresh local salt/iv the way importIdentity() does for an uploaded
+  // export file.
+  async function restoreIdentityFromSync(password) {
+    const { atlasIdentitySyncBackup } = await chrome.storage.sync.get('atlasIdentitySyncBackup');
+    if (!atlasIdentitySyncBackup) throw new Error('No synced identity found for this Chrome account.');
+    const salt = new Uint8Array(b64urlDecode(atlasIdentitySyncBackup.salt));
+    const iv = new Uint8Array(b64urlDecode(atlasIdentitySyncBackup.iv));
+    const iterations = atlasIdentitySyncBackup.kdfIterations || KDF_ITERATIONS_LEGACY;
+    const key = await deriveAesKey([password], salt, iterations);
+    let plaintext;
+    try {
+      plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, b64urlDecode(atlasIdentitySyncBackup.ciphertext));
+    } catch (err) {
+      throw new Error('Incorrect password.');
+    }
+    const { publicKey, privateKeyJwk } = JSON.parse(new TextDecoder().decode(plaintext));
+    await chrome.storage.local.set({
+      atlasIdentity: atlasIdentitySyncBackup,
+      atlasIdentityMode: 'local',
+      atlasIdentitySyncBackupEnabled: true
+    });
+    await chrome.storage.session.set({ atlasUnlockedIdentity: { publicKey, privateKeyJwk } });
+    await cacheAutoBackupSessionKey(password);
+    return { publicKey };
   }
 
   // ---------- mail (correspondence tied to a held credential) ----------
@@ -5427,6 +5610,8 @@ const AtlasWallet = (() => {
     exportFullBackup, importFullBackup,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
     writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,
+    getIdentitySyncBackupSettings, enableIdentitySyncBackup, disableIdentitySyncBackup,
+    hasSyncedIdentityAvailable, restoreIdentityFromSync,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,

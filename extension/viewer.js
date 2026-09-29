@@ -1942,6 +1942,18 @@ const autoBackupRestoreFileInput = document.getElementById('autoBackupRestoreFil
 const autoBackupRestorePasswordInput = document.getElementById('autoBackupRestorePasswordInput');
 const autoBackupRestoreBtn = document.getElementById('autoBackupRestoreBtn');
 const autoBackupRestoreStatusEl = document.getElementById('autoBackupRestoreStatus');
+const identitySyncLocalSection = document.getElementById('identitySyncLocalSection');
+const identitySyncWebAuthnNote = document.getElementById('identitySyncWebAuthnNote');
+const identitySyncStatusLine = document.getElementById('identitySyncStatusLine');
+const identitySyncEnableBtn = document.getElementById('identitySyncEnableBtn');
+const identitySyncEnablePasswordInput = document.getElementById('identitySyncEnablePasswordInput');
+const identitySyncConfirmEnableBtn = document.getElementById('identitySyncConfirmEnableBtn');
+const identitySyncDisableBtn = document.getElementById('identitySyncDisableBtn');
+const identitySyncStatusEl = document.getElementById('identitySyncStatus');
+const onboardingSyncedIdentityBox = document.getElementById('onboardingSyncedIdentityBox');
+const onboardingSyncedIdentityPasswordInput = document.getElementById('onboardingSyncedIdentityPasswordInput');
+const onboardingRestoreSyncedIdentityBtn = document.getElementById('onboardingRestoreSyncedIdentityBtn');
+const onboardingSyncedIdentityStatusEl = document.getElementById('onboardingSyncedIdentityStatus');
 const exportStatusEl = document.getElementById('exportStatus');
 const exportBtn = document.getElementById('exportBtn');
 const importWalletBtn = document.getElementById('importWalletBtn');
@@ -3711,6 +3723,10 @@ async function refreshIdentityModeControls() {
   // Full backup does, so it's gated the same way.
   autoBackupLocalSection.style.display = mode === 'webauthn' ? 'none' : '';
   autoBackupWebAuthnNote.style.display = mode === 'webauthn' ? '' : 'none';
+  // Identity sync only ever carries the private key itself, so it's gated
+  // the exact same way Identity backup is — nothing to sync for a passkey.
+  identitySyncLocalSection.style.display = mode === 'webauthn' ? 'none' : '';
+  identitySyncWebAuthnNote.style.display = mode === 'webauthn' ? '' : 'none';
 }
 
 // Reflects wallet.js's atlasAutoBackupSettings onto the Settings panel:
@@ -3764,6 +3780,37 @@ async function refreshAutoBackupDisplay() {
   autoBackupReconnectBtn.style.display = 'none';
   autoBackupReopenWindowBtn.style.display = 'none';
   autoBackupTurnOffBtn.style.display = '';
+}
+
+// Reflects wallet.js's atlasIdentitySyncBackupEnabled flag onto the
+// Settings panel — much simpler than refreshAutoBackupDisplay above since
+// there's no file handle, no permission, and no window to lose track of;
+// it's either on or off. Called on opening Settings and whenever
+// chrome.storage.onChanged reports that key changed.
+async function refreshIdentitySyncDisplay() {
+  if (!identitySyncStatusLine) return;
+  const settings = await AtlasWallet.getIdentitySyncBackupSettings();
+  identitySyncEnableBtn.style.display = settings.enabled ? 'none' : '';
+  identitySyncEnablePasswordInput.style.display = 'none';
+  identitySyncConfirmEnableBtn.style.display = 'none';
+  identitySyncDisableBtn.style.display = settings.enabled ? '' : 'none';
+  identitySyncStatusLine.textContent = settings.enabled
+    ? 'On — this device’s identity is kept synced to your Chrome account.'
+    : 'Off.';
+}
+
+// Checked every time the onboarding screen is about to show (no identity
+// on this device yet) — surfaces the "restore synced identity" box only
+// when there's actually something to restore, rather than showing an
+// input that would just fail.
+async function refreshOnboardingSyncedIdentityBox() {
+  if (!onboardingSyncedIdentityBox) return;
+  const available = await AtlasWallet.hasSyncedIdentityAvailable();
+  onboardingSyncedIdentityBox.style.display = available ? '' : 'none';
+  if (available) {
+    onboardingSyncedIdentityPasswordInput.value = '';
+    onboardingSyncedIdentityStatusEl.textContent = '';
+  }
 }
 
 // ---------- wallet panel screen routing ----------
@@ -3920,6 +3967,7 @@ async function routeWalletScreen() {
     unlockPasswordInput.focus();
   } else {
     showWalletScreen('onboardingChoiceScreen');
+    await refreshOnboardingSyncedIdentityBox();
   }
 }
 
@@ -3982,6 +4030,7 @@ async function backToWalletHome() {
     await refreshInventoryDisplay();
   } else {
     showWalletScreen('onboardingChoiceScreen');
+    await refreshOnboardingSyncedIdentityBox();
   }
 }
 
@@ -6252,6 +6301,9 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     // one happened.
     await refreshAutoBackupDisplay();
   }
+  if (areaName === 'local' && changes.atlasIdentitySyncBackupEnabled) {
+    await refreshIdentitySyncDisplay();
+  }
   if (areaName === 'session' && changes.atlasUnlockedIdentity) {
     await refreshIdentityDisplay();
     // Task #111 TODO round 1, item 1: the Messaging button/window are
@@ -6428,6 +6480,28 @@ confirmImportBtn.addEventListener('click', async () => {
     importScreenStatus.textContent = err.message;
   } finally {
     confirmImportBtn.disabled = false;
+  }
+});
+
+// Same shape as confirmImportBtn above (identity only, no wallet/mail/
+// etc.), just pulling the encrypted blob from chrome.storage.sync instead
+// of an uploaded file — no file, no seed phrase needed, just the password
+// that already unlocks it (see wallet.js's restoreIdentityFromSync).
+onboardingRestoreSyncedIdentityBtn.addEventListener('click', async () => {
+  onboardingRestoreSyncedIdentityBtn.disabled = true;
+  onboardingSyncedIdentityStatusEl.textContent = 'Decrypting…';
+  try {
+    await AtlasWallet.restoreIdentityFromSync(onboardingSyncedIdentityPasswordInput.value);
+    onboardingSyncedIdentityPasswordInput.value = '';
+    showWalletScreen('mainWalletScreen');
+    await refreshIdentityDisplay();
+    await refreshInventoryDisplay();
+    await refreshOwnedOncePerUserClassKeys();
+    refreshChatIdentity();
+  } catch (err) {
+    onboardingSyncedIdentityStatusEl.textContent = err.message;
+  } finally {
+    onboardingRestoreSyncedIdentityBtn.disabled = false;
   }
 });
 
@@ -6623,6 +6697,7 @@ async function openSettings() {
   await refreshCacheDisplay();
   await refreshChatAdminDisplay();
   await refreshAutoBackupDisplay();
+  await refreshIdentitySyncDisplay();
   if (characterScaleInputEl) {
     const scale = await AtlasWallet.getCharacterScale();
     characterScaleInputEl.value = String(scale);
@@ -10458,6 +10533,42 @@ autoBackupTurnOffBtn.addEventListener('click', async () => {
     await refreshAutoBackupDisplay();
   } finally {
     autoBackupTurnOffBtn.disabled = false;
+  }
+});
+
+// Two-step, same "prove you know it" pattern as every other backup
+// toggle here: the button reveals a password field rather than acting
+// immediately, since turning this on requires re-verifying the current
+// password (see wallet.js's enableIdentitySyncBackup).
+identitySyncEnableBtn.addEventListener('click', () => {
+  identitySyncEnableBtn.style.display = 'none';
+  identitySyncEnablePasswordInput.style.display = '';
+  identitySyncConfirmEnableBtn.style.display = '';
+  identitySyncEnablePasswordInput.value = '';
+  identitySyncStatusEl.textContent = '';
+  identitySyncEnablePasswordInput.focus();
+});
+
+identitySyncConfirmEnableBtn.addEventListener('click', async () => {
+  identitySyncConfirmEnableBtn.disabled = true;
+  try {
+    await AtlasWallet.enableIdentitySyncBackup(identitySyncEnablePasswordInput.value);
+    identitySyncEnablePasswordInput.value = '';
+    await refreshIdentitySyncDisplay();
+  } catch (err) {
+    identitySyncStatusEl.textContent = err.message;
+  } finally {
+    identitySyncConfirmEnableBtn.disabled = false;
+  }
+});
+
+identitySyncDisableBtn.addEventListener('click', async () => {
+  identitySyncDisableBtn.disabled = true;
+  try {
+    await AtlasWallet.disableIdentitySyncBackup();
+    await refreshIdentitySyncDisplay();
+  } finally {
+    identitySyncDisableBtn.disabled = false;
   }
 });
 

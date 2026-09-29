@@ -1450,6 +1450,20 @@
     <!-- Screen: no identity on this device yet -->
     <div id="onboardingChoiceScreen" class="wallet-screen">
       <h3>Set up your wallet</h3>
+      <!-- Shown only when AtlasWallet.hasSyncedIdentityAvailable() finds a
+           synced identity blob in chrome.storage.sync for this Chrome
+           account (see wallet.js's "identity sync via chrome.storage.sync"
+           section) — surfaced first, above the normal create/import
+           choices, since it's the fastest path back in when it applies. -->
+      <div id="onboardingSyncedIdentityBox" class="warn-box" style="display:none;">
+        A synced identity was found for this Chrome account. Enter its
+        password to restore it on this device — no file needed.
+        <input type="password" id="onboardingSyncedIdentityPasswordInput" placeholder="Password" style="margin-top:8px;">
+        <div class="btn-col" style="margin-top:8px;">
+          <button id="onboardingRestoreSyncedIdentityBtn" type="button">Restore synced identity</button>
+        </div>
+        <div id="onboardingSyncedIdentityStatus" class="mono"></div>
+      </div>
       <div class="subhead">Password identity</div>
       <div class="warn-box">
         One password protects your identity on this device. You'll enter it once per browser session — Domain Atlas doesn't ask again until you fully close and reopen the browser.
@@ -1679,6 +1693,36 @@
             </div>
           </div>
           <div id="autoBackupWebAuthnNote" class="empty-note" style="display:none;">Passkey identities can't be included in an automatic backup either, same reason as Identity backup and Full backup above — the private key never leaves the authenticator.</div>
+        </div>
+      </div>
+
+      <!-- Identity sync via chrome.storage.sync: a second, much smaller
+           automatic-recovery channel alongside Automatic backup above —
+           this one only ever carries the identity itself (the same
+           already-encrypted local identity blob), riding along with the
+           person's Chrome account instead of a file on disk. No picker,
+           no permission prompt, no window that needs to stay open — but
+           it does mean this data also passes through Google's own sync
+           infrastructure, still encrypted, just not on infrastructure the
+           person runs themselves. See wallet.js's own "identity sync via
+           chrome.storage.sync" section for the full reasoning on why it's
+           scoped to just the identity and kept opt-in. -->
+      <div class="settings-category" data-category="identity-sync">
+        <button type="button" class="settings-category-toggle"><span>Identity sync</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div id="identitySyncLocalSection">
+            <div class="empty-note">Keeps just your identity (not your wallet, mail, or other data) synced to your Chrome account, so a new device can recover it with just your password — no file to keep track of. The data still passes through Google's own sync infrastructure, encrypted; off by default.</div>
+            <div id="identitySyncStatusLine" class="mono" style="margin-top:8px;">Off.</div>
+            <div class="btn-col" style="margin-top:8px;">
+              <button id="identitySyncEnableBtn" type="button">Turn on identity sync</button>
+              <input type="password" id="identitySyncEnablePasswordInput" placeholder="Confirm your wallet password" style="display:none;">
+              <button id="identitySyncConfirmEnableBtn" type="button" style="display:none;">Confirm</button>
+              <button id="identitySyncDisableBtn" type="button" class="btn-secondary" style="display:none;">Turn off identity sync</button>
+            </div>
+            <div id="identitySyncStatus" class="mono"></div>
+          </div>
+          <div id="identitySyncWebAuthnNote" class="empty-note" style="display:none;">Passkey identities can't be synced this way either — the private key never leaves the authenticator, so there's nothing to sync.</div>
+          <div class="empty-note" style="margin-top:10px;">To restore a synced identity onto a new device, open the wallet there — if one is found for that Chrome account, it's offered right on the setup screen.</div>
         </div>
       </div>
 
