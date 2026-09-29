@@ -10549,7 +10549,14 @@ exportFullBackupBtn.addEventListener('click', async () => {
 // whatever it did via the chrome.storage.onChanged listener above, or via
 // its heartbeat once the window is open and left that way.
 function openBackupSetupWindow() {
-  chrome.windows.create({ url: chrome.runtime.getURL('backup-setup.html'), type: 'popup', width: 480, height: 640 });
+  // height: 780 — tall enough that the explain screen (by far the longest:
+  // four paragraphs plus a tip box, label, input, and buttons) never needs
+  // its own scrollbar. A too-short window here is exactly how this
+  // extension's own stray-window problem turned up: a forgotten,
+  // never-minimized copy of this window sitting on screen, over-scrolled
+  // content and all, mistaken for something wrong with the wallet panel
+  // itself.
+  chrome.windows.create({ url: chrome.runtime.getURL('backup-setup.html'), type: 'popup', width: 480, height: 780 });
 }
 
 autoBackupSetupBtn.addEventListener('click', openBackupSetupWindow);

@@ -30,6 +30,27 @@ const reconnectBtn = document.getElementById('reconnectBtn');
 const reconnectReasonText = document.getElementById('reconnectReasonText');
 const reconnectStatusEl = document.getElementById('reconnectStatus');
 
+// This window is designed to stay open (minimized) indefinitely so silent
+// backup writes keep working — see the top comment above. Minimizing used
+// to be manual-only, which meant a copy of this window could sit forgotten
+// on screen at full size for as long as nobody clicked the button. Once
+// the "keep this open" screen is showing, there's nothing left for a
+// person to do here, so auto-minimize after a short delay instead of
+// waiting on a click; the button stays for anyone who wants it sooner.
+const AUTO_MINIMIZE_DELAY_MS = 4000;
+let autoMinimizeTimer = null;
+
+function minimizeThisWindow() {
+  if (autoMinimizeTimer) {
+    clearTimeout(autoMinimizeTimer);
+    autoMinimizeTimer = null;
+  }
+  if (!chrome.windows || !chrome.windows.getCurrent) { window.blur(); return; }
+  chrome.windows.getCurrent((win) => {
+    if (win && win.id !== undefined) chrome.windows.update(win.id, { state: 'minimized' });
+  });
+}
+
 function showOnly(screen) {
   for (const el of [setupScreen, blockedScreen, reconnectScreen, doneScreen]) {
     if (el) el.classList.toggle('hidden', el !== screen);
@@ -49,6 +70,8 @@ function showKeepOpenScreen(fileName) {
   doneText.textContent = fileName
     ? 'Saving to "' + fileName + '". It stays up to date on its own from here.'
     : 'It stays up to date on its own from here.';
+  if (autoMinimizeTimer) clearTimeout(autoMinimizeTimer);
+  autoMinimizeTimer = setTimeout(minimizeThisWindow, AUTO_MINIMIZE_DELAY_MS);
 }
 
 (async () => {
@@ -138,11 +161,12 @@ reconnectBtn.addEventListener('click', async () => {
   }
 });
 
-minimizeBtn.addEventListener('click', () => {
-  if (!chrome.windows || !chrome.windows.getCurrent) { window.blur(); return; }
-  chrome.windows.getCurrent((win) => {
-    if (win && win.id !== undefined) chrome.windows.update(win.id, { state: 'minimized' });
-  });
-});
+minimizeBtn.addEventListener('click', minimizeThisWindow);
 
-closeBtn.addEventListener('click', () => window.close());
+closeBtn.addEventListener('click', () => {
+  if (autoMinimizeTimer) {
+    clearTimeout(autoMinimizeTimer);
+    autoMinimizeTimer = null;
+  }
+  window.close();
+});

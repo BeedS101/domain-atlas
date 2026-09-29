@@ -403,9 +403,15 @@
   #walletPanel {
     display: none; position: fixed; top: 56px; right: 0; bottom: 0; width: 360px;
     background: rgba(14,22,27,0.97); border-left: 1px solid #2c3c44; z-index: 11;
-    padding: 16px; overflow-y: auto; font-size: 13px;
+    overflow-y: auto; font-size: 13px;
   }
   #walletPanel.open { display: block; }
+  /* Holds everything #walletPanel used to pad directly, EXCEPT
+     #walletTabBar — split out so the tab bar can sit outside this padding,
+     flush with #walletPanel's own scrollport, which is what lets it stick
+     to the top of the panel (see #walletTabBar's own comment) instead of
+     scrolling away with the rest of whatever screen is open. */
+  #walletPanelContent { padding: 16px; }
   #walletPanel h3 {
     margin: 20px 0 10px; font-size: 12px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em;
     border-top: 1px solid #2c3c44; padding-top: 14px;
@@ -539,8 +545,22 @@
      (Wallet, Settings) — see showWalletScreen() in viewer.js. Onboarding,
      unlock, and identity-creation screens have nothing to tab between yet,
      so the bar stays hidden there and those screens keep their own
-     dedicated back buttons instead. */
-  #walletTabBar { display: none; gap: 8px; margin-bottom: 14px; }
+     dedicated back buttons instead.
+     Sticky within #walletPanel's own scroll area (its nearest scrolling
+     ancestor) so it stays put — visible and clickable — while a long
+     screen (Settings, in particular) scrolls underneath it, instead of
+     scrolling away with everything else. `top: 0` lines up exactly with
+     #walletPanel's scrollport because the panel's own padding now lives on
+     #walletPanelContent instead (see that rule's own comment) — this bar
+     sits outside it, flush with the panel's true top edge. Needs its own
+     opaque background (the panel's own is a translucent overlay content
+     would otherwise show through) and its own left/right/top padding to
+     visually line back up with #walletPanelContent's 16px inset below it. */
+  #walletTabBar {
+    display: none; gap: 8px; padding: 16px 16px 10px;
+    position: sticky; top: 0; z-index: 1;
+    background: rgba(14,22,27,0.97); border-bottom: 1px solid #2c3c44;
+  }
   #walletTabBar.visible { display: flex; }
   #walletTabBar button { flex: 1; }
   #walletTabBar button.active-tab { background: #1d2f38; border-color: #4a90a4; color: #fff6ef; }
@@ -1446,6 +1466,8 @@
       <button id="tradeTabBtn" type="button">Trade</button>
       <button id="settingsTabBtn" type="button">Settings</button>
     </div>
+
+    <div id="walletPanelContent">
 
     <!-- Screen: no identity on this device yet -->
     <div id="onboardingChoiceScreen" class="wallet-screen">
@@ -2674,6 +2696,8 @@
           <div id="calendarRemoteEventsList" class="item-list" style="margin-top:10px;"></div>
         </div>
       </div>
+
+    </div>
 
     </div>
 

@@ -221,6 +221,84 @@ function assert(cond, message) {
     await setupPage.close();
     console.log('PASS: backup-setup.html is correctly treated as the one real writer context —', writerContextResult.reason);
 
+    console.log('STEP 10: the "keep this open" screen auto-minimizes itself after a short delay, with no click needed');
+    // STEP 9's direct writeAutoBackupNow() call marked settings lapsed
+    // (no real file handle exists in this headless test) — irrelevant to
+    // what this step checks, so re-arm a healthy, non-lapsed settings
+    // object the same way STEP 8 first seeded one.
+    await frame.evaluate(async () => {
+      const identity = await AtlasWallet.getIdentity();
+      await new Promise((resolve) => {
+        chrome.storage.local.set({
+          atlasAutoBackupSettings: {
+            ownerPublicKey: identity.publicKey,
+            enabled: true,
+            fileName: 'atlas-wallet-backup.json',
+            salt: 'auto-minimize-test-salt',
+            kdfIterations: 210000,
+            lastWrittenAt: null,
+            lastError: null,
+            lapsed: false
+          }
+        }, resolve);
+      });
+    });
+
+    const autoMinimizePage = await context.newPage();
+    // chrome.windows.getCurrent/update are real extension APIs here, not a
+    // test harness — patch them before backup-setup.js's own top-level
+    // script runs so its calls land on this spy instead of touching any
+    // real OS window state.
+    await autoMinimizePage.addInitScript(() => {
+      window.__minimizeCalls = [];
+      chrome.windows.getCurrent = (cb) => cb({ id: 4242 });
+      chrome.windows.update = (id, info) => { window.__minimizeCalls.push({ id, info }); };
+    });
+    await autoMinimizePage.goto(`chrome-extension://${extensionId}/backup-setup.html`, { waitUntil: 'load' });
+    await autoMinimizePage.waitForFunction(() => {
+      const el = document.getElementById('doneScreen');
+      return el && !el.classList.contains('hidden');
+    }, { timeout: 5000 });
+    const noteText = await autoMinimizePage.evaluate(() => {
+      const el = document.querySelector('#doneScreen p.tip');
+      return el ? el.textContent : null;
+    });
+    assert(noteText && noteText.includes('minimize itself'), 'expected the "keep this open" screen to explain the auto-minimize behavior, got: ' + JSON.stringify(noteText));
+    console.log('PASS: healthy (non-lapsed) settings route straight to the "keep this open" screen, with the auto-minimize note shown');
+
+    const calledTooSoon = await autoMinimizePage.evaluate(() => window.__minimizeCalls.length);
+    assert(calledTooSoon === 0, 'expected no minimize call yet, immediately after the screen appeared, got ' + calledTooSoon);
+
+    await autoMinimizePage.waitForFunction(() => window.__minimizeCalls.length > 0, { timeout: 8000 });
+    const afterDelay = await autoMinimizePage.evaluate(() => window.__minimizeCalls);
+    assert(afterDelay.length === 1, 'expected exactly one auto-minimize call, got ' + afterDelay.length + ': ' + JSON.stringify(afterDelay));
+    assert(afterDelay[0].info && afterDelay[0].info.state === 'minimized', 'expected the auto-minimize call to request the minimized state, got: ' + JSON.stringify(afterDelay[0]));
+    console.log('PASS: the window minimized itself on its own after the delay, with no click —', JSON.stringify(afterDelay[0]));
+    await autoMinimizePage.close();
+
+    console.log('STEP 11: clicking "Minimize this window" still works immediately, and cancels the pending auto-minimize timer instead of double-firing later');
+    const manualMinimizePage = await context.newPage();
+    await manualMinimizePage.addInitScript(() => {
+      window.__minimizeCalls = [];
+      chrome.windows.getCurrent = (cb) => cb({ id: 4242 });
+      chrome.windows.update = (id, info) => { window.__minimizeCalls.push({ id, info }); };
+    });
+    await manualMinimizePage.goto(`chrome-extension://${extensionId}/backup-setup.html`, { waitUntil: 'load' });
+    await manualMinimizePage.waitForFunction(() => {
+      const el = document.getElementById('doneScreen');
+      return el && !el.classList.contains('hidden');
+    }, { timeout: 5000 });
+    await manualMinimizePage.locator('#minimizeBtn').click();
+    const afterClick = await manualMinimizePage.evaluate(() => window.__minimizeCalls.length);
+    assert(afterClick === 1, 'expected the manual click to fire the minimize call immediately, got ' + afterClick);
+    // Wait out the auto-minimize delay to confirm the click canceled the
+    // pending timer rather than leaving it to fire again on its own later.
+    await new Promise((resolve) => setTimeout(resolve, 4800));
+    const afterWaiting = await manualMinimizePage.evaluate(() => window.__minimizeCalls.length);
+    assert(afterWaiting === 1, 'expected the manual click to cancel the pending auto-minimize timer, but it fired again — got ' + afterWaiting + ' total calls');
+    console.log('PASS: manual click minimizes immediately and cancels the pending timer, so it never double-fires');
+    await manualMinimizePage.close();
+
     console.log('\nALL AUTOMATIC BACKUP LOGIC CHECKS PASSED');
   } catch (err) {
     console.error('FAILURE:', err);
