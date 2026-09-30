@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Reserve Bank &amp; Two-Tier Currency Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb; --amber: #96650f; --amber-bg: #fbf1de;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 800px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel .stepnote { color: var(--muted); font-size: 0.9rem; margin-top: 0; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  .panel.caution { background: var(--amber-bg); border-color: var(--amber); }
+  .panel.caution p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button.danger { background: var(--red); border-color: var(--red); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.6rem; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.7rem 0 0.3rem; }
+  input[type="number"], input[type="text"] {
+    width: 100%; font: inherit; font-size: 0.95rem; padding: 0.5rem 0.6rem;
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  .officers { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.7rem; margin-top: 0.8rem; }
+  .officer {
+    border: 1px solid var(--line); border-radius: 9px; padding: 0.75rem 0.85rem; background: #fbfcfd;
+    display: flex; flex-direction: column; gap: 0.35rem;
+  }
+  .officer h3 { margin: 0; font-size: 0.9rem; }
+  .officer .key { font-size: 0.7rem; color: var(--muted); word-break: break-all; }
+  .officer .state { font-size: 0.78rem; }
+  .officer .state.signed { color: var(--green); }
+  .officer .state.waiting { color: var(--muted); }
+  .progress { font-size: 0.88rem; margin: 0.7rem 0 0; }
+  .progress .bar { height: 8px; border-radius: 999px; background: #eef1f3; margin-top: 0.35rem; overflow: hidden; }
+  .progress .fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+  .ledger { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.7rem; margin: 0.8rem 0; }
+  .acct {
+    border: 1px solid var(--line); border-radius: 9px; padding: 0.75rem 0.85rem; background: #fbfcfd;
+  }
+  .acct h4 { margin: 0 0 0.4rem; font-size: 0.88rem; }
+  .acct .bal { font-size: 0.82rem; color: var(--muted); margin: 0.1rem 0; }
+  .acct .bal b { color: var(--ink); }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.5rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .result.warn { background: var(--amber-bg); color: var(--amber); }
+  details.raw { font-size: 0.8rem; margin-top: 0.5rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  textarea#verifyInput {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.7rem; resize: vertical;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>A reserve bank, two commercial banks, and no wallet in sight</h1>
+  <p class="tag">A monetary-policy committee mints currency, two banks issue their own retail dollars against it, customers pay each other and each other's banks, an independent auditor checks the books, and a fraud gets clawed back — seven real, live acts, nothing staged.</p>
+  <p class="lede">
+    This page plays every party in a two-tier currency system at once — the committee, both banks, three
+    customers, and an independent auditor — the same "one tab, several identities" trick
+    <a href="clawback-demo.html">the suspend/clawback demo</a> already uses. Every step below is a genuine,
+    live call to this domain's own server: real fungible balances (SPEC.md §5.4), real committee-approved
+    minting, real bank-to-customer and customer-to-customer payments (§5.4's split mechanism), a real
+    cross-currency settlement at a Trading Station (§7), a real independent attestation (§5.11), and a real
+    suspend-then-clawback of a fraudulent balance (§5.3, §5.12). No admin login anywhere on this page —
+    everything below reaches a self-serve stand-in for whichever authority a step needs, the same way every
+    other demo on this site does.
+  </p>
+
+  <div class="panel pitch">
+    <h2>How the real thing works, briefly</h2>
+    <p>
+      A reserve/central bank normally issues currency directly only to commercial banks — reserve balances,
+      "wholesale" money — never to the public. Commercial banks then extend money to individuals and
+      businesses as deposits, which are technically the bank's own liability, not the central bank's, though
+      ordinarily treated as interchangeable. Real central-bank digital currency projects mostly keep this same
+      two-tier shape: the central bank issues wholesale digital currency to banks, and the banks handle all the
+      retail distribution. Below, "Example Reserve Authority," "Example Bank Alpha," and "Example Bank Beta"
+      are fictional stand-ins playing exactly those three roles — nothing here is modeled on, or represents,
+      any real institution.
+    </p>
+  </div>
+
+  <div class="panel caution">
+    <p>
+      <strong>One honest limitation, stated plainly rather than glossed over:</strong> Bank Alpha and Bank Beta
+      below are both, for now, currencies issued by this one demo domain's own key, playing both bank roles —
+      not two genuinely separate, independently-run domains. The Trading Station settlement in Act 5 runs the
+      exact same, unmodified code that would clear a trade between two truly independent banks' currencies —
+      nothing about that endpoint is issuer-specific — so it's real proof of the mechanism, just not yet proof
+      of two separate live domains actually doing it. That would need a second real deployment with its own
+      domain and signing key, which is a genuine next step, not a limitation of the protocol itself.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Act 1 — the committee approves new reserves</h2>
+    <p class="stepnote">
+      Currency isn't minted unilaterally: a monetary policy committee has to reach its own K-of-N threshold
+      first, reusing the exact same multi-signature mechanism <a href="bank-demo.html">the treasury-approval
+      demo</a> already proves out (SPEC.md §6.2's signed-payload mechanism) — just pointed at a different
+      class and a different recipient.
+    </p>
+    <button id="setupBtn">Set up the committee</button>
+    <button id="resetBtn" class="secondary" type="button" style="display:none; margin-left:0.6rem;">Start over</button>
+    <div class="officers" id="officerCards" style="display:none;"></div>
+    <div id="mintRequestArea" style="display:none; margin-top:1rem;">
+      <label for="mintAmountInput">Reserve Credits to mint, to the Reserve Authority's own treasury</label>
+      <input type="number" id="mintAmountInput" min="1" max="1000000" value="100000">
+      <div class="row"><button id="requestMintBtn" type="button">Request the mint</button></div>
+      <div id="mintRequestStatus"></div>
+    </div>
+    <div id="approvePanel" style="display:none; margin-top:1rem;">
+      <p class="stepnote">Each button below fetches the pending request fresh from the server and signs exactly that — never a cached value.</p>
+      <div class="row" id="approveButtons"></div>
+      <div class="progress"><span id="progressText"></span><div class="bar"><div class="fill" id="progressFill" style="width:0%;"></div></div></div>
+      <div id="approveStatus"></div>
+    </div>
+  </div>
+
+  <div class="panel" id="issuancePanel" style="display:none;">
+    <h2>Act 2 — wholesale issuance to the two banks</h2>
+    <p class="stepnote">
+      The Reserve Authority splits part of its own Reserve Credit balance straight to each bank (SPEC.md
+      §5.4) — exactly what a central bank crediting a commercial bank's reserve account actually is: an
+      accounting entry, not a "transfer" in the retail sense (fungible balances in this protocol move by
+      splitting, never by the unique-item transfer endpoint).
+    </p>
+    <div class="row">
+      <button id="issueAlphaBtn" type="button">Issue 40,000 to Bank Alpha</button>
+      <button id="issueBetaBtn" type="button" disabled>Issue 40,000 to Bank Beta</button>
+    </div>
+    <div id="issuanceResult"></div>
+  </div>
+
+  <div class="panel" id="conversionPanel" style="display:none;">
+    <h2>Act 3 — retail conversion</h2>
+    <p class="stepnote">
+      Each bank spends part of its own held Reserve Credits to buy its own retail currency — SPEC.md §5.8's
+      generic purchase mechanism, the same one every purchasable class on this site already uses, 1 Reserve
+      Credit to 1 retail dollar. What a customer eventually holds is the bank's own retail currency — the
+      bank's liability, not the Reserve Authority's — the same real-world distinction between central-bank
+      reserves and an ordinary deposit.
+    </p>
+    <div class="row">
+      <button id="convertAlphaBtn" type="button">Bank Alpha converts 20,000 reserves → Alpha Dollars</button>
+      <button id="convertBetaBtn" type="button" disabled>Bank Beta converts 20,000 reserves → Beta Dollars</button>
+    </div>
+    <div id="conversionResult"></div>
+  </div>
+
+  <div class="panel" id="retailPanel" style="display:none;">
+    <h2>Act 4 — money reaches actual customers</h2>
+    <p class="stepnote">
+      Each bank credits one customer's account (another split), and then that customer pays a second person
+      directly — an ordinary, everyday, same-bank payment, using the identical mechanism a bank just used on
+      them a moment earlier. Nothing about split cares whether the sender is a bank or a person.
+    </p>
+    <div class="row">
+      <button id="creditAliceBtn" type="button">Bank Alpha credits Alice with 5,000 Alpha Dollars</button>
+      <button id="creditBobBtn" type="button" disabled>Bank Beta credits Bob with 5,000 Beta Dollars</button>
+    </div>
+    <div class="row" style="margin-top:0.8rem;">
+      <button id="payCharlieBtn" type="button" disabled>Alice pays Charlie 1,200 Alpha Dollars</button>
+    </div>
+    <div id="retailResult"></div>
+    <div class="ledger" id="ledger" style="display:none;"></div>
+  </div>
+
+  <div class="panel" id="tradePanel" style="display:none;">
+    <h2>Act 5 — a bank-to-bank trade</h2>
+    <p class="stepnote">
+      Alice only holds Alpha Dollars; Bob only holds Beta Dollars. A Trading Station (SPEC.md §7) matches and
+      atomically settles the two — the same open-listing mechanism <a href="/">the plaza's own market</a>
+      already uses for iron/silver/gold, run here across two different currencies instead. Both sides need
+      this domain's Trading Station membership first, joined the same one-click way every other membership on
+      this site already is.
+    </p>
+    <div class="row">
+      <button id="joinStationBtn" type="button">Alice &amp; Bob join the Trading Station</button>
+    </div>
+    <div class="row" style="margin-top:0.8rem;">
+      <button id="postListingBtn" type="button" disabled>Bob offers 300 Beta Dollars, wants 300 Alpha Dollars</button>
+      <button id="claimListingBtn" type="button" disabled>Alice claims it</button>
+    </div>
+    <div id="tradeResult"></div>
+  </div>
+
+  <div class="panel" id="auditPanel" style="display:none;">
+    <h2>Act 6 — an independent audit</h2>
+    <p class="stepnote">
+      A separate reviewer identity this domain also controls — the same "independent reviewer" stand-in
+      <a href="attestation-demo.html">the attestation demo</a> uses (SPEC.md §5.11: a real second key, never the
+      one that issues currency) — examines Bank Alpha's own held Reserve Credit balance and signs an
+      attestation that it's sufficient to back what Bank Alpha has issued. The attestation is a small,
+      independently-verifiable credential in its own right, not this page's own say-so.
+    </p>
+    <button id="auditBtn" type="button">Request an independent reserve audit of Bank Alpha</button>
+    <div id="auditResult"></div>
+  </div>
+
+  <div class="panel" id="fraudPanel" style="display:none;">
+    <h2>Act 7 — a fraud, then a clawback</h2>
+    <p class="stepnote">
+      Bank Beta's own operational key gets compromised. The attacker uses it to do something that looks
+      completely ordinary — split off a large chunk of Bank Beta's legitimate Beta Dollar balance — straight
+      to a wallet they control. Nothing here is fabricated: this is a real, valid, correctly-signed split,
+      exactly like the ones Acts 2–4 already ran. What makes the difference is what happens next.
+    </p>
+    <button id="fraudBtn" type="button">Simulate the theft</button>
+    <div id="fraudResult"></div>
+    <div class="row" id="decideRow" style="display:none; margin-top:0.8rem;">
+      <button id="clawbackBtn" class="danger" type="button">Suspend, then claw it back to Bank Beta</button>
+    </div>
+    <div id="decideResult"></div>
+  </div>
+
+  <div class="panel" id="verifyPanel">
+    <h2>Verify any credential from this page, independently</h2>
+    <p class="stepnote">
+      Paste any credential's raw JSON below — copy one from a "View raw credential" details box above. This
+      runs entirely in your own browser: it fetches this domain's public key and revocation list, the same two
+      public files anyone could fetch directly, then checks the signature and looks the id up in the
+      revocation list.
+    </p>
+    <textarea id="verifyInput" rows="8" placeholder="Paste a credential's raw JSON here, or click a &#8220;Try verifying this one&#8221; link above."></textarea>
+    <div style="margin-top:0.6rem;"><button id="verifyBtn" type="button">Verify</button></div>
+    <div id="verifyResult"></div>
+  </div>
+
+  <p class="footnote">
+    Every identity on this page (the committee, both banks, all three customers, the fraudster) is an
+    ordinary ECDSA keypair generated fresh in your own browser tab, exactly like every other demo on this
+    site — no accounts, nothing stored server-side beyond the credentials themselves. Suspend and clawback
+    reuse the same self-serve stand-in for admin authority <a href="clawback-demo.html">the suspend/clawback
+    demo</a> already introduced, widened to cover these currency classes too. <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64urlDecode(str) {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  // Same shape as issuer-server/server.js's canonicalize() — sorted-key
+  // JSON, no whitespace. Has to match byte-for-byte or the server's own
+  // signature check fails.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function getJson(url) {
+    const res = await fetch(url, { cache: 'no-store' });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  function errText(res) { return (res.body && res.body.error) || 'unknown error'; }
+
+  // POST /atlas/asset/split (SPEC.md §5.4) — the one mechanism this whole
+  // page leans on for every one-way movement of a fungible balance: the
+  // unique-item transfer endpoint (§5.6) explicitly refuses anything
+  // fungible, and a fungible balance instead moves by splitting a chosen
+  // amount straight to a named recipient, same "possession of the current
+  // credential is what authorizes this" bearer model every other self-serve
+  // action on this site already uses.
+  async function splitAsset(credential, sendAmount, toPublicKey) {
+    return postJson('/atlas/asset/split', { credential, sendAmount, toPublicKey });
+  }
+  async function purchaseAsset(buyer, credential, purchasedClass, quantity) {
+    const payload = { credentialId: credential.id, purchasedClass, quantity, action: 'purchase' };
+    const proof = await signWithSelf(buyer, payload);
+    return postJson('/atlas/asset/purchase', { credential, purchasedClass, quantity, intent: { payload, proof } });
+  }
+  async function issueAsset(ownerPublicKey, assetClass, quantity) {
+    const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass, quantity });
+    if (!res.ok) throw new Error(errText(res));
+    return res.body;
+  }
+  async function demoSuspend(credential) { return postJson('/atlas/demo/clawback/suspend', { credential }); }
+  async function demoClawback(credential, toPublicKey) { return postJson('/atlas/demo/clawback/clawback', { credential, toPublicKey }); }
+  // POST /atlas/asset/consolidate (SPEC.md §5.4.1) — merges two or more of
+  // the same owner's own balances of the same class into one. Used below to
+  // fold a clawed-back credential back into whatever the victim already
+  // held, rather than leaving them holding two separate balances forever.
+  async function consolidateAssets(credentials) {
+    return postJson('/atlas/asset/consolidate', { credentials });
+  }
+
+  // Handles both credential shapes this page deals with: SPEC.md §5's
+  // domain-atlas-asset/1.0 (signed by the key that issues balances,
+  // published at atlas-key.json) and SPEC.md §5.11's
+  // domain-atlas-attestation/1.0 (signed by this domain's SECOND,
+  // independent reviewer key, published separately at
+  // atlas-reviewer-key.json), the same distinction attestation-demo.html's
+  // own copy of this function already draws.
+  async function verifyCredentialIndependently(credential) {
+    if (!credential || typeof credential !== 'object') return { valid: false, reason: 'not an object' };
+    let payload, keyFile;
+    if (credential.credential === 'domain-atlas-attestation/1.0') {
+      keyFile = '/.well-known/atlas-reviewer-key.json';
+      payload = { id: credential.id, subject: credential.subject, claim: credential.claim, issuedAt: credential.issuedAt };
+    } else {
+      keyFile = '/.well-known/atlas-key.json';
+      payload = {
+        id: credential.id, asset: credential.asset, owner: credential.owner,
+        quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
+      };
+    }
+    const keyLabel = keyFile.includes('reviewer') ? "the issuer's reviewer key" : "the issuer's key";
+    const [keyDoc, revDoc] = await Promise.all([
+      fetch(keyFile, { cache: 'no-store' }).then((r) => r.json()),
+      fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
+    ]);
+    const issuedAt = new Date(credential.issuedAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
+    });
+    if (!activeKey) return { valid: false, reason: keyLabel + ' was not valid at issuedAt' };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match " + keyLabel };
+    const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
+    if (revoked) return { valid: false, reason: 'revoked by ' + keyLabel };
+    return { valid: true, reason: 'signature verified against ' + keyLabel + "; not revoked" };
+  }
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    let credential;
+    try {
+      credential = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    try {
+      const verdict = await verifyCredentialIndependently(credential);
+      resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+      resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = 'Could not verify: ' + err.message;
+    }
+  }
+  function fillAndVerify(credential) {
+    document.getElementById('verifyInput').value = JSON.stringify(credential, null, 2);
+    document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    runVerify();
+  }
+  function rawBox(credential) {
+    const div = document.createElement('details');
+    div.className = 'raw';
+    div.innerHTML = '<summary>View raw credential (' + credential.quantity + ' ' + credential.asset.name + ')</summary><pre></pre>' +
+      '<button class="secondary" type="button" style="margin-top:0.5rem; font-size:0.8rem; padding:0.35rem 0.7rem;">Try verifying this one independently ↓</button>';
+    div.querySelector('pre').textContent = JSON.stringify(credential, null, 2);
+    div.querySelector('button').addEventListener('click', () => fillAndVerify(credential));
+    return div;
+  }
+  // Same as rawBox() above, but for a domain-atlas-attestation/1.0
+  // credential (SPEC.md §5.11) — no asset/quantity to summarize, so this
+  // shows the claim text instead.
+  function attestationRawBox(credential) {
+    const div = document.createElement('details');
+    div.className = 'raw';
+    div.innerHTML = '<summary>View raw attestation ("' + credential.claim + '")</summary><pre></pre>' +
+      '<button class="secondary" type="button" style="margin-top:0.5rem; font-size:0.8rem; padding:0.35rem 0.7rem;">Try verifying this one independently ↓</button>';
+    div.querySelector('pre').textContent = JSON.stringify(credential, null, 2);
+    div.querySelector('button').addEventListener('click', () => fillAndVerify(credential));
+    return div;
+  }
+
+  // Page-scoped state — every identity and every currently-live balance
+  // credential this walkthrough is tracking.
+  let officers = [];
+  let treasury = null, bankAlpha = null, bankBeta = null, alice = null, charlie = null, bob = null, fraudster = null;
+  let mintApprovalId = null;
+  const bal = {}; // e.g. bal.treasuryReserve, bal.bankAlphaReserve, bal.bankAlphaAlpha, bal.aliceAlpha, ...
+
+  function renderLedger() {
+    const rows = [
+      ['Reserve Authority', bal.treasuryReserve, 'Reserve Credit'],
+      ['Bank Alpha (reserves)', bal.bankAlphaReserve, 'Reserve Credit'],
+      ['Bank Alpha (Alpha Dollars)', bal.bankAlphaAlpha, 'Alpha Dollar'],
+      ['Bank Beta (reserves)', bal.bankBetaReserve, 'Reserve Credit'],
+      ['Bank Beta (Beta Dollars)', bal.bankBetaBeta, 'Beta Dollar'],
+      ['Alice', bal.aliceAlpha, 'Alpha Dollar'],
+      ['Charlie', bal.charlieAlpha, 'Alpha Dollar'],
+      ['Bob', bal.bobBeta, 'Beta Dollar']
+    ];
+    const wrap = document.getElementById('ledger');
+    wrap.innerHTML = '';
+    rows.forEach(([label, credential, name]) => {
+      if (!credential) return;
+      const div = document.createElement('div');
+      div.className = 'acct';
+      div.innerHTML = '<h4>' + label + '</h4><div class="bal">Holding: <b>' + credential.quantity + '</b> ' + name + '</div>';
+      div.appendChild(rawBox(credential));
+      wrap.appendChild(div);
+    });
+    wrap.style.display = rows.some((r) => r[1]) ? 'grid' : 'none';
+  }
+
+  function shortKey(pk) { return pk.slice(0, 16) + '…'; }
+
+  // --- Act 1: committee setup + K-of-N mint ---
+
+  function renderOfficerCards() {
+    const wrap = document.getElementById('officerCards');
+    wrap.innerHTML = '';
+    officers.forEach((o, i) => {
+      const div = document.createElement('div');
+      div.className = 'officer';
+      div.id = 'officerCard-' + i;
+      div.innerHTML = '<h3>Committee member ' + String.fromCharCode(65 + i) + '</h3><div class="key">' + shortKey(o.publicKey) + '</div><div class="state waiting" id="officerState-' + i + '">Not signed yet</div>';
+      wrap.appendChild(div);
+    });
+    wrap.style.display = '';
+  }
+  function markOfficerSigned(i) {
+    const el = document.getElementById('officerState-' + i);
+    if (el) { el.textContent = 'Signed ✓'; el.className = 'state signed'; }
+  }
+  function renderApproveButtons() {
+    const wrap = document.getElementById('approveButtons');
+    wrap.innerHTML = '';
+    officers.forEach((o, i) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = 'Approve as member ' + String.fromCharCode(65 + i);
+      btn.addEventListener('click', () => onApprove(i, btn));
+      wrap.appendChild(btn);
+    });
+  }
+  function updateProgress(approval) {
+    const need = approval.requiredApprovals, have = approval.signatures.length, total = officers.length;
+    document.getElementById('progressText').textContent = approval.status === 'executed'
+      ? 'Executed — ' + have + ' of ' + total + ' members signed (needed ' + need + ')'
+      : have + ' of ' + need + ' required signatures (out of ' + total + ' members)';
+    document.getElementById('progressFill').style.width = Math.min(100, Math.round((have / need) * 100)) + '%';
+  }
+
+  document.getElementById('setupBtn').addEventListener('click', async () => {
+    document.getElementById('setupBtn').disabled = true;
+    officers = [await genIdentity(), await genIdentity(), await genIdentity()];
+    treasury = await genIdentity();
+    renderOfficerCards();
+    document.getElementById('mintRequestArea').style.display = '';
+    document.getElementById('resetBtn').style.display = '';
+  });
+
+  document.getElementById('requestMintBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('requestMintBtn');
+    const status = document.getElementById('mintRequestStatus');
+    btn.disabled = true;
+    status.textContent = 'Creating the pending mint request…';
+    const amount = parseInt(document.getElementById('mintAmountInput').value, 10);
+    const res = await postJson('/atlas/demo/reserve/request-mint', {
+      approvers: officers.map((o) => o.publicKey), requiredApprovals: 2,
+      toPublicKey: treasury.publicKey, amount, memo: 'Reserve issuance'
+    });
+    if (!res.ok) { status.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    mintApprovalId = res.body.approval.id;
+    status.innerHTML = '<div class="result ok">Pending — 2 of 3 committee signatures required.</div>';
+    renderApproveButtons();
+    updateProgress(res.body.approval);
+    document.getElementById('approvePanel').style.display = '';
+  });
+
+  async function onApprove(i, btn) {
+    btn.disabled = true;
+    const statusEl = document.getElementById('approveStatus');
+    try {
+      const fetched = await getJson('/atlas/demo/reserve/mint?id=' + encodeURIComponent(mintApprovalId));
+      if (!fetched.ok) throw new Error(errText(fetched));
+      const payload = { id: fetched.body.approval.id, action: fetched.body.approval.action };
+      const proof = await signWithSelf(officers[i], payload);
+      const res = await postJson('/atlas/demo/reserve/mint/sign', { id: mintApprovalId, proof });
+      if (!res.ok) { statusEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+      markOfficerSigned(i);
+      updateProgress(res.body.approval);
+      if (res.body.approval.status === 'executed') {
+        bal.treasuryReserve = res.body.approval.executedCredential;
+        statusEl.innerHTML = '<div class="result ok">Threshold reached — ' + bal.treasuryReserve.quantity + ' Reserve Credits minted to the Reserve Authority\'s own treasury.</div>';
+        document.querySelectorAll('#approveButtons button').forEach((b) => { b.disabled = true; });
+        document.getElementById('issuancePanel').style.display = '';
+        renderLedger();
+      } else {
+        statusEl.innerHTML = '<div class="result ok">Signed. Waiting on ' + (res.body.approval.requiredApprovals - res.body.approval.signatures.length) + ' more.</div>';
+      }
+    } catch (err) {
+      statusEl.innerHTML = '<div class="result err">' + err.message + '</div>';
+      btn.disabled = false;
+    }
+  }
+
+  // --- Act 2: wholesale issuance (split) ---
+
+  document.getElementById('issueAlphaBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('issueAlphaBtn');
+    const resultEl = document.getElementById('issuanceResult');
+    btn.disabled = true;
+    bankAlpha = await genIdentity();
+    const res = await splitAsset(bal.treasuryReserve, 40000, bankAlpha.publicKey);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    bal.bankAlphaReserve = res.body.sent;
+    bal.treasuryReserve = res.body.remainder;
+    resultEl.innerHTML = '<div class="result ok">Bank Alpha now holds ' + bal.bankAlphaReserve.quantity + ' Reserve Credits.</div>';
+    document.getElementById('issueBetaBtn').disabled = false;
+    renderLedger();
+  });
+
+  document.getElementById('issueBetaBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('issueBetaBtn');
+    const resultEl = document.getElementById('issuanceResult');
+    btn.disabled = true;
+    bankBeta = await genIdentity();
+    const res = await splitAsset(bal.treasuryReserve, 40000, bankBeta.publicKey);
+    if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    bal.bankBetaReserve = res.body.sent;
+    bal.treasuryReserve = res.body.remainder;
+    resultEl.innerHTML += '<div class="result ok">Bank Beta now holds ' + bal.bankBetaReserve.quantity + ' Reserve Credits. The Reserve Authority keeps ' +
+      (bal.treasuryReserve ? bal.treasuryReserve.quantity : 0) + ' unallocated.</div>';
+    renderLedger();
+    document.getElementById('conversionPanel').style.display = '';
+  });
+
+  // --- Act 3: retail conversion (purchase) ---
+
+  document.getElementById('convertAlphaBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('convertAlphaBtn');
+    const resultEl = document.getElementById('conversionResult');
+    btn.disabled = true;
+    const res = await purchaseAsset(bankAlpha, bal.bankAlphaReserve, 'atlas.currency.alpha', 20000);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    bal.bankAlphaReserve = res.body.balance;
+    bal.bankAlphaAlpha = res.body.purchased;
+    resultEl.innerHTML = '<div class="result ok">Bank Alpha converted 20,000 reserves into ' + bal.bankAlphaAlpha.quantity + ' Alpha Dollars, its own retail currency.</div>';
+    document.getElementById('convertBetaBtn').disabled = false;
+    renderLedger();
+  });
+
+  document.getElementById('convertBetaBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('convertBetaBtn');
+    const resultEl = document.getElementById('conversionResult');
+    btn.disabled = true;
+    const res = await purchaseAsset(bankBeta, bal.bankBetaReserve, 'atlas.currency.beta', 20000);
+    if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    bal.bankBetaReserve = res.body.balance;
+    bal.bankBetaBeta = res.body.purchased;
+    resultEl.innerHTML += '<div class="result ok">Bank Beta converted 20,000 reserves into ' + bal.bankBetaBeta.quantity + ' Beta Dollars, its own retail currency.</div>';
+    renderLedger();
+    document.getElementById('retailPanel').style.display = '';
+  });
+
+  // --- Act 4: bank credits customers, then a customer pays a customer ---
+
+  document.getElementById('creditAliceBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('creditAliceBtn');
+    const resultEl = document.getElementById('retailResult');
+    btn.disabled = true;
+    alice = await genIdentity();
+    const res = await splitAsset(bal.bankAlphaAlpha, 5000, alice.publicKey);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    bal.aliceAlpha = res.body.sent;
+    bal.bankAlphaAlpha = res.body.remainder;
+    resultEl.innerHTML = '<div class="result ok">Alice now holds ' + bal.aliceAlpha.quantity + ' Alpha Dollars in her account at Bank Alpha.</div>';
+    document.getElementById('creditBobBtn').disabled = false;
+    renderLedger();
+  });
+
+  document.getElementById('creditBobBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('creditBobBtn');
+    const resultEl = document.getElementById('retailResult');
+    btn.disabled = true;
+    bob = await genIdentity();
+    const res = await splitAsset(bal.bankBetaBeta, 5000, bob.publicKey);
+    if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    bal.bobBeta = res.body.sent;
+    bal.bankBetaBeta = res.body.remainder;
+    resultEl.innerHTML += '<div class="result ok">Bob now holds ' + bal.bobBeta.quantity + ' Beta Dollars in his account at Bank Beta.</div>';
+    document.getElementById('payCharlieBtn').disabled = false;
+    renderLedger();
+  });
+
+  document.getElementById('payCharlieBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('payCharlieBtn');
+    const resultEl = document.getElementById('retailResult');
+    btn.disabled = true;
+    charlie = await genIdentity();
+    const res = await splitAsset(bal.aliceAlpha, 1200, charlie.publicKey);
+    if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    bal.charlieAlpha = res.body.sent;
+    bal.aliceAlpha = res.body.remainder;
+    resultEl.innerHTML += '<div class="result ok">Alice paid Charlie 1,200 Alpha Dollars directly — the same mechanism a bank just used on her, with no bank involved this time.</div>';
+    renderLedger();
+    document.getElementById('tradePanel').style.display = '';
+    document.getElementById('auditPanel').style.display = '';
+    document.getElementById('fraudPanel').style.display = '';
+  });
+
+  // --- Act 5: Trading Station, two currencies, one settlement ---
+
+  let aliceMembership = null, bobMembership = null;
+  let pendingListingId = null;
+
+  document.getElementById('joinStationBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('joinStationBtn');
+    const resultEl = document.getElementById('tradeResult');
+    btn.disabled = true;
+    try {
+      aliceMembership = await issueAsset(alice.publicKey, 'atlas.tradingstation.membership');
+      bobMembership = await issueAsset(bob.publicKey, 'atlas.tradingstation.membership');
+      resultEl.innerHTML = '<div class="result ok">Both joined — one click each, same as any other membership on this site.</div>';
+      document.getElementById('postListingBtn').disabled = false;
+    } catch (err) {
+      resultEl.innerHTML = '<div class="result err">' + err.message + '</div>';
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('postListingBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('postListingBtn');
+    const resultEl = document.getElementById('tradeResult');
+    btn.disabled = true;
+    const membership = bobMembership;
+    const payload = {
+      offer: { class: 'atlas.currency.beta', quantity: 300 },
+      want: { class: 'atlas.currency.alpha', quantity: 300 },
+      from: { publicKey: bob.publicKey },
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+    };
+    const proof = await signWithSelf(bob, payload);
+    const intent = { payload, proof };
+    const res = await postJson('/atlas/trade/submit', { membership, intent, balance: bal.bobBeta });
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    pendingListingId = res.body.pendingId;
+    resultEl.innerHTML = '<div class="result ok">Listed — open for anyone at the station to claim.</div>';
+    document.getElementById('claimListingBtn').disabled = false;
+  });
+
+  document.getElementById('claimListingBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('claimListingBtn');
+    const resultEl = document.getElementById('tradeResult');
+    btn.disabled = true;
+    const membership = aliceMembership;
+    const payload = {
+      offer: { class: 'atlas.currency.alpha', quantity: 300 },
+      want: { class: 'atlas.currency.beta', quantity: 300 },
+      from: { publicKey: alice.publicKey },
+      counterparty: bob.publicKey,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+    };
+    const proof = await signWithSelf(alice, payload);
+    const res = await postJson('/atlas/trade/claim', { pendingId: pendingListingId, membership, intent: { payload, proof }, balance: bal.aliceAlpha });
+    if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    bal.aliceAlpha = res.body.remainder;
+    const receivedBeta = res.body.received;
+    resultEl.innerHTML += '<div class="result ok">Settled — Alice now holds ' + receivedBeta.quantity +
+      ' Beta Dollars (issued by Bank Beta) alongside ' + (bal.aliceAlpha ? bal.aliceAlpha.quantity : 0) +
+      ' remaining Alpha Dollars. Bob\'s own settled side (300 Alpha Dollars, plus his own remainder) arrives the ordinary way, by mail — he was not live for this exact call.</div>';
+    resultEl.appendChild(rawBox(receivedBeta));
+  });
+
+  // --- Act 6: independent attestation ---
+
+  document.getElementById('auditBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('auditBtn');
+    const resultEl = document.getElementById('auditResult');
+    btn.disabled = true;
+    const res = await postJson('/atlas/demo/attestation/issue', {
+      subjectAssetId: bal.bankAlphaReserve.id,
+      subjectIssuerDomain: location.hostname,
+      claim: 'reserves-verified'
+    });
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    resultEl.innerHTML = '<div class="result ok">' + res.body.attestation.claim + '</div>';
+    resultEl.appendChild(attestationRawBox(res.body.attestation));
+  });
+
+  // --- Act 7: fraud, then suspend + clawback ---
+
+  let stolenCredential = null;
+
+  document.getElementById('fraudBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('fraudBtn');
+    const resultEl = document.getElementById('fraudResult');
+    btn.disabled = true;
+    fraudster = await genIdentity();
+    const res = await splitAsset(bal.bankBetaBeta, 15000, fraudster.publicKey);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    stolenCredential = res.body.sent;
+    bal.bankBetaBeta = res.body.remainder;
+    resultEl.innerHTML = '<div class="result err">Gone — 15,000 Beta Dollars just left Bank Beta for a wallet it never authorized, using its own compromised key. Cryptographically, this is a completely ordinary, valid split.</div>';
+    resultEl.appendChild(rawBox(stolenCredential));
+    document.getElementById('decideRow').style.display = '';
+    renderLedger();
+  });
+
+  document.getElementById('clawbackBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('clawbackBtn');
+    const resultEl = document.getElementById('decideResult');
+    btn.disabled = true;
+    const suspendRes = await demoSuspend(stolenCredential);
+    if (!suspendRes.ok) { resultEl.innerHTML = '<div class="result err">' + errText(suspendRes) + '</div>'; btn.disabled = false; return; }
+    resultEl.innerHTML = '<div class="result ok">Suspended — frozen pending review, wherever it currently sits.</div>';
+    const clawRes = await demoClawback(stolenCredential, bankBeta.publicKey);
+    if (!clawRes.ok) { resultEl.innerHTML += '<div class="result err">' + errText(clawRes) + '</div>'; return; }
+    let recovered = clawRes.body.newCredential;
+    resultEl.innerHTML += '<div class="result ok">Clawed back — a fresh ' + recovered.quantity + '-Beta-Dollar credential lands straight in Bank Beta\'s own wallet, and the stolen one is permanently revoked.</div>';
+    // Bank Beta may still be separately holding whatever it had left over
+    // after the theft — fold the two back into one balance (SPEC.md
+    // §5.4.1) rather than leaving it split across two credentials forever.
+    if (bal.bankBetaBeta) {
+      const mergeRes = await consolidateAssets([bal.bankBetaBeta, recovered]);
+      if (mergeRes.ok) {
+        recovered = mergeRes.body;
+        resultEl.innerHTML += '<div class="result ok">Consolidated with what it already held — Bank Beta now holds one clean balance of ' + recovered.quantity + ' Beta Dollars again.</div>';
+      }
+    }
+    bal.bankBetaBeta = recovered;
+    const verdict = await verifyCredentialIndependently(stolenCredential);
+    resultEl.innerHTML += '<div class="result ' + (verdict.valid ? 'err' : 'ok') + '">Checking the stolen credential independently: ' +
+      (verdict.valid ? 'still valid?! (unexpected)' : 'no longer valid — ' + verdict.reason) + '</div>';
+    resultEl.appendChild(rawBox(bal.bankBetaBeta));
+    renderLedger();
+  });
+
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
+
+  document.getElementById('resetBtn').addEventListener('click', () => location.reload());
+})();
+</script>
+</body>
+</html>

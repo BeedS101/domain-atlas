@@ -20,8 +20,8 @@ try {
 }
 $credential = $body['credential'] ?? null;
 if (!is_array($credential) || !isset($credential['asset'])) send_json(400, ['error' => 'credential is required']);
-if (($credential['asset']['class'] ?? null) !== 'atlas.demo.clawback.token') {
-  send_json(400, ['error' => 'this endpoint only unsuspends atlas.demo.clawback.token']);
+if (!in_array($credential['asset']['class'] ?? null, atlas_demo_suspendable_classes(), true)) {
+  send_json(400, ['error' => 'this endpoint only unsuspends: ' . implode(', ', atlas_demo_suspendable_classes())]);
 }
 if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !== atlas_domain()) {
   send_json(400, ['error' => 'this domain did not issue this credential']);

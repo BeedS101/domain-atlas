@@ -571,6 +571,28 @@ const ATLAS_BANK_APPROVAL_MAX_APPROVERS = 10;
 const ATLAS_BANK_APPROVAL_MAX_AMOUNT = 1000000;
 const ATLAS_DEMO_BANK_ASSET_CLASS = 'atlas.credit.balance'; // the existing spendable-balance class, reused rather than minting a second one
 
+// reserve-bank-demo.html's own K-of-N mint request store — mirrors
+// issuer-server/server.js's RESERVE_MINT_APPROVALS_FILE (own file rather
+// than sharing atlas-bank-approvals-store.json, so the two demos' pending
+// requests never collide). Same TTL/approver/amount limits as the
+// treasury-transfer demo above.
+function atlas_reserve_mint_approvals_file() {
+  return __DIR__ . '/atlas-reserve-mint-approvals-store.json';
+}
+
+const ATLAS_DEMO_CLAWBACK_TOKEN_CLASS = 'atlas.demo.clawback.token';
+const ATLAS_DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
+const ATLAS_DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
+const ATLAS_DEMO_RESERVE_CLASS = 'atlas.currency.reserve';
+
+// reserve-bank-demo.html's own fraud/clawback act reuses the suspend/
+// unsuspend/clawback endpoints below, widened from a single hardcoded
+// class to this short allow-list — mirrors issuer-server/server.js's
+// DEMO_SUSPENDABLE_CLASSES.
+function atlas_demo_suspendable_classes() {
+  return [ATLAS_DEMO_CLAWBACK_TOKEN_CLASS, ATLAS_DEMO_ALPHA_DOLLAR_CLASS, ATLAS_DEMO_BETA_DOLLAR_CLASS];
+}
+
 function atlas_bank_approvals_file() {
   return __DIR__ . '/atlas-bank-approvals-store.json';
 }
@@ -712,6 +734,132 @@ function sign_bank_approval($id, $proof) {
   return ['approval' => $approval];
 }
 
+// K-of-N reserve-mint approvals (reserve-bank-demo.html) — identical
+// flock-guarded shape to the bank-approval quartet above, mirrors
+// issuer-server/server.js's readReserveMintApprovals()/
+// saveReserveMintApproval()/sign_reserve_mint_approval, kept in its own
+// file/functions rather than shared (see atlas_reserve_mint_approvals_file()'s
+// own comment).
+function read_reserve_mint_approvals() {
+  $fh = fopen(atlas_reserve_mint_approvals_file(), 'c+');
+  if ($fh === false) return ['approvals' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc) || !isset($doc['approvals'])) $doc = ['approvals' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $doc['approvals'] = array_values(array_filter($doc['approvals'], function ($a) use ($nowMs) {
+    return ($a['status'] ?? 'pending') !== 'pending' || strtotime($a['expiresAt']) * 1000 > $nowMs;
+  }));
+  return $doc;
+}
+function find_reserve_mint_approval($id) {
+  foreach (read_reserve_mint_approvals()['approvals'] as $a) {
+    if ($a['id'] === $id) return $a;
+  }
+  return null;
+}
+function save_reserve_mint_approval($approval) {
+  $file = atlas_reserve_mint_approvals_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['approvals'])) $doc = ['approvals' => []];
+  $found = false;
+  foreach ($doc['approvals'] as $i => $a) {
+    if ($a['id'] === $approval['id']) { $doc['approvals'][$i] = $approval; $found = true; break; }
+  }
+  if (!$found) $doc['approvals'][] = $approval;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+// Same WYSIWYS reasoning as bank_approval_payload_of() above.
+function reserve_mint_approval_payload_of($approval) {
+  return ['id' => $approval['id'], 'action' => $approval['action']];
+}
+// Same one-lock-held-across-the-whole-sequence reasoning as
+// sign_bank_approval() above — see that function's own comment.
+function sign_reserve_mint_approval($id, $proof) {
+  $file = atlas_reserve_mint_approvals_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['approvals'])) $doc = ['approvals' => []];
+
+  $nowMs = (int) round(microtime(true) * 1000);
+  $idx = null;
+  foreach ($doc['approvals'] as $i => $a) {
+    if ($a['id'] !== $id) continue;
+    if (($a['status'] ?? 'pending') === 'pending' && strtotime($a['expiresAt']) * 1000 <= $nowMs) break;
+    $idx = $i;
+    break;
+  }
+  if ($idx === null) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'no such mint request (or it already expired)'];
+  }
+
+  $approval = $doc['approvals'][$idx];
+  if ($approval['status'] !== 'pending') {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'this request is already ' . $approval['status']];
+  }
+  if (!in_array($proof['publicKey'] ?? null, $approval['approvers'], true)) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'this key is not an authorized approver for this request'];
+  }
+  foreach ($approval['signatures'] as $s) {
+    if ($s['publicKey'] === $proof['publicKey']) {
+      flock($fh, LOCK_UN);
+      fclose($fh);
+      return ['approval' => $approval]; // already signed — idempotent, not an error
+    }
+  }
+
+  $sigOk = verify_envelope(reserve_mint_approval_payload_of($approval), $proof);
+  if (!$sigOk) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'approval signature does not check out'];
+  }
+
+  $approval['signatures'][] = [
+    'publicKey' => $proof['publicKey'],
+    'signerRole' => $proof['signerRole'],
+    'signature' => $proof['signature'],
+    'signedAt' => iso_now(),
+  ];
+  if (count($approval['signatures']) >= $approval['requiredApprovals']) {
+    $kp = atlas_load_keys();
+    $credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $approval['action']['toPublicKey'], $approval['action']['assetClass'], $approval['action']['amount'], null);
+    $approval['status'] = 'executed';
+    $approval['executedCredentialId'] = $credential['id'];
+    // Mirrors issuer-server/server.js's same addition — reserve-bank-demo.html
+    // spends this credential onward (splitting reserves out to each bank
+    // next), and no "look up a credential by id" endpoint exists anywhere
+    // in this protocol, so this is the one chance to deliver it.
+    $approval['executedCredential'] = $credential;
+  }
+  $doc['approvals'][$idx] = $approval;
+
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['approval' => $approval];
+}
+
 // Fixed claim text an attestation-demo.html visitor can request FROM the
 // second, independent domain playing "the reviewer" (SPEC.md §5.11) — a
 // short allow-list rather than free text, same discipline every other
@@ -723,6 +871,7 @@ function atlas_demo_attestation_claims() {
     'reviewed' => 'Independently reviewed on the date shown, and found to be in order.',
     'in-good-standing' => 'Currently in good standing with this reviewer.',
     'certified' => "Certified as meeting this reviewer's own compliance standard.",
+    'reserves-verified' => "Reserve holdings independently confirmed sufficient to back this bank's circulating retail currency.",
   ];
 }
 
@@ -1058,6 +1207,25 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'atlas.electricalConductivity' => ['value' => 63.0, 'unit' => 'MS/m'],
       'atlas.purity' => '99.9%', 'com.example.source' => 'Coastal Bazaar mine',
     ],
+  ],
+  // reserve-bank-demo.html's own currencies — mirrors issuer-server/
+  // server.js's ASSET_CATALOG entries of the same names. See that file's
+  // own comment for the full reasoning (SPEC.md §5.4/§5.6/§5.8/§7 as a
+  // two-tier issuance chain); all three are ordinary, non-bound fungible
+  // classes, unlike atlas.credit.balance's bound "receipt" shape above.
+  'atlas.currency.reserve' => [
+    'name' => 'Reserve Credit', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => true, 'presentation' => 'collectible',
+  ],
+  'atlas.currency.alpha' => [
+    'name' => 'Alpha Dollar', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => true, 'presentation' => 'collectible',
+    'purchase' => ['priceClass' => 'atlas.currency.reserve', 'priceAmount' => 1],
+  ],
+  'atlas.currency.beta' => [
+    'name' => 'Beta Dollar', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => true, 'presentation' => 'collectible',
+    'purchase' => ['priceClass' => 'atlas.currency.reserve', 'priceAmount' => 1],
   ],
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see

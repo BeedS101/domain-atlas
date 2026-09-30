@@ -365,6 +365,15 @@ const BANK_APPROVAL_MIN_APPROVERS = 2;
 const BANK_APPROVAL_MAX_APPROVERS = 10;
 const BANK_APPROVAL_MAX_AMOUNT = 1000000;
 const DEMO_BANK_ASSET_CLASS = 'atlas.credit.balance'; // the existing spendable-balance class, reused rather than minting a second one
+
+// reserve-bank-demo.html's own K-of-N mint request store — same shape and
+// same in-request-only approver roster trade-off as BANK_APPROVALS_FILE
+// just above (see its own comment), kept as a separate file/store rather
+// than sharing one so the two demo walkthroughs never contend over each
+// other's pending requests. Reuses the same TTL/approver/amount limits —
+// no reason for this demo to allow a wider committee or a bigger single
+// mint than the treasury-transfer demo already does.
+const RESERVE_MINT_APPROVALS_FILE = path.join(STATE_DIR, 'atlas-reserve-mint-approvals-store.json');
 // Post Office abuse detection (task #96): how many sends within how large
 // a rolling window counts as "irregular" enough to auto-flag a membership
 // for the operator's attention — see recordPostOfficeSend() below. Tunable
@@ -798,6 +807,43 @@ const ASSET_CATALOG = {
       'atlas.purity': '99.9%', 'com.example.source': 'Coastal Bazaar mine'
     }
   },
+  // reserve-bank-demo.html's own currencies — SPEC.md §5.4 (fungible
+  // balances), §5.6 (direct transfer), §5.8 (purchase), and §7 (trading
+  // stations) illustrated together as a two-tier issuance chain: this
+  // domain's own K-of-N-approved mint (POST /atlas/demo/reserve/request-mint
+  // below) creates Reserve Credits; each demo "bank" then buys its own
+  // retail currency with Reserve Credits it holds through the exact same
+  // generic /atlas/asset/purchase every other purchasable class here
+  // already uses, and passes it on to its own customers by ordinary
+  // transfer. All three are deliberately ordinary, non-bound fungible
+  // classes — ordinarily giftable/transferable/tradeable, unlike
+  // atlas.credit.balance's bound "receipt" shape above, because every beat
+  // of this story (wholesale issuance, retail conversion, a customer
+  // paying another customer, two different banks' currencies settling at
+  // a Trading Station) depends on that.
+  'atlas.currency.reserve': {
+    name: 'Reserve Credit',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: true,
+    presentation: 'collectible'
+  },
+  'atlas.currency.alpha': {
+    name: 'Alpha Dollar',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: true,
+    presentation: 'collectible',
+    purchase: { priceClass: 'atlas.currency.reserve', priceAmount: 1 }
+  },
+  'atlas.currency.beta': {
+    name: 'Beta Dollar',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: true,
+    presentation: 'collectible',
+    purchase: { priceClass: 'atlas.currency.reserve', priceAmount: 1 }
+  },
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
   // viewer.js's CHESS_WIN_REWARDS / maybeAwardChessWin()) — not gated by
@@ -1162,17 +1208,29 @@ const DEMO_CAFETERIA_FULFILLABLE_CLASSES = [
 ];
 const DEMO_ATTESTATION_FILING_CLASS = 'atlas.demo.attestation.filing';
 const DEMO_CLAWBACK_TOKEN_CLASS = 'atlas.demo.clawback.token';
+const DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
+const DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
+const DEMO_RESERVE_CLASS = 'atlas.currency.reserve';
+
+// reserve-bank-demo.html's own fraud/clawback act reuses the suspend/
+// unsuspend/clawback endpoints just below, widened from a single hardcoded
+// class to this short allow-list rather than duplicating three more
+// endpoints for the same operation on a different class.
+const DEMO_SUSPENDABLE_CLASSES = [DEMO_CLAWBACK_TOKEN_CLASS, DEMO_ALPHA_DOLLAR_CLASS, DEMO_BETA_DOLLAR_CLASS];
 
 // Fixed claim text an attestation-demo.html visitor can request FROM the
 // second, independent domain playing "the reviewer" (SPEC.md §5.11) — a
 // short allow-list rather than free text, the same "hardcoded to its own
 // toy" discipline every other self-serve /atlas/demo/* route already
 // applies, so this domain's real signing key never ends up on arbitrary
-// caller-supplied text.
+// caller-supplied text. 'reserves-verified' (reserve-bank-demo.html) reuses
+// this same endpoint unmodified — an attestation's subject is just another
+// held credential, and a bank's own Reserve Credit balance is exactly that.
 const DEMO_ATTESTATION_CLAIMS = {
   reviewed: 'Independently reviewed on the date shown, and found to be in order.',
   'in-good-standing': 'Currently in good standing with this reviewer.',
-  certified: "Certified as meeting this reviewer's own compliance standard."
+  certified: "Certified as meeting this reviewer's own compliance standard.",
+  'reserves-verified': "Reserve holdings independently confirmed sufficient to back this bank's circulating retail currency."
 };
 
 const MIME = {
@@ -2200,6 +2258,35 @@ function saveBankApproval(approval) {
 // trusting a payload string handed to it by whoever created the request —
 // the WYSIWYS property this whole mechanism depends on.
 function bankApprovalPayloadOf(approval) {
+  return { id: approval.id, action: approval.action };
+}
+
+// K-of-N reserve-mint approvals (reserve-bank-demo.html) — identical shape
+// to the bank-approval quartet just above, kept in its own file/functions
+// rather than shared so the two demos' pending requests never collide (see
+// RESERVE_MINT_APPROVALS_FILE's own comment).
+function readReserveMintApprovals() {
+  if (!fs.existsSync(RESERVE_MINT_APPROVALS_FILE)) return { approvals: [] };
+  const doc = JSON.parse(fs.readFileSync(RESERVE_MINT_APPROVALS_FILE, 'utf8'));
+  const now = Date.now();
+  doc.approvals = doc.approvals.filter((a) => a.status !== 'pending' || new Date(a.expiresAt).getTime() > now);
+  return doc;
+}
+function writeReserveMintApprovals(doc) {
+  fs.writeFileSync(RESERVE_MINT_APPROVALS_FILE, JSON.stringify(doc, null, 2));
+}
+function findReserveMintApproval(id) {
+  return readReserveMintApprovals().approvals.find((a) => a.id === id) || null;
+}
+function saveReserveMintApproval(approval) {
+  const doc = readReserveMintApprovals();
+  const idx = doc.approvals.findIndex((a) => a.id === approval.id);
+  if (idx === -1) doc.approvals.push(approval);
+  else doc.approvals[idx] = approval;
+  writeReserveMintApprovals(doc);
+}
+// Same WYSIWYS reasoning as bankApprovalPayloadOf just above.
+function reserveMintApprovalPayloadOf(approval) {
   return { id: approval.id, action: approval.action };
 }
 
@@ -3380,13 +3467,16 @@ async function main() {
 
       // POST /atlas/demo/clawback/suspend — self-serve sibling of the real,
       // admin-gated suspend action behind /atlas/clawback (SPEC.md §5.3),
-      // hardcoded to DEMO_CLAWBACK_TOKEN_CLASS. clawback-demo.html has no
-      // admin login to freeze a credential with, so — same "plays the
-      // privileged role" reasoning as every other /atlas/demo/* route above
-      // — this lets the credential's own currently-valid signature stand in
-      // for that authority: whoever can still produce a full, correctly
-      // signed copy of the token is treated as "the rightful reporter of
-      // its own theft" for this one toy class, never anything else in
+      // gated to DEMO_SUSPENDABLE_CLASSES (originally just
+      // DEMO_CLAWBACK_TOKEN_CLASS; widened for reserve-bank-demo.html's own
+      // fraud act rather than duplicating this endpoint for one more
+      // class). clawback-demo.html has no admin login to freeze a
+      // credential with, so — same "plays the privileged role" reasoning
+      // as every other /atlas/demo/* route above — this lets the
+      // credential's own currently-valid signature stand in for that
+      // authority: whoever can still produce a full, correctly signed copy
+      // of the credential is treated as "the rightful reporter of its own
+      // theft/fraud" for these toy classes, never anything else in
       // ASSET_CATALOG. Deliberately does NOT check who currently owns it —
       // a stolen credential's whole point is that it no longer sits with
       // the person who can prove they minted it, so ownership can't be the
@@ -3394,8 +3484,8 @@ async function main() {
       if (req.method === 'POST' && req.url === '/atlas/demo/clawback/suspend') {
         const { credential } = JSON.parse((await readBody(req)) || '{}');
         if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
-        if (credential.asset.class !== DEMO_CLAWBACK_TOKEN_CLASS) {
-          return sendJson(res, 400, { error: 'this endpoint only suspends ' + DEMO_CLAWBACK_TOKEN_CLASS });
+        if (!DEMO_SUSPENDABLE_CLASSES.includes(credential.asset.class)) {
+          return sendJson(res, 400, { error: 'this endpoint only suspends: ' + DEMO_SUSPENDABLE_CLASSES.join(', ') });
         }
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'this domain did not issue this credential' });
@@ -3418,8 +3508,8 @@ async function main() {
       if (req.method === 'POST' && req.url === '/atlas/demo/clawback/unsuspend') {
         const { credential } = JSON.parse((await readBody(req)) || '{}');
         if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
-        if (credential.asset.class !== DEMO_CLAWBACK_TOKEN_CLASS) {
-          return sendJson(res, 400, { error: 'this endpoint only unsuspends ' + DEMO_CLAWBACK_TOKEN_CLASS });
+        if (!DEMO_SUSPENDABLE_CLASSES.includes(credential.asset.class)) {
+          return sendJson(res, 400, { error: 'this endpoint only unsuspends: ' + DEMO_SUSPENDABLE_CLASSES.join(', ') });
         }
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'this domain did not issue this credential' });
@@ -3447,8 +3537,8 @@ async function main() {
         const { credential, toPublicKey } = JSON.parse((await readBody(req)) || '{}');
         if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
         if (!toPublicKey) return sendJson(res, 400, { error: 'toPublicKey is required' });
-        if (credential.asset.class !== DEMO_CLAWBACK_TOKEN_CLASS) {
-          return sendJson(res, 400, { error: 'this endpoint only claws back ' + DEMO_CLAWBACK_TOKEN_CLASS });
+        if (!DEMO_SUSPENDABLE_CLASSES.includes(credential.asset.class)) {
+          return sendJson(res, 400, { error: 'this endpoint only claws back: ' + DEMO_SUSPENDABLE_CLASSES.join(', ') });
         }
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'this domain did not issue this credential' });
@@ -3556,6 +3646,94 @@ async function main() {
           console.log('Demo bank: treasury transfer', approval.id, 'executed —', credential.id);
         }
         saveBankApproval(approval);
+        return sendJson(res, 200, { approval });
+      }
+
+      // POST /atlas/demo/reserve/request-mint — reserve-bank-demo.html's
+      // own K-of-N committee mint, identical in every respect to
+      // /atlas/demo/bank/request-approval above except the minted class:
+      // a monetary-policy committee approving new Reserve Credits instead
+      // of a bank treasury approving a transfer. Same ungated-to-create,
+      // worthless-without-a-roster-key's-signature posture; same in-request
+      // approver roster trade-off (RESERVE_MINT_APPROVALS_FILE's comment).
+      if (req.method === 'POST' && req.url === '/atlas/demo/reserve/request-mint') {
+        const { approvers, requiredApprovals, toPublicKey, amount, memo } = JSON.parse((await readBody(req)) || '{}');
+        if (!Array.isArray(approvers) || new Set(approvers).size !== approvers.length) {
+          return sendJson(res, 400, { error: 'approvers must be an array of distinct public keys' });
+        }
+        if (approvers.length < BANK_APPROVAL_MIN_APPROVERS || approvers.length > BANK_APPROVAL_MAX_APPROVERS) {
+          return sendJson(res, 400, { error: 'approvers must list between ' + BANK_APPROVAL_MIN_APPROVERS + ' and ' + BANK_APPROVAL_MAX_APPROVERS + ' keys' });
+        }
+        if (!Number.isInteger(requiredApprovals) || requiredApprovals < 2 || requiredApprovals > approvers.length) {
+          return sendJson(res, 400, { error: 'requiredApprovals must be an integer between 2 and the number of approvers' });
+        }
+        if (!toPublicKey) return sendJson(res, 400, { error: 'toPublicKey is required' });
+        if (!Number.isInteger(amount) || amount < 1 || amount > BANK_APPROVAL_MAX_AMOUNT) {
+          return sendJson(res, 400, { error: 'amount must be a positive integer up to ' + BANK_APPROVAL_MAX_AMOUNT });
+        }
+        const now = new Date();
+        const approval = {
+          id: 'urn:atlas:reserve-mint:' + webcrypto.randomUUID(),
+          action: { type: 'reserve-mint', toPublicKey, assetClass: DEMO_RESERVE_CLASS, amount, memo: typeof memo === 'string' ? memo.slice(0, 200) : '' },
+          approvers,
+          requiredApprovals,
+          signatures: [],
+          status: 'pending',
+          executedCredentialId: null,
+          createdAt: now.toISOString(),
+          expiresAt: new Date(now.getTime() + BANK_APPROVAL_TTL_MS).toISOString()
+        };
+        saveReserveMintApproval(approval);
+        console.log('Demo reserve: requested mint', approval.id, '(' + requiredApprovals + '-of-' + approvers.length + ')');
+        return sendJson(res, 200, { approval });
+      }
+
+      // GET /atlas/demo/reserve/mint?id=... — ungated read, same "fetch the
+      // canonical action yourself before signing" reasoning as GET
+      // /atlas/demo/bank/approval above.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/demo/reserve/mint') {
+        const id = new URLSearchParams(req.url.split('?')[1] || '').get('id');
+        if (!id) return sendJson(res, 400, { error: 'id is required' });
+        const approval = findReserveMintApproval(id);
+        if (!approval) return sendJson(res, 404, { error: 'no such mint request (or it already expired)' });
+        return sendJson(res, 200, { approval });
+      }
+
+      // POST /atlas/demo/reserve/mint/sign — one committee member's own
+      // signature, same verification and same "mint the instant the
+      // threshold is reached" execution as
+      // /atlas/demo/bank/approval/sign above.
+      if (req.method === 'POST' && req.url === '/atlas/demo/reserve/mint/sign') {
+        const { id, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!id || !proof) return sendJson(res, 400, { error: 'id and proof are both required' });
+        const approval = findReserveMintApproval(id);
+        if (!approval) return sendJson(res, 404, { error: 'no such mint request (or it already expired)' });
+        if (approval.status !== 'pending') return sendJson(res, 400, { error: 'this request is already ' + approval.status });
+        if (!approval.approvers.includes(proof.publicKey)) {
+          return sendJson(res, 400, { error: 'this key is not an authorized approver for this request' });
+        }
+        if (approval.signatures.some((s) => s.publicKey === proof.publicKey)) {
+          return sendJson(res, 200, { approval }); // already signed — idempotent, not an error
+        }
+        const sigOk = await verifyEnvelope(reserveMintApprovalPayloadOf(approval), proof);
+        if (!sigOk) return sendJson(res, 400, { error: 'approval signature does not check out' });
+        approval.signatures.push({ publicKey: proof.publicKey, signerRole: proof.signerRole, signature: proof.signature, signedAt: new Date().toISOString() });
+        if (approval.signatures.length >= approval.requiredApprovals) {
+          const credential = await mintAssetByClass(approval.action.toPublicKey, approval.action.assetClass, approval.action.amount, null);
+          approval.status = 'executed';
+          approval.executedCredentialId = credential.id;
+          // Unlike bank-demo.html's own sign endpoint, reserve-bank-demo.html
+          // actually spends this credential onward (splitting reserves out to
+          // each bank next) rather than just displaying its id, so the full
+          // signed object rides along in the response — there is no
+          // separate "look up a credential by id" endpoint anywhere in this
+          // protocol (a credential only ever reaches a holder by being
+          // handed to them directly), so this is the one and only chance to
+          // deliver it.
+          approval.executedCredential = credential;
+          console.log('Demo reserve: mint', approval.id, 'executed —', credential.id);
+        }
+        saveReserveMintApproval(approval);
         return sendJson(res, 200, { approval });
       }
 

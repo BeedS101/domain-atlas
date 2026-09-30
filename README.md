@@ -1444,6 +1444,88 @@ genuinely blocks a live-checked credential, a real unsuspend, and a real
 clawback landing a fresh credential in a new owner's hands, all driven
 through the actual page and its actual buttons, not the raw HTTP layer.
 
+## A reserve bank, two commercial banks, and no wallet in sight
+
+`demo-domain-a/reserve-bank-demo.html` is the largest single-page demo on
+this site: a fictional two-tier digital currency system, played entirely
+by one visitor's browser tab across seven acts — a monetary policy
+committee, two commercial banks, three customers, and an independent
+auditor — with no admin login anywhere on the page, the same "one tab,
+several identities" trick `clawback-demo.html` already uses. Nothing on
+it is modeled on a real institution; the caution panel at the top of the
+page says so directly.
+
+Two protocol-accuracy points shaped the whole design, both found by
+reading the actual endpoint code before writing any of the page's own
+JavaScript, not by a failing test afterward. First,
+`/atlas/asset/transfer` (SPEC.md §5.6) explicitly refuses anything
+fungible (`checkPresentedGiftableAsset`/`check_presented_giftable_asset`)
+— it exists to move a unique item, not a balance — so every one-way
+movement of a currency amount on this page, bank to bank, bank to
+customer, and customer to customer alike, goes through
+`/atlas/asset/split` (SPEC.md §5.4) instead, which mints the requested
+amount straight to a caller-named recipient. Second, SPEC.md §7's own
+same-domain currency-conversion mechanism doesn't fit "convert a balance
+issued by someone else," so a bank turning its Reserve Credits into its
+own retail dollars uses the generic purchase mechanism (SPEC.md §5.8)
+instead, spending one held balance to acquire a different catalog class
+regardless of who issued the thing being spent.
+
+Act by act: a three-member committee reaches a 2-of-3 threshold (the
+same K-of-N mechanism as `bank-demo.html`, pointed at a new
+`/atlas/demo/reserve/request-mint` / `/mint` / `/mint/sign` trio rather
+than the treasury-transfer one) before any `atlas.currency.reserve` gets
+minted at all. The Reserve Authority then splits reserves straight to
+Bank Alpha and Bank Beta — wholesale issuance, an accounting entry
+rather than a retail-style transfer. Each bank purchases its own
+`atlas.currency.alpha` / `atlas.currency.beta` with part of what it
+holds. Each bank credits a customer (another split), and one customer
+pays a second person directly with the identical mechanism a bank just
+used on them. Alice (Alpha Dollars only) and Bob (Beta Dollars only)
+join a Trading Station and settle a real cross-currency trade (SPEC.md
+§7) — unmodified, issuer-agnostic settlement code, genuine proof of the
+mechanism even though Bank Alpha and Bank Beta are, for now, both
+currencies issued by this one demo domain's own key rather than two
+independently-run domains, a limitation the page states outright rather
+than glossing over. A second, independent key this domain also controls
+— the same reviewer-key stand-in `attestation-demo.html` already uses —
+attests that Bank Alpha's reserves are sufficient to back what it's
+issued. Finally, Bank Beta's key is simulated as compromised: a
+genuinely valid, correctly-signed split drains a chunk of its balance to
+an attacker, exactly like every legitimate split earlier on the page,
+and only suspend-then-clawback (reusing the same demo endpoints
+`clawback-demo.html` introduced, generalized from one hardcoded class to
+a short list of suspendable currency classes) tells the two apart —
+followed by `/atlas/asset/consolidate` (SPEC.md §5.4.1) folding the
+recovered balance back into whatever Bank Beta still held, when it held
+anything left to fold.
+
+The reserve-mint approval endpoints needed one genuine addition beyond
+`bank-demo.html`'s own pattern: because no endpoint anywhere in this
+protocol looks up a credential by id (a credential only ever reaches its
+holder by being handed back directly in some call's response), the
+executed approval now carries the full minted credential
+(`executedCredential`), not just its id, so the page can chain straight
+into the next split without a lookup that doesn't exist. Both
+`issuer-server/server.js` and `issuer-php/lib/store.php` mirror this,
+including PHP's `flock()`-guarded sign function holding one lock across
+the entire find/validate/mutate/write sequence, the same race-avoidance
+`sign_bank_approval()` already uses.
+
+`test/manual-reserve-bank-demo.js` and
+`test/manual-reserve-bank-demo-php.js` drive all seven acts against a
+real, isolated instance of each backend at the raw HTTP layer, including
+an explicit check that `/atlas/asset/transfer` still refuses the
+fungible currency class. `test/manual-reserve-bank-demo-browser.js`
+drives the actual page end to end in a real headless browser — the pass
+that caught two bugs the API-level tests structurally couldn't: an
+undeclared-variable reference error in the Act 5 trade-listing handler,
+and the page's raw-credential and independent-verification helpers
+(written for ordinary asset balances) choking on an attestation
+credential's different shape in Act 6. Both are fixed, and the page's
+own `verifyCredentialIndependently` now handles both credential shapes
+the same way `attestation-demo.html`'s already does.
+
 ## 9. Verify it yourself
 
 ```bash
