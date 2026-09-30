@@ -913,6 +913,25 @@ const ASSET_CATALOG = {
     fungible: true,
     presentation: 'collectible'
   },
+  // Supply-chain provenance + recall demo (recall-demo.html) — an
+  // ordinary physical good, changing hands by plain /atlas/asset/transfer
+  // like any other giftable non-fungible item (no tradeScope override —
+  // that only gets set to 'bound' the moment a recall is actually issued
+  // against this class, via POST /atlas/demo/recall/issue below).
+  // auditHistory: true is what makes its full custody chain walkable via
+  // GET /atlas/asset/history — see ASSET_HISTORY_FILE's own comment.
+  'atlas.demo.supplychain.widget': {
+    name: 'Demo Widget',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: false,
+    presentation: 'collectible',
+    auditHistory: true,
+    properties: {
+      'atlas.rarity': 'common',
+      'com.example.batch': 'demo-batch-01'
+    }
+  },
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
   // viewer.js's CHESS_WIN_REWARDS / maybeAwardChessWin()) — not gated by
@@ -1316,6 +1335,21 @@ const ORACLE_FLIGHT_NUMBER_RE = /^[A-Z]{2}[0-9]{2,4}$/;
 // watch the same request succeed) demonstrates the threshold actually
 // being enforced rather than merely displayed.
 const ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES = 120;
+
+// Supply-chain provenance + recall demo (recall-demo.html) — the one
+// class this domain lets a live visitor issue a recall against, same
+// "hardcoded to its own toy" narrowing DEMO_SUSPENDABLE_CLASSES gives
+// clawback-demo.html's fraud act, kept as a short list for the same
+// reason even though there's only one entry today.
+const DEMO_SUPPLYCHAIN_WIDGET_CLASS = 'atlas.demo.supplychain.widget';
+const DEMO_RECALLABLE_CLASSES = [DEMO_SUPPLYCHAIN_WIDGET_CLASS];
+// Fixed recall notice text, same short-allow-list-instead-of-free-text
+// discipline DEMO_ATTESTATION_CLAIMS already applies — a visitor picks
+// one of these, never writes the property value directly.
+const DEMO_RECALL_REASONS = {
+  'battery-defect': 'RECALLED: battery cell defect poses a fire risk. Stop using immediately and contact the manufacturer for a replacement.',
+  'choking-hazard': 'RECALLED: a small part may detach and present a choking hazard. Stop using immediately and contact the manufacturer for a replacement.'
+};
 
 const MIME = {
   '.html': 'text/html', '.js': 'application/javascript', '.json': 'application/json',
@@ -4171,6 +4205,41 @@ async function main() {
         saveOraclePolicy(policyRecord);
         console.log('Oracle demo: payout', payout.id, 'of', policyRecord.payoutAmount, 'issued for policy', credential.id, '- delay', attestation.delayMinutes, 'min on', attestation.flightNumber);
         return sendJson(res, 200, { payout, policy: policyRecord });
+      }
+
+      // --- Supply-chain provenance + recall demo (recall-demo.html) ---
+      //
+      // POST /atlas/demo/recall/issue — self-serve sibling of the real,
+      // admin-gated POST /atlas/admin/class-patch (SPEC.md's class-wide
+      // patch mechanism, see the README's own "Class-wide patches"
+      // section), restricted to DEMO_RECALLABLE_CLASSES and a fixed
+      // allow-list of recall notice texts (DEMO_RECALL_REASONS) — same
+      // "plays the privileged role" reasoning as every other /atlas/demo/*
+      // route above, just standing in for the manufacturer's own recall
+      // authority rather than a domain operator's. Sets tradeScope:
+      // 'bound' alongside the notice on purpose: once a class is recalled,
+      // nothing here still lets it be passed on to someone else, which
+      // Act 5 of the page's own "try to break it" step actually exercises
+      // against the ordinary /atlas/asset/transfer gate, not anything new.
+      //
+      // Deliberately does NOT touch any already-issued widget credential
+      // directly — nothing here even asks for one. The patch only ever
+      // reaches a current holder the next time their own wallet checks in
+      // (POST /atlas/mail/check, same mechanism every other class patch
+      // already uses), which is the entire point being demonstrated: this
+      // domain keeps no registry of who holds what, so a mass recall is
+      // one flat-file write, not N credential lookups.
+      if (req.method === 'POST' && req.url === '/atlas/demo/recall/issue') {
+        const { assetClass, reason } = JSON.parse((await readBody(req)) || '{}');
+        if (!DEMO_RECALLABLE_CLASSES.includes(assetClass)) {
+          return sendJson(res, 400, { error: 'this endpoint only recalls: ' + DEMO_RECALLABLE_CLASSES.join(', ') });
+        }
+        if (!Object.prototype.hasOwnProperty.call(DEMO_RECALL_REASONS, reason)) {
+          return sendJson(res, 400, { error: 'reason must be one of: ' + Object.keys(DEMO_RECALL_REASONS).join(', ') });
+        }
+        const patch = setClassPatch(assetClass, { properties: { 'com.example.recallNotice': DEMO_RECALL_REASONS[reason] }, tradeScope: 'bound' });
+        console.log('Demo-recalled', assetClass, '->', reason);
+        return sendJson(res, 200, { assetClass, patch });
       }
 
       // --- Admin session (short-lived bearer token layered on the roster

@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Supply-Chain Recall Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb; --amber: #96650f; --amber-bg: #fbf1de;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 800px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel .stepnote { color: var(--muted); font-size: 0.9rem; margin-top: 0; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  .panel.caution { background: var(--amber-bg); border-color: var(--amber); }
+  .panel.caution p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.6rem; align-items: center; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.7rem 0 0.3rem; }
+  select {
+    font: inherit; font-size: 0.95rem; padding: 0.5rem 0.6rem;
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  .card {
+    border: 1px solid var(--line); border-radius: 9px; padding: 0.8rem 1rem; background: #fbfcfd; margin-top: 0.8rem;
+  }
+  .card h4 { margin: 0 0 0.4rem; font-size: 0.9rem; }
+  .card .row { margin-top: 0.3rem; font-size: 0.85rem; color: var(--muted); }
+  .card .row b { color: var(--ink); }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.5rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .result.warn { background: var(--amber-bg); color: var(--amber); }
+  details.raw { font-size: 0.8rem; margin-top: 0.5rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  textarea#verifyInput {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.7rem; resize: vertical;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>A product changes hands three times, then gets recalled everywhere at once</h1>
+  <p class="tag">Ordinary custody transfers (SPEC.md §5), walked back through a signed provenance chain, then corrected for every current holder by a single class-wide patch (see the README's "Class-wide patches" section) — no registry of who holds what, ever consulted.</p>
+  <p class="lede">
+    A manufacturer ships one unit into the supply chain. It's resold twice before reaching its
+    final owner, each step an ordinary signed transfer. Anyone can trace the full chain back to
+    the original mint. Then the manufacturer discovers a defect and recalls the entire class at
+    once — and the recall only actually reaches this one unit the next time its owner's wallet
+    checks in, not the moment the recall is issued. Every step below is a genuine, live call to
+    this domain's own server.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this looks like for a real business</h2>
+    <p>
+      Swap "widget" for any serialized physical good — an appliance, a car part, a food batch.
+      The manufacturer never has to track down who currently holds each unit: it issues the
+      recall once, against the class, and every wallet that still holds one picks up the notice
+      (and loses the ability to resell it) the next time it checks in on its own schedule.
+    </p>
+  </div>
+
+  <div class="panel caution">
+    <p>
+      <strong>One honest limitation, stated plainly:</strong> this domain keeps no record of who
+      currently holds a widget, so "issuing a recall" can only ever be a patch waiting to be
+      picked up — it cannot push a notice to anyone. Act 5 below makes a wallet's own check-in a
+      manual button click so you can see that lazy hand-off happen; a real wallet would simply do
+      it on its own periodic schedule. The two recall reasons and the one recallable class are
+      also fixed for this demo, the same "short allow-list instead of free text" limit every
+      other self-serve demo route on this site already applies.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Act 1 — the manufacturer ships one widget into the supply chain</h2>
+    <p class="stepnote">
+      One click mints a single, unique widget credential directly to a fresh Distributor
+      identity generated in your own browser — the same plain self-serve mint every other demo's
+      issuance step already uses.
+    </p>
+    <div class="row"><button id="mintBtn" type="button">Ship a widget</button></div>
+    <div id="mintResult"></div>
+  </div>
+
+  <div class="panel" id="transferPanel" style="display:none;">
+    <h2>Act 2 — it changes hands twice before reaching its owner</h2>
+    <p class="stepnote">
+      Two ordinary transfers, each a bearer-but-verified intent signed by whoever currently holds
+      the widget: Distributor to Retailer, then Retailer to Customer.
+    </p>
+    <div class="row"><button id="transfer1Btn" type="button">Transfer: Distributor → Retailer</button></div>
+    <div id="transfer1Result"></div>
+    <div class="row"><button id="transfer2Btn" type="button" disabled>Transfer: Retailer → Customer</button></div>
+    <div id="transfer2Result"></div>
+  </div>
+
+  <div class="panel" id="historyPanel" style="display:none;">
+    <h2>Act 3 — trace its full supply chain</h2>
+    <p class="stepnote">
+      One call walks the widget's provenance backward through every archived predecessor body,
+      oldest first: the original mint, then each transfer along the way.
+    </p>
+    <div class="row"><button id="traceBtn" type="button">Trace this widget's history</button></div>
+    <div id="traceResult"></div>
+  </div>
+
+  <div class="panel" id="recallPanel" style="display:none;">
+    <h2>Act 4 — the manufacturer issues a recall</h2>
+    <p class="stepnote">
+      Picking a reason and clicking issue sets a single class-wide patch. Nothing already issued
+      is touched directly — this only takes effect the next time a holder's own wallet checks in.
+    </p>
+    <label for="reasonSelect">Recall reason</label>
+    <select id="reasonSelect">
+      <option value="battery-defect">Battery cell defect (fire risk)</option>
+      <option value="choking-hazard">Small detachable part (choking hazard)</option>
+    </select>
+    <div class="row"><button id="issueRecallBtn" type="button">Issue the recall</button></div>
+    <div id="recallResult"></div>
+  </div>
+
+  <div class="panel" id="checkinPanel" style="display:none;">
+    <h2>Act 5 — the customer's wallet checks in</h2>
+    <p class="stepnote">
+      Try a tampered copy of the widget credential first — it's silently ignored, never trusted.
+      Then check in for real with the untouched credential and the recall notice actually lands.
+    </p>
+    <div class="row">
+      <button id="tamperCheckinBtn" type="button" class="secondary">Check in with a tampered credential</button>
+      <button id="realCheckinBtn" type="button">Check in for real</button>
+    </div>
+    <div id="checkinResult"></div>
+  </div>
+
+  <div class="panel" id="breakPanel" style="display:none;">
+    <h2>Act 6 — try to break it</h2>
+    <p class="stepnote">
+      The widget is now bound to its current owner because of the recall — try passing it on
+      anyway.
+    </p>
+    <div class="row"><button id="resaleBtn" type="button" class="secondary">Try reselling the recalled widget</button></div>
+    <div id="breakResult"></div>
+  </div>
+
+  <div class="panel" id="verifyPanel">
+    <h2>Verify any credential from this page, independently</h2>
+    <p class="stepnote">
+      Paste any widget credential's raw JSON below — copy one from a "View raw" details box
+      above. This runs entirely in your own browser: it fetches this domain's public key
+      directly, then checks the signature itself.
+    </p>
+    <textarea id="verifyInput" rows="8" placeholder="Paste a credential's raw JSON here, or click a &#8220;Try verifying this one&#8221; link above."></textarea>
+    <div style="margin-top:0.6rem;"><button id="verifyBtn" type="button">Verify</button></div>
+    <div id="verifyResult"></div>
+  </div>
+
+  <p class="footnote">
+    Every identity on this page is an ordinary ECDSA keypair generated fresh in your own browser
+    tab, exactly like every other demo on this site — no accounts, nothing stored server-side
+    beyond the credentials and the class patch themselves. <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+  const WIDGET_CLASS = 'atlas.demo.supplychain.widget';
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64urlDecode(str) {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function getJson(url) {
+    const res = await fetch(url, { cache: 'no-store' });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  function errText(res) { return (res.body && res.body.error) || 'unknown error'; }
+
+  async function mintWidget(ownerPublicKey) {
+    return postJson('/atlas/asset/issue', { ownerPublicKey, assetClass: WIDGET_CLASS });
+  }
+  async function transferWidget(identity, credential, recipientPublicKey) {
+    const payload = { credentialId: credential.id, recipientPublicKey, action: 'transfer' };
+    const proof = await signWithSelf(identity, payload);
+    return postJson('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload, proof } });
+  }
+  async function traceHistory(id) {
+    return getJson('/atlas/asset/history?id=' + encodeURIComponent(id));
+  }
+  async function issueRecall(reason) {
+    return postJson('/atlas/demo/recall/issue', { assetClass: WIDGET_CLASS, reason });
+  }
+  async function checkIn(credential) {
+    return postJson('/atlas/mail/check', { credentialIds: [credential.id], credentials: [credential] });
+  }
+
+  // Only ever needs to check the one credential shape this whole demo
+  // produces (domain-atlas-asset/1.0, signed by this domain's main key) —
+  // unlike oracle-demo.html's verifier, there's no second, independent
+  // signing role in this story.
+  async function verifyCredentialIndependently(credential) {
+    if (!credential || typeof credential !== 'object') return { valid: false, reason: 'not an object' };
+    if (credential.credential !== 'domain-atlas-asset/1.0') return { valid: false, reason: 'not a recognized asset credential' };
+    const payload = {
+      id: credential.id, asset: credential.asset, owner: credential.owner,
+      quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
+    };
+    const [keyDoc, revDoc] = await Promise.all([
+      fetch('/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json()),
+      fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
+    ]);
+    const atTime = new Date(credential.issuedAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === credential.issuer.publicKey && atTime >= from && atTime <= until;
+    });
+    if (!activeKey) return { valid: false, reason: "the issuer's key was not valid at issuance" };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match the issuer's key" };
+    const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
+    if (revoked) return { valid: false, reason: 'revoked by the issuer' };
+    return { valid: true, reason: "signature verified against the issuer's key; not revoked" };
+  }
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    let credential;
+    try {
+      credential = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    try {
+      const verdict = await verifyCredentialIndependently(credential);
+      resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+      resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = 'Could not verify: ' + err.message;
+    }
+  }
+  function fillAndVerify(credential) {
+    document.getElementById('verifyInput').value = JSON.stringify(credential, null, 2);
+    document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    runVerify();
+  }
+  function rawBox(label, obj) {
+    const div = document.createElement('details');
+    div.className = 'raw';
+    div.innerHTML = '<summary>View raw ' + label + '</summary><pre></pre>' +
+      '<button class="secondary" type="button" style="margin-top:0.5rem; font-size:0.8rem; padding:0.35rem 0.7rem;">Try verifying this one independently ↓</button>';
+    div.querySelector('pre').textContent = JSON.stringify(obj, null, 2);
+    div.querySelector('button').addEventListener('click', () => fillAndVerify(obj));
+    return div;
+  }
+
+  let distributor = null, retailer = null, customer = null, stranger = null, widget = null;
+
+  document.getElementById('mintBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('mintBtn');
+    const resultEl = document.getElementById('mintResult');
+    btn.disabled = true;
+    distributor = await genIdentity();
+    const res = await mintWidget(distributor.publicKey);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    widget = res.body;
+    resultEl.innerHTML = '<div class="result ok">Widget ' + widget.id + ' minted to the Distributor.</div>';
+    resultEl.appendChild(rawBox('widget credential', widget));
+    document.getElementById('transferPanel').style.display = '';
+  });
+
+  document.getElementById('transfer1Btn').addEventListener('click', async () => {
+    const btn = document.getElementById('transfer1Btn');
+    const resultEl = document.getElementById('transfer1Result');
+    btn.disabled = true;
+    retailer = await genIdentity();
+    const res = await transferWidget(distributor, widget, retailer.publicKey);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    widget = res.body.credential;
+    resultEl.innerHTML = '<div class="result ok">Transferred to the Retailer.</div>';
+    resultEl.appendChild(rawBox('widget credential', widget));
+    document.getElementById('transfer2Btn').disabled = false;
+  });
+
+  document.getElementById('transfer2Btn').addEventListener('click', async () => {
+    const btn = document.getElementById('transfer2Btn');
+    const resultEl = document.getElementById('transfer2Result');
+    btn.disabled = true;
+    customer = await genIdentity();
+    const res = await transferWidget(retailer, widget, customer.publicKey);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    widget = res.body.credential;
+    resultEl.innerHTML = '<div class="result ok">Transferred to the Customer — its final owner.</div>';
+    resultEl.appendChild(rawBox('widget credential', widget));
+    document.getElementById('historyPanel').style.display = '';
+  });
+
+  document.getElementById('traceBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('traceResult');
+    const res = await traceHistory(widget.supersedes);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; return; }
+    const chain = res.body.chain || [];
+    resultEl.innerHTML = '<div class="result ok">Full chain, oldest first (' + chain.length + ' earlier link' + (chain.length === 1 ? '' : 's') + '):</div>';
+    chain.forEach((link, i) => {
+      resultEl.appendChild(rawBox('link ' + (i + 1) + ' of ' + chain.length + ' (' + link.reason + ')', link));
+    });
+    document.getElementById('recallPanel').style.display = '';
+  });
+
+  document.getElementById('issueRecallBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('recallResult');
+    const reason = document.getElementById('reasonSelect').value;
+    const res = await issueRecall(reason);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; return; }
+    resultEl.innerHTML = '<div class="result ok">Recall issued against every ' + res.body.assetClass + ' — nothing already issued was touched.</div>';
+    resultEl.appendChild(rawBox('class patch', res.body.patch));
+    document.getElementById('checkinPanel').style.display = '';
+  });
+
+  document.getElementById('tamperCheckinBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('checkinResult');
+    const tampered = JSON.parse(JSON.stringify(widget));
+    tampered.asset.properties = Object.assign({}, tampered.asset.properties, { 'com.example.batch': 'tampered-batch-99' });
+    const res = await checkIn(tampered);
+    const accepted = (res.body.updates || []).some((u) => u.id === widget.id);
+    resultEl.innerHTML = '<div class="result ' + (accepted ? 'err' : 'warn') + '">' +
+      (accepted ? 'Unexpected — a tampered credential got an update applied.' :
+        'Correctly ignored — the signature no longer matched, so nothing was trusted or applied.') + '</div>';
+  });
+
+  document.getElementById('realCheckinBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('checkinResult');
+    const res = await checkIn(widget);
+    const update = (res.body.updates || []).find((u) => u.id === widget.id);
+    if (!update || !update.newCredential) {
+      resultEl.innerHTML += '<div class="result err">No update came back for this check-in — unexpected.</div>';
+      return;
+    }
+    widget = update.newCredential;
+    resultEl.innerHTML += '<div class="result ok">The recall landed: ' + widget.asset.properties['com.example.recallNotice'] + '</div>';
+    resultEl.appendChild(rawBox('reissued widget credential', widget));
+    document.getElementById('breakPanel').style.display = '';
+  });
+
+  document.getElementById('resaleBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('breakResult');
+    stranger = await genIdentity();
+    const res = await transferWidget(customer, widget, stranger.publicKey);
+    resultEl.innerHTML = '<div class="result ' + (res.ok ? 'err' : 'warn') + '">' +
+      (res.ok ? 'Unexpected — this should have been rejected.' : 'Rejected — ' + errText(res)) + '</div>';
+  });
+
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
+})();
+</script>
+</body>
+</html>

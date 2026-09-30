@@ -1700,6 +1700,54 @@ bug before shipping, this page's first full run passed clean too, with
 an explicit assertion that zero uncaught page errors occurred across the
 whole walkthrough.
 
+## A product that gets recalled everywhere at once
+
+Every prior demo's mechanism touches one credential, or one already-named
+group, at a time. `demo-domain-a/recall-demo.html` proves the other shape:
+a manufacturer ships one physical good, it resells twice on its way to an
+owner, and then the manufacturer discovers a defect and recalls the whole
+class in a single act — reusing the class-wide patch mechanism ("Class-
+wide patches", above) rather than anything new. The point being
+demonstrated is what that mechanism already implies: this domain keeps no
+record of who currently holds anything, so a recall can only ever be a
+patch waiting to be picked up, not a push. It reaches this one unit only
+the next time its owner's own wallet checks in.
+
+New backend surface, on both issuer-server/server.js and issuer-php
+(mirrored, each independently syntax-checked): one non-fungible
+`atlas.demo.supplychain.widget` class, ordinarily tradeable like any other
+giftable item and with `auditHistory: true` set so its full custody chain
+is walkable ("Walking a credential's own history...", above), plus a
+single new endpoint, `POST /atlas/demo/recall/issue` — a self-serve
+sibling of the real, admin-gated `POST /atlas/admin/class-patch`,
+restricted to this one class and a fixed pair of recall reasons the same
+way every other self-serve demo route restricts itself to a short
+allow-list. It sets the class's `tradeScope` to `bound` alongside the
+recall notice, which is what turns an ordinary resale attempt into a
+rejection once the recall has landed — the existing transfer gate, not
+anything built for this demo.
+
+Six acts: minting a widget to a fresh Distributor identity; two ordinary
+transfers, Distributor to Retailer to Customer; tracing the widget's full
+provenance back to the original mint in one call; issuing the recall
+against the whole class; the Customer's wallet checking in — first with a
+tampered copy of its own credential, silently ignored because the
+signature no longer checks out, then for real, which reissues the
+credential bound and carrying the recall notice; and finally trying to
+resell that now-bound widget, correctly rejected.
+
+Verified three ways, the same discipline every prior demo on this list
+used: `test/manual-recall-demo.js` and its PHP companion
+`test/manual-recall-demo-php.js` drive every check (mint, both resales,
+the provenance trace, the recall issuance, the tampered check-in's silent
+rejection, the real check-in's reissue, an independent signature
+verification of the reissued credential, and the final resale rejection)
+against an isolated instance of each backend at the raw HTTP layer, both
+passing clean on the first run. `test/manual-recall-demo-browser.js`
+drives the actual page end to end in a real headless browser, with an
+explicit assertion that zero uncaught page errors occurred across the
+whole walkthrough — also clean on the first run.
+
 ## 9. Verify it yourself
 
 ```bash

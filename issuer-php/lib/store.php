@@ -599,6 +599,27 @@ function atlas_oracle_policies_file() {
 const ATLAS_ORACLE_FLIGHT_NUMBER_RE = '/^[A-Z]{2}[0-9]{2,4}$/';
 const ATLAS_ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES = 120;
 
+// Supply-chain provenance + recall demo (recall-demo.html) — the one class
+// this domain lets a live visitor issue a recall against, same "hardcoded
+// to its own toy" narrowing atlas_demo_suspendable_classes() gives
+// clawback-demo.html's fraud act, kept as a short list for the same reason
+// even though there's only one entry today. Mirrors issuer-server/
+// server.js's DEMO_SUPPLYCHAIN_WIDGET_CLASS/DEMO_RECALLABLE_CLASSES.
+const ATLAS_DEMO_SUPPLYCHAIN_WIDGET_CLASS = 'atlas.demo.supplychain.widget';
+function atlas_demo_recallable_classes() {
+  return [ATLAS_DEMO_SUPPLYCHAIN_WIDGET_CLASS];
+}
+// Fixed recall notice text, same short-allow-list-instead-of-free-text
+// discipline atlas_demo_attestation_claims() already applies — a visitor
+// picks one of these, never writes the property value directly. Mirrors
+// issuer-server/server.js's DEMO_RECALL_REASONS.
+function atlas_demo_recall_reasons() {
+  return [
+    'battery-defect' => 'RECALLED: battery cell defect poses a fire risk. Stop using immediately and contact the manufacturer for a replacement.',
+    'choking-hazard' => 'RECALLED: a small part may detach and present a choking hazard. Stop using immediately and contact the manufacturer for a replacement.',
+  ];
+}
+
 const ATLAS_DEMO_CLAWBACK_TOKEN_CLASS = 'atlas.demo.clawback.token';
 const ATLAS_DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
 const ATLAS_DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
@@ -1286,6 +1307,22 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.demo.insurance.payout' => [
     'name' => 'Flight Delay Payout', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
     'fungible' => true, 'presentation' => 'collectible',
+  ],
+  // Supply-chain provenance + recall demo (recall-demo.html) — an ordinary
+  // physical good, changing hands by plain atlas/asset/transfer.php like
+  // any other giftable non-fungible item (no tradeScope override — that
+  // only gets set to 'bound' the moment a recall is actually issued
+  // against this class, via POST /atlas/demo/recall/issue.php below).
+  // 'auditHistory' => true is what makes its full custody chain walkable
+  // via GET /atlas/asset/history.php — see that comment. Mirrors
+  // issuer-server/server.js's ASSET_CATALOG entry of the same name.
+  'atlas.demo.supplychain.widget' => [
+    'name' => 'Demo Widget', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => false, 'presentation' => 'collectible', 'auditHistory' => true,
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.batch' => 'demo-batch-01',
+    ],
   ],
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
