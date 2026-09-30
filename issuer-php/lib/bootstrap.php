@@ -743,56 +743,70 @@ function check_presented_membership($publicKeyB64url, $credential, $expectedOwne
 // otherwise-unrelated signature), confirm a key matching it was valid at
 // credential.issuedAt, verify the signature against THAT key, then check
 // THAT domain's own revocation list — never this server's own is_revoked(),
-// which only knows about ids this server itself minted. Mirrors
+// which only knows about ids this server itself minted. Goes through
+// atlas_http_request() (curl-first, identifying User-Agent) the same way
+// fetch_domain_public_key() does — this used to have its own, older, plain
+// file_get_contents() calls, predating that helper and never migrated to
+// it, which is exactly why this path kept failing silently on a host
+// missing the openssl stream wrapper after fetch_domain_public_key() was
+// already fixed. Returns true, or a short reason string on failure (never
+// a bare false) so a caller can surface WHY instead of a dead end — mirrors
 // issuer-server/server.js's verifyForeignAssetCredential().
 function verify_foreign_asset_credential($credential) {
+  $issuerDomain = $credential['issuer']['domain'];
   try {
-    $issuerDomain = $credential['issuer']['domain'];
-    $context = stream_context_create(['http' => ['method' => 'GET', 'ignore_errors' => true, 'timeout' => 10]]);
-    $keyRaw = @file_get_contents(atlas_base_url($issuerDomain) . '/.well-known/atlas-key.json', false, $context);
-    if ($keyRaw === false) return false;
-    $keyDoc = json_decode($keyRaw, true);
-    if (!is_array($keyDoc) || empty($keyDoc['keys'])) return false;
-    $revRaw = @file_get_contents(atlas_base_url($issuerDomain) . '/.well-known/atlas-revocations.json', false, $context);
-    $revDoc = $revRaw !== false ? json_decode($revRaw, true) : null;
-    $revoked = is_array($revDoc) && isset($revDoc['revoked']) ? $revDoc['revoked'] : [];
-    // atlas_suspensions_file() is published the same way revocations are
-    // (see its own comment in store.php), so a foreign credential's live
-    // suspension is honored here too, not just a same-domain one — a
-    // missing or unreachable document is treated as "nothing suspended,"
-    // same fail-open posture $revoked already has for a domain that
-    // doesn't publish one.
-    $susRaw = @file_get_contents(atlas_base_url($issuerDomain) . '/.well-known/atlas-suspensions.json', false, $context);
-    $susDoc = $susRaw !== false ? json_decode($susRaw, true) : null;
-    $suspended = is_array($susDoc) && isset($susDoc['suspended']) ? $susDoc['suspended'] : [];
-
-    $issuedAt = strtotime($credential['issuedAt']);
-    $activeKey = null;
-    foreach ($keyDoc['keys'] as $k) {
-      if (($k['publicKey'] ?? null) !== ($credential['issuer']['publicKey'] ?? null)) continue;
-      $from = strtotime($k['validFrom']);
-      $until = !empty($k['validUntil']) ? strtotime($k['validUntil']) : PHP_INT_MAX;
-      if ($issuedAt >= $from && $issuedAt <= $until) { $activeKey = $k; break; }
-    }
-    if ($activeKey === null) return false;
-
-    $sigOk = verify_domain_signature($activeKey['publicKey'], asset_payload_of($credential), $credential['signature']);
-    if (!$sigOk) return false;
-
-    foreach ($revoked as $r) {
-      if (($r['id'] ?? null) === $credential['id']) return false;
-    }
-    $now = time();
-    foreach ($suspended as $s) {
-      if (($s['id'] ?? null) !== $credential['id']) continue;
-      $expiresAt = $s['expiresAt'] ?? null;
-      if ($expiresAt === null || strtotime($expiresAt) > $now) return false;
-    }
-    if (is_expired($credential)) return false;
-    return true;
+    $keyRes = atlas_http_request('GET', atlas_base_url($issuerDomain) . '/.well-known/atlas-key.json');
   } catch (Exception $e) {
-    return false;
+    return 'could not fetch its published key (' . $e->getMessage() . ')';
   }
+  if ($keyRes['status'] !== 200) return 'it returned HTTP ' . $keyRes['status'] . ' for its own published key';
+  $keyDoc = json_decode($keyRes['raw'], true);
+  if (!is_array($keyDoc) || empty($keyDoc['keys'])) return 'it returned no usable key document';
+
+  // A missing or unreachable revocation/suspension document is treated as
+  // "nothing revoked/suspended" — same fail-open posture this always had,
+  // now just going through the same curl-first helper.
+  $revoked = [];
+  try {
+    $revRes = atlas_http_request('GET', atlas_base_url($issuerDomain) . '/.well-known/atlas-revocations.json');
+    $revDoc = $revRes['status'] === 200 ? json_decode($revRes['raw'], true) : null;
+    if (is_array($revDoc) && isset($revDoc['revoked'])) $revoked = $revDoc['revoked'];
+  } catch (Exception $e) {
+    // fail-open, as above
+  }
+  $suspended = [];
+  try {
+    $susRes = atlas_http_request('GET', atlas_base_url($issuerDomain) . '/.well-known/atlas-suspensions.json');
+    $susDoc = $susRes['status'] === 200 ? json_decode($susRes['raw'], true) : null;
+    if (is_array($susDoc) && isset($susDoc['suspended'])) $suspended = $susDoc['suspended'];
+  } catch (Exception $e) {
+    // fail-open, as above
+  }
+
+  $issuedAt = strtotime($credential['issuedAt']);
+  $activeKey = null;
+  foreach ($keyDoc['keys'] as $k) {
+    if (($k['publicKey'] ?? null) !== ($credential['issuer']['publicKey'] ?? null)) continue;
+    $from = strtotime($k['validFrom']);
+    $until = !empty($k['validUntil']) ? strtotime($k['validUntil']) : PHP_INT_MAX;
+    if ($issuedAt >= $from && $issuedAt <= $until) { $activeKey = $k; break; }
+  }
+  if ($activeKey === null) return 'no key matching this credential was valid at its own issuedAt';
+
+  $sigOk = verify_domain_signature($activeKey['publicKey'], asset_payload_of($credential), $credential['signature']);
+  if (!$sigOk) return "signature doesn't match its own published key";
+
+  foreach ($revoked as $r) {
+    if (($r['id'] ?? null) === $credential['id']) return 'it has revoked this credential';
+  }
+  $now = time();
+  foreach ($suspended as $s) {
+    if (($s['id'] ?? null) !== $credential['id']) continue;
+    $expiresAt = $s['expiresAt'] ?? null;
+    if ($expiresAt === null || strtotime($expiresAt) > $now) return 'it has suspended this credential';
+  }
+  if (is_expired($credential)) return 'credential has expired';
+  return true;
 }
 
 // Task #250 (World Drops, SPEC.md §5.5): a third sibling to
@@ -837,8 +851,10 @@ function check_presented_transferable_asset($publicKeyB64url, $credential, $expe
     if (!$ok) return 'asset signature does not check out';
     return null;
   }
-  $foreignOk = verify_foreign_asset_credential($credential);
-  if (!$foreignOk) return 'could not verify this asset against its issuer (' . $credential['issuer']['domain'] . ')';
+  $foreignResult = verify_foreign_asset_credential($credential);
+  if ($foreignResult !== true) {
+    return 'could not verify this asset against its issuer (' . $credential['issuer']['domain'] . '): ' . $foreignResult;
+  }
   return null;
 }
 

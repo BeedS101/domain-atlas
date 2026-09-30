@@ -3116,40 +3116,47 @@ async function main() {
   // revocation list — never this server's own isRevoked(), which only
   // knows about ids this server itself minted and could never have heard
   // of a foreign one being revoked.
+  // Returns true, or a short reason string on failure (never a bare
+  // false), so a caller can surface WHY instead of a dead end — same
+  // reasoning as issuer-php/lib/bootstrap.php's verify_foreign_asset_
+  // credential(), which used to have this exact blanket "swallow every
+  // failure into a plain false" shape too.
   async function verifyForeignAssetCredential(credential) {
+    const base = baseUrl(credential.issuer.domain);
+    let keyRes, revRes, susRes;
     try {
-      const base = baseUrl(credential.issuer.domain);
-      const [keyRes, revRes, susRes] = await Promise.all([
-        fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store' }),
-        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store' }),
-        fetch(base + '/.well-known/atlas-suspensions.json', { cache: 'no-store' })
+      [keyRes, revRes, susRes] = await Promise.all([
+        fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS }),
+        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS }),
+        fetch(base + '/.well-known/atlas-suspensions.json', { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS })
       ]);
-      if (!keyRes.ok) return false;
-      const keyDoc = await keyRes.json();
-      const revDoc = revRes.ok ? await revRes.json() : { revoked: [] };
-      // SUSPENSIONS_FILE is published the same way revocations are (see its
-      // own comment), so a foreign credential's live suspension is honored
-      // here too, not just a same-domain one — a missing or unreachable
-      // document is treated as "nothing suspended," same fail-open posture
-      // revDoc already has for a domain that doesn't publish one.
-      const susDoc = susRes.ok ? await susRes.json() : { suspended: [] };
-      const issuedAt = new Date(credential.issuedAt).getTime();
-      const activeKey = (keyDoc.keys || []).find((k) => {
-        const from = new Date(k.validFrom).getTime();
-        const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
-        return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
-      });
-      if (!activeKey) return false;
-      const sigOk = await verifyDomainSignature(activeKey.publicKey, assetPayloadOf(credential), credential.signature);
-      if (!sigOk) return false;
-      if ((revDoc.revoked || []).some((r) => r.id === credential.id)) return false;
-      const now = Date.now();
-      if ((susDoc.suspended || []).some((s) => s.id === credential.id && (!s.expiresAt || new Date(s.expiresAt).getTime() > now))) return false;
-      if (isExpired(credential)) return false;
-      return true;
     } catch (err) {
-      return false;
+      return 'could not reach it (' + ((err.cause && err.cause.message) ? err.cause.message : err.message) + ')';
     }
+    if (!keyRes.ok) return 'it returned HTTP ' + keyRes.status + ' for its own published key';
+    const keyDoc = await keyRes.json();
+    if (!keyDoc.keys || !keyDoc.keys.length) return 'it returned no usable key document';
+    const revDoc = revRes.ok ? await revRes.json() : { revoked: [] };
+    // SUSPENSIONS_FILE is published the same way revocations are (see its
+    // own comment), so a foreign credential's live suspension is honored
+    // here too, not just a same-domain one — a missing or unreachable
+    // document is treated as "nothing suspended," same fail-open posture
+    // revDoc already has for a domain that doesn't publish one.
+    const susDoc = susRes.ok ? await susRes.json() : { suspended: [] };
+    const issuedAt = new Date(credential.issuedAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
+    });
+    if (!activeKey) return 'no key matching this credential was valid at its own issuedAt';
+    const sigOk = await verifyDomainSignature(activeKey.publicKey, assetPayloadOf(credential), credential.signature);
+    if (!sigOk) return "signature doesn't match its own published key";
+    if ((revDoc.revoked || []).some((r) => r.id === credential.id)) return 'it has revoked this credential';
+    const now = Date.now();
+    if ((susDoc.suspended || []).some((s) => s.id === credential.id && (!s.expiresAt || new Date(s.expiresAt).getTime() > now))) return 'it has suspended this credential';
+    if (isExpired(credential)) return 'credential has expired';
+    return true;
   }
 
   // Task #250 (World Drops, SPEC.md §5.5): a THIRD sibling of
@@ -3185,8 +3192,8 @@ async function main() {
       if (!ok) return 'asset signature does not check out';
       return null;
     }
-    const foreignOk = await verifyForeignAssetCredential(credential);
-    if (!foreignOk) return 'could not verify this asset against its issuer (' + credential.issuer.domain + ')';
+    const foreignResult = await verifyForeignAssetCredential(credential);
+    if (foreignResult !== true) return 'could not verify this asset against its issuer (' + credential.issuer.domain + '): ' + foreignResult;
     return null;
   }
 
