@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Oracle-Triggered Payout Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb; --amber: #96650f; --amber-bg: #fbf1de;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 800px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel .stepnote { color: var(--muted); font-size: 0.9rem; margin-top: 0; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  .panel.caution { background: var(--amber-bg); border-color: var(--amber); }
+  .panel.caution p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.6rem; align-items: center; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.7rem 0 0.3rem; }
+  input[type="text"], input[type="number"] {
+    font: inherit; font-size: 0.95rem; padding: 0.5rem 0.6rem;
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  input[type="text"] { width: 160px; }
+  input[type="number"] { width: 110px; }
+  .card {
+    border: 1px solid var(--line); border-radius: 9px; padding: 0.8rem 1rem; background: #fbfcfd; margin-top: 0.8rem;
+  }
+  .card h4 { margin: 0 0 0.4rem; font-size: 0.9rem; }
+  .card .row { margin-top: 0.3rem; font-size: 0.85rem; color: var(--muted); }
+  .card .row b { color: var(--ink); }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.5rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .result.warn { background: var(--amber-bg); color: var(--amber); }
+  details.raw { font-size: 0.8rem; margin-top: 0.5rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  textarea#verifyInput {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.7rem; resize: vertical;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>A flight gets delayed, and the payout signs itself</h1>
+  <p class="tag">Two already-proven primitives — a third party's signed attestation (SPEC.md §5.11) and asset issuance (SPEC.md §5) — combined into one automatic claim, with no manual review step in between.</p>
+  <p class="lede">
+    You buy a flight-delay policy. An independent flight-status oracle — a genuinely different
+    signing key than the one that issued your policy — reports how delayed the flight actually
+    was. The moment a report meets the policy's threshold, requesting a payout mints it on the
+    spot: no adjuster, no claim form, no waiting. Every step below is a genuine, live call to
+    this domain's own server.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this looks like for a real business</h2>
+    <p>
+      Swap "flight delay" for anything an independent party can observe and sign: a shipment
+      arriving late, a temperature threshold crossed in transit, a game's final score, a
+      benchmark closing above or below a line. Whoever holds the policy gets paid the instant a
+      qualifying report exists — the oracle never touches the money, and the issuer never
+      decides who wins.
+    </p>
+  </div>
+
+  <div class="panel caution">
+    <p>
+      <strong>One honest limitation, stated plainly:</strong> the "independent" oracle here is
+      this same domain's second, independent key — the exact stand-in
+      <a href="attestation-demo.html">the attestation demo</a>'s reviewer and
+      <a href="reserve-bank-demo.html">the reserve-bank demo</a>'s auditor already use, not a
+      genuinely separate flight-data provider. The signature check works identically either way;
+      a real deployment would point this role at an actual airline-data feed's own published key.
+      The 120-minute payout threshold is also fixed for this demo, the same for every policy,
+      rather than something a real underwriter would price per policy.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Act 1 — buy a policy</h2>
+    <p class="stepnote">
+      One click mints a bound policy credential to a fresh identity generated in your own
+      browser. Its flight and payout terms are recorded against the credential's own id — the
+      generic asset shape has no room for custom fields, so this is exactly the kind of thing
+      §5.11's attestation half of this demo has to reach outside a bare credential for.
+    </p>
+    <label for="flightInput">Flight number</label>
+    <input type="text" id="flightInput" value="BA249">
+    <label for="payoutInput">Payout if delayed 120+ minutes</label>
+    <input type="number" id="payoutInput" value="500" min="1" max="1000000">
+    <div class="row"><button id="buyBtn" type="button">Buy this policy</button></div>
+    <div id="buyResult"></div>
+  </div>
+
+  <div class="panel" id="reportPanel" style="display:none;">
+    <h2>Act 2 — the oracle reports the flight's status</h2>
+    <p class="stepnote">
+      The oracle signs its own opinion about the flight — a genuinely different key than the one
+      that issued your policy. Try a short delay first; it won't be enough to trigger a payout.
+    </p>
+    <label for="delayInput">Reported delay (minutes)</label>
+    <input type="number" id="delayInput" value="45" min="0" max="600">
+    <div class="row"><button id="reportBtn" type="button">Get an oracle report</button></div>
+    <div id="reportResult"></div>
+  </div>
+
+  <div class="panel" id="claimPanel" style="display:none;">
+    <h2>Act 3 — request your payout</h2>
+    <p class="stepnote">
+      Presenting your policy alongside the oracle's latest report either mints your payout on
+      the spot, or tells you exactly why not — try it with the short delay above, watch it get
+      rejected, then go back to Act 2, report a longer delay, and try again.
+    </p>
+    <div class="row"><button id="claimBtn" type="button">Request the payout</button></div>
+    <div id="claimResult"></div>
+  </div>
+
+  <div class="panel" id="breakPanel" style="display:none;">
+    <h2>Act 4 — try to break it</h2>
+    <p class="stepnote">
+      Your payout already landed — both buttons below try to get a second one out of the same
+      policy.
+    </p>
+    <div class="row">
+      <button id="doubleClaimBtn" type="button" class="secondary">Request the payout again</button>
+      <button id="wrongFlightBtn" type="button" class="secondary">Claim using a report for a different flight</button>
+    </div>
+    <div id="breakResult"></div>
+  </div>
+
+  <div class="panel" id="verifyPanel">
+    <h2>Verify any credential from this page, independently</h2>
+    <p class="stepnote">
+      Paste a policy, an oracle report, or a payout's raw JSON below — copy one from a "View raw"
+      details box above. This runs entirely in your own browser: it fetches this domain's public
+      key(s) directly, then checks the signature itself.
+    </p>
+    <textarea id="verifyInput" rows="8" placeholder="Paste a credential's raw JSON here, or click a &#8220;Try verifying this one&#8221; link above."></textarea>
+    <div style="margin-top:0.6rem;"><button id="verifyBtn" type="button">Verify</button></div>
+    <div id="verifyResult"></div>
+  </div>
+
+  <p class="footnote">
+    Your policy identity is an ordinary ECDSA keypair generated fresh in your own browser tab,
+    exactly like every other demo on this site — no accounts, nothing stored server-side beyond
+    the credentials and policy record themselves. <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64urlDecode(str) {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  function errText(res) { return (res.body && res.body.error) || 'unknown error'; }
+
+  async function buyPolicy(ownerPublicKey, flightNumber, payoutAmount) {
+    return postJson('/atlas/demo/oracle/policy/issue', { ownerPublicKey, flightNumber, payoutAmount });
+  }
+  async function getOracleReport(flightNumber, delayMinutes) {
+    return postJson('/atlas/demo/oracle/attest', { flightNumber, delayMinutes });
+  }
+  async function claimPayout(identity, credential, attestation) {
+    const payload = { policyId: credential.id, action: 'claim-payout' };
+    const proof = await signWithSelf(identity, payload);
+    return postJson('/atlas/demo/oracle/payout/claim', { credential, attestation, intent: { payload, proof } });
+  }
+
+  // Handles both shapes this page can ever hand a visitor: an ordinary
+  // asset credential (the policy or the payout, checked against this
+  // domain's main key) and an oracle report (checked against this
+  // domain's separately-published reviewer key, the same second identity
+  // attestation-demo.html's own verify panel already checks against).
+  async function verifyCredentialIndependently(credential) {
+    if (!credential || typeof credential !== 'object') return { valid: false, reason: 'not an object' };
+    let payload, keyFile, timeField;
+    if (credential.credential === 'domain-atlas-oracle-attestation/1.0') {
+      keyFile = '/.well-known/atlas-reviewer-key.json';
+      payload = { id: credential.id, flightNumber: credential.flightNumber, delayMinutes: credential.delayMinutes, observedAt: credential.observedAt };
+      timeField = credential.observedAt;
+    } else {
+      keyFile = '/.well-known/atlas-key.json';
+      payload = {
+        id: credential.id, asset: credential.asset, owner: credential.owner,
+        quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
+      };
+      timeField = credential.issuedAt;
+    }
+    const keyLabel = keyFile.includes('reviewer') ? "the issuer's oracle key" : "the issuer's key";
+    const [keyDoc, revDoc] = await Promise.all([
+      fetch(keyFile, { cache: 'no-store' }).then((r) => r.json()),
+      fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
+    ]);
+    const atTime = new Date(timeField).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === credential.issuer.publicKey && atTime >= from && atTime <= until;
+    });
+    if (!activeKey) return { valid: false, reason: keyLabel + ' was not valid at issuance' };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match " + keyLabel };
+    const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
+    if (revoked) return { valid: false, reason: 'revoked by ' + keyLabel };
+    return { valid: true, reason: 'signature verified against ' + keyLabel + '; not revoked' };
+  }
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    let credential;
+    try {
+      credential = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    try {
+      const verdict = await verifyCredentialIndependently(credential);
+      resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+      resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = 'Could not verify: ' + err.message;
+    }
+  }
+  function fillAndVerify(credential) {
+    document.getElementById('verifyInput').value = JSON.stringify(credential, null, 2);
+    document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    runVerify();
+  }
+  function rawBox(label, obj) {
+    const div = document.createElement('details');
+    div.className = 'raw';
+    div.innerHTML = '<summary>View raw ' + label + '</summary><pre></pre>' +
+      '<button class="secondary" type="button" style="margin-top:0.5rem; font-size:0.8rem; padding:0.35rem 0.7rem;">Try verifying this one independently ↓</button>';
+    div.querySelector('pre').textContent = JSON.stringify(obj, null, 2);
+    div.querySelector('button').addEventListener('click', () => fillAndVerify(obj));
+    return div;
+  }
+
+  let traveler = null, policy = null, flightNumber = null, payoutAmount = null;
+  let latestAttestation = null;
+
+  document.getElementById('buyBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('buyBtn');
+    const resultEl = document.getElementById('buyResult');
+    btn.disabled = true;
+    flightNumber = (document.getElementById('flightInput').value || '').trim().toUpperCase();
+    payoutAmount = Math.max(1, parseInt(document.getElementById('payoutInput').value, 10) || 500);
+    traveler = await genIdentity();
+    const res = await buyPolicy(traveler.publicKey, flightNumber, payoutAmount);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    policy = res.body.policy;
+    resultEl.innerHTML = '<div class="result ok">Policy issued for ' + flightNumber + ', paying ' + payoutAmount +
+      ' if delayed ' + res.body.thresholdMinutes + '+ minutes.</div>';
+    resultEl.appendChild(rawBox('policy', policy));
+    document.getElementById('reportPanel').style.display = '';
+  });
+
+  document.getElementById('reportBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('reportResult');
+    const delayMinutes = Math.max(0, parseInt(document.getElementById('delayInput').value, 10) || 0);
+    const res = await getOracleReport(flightNumber, delayMinutes);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; return; }
+    latestAttestation = res.body.attestation;
+    resultEl.innerHTML = '<div class="result ok">Oracle reports ' + flightNumber + ' delayed ' + delayMinutes + ' minutes.</div>';
+    resultEl.appendChild(rawBox('oracle report', latestAttestation));
+    document.getElementById('claimPanel').style.display = '';
+  });
+
+  document.getElementById('claimBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('claimResult');
+    const res = await claimPayout(traveler, policy, latestAttestation);
+    if (!res.ok) {
+      resultEl.innerHTML = '<div class="result warn">Not paid out — ' + errText(res) + '</div>';
+      return;
+    }
+    const payout = res.body.payout;
+    resultEl.innerHTML = '<div class="result ok">Paid out ' + payout.quantity + ' units, straight from the report above — no manual review.</div>';
+    resultEl.appendChild(rawBox('payout', payout));
+    document.getElementById('breakPanel').style.display = '';
+  });
+
+  document.getElementById('doubleClaimBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('breakResult');
+    const res = await claimPayout(traveler, policy, latestAttestation);
+    resultEl.innerHTML = '<div class="result ' + (res.ok ? 'err' : 'warn') + '">' +
+      (res.ok ? 'Unexpected — this should have been rejected.' : 'Rejected — ' + errText(res)) + '</div>';
+  });
+
+  document.getElementById('wrongFlightBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('breakResult');
+    const otherFlight = flightNumber === 'ZZ999' ? 'YY888' : 'ZZ999';
+    const reportRes = await getOracleReport(otherFlight, 150);
+    if (!reportRes.ok) {
+      resultEl.innerHTML += '<div class="result err">Could not even get a report for the mismatch attempt: ' + errText(reportRes) + '</div>';
+      return;
+    }
+    const claimRes = await claimPayout(traveler, policy, reportRes.body.attestation);
+    resultEl.innerHTML += '<div class="result ' + (claimRes.ok ? 'err' : 'warn') + '">' +
+      (claimRes.ok ? 'Unexpected — this should have been rejected.' : 'Rejected — ' + errText(claimRes)) + '</div>';
+  });
+
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
+})();
+</script>
+</body>
+</html>

@@ -1639,6 +1639,67 @@ rejected as still-open. The fix compares raw milliseconds for the
 open/closed decision and only rounds (up, via `Math.ceil`) for what the
 countdown displays.
 
+## A delayed flight, and a payout that signs itself
+
+Every self-serve mechanism up to this point has needed a human to decide
+something: a member votes, a bank's officers approve a mint, a holder
+requests a transfer. `demo-domain-a/oracle-demo.html` proves a shape with
+no decision in the loop at all: an independent flight-status oracle signs
+its own opinion about a flight's delay (SPEC.md §5.11's attestation, the
+same second, independent key `attestation-demo.html`'s reviewer and
+`reserve-bank-demo.html`'s auditor already play), and presenting that
+report alongside a held policy either mints a payout on the spot or
+explains exactly why not — no adjuster, no claim form, no manual review.
+
+New backend surface on both issuer-server/server.js and issuer-php
+(mirrored, each independently syntax-checked): a bound
+`atlas.demo.insurance.policy` credential whose flight/payout terms live
+in their own store keyed by the credential's id (the generic asset shape
+has no room for per-instance fields like that), a fungible
+`atlas.demo.insurance.payout` class minted only once a claim clears every
+check, and four endpoints — `POST policy/issue`, `POST attest` (the
+oracle's own signed report, a different shape of third-party opinion than
+the generic attestation endpoint's — this one is about a flight, not an
+already-issued asset, so it's handed back directly rather than persisted
+to the attestation store), `GET policy` (a claim's live status), and
+`POST payout/claim`, the one endpoint that actually combines both
+primitives. The claim's own checks run in a specific order on purpose:
+flight match before the claimed flag, so a report for a different flight
+is always rejected as a mismatch rather than being masked by an unrelated
+"already paid out" once a policy has one; the claimed flag itself is the
+sole, atomic guard against a double payout (PHP holds one
+`flock(LOCK_EX)` across the whole find/validate/mutate/write sequence,
+the same reasoning `cast_governance_vote()` already established; Node
+gets the same guarantee for free by keeping that whole stretch free of
+any `await`, so two near-simultaneous claims against the same policy can
+never both observe `claimed: false`).
+
+Four acts: buying a policy for a flight and payout amount; the oracle
+reporting a short delay first — not enough to trigger a payout, shown as
+a non-fatal "not paid out" rather than a dead end; reporting a longer
+delay for the same flight, after which requesting the payout succeeds
+immediately; and two "try to break it" buttons once it has — requesting
+the same payout again, and presenting a genuine, well-over-threshold
+report for a different flight, both correctly rejected. A caution panel
+discloses the same honest limitation `attestation-demo.html` and
+`reserve-bank-demo.html` already disclose about their own stand-in
+third party: the oracle here is this domain's own second key, not a
+genuinely separate flight-data provider, and the 120-minute threshold is
+fixed for every policy rather than priced individually.
+
+Verified three ways, the same discipline every prior demo on this list
+used: `test/manual-oracle-demo.js` and its PHP companion
+`test/manual-oracle-demo-php.js` drive every check (buy, sub-threshold
+rejection, over-threshold success, independent signature verification of
+the payout, double-claim rejection, mismatched-flight rejection) against
+an isolated instance of each backend at the raw HTTP layer, both passing
+clean on the first run. `test/manual-oracle-demo-browser.js` drives the
+actual page end to end in a real headless browser — unlike the reserve-
+bank and governance demos' own browser passes, which each caught a real
+bug before shipping, this page's first full run passed clean too, with
+an explicit assertion that zero uncaught page errors occurred across the
+whole walkthrough.
+
 ## 9. Verify it yourself
 
 ```bash

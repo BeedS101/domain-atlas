@@ -423,6 +423,36 @@ function attestation_payload_of($credential) {
   ];
 }
 
+// Oracle-triggered payout demo (oracle-demo.html) — a different shape of
+// third-party opinion than issue_attestation() above (always about an
+// already-issued asset credential): this one is about a flight, signed
+// with the same second, independent reviewer keypair every other demo's
+// own "independent third party" role already reuses. Never persisted to
+// ATTESTATIONS_FILE (that store's subject shape doesn't fit a flight) —
+// handed back directly and re-verified fresh wherever it's presented.
+// Mirrors issuer-server/server.js's issueOracleAttestation().
+function issue_oracle_attestation($privateKey, $publicKeyB64url, $flightNumber, $delayMinutes) {
+  $payload = [
+    'id' => 'urn:atlas:oracle-attestation:' . atlas_uuid(),
+    'flightNumber' => $flightNumber,
+    'delayMinutes' => $delayMinutes,
+    'observedAt' => iso_now(),
+  ];
+  $signature = atlas_sign($privateKey, $payload);
+  return array_merge(
+    ['credential' => 'domain-atlas-oracle-attestation/1.0'],
+    $payload,
+    ['issuer' => ['domain' => atlas_domain(), 'publicKey' => $publicKeyB64url], 'signature' => $signature]
+  );
+}
+// Mirrors issuer-server/server.js's oracleAttestationPayloadOf().
+function oracle_attestation_payload_of($credential) {
+  return [
+    'id' => $credential['id'], 'flightNumber' => $credential['flightNumber'],
+    'delayMinutes' => $credential['delayMinutes'], 'observedAt' => $credential['observedAt'],
+  ];
+}
+
 // Builds `asset` fresh from ATLAS_ASSET_CATALOG (via
 // atlas_asset_catalog_entry() in store.php) and signs it via issue_asset()
 // above — the "looked up fresh on every mint/split/consolidate/trade,

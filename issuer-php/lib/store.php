@@ -589,6 +589,16 @@ function atlas_governance_proposals_file() {
   return __DIR__ . '/atlas-governance-proposals-store.json';
 }
 
+// Oracle-triggered payout demo (oracle-demo.html) — mirrors
+// issuer-server/server.js's ORACLE_POLICIES_FILE.
+function atlas_oracle_policies_file() {
+  return __DIR__ . '/atlas-oracle-policies-store.json';
+}
+// Mirrors issuer-server/server.js's ORACLE_FLIGHT_NUMBER_RE/
+// ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES.
+const ATLAS_ORACLE_FLIGHT_NUMBER_RE = '/^[A-Z]{2}[0-9]{2,4}$/';
+const ATLAS_ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES = 120;
+
 const ATLAS_DEMO_CLAWBACK_TOKEN_CLASS = 'atlas.demo.clawback.token';
 const ATLAS_DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
 const ATLAS_DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
@@ -1251,6 +1261,31 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'com.example.tier' => 'governance-member',
       'com.example.issuedFor' => 'assembly voting rights',
     ],
+  ],
+  // Oracle-triggered payout demo (oracle-demo.html): a flight-delay
+  // insurance policy, bound like the governance membership above — a
+  // personal claim on its own holder's eligibility, not something to
+  // gift away. Per-instance flight/payout terms live in
+  // atlas-oracle-policies-store.json (see atlas_oracle_policies_file()
+  // below), keyed by this credential's own id, not in this fixed catalog
+  // entry. Mirrors issuer-server/server.js's ASSET_CATALOG entry of the
+  // same name.
+  'atlas.demo.insurance.policy' => [
+    'name' => 'Flight Delay Policy', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.tier' => 'insurance-policy',
+      'com.example.issuedFor' => 'flight delay payout eligibility',
+    ],
+  ],
+  // The payout itself — ordinary fungible currency, minted only once a
+  // claim clears every check in atlas/demo/oracle/payout/claim.php.
+  // Mirrors issuer-server/server.js's ASSET_CATALOG entry of the same
+  // name.
+  'atlas.demo.insurance.payout' => [
+    'name' => 'Flight Delay Payout', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => true, 'presentation' => 'collectible',
   ],
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
@@ -2293,6 +2328,113 @@ function cast_governance_vote($proposalId, $payload, $proof) {
   flock($fh, LOCK_UN);
   fclose($fh);
   return ['proposal' => $proposal];
+}
+
+// Oracle-triggered payout demo — one flat store of policies, keyed by
+// the policy CREDENTIAL's own id, same "one file, filter/derive on
+// read" shape as every other demo store above. Mirrors
+// issuer-server/server.js's readOraclePolicies()/findOraclePolicy().
+function find_oracle_policy($credentialId) {
+  $fh = fopen(atlas_oracle_policies_file(), 'c+');
+  if ($fh === false) return null;
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc) || !isset($doc['policies'])) return null;
+  foreach ($doc['policies'] as $p) {
+    if ($p['credentialId'] === $credentialId) return $p;
+  }
+  return null;
+}
+// Upsert-by-credentialId under one exclusive lock — used both for a
+// fresh policy's first save and for recording payoutCredentialId once a
+// claim mints its payout (by which point claim_oracle_policy() below has
+// already marked `claimed` under its own lock; this second write only
+// ever touches a policy id that isn't racing against anything else).
+// Mirrors issuer-server/server.js's saveOraclePolicy().
+function save_oracle_policy($policy) {
+  $file = atlas_oracle_policies_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['policies'])) $doc = ['policies' => []];
+  $idx = null;
+  foreach ($doc['policies'] as $i => $p) {
+    if ($p['credentialId'] === $policy['credentialId']) { $idx = $i; break; }
+  }
+  if ($idx === null) $doc['policies'][] = $policy;
+  else $doc['policies'][$idx] = $policy;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+// Atomically checks and marks one policy's own claimed flag, holding a
+// single exclusive lock across the whole find/validate/mutate/write
+// sequence — cast_governance_vote()'s own reasoning: two near-
+// simultaneous claims against the SAME policy is a real race under
+// PHP's multi-process model, and a bare read-then-write would let both
+// requests observe claimed=false before either's write lands, minting
+// two payouts for one policy. The attestation's SIGNATURE is verified by
+// the caller before this is ever called (that check doesn't touch this
+// store, so it stays outside the lock); flightNumber/delayMinutes are
+// passed in already-trusted, straight from that verified attestation.
+// The payout itself is minted by the caller AFTER this returns
+// successfully — signing a credential and appending a revocation both
+// touch different files this lock doesn't cover. Returns
+// ['error' => '...'] or ['policy' => the now-claimed record].
+function claim_oracle_policy($credentialId, $flightNumber, $delayMinutes) {
+  $file = atlas_oracle_policies_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['policies'])) $doc = ['policies' => []];
+
+  $idx = null;
+  foreach ($doc['policies'] as $i => $p) {
+    if ($p['credentialId'] === $credentialId) { $idx = $i; break; }
+  }
+  if ($idx === null) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'no policy record on file for this credential'];
+  }
+
+  $policy = $doc['policies'][$idx];
+  // Flight match is checked BEFORE the claimed flag on purpose — see
+  // issuer-server/server.js's own comment on this same ordering: an
+  // attestation for a different flight tells you nothing about THIS
+  // policy regardless of whether it's already been paid out.
+  if ($policy['flightNumber'] !== $flightNumber) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'that attestation is about a different flight than this policy covers'];
+  }
+  if ($policy['claimed']) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'this policy has already been paid out'];
+  }
+  if ($delayMinutes < ATLAS_ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'the attested delay (' . $delayMinutes . ' min) does not meet this policy\'s ' .
+      ATLAS_ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES . '-minute payout threshold'];
+  }
+
+  $policy['claimed'] = true;
+  $doc['policies'][$idx] = $policy;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['policy' => $policy];
 }
 
 // Same lookup as is_valid_postoffice_member(), but returns the matching

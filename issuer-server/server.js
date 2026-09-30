@@ -383,6 +383,14 @@ const RESERVE_MINT_APPROVALS_FILE = path.join(STATE_DIR, 'atlas-reserve-mint-app
 // because they answer different questions and nothing else reads either.
 const GOVERNANCE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-governance-members-store.json');
 const GOVERNANCE_PROPOSALS_FILE = path.join(STATE_DIR, 'atlas-governance-proposals-store.json');
+// Oracle-triggered payout demo (oracle-demo.html): a flight-delay policy
+// combines §5.11's attestation and §5.8's mint/purchase into one
+// scenario — a policy's own flight/payout terms live here, keyed by its
+// credential's id, since the generic asset credential shape (SPEC.md §5)
+// has no room for per-instance fields like that; `claimed` is this
+// store's own one-way flag (no un-claiming), checked before ever minting
+// a second payout against the same policy.
+const ORACLE_POLICIES_FILE = path.join(STATE_DIR, 'atlas-oracle-policies-store.json');
 // Post Office abuse detection (task #96): how many sends within how large
 // a rolling window counts as "irregular" enough to auto-flag a membership
 // for the operator's attention — see recordPostOfficeSend() below. Tunable
@@ -873,6 +881,38 @@ const ASSET_CATALOG = {
       'com.example.issuedFor': 'assembly voting rights'
     }
   },
+  // Oracle-triggered payout demo (oracle-demo.html): a flight-delay
+  // insurance policy. Bound like the governance membership above — a
+  // policy is a personal claim on ITS OWN holder's eligibility, not
+  // something to gift or trade away. The flight/payout terms themselves
+  // don't live in this fixed catalog entry (every instance covers a
+  // different flight and amount) — see ORACLE_POLICIES_FILE/
+  // saveOraclePolicy below for where those per-instance fields actually
+  // live, keyed by this credential's own id.
+  'atlas.demo.insurance.policy': {
+    name: 'Flight Delay Policy',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    thumbnail: `https://${DOMAIN}/assets/badge.png`,
+    fungible: false,
+    presentation: 'document',
+    tradeScope: 'bound',
+    properties: {
+      'atlas.rarity': 'common',
+      'com.example.tier': 'insurance-policy',
+      'com.example.issuedFor': 'flight delay payout eligibility'
+    }
+  },
+  // The payout itself — an ordinary fungible currency, minted fresh only
+  // once a claim actually clears every check in POST
+  // /atlas/demo/oracle/payout/claim below. Ordinarily transferable,
+  // unlike the policy above: once paid out, it's just money.
+  'atlas.demo.insurance.payout': {
+    name: 'Flight Delay Payout',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: true,
+    presentation: 'collectible'
+  },
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
   // viewer.js's CHESS_WIN_REWARDS / maybeAwardChessWin()) — not gated by
@@ -1261,6 +1301,21 @@ const DEMO_ATTESTATION_CLAIMS = {
   certified: "Certified as meeting this reviewer's own compliance standard.",
   'reserves-verified': "Reserve holdings independently confirmed sufficient to back this bank's circulating retail currency."
 };
+
+// Oracle-triggered payout demo — a fixed shape for a flight code
+// (two letters, 2-4 digits, e.g. "BA249") rather than free text, the
+// same "validated shape, not arbitrary caller-supplied text" discipline
+// every other self-serve /atlas/demo/* route already applies. Shared by
+// the policy-issue and oracle-attest endpoints so an attestation can
+// only ever be about something that could plausibly be a real flight.
+const ORACLE_FLIGHT_NUMBER_RE = /^[A-Z]{2}[0-9]{2,4}$/;
+// A fixed, protocol-level payout threshold rather than a per-policy
+// caller-chosen one — every policy this demo issues pays out on the
+// identical condition, so the "try to break it" act (attest a delay
+// under this line, watch the claim get rejected; attest one over it,
+// watch the same request succeed) demonstrates the threshold actually
+// being enforced rather than merely displayed.
+const ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES = 120;
 
 const MIME = {
   '.html': 'text/html', '.js': 'application/javascript', '.json': 'application/json',
@@ -2201,6 +2256,28 @@ function governanceStatus(proposal) {
   return Date.now() >= new Date(proposal.deadline).getTime() ? 'closed' : 'open';
 }
 
+// Oracle-triggered payout demo — one flat store of policies, same "one
+// file, filter/derive on read" shape as every other demo store above.
+// Keyed by the policy CREDENTIAL's own id, since that's the only thing
+// a claim request presents back.
+function readOraclePolicies() {
+  if (!fs.existsSync(ORACLE_POLICIES_FILE)) return { policies: [] };
+  return JSON.parse(fs.readFileSync(ORACLE_POLICIES_FILE, 'utf8'));
+}
+function writeOraclePolicies(doc) {
+  fs.writeFileSync(ORACLE_POLICIES_FILE, JSON.stringify(doc, null, 2));
+}
+function findOraclePolicy(credentialId) {
+  return readOraclePolicies().policies.find((p) => p.credentialId === credentialId) || null;
+}
+function saveOraclePolicy(policy) {
+  const doc = readOraclePolicies();
+  const idx = doc.policies.findIndex((p) => p.credentialId === policy.credentialId);
+  if (idx === -1) doc.policies.push(policy);
+  else doc.policies[idx] = policy;
+  writeOraclePolicies(doc);
+}
+
 // Domain admin roster — same "missing file means the empty case" and flat-
 // array shape every other roster in this server already uses. An entry's
 // own `revoked` flag (not the shared REVOCATIONS_FILE, which is scoped to
@@ -2715,6 +2792,30 @@ async function main() {
   // domain's own already-issued attestations before revoking it.
   function attestationPayloadOf(credential) {
     return { id: credential.id, subject: credential.subject, claim: credential.claim, issuedAt: credential.issuedAt };
+  }
+
+  // Oracle-triggered payout demo (oracle-demo.html) — a different shape
+  // of third-party opinion than issueAttestation() above (which is
+  // always ABOUT an already-issued asset credential): this one is about
+  // a flight, signed by the same independent reviewer key every other
+  // demo's own "independent third party" role already reuses, never
+  // persisted to ATTESTATIONS_FILE (that store's subject shape doesn't
+  // fit a flight, and nothing here needs to list "every attestation
+  // about flight X" the way §5.11's real list endpoint does) — handed
+  // back directly and re-verified fresh wherever it's presented, the
+  // same way a governance decision credential is never stored either.
+  async function issueOracleAttestation(flightNumber, delayMinutes) {
+    const payload = {
+      id: 'urn:atlas:oracle-attestation:' + webcrypto.randomUUID(),
+      flightNumber,
+      delayMinutes,
+      observedAt: new Date().toISOString()
+    };
+    const signature = await signAsReviewer(payload);
+    return { credential: 'domain-atlas-oracle-attestation/1.0', ...payload, issuer: { domain: DOMAIN, publicKey: reviewerPublicKeyB64url }, signature };
+  }
+  function oracleAttestationPayloadOf(credential) {
+    return { id: credential.id, flightNumber: credential.flightNumber, delayMinutes: credential.delayMinutes, observedAt: credential.observedAt };
   }
 
   // Task #250 fourth follow-up — transfers a NON-fungible credential to a
@@ -3934,6 +4035,142 @@ async function main() {
         const decision = { credential: 'domain-atlas-governance-decision/1.0', ...decisionPayload, issuer: { domain: DOMAIN, publicKey: publicKeyB64url }, signature };
         console.log('Governance: finalized', proposal.id, '->', decisionPayload.outcome, '(' + tally.yes + ' yes / ' + tally.no + ' no)');
         return sendJson(res, 200, { decision });
+      }
+
+      // --- Oracle-triggered payout demo (oracle-demo.html) ---
+      //
+      // POST /atlas/demo/oracle/policy/issue — mints a bound
+      // atlas.demo.insurance.policy credential and records its
+      // flight/payout terms in ORACLE_POLICIES_FILE, keyed by the fresh
+      // credential's own id. Ungated, same "plays the privileged role for
+      // a live visitor" reasoning as every other /atlas/demo/* issuance
+      // route — a real deployment would sell this behind an actual
+      // premium payment, not a free click.
+      if (req.method === 'POST' && req.url === '/atlas/demo/oracle/policy/issue') {
+        const { ownerPublicKey, flightNumber, payoutAmount } = JSON.parse((await readBody(req)) || '{}');
+        if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
+        if (!ORACLE_FLIGHT_NUMBER_RE.test(flightNumber || '')) {
+          return sendJson(res, 400, { error: 'flightNumber must look like a real flight code, e.g. "BA249"' });
+        }
+        if (!Number.isInteger(payoutAmount) || payoutAmount <= 0 || payoutAmount > 1000000) {
+          return sendJson(res, 400, { error: 'payoutAmount must be a positive integer up to 1,000,000' });
+        }
+        const policy = await mintAssetByClass(ownerPublicKey, 'atlas.demo.insurance.policy', 1, null);
+        saveOraclePolicy({ credentialId: policy.id, ownerPublicKey, flightNumber, payoutAmount, claimed: false, payoutCredentialId: null });
+        console.log('Oracle demo: policy', policy.id, 'issued for', flightNumber, '-', payoutAmount, 'payout if delay >=', ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES, 'min');
+        return sendJson(res, 200, { policy, flightNumber, payoutAmount, thresholdMinutes: ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES });
+      }
+
+      // POST /atlas/demo/oracle/attest — the independent flight-status
+      // oracle's own signed opinion about one flight's delay, using the
+      // SAME reviewer key attestation-demo.html's "independent reviewer"
+      // and reserve-bank-demo.html's "independent auditor" already play —
+      // a genuinely different signer than the policy-issuing key above.
+      // Ungated: a real deployment would put this behind the oracle's own
+      // authenticated feed, not a public button, but the signature itself
+      // is what a verifying client actually relies on either way.
+      if (req.method === 'POST' && req.url === '/atlas/demo/oracle/attest') {
+        const { flightNumber, delayMinutes } = JSON.parse((await readBody(req)) || '{}');
+        if (!ORACLE_FLIGHT_NUMBER_RE.test(flightNumber || '')) {
+          return sendJson(res, 400, { error: 'flightNumber must look like a real flight code, e.g. "BA249"' });
+        }
+        if (!Number.isInteger(delayMinutes) || delayMinutes < 0 || delayMinutes > 1440) {
+          return sendJson(res, 400, { error: 'delayMinutes must be an integer between 0 and 1440' });
+        }
+        const attestation = await issueOracleAttestation(flightNumber, delayMinutes);
+        console.log('Oracle demo: attested', flightNumber, 'delayed', delayMinutes, 'minutes');
+        return sendJson(res, 200, { attestation });
+      }
+
+      // GET /atlas/demo/oracle/policy?id=... — ungated, same "read is
+      // open" reasoning as GET /atlas/demo/governance/proposal above: a
+      // policy's own claim status is exactly what a holder (or anyone
+      // helping them) needs to check before attempting a claim.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/demo/oracle/policy') {
+        const id = new URLSearchParams(req.url.split('?')[1] || '').get('id');
+        if (!id) return sendJson(res, 400, { error: 'id is required' });
+        const policy = findOraclePolicy(id);
+        if (!policy) return sendJson(res, 404, { error: 'no such policy' });
+        return sendJson(res, 200, { policy });
+      }
+
+      // POST /atlas/demo/oracle/payout/claim — the one endpoint that
+      // actually combines both primitives: presenting the held policy
+      // credential (bearer-but-verified, same intent-envelope shape
+      // /atlas/asset/purchase already uses — the holder's own signature
+      // is what authorizes claiming against their own policy) alongside
+      // an oracle attestation triggers an automatic payout, with every
+      // check that makes this more than "anyone can mint themselves
+      // money": the policy must genuinely be this domain's own, held by
+      // the claimant, and not already paid out; the attestation must
+      // genuinely carry this domain's own oracle signature, be about the
+      // SAME flight this policy covers, and clear this policy's fixed
+      // delay threshold.
+      if (req.method === 'POST' && req.url === '/atlas/demo/oracle/payout/claim') {
+        const { credential, attestation, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !attestation || !intent) {
+          return sendJson(res, 400, { error: 'credential, attestation, and intent are all required' });
+        }
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.policyId !== credential.id || intent.payload.action !== 'claim-payout') {
+          return sendJson(res, 400, { error: 'intent does not authorize claiming a payout on this policy' });
+        }
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const holderPub = intent.proof.publicKey;
+
+        const problem = await checkPresentedMembership(credential, holderPub, 'atlas.demo.insurance.policy');
+        if (problem) return sendJson(res, 400, { error: problem });
+
+        // The attestation's SIGNATURE is verified here, before the policy
+        // store is ever touched — it doesn't depend on the policy record
+        // at all. Everything from the read below through the claimed-
+        // flag write is then plain synchronous code with no `await`
+        // anywhere in between, which is what actually closes the race:
+        // two near-simultaneous claims against the SAME policy can never
+        // both observe claimed:false, the same guarantee PHP's own
+        // claim_oracle_policy() buys explicitly with flock(LOCK_EX) — a
+        // single Node event loop gets it for free, but only because
+        // nothing here yields control partway through.
+        const attestationOk = attestation.issuer && attestation.issuer.publicKey === reviewerPublicKeyB64url &&
+          await verifyOwnReviewerSignature(attestation, oracleAttestationPayloadOf(attestation));
+        if (!attestationOk) return sendJson(res, 400, { error: "attestation signature does not check out against this domain's own oracle key" });
+
+        const policyRecord = findOraclePolicy(credential.id);
+        if (!policyRecord) return sendJson(res, 404, { error: 'no policy record on file for this credential' });
+        // Flight match is checked BEFORE the claimed flag on purpose: an
+        // attestation for a different flight tells you nothing about
+        // THIS policy regardless of whether it's already been paid out,
+        // so that mismatch is worth surfacing on its own rather than
+        // being masked by an unrelated "already claimed" once a policy
+        // has been.
+        if (attestation.flightNumber !== policyRecord.flightNumber) {
+          return sendJson(res, 400, { error: 'that attestation is about a different flight than this policy covers' });
+        }
+        if (policyRecord.claimed) return sendJson(res, 400, { error: 'this policy has already been paid out' });
+        if (attestation.delayMinutes < ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES) {
+          return sendJson(res, 400, {
+            error: 'the attested delay (' + attestation.delayMinutes + ' min) does not meet this policy\'s ' +
+              ORACLE_DELAY_PAYOUT_THRESHOLD_MINUTES + '-minute payout threshold'
+          });
+        }
+        policyRecord.claimed = true;
+        saveOraclePolicy(policyRecord);
+
+        // Deliberately does NOT revoke the policy credential itself — the
+        // store's own `claimed` flag above is already the sole, atomic
+        // guard against a double payout (see claim_oracle_policy()'s own
+        // comment), and leaving the credential unrevoked means a second
+        // presentation is rejected for the actually-relevant reason
+        // ("already paid out") rather than a generic "revoked", and a
+        // presentation for a genuinely different flight still reaches
+        // (and fails) the flight-match check above instead of being
+        // masked by an unrelated revocation.
+        const payout = await mintAssetByClass(holderPub, 'atlas.demo.insurance.payout', policyRecord.payoutAmount, null);
+        policyRecord.payoutCredentialId = payout.id;
+        saveOraclePolicy(policyRecord);
+        console.log('Oracle demo: payout', payout.id, 'of', policyRecord.payoutAmount, 'issued for policy', credential.id, '- delay', attestation.delayMinutes, 'min on', attestation.flightNumber);
+        return sendJson(res, 200, { payout, policy: policyRecord });
       }
 
       // --- Admin session (short-lived bearer token layered on the roster
