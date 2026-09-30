@@ -70,6 +70,12 @@ foreach (array_keys($wanted) as $id) {
   $revocation = null;
   foreach ($revoked as $r) { if ($r['id'] === $id) { $revocation = $r; break; } }
   if ($revocation) { $updates[] = ['id' => $id, 'status' => 'revoked', 'reason' => $revocation['reason']]; continue; }
+  // A suspended id gets its own status rather than being silently
+  // indistinguishable from "still fine" — same channel this endpoint
+  // already uses to report a revocation, just a lighter, reversible one.
+  // Mirrors issuer-server/server.js's /atlas/mail/check extension.
+  $suspension = find_suspension($id);
+  if ($suspension) { $updates[] = ['id' => $id, 'status' => 'suspended', 'reason' => $suspension['reason'], 'expiresAt' => $suspension['expiresAt'] ?? null]; continue; }
   if (isset($presentedById[$id])) {
     $applied = apply_class_patch_if_stale($kp['privateKey'], $kp['publicKeyB64url'], $presentedById[$id]);
     if ($applied) $updates[] = $applied;

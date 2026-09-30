@@ -36,6 +36,9 @@ if (($attestation['credentialId'] ?? null) !== $credential['id']) {
 if (is_revoked($credential['id'])) {
   send_json(400, ['error' => 'that credential has already been revoked — nothing to claim']);
 }
+if (is_suspended($credential['id'])) {
+  send_json(400, ['error' => 'that credential is currently suspended pending review — nothing to claim']);
+}
 
 $ownSignatureOk = verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential));
 if (!$ownSignatureOk) {

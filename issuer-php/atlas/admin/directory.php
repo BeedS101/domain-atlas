@@ -13,7 +13,10 @@
 // currently-unrevoked credentials only: a revoked credential id is
 // exactly the kind of dead-end address the mail form's own recipient
 // warning (see atlas/mail/send.php) exists to catch, so there's no reason
-// to offer one as a suggestion here.
+// to offer one as a suggestion here. Deliberately NOT also filtered by
+// is_suspended() — unlike a revoked entry (permanently gone), a suspended
+// one is exactly what the operator managing this directory needs to
+// still see, to decide whether to lift it.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();

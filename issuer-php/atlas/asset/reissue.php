@@ -85,6 +85,7 @@ if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible']
   send_json(400, ['error' => "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential"]);
 }
 if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked']);
+if (is_suspended($credential['id'])) send_json(400, ['error' => 'credential is currently suspended pending review']);
 
 $sigOk = verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential));
 if (!$sigOk) send_json(400, ['error' => "credential signature does not check out against this issuer's key"]);

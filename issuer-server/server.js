@@ -113,6 +113,15 @@ fs.mkdirSync(STATE_DIR, { recursive: true });
 const KEY_FILE = path.join(STATE_DIR, 'issuer-private-key.jwk.json');
 const PUBLIC_KEY_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-key.json');
 const REVOCATIONS_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-revocations.json');
+// A second, reversible way a credential can stop being usable, alongside
+// the permanent REVOCATIONS_FILE above — a pause, not a death sentence.
+// Published under .well-known the same way revocations are, so a foreign
+// domain checking a credential this domain issued (verifyForeignAssetCredential
+// below) sees a live suspension the same way it already sees a
+// revocation, rather than the two states being visible asymmetrically.
+// Unlike a revocation, an entry here can be lifted (unsuspend()) or carry
+// its own `expiresAt` and lift itself — see isSuspended()/suspend() below.
+const SUSPENSIONS_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-suspensions.json');
 // SPEC.md §5.11 — a second, independent keypair this SAME domain also
 // generates and publishes, used only for third-party attestations, never
 // for anything issue_asset() above issues. Genuinely separate from
@@ -1540,6 +1549,9 @@ function ensureWellKnownFiles(publicKeyB64url) {
   if (!fs.existsSync(REVOCATIONS_FILE)) {
     fs.writeFileSync(REVOCATIONS_FILE, JSON.stringify({ revoked: [] }, null, 2));
   }
+  if (!fs.existsSync(SUSPENSIONS_FILE)) {
+    fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify({ suspended: [] }, null, 2));
+  }
 }
 
 // SPEC.md §5.11's single-domain stand-in for "a second, independent
@@ -1630,6 +1642,46 @@ function revoke(id, reason) {
   const doc = readRevocations();
   doc.revoked.push({ id, revokedAt: new Date().toISOString(), reason });
   fs.writeFileSync(REVOCATIONS_FILE, JSON.stringify(doc, null, 2));
+}
+
+// See SUSPENSIONS_FILE's own comment above. findSuspension() is the one
+// real piece of logic — everything else about a suspension is a plain
+// list entry — since "is this id suspended" depends on the clock, not
+// just presence in the list: an entry with a past expiresAt is no longer
+// in effect, the same as if it had been explicitly lifted, without
+// needing a background job to go clean it up first.
+function readSuspensions() {
+  return JSON.parse(fs.readFileSync(SUSPENSIONS_FILE, 'utf8'));
+}
+function findSuspension(id) {
+  const now = Date.now();
+  return readSuspensions().suspended.find((s) => s.id === id && (!s.expiresAt || new Date(s.expiresAt).getTime() > now)) || null;
+}
+function isSuspended(id) {
+  return findSuspension(id) !== null;
+}
+// `expiresAt` is optional — an admin can choose either behavior per
+// suspension: give it a deadline for an automatic lift (no follow-up
+// action needed), or leave it indefinite until unsuspend() is called
+// explicitly. Replaces any existing entry for the same id rather than
+// stacking duplicates, and prunes anything already expired on the way in
+// so the file doesn't grow forever with dead entries.
+function suspend(id, reason, expiresAt) {
+  const doc = readSuspensions();
+  const now = Date.now();
+  doc.suspended = doc.suspended.filter((s) => (!s.expiresAt || new Date(s.expiresAt).getTime() > now) && s.id !== id);
+  doc.suspended.push({ id, suspendedAt: new Date().toISOString(), reason: reason || 'issuer-request', expiresAt: expiresAt || null });
+  fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify(doc, null, 2));
+}
+// Returns whether an entry was actually there to remove — lets the
+// endpoint tell an admin "there was nothing to lift" from "done" without
+// a separate lookup first.
+function unsuspend(id) {
+  const doc = readSuspensions();
+  const before = doc.suspended.length;
+  doc.suspended = doc.suspended.filter((s) => s.id !== id);
+  fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify(doc, null, 2));
+  return doc.suspended.length !== before;
 }
 
 // See ASSET_HISTORY_FILE's own comment above. Called alongside revoke()
@@ -1991,7 +2043,7 @@ function appendPostOfficeMember(entry) {
 // correct either way at no extra cost.
 function isValidPostOfficeMember(ownerPublicKey) {
   const doc = readPostOfficeMembers();
-  return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId));
+  return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
 }
 
 // Domain admin roster — same "missing file means the empty case" and flat-
@@ -2220,7 +2272,7 @@ function recordPostOfficeSend(credentialId) {
 // membership in POST /atlas/postoffice/send do inline, factored out once
 // the settings endpoints below needed it a third and fourth time.
 function findLiveMember(doc, ownerPublicKey) {
-  return doc.members.find((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId));
+  return doc.members.find((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
 }
 
 // Task #94 (consent/block model, "both, recipient's choice" per direct
@@ -2247,7 +2299,7 @@ function updatePostOfficeMember(ownerPublicKey, mutate) {
 // two subtly different string-compare implementations drifting apart.
 function findMemberByHandle(doc, handle) {
   const target = handle.toLowerCase();
-  return doc.members.find((m) => m.handle && m.handle.toLowerCase() === target && !isRevoked(m.credentialId));
+  return doc.members.find((m) => m.handle && m.handle.toLowerCase() === target && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
 }
 
 function readBody(req) {
@@ -2663,6 +2715,7 @@ async function main() {
     if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot split or consolidate a unique asset';
     if (typeof credential.quantity !== 'number' || credential.quantity < minQuantity) return 'asset has insufficient quantity';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
     if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
@@ -2688,6 +2741,7 @@ async function main() {
     if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be traded';
     if (credential.asset.fungible !== false) return 'asset class is fungible — present it as a quantity balance, not a unique item';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
     if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
@@ -2707,6 +2761,7 @@ async function main() {
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'membership does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'membership is the wrong class';
     if (isRevoked(credential.id)) return 'membership already revoked';
+    if (isSuspended(credential.id)) return 'membership is currently suspended pending review';
     if (isExpired(credential)) return 'membership has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'membership signature does not check out';
@@ -2732,13 +2787,20 @@ async function main() {
   async function verifyForeignAssetCredential(credential) {
     try {
       const base = baseUrl(credential.issuer.domain);
-      const [keyRes, revRes] = await Promise.all([
+      const [keyRes, revRes, susRes] = await Promise.all([
         fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store' }),
-        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store' })
+        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store' }),
+        fetch(base + '/.well-known/atlas-suspensions.json', { cache: 'no-store' })
       ]);
       if (!keyRes.ok) return false;
       const keyDoc = await keyRes.json();
       const revDoc = revRes.ok ? await revRes.json() : { revoked: [] };
+      // SUSPENSIONS_FILE is published the same way revocations are (see its
+      // own comment), so a foreign credential's live suspension is honored
+      // here too, not just a same-domain one — a missing or unreachable
+      // document is treated as "nothing suspended," same fail-open posture
+      // revDoc already has for a domain that doesn't publish one.
+      const susDoc = susRes.ok ? await susRes.json() : { suspended: [] };
       const issuedAt = new Date(credential.issuedAt).getTime();
       const activeKey = (keyDoc.keys || []).find((k) => {
         const from = new Date(k.validFrom).getTime();
@@ -2749,6 +2811,8 @@ async function main() {
       const sigOk = await verifyDomainSignature(activeKey.publicKey, assetPayloadOf(credential), credential.signature);
       if (!sigOk) return false;
       if ((revDoc.revoked || []).some((r) => r.id === credential.id)) return false;
+      const now = Date.now();
+      if ((susDoc.suspended || []).some((s) => s.id === credential.id && (!s.expiresAt || new Date(s.expiresAt).getTime() > now))) return false;
       if (isExpired(credential)) return false;
       return true;
     } catch (err) {
@@ -2783,6 +2847,7 @@ async function main() {
     if (!credential.issuer || !credential.issuer.domain) return 'asset has no issuer domain';
     if (credential.issuer.domain === DOMAIN) {
       if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
       if (isExpired(credential)) return 'asset has expired';
       const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
       if (!ok) return 'asset signature does not check out';
@@ -2813,6 +2878,7 @@ async function main() {
     if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be sent to anyone else';
     if (credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only transfers a unique item';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
     if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
@@ -2834,6 +2900,7 @@ async function main() {
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
     if (credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only redeems a unique item';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
     if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
@@ -2859,6 +2926,7 @@ async function main() {
     if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot spend a unique asset by quantity';
     if (typeof credential.quantity !== 'number' || credential.quantity < amount) return 'balance is insufficient for this purchase';
     if (isRevoked(credential.id)) return 'asset already revoked';
+    if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
     if (isExpired(credential)) return 'balance has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
@@ -2879,6 +2947,7 @@ async function main() {
     if (!credential.issuer || credential.issuer.domain !== DOMAIN) return 'this domain did not issue this credential';
     if (!credential.asset || credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only fulfills a single held instance';
     if (isRevoked(credential.id)) return 'asset already revoked or already fulfilled';
+    if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
     // A museum day ticket (SPEC.md §5.1's expiresAt — see isExpired above)
     // is the worked example this check exists for: a ticket presented at
     // the door after its own deadline has passed is rejected here even
@@ -3460,6 +3529,10 @@ async function main() {
       // credential id is exactly the kind of dead-end address the mail
       // form's own recipient warning (see /atlas/mail/send above) exists
       // to catch, so there's no reason to offer one as a suggestion here.
+      // Deliberately NOT also filtered by isSuspended — unlike a revoked
+      // entry (permanently gone), a suspended one is exactly what the
+      // operator managing this directory needs to still see, to decide
+      // whether to lift it.
       if (req.method === 'POST' && req.url === '/atlas/admin/directory') {
         const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
         const auth = await requireAdminAuth(payload, proof, token);
@@ -3573,6 +3646,7 @@ async function main() {
           return sendJson(res, 400, { error: "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential" });
         }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
+        if (isSuspended(credential.id)) return sendJson(res, 400, { error: 'credential is currently suspended pending review' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: 'credential signature does not check out against this issuer\'s key' });
 
@@ -3733,6 +3807,41 @@ async function main() {
         revoke(payload.id, payload.reason || 'issuer-request');
         console.log('Revoked', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { ok: true });
+      }
+
+      // Admin-gated, same shape as /atlas/revoke just above — a reversible
+      // pause instead of a permanent kill. Meant for exactly the case
+      // revoke-and-reissue is too heavy-handed for: a fraud report just
+      // came in, freeze the credential while it's investigated, then
+      // either lift it (false alarm — nothing else ever happened) or
+      // escalate to an actual revoke once confirmed. `expiresAt` is
+      // optional — omit it for an indefinite suspension, or give an ISO
+      // timestamp for one that lifts itself without a follow-up call.
+      if (req.method === 'POST' && req.url === '/atlas/suspend') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !payload.id) return sendJson(res, 400, { error: 'payload.id is required' });
+        if (payload.expiresAt !== undefined && payload.expiresAt !== null && typeof payload.expiresAt !== 'string') {
+          return sendJson(res, 400, { error: 'payload.expiresAt, when given, must be an ISO timestamp string' });
+        }
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        suspend(payload.id, payload.reason || 'issuer-request', payload.expiresAt || null);
+        console.log('Suspended', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...', payload.expiresAt ? ('until ' + payload.expiresAt) : '(indefinite)');
+        return sendJson(res, 200, { ok: true });
+      }
+
+      // Lifts a suspension early — a no-op (still 200, wasSuspended: false)
+      // if the id wasn't suspended in the first place, or its suspension
+      // had already expired on its own, rather than treating "nothing to
+      // lift" as an error.
+      if (req.method === 'POST' && req.url === '/atlas/unsuspend') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !payload.id) return sendJson(res, 400, { error: 'payload.id is required' });
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const wasSuspended = unsuspend(payload.id);
+        console.log('Unsuspended', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { ok: true, wasSuspended });
       }
 
       // --- §5.4 splitting and consolidating fungible balances ---
@@ -4507,6 +4616,7 @@ async function main() {
         if (!credential.asset || !credential.issuer || credential.issuer.domain !== DOMAIN) return sendJson(res, 400, { error: 'this domain did not issue that credential' });
         if (attestation.credentialId !== credential.id) return sendJson(res, 400, { error: 'attestation does not name the credential it was sent with' });
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that credential has already been revoked — nothing to claim' });
+        if (isSuspended(credential.id)) return sendJson(res, 400, { error: 'that credential is currently suspended pending review — nothing to claim' });
 
         const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
@@ -4574,6 +4684,7 @@ async function main() {
           return sendJson(res, 400, { error: 'payload.credentialId does not match the presented credential' });
         }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'this credential has been revoked' });
+        if (isSuspended(credential.id)) return sendJson(res, 400, { error: 'this credential is currently suspended pending review' });
         const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
         if (!credential.owner || proof.publicKey !== credential.owner.publicKey) {
@@ -4709,6 +4820,14 @@ async function main() {
           if (supersession) { updates.push(supersession); continue; }
           const revocation = revoked.find((r) => r.id === id);
           if (revocation) { updates.push({ id, status: 'revoked', reason: revocation.reason }); continue; }
+          // A suspended id gets its own status rather than being silently
+          // indistinguishable from "still fine" — same channel this
+          // endpoint already uses to report a revocation, just a lighter,
+          // reversible one. `expiresAt` lets a wallet show "until <date>"
+          // when the admin gave it a deadline, or nothing when it's
+          // indefinite (SUSPENSIONS_FILE's own comment above).
+          const suspension = findSuspension(id);
+          if (suspension) { updates.push({ id, status: 'suspended', reason: suspension.reason, expiresAt: suspension.expiresAt }); continue; }
           const presented = presentedById.get(id);
           if (presented) {
             const applied = await applyClassPatchIfStale(presented);
@@ -4851,7 +4970,7 @@ async function main() {
         if (!senderOk) return sendJson(res, 400, { error: 'sender signature does not check out' });
 
         const doc = readPostOfficeMembers();
-        const senderMembership = doc.members.find((m) => m.ownerPublicKey === proof.publicKey && !isRevoked(m.credentialId));
+        const senderMembership = doc.members.find((m) => m.ownerPublicKey === proof.publicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
         if (!senderMembership) {
           return sendJson(res, 400, { error: 'you do not hold a Global Mail membership at this domain — join its Post Office before sending through it' });
         }
@@ -4887,7 +5006,7 @@ async function main() {
           return sendJson(res, 200, relayBody);
         }
 
-        const membership = doc.members.find((m) => m.ownerPublicKey === payload.to.publicKey && !isRevoked(m.credentialId));
+        const membership = doc.members.find((m) => m.ownerPublicKey === payload.to.publicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
         if (!membership) {
           return sendJson(res, 400, { error: 'recipient does not hold a valid Global Mail membership at this domain — nothing was sent' });
         }
@@ -5025,7 +5144,7 @@ async function main() {
         // relaying domain's own identity — a trusted relaying domain vouching
         // for its member does not bypass the recipient's own settings.
         const doc = readPostOfficeMembers();
-        const membership = doc.members.find((m) => m.ownerPublicKey === payload.to.publicKey && !isRevoked(m.credentialId));
+        const membership = doc.members.find((m) => m.ownerPublicKey === payload.to.publicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
         if (!membership) {
           return sendJson(res, 400, { error: 'recipient does not hold a valid Global Mail membership at this domain — nothing was sent' });
         }

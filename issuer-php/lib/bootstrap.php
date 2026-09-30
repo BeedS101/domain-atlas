@@ -540,6 +540,7 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   }
   if (!isset($credential['quantity']) || $credential['quantity'] < $minQuantity) return 'asset has insufficient quantity';
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
   if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
@@ -573,6 +574,7 @@ function check_presented_unique_asset($publicKeyB64url, $credential, $expectedOw
     return 'asset class is fungible — present it as a quantity balance, not a unique item';
   }
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
   if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
@@ -632,6 +634,7 @@ function check_presented_membership($publicKeyB64url, $credential, $expectedOwne
     return 'membership is the wrong class';
   }
   if (is_revoked($credential['id'])) return 'membership already revoked';
+  if (is_suspended($credential['id'])) return 'membership is currently suspended pending review';
   if (is_expired($credential)) return 'membership has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'membership signature does not check out';
@@ -664,6 +667,15 @@ function verify_foreign_asset_credential($credential) {
     $revRaw = @file_get_contents(atlas_base_url($issuerDomain) . '/.well-known/atlas-revocations.json', false, $context);
     $revDoc = $revRaw !== false ? json_decode($revRaw, true) : null;
     $revoked = is_array($revDoc) && isset($revDoc['revoked']) ? $revDoc['revoked'] : [];
+    // atlas_suspensions_file() is published the same way revocations are
+    // (see its own comment in store.php), so a foreign credential's live
+    // suspension is honored here too, not just a same-domain one — a
+    // missing or unreachable document is treated as "nothing suspended,"
+    // same fail-open posture $revoked already has for a domain that
+    // doesn't publish one.
+    $susRaw = @file_get_contents(atlas_base_url($issuerDomain) . '/.well-known/atlas-suspensions.json', false, $context);
+    $susDoc = $susRaw !== false ? json_decode($susRaw, true) : null;
+    $suspended = is_array($susDoc) && isset($susDoc['suspended']) ? $susDoc['suspended'] : [];
 
     $issuedAt = strtotime($credential['issuedAt']);
     $activeKey = null;
@@ -680,6 +692,12 @@ function verify_foreign_asset_credential($credential) {
 
     foreach ($revoked as $r) {
       if (($r['id'] ?? null) === $credential['id']) return false;
+    }
+    $now = time();
+    foreach ($suspended as $s) {
+      if (($s['id'] ?? null) !== $credential['id']) continue;
+      $expiresAt = $s['expiresAt'] ?? null;
+      if ($expiresAt === null || strtotime($expiresAt) > $now) return false;
     }
     if (is_expired($credential)) return false;
     return true;
@@ -724,6 +742,7 @@ function check_presented_transferable_asset($publicKeyB64url, $credential, $expe
   if (empty($credential['issuer']['domain'])) return 'asset has no issuer domain';
   if ($credential['issuer']['domain'] === atlas_domain()) {
     if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
     if (is_expired($credential)) return 'asset has expired';
     $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
     if (!$ok) return 'asset signature does not check out';
@@ -764,6 +783,7 @@ function check_presented_giftable_asset($publicKeyB64url, $credential, $expected
     return 'asset class is fungible — this endpoint only transfers a unique item';
   }
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
   if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
@@ -791,6 +811,7 @@ function check_presented_redeemable_asset($publicKeyB64url, $credential, $expect
     return 'asset class is fungible — this endpoint only redeems a unique item';
   }
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
   if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
@@ -820,6 +841,7 @@ function check_presented_spendable_asset($publicKeyB64url, $credential, $expecte
   }
   if (!isset($credential['quantity']) || $credential['quantity'] < $amount) return 'balance is insufficient for this purchase';
   if (is_revoked($credential['id'])) return 'asset already revoked';
+  if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
   if (is_expired($credential)) return 'balance has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
@@ -846,6 +868,7 @@ function check_presented_fulfillable_asset($publicKeyB64url, $credential) {
     return 'asset class is fungible — this endpoint only fulfills a single held instance';
   }
   if (is_revoked($credential['id'])) return 'asset already revoked or already fulfilled';
+  if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
   // A museum day ticket (SPEC.md §5.1's expiresAt) is the worked example
   // this check exists for — see issuer-server/server.js's
   // checkPresentedFulfillableAsset() for the full reasoning.

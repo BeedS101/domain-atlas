@@ -43,6 +43,17 @@ function atlas_revocations_file() {
   return atlas_docroot() . '/.well-known/atlas-revocations.json';
 }
 
+// A second, reversible way a credential can stop being usable, alongside
+// the permanent atlas_revocations_file() above — a pause, not a death
+// sentence. Published under .well-known the same way revocations are, so
+// a foreign domain checking a credential this domain issued
+// (verify_foreign_asset_credential() below) sees a live suspension the
+// same way it already sees a revocation. Mirrors issuer-server/server.js's
+// SUSPENSIONS_FILE.
+function atlas_suspensions_file() {
+  return atlas_docroot() . '/.well-known/atlas-suspensions.json';
+}
+
 // SPEC.md §5.11 — a second, independent keypair this SAME domain also
 // generates and publishes, used only for third-party attestations, never
 // for anything issue_asset() issues. Mirrors issuer-server/server.js's
@@ -1491,6 +1502,90 @@ function atlas_revoke($id, $reason) {
   fclose($fh);
 }
 
+// ---------- suspensions (same flock-guarded shape as revocations above)
+// ---------- See atlas_suspensions_file()'s own comment. find_suspension()
+// is the one real piece of logic here — everything else about a
+// suspension is a plain list entry — since "is this id suspended" depends
+// on the clock, not just presence in the list: an entry with a past
+// expiresAt is no longer in effect, the same as if it had been explicitly
+// lifted, without needing a background job to go clean it up first.
+// Mirrors issuer-server/server.js's readSuspensions()/findSuspension()/
+// isSuspended().
+
+function read_suspensions() {
+  $fh = fopen(atlas_suspensions_file(), 'c+');
+  if ($fh === false) return ['suspended' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['suspended' => []];
+}
+
+function find_suspension($id) {
+  $now = time();
+  foreach (read_suspensions()['suspended'] as $s) {
+    if (($s['id'] ?? null) !== $id) continue;
+    $expiresAt = $s['expiresAt'] ?? null;
+    if ($expiresAt === null || strtotime($expiresAt) > $now) return $s;
+  }
+  return null;
+}
+
+function is_suspended($id) {
+  return find_suspension($id) !== null;
+}
+
+// $expiresAt (a string) is optional — an admin can choose either behavior
+// per suspension: give it a deadline for an automatic lift, or pass null
+// for one that stays in effect until atlas_unsuspend() is called
+// explicitly. Replaces any existing entry for the same id rather than
+// stacking duplicates, and prunes anything already expired on the way in.
+function atlas_suspend($id, $reason, $expiresAt) {
+  $file = atlas_suspensions_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['suspended' => []];
+  $now = time();
+  $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($now, $id) {
+    if (($s['id'] ?? null) === $id) return false;
+    $expiresAt = $s['expiresAt'] ?? null;
+    return $expiresAt === null || strtotime($expiresAt) > $now;
+  }));
+  $doc['suspended'][] = ['id' => $id, 'suspendedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason ?: 'issuer-request', 'expiresAt' => $expiresAt ?: null];
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// Returns whether an entry was actually there to remove — lets the
+// endpoint tell an admin "there was nothing to lift" from "done" without
+// a separate lookup first.
+function atlas_unsuspend($id) {
+  $file = atlas_suspensions_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['suspended' => []];
+  $before = count($doc['suspended']);
+  $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($id) { return ($s['id'] ?? null) !== $id; }));
+  $wasSuspended = count($doc['suspended']) !== $before;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $wasSuspended;
+}
+
 // See atlas_asset_history_file()'s own comment above. Called alongside
 // atlas_revoke() at every site that supersedes a credential with a
 // freshly minted replacement — a no-op for any class that hasn't opted
@@ -1826,7 +1921,7 @@ function append_postoffice_member($entry) {
 function is_valid_postoffice_member($ownerPublicKey) {
   $doc = read_postoffice_members();
   foreach ($doc['members'] as $m) {
-    if (isset($m['ownerPublicKey']) && $m['ownerPublicKey'] === $ownerPublicKey && !is_revoked($m['credentialId'])) {
+    if (isset($m['ownerPublicKey']) && $m['ownerPublicKey'] === $ownerPublicKey && !is_revoked($m['credentialId']) && !is_suspended($m['credentialId'])) {
       return true;
     }
   }
@@ -1840,7 +1935,7 @@ function is_valid_postoffice_member($ownerPublicKey) {
 function find_postoffice_membership($ownerPublicKey) {
   $doc = read_postoffice_members();
   foreach ($doc['members'] as $m) {
-    if (isset($m['ownerPublicKey']) && $m['ownerPublicKey'] === $ownerPublicKey && !is_revoked($m['credentialId'])) {
+    if (isset($m['ownerPublicKey']) && $m['ownerPublicKey'] === $ownerPublicKey && !is_revoked($m['credentialId']) && !is_suspended($m['credentialId'])) {
       return $m;
     }
   }
@@ -2197,7 +2292,7 @@ function update_postoffice_member($ownerPublicKey, callable $mutate) {
 
   $found = null;
   foreach ($doc['members'] as &$member) {
-    if (isset($member['ownerPublicKey']) && $member['ownerPublicKey'] === $ownerPublicKey && !is_revoked($member['credentialId'])) {
+    if (isset($member['ownerPublicKey']) && $member['ownerPublicKey'] === $ownerPublicKey && !is_revoked($member['credentialId']) && !is_suspended($member['credentialId'])) {
       $mutate($member);
       $found = $member;
       break;
@@ -2256,7 +2351,7 @@ function find_postoffice_member_by_handle($handle) {
   $target = strtolower($handle);
   $doc = read_postoffice_members();
   foreach ($doc['members'] as $m) {
-    if (!empty($m['handle']) && strtolower($m['handle']) === $target && !is_revoked($m['credentialId'])) {
+    if (!empty($m['handle']) && strtolower($m['handle']) === $target && !is_revoked($m['credentialId']) && !is_suspended($m['credentialId'])) {
       return $m;
     }
   }
