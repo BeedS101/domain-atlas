@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Open Assembly Governance Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb; --amber: #96650f; --amber-bg: #fbf1de;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 800px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel .stepnote { color: var(--muted); font-size: 0.9rem; margin-top: 0; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  .panel.caution { background: var(--amber-bg); border-color: var(--amber); }
+  .panel.caution p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button.danger { background: var(--red); border-color: var(--red); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.6rem; align-items: center; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.7rem 0 0.3rem; }
+  input[type="text"], input[type="number"] {
+    font: inherit; font-size: 0.95rem; padding: 0.5rem 0.6rem;
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  input[type="text"] { width: 100%; }
+  input[type="number"] { width: 90px; }
+  .members { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.7rem; margin-top: 0.8rem; }
+  .member {
+    border: 1px solid var(--line); border-radius: 9px; padding: 0.7rem 0.8rem; background: #fbfcfd;
+  }
+  .member h4 { margin: 0 0 0.3rem; font-size: 0.88rem; }
+  .member .key { font-size: 0.7rem; color: var(--muted); word-break: break-all; }
+  .tally { margin-top: 0.8rem; }
+  .tally .bar { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: #eef1f3; }
+  .tally .yes { background: var(--green); }
+  .tally .no { background: var(--red); }
+  .tally .counts { font-size: 0.85rem; margin-top: 0.4rem; color: var(--muted); }
+  .tally .counts b { color: var(--ink); }
+  .countdown { font-size: 0.9rem; margin-top: 0.5rem; }
+  .countdown.open { color: var(--accent); }
+  .countdown.closed { color: var(--green); }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.5rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .result.warn { background: var(--amber-bg); color: var(--amber); }
+  details.raw { font-size: 0.8rem; margin-top: 0.5rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  textarea#verifyInput {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.7rem; resize: vertical;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>An open assembly, a vote nobody can cast twice, and a deadline nobody has to enforce by hand</h1>
+  <p class="tag">Not a fixed committee of named officers — anyone can join, anyone who's joined can propose, everyone gets exactly one vote, the tally is visible the whole time, and the vote closes itself the instant the clock says so.</p>
+  <p class="lede">
+    <a href="bank-demo.html">The treasury-approval demo</a> proves K-of-N signing among a small, fixed, named
+    roster — the right shape for a committee. This page proves a genuinely different consensus shape: open
+    enrollment (anyone can become a member, any member can propose), one-member-one-vote with a transparent
+    running tally (visible the moment each vote lands, not hidden until some threshold crosses), and a
+    deadline-based close (nobody decides when voting ends — SPEC.md §5.10's same "the clock already decided"
+    reasoning credential expiry uses, applied to a vote instead). Every step below is a genuine, live call to
+    this domain's own server.
+  </p>
+
+  <div class="panel caution">
+    <p>
+      <strong>One honest limitation, stated plainly:</strong> membership is free to mint, on purpose — this
+      proves the MECHANISM (one credential, one vote, a real transparent tally, a real self-closing deadline),
+      not a Sybil-resistant one-person-one-vote system. A real deployment would gate membership behind
+      something costlier than a click — an invitation, a KYC check, a staked deposit — the same way a real
+      election gates who gets a ballot.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Act 1 — the assembly is open to anyone</h2>
+    <p class="stepnote">
+      Three visitors join by minting an ordinary membership credential (<code>atlas.demo.governance.membership</code>)
+      — the same one-click, no-approval-needed shape every other membership on this site already uses. No
+      invitation, no vetting: that's the point being disclosed above.
+    </p>
+    <button id="joinBtn" type="button">Alice, Bob, and Charlie all join the assembly</button>
+    <div id="joinResult"></div>
+    <div class="members" id="memberCards" style="display:none;"></div>
+  </div>
+
+  <div class="panel" id="proposePanel" style="display:none;">
+    <h2>Act 2 — any member can put something to a vote</h2>
+    <p class="stepnote">
+      Alice proposes it. The deadline is a plain future timestamp — voting closes the instant the clock
+      passes it, not when anyone decides to close it.
+    </p>
+    <label for="titleInput">What's being proposed</label>
+    <input type="text" id="titleInput" value="Extend the plaza market's opening hours">
+    <label for="deadlineInput">Closes in (seconds) — kept short here so you can watch it close live</label>
+    <input type="number" id="deadlineInput" value="20" min="5" max="300">
+    <div class="row"><button id="proposeBtn" type="button">Alice proposes this</button></div>
+    <div id="proposeResult"></div>
+    <div class="countdown" id="countdown" style="display:none;"></div>
+  </div>
+
+  <div class="panel" id="votePanel" style="display:none;">
+    <h2>Act 3 — one member, one vote, tallied live</h2>
+    <p class="stepnote">
+      Every vote below lands immediately and is visible to anyone — no waiting for all votes to arrive, no
+      threshold to cross first.
+    </p>
+    <div class="row">
+      <button id="aliceYesBtn" type="button">Alice votes Yes</button>
+      <button id="bobYesBtn" type="button">Bob votes Yes</button>
+      <button id="charlieNoBtn" type="button">Charlie votes No</button>
+    </div>
+    <div id="voteResult"></div>
+    <div class="tally" id="tallyBox" style="display:none;">
+      <div class="bar"><div class="yes" id="yesBar"></div><div class="no" id="noBar"></div></div>
+      <div class="counts" id="tallyCounts"></div>
+    </div>
+  </div>
+
+  <div class="panel" id="breakPanel" style="display:none;">
+    <h2>Act 4 — try to break it</h2>
+    <p class="stepnote">
+      One-member-one-vote and membership-gated voting are both real constraints, not just UI — the two
+      buttons below try to violate each one directly.
+    </p>
+    <div class="row">
+      <button id="doubleVoteBtn" type="button" class="secondary">Alice tries to vote again</button>
+      <button id="nonMemberVoteBtn" type="button" class="secondary">Dana (never joined) tries to vote</button>
+    </div>
+    <div id="breakResult"></div>
+  </div>
+
+  <div class="panel" id="finalizePanel" style="display:none;">
+    <h2>Act 5 — the deadline passes, and anyone can get a signed decision</h2>
+    <p class="stepnote">
+      Once voting closes, requesting this asks the domain to sign its own factual record of the outcome — a
+      small, independently-verifiable credential in its own right, callable by anyone, any number of times,
+      always producing the same result.
+    </p>
+    <button id="finalizeBtn" type="button" disabled>Request the signed decision</button>
+    <div id="finalizeResult"></div>
+  </div>
+
+  <div class="panel" id="verifyPanel">
+    <h2>Verify any decision from this page, independently</h2>
+    <p class="stepnote">
+      Paste a decision's raw JSON below — copy one from the "View raw decision" details box above. This runs
+      entirely in your own browser: it fetches this domain's public key directly, then checks the signature
+      itself.
+    </p>
+    <textarea id="verifyInput" rows="8" placeholder="Paste a decision's raw JSON here, or click a &#8220;Try verifying this one&#8221; link above."></textarea>
+    <div style="margin-top:0.6rem;"><button id="verifyBtn" type="button">Verify</button></div>
+    <div id="verifyResult"></div>
+  </div>
+
+  <p class="footnote">
+    Alice, Bob, Charlie, and Dana are ordinary ECDSA keypairs generated fresh in your own browser tab, exactly
+    like every other demo on this site — no accounts, nothing stored server-side beyond the credentials and
+    votes themselves. <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64urlDecode(str) {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  function errText(res) { return (res.body && res.body.error) || 'unknown error'; }
+
+  async function issueAsset(ownerPublicKey, assetClass) {
+    const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass, quantity: 1 });
+    if (!res.ok) throw new Error(errText(res));
+    return res.body;
+  }
+  async function propose(identity, title, deadlineIso) {
+    const payload = { title, deadline: deadlineIso };
+    const proof = await signWithSelf(identity, payload);
+    return postJson('/atlas/demo/governance/propose', { payload, proof });
+  }
+  async function vote(identity, proposalId, choice) {
+    const payload = { proposalId, choice };
+    const proof = await signWithSelf(identity, payload);
+    return postJson('/atlas/demo/governance/vote', { payload, proof });
+  }
+  async function finalize(proposalId) {
+    return postJson('/atlas/demo/governance/finalize', { proposalId });
+  }
+
+  async function verifyDecisionIndependently(decision) {
+    if (!decision || typeof decision !== 'object') return { valid: false, reason: 'not an object' };
+    const keyDoc = await fetch('/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json());
+    const revDoc = await fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }));
+    const issuedAt = new Date(decision.issuedAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === decision.issuer.publicKey && issuedAt >= from && issuedAt <= until;
+    });
+    if (!activeKey) return { valid: false, reason: "issuer key was not valid at this decision's issuedAt" };
+    const payload = {
+      id: decision.id, proposalId: decision.proposalId, title: decision.title, outcome: decision.outcome,
+      yesCount: decision.yesCount, noCount: decision.noCount, totalVotes: decision.totalVotes,
+      closedAt: decision.closedAt, issuedAt: decision.issuedAt
+    };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(decision.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match the issuer's key" };
+    const revoked = (revDoc.revoked || []).some((r) => r.id === decision.id);
+    if (revoked) return { valid: false, reason: 'revoked by the issuer' };
+    return { valid: true, reason: "signature verified against the issuer's current key; not revoked" };
+  }
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    let decision;
+    try {
+      decision = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    try {
+      const verdict = await verifyDecisionIndependently(decision);
+      resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+      resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = 'Could not verify: ' + err.message;
+    }
+  }
+  function fillAndVerify(decision) {
+    document.getElementById('verifyInput').value = JSON.stringify(decision, null, 2);
+    document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    runVerify();
+  }
+  function rawBox(label, obj) {
+    const div = document.createElement('details');
+    div.className = 'raw';
+    div.innerHTML = '<summary>View raw ' + label + '</summary><pre></pre>' +
+      '<button class="secondary" type="button" style="margin-top:0.5rem; font-size:0.8rem; padding:0.35rem 0.7rem;">Try verifying this one independently ↓</button>';
+    div.querySelector('pre').textContent = JSON.stringify(obj, null, 2);
+    div.querySelector('button').addEventListener('click', () => fillAndVerify(obj));
+    return div;
+  }
+
+  function renderTally(tally) {
+    const box = document.getElementById('tallyBox');
+    box.style.display = '';
+    const total = Math.max(tally.total, 1);
+    document.getElementById('yesBar').style.width = (100 * tally.yes / total) + '%';
+    document.getElementById('noBar').style.width = (100 * tally.no / total) + '%';
+    document.getElementById('tallyCounts').innerHTML = '<b>' + tally.yes + '</b> yes &middot; <b>' + tally.no + '</b> no &middot; ' + tally.total + ' of 3 members voted so far';
+  }
+
+  let alice = null, bob = null, charlie = null, dana = null;
+  let proposalId = null, deadlineMs = null, countdownTimer = null;
+
+  document.getElementById('joinBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('joinBtn');
+    const resultEl = document.getElementById('joinResult');
+    btn.disabled = true;
+    try {
+      alice = await genIdentity();
+      bob = await genIdentity();
+      charlie = await genIdentity();
+      await issueAsset(alice.publicKey, 'atlas.demo.governance.membership');
+      await issueAsset(bob.publicKey, 'atlas.demo.governance.membership');
+      await issueAsset(charlie.publicKey, 'atlas.demo.governance.membership');
+      resultEl.innerHTML = '<div class="result ok">All three joined — one click each, no approval needed.</div>';
+      const wrap = document.getElementById('memberCards');
+      wrap.innerHTML = '';
+      [['Alice', alice], ['Bob', bob], ['Charlie', charlie]].forEach(([name, id]) => {
+        const div = document.createElement('div');
+        div.className = 'member';
+        div.innerHTML = '<h4>' + name + '</h4><div class="key">' + id.publicKey + '</div>';
+        wrap.appendChild(div);
+      });
+      wrap.style.display = '';
+      document.getElementById('proposePanel').style.display = '';
+    } catch (err) {
+      resultEl.innerHTML = '<div class="result err">' + err.message + '</div>';
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('proposeBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('proposeBtn');
+    const resultEl = document.getElementById('proposeResult');
+    btn.disabled = true;
+    const title = document.getElementById('titleInput').value.trim() || 'Untitled proposal';
+    const seconds = Math.max(5, parseInt(document.getElementById('deadlineInput').value, 10) || 20);
+    const deadlineIso = new Date(Date.now() + seconds * 1000).toISOString();
+    const res = await propose(alice, title, deadlineIso);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    proposalId = res.body.proposal.id;
+    deadlineMs = new Date(res.body.proposal.deadline).getTime();
+    resultEl.innerHTML = '<div class="result ok">Proposed: "' + title + '" — open to votes until the countdown below reaches zero.</div>';
+    const countdownEl = document.getElementById('countdown');
+    countdownEl.style.display = '';
+    countdownTimer = setInterval(() => {
+      // Compare raw milliseconds, not seconds rounded for display —
+      // rounding (e.g. 400ms left rounding to "0s") would flip this to
+      // "closed" and unlock the finalize button slightly before the
+      // deadline the server itself is still checking against, and the
+      // very next finalize request would come back rejected as
+      // still-open.
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs > 0) {
+        countdownEl.className = 'countdown open';
+        countdownEl.textContent = 'Voting closes in ' + Math.ceil(remainingMs / 1000) + 's…';
+      } else {
+        countdownEl.className = 'countdown closed';
+        countdownEl.textContent = 'Voting closed — the deadline passed on its own, nobody had to end it.';
+        document.getElementById('finalizeBtn').disabled = false;
+        clearInterval(countdownTimer);
+      }
+    }, 250);
+    document.getElementById('votePanel').style.display = '';
+    document.getElementById('breakPanel').style.display = '';
+    document.getElementById('finalizePanel').style.display = '';
+  });
+
+  async function castAndRender(identity, choice, btn, resultEl) {
+    btn.disabled = true;
+    const res = await vote(identity, proposalId, choice);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; return; }
+    resultEl.innerHTML = '<div class="result ok">Vote recorded.</div>';
+    renderTally(res.body.tally);
+  }
+  document.getElementById('aliceYesBtn').addEventListener('click', (e) => castAndRender(alice, 'yes', e.target, document.getElementById('voteResult')));
+  document.getElementById('bobYesBtn').addEventListener('click', (e) => castAndRender(bob, 'yes', e.target, document.getElementById('voteResult')));
+  document.getElementById('charlieNoBtn').addEventListener('click', (e) => castAndRender(charlie, 'no', e.target, document.getElementById('voteResult')));
+
+  document.getElementById('doubleVoteBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('breakResult');
+    const res = await vote(alice, proposalId, 'yes');
+    resultEl.innerHTML = '<div class="result ' + (res.ok ? 'err' : 'warn') + '">' +
+      (res.ok ? 'Unexpected — this should have been rejected.' : 'Rejected — ' + errText(res)) + '</div>';
+  });
+  document.getElementById('nonMemberVoteBtn').addEventListener('click', async () => {
+    const resultEl = document.getElementById('breakResult');
+    dana = await genIdentity();
+    const res = await vote(dana, proposalId, 'yes');
+    resultEl.innerHTML += '<div class="result ' + (res.ok ? 'err' : 'warn') + '">' +
+      (res.ok ? 'Unexpected — this should have been rejected.' : 'Rejected — ' + errText(res)) + '</div>';
+  });
+
+  document.getElementById('finalizeBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('finalizeBtn');
+    const resultEl = document.getElementById('finalizeResult');
+    btn.disabled = true;
+    const res = await finalize(proposalId);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    const decision = res.body.decision;
+    resultEl.innerHTML = '<div class="result ' + (decision.outcome === 'passed' ? 'ok' : 'err') + '">' +
+      'Outcome: <b>' + decision.outcome.toUpperCase() + '</b> — ' + decision.yesCount + ' yes, ' + decision.noCount + ' no, ' + decision.totalVotes + ' total votes.</div>';
+    resultEl.appendChild(rawBox('decision', decision));
+  });
+
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
+})();
+</script>
+</body>
+</html>

@@ -580,6 +580,15 @@ function atlas_reserve_mint_approvals_file() {
   return __DIR__ . '/atlas-reserve-mint-approvals-store.json';
 }
 
+// Governance/voting demo (governance-demo.html) — mirrors
+// issuer-server/server.js's GOVERNANCE_MEMBERS_FILE/GOVERNANCE_PROPOSALS_FILE.
+function atlas_governance_members_file() {
+  return __DIR__ . '/atlas-governance-members-store.json';
+}
+function atlas_governance_proposals_file() {
+  return __DIR__ . '/atlas-governance-proposals-store.json';
+}
+
 const ATLAS_DEMO_CLAWBACK_TOKEN_CLASS = 'atlas.demo.clawback.token';
 const ATLAS_DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
 const ATLAS_DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
@@ -1226,6 +1235,22 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'name' => 'Beta Dollar', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
     'fungible' => true, 'presentation' => 'collectible',
     'purchase' => ['priceClass' => 'atlas.currency.reserve', 'priceAmount' => 1],
+  ],
+  // Governance/voting demo (governance-demo.html): open enrollment, same
+  // "claiming this specific class IS joining" shape as
+  // atlas.postoffice.membership/atlas.tradingstation.membership below —
+  // free to mint on purpose, so this proves the MECHANISM (one
+  // credential, one vote, a transparent tally, a real deadline), not a
+  // Sybil-resistant one-person-one-vote system. Mirrors
+  // issuer-server/server.js's ASSET_CATALOG entry of the same name.
+  'atlas.demo.governance.membership' => [
+    'name' => '{domain} Assembly Membership', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => false, 'presentation' => 'document', 'tradeScope' => 'bound',
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.tier' => 'governance-member',
+      'com.example.issuedFor' => 'assembly voting rights',
+    ],
   ],
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
@@ -2104,6 +2129,170 @@ function is_valid_postoffice_member($ownerPublicKey) {
     }
   }
   return false;
+}
+
+// Governance/voting demo — membership roster, identical shape to
+// Post Office's own just above. Mirrors issuer-server/server.js's
+// readGovernanceMembers()/appendGovernanceMember()/isValidGovernanceMember().
+function read_governance_members() {
+  $fh = fopen(atlas_governance_members_file(), 'c+');
+  if ($fh === false) return ['members' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['members' => []];
+}
+function append_governance_member($entry) {
+  $file = atlas_governance_members_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+  $doc['members'][] = $entry;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+function is_valid_governance_member($ownerPublicKey) {
+  $doc = read_governance_members();
+  foreach ($doc['members'] as $m) {
+    if (isset($m['ownerPublicKey']) && $m['ownerPublicKey'] === $ownerPublicKey && !is_revoked($m['credentialId']) && !is_suspended($m['credentialId'])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Governance/voting demo — proposals. Mirrors issuer-server/server.js's
+// governanceTally()/governanceStatus(): status is never stored, always
+// derived fresh from the wall clock against the proposal's own
+// pre-committed deadline.
+function governance_tally($proposal) {
+  $yes = 0; $no = 0;
+  foreach ($proposal['votes'] as $v) {
+    if (($v['choice'] ?? null) === 'yes') $yes++;
+    elseif (($v['choice'] ?? null) === 'no') $no++;
+  }
+  return ['yes' => $yes, 'no' => $no, 'total' => count($proposal['votes'])];
+}
+function governance_status($proposal) {
+  $nowMs = (int) round(microtime(true) * 1000);
+  return $nowMs >= strtotime($proposal['deadline']) * 1000 ? 'closed' : 'open';
+}
+
+// Read-only single-proposal lookup, shared lock — safe alongside the
+// exclusive-lock writers below since nothing here mutates the file.
+function find_governance_proposal($id) {
+  $fh = fopen(atlas_governance_proposals_file(), 'c+');
+  if ($fh === false) return null;
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc) || !isset($doc['proposals'])) return null;
+  foreach ($doc['proposals'] as $p) {
+    if ($p['id'] === $id) return $p;
+  }
+  return null;
+}
+
+// Validates and appends a new proposal under one exclusive lock — no
+// two-writer race to close here specifically (each proposal gets its own
+// fresh random id), but held for the whole sequence anyway for the same
+// reason append_postoffice_member() is, rather than a bare read-then-write.
+// Returns ['error' => '...'] or ['proposal' => the new record].
+function create_governance_proposal($payload, $proof) {
+  $sigOk = verify_envelope($payload, $proof);
+  if (!$sigOk) return ['error' => 'signature does not check out'];
+  if (!is_valid_governance_member($proof['publicKey'] ?? null)) {
+    return ['error' => 'you must hold a live Assembly membership to propose something — join first'];
+  }
+  $proposal = [
+    'id' => 'urn:atlas:governance:' . atlas_uuid(),
+    'title' => $payload['title'],
+    'description' => $payload['description'] ?? '',
+    'deadline' => $payload['deadline'],
+    'createdAt' => iso_now(),
+    'createdBy' => $proof['publicKey'],
+    'votes' => [],
+  ];
+  $file = atlas_governance_proposals_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['proposals'])) $doc = ['proposals' => []];
+  $doc['proposals'][] = $proposal;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['proposal' => $proposal];
+}
+
+// Validates and casts one vote under ONE exclusive lock held across the
+// entire find/validate/mutate/write sequence — exactly sign_bank_approval()'s
+// own reasoning: two votes on the SAME proposal arriving at nearly the
+// same moment must never both read the same pre-vote state and each
+// write back only their own addition, silently dropping one, and the
+// "already voted" check is meaningless unless it's checked against the
+// same state the write is about to commit. Returns ['error' => '...'] or
+// ['proposal' => the updated record].
+function cast_governance_vote($proposalId, $payload, $proof) {
+  $sigOk = verify_envelope($payload, $proof);
+  if (!$sigOk) return ['error' => 'signature does not check out'];
+  if (!is_valid_governance_member($proof['publicKey'] ?? null)) {
+    return ['error' => 'you must hold a live Assembly membership to vote — join first'];
+  }
+
+  $file = atlas_governance_proposals_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['proposals'])) $doc = ['proposals' => []];
+
+  $idx = null;
+  foreach ($doc['proposals'] as $i => $p) {
+    if ($p['id'] === $proposalId) { $idx = $i; break; }
+  }
+  if ($idx === null) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'no such proposal'];
+  }
+
+  $proposal = $doc['proposals'][$idx];
+  if (governance_status($proposal) === 'closed') {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'voting on this proposal has closed'];
+  }
+  foreach ($proposal['votes'] as $v) {
+    if ($v['voterPublicKey'] === $proof['publicKey']) {
+      flock($fh, LOCK_UN);
+      fclose($fh);
+      return ['error' => 'you have already voted on this proposal'];
+    }
+  }
+
+  $proposal['votes'][] = ['voterPublicKey' => $proof['publicKey'], 'choice' => $payload['choice'], 'votedAt' => iso_now()];
+  $doc['proposals'][$idx] = $proposal;
+
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['proposal' => $proposal];
 }
 
 // Same lookup as is_valid_postoffice_member(), but returns the matching

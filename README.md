@@ -1593,6 +1593,52 @@ though this page's first full run passed clean, with an explicit
 assertion that zero uncaught page errors occurred across the whole
 walkthrough.
 
+## An open assembly, and a vote that closes itself
+
+Every self-serve mechanism up to this point either has a fixed, named
+roster (`bank-demo.html`'s K-of-N committee) or settles a direct exchange
+between two known parties. `demo-domain-a/governance-demo.html` proves a
+different shape entirely: open enrollment (anyone mints
+`atlas.demo.governance.membership` and is a member, no invitation or
+vetting), one-member-one-vote with a transparent running tally visible the
+moment each vote lands, and a deadline-based close — nobody decides when
+voting ends, `governanceStatus()` just compares the wall clock to the
+proposal's own pre-committed deadline on every read, the same "the clock
+already decided" reasoning SPEC.md §5.10 applies to a credential's own
+time-based expiry.
+
+Five acts: Alice, Bob, and Charlie all join the assembly; Alice proposes
+something with a short deadline; all three vote, with the tally rendering
+live after each one; a double vote by Alice and a vote by Dana (who never
+joined) are both rejected; and once the deadline passes on its own, anyone
+can request a signed decision credential — the domain's own factual
+record of its proposal's outcome, deterministic and re-derivable from
+already-public data, the same shape `/atlas/demo/attestation/issue`
+already uses for a third party's claim. A caution panel discloses the
+same honest limitation `reserve-bank-demo.html` and `federation-demo.html`
+already disclose about their own stand-in shortcuts: membership here is
+free to mint on purpose, proving the mechanism (one credential, one vote,
+a real tally, a real self-closing deadline) rather than Sybil-resistant
+one-person-one-vote — a real deployment would gate membership behind
+something costlier than a click.
+
+Verified three ways, the same discipline `reserve-bank-demo.html` and
+`federation-demo.html` both used: `test/manual-governance-demo.js` and its
+PHP companion `test/manual-governance-demo-php.js` drive every check
+(join, propose, vote, double-vote rejection, non-member rejection, an
+early-finalize rejection, finalize, and independent signature
+verification of the returned decision) against an isolated instance of
+each backend at the raw HTTP layer; `test/manual-governance-demo-browser.js`
+drives the actual page end to end in a real headless browser. That
+browser run is what caught a real bug before this page shipped: the
+countdown display rounded its remaining seconds for display, and that
+rounding could tip it into "closed" — unlocking the finalize button —
+up to half a second before the server's own unrounded clock agreed
+voting had actually ended, so the very first finalize request came back
+rejected as still-open. The fix compares raw milliseconds for the
+open/closed decision and only rounds (up, via `Math.ceil`) for what the
+countdown displays.
+
 ## 9. Verify it yourself
 
 ```bash

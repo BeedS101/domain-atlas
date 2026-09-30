@@ -122,4 +122,13 @@ if ($assetClass === 'atlas.tradingstation.membership') {
   append_mail(array_merge($welcomePayload, ['signature' => $welcomeSignature]));
 }
 
+// Governance/voting demo — same shape as Post Office/Trading Station
+// just above: claiming this class IS joining the assembly, logged to its
+// own roster (is_valid_governance_member(), the gate propose/vote below
+// check every request against). Mirrors issuer-server/server.js's same
+// branch in its /atlas/asset/issue handler.
+if ($assetClass === 'atlas.demo.governance.membership') {
+  append_governance_member(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'joinedAt' => $credential['issuedAt']]);
+}
+
 send_json(200, $credential);

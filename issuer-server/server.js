@@ -374,6 +374,15 @@ const DEMO_BANK_ASSET_CLASS = 'atlas.credit.balance'; // the existing spendable-
 // no reason for this demo to allow a wider committee or a bigger single
 // mint than the treasury-transfer demo already does.
 const RESERVE_MINT_APPROVALS_FILE = path.join(STATE_DIR, 'atlas-reserve-mint-approvals-store.json');
+// Governance/voting demo (governance-demo.html): two flat files, same
+// "one JSON file, filter/derive on read" shape as every other demo store
+// above — a membership roster (open enrollment: anyone can mint
+// atlas.demo.governance.membership and is logged here exactly like Post
+// Office/Trading Station membership above) and the proposals themselves
+// (each with its own append-only votes array). Kept separate from both
+// because they answer different questions and nothing else reads either.
+const GOVERNANCE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-governance-members-store.json');
+const GOVERNANCE_PROPOSALS_FILE = path.join(STATE_DIR, 'atlas-governance-proposals-store.json');
 // Post Office abuse detection (task #96): how many sends within how large
 // a rolling window counts as "irregular" enough to auto-flag a membership
 // for the operator's attention — see recordPostOfficeSend() below. Tunable
@@ -843,6 +852,26 @@ const ASSET_CATALOG = {
     fungible: true,
     presentation: 'collectible',
     purchase: { priceClass: 'atlas.currency.reserve', priceAmount: 1 }
+  },
+  // Governance/voting demo (governance-demo.html): open enrollment, same
+  // "claiming this specific class IS joining" shape as
+  // atlas.postoffice.membership/atlas.tradingstation.membership above —
+  // free to mint on purpose, so this proves the MECHANISM (one
+  // credential, one vote, a transparent tally, a real deadline), not a
+  // Sybil-resistant one-person-one-vote system; a real deployment would
+  // gate issuance behind something costlier than a click.
+  'atlas.demo.governance.membership': {
+    name: `${DOMAIN} Assembly Membership`,
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    thumbnail: `https://${DOMAIN}/assets/badge.png`,
+    fungible: false,
+    presentation: 'document',
+    tradeScope: 'bound',
+    properties: {
+      'atlas.rarity': 'common',
+      'com.example.tier': 'governance-member',
+      'com.example.issuedFor': 'assembly voting rights'
+    }
   },
   // Task #201: a one-off keepsake for beating the in-world chess bot on
   // Hard difficulty, minted alongside the per-win gold reward (see
@@ -2121,6 +2150,57 @@ function isValidPostOfficeMember(ownerPublicKey) {
   return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
 }
 
+// Governance/voting demo — membership roster, identical shape to
+// Post Office's own just above.
+function readGovernanceMembers() {
+  if (!fs.existsSync(GOVERNANCE_MEMBERS_FILE)) return { members: [] };
+  return JSON.parse(fs.readFileSync(GOVERNANCE_MEMBERS_FILE, 'utf8'));
+}
+function appendGovernanceMember(entry) {
+  const doc = readGovernanceMembers();
+  doc.members.push(entry);
+  fs.writeFileSync(GOVERNANCE_MEMBERS_FILE, JSON.stringify(doc, null, 2));
+}
+function isValidGovernanceMember(ownerPublicKey) {
+  const doc = readGovernanceMembers();
+  return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
+}
+
+// Governance/voting demo — proposals, same "one file, filter/derive on
+// read" shape as the bank/reserve-mint approval stores, but no signature
+// threshold: a proposal just accumulates one vote per member, and
+// whether it's still open is a plain deadline comparison, not a status
+// field anything ever flips explicitly (governanceStatus() below).
+function readGovernanceProposals() {
+  if (!fs.existsSync(GOVERNANCE_PROPOSALS_FILE)) return { proposals: [] };
+  return JSON.parse(fs.readFileSync(GOVERNANCE_PROPOSALS_FILE, 'utf8'));
+}
+function writeGovernanceProposals(doc) {
+  fs.writeFileSync(GOVERNANCE_PROPOSALS_FILE, JSON.stringify(doc, null, 2));
+}
+function findGovernanceProposal(id) {
+  return readGovernanceProposals().proposals.find((p) => p.id === id) || null;
+}
+function saveGovernanceProposal(proposal) {
+  const doc = readGovernanceProposals();
+  const idx = doc.proposals.findIndex((p) => p.id === proposal.id);
+  if (idx === -1) doc.proposals.push(proposal);
+  else doc.proposals[idx] = proposal;
+  writeGovernanceProposals(doc);
+}
+function governanceTally(proposal) {
+  const yes = proposal.votes.filter((v) => v.choice === 'yes').length;
+  const no = proposal.votes.filter((v) => v.choice === 'no').length;
+  return { yes, no, total: proposal.votes.length };
+}
+// Deliberately never written to storage — "closed" is always derived
+// fresh from the wall clock against the proposal's own pre-committed
+// deadline, the same "nobody decides, the clock already did" reasoning
+// SPEC.md §5.10 applies to a credential's own time-based expiry.
+function governanceStatus(proposal) {
+  return Date.now() >= new Date(proposal.deadline).getTime() ? 'closed' : 'open';
+}
+
 // Domain admin roster — same "missing file means the empty case" and flat-
 // array shape every other roster in this server already uses. An entry's
 // own `revoked` flag (not the shared REVOCATIONS_FILE, which is scoped to
@@ -3248,6 +3328,15 @@ async function main() {
           console.log('Trading Station member logged + welcome mail queued for', credential.id);
         }
 
+        // Governance/voting demo — same shape as Post Office/Trading
+        // Station just above: claiming this class IS joining the
+        // assembly, logged to its own roster (isValidGovernanceMember,
+        // the gate propose/vote below check every request against).
+        if (assetClass === 'atlas.demo.governance.membership') {
+          appendGovernanceMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
+          console.log('Governance member logged for', credential.id);
+        }
+
         return sendJson(res, 200, credential);
       }
 
@@ -3735,6 +3824,116 @@ async function main() {
         }
         saveReserveMintApproval(approval);
         return sendJson(res, 200, { approval });
+      }
+
+      // --- Governance/voting demo (governance-demo.html) ---
+      //
+      // POST /atlas/demo/governance/propose — any current member (open
+      // enrollment: anyone can mint atlas.demo.governance.membership,
+      // checked via isValidGovernanceMember) can put something to a vote.
+      // deadline is a plain future ISO timestamp, the same shape a trade
+      // intent's own expiresAt already is — no separate "close" action
+      // ever flips a status; governanceStatus() below just compares the
+      // clock to this value on every read.
+      if (req.method === 'POST' && req.url === '/atlas/demo/governance/propose') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        if (!payload.title || typeof payload.title !== 'string') return sendJson(res, 400, { error: 'payload.title is required' });
+        const deadlineMs = new Date(payload.deadline).getTime();
+        if (!Number.isFinite(deadlineMs) || deadlineMs <= Date.now()) {
+          return sendJson(res, 400, { error: 'payload.deadline must be a valid timestamp in the future' });
+        }
+        const sigOk = await verifyEnvelope(payload, proof);
+        if (!sigOk) return sendJson(res, 400, { error: 'signature does not check out' });
+        if (!isValidGovernanceMember(proof.publicKey)) {
+          return sendJson(res, 400, { error: 'you must hold a live Assembly membership to propose something — join first' });
+        }
+        const proposal = {
+          id: 'urn:atlas:governance:' + webcrypto.randomUUID(),
+          title: payload.title,
+          description: payload.description || '',
+          deadline: payload.deadline,
+          createdAt: new Date().toISOString(),
+          createdBy: proof.publicKey,
+          votes: []
+        };
+        saveGovernanceProposal(proposal);
+        console.log('Governance: proposal', proposal.id, 'opened by', proof.publicKey.slice(0, 16) + '...', '-', proposal.title);
+        return sendJson(res, 200, { proposal, tally: governanceTally(proposal), status: governanceStatus(proposal) });
+      }
+
+      // POST /atlas/demo/governance/vote — one member, one vote, checked
+      // against the proposal's own votes array (not a separate "have I
+      // voted" flag anywhere else), and rejected outright once the
+      // deadline has passed — the same bearer-but-verified shape every
+      // other self-serve action here uses: holding a live membership is
+      // what authorizes this, checked by signature, not merely claimed.
+      if (req.method === 'POST' && req.url === '/atlas/demo/governance/vote') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        if (!payload.proposalId) return sendJson(res, 400, { error: 'payload.proposalId is required' });
+        if (payload.choice !== 'yes' && payload.choice !== 'no') return sendJson(res, 400, { error: 'payload.choice must be "yes" or "no"' });
+        const sigOk = await verifyEnvelope(payload, proof);
+        if (!sigOk) return sendJson(res, 400, { error: 'signature does not check out' });
+        if (!isValidGovernanceMember(proof.publicKey)) {
+          return sendJson(res, 400, { error: 'you must hold a live Assembly membership to vote — join first' });
+        }
+        const proposal = findGovernanceProposal(payload.proposalId);
+        if (!proposal) return sendJson(res, 404, { error: 'no such proposal' });
+        if (governanceStatus(proposal) === 'closed') return sendJson(res, 400, { error: 'voting on this proposal has closed' });
+        if (proposal.votes.some((v) => v.voterPublicKey === proof.publicKey)) {
+          return sendJson(res, 400, { error: 'you have already voted on this proposal' });
+        }
+        proposal.votes.push({ voterPublicKey: proof.publicKey, choice: payload.choice, votedAt: new Date().toISOString() });
+        saveGovernanceProposal(proposal);
+        console.log('Governance: vote recorded on', proposal.id, '-', payload.choice, 'from', proof.publicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { proposal, tally: governanceTally(proposal), status: governanceStatus(proposal) });
+      }
+
+      // GET /atlas/demo/governance/proposal?id=... — ungated, same "read
+      // is open" reasoning as GET /atlas/trade/listings and GET
+      // /atlas/attestation/list: a live, transparent tally is the whole
+      // point of this demo, not something only a participant can check.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/demo/governance/proposal') {
+        const id = new URLSearchParams(req.url.split('?')[1] || '').get('id');
+        if (!id) return sendJson(res, 400, { error: 'id is required' });
+        const proposal = findGovernanceProposal(id);
+        if (!proposal) return sendJson(res, 404, { error: 'no such proposal' });
+        return sendJson(res, 200, { proposal, tally: governanceTally(proposal), status: governanceStatus(proposal) });
+      }
+
+      // POST /atlas/demo/governance/finalize — ungated, same shape as
+      // /atlas/demo/attestation/issue: a deterministic computation over
+      // already-public data (this proposal's own votes, which cannot
+      // change once closed), signed with this domain's ordinary key —
+      // not the reviewer key, since this is the domain's own factual
+      // record of ITS OWN proposal's outcome, not a third party's
+      // opinion about something else. Callable by anyone, any number of
+      // times, always producing the same signed result once the deadline
+      // has passed — there is nothing here for a caller to forge, only
+      // to request the domain actually put its name to.
+      if (req.method === 'POST' && req.url === '/atlas/demo/governance/finalize') {
+        const { proposalId } = JSON.parse((await readBody(req)) || '{}');
+        if (!proposalId) return sendJson(res, 400, { error: 'proposalId is required' });
+        const proposal = findGovernanceProposal(proposalId);
+        if (!proposal) return sendJson(res, 404, { error: 'no such proposal' });
+        if (governanceStatus(proposal) === 'open') return sendJson(res, 400, { error: 'voting is still open — nothing to finalize yet' });
+        const tally = governanceTally(proposal);
+        const decisionPayload = {
+          id: 'urn:atlas:governance-decision:' + webcrypto.randomUUID(),
+          proposalId: proposal.id,
+          title: proposal.title,
+          outcome: tally.yes > tally.no ? 'passed' : 'failed',
+          yesCount: tally.yes,
+          noCount: tally.no,
+          totalVotes: tally.total,
+          closedAt: proposal.deadline,
+          issuedAt: new Date().toISOString()
+        };
+        const signature = await sign(decisionPayload);
+        const decision = { credential: 'domain-atlas-governance-decision/1.0', ...decisionPayload, issuer: { domain: DOMAIN, publicKey: publicKeyB64url }, signature };
+        console.log('Governance: finalized', proposal.id, '->', decisionPayload.outcome, '(' + tally.yes + ' yes / ' + tally.no + ' no)');
+        return sendJson(res, 200, { decision });
       }
 
       // --- Admin session (short-lived bearer token layered on the roster
