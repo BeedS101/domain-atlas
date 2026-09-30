@@ -1526,6 +1526,73 @@ credential's different shape in Act 6. Both are fixed, and the page's
 own `verifyCredentialIndependently` now handles both credential shapes
 the same way `attestation-demo.html`'s already does.
 
+## Two genuinely separate domains, and a real message between them
+
+Every standalone demo page up to this point — `bank-demo.html`,
+`clawback-demo.html`, `attestation-demo.html`, `reserve-bank-demo.html`
+— proves a mechanism using one domain's own second identity as a
+stand-in (a second key `attestation-demo.html`'s reviewer already uses,
+or the same trick `reserve-bank-demo.html` uses for Bank Alpha and Bank
+Beta, both disclosed plainly on those pages rather than glossed over).
+That's honest and useful, but none of them prove domains can actually
+interoperate. `demo-domain-a/federation-demo.html` is the one that does:
+SPEC.md §11.3-§11.4's Post Office federation, run for real between two
+servers that have never shared a process, a key, or a state file — the
+same two-independent-instance setup this project's own test suite
+(`test/manual-federation-relay.js` and its PHP companion) has proven out
+since Post Office federation first shipped, now with its own flashy,
+extension-free narrative page.
+
+The backend needed zero changes for this — federation, handle
+addressing, block lists, and friends-only consent were already fully
+built and tested on both `issuer-server/server.js` and `issuer-php`, just
+never shown off as their own page. Five acts: Alice joins the Post Office
+at Domain A and registers a handle; Bob joins at Domain B (a genuine
+cross-origin call — CORS is wide open on both backends already) and
+registers his own; Alice sends a message through her OWN home domain,
+addressed to Bob's home domain, and Domain A relays it server-to-server —
+signing its own attestation, which Domain B independently verifies by
+fetching Domain A's real published key over the network before accepting
+anything; Bob checks his mail directly at Domain B (never routed through
+Domain A) and the page independently re-verifies the message against
+Domain B's own freshly-fetched key, confirming `from.homeDomain` and
+`from.handle` are attributed correctly rather than merely claimed; and
+Bob blocks Alice's key at Domain B (his own self-service setting, no
+operator involved) — a retry is rejected with the identical wording a
+plain "not a member here" case uses, and removing the block restores
+delivery immediately, no restart, nothing to clear.
+
+Two operator-only pieces are deliberately left out of the interactive
+page, the same "self-serve only where there's a credential to prove
+authority over" line every other demo already draws: the per-domain
+relay rate limit (SPEC.md §11.4's abuse-rate flagging is informational
+only, for a human operator's attention, never a visitor-facing toggle)
+and the operator's own federation blocklist (blocking an entire
+misbehaving domain outright is a policy decision with no credential
+behind it, unlike everything else self-serve on this site). Both are
+real and already covered by the existing test suite — just not something
+a random visitor to a shared demo page should be able to flip.
+
+**Domain B, for now:** the page has a plain text field for Domain B's
+address, defaulting to `localhost:8002` — this project's own
+already-documented second local instance (see "Serve the two demo
+domains" above), a genuinely separate process with its own generated
+keypair, not a simulation. It just isn't yet a second domain reachable
+from the open internet. When one exists, that field is the only thing
+that needs to change — nothing else on the page, and no code.
+
+Verified three ways, mirroring `reserve-bank-demo.html`'s own approach:
+`test/manual-federation-demo.js` and `test/manual-federation-demo-php.js`
+drive all six checks (join, cross-domain send, direct receive-side
+verification, block, unblock) against two genuinely independent isolated
+instances of each backend at the raw HTTP layer; `test/manual-federation-demo-browser.js`
+drives the actual page end to end in a real headless browser across two
+real running Node instances — the same click-through discipline that
+caught two real bugs on `reserve-bank-demo.html` before it shipped,
+though this page's first full run passed clean, with an explicit
+assertion that zero uncaught page errors occurred across the whole
+walkthrough.
+
 ## 9. Verify it yourself
 
 ```bash

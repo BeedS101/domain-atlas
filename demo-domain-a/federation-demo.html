@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Real Cross-Domain Federation Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb; --amber: #96650f; --amber-bg: #fbf1de;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 800px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel .stepnote { color: var(--muted); font-size: 0.9rem; margin-top: 0; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  .panel.caution { background: var(--amber-bg); border-color: var(--amber); }
+  .panel.caution p { color: var(--ink); margin: 0 0 0.6rem; }
+  .panel.caution p:last-child { margin-bottom: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button.danger { background: var(--red); border-color: var(--red); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.6rem; align-items: center; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.7rem 0 0.3rem; }
+  input[type="text"] {
+    width: 100%; font: inherit; font-size: 0.95rem; padding: 0.5rem 0.6rem;
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  input[type="text"].inline { width: auto; min-width: 220px; }
+  .identity {
+    border: 1px solid var(--line); border-radius: 9px; padding: 0.75rem 0.85rem; background: #fbfcfd;
+    margin-top: 0.8rem;
+  }
+  .identity h4 { margin: 0 0 0.3rem; font-size: 0.9rem; }
+  .identity .key { font-size: 0.72rem; color: var(--muted); word-break: break-all; }
+  .identity .home { font-size: 0.82rem; margin-top: 0.3rem; }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.5rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .result.warn { background: var(--amber-bg); color: var(--amber); }
+  details.raw { font-size: 0.8rem; margin-top: 0.5rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  textarea#verifyInput {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.7rem; resize: vertical;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>Two independently-run domains, and a real message between them</h1>
+  <p class="tag">Not one browser tab playing two roles — two genuinely separate, already-running Domain Atlas servers, each with its own signing key, each independently vouching for its own members, relaying a real message between them over a real network call.</p>
+  <p class="lede">
+    Every earlier demo on this site proves a mechanism using one domain's own second identity as a stand-in —
+    a second key this same server also controls (the attestation demo's reviewer, the reserve bank demo's Bank
+    Alpha and Bank Beta). That's honest and useful, but it stops short of proving domains can actually
+    interoperate. This page proves that part: SPEC.md §11.3-§11.4's Post Office federation, run for real
+    between two servers that have never shared a process, a key, or a state file.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What's actually different here</h2>
+    <p>
+      Alice joins the Post Office at Domain A and never registers anywhere else. Bob joins at Domain B and
+      never registers at Domain A. When Alice sends Bob a message, she sends it through her OWN home domain —
+      Domain A — addressed to Bob's home domain. Domain A signs its own attestation ("I vouch for this
+      sender") and makes a real outbound HTTP call to Domain B's <code>/atlas/postoffice/relay</code>. Domain B
+      independently fetches Domain A's actual published key over the network and checks that attestation
+      before accepting anything — the same cross-domain trust bootstrap every credential in this protocol
+      already relies on, just exercised server-to-server for the first time instead of client-to-server.
+    </p>
+  </div>
+
+  <div class="panel caution">
+    <p>
+      <strong>Domain B, for now:</strong> the field below points at a second, already-running Domain Atlas
+      instance — by default the local second instance this project's own README already documents
+      (<code>localhost:8002</code>, started the same way Domain A is, just with its own port/docroot/state
+      folder). It's a genuinely separate process with its own generated keypair, not a simulation — the same
+      "two independent servers" federation already needs, just not yet a second registered domain reachable
+      from the open internet. When one exists, paste its address here — nothing else on this page changes.
+    </p>
+    <label for="domainBInput">Domain B address (host, optionally with port)</label>
+    <input type="text" id="domainBInput" class="inline" value="localhost:8002">
+  </div>
+
+  <div class="panel">
+    <h2>Act 1 — Alice joins the Post Office at Domain A</h2>
+    <p class="stepnote">
+      An ordinary membership credential (<code>atlas.postoffice.membership</code>), minted the same one-click
+      way every other membership on this site already is, plus a short handle so Bob can address her without
+      needing her raw public key.
+    </p>
+    <button id="setupAliceBtn" type="button">Set up Alice, join Domain A's Post Office</button>
+    <div id="aliceResult"></div>
+    <div id="aliceCard"></div>
+  </div>
+
+  <div class="panel" id="bobPanel" style="display:none;">
+    <h2>Act 2 — Bob joins the Post Office at Domain B</h2>
+    <p class="stepnote">
+      The identical action, run against a completely different server at the address above — this call never
+      touches Domain A at all.
+    </p>
+    <button id="setupBobBtn" type="button">Set up Bob, join Domain B's Post Office</button>
+    <div id="bobResult"></div>
+    <div id="bobCard"></div>
+  </div>
+
+  <div class="panel" id="sendPanel" style="display:none;">
+    <h2>Act 3 — Alice sends Bob a message, across domains</h2>
+    <p class="stepnote">
+      Alice submits this to her own home domain (A), addressed to <code>bob#&lt;Domain B&gt;</code>. Domain A
+      never mints anything into Bob's wallet itself — it makes a real outbound call to Domain B, which is the
+      only domain that actually holds Bob's membership and gets to decide whether to accept the message.
+    </p>
+    <button id="sendBtn" type="button">Alice sends "Hello from Domain A" to Bob</button>
+    <div id="sendResult"></div>
+  </div>
+
+  <div class="panel" id="checkPanel" style="display:none;">
+    <h2>Act 4 — Bob checks his own mail, directly at Domain B</h2>
+    <p class="stepnote">
+      This call goes straight to Domain B — never routed through Domain A — proving the message is genuinely
+      sitting there waiting for Bob, not merely claimed in Act 3's response. The page then independently
+      re-fetches Domain B's own published key and verifies the message's signature itself, the same check
+      SPEC.md §11 requires of any real client.
+    </p>
+    <button id="checkBobMailBtn" type="button">Bob checks his mail at Domain B</button>
+    <div id="checkResult"></div>
+  </div>
+
+  <div class="panel" id="privacyPanel" style="display:none;">
+    <h2>Act 5 — Bob decides who can reach him</h2>
+    <p class="stepnote">
+      This is Bob's own setting on his own membership at Domain B, self-service — no operator involved.
+      Blocking Alice's key and unblocking it again both take effect immediately: a plain setting Domain B
+      checks fresh on every relay attempt, not a restart-required config.
+    </p>
+    <div class="row">
+      <button id="blockBtn" type="button">Bob blocks Alice's key at Domain B</button>
+      <button id="retrySendBtn" type="button" disabled>Alice tries to send again</button>
+    </div>
+    <div class="row" style="margin-top:0.8rem;">
+      <button id="unblockBtn" type="button" disabled>Bob removes the block</button>
+      <button id="resendBtn" type="button" disabled>Alice sends once more</button>
+    </div>
+    <div id="privacyResult"></div>
+  </div>
+
+  <div class="panel" id="verifyPanel">
+    <h2>Verify any message from this page, independently</h2>
+    <p class="stepnote">
+      Paste a message's raw JSON below — copy one from a "View raw message" details box above — and name
+      which domain actually delivered it (Domain B for everything above, since Bob's home domain is who
+      signs what Bob receives). This runs entirely in your own browser: it fetches that domain's own public
+      key directly, the same file anyone could fetch, then checks the signature itself.
+    </p>
+    <label for="verifyDomainInput">Domain that delivered this message</label>
+    <input type="text" id="verifyDomainInput" class="inline">
+    <textarea id="verifyInput" rows="8" placeholder="Paste a message's raw JSON here, or click a &#8220;Try verifying this one&#8221; link above."></textarea>
+    <div style="margin-top:0.6rem;"><button id="verifyBtn" type="button">Verify</button></div>
+    <div id="verifyResult"></div>
+  </div>
+
+  <p class="footnote">
+    Alice and Bob are ordinary ECDSA keypairs generated fresh in your own browser tab, exactly like every
+    other demo on this site — no accounts, nothing stored server-side beyond the credentials and messages
+    themselves. Two things this page deliberately leaves out, since both are the receiving operator's own
+    call rather than anything a visitor should control: the per-domain relay rate limit (SPEC.md §11.4 flags
+    an over-threshold sender for a human operator's attention, informational only, never a visitor-facing
+    toggle) and the operator's own federation blocklist (blocking an entire misbehaving domain outright — a
+    policy decision with no credential to prove authority over, unlike everything else self-serve on this
+    site). Both are real and already tested (<code>test/manual-federation-relay.js</code> and its PHP
+    companion) — just not things a random visitor to a shared demo should be able to flip. <a href="/">Back
+    to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+  const DOMAIN_A = location.host;
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64urlDecode(str) {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  // Same shape as issuer-server/server.js's canonicalize() — sorted-key
+  // JSON, no whitespace. Has to match byte-for-byte or the server's own
+  // signature check fails.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  // Same http(s)-by-hostname convention issuer-server/server.js's own
+  // baseUrl() uses server-side — kept in sync on purpose, since Domain B's
+  // address is typed in by whoever's running this page, not baked in.
+  function baseUrl(domain) {
+    if (domain.startsWith('http')) return domain.replace(/\/$/, '');
+    const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(domain);
+    return ((isLocalHost ? 'http://' : 'https://') + domain).replace(/\/$/, '');
+  }
+  async function postJson(domain, path, body) {
+    let res;
+    try {
+      res = await fetch(baseUrl(domain) + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    } catch (err) {
+      return { ok: false, status: 0, body: { error: 'could not reach ' + domain + ' — is it actually running? (' + err.message + ')' } };
+    }
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  function errText(res) { return (res.body && res.body.error) || 'unknown error'; }
+
+  async function issueAsset(domain, ownerPublicKey, assetClass) {
+    const res = await postJson(domain, '/atlas/asset/issue', { ownerPublicKey, assetClass, quantity: 1 });
+    if (!res.ok) throw new Error(errText(res));
+    return res.body;
+  }
+  async function setHandle(domain, identity, handle) {
+    const payload = { handle };
+    const proof = await signWithSelf(identity, payload);
+    const res = await postJson(domain, '/atlas/postoffice/handle', { payload, proof });
+    if (!res.ok) throw new Error(errText(res));
+    return res.body;
+  }
+  async function sendMail(domain, senderIdentity, toPublicKey, toDomain, subject, body) {
+    const to = { publicKey: toPublicKey };
+    if (toDomain) to.domain = toDomain;
+    const payload = { to, subject, body };
+    const proof = await signWithSelf(senderIdentity, payload);
+    return postJson(domain, '/atlas/postoffice/send', { payload, proof });
+  }
+  async function checkMail(domain, credentialId) {
+    return postJson(domain, '/atlas/mail/check', { credentialIds: [credentialId] });
+  }
+  async function blockSender(domain, identity, blockedPublicKey) {
+    const payload = { blockedPublicKey };
+    const proof = await signWithSelf(identity, payload);
+    return postJson(domain, '/atlas/postoffice/block', { payload, proof });
+  }
+  async function unblockSender(domain, identity, blockedPublicKey) {
+    const payload = { blockedPublicKey };
+    const proof = await signWithSelf(identity, payload);
+    return postJson(domain, '/atlas/postoffice/unblock', { payload, proof });
+  }
+
+  // Same payload shape (and same "key valid at sentAt" rule) as
+  // extension/wallet.js's own verifyMailMessage() — a mail message is
+  // signed by whichever domain actually delivered it, over
+  // {id, credentialId, subject, body, [attachedAsset], [from], sentAt}.
+  async function verifyMailIndependently(domain, message) {
+    if (!message || typeof message !== 'object') return { valid: false, reason: 'not an object' };
+    let keyDoc;
+    try {
+      keyDoc = await fetch(baseUrl(domain) + '/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json());
+    } catch (err) {
+      return { valid: false, reason: 'could not fetch ' + domain + '\'s published key: ' + err.message };
+    }
+    const sentAt = new Date(message.sentAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return sentAt >= from && sentAt <= until;
+    });
+    if (!activeKey) return { valid: false, reason: domain + ' had no currently-valid published key at sentAt' };
+    const payload = {
+      id: message.id, credentialId: message.credentialId, subject: message.subject, body: message.body,
+      ...(message.attachedAsset ? { attachedAsset: message.attachedAsset } : {}),
+      ...(message.from ? { from: message.from } : {}),
+      sentAt: message.sentAt
+    };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(message.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match " + domain + "'s published key" };
+    return { valid: true, reason: 'signature verified against ' + domain + "'s own currently-published key" };
+  }
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    const domain = document.getElementById('verifyDomainInput').value.trim();
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    if (!domain) { resultEl.className = 'result err'; resultEl.textContent = 'Name which domain delivered this message first.'; return; }
+    let message;
+    try {
+      message = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    const verdict = await verifyMailIndependently(domain, message);
+    resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+    resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+  }
+  function fillAndVerify(domain, message) {
+    document.getElementById('verifyDomainInput').value = domain;
+    document.getElementById('verifyInput').value = JSON.stringify(message, null, 2);
+    document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    runVerify();
+  }
+  function rawBox(label, domain, obj) {
+    const div = document.createElement('details');
+    div.className = 'raw';
+    div.innerHTML = '<summary>View raw ' + label + '</summary><pre></pre>' +
+      '<button class="secondary" type="button" style="margin-top:0.5rem; font-size:0.8rem; padding:0.35rem 0.7rem;">Try verifying this one independently ↓</button>';
+    div.querySelector('pre').textContent = JSON.stringify(obj, null, 2);
+    div.querySelector('button').addEventListener('click', () => fillAndVerify(domain, obj));
+    return div;
+  }
+
+  function domainB() { return document.getElementById('domainBInput').value.trim(); }
+  // Handles are suffixed with a few random characters so two visitors
+  // running this same shared demo page at once don't collide on "alice"
+  // already being taken at Domain B's Post Office (a real, live server
+  // shared by every visitor — unlike a fresh Node instance per test run).
+  function randomSuffix() { return Math.random().toString(36).slice(2, 6); }
+
+  let alice = null, bob = null, aliceMembership = null, bobMembership = null;
+  let aliceHandle = null, bobHandle = null;
+  let lastMessage = null;
+
+  document.getElementById('setupAliceBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('setupAliceBtn');
+    const resultEl = document.getElementById('aliceResult');
+    btn.disabled = true;
+    try {
+      alice = await genIdentity();
+      aliceMembership = await issueAsset(DOMAIN_A, alice.publicKey, 'atlas.postoffice.membership');
+      aliceHandle = 'alice' + randomSuffix();
+      await setHandle(DOMAIN_A, alice, aliceHandle);
+      resultEl.innerHTML = '<div class="result ok">Alice joined ' + DOMAIN_A + '\'s Post Office as ' + aliceHandle + '#' + DOMAIN_A + '.</div>';
+      const card = document.getElementById('aliceCard');
+      card.innerHTML = '';
+      const div = document.createElement('div');
+      div.className = 'identity';
+      div.innerHTML = '<h4>Alice</h4><div class="key">' + alice.publicKey + '</div><div class="home">Home domain: <b>' + DOMAIN_A + '</b> — handle <b>' + aliceHandle + '</b></div>';
+      card.appendChild(div);
+      document.getElementById('bobPanel').style.display = '';
+    } catch (err) {
+      resultEl.innerHTML = '<div class="result err">' + err.message + '</div>';
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('setupBobBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('setupBobBtn');
+    const resultEl = document.getElementById('bobResult');
+    btn.disabled = true;
+    const domB = domainB();
+    if (!domB) { resultEl.innerHTML = '<div class="result err">Enter Domain B\'s address above first.</div>'; btn.disabled = false; return; }
+    try {
+      bob = await genIdentity();
+      bobMembership = await issueAsset(domB, bob.publicKey, 'atlas.postoffice.membership');
+      bobHandle = 'bob' + randomSuffix();
+      await setHandle(domB, bob, bobHandle);
+      resultEl.innerHTML = '<div class="result ok">Bob joined ' + domB + '\'s Post Office as ' + bobHandle + '#' + domB + ' — a completely separate server from ' + DOMAIN_A + '.</div>';
+      const card = document.getElementById('bobCard');
+      card.innerHTML = '';
+      const div = document.createElement('div');
+      div.className = 'identity';
+      div.innerHTML = '<h4>Bob</h4><div class="key">' + bob.publicKey + '</div><div class="home">Home domain: <b>' + domB + '</b> — handle <b>' + bobHandle + '</b></div>';
+      card.appendChild(div);
+      document.getElementById('sendPanel').style.display = '';
+    } catch (err) {
+      resultEl.innerHTML = '<div class="result err">' + err.message + '</div>';
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('sendBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('sendBtn');
+    const resultEl = document.getElementById('sendResult');
+    btn.disabled = true;
+    const domB = domainB();
+    const res = await sendMail(DOMAIN_A, alice, bob.publicKey, domB, 'Hello from ' + DOMAIN_A, 'This message was relayed from ' + DOMAIN_A + ' to ' + domB + ' — two independent servers, a real network call between them.');
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    lastMessage = res.body;
+    resultEl.innerHTML = '<div class="result ok">Sent — ' + DOMAIN_A + ' relayed it to ' + domB + ' and got back a real, ' + domB + '-signed message in response.</div>';
+    resultEl.appendChild(rawBox('relay response (' + domB + '\'s own signed copy)', domB, res.body));
+    document.getElementById('checkPanel').style.display = '';
+  });
+
+  document.getElementById('checkBobMailBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('checkBobMailBtn');
+    const resultEl = document.getElementById('checkResult');
+    btn.disabled = true;
+    const domB = domainB();
+    const res = await checkMail(domB, bobMembership.id);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    const message = (res.body.messages || [])[res.body.messages.length - 1];
+    if (!message) { resultEl.innerHTML = '<div class="result err">No message found waiting for Bob at ' + domB + '.</div>'; btn.disabled = false; return; }
+    lastMessage = message;
+    const verdict = await verifyMailIndependently(domB, message);
+    resultEl.innerHTML = '<div class="result ' + (verdict.valid ? 'ok' : 'err') + '">' +
+      'From: ' + (message.from && message.from.handle ? message.from.handle + '#' + message.from.homeDomain : (message.from ? message.from.publicKey : 'unknown')) +
+      ' — Subject: "' + message.subject + '"</div>' +
+      '<div class="result ' + (verdict.valid ? 'ok' : 'err') + '">' + (verdict.valid ? '✓ ' : '✗ ') + verdict.reason + '</div>';
+    if (message.from && message.from.homeDomain === DOMAIN_A && message.from.handle === aliceHandle) {
+      resultEl.innerHTML += '<div class="result ok">Confirmed — Bob\'s own copy, fetched directly from ' + domB + ', correctly attributes this to ' + aliceHandle + '#' + DOMAIN_A + ', not to ' + domB + ' itself.</div>';
+    }
+    resultEl.appendChild(rawBox('message (as Bob received it)', domB, message));
+    document.getElementById('privacyPanel').style.display = '';
+  });
+
+  document.getElementById('blockBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('blockBtn');
+    const resultEl = document.getElementById('privacyResult');
+    btn.disabled = true;
+    const domB = domainB();
+    const res = await blockSender(domB, bob, alice.publicKey);
+    if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    resultEl.innerHTML = '<div class="result ok">Bob blocked Alice\'s key at ' + domB + ' — his own setting, on his own membership, no operator involved.</div>';
+    document.getElementById('retrySendBtn').disabled = false;
+  });
+
+  document.getElementById('retrySendBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('retrySendBtn');
+    const resultEl = document.getElementById('privacyResult');
+    btn.disabled = true;
+    const domB = domainB();
+    const res = await sendMail(DOMAIN_A, alice, bob.publicKey, domB, 'Are you there?', 'trying again after the block');
+    resultEl.innerHTML += '<div class="result ' + (res.ok ? 'err' : 'warn') + '">' +
+      (res.ok ? 'Unexpected — this should have been rejected.' : 'Rejected, worded no differently than "not a member here" — Alice can\'t tell she was blocked specifically: ' + errText(res)) +
+      '</div>';
+    document.getElementById('unblockBtn').disabled = false;
+  });
+
+  document.getElementById('unblockBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('unblockBtn');
+    const resultEl = document.getElementById('privacyResult');
+    btn.disabled = true;
+    const domB = domainB();
+    const res = await unblockSender(domB, bob, alice.publicKey);
+    if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    resultEl.innerHTML += '<div class="result ok">Bob removed the block at ' + domB + ' — takes effect immediately, no restart, nothing to clear.</div>';
+    document.getElementById('resendBtn').disabled = false;
+  });
+
+  document.getElementById('resendBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('resendBtn');
+    const resultEl = document.getElementById('privacyResult');
+    btn.disabled = true;
+    const domB = domainB();
+    const res = await sendMail(DOMAIN_A, alice, bob.publicKey, domB, 'One more try', 'should go through again now');
+    resultEl.innerHTML += '<div class="result ' + (res.ok ? 'ok' : 'err') + '">' +
+      (res.ok ? 'Delivered again, immediately — the exact same path, working again the instant the block was lifted.' : errText(res)) +
+      '</div>';
+  });
+
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
+})();
+</script>
+</body>
+</html>

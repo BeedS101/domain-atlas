@@ -114,6 +114,18 @@
   </div>
 
   <div class="callout">
+    <h2>...and two genuinely separate domains can actually talk to each other</h2>
+    <p>Every demo above proves a mechanism using one domain's own second identity as a
+       stand-in. This one doesn't: Alice joins one already-running domain's Post Office,
+       Bob joins a completely different one, and a message crosses between them for
+       real — one domain signs its own attestation, the other independently fetches its
+       published key over the network and checks it, before either domain has ever
+       shared a process, a key, or a state file.
+       <a href="/federation-demo.html">Try the cross-domain federation demo →</a>
+    </p>
+  </div>
+
+  <div class="callout">
     <h2>...and a single ordinary page can point at one exact spot</h2>
     <p>Two plain pages, each with one extra <code>&lt;link rel="spatial"&gt;</code> tag in
        its head naming a specific place inside a world this domain already declared —
