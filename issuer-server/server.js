@@ -3844,6 +3844,100 @@ async function main() {
         return sendJson(res, 200, { ok: true, wasSuspended });
       }
 
+      // Admin-gated (requireAdminAuth, above) — the other half of what
+      // suspend/unsuspend exists to buy time for: once a fraud report is
+      // actually confirmed (rather than still under investigation), revoke
+      // the credential wherever it currently sits and mint a fresh one
+      // straight to its rightful owner, in the same act. Not a new
+      // primitive — this is exactly transferUniqueAsset()'s mint-then-
+      // revoke shape, just issuer-authorized instead of the current
+      // holder's own signature, and aimed at a DIFFERENT owner than
+      // whoever is presenting it. Works for a fungible balance or a unique
+      // asset alike (issueAsset() doesn't care), and ignores tradeScope
+      // entirely — a 'bound' membership card is exactly as clawback-able
+      // as anything else, the same total, issuer-authoritative reach
+      // /atlas/revoke already has, not the holder-initiated discipline
+      // checkPresentedGiftable/TransferableAsset enforce for a holder's
+      // own transfer.
+      //
+      // Caveat: ignoring tradeScope only reaches the CREDENTIAL itself —
+      // it does not update a separate roster side-table a bound class's
+      // credential happens to gate (POSTOFFICE_MEMBERS_FILE,
+      // TRADINGSTATION_MEMBERS_FILE). Clawing back a Post Office or
+      // Trading Station membership card revokes the old one and mints a
+      // real, valid replacement for the new owner, but that new owner
+      // won't show up in the roster isValidPostOfficeMember()/
+      // findLiveMember() actually check until they separately (re-)join —
+      // the same bookkeeping gap that already exists for any other path
+      // that might supersede a membership credential, not something new
+      // this endpoint introduces.
+      //
+      // Deliberately claws back exactly the quantity on the credential
+      // presented, no more — it does not attempt to trace or split a
+      // balance that's since been partially spent, split, or consolidated
+      // with legitimate funds. Which fraction of a mixed balance is
+      // actually tainted is the harder "was this really theft, and how
+      // much of it" question a human investigation has to answer before
+      // this endpoint is ever called; the asset-history audit trail
+      // (ASSET_HISTORY_FILE, above) is what that investigation walks, this
+      // endpoint just acts on its conclusion.
+      //
+      // Wire shape: {payload: {credential, toPublicKey}, proof} or
+      // {payload, token}, same envelope /atlas/revoke and /atlas/suspend
+      // already use. If toPublicKey currently holds a live Post Office
+      // membership at this domain, the fresh credential is also delivered
+      // as a mail gift attachment addressed to that membership — the same
+      // "absent counterparty" delivery /atlas/trade/claim already uses for
+      // a poster who isn't live for the call — so the rightful owner's own
+      // wallet can pick it up on its next mail check without the operator
+      // handing it over by hand. Otherwise it's simply returned in the
+      // response, same as /atlas/asset/transfer already leaves delivery to
+      // the caller when the recipient has no reachable mailbox here.
+      if (req.method === 'POST' && req.url === '/atlas/clawback') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !payload.credential || !payload.toPublicKey) {
+          return sendJson(res, 400, { error: 'payload.credential and payload.toPublicKey are both required' });
+        }
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+
+        const credential = payload.credential;
+        const toPublicKey = payload.toPublicKey;
+        if (!credential.id || !credential.asset || !credential.owner || !credential.issuer) {
+          return sendJson(res, 400, { error: 'payload.credential must be a domain-atlas-asset/1.0 credential' });
+        }
+        if (credential.issuer.domain !== DOMAIN) return sendJson(res, 400, { error: 'credential was not issued by this domain' });
+        if (toPublicKey === credential.owner.publicKey) {
+          return sendJson(res, 400, { error: "toPublicKey already matches the credential's current owner — nothing to claw back" });
+        }
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked — nothing to claw back' });
+        const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
+
+        const newCredential = await issueAsset(toPublicKey, credential.asset, credential.quantity, credential.id);
+        revoke(credential.id, 'clawback');
+        archiveIfAudited(credential, 'clawback');
+
+        const recipientMember = findLiveMember(readPostOfficeMembers(), toPublicKey);
+        let delivered = false;
+        if (recipientMember) {
+          const noticePayload = {
+            id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
+            credentialId: recipientMember.credentialId,
+            subject: 'An asset was returned to you at ' + DOMAIN,
+            body: `A ${credential.asset.class} credential was clawed back from its previous holder and reissued to you by this domain's operator.`,
+            attachedAsset: newCredential,
+            sentAt: new Date().toISOString()
+          };
+          const noticeSignature = await sign(noticePayload);
+          appendMail({ ...noticePayload, signature: noticeSignature });
+          delivered = true;
+        }
+
+        console.log('Clawed back', credential.asset.class, credential.id, '-> reissued to', toPublicKey.slice(0, 16) + '...', delivered ? '(delivered by mail)' : '(returned in response only)', 'by admin', auth.publicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { status: 'clawed-back', newCredential, delivered });
+      }
+
       // --- §5.4 splitting and consolidating fungible balances ---
       if (req.method === 'POST' && req.url === '/atlas/asset/split') {
         const { credential, sendAmount, toPublicKey } = JSON.parse((await readBody(req)) || '{}');
