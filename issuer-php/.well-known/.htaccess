@@ -1,0 +1,15 @@
+# Every file in this directory is a deliberately public document — the
+# whole point of "well-known" (key discovery, revocation checks, SPEC.md's
+# own convention). Every atlas/*.php route already sends
+# Access-Control-Allow-Origin: * via cors_headers(), but a file here is
+# served directly by Apache, never through a PHP script, so that never
+# runs for it. Invisible in every demo on this site that plays both
+# federated roles on one server (same-origin fetch, CORS never applies) —
+# only surfaces once a browser genuinely fetches another, separate
+# domain's own key cross-origin, which federation-demo.html's independent
+# signature verification does. Mirrors issuer-server/server.js's
+# serveStatic(), which already sends this header on every static response
+# unconditionally.
+<IfModule mod_headers.c>
+  Header always set Access-Control-Allow-Origin "*"
+</IfModule>

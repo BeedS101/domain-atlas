@@ -1573,13 +1573,17 @@ behind it, unlike everything else self-serve on this site). Both are
 real and already covered by the existing test suite — just not something
 a random visitor to a shared demo page should be able to flip.
 
-**Domain B, for now:** the page has a plain text field for Domain B's
-address, defaulting to `localhost:8002` — this project's own
-already-documented second local instance (see "Serve the two demo
-domains" above), a genuinely separate process with its own generated
-keypair, not a simulation. It just isn't yet a second domain reachable
-from the open internet. When one exists, that field is the only thing
-that needs to change — nothing else on the page, and no code.
+**Domain B, for real:** the page has a plain text field for Domain B's
+address, now defaulting to `domain-atlas.co.za` — this project's own
+second, genuinely separate registered domain, reachable from the open
+internet, running its own deployment of the exact same software with its
+own generated keypair. Confirmed exactly what the caution panel always
+promised: the field was the only thing that needed to change once a real
+second domain existed — nothing else on the page, and no code, since
+`baseUrl()`'s own http(s)-by-hostname convention already treats anything
+that isn't `localhost`/`127.0.0.1`/`[::1]` as a real domain over HTTPS.
+Typing in a local second instance's address instead (`localhost:8002`,
+per "Serve the two demo domains" above) still works exactly as before.
 
 Verified three ways, mirroring `reserve-bank-demo.html`'s own approach:
 `test/manual-federation-demo.js` and `test/manual-federation-demo-php.js`

@@ -97,15 +97,15 @@
 
   <div class="panel caution">
     <p>
-      <strong>Domain B, for now:</strong> the field below points at a second, already-running Domain Atlas
-      instance — by default the local second instance this project's own README already documents
-      (<code>localhost:8002</code>, started the same way Domain A is, just with its own port/docroot/state
-      folder). It's a genuinely separate process with its own generated keypair, not a simulation — the same
-      "two independent servers" federation already needs, just not yet a second registered domain reachable
-      from the open internet. When one exists, paste its address here — nothing else on this page changes.
+      <strong>Domain B, for real:</strong> the field below defaults to <code>domain-atlas.co.za</code> —
+      this project's own second, genuinely separate registered domain, an independent deployment of the
+      same software with its own generated keypair on its own server. Nothing on this page is simulated:
+      every call below crosses a real network boundary between two domains that have never shared a
+      process, a key, or a state file. Point it at a local second instance instead
+      (<code>localhost:8002</code>, per this project's own README) if you're running both yourself.
     </p>
     <label for="domainBInput">Domain B address (host, optionally with port)</label>
-    <input type="text" id="domainBInput" class="inline" value="localhost:8002">
+    <input type="text" id="domainBInput" class="inline" value="domain-atlas.co.za">
   </div>
 
   <div class="panel">

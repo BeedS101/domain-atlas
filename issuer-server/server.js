@@ -468,6 +468,14 @@ const SERIAL_COUNTERS_FILE = path.join(STATE_DIR, 'atlas-serial-counters.json');
 const PORT = process.env.PORT || 8001;
 const DOMAIN = process.env.ATLAS_DOMAIN || 'localhost:8001';
 
+// Every genuinely cross-host request this server ever makes (fetching
+// another domain's published key, relaying mail/world-drop claims) sends
+// this — some hosts' own bot/WAF protection blocks a request with no
+// recognizable User-Agent, which a browser request from the same page
+// never hits. Named plainly so a receiving host's admin can see what it
+// is. Mirrors issuer-php/lib/bootstrap.php's ATLAS_OUTBOUND_REQUEST_HEADERS.
+const OUTBOUND_REQUEST_HEADERS = { 'User-Agent': 'DomainAtlas-Relay/1.0', Accept: 'application/json' };
+
 // One catalog for every asset class this issuer knows how to mint —
 // unique and fungible alike (SPEC.md §5, task #44's merge of the former
 // ITEM_CATALOG and RESOURCE_CATALOG). Each entry carries everything
@@ -1648,7 +1656,12 @@ function baseUrl(domain) {
 // way an asset credential's own verification is), rather than requiring the
 // caller to know which key era they're in.
 async function fetchDomainPublicKey(domain) {
-  const res = await fetch(baseUrl(domain) + '/.well-known/atlas-key.json', { cache: 'no-store' });
+  let res;
+  try {
+    res = await fetch(baseUrl(domain) + '/.well-known/atlas-key.json', { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS });
+  } catch (err) {
+    throw new Error('could not reach ' + domain + ' to fetch its published key' + ((err.cause && err.cause.message) ? ' (' + err.cause.message + ')' : ' (' + err.message + ')'));
+  }
   if (!res.ok) throw new Error('could not fetch ' + domain + '\'s published key (HTTP ' + res.status + ')');
   const keyDoc = await res.json();
   const now = Date.now();
@@ -5490,7 +5503,7 @@ async function main() {
         try {
           relayRes = await fetch(baseUrl(credential.issuer.domain) + '/atlas/world/drops/relay-claim', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
             body: JSON.stringify({ credential, attestation, attestationSignature })
           });
         } catch (err) {
@@ -5499,7 +5512,7 @@ async function main() {
           // Promise.all has (no cross-call rollback in this demo); a
           // network failure here can strand the item rather than restore
           // the listing. Documented, not hidden.
-          return sendJson(res, 502, { error: 'could not reach ' + credential.issuer.domain + ' to complete this claim: ' + err.message });
+          return sendJson(res, 502, { error: 'could not reach ' + credential.issuer.domain + ' to complete this claim: ' + ((err.cause && err.cause.message) ? err.cause.message : err.message) });
         }
         const relayBody = await relayRes.json().catch(() => ({}));
         if (!relayRes.ok) {
@@ -5904,11 +5917,11 @@ async function main() {
           try {
             relayRes = await fetch(baseUrl(payload.to.domain) + '/atlas/postoffice/relay', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
               body: JSON.stringify({ payload, proof, relayAttestation, relaySignature })
             });
           } catch (err) {
-            return sendJson(res, 502, { error: 'could not reach ' + payload.to.domain + ' to relay this message: ' + err.message });
+            return sendJson(res, 502, { error: 'could not reach ' + payload.to.domain + ' to relay this message: ' + ((err.cause && err.cause.message) ? err.cause.message : err.message) });
           }
           const relayBody = await relayRes.json().catch(() => ({}));
           if (!relayRes.ok) {

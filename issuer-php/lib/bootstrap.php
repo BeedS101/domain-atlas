@@ -226,13 +226,7 @@ function verify_own_credential_signature($publicKeyB64url, $credential, $payload
 // another domain — every other cross-domain trust check in this protocol
 // has always been the CLIENT's job (extension/wallet.js's own
 // verifyCredential()). Federation's relay step is the first time a SERVER
-// itself needs to. No HTTP client library exists anywhere in this
-// dependency-free bundle, so this uses plain file_get_contents() against an
-// http(s):// stream wrapper (allow_url_fopen, on by default) rather than
-// requiring the curl extension — 'ignore_errors' => true is what lets a
-// non-2xx response's JSON body still be read instead of file_get_contents()
-// just returning false, same as issuer-server/server.js's own fetch() calls
-// read the body on a rejection.
+// itself needs to.
 
 // Same http(s)-scheme-by-hostname convention issuer-server/server.js's own
 // baseUrl() and extension/wallet.js's own baseUrl() already use — kept in
@@ -244,29 +238,91 @@ function atlas_base_url($domain) {
   return rtrim(($isLocalHost ? 'http://' : 'https://') . $domain, '/');
 }
 
-// POSTs JSON to another domain and returns its status + decoded body
-// regardless of whether that status was 2xx — a relay attempt needs to see
-// WHY the home domain rejected something, not just that it did.
-function atlas_http_post_json($url, $body) {
+// Every genuinely cross-host request this server ever makes identifies
+// itself with this — PHP's stream wrapper sends no User-Agent at all by
+// default, and a shared host's own bot/WAF protection (mod_security,
+// Imunify360, etc. — common on cPanel hosting) routinely blocks exactly
+// that as looking like a scanner, which a browser request from the same
+// page never hits. Named plainly so a receiving host's admin can see
+// what it is.
+const ATLAS_OUTBOUND_USER_AGENT = 'DomainAtlas-Relay/1.0';
+
+// The actual outbound HTTP call both atlas_http_post_json() and
+// fetch_domain_public_key() below build on. Tries the curl extension
+// FIRST, falling back to a plain file_get_contents() stream-wrapper
+// request only if curl isn't loaded — discovered the hard way: a shared
+// host can easily have the `openssl` PHP extension disabled (breaking
+// the https:// stream wrapper outright, "no suitable wrapper could be
+// found", with NO wrapper capable of an outbound HTTPS request at all)
+// while `curl` stays fully functional, since curl links its own TLS
+// support at the C level rather than going through PHP's stream-wrapper
+// registry. Every host this bundle has ever run on so far has had curl,
+// so this is the primary path now, not a fallback of last resort; the
+// stream-wrapper path stays only for the rare host without even that.
+// Returns ['status' => int, 'raw' => string] on any completed request
+// (2xx or not — a caller needs to see WHY the other domain rejected
+// something, not just that it did), or throws with the real underlying
+// reason on a connection that never completed at all.
+function atlas_http_request($method, $url, $jsonBody = null) {
+  $headers = ['User-Agent: ' . ATLAS_OUTBOUND_USER_AGENT, 'Accept: application/json'];
+  if ($jsonBody !== null) $headers[] = 'Content-Type: application/json';
+
+  if (function_exists('curl_init')) {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+      CURLOPT_CUSTOMREQUEST => $method,
+      CURLOPT_HTTPHEADER => $headers,
+      CURLOPT_RETURNTRANSFER => true,
+      CURLOPT_TIMEOUT => 10,
+      CURLOPT_FOLLOWLOCATION => false,
+    ]);
+    if ($jsonBody !== null) curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($jsonBody));
+    $raw = curl_exec($ch);
+    if ($raw === false) {
+      $err = curl_error($ch);
+      curl_close($ch);
+      throw new Exception($err ?: 'curl request failed for an unknown reason');
+    }
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    return ['status' => $status, 'raw' => $raw];
+  }
+
   $context = stream_context_create([
     'http' => [
-      'method' => 'POST',
-      'header' => "Content-Type: application/json\r\n",
-      'content' => json_encode($body),
+      'method' => $method,
+      'header' => implode("\r\n", $headers) . "\r\n",
+      'content' => $jsonBody !== null ? json_encode($jsonBody) : null,
       'ignore_errors' => true,
       'timeout' => 10,
     ],
   ]);
+  error_clear_last();
   $raw = @file_get_contents($url, false, $context);
-  if ($raw === false) throw new Exception('could not reach ' . $url);
+  if ($raw === false) {
+    $err = error_get_last();
+    throw new Exception($err ? $err['message'] : 'request failed for an unknown reason');
+  }
   $status = 0;
   if (isset($http_response_header)) {
     foreach ($http_response_header as $header) {
       if (preg_match('#^HTTP/\S+\s+(\d+)#', $header, $m)) { $status = (int) $m[1]; break; }
     }
   }
-  $decoded = json_decode($raw, true);
-  return ['status' => $status, 'body' => is_array($decoded) ? $decoded : []];
+  return ['status' => $status, 'raw' => $raw];
+}
+
+// POSTs JSON to another domain and returns its status + decoded body
+// regardless of whether that status was 2xx — a relay attempt needs to see
+// WHY the home domain rejected something, not just that it did.
+function atlas_http_post_json($url, $body) {
+  try {
+    $res = atlas_http_request('POST', $url, $body);
+  } catch (Exception $e) {
+    throw new Exception('could not reach ' . $url . ' (' . $e->getMessage() . ')');
+  }
+  $decoded = json_decode($res['raw'], true);
+  return ['status' => $res['status'], 'body' => is_array($decoded) ? $decoded : []];
 }
 
 // Task #97 (SPEC.md §11.4 step 3): fetches another domain's own published
@@ -277,10 +333,13 @@ function atlas_http_post_json($url, $body) {
 // checked at the moment it arrives, not against some earlier issuedAt),
 // same as issuer-server/server.js's fetchDomainPublicKey().
 function fetch_domain_public_key($domain) {
-  $context = stream_context_create(['http' => ['method' => 'GET', 'ignore_errors' => true, 'timeout' => 10]]);
-  $raw = @file_get_contents(atlas_base_url($domain) . '/.well-known/atlas-key.json', false, $context);
-  if ($raw === false) throw new Exception('could not fetch ' . $domain . '\'s published key');
-  $keyDoc = json_decode($raw, true);
+  try {
+    $res = atlas_http_request('GET', atlas_base_url($domain) . '/.well-known/atlas-key.json');
+  } catch (Exception $e) {
+    throw new Exception('could not fetch ' . $domain . '\'s published key (' . $e->getMessage() . ')');
+  }
+  if ($res['status'] !== 200) throw new Exception($domain . ' returned HTTP ' . $res['status'] . ' for its own published key');
+  $keyDoc = json_decode($res['raw'], true);
   if (!is_array($keyDoc) || empty($keyDoc['keys'])) throw new Exception($domain . ' returned no usable key document');
   $now = time();
   foreach ($keyDoc['keys'] as $k) {
