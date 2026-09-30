@@ -1190,6 +1190,16 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'fungible' => false, 'presentation' => 'document',
     'properties' => ['com.example.filingType' => 'Annual Compliance Filing'],
   ],
+  // demo-domain-a/clawback-demo.html (SPEC.md §5.3's suspend-style
+  // reversible freeze and §5.12's clawback) — mirrors issuer-server/
+  // server.js's ASSET_CATALOG entry of the same name; see that entry's own
+  // comment. No modelPath override to 'bound': it has to move hands via an
+  // ordinary transfer for the demo's "theft" step to be genuine.
+  'atlas.demo.clawback.token' => [
+    'name' => 'Demo Recovery Token', 'modelPath' => '/assets/badge.glb',
+    'fungible' => false, 'presentation' => 'collectible',
+    'properties' => ['com.example.note' => 'Stands in for anything worth protecting once a key is compromised.'],
+  ],
   // Test-only fixture for manual-asset-expiry.js — mirrors issuer-server/
   // server.js's ASSET_CATALOG entry of the same name; see that entry's own
   // comment for why this exists.

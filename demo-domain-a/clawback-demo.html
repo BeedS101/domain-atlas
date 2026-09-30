@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Suspend &amp; Clawback Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button.danger { background: var(--red); border-color: var(--red); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .btnRow { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+  .card {
+    border: 1px solid var(--line); border-radius: 9px; padding: 1rem; background: #fbfcfd;
+    display: flex; flex-direction: column; gap: 0.55rem; margin-top: 1rem;
+  }
+  .card h3 { margin: 0; font-size: 1rem; }
+  .badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
+    text-transform: uppercase; padding: 0.15em 0.55em; border-radius: 999px; width: fit-content;
+  }
+  .badge.giftable { background: var(--green-bg); color: var(--green); }
+  .badge.suspended { background: #fff3e0; color: #9a5b00; }
+  .badge.stolen { background: var(--red-bg); color: var(--red); }
+  .badge.recovered { background: var(--accent-bg); color: var(--accent); }
+  .props { font-size: 0.86rem; color: var(--muted); }
+  .props div { margin: 0.1rem 0; }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.2rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  details.raw { font-size: 0.8rem; margin-top: 0.1rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  .fillVerifyBtn { display: block; margin-top: 0.55rem; font-size: 0.8rem; padding: 0.4rem 0.8rem; }
+  textarea#verifyInput {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; margin-top: 0.7rem; resize: vertical;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>Freeze it, then decide</h1>
+  <p class="tag">A real compromised-key theft, a real suspension, a real blocked sale, and a real recovery.</p>
+  <p class="lede">
+    Click below and this page mints you one collectible, then walks it through a theft the
+    way one actually happens: a key that can sign anything it's asked to, doing exactly
+    that. Everything after is genuine — a real transfer to the thief, a real suspension
+    placed against the fraud report, a real sale attempt that the freeze actually blocks,
+    and then either a real release or a real clawback, your call. Nothing here is staged;
+    every request below is a live call to this domain's own server.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this looks like for a real business</h2>
+    <p>
+      Swap "collectible" for a company's signing key, a customer's loyalty balance, or a
+      benefits card — anything that keeps its value only as long as it sits with the right
+      key. A suspicious report shouldn't have to choose between doing nothing and undoing
+      it outright: freezing it first buys time to find out which one is true, and the
+      credential itself is what proves whether the freeze is even real.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Step 1 — mint your token</h2>
+    <button id="mintBtn">Mint my demo token</button>
+    <button id="resetBtn" class="secondary" type="button" style="display:none; margin-left:0.6rem;">Start over</button>
+    <p id="mintStatus" class="props" style="margin-top:0.6rem;"></p>
+    <div id="tokenCard"></div>
+  </div>
+
+  <div class="panel" id="theftPanel" style="display:none;">
+    <h2>Step 2 — the key behind it gets compromised</h2>
+    <p class="props" style="margin-top:0;">
+      A phished password, a copied seed phrase, malware on the device — however it happens,
+      the result is the same: someone else now has a key that can sign anything you could.
+      This page plays both parts, so clicking below signs a real transfer with
+      <em>your</em> own key, sending it to a thief's wallet — dishonest of the thief, but
+      cryptographically a completely ordinary, valid request.
+    </p>
+    <div class="btnRow">
+      <button id="stealBtn">Simulate the theft</button>
+      <button id="launderBtn" class="secondary" type="button" disabled>Launder it one hop further (optional)</button>
+    </div>
+    <div id="theftResult"></div>
+  </div>
+
+  <div class="panel" id="reportPanel" style="display:none;">
+    <h2>Step 3 — you notice, and report it</h2>
+    <p class="props" style="margin-top:0;">
+      You don't have the thief's key, and you can't undo a signature after the fact — but
+      you can still recognize your own token wherever it's landed and ask this domain to
+      freeze it on the spot, pending a decision.
+    </p>
+    <button id="suspendBtn">Report it stolen — suspend it</button>
+    <div id="suspendResult"></div>
+  </div>
+
+  <div class="panel" id="salePanel" style="display:none;">
+    <h2>Step 4 — watch the freeze actually work</h2>
+    <p class="props" style="margin-top:0;">
+      The thief lines up a buyer and tries to cash out before anyone notices. This is a
+      completely ordinary transfer, the same one that worked fine back in Step 2 — the only
+      thing that changed is the suspension now sitting on this exact credential.
+    </p>
+    <button id="attemptSaleBtn">Try to sell it to a buyer</button>
+    <div id="saleResult"></div>
+  </div>
+
+  <div class="panel" id="decidePanel" style="display:none;">
+    <h2>Step 5 — you decide</h2>
+    <p class="props" style="margin-top:0;">
+      Both paths below are real. One lifts the freeze and lets the very sale from Step 4
+      go through exactly as it would have all along. The other reissues the token straight
+      into your own wallet and permanently revokes the stolen one, wherever it currently
+      sits — the thief's laundering hop, if you took it, makes no difference.
+    </p>
+    <div class="btnRow">
+      <button id="unsuspendBtn" class="secondary">False alarm — unsuspend</button>
+      <button id="clawbackBtn" class="danger">Confirmed — claw it back</button>
+    </div>
+    <div id="decideResult"></div>
+  </div>
+
+  <div class="panel" id="verifyPanel">
+    <h2>Step 6 — verify any credential, independently</h2>
+    <p class="props" style="margin-top:0;">
+      Paste a credential's raw JSON below and check it. This runs entirely in your own
+      browser: it fetches this domain's public key and revocation list — the same two
+      public files anyone, including your own systems, could fetch directly — then checks
+      the signature and looks the id up in the revocation list. Try the old, stolen
+      credential after a clawback below and watch it come back revoked.
+    </p>
+    <textarea id="verifyInput" rows="8" placeholder='Paste a credential&#8217;s raw JSON here, or click &#8220;Try verifying this one&#8221; on the card above.'></textarea>
+    <div style="margin-top:0.6rem;">
+      <button id="verifyBtn" type="button">Verify</button>
+    </div>
+    <div id="verifyResult"></div>
+  </div>
+
+  <p class="footnote">
+    Nothing on this page is stored in a database anywhere. Suspension and clawback are
+    ordinarily an operator's own admin-gated actions (SPEC.md §5.3, §5.12) — this page
+    reaches a narrow, purpose-built stand-in for that authority that only ever acts on
+    this one toy class, and only when handed the credential's own currently-valid signed
+    body, the same "you can only act on what you can already fully name" rule the login
+    demo's self-serve revoke already uses. <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64urlDecode(str) {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  // Same shape as issuer-server/server.js's canonicalize() — sorted-key
+  // JSON, no whitespace. Has to match byte-for-byte or the server's own
+  // signature check fails.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function issueAsset(ownerPublicKey, assetClass) {
+    const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
+    return res.body;
+  }
+  // Real /atlas/asset/transfer, signed by whichever identity currently
+  // holds the credential — used for the theft itself, the optional
+  // laundering hop, the blocked sale attempt, and the post-unsuspend retry.
+  async function transferAsset(sender, credential, recipientPublicKey) {
+    const payload = { credentialId: credential.id, recipientPublicKey, action: 'transfer' };
+    const proof = await signWithSelf(sender, payload);
+    return postJson('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload, proof } });
+  }
+  async function demoSuspend(credential) {
+    return postJson('/atlas/demo/clawback/suspend', { credential });
+  }
+  async function demoUnsuspend(credential) {
+    return postJson('/atlas/demo/clawback/unsuspend', { credential });
+  }
+  async function demoClawback(credential, toPublicKey) {
+    return postJson('/atlas/demo/clawback/clawback', { credential, toPublicKey });
+  }
+  // Same signed-payload shape and same checks as business-demo.html's own
+  // verifyCredentialIndependently() (SPEC.md §5, steps 1/2/4) — fetches
+  // this domain's public .well-known files directly rather than asking the
+  // server "is this valid", so the result reflects only what anyone else
+  // could check for themselves, not this page's say-so.
+  async function verifyCredentialIndependently(credential) {
+    const [keyDoc, revDoc] = await Promise.all([
+      fetch('/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json()),
+      fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
+    ]);
+    const issuedAt = new Date(credential.issuedAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
+    });
+    if (!activeKey) return { valid: false, reason: 'issuer key was not valid at issuedAt' };
+    const payload = {
+      id: credential.id, asset: credential.asset, owner: credential.owner,
+      quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
+    };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match the issuer's key" };
+    const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
+    if (revoked) return { valid: false, reason: 'revoked by the issuer' };
+    return { valid: true, reason: "signature verified against the issuer's current key; not revoked" };
+  }
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    let credential;
+    try {
+      credential = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    try {
+      const verdict = await verifyCredentialIndependently(credential);
+      resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+      resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = 'Could not verify: ' + err.message;
+    }
+  }
+  function fillAndVerify(credential) {
+    document.getElementById('verifyInput').value = JSON.stringify(credential, null, 2);
+    document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    runVerify();
+  }
+
+  // Page-scoped state. This page plays every party in the story at once —
+  // you, the thief, the fence, the buyer — the same "one tab, several
+  // identities" shape business-demo.html already uses for "you" and "your
+  // friend".
+  let you = null, thief = null, fence = null, buyer = null;
+  let liveCredential = null;     // the current, currently-valid signed body
+  let holderName = null;         // 'you' | 'thief' | 'fence' | 'buyer'
+  let launderedThroughFence = false;
+  let suspended = false;
+
+  function holderIdentity() {
+    return { you, thief, fence, buyer }[holderName];
+  }
+
+  function rawDetails(credential) {
+    const shown = {
+      id: credential.id,
+      owner: credential.owner.publicKey.slice(0, 20) + '…',
+      issuer: credential.issuer.domain,
+      signature: credential.signature.slice(0, 24) + '…',
+      asset: credential.asset
+    };
+    return JSON.stringify(shown, null, 2);
+  }
+
+  function renderTokenCard() {
+    const holderLabel = { you: 'you', thief: "the thief", fence: 'the fence', buyer: 'the buyer' }[holderName];
+    let badgeClass = 'giftable', badgeText = 'With you';
+    if (suspended) { badgeClass = 'suspended'; badgeText = 'Suspended'; }
+    else if (holderName === 'thief' || holderName === 'fence') { badgeClass = 'stolen'; badgeText = 'Stolen'; }
+    else if (holderName === 'buyer') { badgeClass = 'giftable'; badgeText = 'Sold'; }
+    else if (holderName === 'you' && liveCredential.supersedes) { badgeClass = 'recovered'; badgeText = 'Recovered'; }
+
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML =
+      '<span class="badge ' + badgeClass + '">' + badgeText + '</span>' +
+      '<h3>' + liveCredential.asset.name + '</h3>' +
+      '<div class="props">Currently held by: ' + holderLabel + '</div>' +
+      '<div class="props">' + Object.entries(liveCredential.asset.properties || {}).map(([k, v]) => '<div>' + k + ': ' + v + '</div>').join('') + '</div>' +
+      '<details class="raw"><summary>View raw signed credential</summary><pre></pre>' +
+      '<button class="fillVerifyBtn secondary" type="button">Try verifying this one independently ↓</button></details>';
+    div.querySelector('pre').textContent = rawDetails(liveCredential);
+    div.querySelector('.fillVerifyBtn').addEventListener('click', () => fillAndVerify(liveCredential));
+    const host = document.getElementById('tokenCard');
+    host.innerHTML = '';
+    host.appendChild(div);
+  }
+
+  document.getElementById('mintBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('mintBtn');
+    const status = document.getElementById('mintStatus');
+    btn.disabled = true;
+    status.textContent = 'Generating a wallet keypair and minting your token…';
+    try {
+      you = await genIdentity();
+      liveCredential = await issueAsset(you.publicKey, 'atlas.demo.clawback.token');
+      holderName = 'you';
+      renderTokenCard();
+      status.textContent = 'Done — minted to a fresh public key generated just now in this tab.';
+      document.getElementById('resetBtn').style.display = '';
+      document.getElementById('theftPanel').style.display = '';
+    } catch (err) {
+      status.textContent = 'Something went wrong: ' + err.message;
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('stealBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('stealBtn');
+    const resultEl = document.getElementById('theftResult');
+    btn.disabled = true;
+    resultEl.innerHTML = '';
+    thief = await genIdentity();
+    const res = await transferAsset(you, liveCredential, thief.publicKey);
+    if (res.ok) {
+      liveCredential = res.body.credential;
+      holderName = 'thief';
+      renderTokenCard();
+      resultEl.innerHTML = '<div class="result err">Gone — a real, valid transfer just moved it to the thief\'s wallet, signed with your own (compromised) key.</div>';
+      document.getElementById('launderBtn').disabled = false;
+      document.getElementById('reportPanel').style.display = '';
+    } else {
+      resultEl.innerHTML = '<div class="result err">Transfer failed: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('launderBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('launderBtn');
+    const resultEl = document.getElementById('theftResult');
+    btn.disabled = true;
+    fence = await genIdentity();
+    const res = await transferAsset(thief, liveCredential, fence.publicKey);
+    if (res.ok) {
+      liveCredential = res.body.credential;
+      holderName = 'fence';
+      launderedThroughFence = true;
+      renderTokenCard();
+      resultEl.innerHTML += '<div class="result err">Moved on again — now with the fence, one hop further from you.</div>';
+    } else {
+      resultEl.innerHTML += '<div class="result err">Laundering hop failed: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('suspendBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('suspendBtn');
+    const resultEl = document.getElementById('suspendResult');
+    btn.disabled = true;
+    document.getElementById('launderBtn').disabled = true;
+    const res = await demoSuspend(liveCredential);
+    if (res.ok) {
+      suspended = true;
+      renderTokenCard();
+      resultEl.innerHTML = '<div class="result ok">Suspended — this exact credential is now frozen pending review, wherever it currently sits.</div>';
+      document.getElementById('salePanel').style.display = '';
+    } else {
+      resultEl.innerHTML = '<div class="result err">Could not suspend: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
+      btn.disabled = false;
+      document.getElementById('launderBtn').disabled = false;
+    }
+  });
+
+  document.getElementById('attemptSaleBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('attemptSaleBtn');
+    const resultEl = document.getElementById('saleResult');
+    btn.disabled = true;
+    buyer = await genIdentity();
+    const res = await transferAsset(holderIdentity(), liveCredential, buyer.publicKey);
+    if (res.ok) {
+      // Only reachable if suspend somehow didn't take — not expected.
+      liveCredential = res.body.credential;
+      holderName = 'buyer';
+      renderTokenCard();
+      resultEl.innerHTML = '<div class="result err">Unexpected — the sale went through.</div>';
+    } else {
+      resultEl.innerHTML = '<div class="result ok">Blocked, exactly as it should be: "' + ((res.body && res.body.error) || 'unknown error') + '"</div>';
+      document.getElementById('decidePanel').style.display = '';
+    }
+  });
+
+  document.getElementById('unsuspendBtn').addEventListener('click', async () => {
+    const unsuspendBtn = document.getElementById('unsuspendBtn');
+    const clawbackBtn = document.getElementById('clawbackBtn');
+    const resultEl = document.getElementById('decideResult');
+    unsuspendBtn.disabled = true;
+    clawbackBtn.disabled = true;
+    const res = await demoUnsuspend(liveCredential);
+    if (!res.ok) {
+      resultEl.innerHTML = '<div class="result err">Could not unsuspend: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
+      unsuspendBtn.disabled = false;
+      clawbackBtn.disabled = false;
+      return;
+    }
+    suspended = false;
+    resultEl.innerHTML = '<div class="result ok">Lifted — false alarm confirmed. Retrying the exact same sale from Step 4…</div>';
+    const retry = await transferAsset(holderIdentity(), liveCredential, buyer.publicKey);
+    if (retry.ok) {
+      liveCredential = retry.body.credential;
+      holderName = 'buyer';
+      renderTokenCard();
+      resultEl.innerHTML += '<div class="result ok">Sale completed — the freeze is gone, and this token behaves exactly as it did before Step 2 ever happened.</div>';
+    } else {
+      resultEl.innerHTML += '<div class="result err">Retry failed: ' + ((retry.body && retry.body.error) || 'unknown error') + '</div>';
+    }
+  });
+
+  document.getElementById('clawbackBtn').addEventListener('click', async () => {
+    const unsuspendBtn = document.getElementById('unsuspendBtn');
+    const clawbackBtn = document.getElementById('clawbackBtn');
+    const resultEl = document.getElementById('decideResult');
+    unsuspendBtn.disabled = true;
+    clawbackBtn.disabled = true;
+    const oldCredential = liveCredential;
+    const res = await demoClawback(liveCredential, you.publicKey);
+    if (!res.ok) {
+      resultEl.innerHTML = '<div class="result err">Could not claw it back: ' + ((res.body && res.body.error) || 'unknown error') + '</div>';
+      unsuspendBtn.disabled = false;
+      clawbackBtn.disabled = false;
+      return;
+    }
+    liveCredential = res.body.newCredential;
+    holderName = 'you';
+    suspended = false;
+    renderTokenCard();
+    resultEl.innerHTML = '<div class="result ok">Clawed back — a brand new credential just landed straight in your own wallet' +
+      (launderedThroughFence ? ', skipping right past the fence it was laundered through' : '') + '.</div>';
+    const verdict = await verifyCredentialIndependently(oldCredential);
+    resultEl.innerHTML += '<div class="result ' + (verdict.valid ? 'ok' : 'err') + '">Checking the old, stolen credential independently: ' +
+      (verdict.valid ? 'still valid?! (unexpected)' : 'no longer valid — ' + verdict.reason) + '</div>';
+  });
+
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
+
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    you = null; thief = null; fence = null; buyer = null;
+    liveCredential = null; holderName = null; launderedThroughFence = false; suspended = false;
+    document.getElementById('tokenCard').innerHTML = '';
+    document.getElementById('mintStatus').textContent = '';
+    document.getElementById('mintBtn').disabled = false;
+    document.getElementById('resetBtn').style.display = 'none';
+    document.getElementById('theftPanel').style.display = 'none';
+    document.getElementById('reportPanel').style.display = 'none';
+    document.getElementById('salePanel').style.display = 'none';
+    document.getElementById('decidePanel').style.display = 'none';
+    document.getElementById('theftResult').innerHTML = '';
+    document.getElementById('suspendResult').innerHTML = '';
+    document.getElementById('saleResult').innerHTML = '';
+    document.getElementById('decideResult').innerHTML = '';
+    document.getElementById('stealBtn').disabled = false;
+    document.getElementById('launderBtn').disabled = true;
+    document.getElementById('suspendBtn').disabled = false;
+    document.getElementById('attemptSaleBtn').disabled = false;
+    document.getElementById('unsuspendBtn').disabled = false;
+    document.getElementById('clawbackBtn').disabled = false;
+    document.getElementById('verifyInput').value = '';
+    const verifyResult = document.getElementById('verifyResult');
+    verifyResult.className = '';
+    verifyResult.textContent = '';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+</script>
+</body>
+</html>

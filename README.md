@@ -1376,6 +1376,57 @@ against the PHP port, including a genuine three-simultaneous-signers
 race proving the `flock()` fix holds under real concurrent signing, not
 just in theory.
 
+## Freezing a stolen credential, then deciding
+
+`demo-domain-a/clawback-demo.html` walks a theft through the two
+mechanisms that exist for exactly this: suspend (SPEC.md §5.3-adjacent,
+a reversible freeze) and clawback (SPEC.md §5.12, an issuer-forced
+recovery). No new credential shape and no new verification steps for
+either one — a suspended credential still checks out against everything
+in SPEC.md §5's own four verification steps, it's the presentation-time
+gates (`checkPresentedGiftableAsset`/`check_presented_giftable_asset` and
+its siblings) that additionally refuse anything currently on the
+suspension list, and a clawed-back credential is an ordinary asset
+credential like any other.
+
+The page mints one `atlas.demo.clawback.token` to a fresh identity, then
+plays the rest of the story with identities it generates in the same tab:
+a real `/atlas/asset/transfer`, signed with the rightful owner's own key,
+moves it to a "thief" — dishonest, but cryptographically indistinguishable
+from a real compromised-key theft, which is the point. An optional second
+hop launders it on to a "fence." Reporting it stolen calls
+`/atlas/demo/clawback/suspend`; the thief (or fence) then genuinely tries
+to sell it to a "buyer" via the same ordinary transfer endpoint, and it's
+genuinely rejected — `checkPresentedGiftableAsset` sees the live
+suspension and refuses before the signature is even checked. From there,
+`/atlas/demo/clawback/unsuspend` retries and completes that exact sale
+(false alarm), or `/atlas/demo/clawback/clawback` reissues the token
+straight into the original owner's wallet and permanently revokes the
+stolen one — wherever it's since moved to, laundering hop or not.
+
+Suspend, unsuspend, and clawback are ordinarily an operator's own
+admin-gated actions (`POST /atlas/suspend`, `/atlas/unsuspend`,
+`/atlas/clawback`, all `require_admin_auth()`-gated) — a live-site visitor
+has no such login. The three new `/atlas/demo/clawback/*` routes are the
+same self-serve pattern `login-demo.html`'s revoke and the warranty/
+cafeteria demos already use: no admin auth at all, hardcoded to
+`atlas.demo.clawback.token` only, and gated instead on the credential's
+own currently-valid issuer signature — whoever can produce the full
+signed body is treated as "the rightful reporter of its own theft" for
+this one toy class, the same "you can only act on what you can already
+fully name" rule every other self-serve route already relies on. Unlike
+those siblings, suspend/unsuspend deliberately skip an ownership check —
+a stolen credential's whole point is that it no longer sits with whoever
+can prove they minted it.
+
+`test/manual-demo-self-serve.js` (which already covered the warranty,
+cafeteria, and login self-serve routes) now also drives these three end
+to end on both backends: suspending and proving a real transfer is
+genuinely blocked by it (not just that the endpoint said ok), unsuspending
+and proving that exact same transfer now succeeds, and clawing a stolen
+token back while rejecting a no-op target — plus a regression check that
+the real admin-gated siblings still reject an unauthenticated request.
+
 ## 9. Verify it yourself
 
 ```bash

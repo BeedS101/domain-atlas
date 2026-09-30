@@ -18,6 +18,13 @@ demo-domain-a/.well-known/atlas-key.json
 demo-domain-a/.well-known/atlas-revocations.json
 demo-domain-a/.well-known/atlas-suspensions.json
 
+# The second, independent keypair SPEC.md §5.11's attestation demo
+# generates for "the reviewer" (REVIEWER_KEY_FILE/REVIEWER_PUBLIC_KEY_FILE)
+# — a real private key plus its public mirror, same reasoning as the pair
+# above, just missed when that pair was first ignored.
+issuer-server/reviewer-private-key.jwk.json
+demo-domain-a/.well-known/atlas-reviewer-key.json
+
 # Same, for the second issuer-server instance README.md's "Serve the two
 # demo domains" now runs for demo-domain-b (task #75/#87's Post Office) —
 # its own private key + mail/roster state, plus demo-domain-b's own
@@ -37,6 +44,11 @@ issuer-php/lib/atlas-*.json
 issuer-php/.well-known/atlas-key.json
 issuer-php/.well-known/atlas-revocations.json
 issuer-php/.well-known/atlas-suspensions.json
+
+# Same reviewer-key pair as the Node entries above, PHP's own paths
+# (atlas_reviewer_key_file()/atlas_reviewer_public_key_file(), lib/store.php).
+issuer-php/lib/reviewer-private-key.pem
+issuer-php/.well-known/atlas-reviewer-key.json
 
 # Test run artifacts
 test/atlas-wallet-export.json

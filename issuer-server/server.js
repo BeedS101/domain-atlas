@@ -986,6 +986,22 @@ const ASSET_CATALOG = {
       'com.example.filingType': 'Annual Compliance Filing'
     }
   },
+  // demo-domain-a/clawback-demo.html (SPEC.md §5.3's suspend-style
+  // reversible freeze and §5.12's clawback): stands in for anything worth
+  // protecting — an account, an heirloom, a balance — while the demo walks
+  // a stolen credential through a real compromised-key transfer, a real
+  // suspension, a real blocked transfer attempt, and a real recovery. No
+  // tradeScope override: it has to move hands via an ordinary
+  // /atlas/asset/transfer for the "theft" step to be genuine, not staged.
+  'atlas.demo.clawback.token': {
+    name: 'Demo Recovery Token',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    fungible: false,
+    presentation: 'collectible',
+    properties: {
+      'com.example.note': 'Stands in for anything worth protecting once a key is compromised.'
+    }
+  },
   // Test-only fixture for manual-asset-expiry.js: a real expiresAt with a
   // sub-minute deadline, so the automated check can observe a genuine
   // expiry within a couple of seconds instead of waiting the museum
@@ -1145,6 +1161,7 @@ const DEMO_CAFETERIA_FULFILLABLE_CLASSES = [
   'atlas.demo.cafeteria.snack'
 ];
 const DEMO_ATTESTATION_FILING_CLASS = 'atlas.demo.attestation.filing';
+const DEMO_CLAWBACK_TOKEN_CLASS = 'atlas.demo.clawback.token';
 
 // Fixed claim text an attestation-demo.html visitor can request FROM the
 // second, independent domain playing "the reviewer" (SPEC.md §5.11) — a
@@ -3359,6 +3376,94 @@ async function main() {
         revoke(id, 'demo-self-serve');
         console.log('Demo-revoked attestation', id);
         return sendJson(res, 200, { ok: true });
+      }
+
+      // POST /atlas/demo/clawback/suspend — self-serve sibling of the real,
+      // admin-gated suspend action behind /atlas/clawback (SPEC.md §5.3),
+      // hardcoded to DEMO_CLAWBACK_TOKEN_CLASS. clawback-demo.html has no
+      // admin login to freeze a credential with, so — same "plays the
+      // privileged role" reasoning as every other /atlas/demo/* route above
+      // — this lets the credential's own currently-valid signature stand in
+      // for that authority: whoever can still produce a full, correctly
+      // signed copy of the token is treated as "the rightful reporter of
+      // its own theft" for this one toy class, never anything else in
+      // ASSET_CATALOG. Deliberately does NOT check who currently owns it —
+      // a stolen credential's whole point is that it no longer sits with
+      // the person who can prove they minted it, so ownership can't be the
+      // gate here the way it is for an ordinary transfer.
+      if (req.method === 'POST' && req.url === '/atlas/demo/clawback/suspend') {
+        const { credential } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
+        if (credential.asset.class !== DEMO_CLAWBACK_TOKEN_CLASS) {
+          return sendJson(res, 400, { error: 'this endpoint only suspends ' + DEMO_CLAWBACK_TOKEN_CLASS });
+        }
+        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'this domain did not issue this credential' });
+        }
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
+        const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
+        suspend(credential.id, 'demo-fraud-report', null);
+        console.log('Demo-suspended', credential.id);
+        return sendJson(res, 200, { ok: true });
+      }
+
+      // POST /atlas/demo/clawback/unsuspend — the "false alarm" branch of
+      // the same walkthrough above: lifts a suspension placed by the
+      // endpoint above, under the identical class/issuer/signature checks.
+      // No isRevoked/isSuspended precondition here — unsuspend() itself
+      // already reports whether there was anything to lift, and asking a
+      // demo visitor to first re-diagnose the credential's current state
+      // just to call this would add nothing but a redundant round trip.
+      if (req.method === 'POST' && req.url === '/atlas/demo/clawback/unsuspend') {
+        const { credential } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
+        if (credential.asset.class !== DEMO_CLAWBACK_TOKEN_CLASS) {
+          return sendJson(res, 400, { error: 'this endpoint only unsuspends ' + DEMO_CLAWBACK_TOKEN_CLASS });
+        }
+        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'this domain did not issue this credential' });
+        }
+        const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
+        const wasSuspended = unsuspend(credential.id);
+        console.log('Demo-unsuspended', credential.id, wasSuspended ? '(was suspended)' : '(was not suspended)');
+        return sendJson(res, 200, { ok: true, wasSuspended });
+      }
+
+      // POST /atlas/demo/clawback/clawback — self-serve sibling of the
+      // real, admin-gated /atlas/clawback (SPEC.md §5.12), hardcoded the
+      // same way as the two routes above. Confirms SPEC.md §5.12's own
+      // framing that clawback finds a stolen asset wherever it currently
+      // sits: toPublicKey only has to differ from the credential's CURRENT
+      // owner, not from whoever first held it, so the demo's optional
+      // thief-to-fence laundering hop makes no difference to this check.
+      // No roster to fix up here — DEMO_CLAWBACK_TOKEN_CLASS is never a
+      // membership credential — so this mirrors the real endpoint's
+      // core three steps only (reissue, revoke, archive) and skips its
+      // mail-delivery and roster fix-up, which exist there for classes
+      // this demo class was never meant to touch.
+      if (req.method === 'POST' && req.url === '/atlas/demo/clawback/clawback') {
+        const { credential, toPublicKey } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
+        if (!toPublicKey) return sendJson(res, 400, { error: 'toPublicKey is required' });
+        if (credential.asset.class !== DEMO_CLAWBACK_TOKEN_CLASS) {
+          return sendJson(res, 400, { error: 'this endpoint only claws back ' + DEMO_CLAWBACK_TOKEN_CLASS });
+        }
+        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'this domain did not issue this credential' });
+        }
+        if (toPublicKey === credential.owner.publicKey) {
+          return sendJson(res, 400, { error: "toPublicKey already matches the credential's current owner — nothing to claw back" });
+        }
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked — nothing to claw back' });
+        const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
+        const newCredential = await issueAsset(toPublicKey, credential.asset, credential.quantity, credential.id);
+        revoke(credential.id, 'clawback');
+        archiveIfAudited(credential, 'clawback');
+        console.log('Demo-clawed-back', credential.id, '-> reissued to', toPublicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { newCredential });
       }
 
       // POST /atlas/demo/bank/request-approval — bank-demo.html's K-of-N

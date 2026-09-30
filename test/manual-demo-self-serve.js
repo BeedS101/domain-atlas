@@ -1,13 +1,14 @@
-// Manual check for the four self-serve /atlas/demo/* routes added so a
-// solo visitor to warranty-demo.html, cafeteria-demo.html, and
-// login-demo.html can finish those pages without a real admin login — the
-// live site (evtec.co.za) has no way for an ordinary visitor to become an
-// admin, so those pages previously asked a visitor to do something they
+// Manual check for the self-serve /atlas/demo/* routes added so a solo
+// visitor to warranty-demo.html, cafeteria-demo.html, login-demo.html, and
+// clawback-demo.html can finish those pages without a real admin login —
+// the live site (evtec.co.za) has no way for an ordinary visitor to become
+// an admin, so those pages previously asked a visitor to do something they
 // simply couldn't do. Each new route does exactly what its admin-gated
 // sibling does (POST /atlas/asset/mint, /atlas/asset/reissue,
-// /atlas/asset/fulfill, /atlas/revoke respectively), minus the auth, but
-// hardcoded to touch only its own page's own toy class — this test's main
-// job is proving that class-scoping actually holds, on both backends.
+// /atlas/asset/fulfill, /atlas/revoke, /atlas/suspend, /atlas/unsuspend,
+// /atlas/clawback respectively), minus the auth, but hardcoded to touch
+// only its own page's own toy class — this test's main job is proving
+// that class-scoping actually holds, on both backends.
 //
 // Run at the HTTP layer directly against BOTH backends, same isolated-
 // instance reasoning every other manual-*.js test in this project uses.
@@ -34,6 +35,22 @@
 //      routes didn't loosen them.
 //  10. PHP — the same mint+stamp-sale, cafeteria class-scoping, and login
 //      class-scoping behavior on an independent issuer-php bundle.
+//  11. Node — POST /atlas/demo/clawback/suspend succeeds with no auth, and
+//      a real /atlas/asset/transfer attempt against that exact credential
+//      is genuinely rejected as suspended — proving the freeze holds, not
+//      just that the endpoint returned ok.
+//  12. Node — the same suspend route rejects a credential outside
+//      atlas.demo.clawback.token.
+//  13. Node — POST /atlas/demo/clawback/unsuspend lifts the freeze, and the
+//      identical transfer blocked in step 11 now succeeds for real.
+//  14. Node — POST /atlas/demo/clawback/clawback reissues a stolen token
+//      straight to a chosen recipient, genuinely signed, revokes the old
+//      one, and rejects toPublicKey already matching the current owner.
+//  15. Node — regression: the real admin-gated /atlas/suspend,
+//      /atlas/unsuspend, and /atlas/clawback still reject an
+//      unauthenticated request exactly as before.
+//  16. PHP — the same suspend/block/unsuspend/retry and clawback behavior
+//      on the independent issuer-php bundle.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -76,6 +93,16 @@ function canonicalize(value) {
   if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
   const keys = Object.keys(value).sort();
   return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+}
+async function signWithSelf(identity, payload) {
+  const data = new TextEncoder().encode(canonicalize(payload));
+  const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+  return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64url(new Uint8Array(sig)) };
+}
+async function transferAsset(base, sender, credential, recipientPublicKey) {
+  const payload = { credentialId: credential.id, recipientPublicKey, action: 'transfer' };
+  const proof = await signWithSelf(sender, payload);
+  return postJson(base, '/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload, proof } });
 }
 async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
   const res = await postJson(base, '/atlas/asset/issue', { ownerPublicKey, assetClass, ...(quantity !== undefined ? { quantity } : {}) });
@@ -210,6 +237,74 @@ async function isRevoked(base, credentialId) {
     const phpWrongRevoke = await postJson(PHP_BASE, '/atlas/demo/login/revoke', { credential: phpOutOfScope });
     assert(phpWrongRevoke.status === 400, 'expected PHP to reject an out-of-scope revoke too, got: ' + JSON.stringify(phpWrongRevoke.body));
     console.log('PASS: PHP matches Node across all four self-serve demo routes');
+
+    console.log('STEP 11: Node — /atlas/demo/clawback/suspend succeeds with no auth, and a real transfer attempt against it is genuinely blocked');
+    const owner = await genIdentity();
+    const buyer = await genIdentity();
+    let token = await issueAsset(NODE_BASE, owner.publicKey, 'atlas.demo.clawback.token');
+    const suspended = await postJson(NODE_BASE, '/atlas/demo/clawback/suspend', { credential: token });
+    assert(suspended.status === 200 && suspended.body.ok === true, 'expected the self-serve suspend to succeed, got: ' + JSON.stringify(suspended.body));
+    const blockedSale = await transferAsset(NODE_BASE, owner, token, buyer.publicKey);
+    assert(blockedSale.status === 400 && /suspended pending review/.test(blockedSale.body.error), 'expected the transfer to be genuinely blocked by the suspension, got: ' + JSON.stringify(blockedSale.body));
+    console.log('PASS: suspending with no admin login actually freezes the credential —', token.id);
+
+    console.log('STEP 12: Node — /atlas/demo/clawback/suspend rejects a credential outside atlas.demo.clawback.token');
+    const wrongClassSuspend = await postJson(NODE_BASE, '/atlas/demo/clawback/suspend', { credential: outOfScope });
+    assert(wrongClassSuspend.status === 400 && /only suspends/.test(wrongClassSuspend.body.error), 'expected an out-of-scope rejection, got: ' + JSON.stringify(wrongClassSuspend.body));
+    console.log('PASS: suspending an out-of-scope class is rejected —', wrongClassSuspend.body.error);
+
+    console.log('STEP 13: Node — /atlas/demo/clawback/unsuspend lifts the freeze, and the same blocked sale now succeeds for real');
+    const unsuspended = await postJson(NODE_BASE, '/atlas/demo/clawback/unsuspend', { credential: token });
+    assert(unsuspended.status === 200 && unsuspended.body.ok === true && unsuspended.body.wasSuspended === true, 'expected the self-serve unsuspend to succeed and report it lifted something, got: ' + JSON.stringify(unsuspended.body));
+    const retriedSale = await transferAsset(NODE_BASE, owner, token, buyer.publicKey);
+    assert(retriedSale.status === 200, 'expected the identical transfer to succeed once unsuspended, got: ' + JSON.stringify(retriedSale.body));
+    console.log('PASS: unsuspending with no admin login genuinely lifts the freeze —', retriedSale.body.credential.id);
+
+    console.log('STEP 14: Node — /atlas/demo/clawback/clawback reissues a stolen token to its rightful owner, revokes the old one, and rejects a no-op target');
+    const victim = await genIdentity();
+    const thief = await genIdentity();
+    let stolen = await issueAsset(NODE_BASE, victim.publicKey, 'atlas.demo.clawback.token');
+    const theftTransfer = await transferAsset(NODE_BASE, victim, stolen, thief.publicKey);
+    assert(theftTransfer.status === 200, 'expected the simulated theft transfer to succeed, got: ' + JSON.stringify(theftTransfer.body));
+    stolen = theftTransfer.body.credential;
+    const noopClawback = await postJson(NODE_BASE, '/atlas/demo/clawback/clawback', { credential: stolen, toPublicKey: thief.publicKey });
+    assert(noopClawback.status === 400 && /nothing to claw back/.test(noopClawback.body.error), 'expected clawing back to the current owner to be rejected, got: ' + JSON.stringify(noopClawback.body));
+    const clawedBack = await postJson(NODE_BASE, '/atlas/demo/clawback/clawback', { credential: stolen, toPublicKey: victim.publicKey });
+    assert(clawedBack.status === 200, 'expected the self-serve clawback to succeed, got: ' + JSON.stringify(clawedBack.body));
+    assert(clawedBack.body.newCredential.owner.publicKey === victim.publicKey, 'expected the new credential to belong to the victim, got: ' + JSON.stringify(clawedBack.body.newCredential.owner));
+    assert(await verifyGenuineSignature(NODE_BASE, clawedBack.body.newCredential), 'expected the clawed-back credential to carry a genuine issuer signature');
+    assert(await isRevoked(NODE_BASE, stolen.id), 'expected the stolen credential to be revoked after clawback');
+    console.log('PASS: self-serve clawback returns a stolen token straight to its owner —', clawedBack.body.newCredential.id);
+
+    console.log('STEP 15: Node — regression: the real admin-gated /atlas/suspend, /atlas/unsuspend, and /atlas/clawback still reject an unauthenticated request');
+    const realSuspend = await postJson(NODE_BASE, '/atlas/suspend', { payload: { id: token.id, reason: 'test' } });
+    const realUnsuspend = await postJson(NODE_BASE, '/atlas/unsuspend', { payload: { id: token.id } });
+    const realClawback = await postJson(NODE_BASE, '/atlas/clawback', { payload: { credential: token, toPublicKey: buyer.publicKey } });
+    assert([realSuspend.status, realUnsuspend.status, realClawback.status].every((s) => s === 401), 'expected every real admin-gated suspend/unsuspend/clawback route to still reject with no auth, got: ' + JSON.stringify([realSuspend.status, realUnsuspend.status, realClawback.status]));
+    console.log('PASS: the real admin-gated suspend/unsuspend/clawback routes are unaffected — still 401 with no admin proof');
+
+    console.log('STEP 16: PHP — the same suspend/block/unsuspend/retry and clawback behavior on the independent issuer-php bundle');
+    const phpOwner = await genIdentity();
+    const phpBuyer = await genIdentity();
+    let phpToken = await issueAsset(PHP_BASE, phpOwner.publicKey, 'atlas.demo.clawback.token');
+    const phpSuspended = await postJson(PHP_BASE, '/atlas/demo/clawback/suspend', { credential: phpToken });
+    assert(phpSuspended.status === 200 && phpSuspended.body.ok === true, 'expected PHP self-serve suspend to succeed, got: ' + JSON.stringify(phpSuspended.body));
+    const phpBlockedSale = await transferAsset(PHP_BASE, phpOwner, phpToken, phpBuyer.publicKey);
+    assert(phpBlockedSale.status === 400 && /suspended pending review/.test(phpBlockedSale.body.error), 'expected PHP to genuinely block the suspended transfer too, got: ' + JSON.stringify(phpBlockedSale.body));
+    const phpUnsuspended = await postJson(PHP_BASE, '/atlas/demo/clawback/unsuspend', { credential: phpToken });
+    assert(phpUnsuspended.status === 200 && phpUnsuspended.body.wasSuspended === true, 'expected PHP self-serve unsuspend to succeed, got: ' + JSON.stringify(phpUnsuspended.body));
+    const phpRetriedSale = await transferAsset(PHP_BASE, phpOwner, phpToken, phpBuyer.publicKey);
+    assert(phpRetriedSale.status === 200, 'expected PHP to allow the retried transfer once unsuspended, got: ' + JSON.stringify(phpRetriedSale.body));
+    const phpVictim = await genIdentity();
+    const phpThief = await genIdentity();
+    let phpStolen = await issueAsset(PHP_BASE, phpVictim.publicKey, 'atlas.demo.clawback.token');
+    const phpTheftTransfer = await transferAsset(PHP_BASE, phpVictim, phpStolen, phpThief.publicKey);
+    assert(phpTheftTransfer.status === 200, 'expected the PHP simulated theft transfer to succeed, got: ' + JSON.stringify(phpTheftTransfer.body));
+    phpStolen = phpTheftTransfer.body.credential;
+    const phpClawedBack = await postJson(PHP_BASE, '/atlas/demo/clawback/clawback', { credential: phpStolen, toPublicKey: phpVictim.publicKey });
+    assert(phpClawedBack.status === 200 && phpClawedBack.body.newCredential.owner.publicKey === phpVictim.publicKey, 'expected PHP self-serve clawback to succeed, got: ' + JSON.stringify(phpClawedBack.body));
+    assert(await isRevoked(PHP_BASE, phpStolen.id), 'expected PHP to revoke the stolen credential after clawback');
+    console.log('PASS: PHP matches Node across suspend, unsuspend, and clawback self-serve routes');
 
     console.log('\nALL DEMO SELF-SERVE CHECKS PASSED');
   } catch (err) {
