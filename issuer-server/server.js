@@ -150,6 +150,17 @@ const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
 // consult on every send, not a public document.
 const MAIL_ENCRYPTION_KEYS_FILE = path.join(STATE_DIR, 'atlas-mail-encryption-keys.json');
 const ASSET_UPDATES_FILE = path.join(STATE_DIR, 'atlas-asset-updates-store.json');
+// Opt-in archive of a superseded credential's own full body, for any class
+// whose ASSET_CATALOG entry sets `auditHistory: true` (see
+// atlas.demo.warranty.certificate below for the first one) — off by
+// default, so every other class's supersession events cost this nothing.
+// Not a new mechanism: every credential already carries `supersedes`, a
+// signed pointer to whatever it replaced (SPEC.md §5's own "On
+// terminology" note already calls this a verifiable lineage), but nothing
+// requires an issuer to keep serving a superseded body once it's revoked.
+// This is that missing piece — see archiveIfAudited() below, and GET
+// /atlas/asset/history for what it's for.
+const ASSET_HISTORY_FILE = path.join(STATE_DIR, 'atlas-asset-history-store.json');
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // one entry per asset CLASS an operator has ever patched (POST
 // /atlas/admin/class-patch), never one per item or per holder: a bulk
@@ -905,11 +916,19 @@ const ASSET_CATALOG = {
   // properties by whoever's looking, not enforced by isExpired(), since
   // that would also block transferring a product whose warranty already
   // lapsed, which is exactly backwards for a used-goods resale.
+  //
+  // `auditHistory: true` is the first real use of archiveIfAudited() (see
+  // ASSET_HISTORY_FILE's own comment) — every stamp-sale and every resale
+  // supersedes the certificate with a fresh credential, so without this
+  // nothing on the current one alone could tell a later owner whether it
+  // was ever resold before, or what the factory/retailer set at each step.
+  // GET /atlas/asset/history?id=... walks it back to the original mint.
   'atlas.demo.warranty.certificate': {
     name: 'Warranty Certificate',
     model: `https://${DOMAIN}/assets/badge.glb`,
     fungible: false,
-    presentation: 'document'
+    presentation: 'document',
+    auditHistory: true
   },
   // demo-domain-a/attestation-demo.html (SPEC.md §5.11): the asset a
   // completely separate domain then independently attests to. Nothing
@@ -1549,6 +1568,52 @@ function revoke(id, reason) {
   const doc = readRevocations();
   doc.revoked.push({ id, revokedAt: new Date().toISOString(), reason });
   fs.writeFileSync(REVOCATIONS_FILE, JSON.stringify(doc, null, 2));
+}
+
+// See ASSET_HISTORY_FILE's own comment above. Called alongside revoke()
+// at every site that supersedes a credential with a freshly minted
+// replacement — a no-op for any class that hasn't opted in, so this adds
+// nothing to the ordinary path except one cheap catalog lookup. Archives
+// the OLD credential's full signed body (still independently verifiable
+// later against this domain's key history) plus why it was superseded and
+// when, keyed by the id that's about to stop being served anywhere else.
+function readAssetHistory() {
+  if (!fs.existsSync(ASSET_HISTORY_FILE)) return { archived: [] };
+  return JSON.parse(fs.readFileSync(ASSET_HISTORY_FILE, 'utf8'));
+}
+function archiveIfAudited(credential, reason) {
+  const catalogEntry = ASSET_CATALOG[credential.asset.class];
+  if (!catalogEntry || !catalogEntry.auditHistory) return;
+  const doc = readAssetHistory();
+  doc.archived.push({ ...credential, archivedAt: new Date().toISOString(), reason });
+  fs.writeFileSync(ASSET_HISTORY_FILE, JSON.stringify(doc, null, 2));
+}
+function findArchivedAsset(id) {
+  return readAssetHistory().archived.find((a) => a.id === id) || null;
+}
+// Walks backward from `id` through archived predecessor bodies, following
+// each one's own `supersedes` in turn, and returns them oldest-first.
+// `id` is the id to start FROM — ordinarily the caller's own current
+// credential's `supersedes` value (the caller's own current body is never
+// itself archived, since it hasn't been superseded yet), or any
+// already-archived id if inspecting a past link directly. Stops rather
+// than guessing the moment `supersedes` is an array (a fungible
+// consolidation, which merges more than one lineage into one credential —
+// genuinely branching, not a single chain) since nothing using this so
+// far produces one; a class that needs to walk branches too can extend
+// this later. Also stops on a cycle, though one should never occur.
+function walkAssetHistory(id) {
+  const chain = [];
+  const seen = new Set();
+  let current = id;
+  while (current && typeof current === 'string' && !seen.has(current)) {
+    seen.add(current);
+    const archived = findArchivedAsset(current);
+    if (!archived) break;
+    chain.push(archived);
+    current = archived.supersedes;
+  }
+  return chain.reverse();
 }
 
 // A second, orthogonal way a credential can stop being valid, alongside
@@ -2411,6 +2476,7 @@ async function main() {
     };
     const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
     revoke(credential.id, 'class-patch');
+    archiveIfAudited(credential, 'class-patch');
     const update = { id: credential.id, status: 'superseded', reason: 'class-patch', newCredential };
     appendAssetUpdate(update);
     console.log('Auto-reissued (class patch)', credential.asset.name, credential.id, '->', newCredential.id);
@@ -2777,6 +2843,7 @@ async function main() {
       ? await transferUniqueAsset(claimantPublicKey, credential)
       : await mintAssetByClass(claimantPublicKey, credential.asset.class, credential.quantity, credential.id);
     revoke(credential.id, 'claimed from a world drop');
+    archiveIfAudited(credential, 'claimed from a world drop');
     return received;
   }
 
@@ -3039,6 +3106,7 @@ async function main() {
         const newAsset = { ...credential.asset, properties: mergeProperties(credential.asset.properties, properties) };
         const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
         revoke(credential.id, 'superseded');
+        archiveIfAudited(credential, 'superseded');
         appendAssetUpdate({ id: credential.id, status: 'superseded', reason: 'superseded', newCredential });
         console.log('Demo-stamped sale on', credential.id, '->', newCredential.id);
         return sendJson(res, 200, { newCredential });
@@ -3449,9 +3517,25 @@ async function main() {
         // a crash between the two would leave an extra valid asset rather
         // than a holder with neither.
         revoke(credential.id, 'superseded');
+        archiveIfAudited(credential, 'superseded');
         appendAssetUpdate({ id: credential.id, status: 'superseded', reason: 'superseded', newCredential });
         console.log('Reissued', credential.asset.name, credential.id, '->', newCredential.id);
         return sendJson(res, 200, { newCredential });
+      }
+
+      // GET /atlas/asset/history?id=... — ungated, same "read is open"
+      // reasoning as every other status/discovery read in this file. `id`
+      // is the id to start walking the archive FROM, ordinarily your own
+      // current credential's own `supersedes` value (your current body
+      // isn't itself archived yet — only what it replaced is), or any
+      // already-archived id if you're inspecting a past link directly. An
+      // empty chain just means either nothing before this id was archived,
+      // or the class it belongs to never opted into auditHistory at all —
+      // see ASSET_HISTORY_FILE's own comment.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/asset/history') {
+        const id = new URLSearchParams(req.url.split('?')[1] || '').get('id');
+        if (!id) return sendJson(res, 400, { error: 'id is required' });
+        return sendJson(res, 200, { chain: walkAssetHistory(id) });
       }
 
       // Admin-gated (requireAdminAuth, same as every other admin action):
@@ -3596,6 +3680,7 @@ async function main() {
         const sent = await mintAssetByClass(toPublicKey, expectedClass, sendAmount, credential.id);
         const remainder = remainderQty > 0 ? await mintAssetByClass(expectedOwner, expectedClass, remainderQty, credential.id) : null;
         revoke(credential.id, 'superseded');
+        archiveIfAudited(credential, 'superseded');
         console.log('Split', expectedClass, '- sent', sendAmount, 'kept', remainderQty);
         return sendJson(res, 200, { sent, remainder });
       }
@@ -3630,7 +3715,7 @@ async function main() {
         }
         const total = credentials.reduce((sum, c) => sum + c.quantity, 0);
         const merged = await mintAssetByClass(owner, cls, total, ids);
-        ids.forEach((id) => revoke(id, 'consolidated'));
+        credentials.forEach((c) => { revoke(c.id, 'consolidated'); archiveIfAudited(c, 'consolidated'); });
         console.log('Consolidated', credentials.length, cls, 'balances into', total, 'for', owner.slice(0, 16) + '...');
         return sendJson(res, 200, merged);
       }
@@ -3695,6 +3780,7 @@ async function main() {
           remainderQty > 0 ? mintAssetByClass(expectedOwner, fromClass, remainderQty, credential.id) : Promise.resolve(null)
         ]);
         revoke(credential.id, 'superseded');
+        archiveIfAudited(credential, 'superseded');
         console.log('Converted', spendAmount, fromClass, '->', resultQuantity, toClass, 'for', expectedOwner.slice(0, 16) + '...');
         return sendJson(res, 200, { received, remainder });
       }
@@ -3785,6 +3871,7 @@ async function main() {
 
         const received = await transferUniqueAsset(recipientPublicKey, credential);
         revoke(credential.id, 'transferred');
+        archiveIfAudited(credential, 'transferred');
         console.log('Transferred', credential.asset.class, credential.id, '->', recipientPublicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { status: 'transferred', credential: received });
       }
@@ -3871,6 +3958,7 @@ async function main() {
           ? await mintAssetByClass(buyerPub, catalogEntry.purchase.priceClass, remainderQty, credential.id)
           : null;
         revoke(credential.id, 'superseded');
+        archiveIfAudited(credential, 'superseded');
         console.log('Purchased', qty, purchasedClass, 'for', totalPrice, catalogEntry.purchase.priceClass, '-', buyerPub.slice(0, 16) + '...');
         return sendJson(res, 200, { balance, purchased });
       }
@@ -4168,6 +4256,8 @@ async function main() {
         ]);
         revoke(balanceA.id, 'superseded');
         revoke(balanceB.id, 'superseded');
+        archiveIfAudited(balanceA, 'superseded');
+        archiveIfAudited(balanceB, 'superseded');
         removePendingTrade(posted.id);
 
         if (aRemainder) appendAssetUpdate({ id: balanceA.id, status: 'superseded', reason: 'superseded', newCredential: aRemainder });

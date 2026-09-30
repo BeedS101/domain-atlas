@@ -41,5 +41,8 @@ foreach ($credentials as $credential) {
 
 $total = array_reduce($credentials, function ($sum, $c) { return $sum + $c['quantity']; }, 0);
 $merged = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $owner, $cls, $total, $ids);
-foreach ($ids as $id) atlas_revoke($id, 'consolidated');
+foreach ($credentials as $c) {
+  atlas_revoke($c['id'], 'consolidated');
+  archive_if_audited($c, 'consolidated');
+}
 send_json(200, $merged);

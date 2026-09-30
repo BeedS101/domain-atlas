@@ -99,6 +99,7 @@ $newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $credent
 // the two would leave an extra valid asset rather than a holder with
 // neither.
 atlas_revoke($credential['id'], 'superseded');
+archive_if_audited($credential, 'superseded');
 append_asset_update(['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'superseded', 'newCredential' => $newCredential]);
 
 send_json(200, ['newCredential' => $newCredential]);

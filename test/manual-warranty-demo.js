@@ -25,6 +25,13 @@
 //      while keeping the exact same serial number and warranty status.
 //   6. "Try verifying this one independently" on the transferred
 //      certificate reports it valid.
+//   7. "View full history" walks the certificate's own `supersedes` chain
+//      back through every prior link (the two earlier stamps and the
+//      original mint) via a real GET /atlas/asset/history call — proving
+//      atlas.demo.warranty.certificate's `auditHistory: true` opt-in
+//      (issuer-server/server.js's ASSET_CATALOG entry) actually archives a
+//      credential's full body every time it's superseded, not just on one
+//      specific endpoint.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -125,6 +132,17 @@ function isoDateDaysAgo(days) {
     await page.locator('#certificateCard .fillVerifyBtn').click();
     await page.waitForFunction(() => (document.getElementById('verifyResult').textContent || '').startsWith('✓ Valid'), { timeout: 10000 });
     console.log('PASS: independently verified as valid —', await page.locator('#verifyResult').textContent());
+
+    console.log('STEP 7: "View full history" walks the supersedes chain back through both stamps and the original mint');
+    await page.locator('#historyBtn').click();
+    await page.waitForFunction(() => document.querySelectorAll('#historyResult .card').length > 0, { timeout: 10000 });
+    const historyCards = await page.locator('#historyResult .card').allTextContents();
+    assert(historyCards.length === 3, 'expected 3 archived links (original mint + both stamps), got ' + historyCards.length);
+    assert(historyCards.every((c) => c.includes('SN-0001')), 'expected every archived link to still carry the original serial number');
+    assert(!historyCards[0].includes('Sold by'), 'expected the oldest link (the original mint) to carry no retailer yet, got: ' + historyCards[0]);
+    assert(historyCards[1].includes('Example Retailer'), 'expected the middle link (the first stamp) to carry the retailer name, got: ' + historyCards[1]);
+    assert(historyCards[2].includes('Example Retailer'), 'expected the third link (the second stamp, since re-stamping counts as its own supersession) to carry the retailer name too, got: ' + historyCards[2]);
+    console.log('PASS: full history shows all 3 prior links, each independently carrying the original serial number');
 
     console.log('\nALL WARRANTY DEMO CHECKS PASSED');
   } catch (err) {

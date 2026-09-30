@@ -44,6 +44,7 @@ $newAsset['properties'] = merge_properties($newAsset['properties'] ?? [], $prope
 $newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id']);
 
 atlas_revoke($credential['id'], 'superseded');
+archive_if_audited($credential, 'superseded');
 append_asset_update(['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'superseded', 'newCredential' => $newCredential]);
 
 send_json(200, ['newCredential' => $newCredential]);

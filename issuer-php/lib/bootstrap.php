@@ -351,6 +351,7 @@ function apply_class_patch_if_stale($privateKey, $publicKeyB64url, $credential) 
   if (isset($patch['properties'])) $newAsset['properties'] = merge_properties($newAsset['properties'] ?? [], $patch['properties']);
   $newCredential = issue_asset($privateKey, $publicKeyB64url, $credential['owner']['publicKey'], $newAsset, $credential['quantity'], $credential['id']);
   atlas_revoke($credential['id'], 'class-patch');
+  archive_if_audited($credential, 'class-patch');
   $update = ['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'class-patch', 'newCredential' => $newCredential];
   append_asset_update($update);
   return $update;
@@ -874,6 +875,7 @@ function fulfill_world_drop_claim($kp, $credential, $claimantPublicKey) {
     $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $credential['asset']['class'], $credential['quantity'], $credential['id']);
   }
   atlas_revoke($credential['id'], 'claimed from a world drop');
+  archive_if_audited($credential, 'claimed from a world drop');
   return $received;
 }
 

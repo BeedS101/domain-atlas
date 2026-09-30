@@ -83,6 +83,21 @@ function atlas_asset_updates_file() {
   return __DIR__ . '/atlas-asset-updates-store.json';
 }
 
+// Opt-in archive of a superseded credential's own full body, for any class
+// whose ATLAS_ASSET_CATALOG entry sets 'auditHistory' => true (see
+// atlas.demo.warranty.certificate above for the first one) — off by
+// default, so every other class's supersession events cost this nothing.
+// Not a new mechanism: every credential already carries `supersedes`, a
+// signed pointer to whatever it replaced (SPEC.md §5's own "On
+// terminology" note already calls this a verifiable lineage), but nothing
+// requires an issuer to keep serving a superseded body once it's revoked.
+// This is that missing piece — see archive_if_audited() below, and GET
+// /atlas/asset/history for what it's for. Mirrors issuer-server/
+// server.js's ASSET_HISTORY_FILE.
+function atlas_asset_history_file() {
+  return __DIR__ . '/atlas-asset-history-store.json';
+}
+
 // Same "not web-reachable" reasoning as atlas_mail_file() above — one
 // entry per asset CLASS an operator has ever patched (POST /atlas/admin/
 // class-patch), never one per item or per holder: a bulk alternative to
@@ -1118,11 +1133,17 @@ const ATLAS_ASSET_CATALOG_BASE = [
   // default. No expiresInMinutes either — "expired" is read off the
   // stamped properties by whoever's looking, not enforced by is_expired(),
   // since that would also block transferring a product whose warranty
-  // already lapsed. Mirrors issuer-server/server.js's ASSET_CATALOG entry
-  // of the same name.
+  // already lapsed. `auditHistory` => true is the first real use of
+  // archive_if_audited() (see atlas_asset_history_file()'s own comment) —
+  // every stamp-sale and every resale supersedes the certificate with a
+  // fresh credential, so without this nothing on the current one alone
+  // could tell a later owner whether it was ever resold before, or what
+  // the factory/retailer set at each step. GET /atlas/asset/history?id=...
+  // walks it back to the original mint. Mirrors issuer-server/server.js's
+  // ASSET_CATALOG entry of the same name.
   'atlas.demo.warranty.certificate' => [
     'name' => 'Warranty Certificate', 'modelPath' => '/assets/badge.glb',
-    'fungible' => false, 'presentation' => 'document',
+    'fungible' => false, 'presentation' => 'document', 'auditHistory' => true,
   ],
   // demo-domain-a/attestation-demo.html (SPEC.md §5.11) — the asset a
   // completely separate domain then independently attests to. An ordinary
@@ -1443,6 +1464,69 @@ function atlas_revoke($id, $reason) {
   fflush($fh);
   flock($fh, LOCK_UN);
   fclose($fh);
+}
+
+// See atlas_asset_history_file()'s own comment above. Called alongside
+// atlas_revoke() at every site that supersedes a credential with a
+// freshly minted replacement — a no-op for any class that hasn't opted
+// in, so this adds nothing to the ordinary path except one cheap catalog
+// lookup. Archives the OLD credential's full signed body (still
+// independently verifiable later against this domain's key history) plus
+// why it was superseded and when, keyed by the id that's about to stop
+// being served anywhere else. Same flock-guarded read-modify-write shape
+// as atlas_revoke() above — PHP requests can genuinely run concurrently,
+// unlike the single-threaded Node demo.
+function read_asset_history() {
+  $fh = fopen(atlas_asset_history_file(), 'c+');
+  if ($fh === false) return ['archived' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) && isset($doc['archived']) ? $doc : ['archived' => []];
+}
+function archive_if_audited($credential, $reason) {
+  $cls = $credential['asset']['class'] ?? null;
+  $catalogEntry = $cls !== null && isset(ATLAS_ASSET_CATALOG[$cls]) ? ATLAS_ASSET_CATALOG[$cls] : null;
+  if (!$catalogEntry || empty($catalogEntry['auditHistory'])) return;
+  $file = atlas_asset_history_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['archived'])) $doc = ['archived' => []];
+  $doc['archived'][] = array_merge($credential, ['archivedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason]);
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+function find_archived_asset($id) {
+  foreach (read_asset_history()['archived'] as $a) {
+    if (($a['id'] ?? null) === $id) return $a;
+  }
+  return null;
+}
+// Walks backward from $id through archived predecessor bodies, following
+// each one's own `supersedes` in turn, and returns them oldest-first. See
+// issuer-server/server.js's walkAssetHistory() for the full reasoning,
+// including why this stops rather than guesses the moment `supersedes` is
+// an array (a fungible consolidation, genuinely branching, not a single
+// chain).
+function walk_asset_history($id) {
+  $chain = [];
+  $seen = [];
+  $current = $id;
+  while (is_string($current) && $current !== '' && !isset($seen[$current])) {
+    $seen[$current] = true;
+    $archived = find_archived_asset($current);
+    if (!$archived) break;
+    $chain[] = $archived;
+    $current = $archived['supersedes'] ?? null;
+  }
+  return array_reverse($chain);
 }
 
 // ---------- mail (flock-guarded, same reasoning as revocations above —

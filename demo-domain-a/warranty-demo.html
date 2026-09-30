@@ -135,6 +135,19 @@
     <div id="certificateCard"></div>
   </div>
 
+  <div class="panel" id="historyPanel" style="display:none;">
+    <h2>Full history</h2>
+    <p class="props" style="margin-top:0;">
+      A genuine call to <code>GET /atlas/asset/history</code> — walks this certificate's own
+      <code>supersedes</code> chain back through every stamped sale and every resale, one
+      archived link at a time, each one still an independently verifiable signed credential
+      in its own right. Nothing about this is specific to warranties — any class can opt into
+      the same archive, this is just the first one that does.
+    </p>
+    <button type="button" id="historyBtn" class="secondary">View full history</button>
+    <div id="historyResult"></div>
+  </div>
+
   <div class="panel" id="reissuePanel" style="display:none;">
     <h2>Step 2 of 4 — the retailer stamps the sale</h2>
     <p class="props" style="margin-top:0;">
@@ -310,8 +323,14 @@
       runVerify();
     });
     document.getElementById('cardPanel').style.display = '';
+    document.getElementById('historyPanel').style.display = '';
     document.getElementById('reissuePanel').style.display = '';
     document.getElementById('transferPanel').style.display = '';
+    // A fresh mint/stamp/transfer makes the certificate's own `supersedes`
+    // move, so any history shown for the PREVIOUS credential is now stale —
+    // clear it rather than leave a result that no longer matches what's
+    // displayed above it.
+    document.getElementById('historyResult').innerHTML = '';
   }
 
   document.getElementById('copyKeyBtn').addEventListener('click', async () => {
@@ -415,6 +434,49 @@
     } catch (err) {
       result.className = 'result err';
       result.textContent = 'Could not transfer: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('historyBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('historyBtn');
+    const result = document.getElementById('historyResult');
+    // The current credential's own body is never itself archived — only
+    // what it replaced is — so the walk starts from ITS `supersedes`, not
+    // its own id. See atlas/asset/history.php's own comment (WYSIWYS-
+    // adjacent reasoning: this page already trusts its own currentCredential,
+    // so no extra verification round trip happens here, only the fetch).
+    const startId = currentCredential.supersedes;
+    if (!startId) {
+      result.innerHTML = '<p class="props">This is the original mint — nothing came before it.</p>';
+      return;
+    }
+    btn.disabled = true;
+    result.innerHTML = '<p class="props">Loading…</p>';
+    try {
+      const res = await fetch('/atlas/asset/history?id=' + encodeURIComponent(startId));
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'history lookup failed');
+      const chain = body.chain || [];
+      if (chain.length === 0) {
+        result.innerHTML = '<p class="props">No archived history found for this certificate.</p>';
+        return;
+      }
+      result.innerHTML = chain.map((c, i) => {
+        const p = (c.asset && c.asset.properties) || {};
+        return '<div class="card">' +
+          '<h3>Link ' + (i + 1) + ' of ' + chain.length + '</h3>' +
+          '<div class="props">' +
+          '<div>Serial: ' + (p['com.example.serialNumber'] || '(not set)') + '</div>' +
+          (p['com.example.retailer'] ? '<div>Sold by: ' + p['com.example.retailer'] + '</div>' : '') +
+          (p['com.example.saleDate'] ? '<div>Sale date: ' + p['com.example.saleDate'] + '</div>' : '') +
+          '<div>Owner at the time: ' + c.owner.publicKey.slice(0, 24) + '…</div>' +
+          '<div>Retired ' + new Date(c.archivedAt).toLocaleString() + ' — reason: ' + c.reason + '</div>' +
+          '</div></div>';
+      }).join('');
+    } catch (err) {
+      result.innerHTML = '<p class="result err">Could not load history: ' + err.message + '</p>';
     } finally {
       btn.disabled = false;
     }

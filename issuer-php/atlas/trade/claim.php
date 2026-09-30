@@ -122,6 +122,8 @@ $bReceived = $offerAIsUnique
 
 atlas_revoke($balanceA['id'], 'superseded');
 atlas_revoke($balanceB['id'], 'superseded');
+archive_if_audited($balanceA, 'superseded');
+archive_if_audited($balanceB, 'superseded');
 remove_pending_trade($posted['id']);
 
 if ($aRemainder) {

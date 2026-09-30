@@ -1283,6 +1283,37 @@ involved, stamping a sale to flip the status to Active, a further stamp
 flipping it to Expired, a genuine transfer preserving every fact, and
 independent verification.
 
+## Walking a credential's own history back to its original mint
+
+Every credential already carries `supersedes`, a signed pointer to
+whatever it replaced — chained backward, that's already a cryptographically
+verifiable lineage for any one asset, without a token, a chain, or a gas
+fee. What's genuinely missing is that nothing requires an issuer to keep
+serving a *superseded* credential body once it's revoked, so a holder can
+confirm an asset's immediate parent but not necessarily walk the whole
+chain back to origin. `archiveIfAudited`/`archive_if_audited` closes that
+gap: an opt-in archive, called alongside the ordinary revoke at every
+point in this project that supersedes a credential with a freshly minted
+replacement (reissue, split, consolidate, currency conversion, transfer,
+purchase, a Trading Station settlement, a class-wide patch, a claimed
+world drop) — for any class whose own catalog entry sets `auditHistory:
+true`, and a no-op (one cheap lookup) for every other class. `GET
+/atlas/asset/history?id=...` then walks that archive backward from a
+given id, following each link's own `supersedes` in turn, and returns
+the chain oldest-first.
+
+`atlas.demo.warranty.certificate` is the first class to opt in —
+`warranty-demo.html`'s own "View full history" button calls this
+endpoint with the certificate's current `supersedes` value and renders
+every prior stamp and resale it can find, each one still an
+independently verifiable signed credential in its own right, not just a
+description of what happened. `test/manual-warranty-demo.js`'s own step
+7 drives the actual button; `test/manual-asset-history-php.js` exercises
+the same mechanism directly against the PHP port's HTTP layer, including
+the real admin-gated `/atlas/asset/mint`/`/atlas/asset/reissue` endpoints
+the page itself never calls, and confirms a class that never opted in is
+never archived, however many times it changes hands.
+
 ## A transfer that needs more than one signature
 
 `demo-domain-a/bank-demo.html` demos K-of-N multi-party approval: a

@@ -1160,3 +1160,47 @@ HTTP layer directly (including a genuine concurrent-signing race), same
 "isolated instance, own port" reasoning as every other manual-*.js test —
 against a running instance of issuer-server/server.js and this bundle
 respectively.
+
+
+Opt-in audited history for a class (warranty-demo.html)
+-----------------------------------------------------------
+Every credential already carries `supersedes`, a signed pointer to
+whatever it replaced (SPEC.md section 5's own "On terminology" note
+already calls this a verifiable lineage) — but nothing requires an
+issuer to keep serving a superseded body once it's revoked, so a holder
+could confirm a credential's immediate parent but never walk the whole
+chain back to its original mint. archive_if_audited() (lib/store.php)
+closes that gap: called alongside atlas_revoke() at every site in this
+bundle that supersedes a credential with a freshly minted replacement
+(reissue, split, consolidate, convert, transfer, purchase, trade
+settlement, a class-wide patch, a claimed world drop), it archives the
+OLD credential's full signed body — still independently verifiable
+later — the instant a class whose own ATLAS_ASSET_CATALOG entry sets
+`auditHistory: true` gets superseded. Off by default: for any class that
+hasn't opted in, this costs one cheap catalog lookup and nothing else.
+GET /atlas/asset/history?id=... (atlas/asset/history.php) walks that
+archive backward from a given id, following each link's own `supersedes`
+in turn, and returns the chain oldest-first; `id` is ordinarily the
+caller's own current credential's `supersedes` value, since the current
+body isn't itself archived yet. It stops rather than guesses the moment
+`supersedes` is an array (a fungible consolidation genuinely merges more
+than one lineage into one credential, not a single chain) since nothing
+using this yet produces one.
+
+atlas.demo.warranty.certificate is the first class to opt in — every
+stamped sale and every resale supersedes the certificate with a fresh
+credential, so without this nothing on the current one alone could tell
+a later owner whether it was ever resold before, or what the factory/
+retailer set at each step. warranty-demo.html's own "View full history"
+button calls this endpoint with the certificate's own `supersedes` value
+and renders each archived link's serial/retailer/sale-date facts plus
+why and when it was retired. Storage lives in
+lib/atlas-asset-history-store.json, same flock()-guarded read-modify-
+write shape as atlas_revoke() itself, since PHP requests can genuinely
+run concurrently unlike the single-threaded Node demo.
+test/manual-warranty-demo.js's own STEP 7 drives the actual button
+against the Node backend; test/manual-asset-history-php.js exercises the
+mechanism directly against this bundle's HTTP layer, including the real
+admin-gated /atlas/asset/mint and /atlas/asset/reissue endpoints the
+page itself never calls, and confirms a class that never opted in is
+never archived, however many times it changes hands.

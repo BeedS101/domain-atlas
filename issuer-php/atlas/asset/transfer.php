@@ -51,4 +51,5 @@ if ($problem) send_json(400, ['error' => $problem]);
 
 $received = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $recipientPublicKey, $credential);
 atlas_revoke($credential['id'], 'transferred');
+archive_if_audited($credential, 'transferred');
 send_json(200, ['status' => 'transferred', 'credential' => $received]);

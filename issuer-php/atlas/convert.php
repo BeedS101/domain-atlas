@@ -66,4 +66,5 @@ $remainder = $remainderQty > 0
   ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $fromClass, $remainderQty, $credential['id'])
   : null;
 atlas_revoke($credential['id'], 'superseded');
+archive_if_audited($credential, 'superseded');
 send_json(200, ['received' => $received, 'remainder' => $remainder]);

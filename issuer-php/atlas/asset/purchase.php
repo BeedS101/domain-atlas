@@ -58,4 +58,5 @@ $balance = $remainderQty > 0
   ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $buyerPub, $priceClass, $remainderQty, $credential['id'])
   : null;
 atlas_revoke($credential['id'], 'superseded');
+archive_if_audited($credential, 'superseded');
 send_json(200, ['balance' => $balance, 'purchased' => $purchased]);
