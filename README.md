@@ -1427,6 +1427,23 @@ and proving that exact same transfer now succeeds, and clawing a stolen
 token back while rejecting a no-op target — plus a regression check that
 the real admin-gated siblings still reject an unauthenticated request.
 
+The real, operator-only siblings behind all this (`POST /atlas/suspend`,
+`/atlas/unsuspend`, `/atlas/clawback`) had no form on the admin panel
+itself — a real gap, noticed while building the demo above and left alone
+at the time since it hadn't been asked for. The admin panel
+(`issuer-server/admin-panel/index.html`, byte-identical to
+`issuer-php/atlas-admin/index.html` — see "Admin panel" earlier in this
+file) now has both: a combined "Suspend / unsuspend a credential" panel
+(one credential id field, reason/expiry only used by suspend) right next
+to Revoke, and a "Claw back a credential" panel taking the exact
+credential JSON plus the rightful owner's public key, next to it. Both
+use the session token the same way every other panel form already does —
+no new auth mechanism. Verified end to end in a real headless browser
+against both backends: a real admin session token, a real suspend that
+genuinely blocks a live-checked credential, a real unsuspend, and a real
+clawback landing a fresh credential in a new owner's hands, all driven
+through the actual page and its actual buttons, not the raw HTTP layer.
+
 ## 9. Verify it yourself
 
 ```bash
@@ -1638,9 +1655,9 @@ simplifications are worth naming plainly rather than leaving implicit:
   one-page admin panel bundled with the issuer software itself
   (`issuer-server/admin-panel/index.html`, and the byte-identical
   `issuer-php/atlas-admin/index.html`, both served at `/atlas-admin/`) —
-  forms for every gated action (revoke, reissue, class-wide patch, mail
-  send, calendar), each calling its endpoint with `{payload, token}`, no
-  signature needed per click.
+  forms for every gated action (revoke, suspend/unsuspend, clawback,
+  reissue, class-wide patch, mail send, calendar), each calling its
+  endpoint with `{payload, token}`, no signature needed per click.
   The handoff itself is the interesting part: the wallet lives in an
   extension-origin iframe, cross-origin from the domain's own pages, so it
   can't put the token in that origin's `sessionStorage` directly, and a

@@ -130,6 +130,39 @@
       </section>
 
       <section class="panel">
+        <h2>Suspend / unsuspend a credential</h2>
+        <p class="hint">A reversible freeze (POST /atlas/suspend, /atlas/unsuspend) for when a report just came in and revoking outright would be too heavy-handed — a suspended credential still exists and still verifies, it's just refused wherever a presentation is checked, until this is lifted or it expires on its own.</p>
+        <label for="suspendId">Credential id</label>
+        <input type="text" id="suspendId" placeholder="urn:atlas:asset:...">
+        <div class="row">
+          <div>
+            <label for="suspendReason">Reason (optional, suspend only)</label>
+            <input type="text" id="suspendReason" placeholder="fraud-report">
+          </div>
+          <div>
+            <label for="suspendExpiresAt">Expires at (optional, suspend only)</label>
+            <input type="text" id="suspendExpiresAt" placeholder="2026-12-01T00:00:00Z — indefinite if left blank">
+          </div>
+        </div>
+        <div class="row">
+          <button class="submit" id="suspendBtn" type="button">Suspend</button>
+          <button class="submit" id="unsuspendBtn" type="button">Unsuspend</button>
+        </div>
+        <div class="result" id="suspendResult"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Claw back a credential</h2>
+        <p class="hint">Once a suspended report is actually confirmed: revokes the credential wherever it currently sits and mints a fresh one straight to whoever it actually belongs to, in the same act (POST /atlas/clawback). Works on a stolen balance or a unique item alike, and reaches a 'bound' relationship credential (a Post Office or Trading Station membership) the same total way revoke already does — re-pointing that membership's own roster entry automatically if so. Paste the exact credential as it currently stands, wherever it's ended up.</p>
+        <label for="clawbackCredential">Credential JSON</label>
+        <textarea id="clawbackCredential" placeholder='{"credential":"domain-atlas-asset/1.0", ...}'></textarea>
+        <label for="clawbackToPublicKey">Rightful owner's public key</label>
+        <input type="text" id="clawbackToPublicKey" placeholder="base64url-encoded public key">
+        <button class="submit" id="clawbackBtn" type="button">Claw back</button>
+        <div class="result" id="clawbackResult"></div>
+      </section>
+
+      <section class="panel">
         <h2>Mint an asset</h2>
         <p class="hint">Mints a brand-new credential with its own starting facts (POST /atlas/asset/mint) — the authenticated sibling of a visitor's own self-serve mint, for when a specific instance needs a fact only this domain should be able to set (a factory's real serial number, say) rather than every unit of a class coming out identical. Properties merge onto the class's own catalog defaults, same merge rules as Reissue below.</p>
         <label for="mintOwnerPublicKey">Owner public key</label>
@@ -436,6 +469,58 @@
       try {
         const res = await postJson('/atlas/revoke', { payload: { id, reason: reason || undefined }, token: session.token });
         showResult(result, res.ok, res.ok ? 'Revoked.' : (res.body.error || 'Revoke failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- suspend / unsuspend ----------
+    document.getElementById('suspendBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('suspendBtn');
+      const result = document.getElementById('suspendResult');
+      const id = document.getElementById('suspendId').value.trim();
+      const reason = document.getElementById('suspendReason').value.trim();
+      const expiresAt = document.getElementById('suspendExpiresAt').value.trim();
+      if (!id) return showResult(result, false, 'Credential id is required.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/suspend', { payload: { id, reason: reason || undefined, expiresAt: expiresAt || undefined }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Suspended.' : (res.body.error || 'Suspend failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('unsuspendBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('unsuspendBtn');
+      const result = document.getElementById('suspendResult');
+      const id = document.getElementById('suspendId').value.trim();
+      if (!id) return showResult(result, false, 'Credential id is required.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/unsuspend', { payload: { id }, token: session.token });
+        showResult(result, res.ok, res.ok ? (res.body.wasSuspended ? 'Unsuspended.' : 'Nothing to unsuspend — it was not currently suspended.') : (res.body.error || 'Unsuspend failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- clawback ----------
+    document.getElementById('clawbackBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('clawbackBtn');
+      const result = document.getElementById('clawbackResult');
+      let credential;
+      try {
+        credential = JSON.parse(document.getElementById('clawbackCredential').value);
+      } catch (err) {
+        return showResult(result, false, 'Credential JSON does not parse: ' + err.message);
+      }
+      const toPublicKey = document.getElementById('clawbackToPublicKey').value.trim();
+      if (!toPublicKey) return showResult(result, false, "Rightful owner's public key is required.");
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/clawback', { payload: { credential, toPublicKey }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Clawed back -> ' + res.body.newCredential.id + (res.body.delivered ? ' (delivered by mail)' : ' (returned here — no live Post Office mailbox to deliver to)') : (res.body.error || 'Clawback failed.'));
       } finally {
         btn.disabled = false;
       }
