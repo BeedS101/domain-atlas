@@ -72,6 +72,14 @@ function atlas_mail_file() {
   return __DIR__ . '/atlas-mail-store.json';
 }
 
+// Hard per-recipient mailbox cap — defense in depth against unbounded mail
+// storage (read_mail()/append_mail() never pruned or expired anything
+// before this), applying equally to a local send and a federated relay.
+// Mirrors issuer-server/server.js's MAILBOX_CAP. Plain constant rather
+// than an env var, same "shared hosting doesn't make those easy to set"
+// reasoning as the Post Office thresholds below.
+const ATLAS_MAILBOX_CAP = 200;
+
 // Asset-update store (SPEC.md §5.1.1, non-fungible only) — same "not
 // web-reachable, flock-guarded flat array" shape as atlas_mail_file()
 // above. Each entry is exactly the {id, status, reason, newCredential}
@@ -160,6 +168,23 @@ function is_domain_blocked($domain) {
   $doc = json_decode(file_get_contents($path), true);
   $blocked = is_array($doc) && isset($doc['blocked']) ? $doc['blocked'] : [];
   return in_array($domain, $blocked, true);
+}
+
+// Federation relay rate limiting (SPEC.md §11.4) — mirrors issuer-server/
+// server.js's RELAY_RATE_THRESHOLD/_WINDOW_MS. Unlike
+// ATLAS_POSTOFFICE_SPAM_THRESHOLD above, which only flags a local member
+// for the operator to review, a relaying domain has no membership here to
+// leverage that way — nothing stops a throwaway domain from minting
+// itself a fresh identity and relaying again — so relay_rate_limited()
+// below actually rejects once a relaying domain crosses this threshold
+// within the window, rather than just flagging. Plain constants, same
+// "shared hosting doesn't make env vars easy to set" reasoning as the
+// Post Office thresholds.
+const ATLAS_RELAY_RATE_THRESHOLD = 30;
+const ATLAS_RELAY_RATE_WINDOW_MS = 60000;
+const ATLAS_RELAY_RATE_LOG_RETENTION_MS = 86400000; // 24 hours, in ms — same "keep more history than the detection window" reasoning as ATLAS_POSTOFFICE_SEND_LOG_RETENTION_MS
+function atlas_federation_relay_rate_file() {
+  return __DIR__ . '/atlas-federation-relay-rate-store.json';
 }
 
 // Domain admin roster — mirrors issuer-server/server.js's ADMIN_KEYS_FILE.
@@ -1551,6 +1576,20 @@ function append_mail($message) {
   $doc = json_decode($data, true);
   if (!is_array($doc)) $doc = ['messages' => []];
   $doc['messages'][] = $message;
+
+  // ATLAS_MAILBOX_CAP enforcement (see its own comment above): only this
+  // message's own mailbox is ever pruned, and only its oldest entries —
+  // every other recipient's mail is untouched.
+  $own = array_values(array_filter($doc['messages'], function ($m) use ($message) {
+    return ($m['credentialId'] ?? null) === $message['credentialId'];
+  }));
+  if (count($own) > ATLAS_MAILBOX_CAP) {
+    $dropIds = array_flip(array_map(function ($m) { return $m['id']; }, array_slice($own, 0, count($own) - ATLAS_MAILBOX_CAP)));
+    $doc['messages'] = array_values(array_filter($doc['messages'], function ($m) use ($dropIds) {
+      return !isset($dropIds[$m['id'] ?? null]);
+    }));
+  }
+
   ftruncate($fh, 0);
   rewind($fh);
   fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
@@ -2066,6 +2105,61 @@ function record_postoffice_send($credentialId) {
   }
   unset($member);
 
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// ---------- federation relay rate limiting (same flock-guarded shape as
+// record_postoffice_send() above, keyed by relayingDomain since there's no
+// membership record to hang this off of for a peer domain) ----------
+
+function read_relay_rate_log() {
+  $fh = fopen(atlas_federation_relay_rate_file(), 'c+');
+  if ($fh === false) return ['domains' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['domains' => []];
+}
+
+// Checked BEFORE fetch_domain_public_key()'s network round-trip in
+// relay.php, so a domain already over the threshold gets an immediate 429
+// instead of this domain paying for a key fetch it would just discard.
+function relay_rate_limited($relayingDomain) {
+  $doc = read_relay_rate_log();
+  $log = $doc['domains'][$relayingDomain] ?? [];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $recentCount = count(array_filter($log, function ($iso) use ($nowMs) {
+    return ($nowMs - strtotime($iso) * 1000) <= ATLAS_RELAY_RATE_WINDOW_MS;
+  }));
+  return $recentCount >= ATLAS_RELAY_RATE_THRESHOLD;
+}
+
+// Called only once a relay attempt's attestation signature has actually
+// checked out (see relay.php) — never for a raw, unverified request — so
+// naming another domain in relayAttestation without holding its key can
+// never spend that domain's own rate-limit budget.
+function record_relay_attempt($relayingDomain) {
+  $file = atlas_federation_relay_rate_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return;
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['domains' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $log = $doc['domains'][$relayingDomain] ?? [];
+  $log[] = iso_now();
+  $retained = array_values(array_filter($log, function ($iso) use ($nowMs) {
+    return ($nowMs - strtotime($iso) * 1000) <= ATLAS_RELAY_RATE_LOG_RETENTION_MS;
+  }));
+  $doc['domains'][$relayingDomain] = $retained;
   ftruncate($fh, 0);
   rewind($fh);
   fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));

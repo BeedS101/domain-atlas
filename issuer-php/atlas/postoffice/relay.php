@@ -17,6 +17,12 @@
 //   3. Recipient membership + consent — identical to §11.3 step 3 in
 //      send.php, just keyed off the ORIGINAL sender's public key rather
 //      than whoever happened to relay the message in.
+// Between steps 1 and 2, the relaying domain is also checked against the
+// operator's manual blocklist (is_domain_blocked()) and a per-domain
+// rolling-window rate limit (relay_rate_limited()) — both cheap checks on
+// the CLAIMED relaying domain, run before the network round-trip step 2
+// needs, since a domain that's already blocked or already over its
+// recent-volume budget is never going to be accepted regardless.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
@@ -60,6 +66,15 @@ if (is_domain_blocked($relayAttestation['relayingDomain'])) {
   send_json(403, ['error' => 'this domain is not accepting relayed mail from ' . $relayAttestation['relayingDomain']]);
 }
 
+// Rate limit, also checked before the same network round-trip and for the
+// same reason — a domain already over its window budget is rejected
+// without this domain paying for a key fetch it would just discard. See
+// ATLAS_RELAY_RATE_THRESHOLD's own comment (lib/store.php) for why this
+// rejects outright rather than only flagging.
+if (relay_rate_limited($relayAttestation['relayingDomain'])) {
+  send_json(429, ['error' => 'too many relayed messages from ' . $relayAttestation['relayingDomain'] . ' recently — try again shortly']);
+}
+
 // Step 2 — relaying-domain authentication (SPEC.md §11.4 step 3): fetch its
 // published key and verify the attestation against it.
 try {
@@ -71,6 +86,9 @@ $attestationOk = verify_domain_signature($relayingDomainKey, $relayAttestation, 
 if (!$attestationOk) {
   send_json(400, ['error' => $relayAttestation['relayingDomain'] . '\'s relay attestation does not check out']);
 }
+// Only recorded once the attestation is genuinely this domain's own — see
+// record_relay_attempt()'s own comment for why that matters.
+record_relay_attempt($relayAttestation['relayingDomain']);
 
 // Step 3 — recipient membership + consent, byte-for-byte the same check
 // send.php runs for a local send, keyed off the ORIGINAL sender's public

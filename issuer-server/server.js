@@ -133,6 +133,17 @@ const REVIEWER_PUBLIC_KEY_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-
 // next to the private key file for the same "server-process-only state"
 // reason, not in the public docroot.
 const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
+// Hard per-recipient mailbox cap — defense in depth against unbounded mail
+// storage, which applies equally to a local /atlas/postoffice/send and a
+// federated /atlas/postoffice/relay (readMail()/appendMail() never pruned
+// or expired anything before this). Once a credentialId's own stored
+// message count would exceed this, appendMail() below drops that
+// mailbox's OLDEST messages first — new mail (including genuinely
+// unread, legitimate mail) always gets through rather than being turned
+// away once a mailbox fills up, at the cost of a sustained flood being
+// able to crowd out real mail while it's actively happening. Other
+// recipients' mailboxes are never touched by one mailbox hitting its cap.
+const MAILBOX_CAP = parseInt(process.env.ATLAS_MAILBOX_CAP || '200', 10);
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // one entry per asset reissue (SPEC.md §5.1.1 — non-fungible only), keyed
 // by the SUPERSEDED credential's id so /atlas/mail/check can answer "what
@@ -214,6 +225,25 @@ const POSTOFFICE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-postoffice-members-s
 // PEER DOMAIN's relayed mail outright, regardless of which of its members
 // sent it.
 const FEDERATION_BLOCKLIST_FILE = path.join(STATE_DIR, 'atlas-federation-blocklist.json');
+// Federation relay rate limiting (SPEC.md §11.4): unlike POSTOFFICE_SPAM_
+// THRESHOLD/_WINDOW_MS above, which only FLAGS a local member for the
+// operator to review, a relaying domain has no membership here for that
+// leverage to work against — nothing stops a throwaway domain from
+// minting itself a fresh identity and relaying again. So this one actually
+// REJECTS once a relaying domain crosses the threshold within the window,
+// rather than just flagging. Counted per verified relay attempt (i.e.
+// after its attestation signature checks out — see recordRelayAttempt()
+// below), never per raw request, so an attacker can't burn through another
+// domain's own rate-limit budget just by naming it in relayAttestation
+// without actually holding its key. Tunable via env for a real deployment,
+// same convention as the Post Office thresholds above.
+const RELAY_RATE_THRESHOLD = parseInt(process.env.ATLAS_RELAY_RATE_THRESHOLD || '30', 10);
+const RELAY_RATE_WINDOW_MS = parseInt(process.env.ATLAS_RELAY_RATE_WINDOW_MS || '60000', 10);
+// How long a relay timestamp stays in a domain's log before being pruned —
+// same "keep more history than the detection window for later review"
+// reasoning as POSTOFFICE_SEND_LOG_RETENTION_MS.
+const RELAY_RATE_LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
+const RELAY_RATE_FILE = path.join(STATE_DIR, 'atlas-federation-relay-rate-store.json');
 // Domain admin roster: the public keys authorized to act as this domain's
 // own operator over HTTP, reusing the same visitor-identity mechanism
 // (verifyEnvelope below, SPEC.md §6.2) rather than a separate admin
@@ -1362,6 +1392,38 @@ function isDomainBlocked(domain) {
   return (readFederationBlocklist().blocked || []).includes(domain);
 }
 
+// Federation relay rate limiting (see RELAY_RATE_THRESHOLD's own comment
+// above for why this rejects rather than just flags). Same shape as
+// recordPostOfficeSend()'s rolling-window log, keyed by relayingDomain
+// instead of a member's credentialId since there's no membership record
+// to hang this off of for a peer domain.
+function readRelayRateLog() {
+  if (!fs.existsSync(RELAY_RATE_FILE)) return { domains: {} };
+  return JSON.parse(fs.readFileSync(RELAY_RATE_FILE, 'utf8'));
+}
+// Checked BEFORE fetchDomainPublicKey's network round-trip, so a domain
+// that's already over the threshold gets an immediate 429 instead of this
+// server paying for a key fetch it's just going to throw away anyway.
+function relayRateLimited(relayingDomain) {
+  const log = (readRelayRateLog().domains[relayingDomain] || []).map((iso) => new Date(iso).getTime());
+  const now = Date.now();
+  const recentCount = log.filter((t) => now - t <= RELAY_RATE_WINDOW_MS).length;
+  return recentCount >= RELAY_RATE_THRESHOLD;
+}
+// Called only once a relay attempt's attestation signature has actually
+// checked out (see the route handler below) — never for a raw, unverified
+// request — so naming another domain in relayAttestation without holding
+// its key can never spend that domain's own rate-limit budget.
+function recordRelayAttempt(relayingDomain) {
+  const doc = readRelayRateLog();
+  const now = Date.now();
+  const log = (doc.domains[relayingDomain] || []).map((iso) => new Date(iso).getTime());
+  log.push(now);
+  const retained = log.filter((t) => now - t <= RELAY_RATE_LOG_RETENTION_MS);
+  doc.domains[relayingDomain] = retained.map((t) => new Date(t).toISOString());
+  fs.writeFileSync(RELAY_RATE_FILE, JSON.stringify(doc, null, 2));
+}
+
 // Same http(s)-scheme-by-hostname convention extension/wallet.js's own
 // baseUrl() already uses (plain HTTP for localhost/loopback, since every
 // demo/test domain in this project runs that way; HTTPS otherwise) — kept
@@ -1758,6 +1820,14 @@ function readMail() {
 function appendMail(message) {
   const doc = readMail();
   doc.messages.push(message);
+  // MAILBOX_CAP enforcement (see its own comment above): only this
+  // message's own mailbox is ever pruned, and only its oldest entries —
+  // every other recipient's mail is untouched.
+  const own = doc.messages.filter((m) => m.credentialId === message.credentialId);
+  if (own.length > MAILBOX_CAP) {
+    const dropIds = new Set(own.slice(0, own.length - MAILBOX_CAP).map((m) => m.id));
+    doc.messages = doc.messages.filter((m) => !dropIds.has(m.id));
+  }
   fs.writeFileSync(MAIL_FILE, JSON.stringify(doc, null, 2));
 }
 
@@ -4918,6 +4988,15 @@ async function main() {
           return sendJson(res, 403, { error: 'this domain is not accepting relayed mail from ' + relayAttestation.relayingDomain });
         }
 
+        // Rate limit, also checked before the same network round-trip and
+        // for the same reason — a domain already over its window budget
+        // gets rejected without this server paying for a key fetch it
+        // would just discard. See RELAY_RATE_THRESHOLD's own comment for
+        // why this rejects outright rather than only flagging.
+        if (relayRateLimited(relayAttestation.relayingDomain)) {
+          return sendJson(res, 429, { error: 'too many relayed messages from ' + relayAttestation.relayingDomain + ' recently — try again shortly' });
+        }
+
         // Step 2 — relaying-domain authentication (SPEC.md §11.4 step 3):
         // fetch ITS published key and verify the attestation against it.
         // This is what stands in for sender-membership when this domain has
@@ -4935,6 +5014,10 @@ async function main() {
         if (!attestationOk) {
           return sendJson(res, 400, { error: relayAttestation.relayingDomain + '\'s relay attestation does not check out' });
         }
+        // Only recorded once the attestation is genuinely this domain's
+        // own — see recordRelayAttempt()'s own comment for why that
+        // matters.
+        recordRelayAttempt(relayAttestation.relayingDomain);
 
         // Step 3 — recipient membership + consent, byte-for-byte the same
         // check /atlas/postoffice/send runs for a local send, keyed off the
