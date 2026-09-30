@@ -2,7 +2,7 @@
 // specifically, at the HTTP layer directly — same "own isolated bundle
 // copy" reasoning every other manual-*-php.js test in this project uses
 // (see test/manual-asset-history-php.js). test/manual-clawback.js already
-// covers the same 7 checks against the Node backend; this is its PHP
+// covers the same 9 checks against the Node backend; this is its PHP
 // mirror, exercising issuer-php/atlas/clawback.php and its use of
 // atlas_revoke()/issue_asset()/find_postoffice_membership()/append_mail()
 // in lib/store.php and lib/bootstrap.php instead.
@@ -23,12 +23,13 @@
 //   6. A recipient who already holds a live Post Office membership gets
 //      the clawed-back credential delivered by mail, not just returned.
 //   7. An unauthenticated call (no proof, no token) is rejected 401.
-//
-// Not covered here, same reasoning as manual-clawback.js's own header
-// comment: clawing back a BOUND relationship credential (a Post Office/
-// Trading Station membership card) — a known, pre-existing bookkeeping
-// gap between a credential and the separate roster file that gates
-// sending mail or trading, not something worth a dedicated scenario here.
+//   8. Clawing back a Post Office membership credential re-points the
+//      SAME roster entry at the new owner: a handle registered before
+//      the clawback still resolves (now to the new owner), the new owner
+//      can send mail immediately, the old holder no longer can, and
+//      abuse-tracking (sendLog/recentSendCount/flagged) comes back clean.
+//   9. Clawing back a Trading Station membership credential the same way
+//      re-points its own (simpler) roster entry.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -85,6 +86,30 @@ async function split(credential, sendAmount, toPublicKey) {
 async function mailCheck(ids) {
   const res = await postJson('/atlas/mail/check', { credentialIds: ids });
   if (res.status !== 200) throw new Error('mail check failed: ' + JSON.stringify(res.body));
+  return res.body;
+}
+async function setHandle(identity, handle) {
+  const payload = { handle };
+  const proof = await signWithSelf(identity.kp, identity.publicKey, payload);
+  return postJson('/atlas/postoffice/handle', { payload, proof });
+}
+async function resolveHandle(handle) {
+  return postJson('/atlas/postoffice/resolve', { handle });
+}
+async function sendMail(identity, toPublicKey, subject) {
+  const payload = { to: { publicKey: toPublicKey }, subject, body: 'test' };
+  const proof = await signWithSelf(identity.kp, identity.publicKey, payload);
+  return postJson('/atlas/postoffice/send', { payload, proof });
+}
+async function adminDirectory(admin) {
+  // A non-empty payload, not {} — PHP's json_decode can't tell an empty
+  // JSON object from an empty JSON array, so an empty-object payload
+  // canonicalizes differently on the PHP side than the one this test just
+  // signed in JS, and the signature check fails. Every other admin call
+  // in this test signs a real, non-empty payload already; this is the one
+  // call with nothing to say, so it says something trivial instead.
+  const res = await adminCall('/atlas/admin/directory', admin, { action: 'directory' });
+  if (res.status !== 200) throw new Error('admin directory failed: ' + JSON.stringify(res.body));
   return res.body;
 }
 
@@ -171,6 +196,58 @@ async function mailCheck(ids) {
     const unauthed = await postJson('/atlas/clawback', { payload: { credential: anotherStolen, toPublicKey: victim.publicKey } });
     assert(unauthed.status === 401, 'expected an unauthenticated call to be rejected 401, got ' + unauthed.status);
     console.log('PASS: unauthenticated clawback rejected 401 ->', unauthed.body.error);
+
+    console.log('STEP 8: clawing back a Post Office membership re-points the SAME roster entry at the new owner');
+    const thief2 = await genIdentity();
+    const victim2 = await genIdentity();
+    const hijackedMembership = await issueAsset(thief2.publicKey, 'atlas.postoffice.membership');
+    const handleSet = await setHandle(thief2, 'recoveredacct');
+    assert(handleSet.status === 200, 'expected the handle registration to succeed, got: ' + JSON.stringify(handleSet.body));
+    const beforeClawbackSend = await sendMail(thief2, member.publicKey, 'Before the account was recovered');
+    assert(beforeClawbackSend.status === 200, 'expected the thief to be able to send before the clawback, got: ' + JSON.stringify(beforeClawbackSend.body));
+
+    const membershipClawback = await adminCall('/atlas/clawback', admin, { credential: hijackedMembership, toPublicKey: victim2.publicKey });
+    assert(membershipClawback.status === 200, 'expected the membership clawback to succeed, got: ' + JSON.stringify(membershipClawback.body));
+    const newMembershipCredential = membershipClawback.body.newCredential;
+
+    // Checked BEFORE the new owner sends anything of their own — this is
+    // the state right after the clawback itself, proving the reset is the
+    // clawback's own doing, not just an empty log because nothing has
+    // happened yet.
+    const directoryRightAfter = await adminDirectory(admin);
+    const rosterEntry = directoryRightAfter.postOfficeMembers.find((m) => m.credentialId === newMembershipCredential.id);
+    assert(rosterEntry, 'expected to find the reassigned roster entry in the admin directory, got: ' + JSON.stringify(directoryRightAfter.postOfficeMembers));
+    assert(rosterEntry.ownerPublicKey === victim2.publicKey, 'expected the roster entry\'s owner to be the new owner');
+    assert(rosterEntry.handle === 'recoveredacct', 'expected the handle to be preserved on the reassigned entry');
+    assert(Array.isArray(rosterEntry.sendLog) && rosterEntry.sendLog.length === 0, 'expected sendLog to be reset, got: ' + JSON.stringify(rosterEntry.sendLog));
+    assert(rosterEntry.recentSendCount === 0, 'expected recentSendCount to be reset, got: ' + rosterEntry.recentSendCount);
+    assert(rosterEntry.flagged === false, 'expected flagged to be reset, got: ' + rosterEntry.flagged);
+    console.log('PASS: roster entry shows the new owner, preserved handle, and reset abuse-tracking');
+
+    const resolved = await resolveHandle('recoveredacct');
+    assert(resolved.status === 200 && resolved.body.publicKey === victim2.publicKey, 'expected the handle to still resolve, now to the new owner, got: ' + JSON.stringify(resolved.body));
+    console.log('PASS: handle "recoveredacct" still resolves, now to the new owner');
+
+    const victim2Send = await sendMail(victim2, member.publicKey, 'The account is back with its rightful owner');
+    assert(victim2Send.status === 200, 'expected the new owner to be able to send immediately, got: ' + JSON.stringify(victim2Send.body));
+    console.log('PASS: new owner can send mail immediately, no separate rejoin needed');
+
+    const thief2SendAfter = await sendMail(thief2, member.publicKey, 'Should no longer work');
+    assert(thief2SendAfter.status === 400, 'expected the old holder to no longer be able to send, got ' + thief2SendAfter.status);
+    console.log('PASS: old holder can no longer send ->', thief2SendAfter.body.error);
+
+    console.log('STEP 9: clawing back a Trading Station membership re-points its own (simpler) roster entry the same way');
+    const thief3 = await genIdentity();
+    const victim3 = await genIdentity();
+    const hijackedTsMembership = await issueAsset(thief3.publicKey, 'atlas.tradingstation.membership');
+    const tsClawback = await adminCall('/atlas/clawback', admin, { credential: hijackedTsMembership, toPublicKey: victim3.publicKey });
+    assert(tsClawback.status === 200, 'expected the Trading Station membership clawback to succeed, got: ' + JSON.stringify(tsClawback.body));
+    const newTsCredential = tsClawback.body.newCredential;
+    const tsRoster = JSON.parse(fs.readFileSync(path.join(BUNDLE_DIR, 'lib', 'atlas-tradingstation-members-store.json'), 'utf8'));
+    const tsEntry = tsRoster.members.find((m) => m.credentialId === newTsCredential.id);
+    assert(tsEntry, 'expected to find the reassigned Trading Station roster entry on disk, got: ' + JSON.stringify(tsRoster.members));
+    assert(tsEntry.ownerPublicKey === victim3.publicKey, 'expected the Trading Station roster entry\'s owner to be the new owner');
+    console.log('PASS: Trading Station roster entry re-pointed at the new owner');
 
     console.log('\nALL PHP CLAWBACK CHECKS PASSED');
   } catch (err) {

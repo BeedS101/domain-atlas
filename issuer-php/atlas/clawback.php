@@ -15,16 +15,19 @@
 // has, not the holder-initiated discipline check_presented_giftable_/
 // transferable_asset() enforce for a holder's own transfer.
 //
-// Caveat: ignoring tradeScope only reaches the CREDENTIAL itself — it
-// does not update a separate roster side-table a bound class's
-// credential happens to gate (POSTOFFICE_MEMBERS_FILE,
-// TRADINGSTATION_MEMBERS_FILE). Clawing back a Post Office or Trading
-// Station membership card revokes the old one and mints a real, valid
-// replacement for the new owner, but that new owner won't show up in the
-// roster is_valid_postoffice_member()/find_postoffice_membership()
-// actually check until they separately (re-)join — the same bookkeeping
-// gap that already exists for any other path that might supersede a
-// membership credential, not something new this endpoint introduces.
+// A bound relationship credential (a Post Office or Trading Station
+// membership) is also tracked in a SEPARATE roster file, keyed by
+// credentialId, not just by the credential itself — so clawing one back
+// re-points that SAME roster entry at the new credential id and owner
+// below (reassign_postoffice_membership()/reassign_tradingstation_
+// membership(), lib/store.php), rather than leaving the new owner
+// invisible to is_valid_postoffice_member()/find_postoffice_membership()
+// until they separately rejoined. Whatever the account already had (a
+// claimed handle, mail-mode/block-list settings) is preserved, since that
+// belongs to the account being returned, not to whoever most recently
+// misused it; abuse-tracking (sendLog/recentSendCount/flagged) is reset
+// instead, since that's a record of recent behavior under the OLD holder,
+// not the account itself.
 //
 // Deliberately claws back exactly the quantity on the credential
 // presented, no more — it does not attempt to trace or split a balance
@@ -104,6 +107,18 @@ if ($recipientMember) {
   $noticeSignature = atlas_sign($kp['privateKey'], $noticePayload);
   append_mail(array_merge($noticePayload, ['signature' => $noticeSignature]));
   $delivered = true;
+}
+
+// Runs AFTER the mail-delivery lookup above, not before: clawing back a
+// membership credential straight back to its own rightful owner already
+// hands them the new credential directly in the response, the way a
+// hijacked account gets reset — re-pointing the roster first would make
+// the lookup above find that very entry and mail them a redundant copy
+// of what they're already holding.
+if ($credential['asset']['class'] === 'atlas.postoffice.membership') {
+  reassign_postoffice_membership($credential['id'], $newCredential['id'], $toPublicKey);
+} elseif ($credential['asset']['class'] === 'atlas.tradingstation.membership') {
+  reassign_tradingstation_membership($credential['id'], $newCredential['id'], $toPublicKey);
 }
 
 send_json(200, ['status' => 'clawed-back', 'newCredential' => $newCredential, 'delivered' => $delivered]);

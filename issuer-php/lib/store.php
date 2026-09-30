@@ -1942,6 +1942,52 @@ function find_postoffice_membership($ownerPublicKey) {
   return null;
 }
 
+// atlas/clawback.php's roster fix-up: re-points an EXISTING roster entry
+// (found by its OLD credentialId, regardless of that id's own revoked
+// state — it's about to be revoked by the caller, if it isn't already) at
+// a freshly-clawed-back credential and a new owner, rather than leaving
+// the new owner invisible to is_valid_postoffice_member()/
+// find_postoffice_membership() until they separately rejoin. Whatever the
+// account already had (a claimed handle, mail-mode/block-list settings)
+// is preserved — that belongs to the account being returned, not to
+// whoever most recently misused it — but sendLog/recentSendCount/flagged
+// are reset, since abuse-tracking describes recent behavior under the OLD
+// holder, not the account itself. Returns whether an entry was found to
+// fix up. Mirrors issuer-server/server.js's inline roster fix-up in its
+// own /atlas/clawback handler.
+function reassign_postoffice_membership($oldCredentialId, $newCredentialId, $newOwnerPublicKey) {
+  $file = atlas_postoffice_members_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return false;
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+
+  $found = false;
+  foreach ($doc['members'] as &$member) {
+    if (!isset($member['credentialId']) || $member['credentialId'] !== $oldCredentialId) continue;
+    $member['credentialId'] = $newCredentialId;
+    $member['ownerPublicKey'] = $newOwnerPublicKey;
+    $member['sendLog'] = [];
+    $member['recentSendCount'] = 0;
+    $member['flagged'] = false;
+    $found = true;
+    break;
+  }
+  unset($member);
+
+  if ($found) {
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
+}
+
 // ---------- Trading Station members (task #144 Phase 1) — same
 // flock-guarded read/append shape as Post Office members above. Nothing
 // currently reads this back as a gate (see
@@ -1975,6 +2021,39 @@ function append_tradingstation_member($entry) {
   fflush($fh);
   flock($fh, LOCK_UN);
   fclose($fh);
+}
+
+// atlas/clawback.php's roster fix-up for a Trading Station membership —
+// same idea as reassign_postoffice_membership() above (see that
+// function's own comment), just without abuse-tracking fields to reset.
+function reassign_tradingstation_membership($oldCredentialId, $newCredentialId, $newOwnerPublicKey) {
+  $file = atlas_tradingstation_members_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return false;
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+
+  $found = false;
+  foreach ($doc['members'] as &$member) {
+    if (!isset($member['credentialId']) || $member['credentialId'] !== $oldCredentialId) continue;
+    $member['credentialId'] = $newCredentialId;
+    $member['ownerPublicKey'] = $newOwnerPublicKey;
+    $found = true;
+    break;
+  }
+  unset($member);
+
+  if ($found) {
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
 }
 
 // ---------- Pending remote trades (task #144 Phase 1) — same

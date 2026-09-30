@@ -3860,17 +3860,20 @@ async function main() {
       // checkPresentedGiftable/TransferableAsset enforce for a holder's
       // own transfer.
       //
-      // Caveat: ignoring tradeScope only reaches the CREDENTIAL itself —
-      // it does not update a separate roster side-table a bound class's
-      // credential happens to gate (POSTOFFICE_MEMBERS_FILE,
-      // TRADINGSTATION_MEMBERS_FILE). Clawing back a Post Office or
-      // Trading Station membership card revokes the old one and mints a
-      // real, valid replacement for the new owner, but that new owner
-      // won't show up in the roster isValidPostOfficeMember()/
-      // findLiveMember() actually check until they separately (re-)join —
-      // the same bookkeeping gap that already exists for any other path
-      // that might supersede a membership credential, not something new
-      // this endpoint introduces.
+      // A bound relationship credential (a Post Office or Trading Station
+      // membership) is also tracked in a SEPARATE roster file, keyed by
+      // credentialId, not just by the credential itself — so clawing one
+      // back re-points that SAME roster entry at the new credential id and
+      // owner below, rather than leaving the new owner invisible to
+      // isValidPostOfficeMember()/findLiveMember() (or the Trading Station
+      // equivalent) until they separately rejoined. Whatever the account
+      // already had — a claimed handle, mail-mode/block-list settings — is
+      // preserved, since that belongs to the account being returned, not
+      // to whoever most recently misused it; abuse-tracking (sendLog/
+      // recentSendCount/flagged) is reset instead, since that's a record
+      // of recent behavior under the OLD holder, and the rightful owner
+      // shouldn't inherit a spam flag earned by someone else's misuse of
+      // their own account.
       //
       // Deliberately claws back exactly the quantity on the credential
       // presented, no more — it does not attempt to trace or split a
@@ -3932,6 +3935,34 @@ async function main() {
           const noticeSignature = await sign(noticePayload);
           appendMail({ ...noticePayload, signature: noticeSignature });
           delivered = true;
+        }
+
+        // Roster fix-up runs AFTER the mail-delivery lookup above, not
+        // before: clawing back a membership credential straight back to
+        // its own rightful owner already hands them the new credential
+        // directly in the response, the way a hijacked account gets reset
+        // — re-pointing the roster first would make the lookup above find
+        // that very entry and mail them a redundant copy of what they're
+        // already holding.
+        if (credential.asset.class === 'atlas.postoffice.membership') {
+          const poDoc = readPostOfficeMembers();
+          const member = poDoc.members.find((m) => m.credentialId === credential.id);
+          if (member) {
+            member.credentialId = newCredential.id;
+            member.ownerPublicKey = toPublicKey;
+            member.sendLog = [];
+            member.recentSendCount = 0;
+            member.flagged = false;
+            fs.writeFileSync(POSTOFFICE_MEMBERS_FILE, JSON.stringify(poDoc, null, 2));
+          }
+        } else if (credential.asset.class === 'atlas.tradingstation.membership') {
+          const tsDoc = readTradingStationMembers();
+          const member = tsDoc.members.find((m) => m.credentialId === credential.id);
+          if (member) {
+            member.credentialId = newCredential.id;
+            member.ownerPublicKey = toPublicKey;
+            fs.writeFileSync(TRADINGSTATION_MEMBERS_FILE, JSON.stringify(tsDoc, null, 2));
+          }
         }
 
         console.log('Clawed back', credential.asset.class, credential.id, '-> reissued to', toPublicKey.slice(0, 16) + '...', delivered ? '(delivered by mail)' : '(returned in response only)', 'by admin', auth.publicKey.slice(0, 16) + '...');
