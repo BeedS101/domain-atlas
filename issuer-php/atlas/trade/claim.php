@@ -97,47 +97,71 @@ if ($posterBalanceProblem) {
   send_json(400, ['error' => "the poster's balance no longer checks out (" . $posterBalanceProblem . ') — listing withdrawn']);
 }
 
-// A unique side never has a remainder (its balance's quantity is
-// definitionally 1, exactly what's being offered — SPEC.md §5.1) and is
-// TRANSFERRED rather than re-minted from the catalog, so its actual
-// instance state (serial, a Signet Ring's randomly-rolled enchantments/
-// stats) survives settlement — see transfer_unique_asset()'s own comment
-// for the bug this avoids repeating. A fungible side keeps the original
-// spend/remainder behavior unchanged.
-$remainderA = $offerAIsUnique ? 0 : $balanceA['quantity'] - $offerA['quantity'];
-$remainderB = $offerBIsUnique ? 0 : $balanceB['quantity'] - $offerB['quantity'];
+// SPEC.md §7 v1.29 — a side issued by a domain other than this station's
+// own settles through that domain's relay-lock/relay-settle endpoints
+// instead of being minted here directly; an all-local trade (both sides
+// issued by atlas_domain()) takes exactly the path this always has. Both
+// balances already passed check_presented_(unique_)asset above, which for
+// a foreign side means it's already confirmed to be on this domain's own
+// atlas_trusted_trade_peers() allowlist — nothing further to check here
+// before relaying.
+$issuerADomain = $balanceA['issuer']['domain'];
+$issuerBDomain = $balanceB['issuer']['domain'];
+$tradeId = $posted['id'];
+$lockExpiresAt = gmdate('Y-m-d\TH:i:s\Z', time() + 120);
 
-$aRemainder = $remainderA > 0
-  ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $posterPub, $offerA['class'], $remainderA, $balanceA['id'])
-  : null;
-$aReceived = $offerBIsUnique
-  ? transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $posterPub, $balanceB)
-  : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $posterPub, $wantA['class'], $wantA['quantity'], $balanceA['id']);
-$bRemainder = $remainderB > 0
-  ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPub, $offerB['class'], $remainderB, $balanceB['id'])
-  : null;
-$bReceived = $offerAIsUnique
-  ? transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPub, $balanceA)
-  : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPub, $wantB['class'], $wantB['quantity'], $balanceB['id']);
-
-atlas_revoke($balanceA['id'], 'superseded');
-atlas_revoke($balanceB['id'], 'superseded');
-archive_if_audited($balanceA, 'superseded');
-archive_if_audited($balanceB, 'superseded');
-remove_pending_trade($posted['id']);
-
-if ($aRemainder) {
-  append_asset_update(['id' => $balanceA['id'], 'status' => 'superseded', 'reason' => 'superseded', 'newCredential' => $aRemainder]);
+// Lock phase first, BEFORE either side mutates anything: if a foreign
+// issuer refuses the lock, nothing has been spent yet, and whichever lock
+// did succeed just self-expires (relay-lock.php's own comment on why
+// there's no separate unlock call).
+if ($issuerBDomain !== atlas_domain()) {
+  try {
+    atlas_relay_trade_lock($kp, $issuerBDomain, $tradeId, $balanceB, $lockExpiresAt);
+  } catch (Exception $e) {
+    send_json(502, ['error' => "could not lock the claimant's balance at " . $issuerBDomain . ': ' . $e->getMessage()]);
+  }
 }
-$noticePayload = [
-  'id' => 'urn:atlas:mail:' . atlas_uuid(),
-  'credentialId' => $balanceA['id'],
+if ($issuerADomain !== atlas_domain()) {
+  try {
+    atlas_relay_trade_lock($kp, $issuerADomain, $tradeId, $balanceA, $lockExpiresAt);
+  } catch (Exception $e) {
+    send_json(502, ['error' => "could not lock the poster's balance at " . $issuerADomain . ': ' . $e->getMessage()]);
+  }
+}
+
+// B's side settles FIRST — it produces aReceived, what the absent poster
+// is owed. A's own settlement (next) needs that already in hand before it
+// can mail-deliver it, since only issuerA's mail store is one the
+// poster's wallet is actually polling (fulfill_trade_side_settlement()'s
+// own comment in lib/bootstrap.php has the full reasoning).
+if ($issuerBDomain === atlas_domain()) {
+  $bSide = fulfill_trade_side_settlement($kp, $balanceB, $offerB['quantity'], $posterPub, null);
+} else {
+  try {
+    $bSide = atlas_relay_trade_settle($kp, $issuerBDomain, $tradeId, $balanceB, $offerB['quantity'], $posterPub, null);
+  } catch (Exception $e) {
+    send_json(502, ['error' => "could not settle the claimant's balance at " . $issuerBDomain . ': ' . $e->getMessage()]);
+  }
+}
+$aReceived = $bSide['received'];
+$bRemainder = $bSide['remainder'];
+
+$mailNotice = [
   'subject' => 'Listing claimed at ' . atlas_domain(),
   'body' => "Your open listing of {$offerA['quantity']} {$offerA['class']} for {$wantA['quantity']} {$wantA['class']} was claimed while you were away.",
   'attachedAsset' => $aReceived,
-  'sentAt' => iso_now(),
 ];
-$noticeSignature = atlas_sign($kp['privateKey'], $noticePayload);
-append_mail(array_merge($noticePayload, ['signature' => $noticeSignature]));
+if ($issuerADomain === atlas_domain()) {
+  $aSide = fulfill_trade_side_settlement($kp, $balanceA, $offerA['quantity'], $claimantPub, $mailNotice);
+} else {
+  try {
+    $aSide = atlas_relay_trade_settle($kp, $issuerADomain, $tradeId, $balanceA, $offerA['quantity'], $claimantPub, $aReceived);
+  } catch (Exception $e) {
+    send_json(502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ': ' . $e->getMessage()]);
+  }
+}
+$bReceived = $aSide['received'];
+
+remove_pending_trade($posted['id']);
 
 send_json(200, ['status' => 'settled', 'remainder' => $bRemainder, 'received' => $bReceived]);

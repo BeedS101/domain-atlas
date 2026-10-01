@@ -17,6 +17,28 @@ function atlas_domain() {
   return isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'localhost';
 }
 
+// ATLAS_TRUSTED_TRADE_PEERS (SPEC.md §7) — the only other domains this
+// domain will treat as a genuine cross-domain trading counterpart, in
+// BOTH roles a trade can put it in: accepting a foreign-issued balance at
+// this domain's own Trading Station (checked in
+// check_presented_asset()/check_presented_unique_asset()), and honoring a
+// relay-lock/relay-settle request against a credential THIS domain itself
+// issued, sent by another domain's station on a visitor's behalf (checked
+// in atlas/trade/relay-lock.php and atlas/trade/relay-settle.php). Empty
+// by default: a deployment that never edits this never accepts, and never
+// honors, a cross-domain trade with anyone. Mutual by convention, not by
+// enforcement — list a domain here only once you'd also want it listing
+// you back, the same opted-in-both-ways posture Post Office membership
+// and Trading Station membership already require elsewhere in this
+// bundle, applied here to a domain rather than a visitor.
+function atlas_trusted_trade_peers() {
+  return []; // e.g. ['example.com', 'neighbor.example']
+}
+
+function atlas_is_trusted_trade_peer($domain) {
+  return in_array($domain, atlas_trusted_trade_peers(), true);
+}
+
 // ATLAS_DOCROOT — where .well-known/atlas-key.json and
 // atlas-revocations.json get written/read, and where the private key file
 // lives. Defaults to the folder ABOVE this atlas/ directory, i.e. wherever

@@ -367,6 +367,62 @@ function verify_domain_signature($publicKeyB64url, $payload, $signatureB64url) {
   }
 }
 
+// SPEC.md §7 v1.29 — the OUTBOUND half of atlas/trade/relay-lock.php and
+// atlas/trade/relay-settle.php, called by atlas/trade/claim.php whenever a
+// trade touches a balance issued by a domain other than this one. Same
+// attestation-and-verify shape atlas/world/drops/claim.php's own outbound
+// relay call already uses against relay-claim.php — a small payload signed
+// with THIS domain's own key, which the receiving domain verifies against
+// this domain's published key before acting on it. Throws with the
+// receiving domain's own stated reason on any rejection; the caller
+// decides what that means for the trade as a whole.
+function atlas_relay_trade_lock($kp, $domain, $tradeId, $credential, $expiresAt) {
+  $attestation = [
+    'relayingDomain' => atlas_domain(),
+    'tradeId' => $tradeId,
+    'credentialId' => $credential['id'],
+    'expiresAt' => $expiresAt,
+  ];
+  $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
+  $res = atlas_http_post_json(atlas_base_url($domain) . '/atlas/trade/relay-lock', [
+    'credential' => $credential,
+    'attestation' => $attestation,
+    'attestationSignature' => $attestationSignature,
+  ]);
+  if ($res['status'] !== 200) {
+    throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade lock (HTTP ' . $res['status'] . ')'));
+  }
+  return $res['body'];
+}
+
+// The SETTLE counterpart of atlas_relay_trade_lock() above — asks the
+// credential's own issuer to spend $spendQuantity of an already-locked
+// balance to $newOwnerPublicKey, minting any leftover back to the
+// balance's own original owner (fulfill_trade_side_settlement()'s own
+// comment explains why that's always enough regardless of what the
+// trade's other side offered). $mailDeliverAttachedAsset is optional —
+// see relay-settle.php's own comment on when claim.php needs to pass it.
+function atlas_relay_trade_settle($kp, $domain, $tradeId, $credential, $spendQuantity, $newOwnerPublicKey, $mailDeliverAttachedAsset = null) {
+  $attestation = [
+    'relayingDomain' => atlas_domain(),
+    'tradeId' => $tradeId,
+    'credentialId' => $credential['id'],
+    'spendQuantity' => $spendQuantity,
+    'newOwnerPublicKey' => $newOwnerPublicKey,
+  ];
+  if ($mailDeliverAttachedAsset !== null) $attestation['mailDeliverAttachedAsset'] = $mailDeliverAttachedAsset;
+  $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
+  $res = atlas_http_post_json(atlas_base_url($domain) . '/atlas/trade/relay-settle', [
+    'credential' => $credential,
+    'attestation' => $attestation,
+    'attestationSignature' => $attestationSignature,
+  ]);
+  if ($res['status'] !== 200) {
+    throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade settle (HTTP ' . $res['status'] . ')'));
+  }
+  return $res['body'];
+}
+
 // The signed payload shape (SPEC.md §5: canonicalize({id, asset, owner,
 // quantity, supersedes, issuedAt})) — used both to re-verify a presented
 // credential's signature (before honoring a reissue/split/consolidate/
@@ -628,6 +684,22 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
     return 'asset class is not fungible — cannot split or consolidate a unique asset';
   }
   if (!isset($credential['quantity']) || $credential['quantity'] < $minQuantity) return 'asset has insufficient quantity';
+  // SPEC.md §7/§9: a station settles a foreign-issued balance only for a
+  // domain on its own atlas_trusted_trade_peers() allowlist — the default
+  // (empty list) rejects every foreign balance outright, same as before
+  // this existed. A trusted foreign balance is checked against ITS OWN
+  // domain's published key/revocation/suspension list
+  // (verify_foreign_asset_credential), never this domain's — this
+  // domain's is_revoked()/is_suspended() only know about ids it minted
+  // itself. Mirrors issuer-server/server.js's checkPresentedAsset().
+  if (!isset($credential['issuer']['domain'])) return 'asset has no issuer domain';
+  if ($credential['issuer']['domain'] !== atlas_domain()) {
+    if (!atlas_is_trusted_trade_peer($credential['issuer']['domain'])) {
+      return 'this station does not accept balances issued by ' . $credential['issuer']['domain'];
+    }
+    $foreignResult = verify_foreign_asset_credential($credential);
+    return $foreignResult === true ? null : $foreignResult;
+  }
   if (is_revoked($credential['id'])) return 'asset already revoked';
   if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
   if (is_expired($credential)) return 'asset has expired';
@@ -661,6 +733,16 @@ function check_presented_unique_asset($publicKeyB64url, $credential, $expectedOw
   }
   if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
     return 'asset class is fungible — present it as a quantity balance, not a unique item';
+  }
+  // Same foreign-balance allowance as check_presented_asset() above — see
+  // its own comment for the reasoning and the allowlist this gates on.
+  if (!isset($credential['issuer']['domain'])) return 'asset has no issuer domain';
+  if ($credential['issuer']['domain'] !== atlas_domain()) {
+    if (!atlas_is_trusted_trade_peer($credential['issuer']['domain'])) {
+      return 'this station does not accept balances issued by ' . $credential['issuer']['domain'];
+    }
+    $foreignResult = verify_foreign_asset_credential($credential);
+    return $foreignResult === true ? null : $foreignResult;
   }
   if (is_revoked($credential['id'])) return 'asset already revoked';
   if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
@@ -1005,6 +1087,67 @@ function fulfill_world_drop_claim($kp, $credential, $claimantPublicKey) {
   atlas_revoke($credential['id'], 'claimed from a world drop');
   archive_if_audited($credential, 'claimed from a world drop');
   return $received;
+}
+
+// SPEC.md §7 v1.29 — the one settlement operation a Trading Station trade
+// ever needs from a given class's own issuer, regardless of how many
+// domains the trade touches: spend $spendQuantity of $credential to
+// $newOwnerPublicKey (the counterparty), mint any leftover back to
+// $credential's OWN original owner. A trade's other side never enters
+// into this — the issuer doesn't need to know or care what the
+// counterparty offered in return, only what's being spent and who's
+// receiving it. Used directly, locally, by atlas/trade/claim.php when this
+// domain is the credential's own issuer, and by atlas/trade/relay-settle.php
+// when another domain's station is relaying this same operation in on a
+// visitor's behalf — one function, same mutation either way.
+//
+// $mailNotice (optional, {subject, body, attachedAsset}) is set only for
+// the side whose original owner isn't live for this request — the poster
+// in atlas/trade/claim.php's claim flow, always absent by construction
+// (SPEC.md §7) — so delivery goes through THIS domain's own mail store
+// (atlas/mail/check.php) rather than a direct HTTP response, addressed to
+// the id being superseded here, which is exactly the id that owner's
+// wallet is already polling. attachedAsset may be a credential this same
+// call just minted (an all-local trade) or one relayed in from the
+// trade's other issuer (a cross-domain trade, bundled in by
+// relay-settle.php's own caller) — either way it's already signed, so the
+// wallet verifies it the same way it verifies everything else, not
+// because this domain vouches for it twice over.
+function fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice = null) {
+  $isUnique = isset($credential['asset']['fungible']) && $credential['asset']['fungible'] === false;
+  $originalOwner = $credential['owner']['publicKey'];
+
+  if ($isUnique) {
+    $received = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $newOwnerPublicKey, $credential);
+    $remainder = null;
+  } else {
+    $leftover = $credential['quantity'] - $spendQuantity;
+    $remainder = $leftover > 0
+      ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $originalOwner, $credential['asset']['class'], $leftover, $credential['id'])
+      : null;
+    $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $newOwnerPublicKey, $credential['asset']['class'], $spendQuantity, $credential['id']);
+  }
+
+  atlas_revoke($credential['id'], 'superseded');
+  archive_if_audited($credential, 'superseded');
+
+  if ($mailNotice !== null) {
+    if ($remainder) {
+      append_asset_update(['id' => $credential['id'], 'status' => 'superseded', 'reason' => 'superseded', 'newCredential' => $remainder]);
+    }
+    $noticePayload = [
+      'id' => 'urn:atlas:mail:' . atlas_uuid(),
+      'credentialId' => $credential['id'],
+      'subject' => $mailNotice['subject'],
+      'body' => $mailNotice['body'],
+      'attachedAsset' => $mailNotice['attachedAsset'],
+      'sentAt' => iso_now(),
+    ];
+    $noticeSignature = atlas_sign($kp['privateKey'], $noticePayload);
+    append_mail(array_merge($noticePayload, ['signature' => $noticeSignature]));
+  }
+
+  return ['received' => $received, 'remainder' => $remainder];
 }
 
 // Task #203: sums an owner's VERIFIED current holdings of one class, off

@@ -468,6 +468,26 @@ const SERIAL_COUNTERS_FILE = path.join(STATE_DIR, 'atlas-serial-counters.json');
 const PORT = process.env.PORT || 8001;
 const DOMAIN = process.env.ATLAS_DOMAIN || 'localhost:8001';
 
+// SPEC.md §7 (v1.29) — the only other domains this domain will treat as a
+// genuine cross-domain trading counterpart, in BOTH roles a trade can put
+// it in: accepting a foreign-issued balance at this domain's own Trading
+// Station (checked in checkPresentedAsset()/checkPresentedUniqueAsset()),
+// and honoring a relay-lock/relay-settle request against a credential
+// THIS domain itself issued, sent by another domain's station on a
+// visitor's behalf (checked in the /atlas/trade/relay-lock and
+// /atlas/trade/relay-settle routes). Empty by default: a deployment that
+// never edits this never accepts, and never honors, a cross-domain trade
+// with anyone. Mutual by convention, not by enforcement — list a domain
+// here only once you'd also want it listing you back, the same
+// opted-in-both-ways posture Post Office membership and Trading Station
+// membership already require elsewhere in this file, applied here to a
+// domain rather than a visitor. Mirrors issuer-php/lib/store.php's
+// atlas_trusted_trade_peers().
+const TRUSTED_TRADE_PEERS = []; // e.g. ['example.com', 'neighbor.example']
+function isTrustedTradePeer(domain) {
+  return TRUSTED_TRADE_PEERS.includes(domain);
+}
+
 // Every genuinely cross-host request this server ever makes (fetching
 // another domain's published key, relaying mail/world-drop claims) sends
 // this — some hosts' own bot/WAF protection blocks a request with no
@@ -3046,6 +3066,21 @@ async function main() {
     // presented balance's own fungible flag says false).
     if (credential.asset.fungible !== true) return 'asset class is not fungible — cannot split or consolidate a unique asset';
     if (typeof credential.quantity !== 'number' || credential.quantity < minQuantity) return 'asset has insufficient quantity';
+    // SPEC.md §7/§9 v1.29: a station settles a foreign-issued balance only
+    // for a domain on its own TRUSTED_TRADE_PEERS allowlist — the default
+    // (empty list) rejects every foreign balance outright, same as before
+    // this existed. A trusted foreign balance is checked against ITS OWN
+    // domain's published key/revocation/suspension list
+    // (verifyForeignAssetCredential), never this domain's — this domain's
+    // isRevoked()/isSuspended() only know about ids it minted itself.
+    if (!credential.issuer || !credential.issuer.domain) return 'asset has no issuer domain';
+    if (credential.issuer.domain !== DOMAIN) {
+      if (!isTrustedTradePeer(credential.issuer.domain)) {
+        return 'this station does not accept balances issued by ' + credential.issuer.domain;
+      }
+      const foreignResult = await verifyForeignAssetCredential(credential);
+      return foreignResult === true ? null : foreignResult;
+    }
     if (isRevoked(credential.id)) return 'asset already revoked';
     if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
     if (isExpired(credential)) return 'asset has expired';
@@ -3072,6 +3107,16 @@ async function main() {
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
     if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be traded';
     if (credential.asset.fungible !== false) return 'asset class is fungible — present it as a quantity balance, not a unique item';
+    // Same foreign-balance allowance as checkPresentedAsset() above — see
+    // its own comment for the reasoning and the allowlist this gates on.
+    if (!credential.issuer || !credential.issuer.domain) return 'asset has no issuer domain';
+    if (credential.issuer.domain !== DOMAIN) {
+      if (!isTrustedTradePeer(credential.issuer.domain)) {
+        return 'this station does not accept balances issued by ' + credential.issuer.domain;
+      }
+      const foreignResult = await verifyForeignAssetCredential(credential);
+      return foreignResult === true ? null : foreignResult;
+    }
     if (isRevoked(credential.id)) return 'asset already revoked';
     if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
     if (isExpired(credential)) return 'asset has expired';
@@ -3323,6 +3368,122 @@ async function main() {
     revoke(credential.id, 'claimed from a world drop');
     archiveIfAudited(credential, 'claimed from a world drop');
     return received;
+  }
+
+  // SPEC.md §7 v1.29 — the one settlement operation a Trading Station
+  // trade ever needs from a given class's own issuer, regardless of how
+  // many domains the trade touches: spend `spendQuantity` of `credential`
+  // to `newOwnerPublicKey` (the counterparty), mint any leftover back to
+  // credential's OWN original owner. A trade's other side never enters
+  // into this — the issuer doesn't need to know or care what the
+  // counterparty offered in return, only what's being spent and who's
+  // receiving it. Used directly, locally, by /atlas/trade/claim when this
+  // domain is the credential's own issuer, and by /atlas/trade/relay-settle
+  // when another domain's station is relaying this same operation in on a
+  // visitor's behalf — one function, same mutation either way.
+  //
+  // `mailNotice` (optional, {subject, body, attachedAsset}) is set only
+  // for the side whose original owner isn't live for this request — the
+  // poster in /atlas/trade/claim's claim flow, always absent by
+  // construction (SPEC.md §7) — so delivery goes through THIS domain's
+  // own mail store (/atlas/mail/check) rather than a direct HTTP
+  // response, addressed to the id being superseded here, exactly the id
+  // that owner's wallet is already polling. attachedAsset may be a
+  // credential this same call just minted (an all-local trade) or one
+  // relayed in from the trade's other issuer (a cross-domain trade,
+  // bundled in by /atlas/trade/relay-settle's own caller) — either way
+  // it's already signed, so the wallet verifies it the same way it
+  // verifies everything else, not because this domain vouches for it
+  // twice over.
+  async function fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice) {
+    const isUnique = credential.asset && credential.asset.fungible === false;
+    const originalOwner = credential.owner.publicKey;
+
+    let received, remainder;
+    if (isUnique) {
+      received = await transferUniqueAsset(newOwnerPublicKey, credential);
+      remainder = null;
+    } else {
+      const leftover = credential.quantity - spendQuantity;
+      [remainder, received] = await Promise.all([
+        leftover > 0 ? mintAssetByClass(originalOwner, credential.asset.class, leftover, credential.id) : Promise.resolve(null),
+        mintAssetByClass(newOwnerPublicKey, credential.asset.class, spendQuantity, credential.id)
+      ]);
+    }
+
+    revoke(credential.id, 'superseded');
+    archiveIfAudited(credential, 'superseded');
+
+    if (mailNotice) {
+      if (remainder) appendAssetUpdate({ id: credential.id, status: 'superseded', reason: 'superseded', newCredential: remainder });
+      const noticePayload = {
+        id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
+        credentialId: credential.id,
+        subject: mailNotice.subject,
+        body: mailNotice.body,
+        attachedAsset: mailNotice.attachedAsset,
+        sentAt: new Date().toISOString()
+      };
+      const noticeSignature = await sign(noticePayload);
+      appendMail({ ...noticePayload, signature: noticeSignature });
+    }
+
+    return { received, remainder };
+  }
+
+  // SPEC.md §7 v1.29 — the OUTBOUND half of the /atlas/trade/relay-lock
+  // route below, called by this server's own /atlas/trade/claim handler
+  // whenever a trade touches a balance issued by a domain other than this
+  // one. Same attestation-and-verify shape the World Drops relay call
+  // above already uses: a small payload signed with sign() (this domain's
+  // own key), which the receiving domain verifies against this domain's
+  // published key before acting on it. Throws with the receiving domain's
+  // own stated reason on any rejection; the caller decides what that
+  // means for the trade as a whole — the lock's own short expiry
+  // self-heals either way, so there's no separate relay-unlock to call.
+  async function relayTradeLock(domain, tradeId, credential, expiresAt) {
+    const attestation = { relayingDomain: DOMAIN, tradeId, credentialId: credential.id, expiresAt };
+    const attestationSignature = await sign(attestation);
+    let res;
+    try {
+      res = await fetch(baseUrl(domain) + '/atlas/trade/relay-lock', {
+        method: 'POST',
+        headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential, attestation, attestationSignature })
+      });
+    } catch (err) {
+      throw new Error('could not reach ' + domain + ' (' + ((err.cause && err.cause.message) ? err.cause.message : err.message) + ')');
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || (domain + ' refused the trade lock (HTTP ' + res.status + ')'));
+    return body;
+  }
+
+  // The SETTLE counterpart of relayTradeLock() above — asks the
+  // credential's own issuer to spend `spendQuantity` of an already-locked
+  // balance to `newOwnerPublicKey`, minting any leftover back to the
+  // balance's own original owner (fulfillTradeSideSettlement()'s own
+  // comment explains why that's always enough regardless of what the
+  // trade's other side offered). `mailDeliverAttachedAsset` is optional —
+  // see the /atlas/trade/relay-settle route's own comment on when
+  // /atlas/trade/claim needs to pass it.
+  async function relayTradeSettle(domain, tradeId, credential, spendQuantity, newOwnerPublicKey, mailDeliverAttachedAsset) {
+    const attestation = { relayingDomain: DOMAIN, tradeId, credentialId: credential.id, spendQuantity, newOwnerPublicKey };
+    if (mailDeliverAttachedAsset) attestation.mailDeliverAttachedAsset = mailDeliverAttachedAsset;
+    const attestationSignature = await sign(attestation);
+    let res;
+    try {
+      res = await fetch(baseUrl(domain) + '/atlas/trade/relay-settle', {
+        method: 'POST',
+        headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential, attestation, attestationSignature })
+      });
+    } catch (err) {
+      throw new Error('could not reach ' + domain + ' (' + ((err.cause && err.cause.message) ? err.cause.message : err.message) + ')');
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || (domain + ' refused the trade settle (HTTP ' + res.status + ')'));
+    return body;
   }
 
   // Task #203: sums an owner's VERIFIED current holdings of one class, off
@@ -5350,42 +5511,209 @@ async function main() {
           return sendJson(res, 400, { error: 'the poster\'s balance no longer checks out (' + posterBalanceProblem + ') — listing withdrawn' });
         }
 
-        // A unique side never has a remainder (its balance's quantity is
-        // definitionally 1, exactly what's being offered — SPEC.md §5.1)
-        // and is TRANSFERRED rather than re-minted from the catalog, so its
-        // actual instance state (serial, a Signet Ring's randomly-rolled
-        // enchantments/stats) survives settlement — see
-        // transferUniqueAsset()'s own comment for the bug this avoids
-        // repeating. A fungible side keeps the original spend/remainder
-        // behavior unchanged.
-        const remainderA = offerAIsUnique ? 0 : balanceA.quantity - offerA.quantity;
-        const remainderB = offerBIsUnique ? 0 : balanceB.quantity - offerB.quantity;
-        const [aRemainder, aReceived, bRemainder, bReceived] = await Promise.all([
-          remainderA > 0 ? mintAssetByClass(posterPub, offerA.class, remainderA, balanceA.id) : Promise.resolve(null),
-          offerBIsUnique ? transferUniqueAsset(posterPub, balanceB) : mintAssetByClass(posterPub, wantA.class, wantA.quantity, balanceA.id),
-          remainderB > 0 ? mintAssetByClass(claimantPub, offerB.class, remainderB, balanceB.id) : Promise.resolve(null),
-          offerAIsUnique ? transferUniqueAsset(claimantPub, balanceA) : mintAssetByClass(claimantPub, wantB.class, wantB.quantity, balanceB.id)
-        ]);
-        revoke(balanceA.id, 'superseded');
-        revoke(balanceB.id, 'superseded');
-        archiveIfAudited(balanceA, 'superseded');
-        archiveIfAudited(balanceB, 'superseded');
-        removePendingTrade(posted.id);
+        // SPEC.md §7 v1.29 — a side issued by a domain other than this
+        // station's own settles through that domain's relay-lock/
+        // relay-settle routes instead of being minted here directly; an
+        // all-local trade (both sides issued by DOMAIN) takes exactly the
+        // path this always has. Both balances already passed
+        // checkPresentedAsset/checkPresentedUniqueAsset above, which for a
+        // foreign side means it's already confirmed to be on this domain's
+        // own TRUSTED_TRADE_PEERS allowlist — nothing further to check
+        // here before relaying.
+        const issuerADomain = balanceA.issuer.domain;
+        const issuerBDomain = balanceB.issuer.domain;
+        const tradeId = posted.id;
+        const lockExpiresAt = new Date(Date.now() + 120000).toISOString();
 
-        if (aRemainder) appendAssetUpdate({ id: balanceA.id, status: 'superseded', reason: 'superseded', newCredential: aRemainder });
-        const noticePayload = {
-          id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
-          credentialId: balanceA.id,
+        // Lock phase first, BEFORE either side mutates anything: if a
+        // foreign issuer refuses the lock, nothing has been spent yet, and
+        // whichever lock did succeed just self-expires (relayTradeLock's
+        // own comment on why there's no separate unlock call).
+        try {
+          if (issuerBDomain !== DOMAIN) await relayTradeLock(issuerBDomain, tradeId, balanceB, lockExpiresAt);
+          if (issuerADomain !== DOMAIN) await relayTradeLock(issuerADomain, tradeId, balanceA, lockExpiresAt);
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not lock both sides of this trade: ' + err.message });
+        }
+
+        // B's side settles FIRST — it produces aReceived, what the absent
+        // poster is owed. A's own settlement (next) needs that already in
+        // hand before it can mail-deliver it, since only issuerA's mail
+        // store is one the poster's wallet is actually polling
+        // (fulfillTradeSideSettlement()'s own comment has the full
+        // reasoning).
+        let bSide;
+        try {
+          bSide = issuerBDomain === DOMAIN
+            ? await fulfillTradeSideSettlement(balanceB, offerB.quantity, posterPub, null)
+            : await relayTradeSettle(issuerBDomain, tradeId, balanceB, offerB.quantity, posterPub, null);
+        } catch (err) {
+          return sendJson(res, 502, { error: "could not settle the claimant's balance at " + issuerBDomain + ': ' + err.message });
+        }
+        const aReceived = bSide.received, bRemainder = bSide.remainder;
+
+        const mailNotice = {
           subject: 'Listing claimed at ' + DOMAIN,
           body: `Your open listing of ${offerA.quantity} ${offerA.class} for ${wantA.quantity} ${wantA.class} was claimed while you were away.`,
-          attachedAsset: aReceived,
-          sentAt: new Date().toISOString()
+          attachedAsset: aReceived
         };
-        const noticeSignature = await sign(noticePayload);
-        appendMail({ ...noticePayload, signature: noticeSignature });
+        let aSide;
+        try {
+          aSide = issuerADomain === DOMAIN
+            ? await fulfillTradeSideSettlement(balanceA, offerA.quantity, claimantPub, mailNotice)
+            : await relayTradeSettle(issuerADomain, tradeId, balanceA, offerA.quantity, claimantPub, aReceived);
+        } catch (err) {
+          return sendJson(res, 502, { error: "could not settle the poster's balance at " + issuerADomain + ': ' + err.message });
+        }
+        const bReceived = aSide.received;
+
+        removePendingTrade(posted.id);
 
         console.log('Listing claimed:', offerA.quantity, offerA.class, '<->', offerB.quantity, offerB.class, '(poster notified by mail)');
         return sendJson(res, 200, { status: 'settled', remainder: bRemainder, received: bReceived });
+      }
+
+      // POST /atlas/trade/relay-lock (SPEC.md §7, v1.29) — the LOCK half
+      // of a cross-domain Trading Station settlement's two-phase commit.
+      // Another domain's station, about to settle a trade that touches a
+      // balance THIS domain issued, asks this domain to suspend() that
+      // balance for the pending trade before either side mutates anything
+      // — so a failure partway through the other domain's own settlement
+      // can never leave one side spent and the other not. Same
+      // attestation-and-verify shape as /atlas/world/drops/relay-claim
+      // above: the relaying domain signs a small attestation with ITS OWN
+      // key, this domain fetches that domain's published key and verifies
+      // the attestation against it, with no prior handshake needed.
+      //
+      // Gated on isTrustedTradePeer() — a signature check alone only
+      // proves the relaying domain sent this, not that this domain is
+      // willing to let that domain direct what happens to a balance it
+      // never got the credential's actual owner's own fresh signature
+      // for. Default (empty list) rejects every relay outright, same
+      // posture checkPresentedAsset()'s own foreign-balance branch
+      // already takes from the other side of this exact trade.
+      if (req.method === 'POST' && req.url === '/atlas/trade/relay-lock') {
+        const { credential, attestation, attestationSignature } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !attestation || !attestationSignature) return sendJson(res, 400, { error: 'credential, attestation, and attestationSignature are all required' });
+        if (!credential.asset || !credential.issuer || credential.issuer.domain !== DOMAIN) return sendJson(res, 400, { error: 'this domain did not issue that credential' });
+        if (attestation.credentialId !== credential.id) return sendJson(res, 400, { error: 'attestation does not name the credential it was sent with' });
+        if (!attestation.tradeId || !attestation.relayingDomain || !attestation.expiresAt) return sendJson(res, 400, { error: 'attestation must carry tradeId, relayingDomain, and expiresAt' });
+
+        const relayingDomain = attestation.relayingDomain;
+        if (!isTrustedTradePeer(relayingDomain)) return sendJson(res, 403, { error: 'this domain does not accept trade relays from ' + relayingDomain });
+
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that balance has already been revoked' });
+        // Any existing suspension that isn't THIS exact trade's own lock —
+        // whether it's a different pending trade or an unrelated admin
+        // review — means this balance isn't free to lock right now.
+        const existing = findSuspension(credential.id);
+        if (existing && existing.reason !== 'trade-lock:' + attestation.tradeId) return sendJson(res, 409, { error: 'that balance is already locked or suspended for something else' });
+        if (isExpired(credential)) return sendJson(res, 400, { error: 'that balance has already expired' });
+
+        const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
+
+        let relayingDomainKey;
+        try {
+          relayingDomainKey = await fetchDomainPublicKey(relayingDomain);
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not verify ' + relayingDomain + '\'s own published key: ' + err.message });
+        }
+        const attestationOk = await verifyDomainSignature(relayingDomainKey, attestation, attestationSignature);
+        if (!attestationOk) return sendJson(res, 400, { error: relayingDomain + '\'s attestation signature does not check out' });
+
+        // A short, station-chosen expiry (SPEC.md §7 — ~120s in practice)
+        // rather than a separate relay-unlock route: an abandoned or
+        // failed trade just lifts itself, the same self-healing
+        // findSuspension() already gives every other suspension in this
+        // file, instead of standing up a second code path that itself
+        // needs to be reachable and trusted to run.
+        suspend(credential.id, 'trade-lock:' + attestation.tradeId, attestation.expiresAt);
+        console.log('Trade balance locked for', relayingDomain + ':', credential.asset.class, credential.id);
+        return sendJson(res, 200, { status: 'locked', expiresAt: attestation.expiresAt });
+      }
+
+      // POST /atlas/trade/relay-settle (SPEC.md §7, v1.29) — the SETTLE
+      // half of a cross-domain Trading Station trade's two-phase commit,
+      // honored only against a balance that's currently locked for this
+      // exact trade (checked below via findSuspension() rather than
+      // trusting the caller's word for it — relay-lock must have
+      // succeeded first). Spends attestation.spendQuantity of the locked
+      // balance to attestation.newOwnerPublicKey and mints any leftover
+      // back to the balance's own original owner — see
+      // fulfillTradeSideSettlement()'s own comment for why that's always
+      // enough regardless of what the trade's other side offered. Same
+      // attestation-and-verify shape as /atlas/trade/relay-lock and
+      // /atlas/world/drops/relay-claim above.
+      if (req.method === 'POST' && req.url === '/atlas/trade/relay-settle') {
+        const { credential, attestation, attestationSignature } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !attestation || !attestationSignature) return sendJson(res, 400, { error: 'credential, attestation, and attestationSignature are all required' });
+        if (!credential.asset || !credential.issuer || credential.issuer.domain !== DOMAIN) return sendJson(res, 400, { error: 'this domain did not issue that credential' });
+        if (attestation.credentialId !== credential.id) return sendJson(res, 400, { error: 'attestation does not name the credential it was sent with' });
+
+        const relayingDomain = attestation.relayingDomain;
+        const tradeId = attestation.tradeId;
+        const spendQuantity = attestation.spendQuantity;
+        const newOwnerPublicKey = attestation.newOwnerPublicKey;
+        if (!relayingDomain || !tradeId || typeof spendQuantity !== 'number' || spendQuantity < 1 || !newOwnerPublicKey) {
+          return sendJson(res, 400, { error: 'attestation must carry relayingDomain, tradeId, a positive integer spendQuantity, and newOwnerPublicKey' });
+        }
+
+        if (!isTrustedTradePeer(relayingDomain)) return sendJson(res, 403, { error: 'this domain does not accept trade relays from ' + relayingDomain });
+
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that balance has already been revoked' });
+        const lock = findSuspension(credential.id);
+        if (!lock || lock.reason !== 'trade-lock:' + tradeId) return sendJson(res, 409, { error: 'that balance was never locked for this trade, or its lock already expired — relay-lock it again first' });
+        if (isExpired(credential)) return sendJson(res, 400, { error: 'that balance has already expired' });
+        const isUnique = credential.asset && credential.asset.fungible === false;
+        if (!isUnique && spendQuantity > credential.quantity) return sendJson(res, 400, { error: 'spendQuantity exceeds this balance\'s own quantity' });
+
+        const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+        if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
+
+        let relayingDomainKey;
+        try {
+          relayingDomainKey = await fetchDomainPublicKey(relayingDomain);
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not verify ' + relayingDomain + '\'s own published key: ' + err.message });
+        }
+        const attestationOk = await verifyDomainSignature(relayingDomainKey, attestation, attestationSignature);
+        if (!attestationOk) return sendJson(res, 400, { error: relayingDomain + '\'s attestation signature does not check out' });
+
+        // mailDeliverAttachedAsset (optional, SPEC.md §7's "mail delivery
+        // for the absent party" case): a credential the trade's OTHER
+        // issuer already minted for this balance's own original owner —
+        // bundled in here, rather than relayed separately, because only
+        // the domain that issued the id being superseded has a mail store
+        // that owner's wallet is actually polling (/atlas/mail/check).
+        // Verified the same way any other foreign-issued credential
+        // presented to this domain is, never mailed on the relaying
+        // domain's word alone.
+        const mailDeliverAttachedAsset = attestation.mailDeliverAttachedAsset || null;
+        let mailNotice = null;
+        if (mailDeliverAttachedAsset) {
+          if (!mailDeliverAttachedAsset.issuer || !mailDeliverAttachedAsset.issuer.domain) {
+            return sendJson(res, 400, { error: 'mailDeliverAttachedAsset has no issuer domain' });
+          }
+          let attachedOk;
+          if (mailDeliverAttachedAsset.issuer.domain === DOMAIN) {
+            attachedOk = await verifyOwnCredentialSignature(mailDeliverAttachedAsset, assetPayloadOf(mailDeliverAttachedAsset))
+              && !isRevoked(mailDeliverAttachedAsset.id) && !isExpired(mailDeliverAttachedAsset);
+          } else {
+            attachedOk = (await verifyForeignAssetCredential(mailDeliverAttachedAsset)) === true;
+          }
+          if (!attachedOk) return sendJson(res, 400, { error: 'mailDeliverAttachedAsset does not check out against its own issuer' });
+          mailNotice = {
+            subject: 'Listing claimed at ' + relayingDomain,
+            body: 'Your open listing was claimed while you were away — the other half of the trade is attached.',
+            attachedAsset: mailDeliverAttachedAsset
+          };
+        }
+
+        const settled = await fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice);
+        unsuspend(credential.id);
+        console.log('Trade balance relay-settled for', relayingDomain + ':', credential.asset.class, credential.id);
+        return sendJson(res, 200, { status: 'settled', received: settled.received, remainder: settled.remainder });
       }
 
       // v1.14 (SPEC.md §7) — a poster withdraws their own still-open
