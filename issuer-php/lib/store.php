@@ -30,13 +30,87 @@ function atlas_domain() {
 // enforcement — list a domain here only once you'd also want it listing
 // you back, the same opted-in-both-ways posture Post Office membership
 // and Trading Station membership already require elsewhere in this
-// bundle, applied here to a domain rather than a visitor.
+// bundle, applied here to a domain rather than a visitor. Admin-managed
+// (see the atlas/admin/trusted-trade-peers/ endpoints) rather than a
+// hand-edited literal, same file-backed posture atlas_suspensions_file()
+// already uses — unlike atlas_federation_blocklist_file(), which stays
+// deliberately hand-edited-only (see its own comment below), this one
+// gets a real admin UI because adding a trading counterpart is routine
+// operator work, not a rare emergency action. Lives in lib/, same
+// not-web-reachable reasoning as atlas_mail_file() above — no other
+// domain ever needs to fetch this one, it's only ever checked locally.
+// Mirrors issuer-server/server.js's TRUSTED_TRADE_PEERS_FILE/
+// readTrustedTradePeers().
+function atlas_trusted_trade_peers_file() {
+  return __DIR__ . '/atlas-trusted-trade-peers-store.json';
+}
+
+// Same flock-guarded shared-read shape as read_suspensions() below.
+// Missing file means no peers are trusted yet, same "absence is the
+// empty case" convention every other store file here uses.
+function read_trusted_trade_peers() {
+  $fh = fopen(atlas_trusted_trade_peers_file(), 'c+');
+  if ($fh === false) return ['peers' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) && isset($doc['peers']) ? $doc : ['peers' => []];
+}
+
 function atlas_trusted_trade_peers() {
-  return []; // e.g. ['example.com', 'neighbor.example']
+  return read_trusted_trade_peers()['peers'];
 }
 
 function atlas_is_trusted_trade_peer($domain) {
   return in_array($domain, atlas_trusted_trade_peers(), true);
+}
+
+// Dedupes on add (re-adding an already-trusted domain is a no-op, not a
+// second entry) and reports back whether this call actually changed
+// anything, same "tell the caller what happened" convention
+// atlas_unsuspend() uses for removal below. Same flock-guarded
+// read-modify-write shape as atlas_suspend().
+function atlas_add_trusted_trade_peer($domain) {
+  $file = atlas_trusted_trade_peers_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc) || !isset($doc['peers'])) $doc = ['peers' => []];
+  if (in_array($domain, $doc['peers'], true)) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return false;
+  }
+  $doc['peers'][] = $domain;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return true;
+}
+
+function atlas_remove_trusted_trade_peer($domain) {
+  $file = atlas_trusted_trade_peers_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc) || !isset($doc['peers'])) $doc = ['peers' => []];
+  $before = count($doc['peers']);
+  $doc['peers'] = array_values(array_filter($doc['peers'], function ($d) use ($domain) { return $d !== $domain; }));
+  $removed = count($doc['peers']) !== $before;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $removed;
 }
 
 // ATLAS_DOCROOT — where .well-known/atlas-key.json and

@@ -152,6 +152,19 @@
       </section>
 
       <section class="panel">
+        <h2>Trusted trade peers</h2>
+        <p class="hint">The other domains this domain will accept a cross-domain Trading Station settlement with (POST /atlas/admin/trusted-trade-peers/add, /remove — SPEC.md §7), in either role a trade can put it in: accepting a foreign-issued balance here, and honoring a relay request against a credential this domain itself issued. Mutual by convention, not by enforcement — add a domain here only once you'd also want it listing this domain back.</p>
+        <label for="trustedPeerDomain">Domain</label>
+        <input type="text" id="trustedPeerDomain" placeholder="neighbor.example">
+        <div class="row">
+          <button class="submit" id="trustedPeerAddBtn" type="button">Add</button>
+          <button class="submit" id="trustedPeerRemoveBtn" type="button">Remove</button>
+        </div>
+        <div class="result" id="trustedPeerResult"></div>
+        <div id="trustedPeerCurrent"></div>
+      </section>
+
+      <section class="panel">
         <h2>Claw back a credential</h2>
         <p class="hint">Once a suspended report is actually confirmed: revokes the credential wherever it currently sits and mints a fresh one straight to whoever it actually belongs to, in the same act (POST /atlas/clawback). Works on a stolen balance or a unique item alike, and reaches a 'bound' relationship credential (a Post Office or Trading Station membership) the same total way revoke already does — re-pointing that membership's own roster entry automatically if so. Paste the exact credential as it currently stands, wherever it's ended up.</p>
         <label for="clawbackCredential">Credential JSON</label>
@@ -442,6 +455,7 @@
       refreshOnlineNow();
       refreshClassPatchClassOptions();
       refreshClassPatches();
+      refreshTrustedTradePeers();
       refreshMailDirectory();
       refreshCalendarWorldOptions();
       refreshCalendarEventOptions();
@@ -500,6 +514,54 @@
       try {
         const res = await postJson('/atlas/unsuspend', { payload: { id }, token: session.token });
         showResult(result, res.ok, res.ok ? (res.body.wasSuspended ? 'Unsuspended.' : 'Nothing to unsuspend — it was not currently suspended.') : (res.body.error || 'Unsuspend failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- trusted trade peers ----------
+    // Every domain currently trusted as a cross-domain Trading Station
+    // counterpart (POST /atlas/admin/trusted-trade-peers, SPEC.md §7) —
+    // shown below the form so the operator can see what's already trusted
+    // instead of guessing from memory, same "list it, re-fetch after each
+    // write" idiom refreshClassPatches() above uses.
+    async function refreshTrustedTradePeers() {
+      const container = document.getElementById('trustedPeerCurrent');
+      if (!container || !session) return;
+      const res = await postJson('/atlas/admin/trusted-trade-peers', { token: session.token });
+      if (!res.ok) return; // best-effort — the form still works without this
+      const peers = res.body.peers || [];
+      const items = peers.length
+        ? peers.map((d) => '<li>' + d + '</li>').join('')
+        : '<li class="empty">None trusted yet.</li>';
+      container.innerHTML = '<div class="class-patch-list"><h3>Currently trusted</h3><ul>' + items + '</ul></div>';
+    }
+
+    document.getElementById('trustedPeerAddBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('trustedPeerAddBtn');
+      const result = document.getElementById('trustedPeerResult');
+      const domain = document.getElementById('trustedPeerDomain').value.trim();
+      if (!domain) return showResult(result, false, 'Domain is required.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/admin/trusted-trade-peers/add', { payload: { domain }, token: session.token });
+        showResult(result, res.ok, res.ok ? (res.body.added ? 'Added.' : 'Already trusted — nothing changed.') : (res.body.error || 'Add failed.'));
+        if (res.ok) await refreshTrustedTradePeers();
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('trustedPeerRemoveBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('trustedPeerRemoveBtn');
+      const result = document.getElementById('trustedPeerResult');
+      const domain = document.getElementById('trustedPeerDomain').value.trim();
+      if (!domain) return showResult(result, false, 'Domain is required.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/admin/trusted-trade-peers/remove', { payload: { domain }, token: session.token });
+        showResult(result, res.ok, res.ok ? (res.body.removed ? 'Removed.' : 'Nothing to remove — it was not currently trusted.') : (res.body.error || 'Remove failed.'));
+        if (res.ok) await refreshTrustedTradePeers();
       } finally {
         btn.disabled = false;
       }

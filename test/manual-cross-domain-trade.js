@@ -72,12 +72,15 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
   return res.body;
 }
 
-function setTrustedPeers(bundleDir, peers) {
-  const serverPath = path.resolve(bundleDir, 'server.js');
-  const src = fs.readFileSync(serverPath, 'utf8');
-  const marker = "const TRUSTED_TRADE_PEERS = []; // e.g. ['example.com', 'neighbor.example']";
-  if (!src.includes(marker)) throw new Error('setTrustedPeers: expected marker not found in ' + serverPath + ' — server.js\'s TRUSTED_TRADE_PEERS literal may have changed');
-  fs.writeFileSync(serverPath, src.replace(marker, 'const TRUSTED_TRADE_PEERS = ' + JSON.stringify(peers) + ';'));
+// Trusted peers are now admin-panel-managed (POST /atlas/admin/
+// trusted-trade-peers/add), file-backed under ATLAS_STATE_DIR rather than
+// a hand-edited server.js literal — so a throwaway instance's trust list
+// is seeded the same way the real server reads it back: write straight to
+// its own copy of TRUSTED_TRADE_PEERS_FILE before the server ever starts,
+// instead of patching source. Must run after stateDir exists but before
+// startNodeServer() reads it.
+function setTrustedPeers(stateDir, peers) {
+  fs.writeFileSync(path.join(stateDir, 'atlas-trusted-trade-peers-store.json'), JSON.stringify({ peers }));
 }
 
 function startNodeServer(bundleDir, port, domain, stateDir, docrootDir) {
@@ -102,8 +105,6 @@ function startNodeServer(bundleDir, port, domain, stateDir, docrootDir) {
   fs.cpSync(BUNDLE_DIR, bundleA, { recursive: true });
   fs.cpSync(BUNDLE_DIR, bundleB, { recursive: true });
   fs.cpSync(BUNDLE_DIR, bundleC, { recursive: true });
-  setTrustedPeers(bundleA, [DOMAIN_B]);
-  setTrustedPeers(bundleB, [DOMAIN_A]);
 
   const stateA = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-cross-trade-node-state-a-'));
   const stateB = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-cross-trade-node-state-b-'));
@@ -111,6 +112,8 @@ function startNodeServer(bundleDir, port, domain, stateDir, docrootDir) {
   const docrootA = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-cross-trade-node-docroot-a-'));
   const docrootB = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-cross-trade-node-docroot-b-'));
   const docrootC = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-cross-trade-node-docroot-c-'));
+  setTrustedPeers(stateA, [DOMAIN_B]);
+  setTrustedPeers(stateB, [DOMAIN_A]);
 
   let procA, procB, procC;
   try {

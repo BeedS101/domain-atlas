@@ -234,6 +234,10 @@ const POSTOFFICE_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-postoffice-members-s
 // PEER DOMAIN's relayed mail outright, regardless of which of its members
 // sent it.
 const FEDERATION_BLOCKLIST_FILE = path.join(STATE_DIR, 'atlas-federation-blocklist.json');
+// See the trusted-trade-peers comment further down (near isTrustedTradePeer)
+// for what this file holds and why it's admin-managed rather than
+// hand-edited-only like FEDERATION_BLOCKLIST_FILE just above.
+const TRUSTED_TRADE_PEERS_FILE = path.join(STATE_DIR, 'atlas-trusted-trade-peers-store.json');
 // Federation relay rate limiting (SPEC.md §11.4): unlike POSTOFFICE_SPAM_
 // THRESHOLD/_WINDOW_MS above, which only FLAGS a local member for the
 // operator to review, a relaying domain has no membership here for that
@@ -481,11 +485,40 @@ const DOMAIN = process.env.ATLAS_DOMAIN || 'localhost:8001';
 // here only once you'd also want it listing you back, the same
 // opted-in-both-ways posture Post Office membership and Trading Station
 // membership already require elsewhere in this file, applied here to a
-// domain rather than a visitor. Mirrors issuer-php/lib/store.php's
+// domain rather than a visitor. Admin-managed (see the
+// /atlas/admin/trusted-trade-peers routes below) rather than a hand-edited
+// literal, same file-backed posture SUSPENSIONS_FILE already uses — unlike
+// FEDERATION_BLOCKLIST_FILE, which stays deliberately hand-edited-only (see
+// its own comment above), this one gets a real admin UI because adding a
+// trading counterpart is routine operator work, not a rare emergency
+// action. Missing file means no peers are trusted yet, same "absence is
+// the empty case" convention every other store file here uses. Mirrors
+// issuer-php/lib/store.php's atlas_trusted_trade_peers_file()/
 // atlas_trusted_trade_peers().
-const TRUSTED_TRADE_PEERS = []; // e.g. ['example.com', 'neighbor.example']
+function readTrustedTradePeers() {
+  if (!fs.existsSync(TRUSTED_TRADE_PEERS_FILE)) return { peers: [] };
+  return JSON.parse(fs.readFileSync(TRUSTED_TRADE_PEERS_FILE, 'utf8'));
+}
 function isTrustedTradePeer(domain) {
-  return TRUSTED_TRADE_PEERS.includes(domain);
+  return (readTrustedTradePeers().peers || []).includes(domain);
+}
+// Dedupes on add (re-adding an already-trusted domain is a no-op, not a
+// second entry) and reports back whether this call actually changed
+// anything, same "tell the caller what happened" convention unsuspend()
+// uses for removal below.
+function addTrustedTradePeer(domain) {
+  const doc = readTrustedTradePeers();
+  if (doc.peers.includes(domain)) return false;
+  doc.peers.push(domain);
+  fs.writeFileSync(TRUSTED_TRADE_PEERS_FILE, JSON.stringify(doc, null, 2));
+  return true;
+}
+function removeTrustedTradePeer(domain) {
+  const doc = readTrustedTradePeers();
+  const before = doc.peers.length;
+  doc.peers = doc.peers.filter((d) => d !== domain);
+  fs.writeFileSync(TRUSTED_TRADE_PEERS_FILE, JSON.stringify(doc, null, 2));
+  return doc.peers.length !== before;
 }
 
 // Every genuinely cross-host request this server ever makes (fetching
@@ -4811,6 +4844,52 @@ async function main() {
         const wasSuspended = unsuspend(payload.id);
         console.log('Unsuspended', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { ok: true, wasSuspended });
+      }
+
+      // Admin-gated (requireAdminAuth, above): every domain this domain
+      // currently treats as a trusted cross-domain trading counterpart (see
+      // TRUSTED_TRADE_PEERS_FILE's own comment above), so the admin panel
+      // can show what's already trusted instead of guessing from memory.
+      if (req.method === 'POST' && req.url === '/atlas/admin/trusted-trade-peers') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        return sendJson(res, 200, { peers: readTrustedTradePeers().peers });
+      }
+
+      // Admin-gated, same shape as /atlas/suspend above. `domain` is taken
+      // as given — trusting it is an explicit, mutual-by-convention
+      // operator decision (see TRUSTED_TRADE_PEERS_FILE's own comment), not
+      // something this endpoint can verify on its own, the same way an
+      // operator hand-editing the old literal never had it verified either.
+      if (req.method === 'POST' && req.url === '/atlas/admin/trusted-trade-peers/add') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !payload.domain || typeof payload.domain !== 'string') {
+          return sendJson(res, 400, { error: 'payload.domain is required' });
+        }
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const added = addTrustedTradePeer(payload.domain);
+        console.log('Trusted trade peer', payload.domain, added ? 'added' : '(already trusted)', 'by admin', auth.publicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { ok: true, added, peers: readTrustedTradePeers().peers });
+      }
+
+      // Lifts trust from a domain — a no-op (still 200, removed: false) if
+      // it wasn't trusted in the first place, same "nothing to lift" shape
+      // /atlas/unsuspend uses above. Removing this domain's own trust in a
+      // peer doesn't touch whatever that peer still has configured for this
+      // domain — see TRUSTED_TRADE_PEERS_FILE's own comment on why this is
+      // mutual by convention, not by enforcement.
+      if (req.method === 'POST' && req.url === '/atlas/admin/trusted-trade-peers/remove') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !payload.domain || typeof payload.domain !== 'string') {
+          return sendJson(res, 400, { error: 'payload.domain is required' });
+        }
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const removed = removeTrustedTradePeer(payload.domain);
+        console.log('Trusted trade peer', payload.domain, removed ? 'removed' : '(was not trusted)', 'by admin', auth.publicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { ok: true, removed, peers: readTrustedTradePeers().peers });
       }
 
       // Admin-gated (requireAdminAuth, above) — the other half of what

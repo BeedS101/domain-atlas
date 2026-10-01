@@ -122,17 +122,14 @@ function startPhpServer(bundleDir, port) {
   });
 }
 
-// Patches a throwaway bundle copy's atlas_trusted_trade_peers() to return
-// a fixed list — the only way to exercise the allowlist without a real
-// admin UI for it, same "edit the one function" posture the function's
-// own comment documents for a real deployment.
+// Trusted peers are now admin-panel-managed (POST /atlas/admin/
+// trusted-trade-peers/add), file-backed in lib/ rather than a hand-edited
+// atlas_trusted_trade_peers() body — so a throwaway bundle's trust list is
+// seeded the same way the real deployment reads it back: write straight to
+// its own copy of atlas_trusted_trade_peers_file() before the server ever
+// starts, instead of patching source.
 function setTrustedPeers(bundleDir, peers) {
-  const storePath = path.resolve(bundleDir, 'lib', 'store.php');
-  const src = fs.readFileSync(storePath, 'utf8');
-  const marker = 'function atlas_trusted_trade_peers() {\n  return []; // e.g. [\'example.com\', \'neighbor.example\']\n}';
-  if (!src.includes(marker)) throw new Error('setTrustedPeers: expected marker not found in ' + storePath + ' — store.php\'s atlas_trusted_trade_peers() body may have changed');
-  const replacement = 'function atlas_trusted_trade_peers() {\n  return ' + JSON.stringify(peers) + ';\n}';
-  fs.writeFileSync(storePath, src.replace(marker, replacement));
+  fs.writeFileSync(path.resolve(bundleDir, 'lib', 'atlas-trusted-trade-peers-store.json'), JSON.stringify({ peers }));
 }
 
 (async () => {
