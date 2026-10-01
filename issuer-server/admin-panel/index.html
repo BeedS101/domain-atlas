@@ -521,14 +521,26 @@
 
     // ---------- trusted trade peers ----------
     // Every domain currently trusted as a cross-domain Trading Station
-    // counterpart (POST /atlas/admin/trusted-trade-peers, SPEC.md §7) —
+    // counterpart (POST /atlas/admin/trusted-trade-peers/, SPEC.md §7) —
     // shown below the form so the operator can see what's already trusted
     // instead of guessing from memory, same "list it, re-fetch after each
     // write" idiom refreshClassPatches() above uses.
+    //
+    // The trailing slash here is required, not cosmetic: on the PHP side
+    // this URL maps to a directory's own index.php (no flat file matches
+    // it exactly), and a real Apache docroot 301-redirects a directory
+    // request missing its trailing slash to add one — a redirect most
+    // clients, including fetch(), replay as a GET even for an original
+    // POST, which this endpoint's require_post() then rejects with 405.
+    // Dropping the trailing slash here reproduces that silently (the
+    // fetch below treats any non-ok status as best-effort-failed and
+    // just leaves the list empty) against a real Apache deployment, even
+    // though it round-trips fine against the PHP built-in dev server
+    // test-router.php uses, which never issues that redirect.
     async function refreshTrustedTradePeers() {
       const container = document.getElementById('trustedPeerCurrent');
       if (!container || !session) return;
-      const res = await postJson('/atlas/admin/trusted-trade-peers', { token: session.token });
+      const res = await postJson('/atlas/admin/trusted-trade-peers/', { token: session.token });
       if (!res.ok) return; // best-effort — the form still works without this
       const peers = res.body.peers || [];
       const items = peers.length

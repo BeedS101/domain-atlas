@@ -4850,7 +4850,13 @@ async function main() {
       // currently treats as a trusted cross-domain trading counterpart (see
       // TRUSTED_TRADE_PEERS_FILE's own comment above), so the admin panel
       // can show what's already trusted instead of guessing from memory.
-      if (req.method === 'POST' && req.url === '/atlas/admin/trusted-trade-peers') {
+      // Trailing slash matches issuer-php's own URL for this one exactly
+      // (see admin-panel/index.html's refreshTrustedTradePeers() comment —
+      // PHP needs it to dodge an Apache directory-redirect that silently
+      // downgrades POST to GET; Node has no such constraint, but matching
+      // the same URL on both backends means one shared admin-panel page
+      // works unmodified against either).
+      if (req.method === 'POST' && req.url === '/atlas/admin/trusted-trade-peers/') {
         const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
         const auth = await requireAdminAuth(payload, proof, token);
         if (auth.error) return sendJson(res, 401, { error: auth.error });
