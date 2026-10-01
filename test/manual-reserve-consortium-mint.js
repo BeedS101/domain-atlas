@@ -126,7 +126,7 @@ function startServer(port, domain, stateDir, docrootDir) {
     console.log('PASS: created', id);
 
     console.log('STEP 2: A can read it back fresh via the ungated GET');
-    res = await get(A_BASE, '/atlas/demo/reserve/consortium/mint?id=' + encodeURIComponent(id));
+    res = await get(A_BASE, '/atlas/demo/reserve/consortium/mint/?id=' + encodeURIComponent(id));
     assert(res.status === 200 && res.body.request.id === id, 'expected to read the request back, got: ' + JSON.stringify(res));
     console.log('PASS: read back');
 
@@ -153,7 +153,7 @@ function startServer(port, domain, stateDir, docrootDir) {
     console.log('STEP 5: a forged attestation (claims to be A, signed with a key that is NOT A\'s real published key) is rejected');
     const forger = await genIdentity();
     // Fresh fetch of the real pending action to build a plausible-looking forged attestation from.
-    const fresh = await get(A_BASE, '/atlas/demo/reserve/consortium/mint?id=' + encodeURIComponent(id));
+    const fresh = await get(A_BASE, '/atlas/demo/reserve/consortium/mint/?id=' + encodeURIComponent(id));
     const forgedAttestation = { domain: A_DOMAIN, requestingDomain: A_DOMAIN, id, action: fresh.body.request.action };
     const forgedSigData = new TextEncoder().encode(canonicalize(forgedAttestation));
     const forgedSig = b64url(new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, forger.kp.privateKey, forgedSigData)));

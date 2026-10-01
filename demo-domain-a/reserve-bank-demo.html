@@ -299,6 +299,19 @@
     <div id="verifyResult"></div>
   </div>
 
+  <div class="panel" id="consortiumShowcasePanel">
+    <h2>Can't try Act 8 yourself? Here's a real one that already happened</h2>
+    <p class="stepnote">
+      Act 8 needs a real admin login on two separately-run domains, so most visitors can't complete it
+      themselves. Below is a real consortium mint request, fetched live right now from
+      <code>evtec.co.za</code>'s own server — not a screenshot, not staged. The same ungated read Act 8 itself
+      polls, pointed at one specific id that's already run to completion: both <code>evtec.co.za</code> and
+      <code>domain-atlas.co.za</code> really signed it, and it really minted the credential shown.
+    </p>
+    <div class="row"><button id="refreshShowcaseBtn" type="button">Fetch it again, right now</button></div>
+    <div id="showcaseResult"></div>
+  </div>
+
   <p class="footnote">
     Every identity on this page (the committee, both banks, all three customers, the fraudster) is an
     ordinary ECDSA keypair generated fresh in your own browser tab, exactly like every other demo on this
@@ -871,7 +884,8 @@
   async function refreshConsortiumStatus() {
     const statusEl = document.getElementById('consortiumApproveStatus');
     if (!consortiumRequestId) return;
-    const res = await getJson('/atlas/demo/reserve/consortium/mint?id=' + encodeURIComponent(consortiumRequestId));
+    // Trailing slash required — see server.js's own route comment.
+    const res = await getJson('/atlas/demo/reserve/consortium/mint/?id=' + encodeURIComponent(consortiumRequestId));
     if (!res.ok) { statusEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; return; }
     updateConsortiumProgress(res.body.request);
     if (res.body.request.status === 'executed') {
@@ -884,6 +898,35 @@
     }
   }
   document.getElementById('refreshConsortiumBtn').addEventListener('click', refreshConsortiumStatus);
+
+  // --- A pinned, real, already-completed Act 8 example, for visitors who
+  // can't run Act 8 themselves (it needs admin access on two separate
+  // domains). Hardcoded to the real evtec.co.za deployment specifically —
+  // not wherever this copy of the page happens to be served from — same
+  // "name the real domain" convention federation-demo.html's own Domain B
+  // field default already uses, so this keeps working and showing the
+  // real thing even when read from a local test copy of this file.
+  const SHOWCASE_DOMAIN = 'evtec.co.za';
+  const SHOWCASE_REQUEST_ID = 'urn:atlas:reserve-mint-consortium:a760d42c-d8f5-4adc-8bc9-0010b48af01e';
+
+  async function loadShowcase() {
+    const resultEl = document.getElementById('showcaseResult');
+    resultEl.innerHTML = '<p class="stepnote">Fetching…</p>';
+    try {
+      const res = await fetch('https://' + SHOWCASE_DOMAIN + '/atlas/demo/reserve/consortium/mint/?id=' + encodeURIComponent(SHOWCASE_REQUEST_ID), { cache: 'no-store' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { resultEl.innerHTML = '<div class="result err">Could not fetch it right now: ' + (body.error || ('HTTP ' + res.status)) + '</div>'; return; }
+      const request = body.request;
+      const have = request.approvals.map((a) => a.domain);
+      resultEl.innerHTML = '<div class="result ok">Status: ' + request.status + ' — signed by ' + have.join(' and ') +
+        ' (' + request.action.amount + ' ' + request.action.assetClass + ')</div>';
+      if (request.executedCredential) resultEl.appendChild(rawBox(request.executedCredential));
+    } catch (err) {
+      resultEl.innerHTML = '<div class="result err">Could not reach ' + SHOWCASE_DOMAIN + ' right now: ' + err.message + '</div>';
+    }
+  }
+  document.getElementById('refreshShowcaseBtn').addEventListener('click', loadShowcase);
+  loadShowcase();
 
   document.getElementById('verifyBtn').addEventListener('click', runVerify);
 

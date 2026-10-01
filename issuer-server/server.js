@@ -4268,11 +4268,29 @@ async function main() {
         return sendJson(res, 200, { request });
       }
 
-      // GET /atlas/demo/reserve/consortium/mint?id=... — ungated read, the
+      // GET /atlas/demo/reserve/consortium/mint/?id=... — ungated read, the
       // canonical source a sibling domain's own co-sign action (below)
       // fetches before it ever signs anything — never trusts a locally
       // supplied action payload.
-      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/demo/reserve/consortium/mint') {
+      //
+      // The trailing slash is required, not cosmetic, same reasoning as
+      // /atlas/admin/trusted-trade-peers/ above — except here it bites a
+      // GET instead of a POST, and as a CORS failure instead of a 405:
+      // on the PHP side this URL maps to a directory's own index.php, and
+      // a real Apache docroot 301-redirects a request missing its
+      // trailing slash to add one. A same-origin GET just follows that
+      // transparently, but the admin panel's own cross-origin fetch to a
+      // SIBLING domain's copy of this route is a CORS request, and
+      // Apache's own redirect response carries no Access-Control-Allow-
+      // Origin header (that header only comes from this PHP endpoint
+      // itself, which the redirect never reaches) — so the browser
+      // refuses to follow it and the whole fetch() rejects with a plain
+      // "Failed to fetch", not a CORS-specific message. Matched on both
+      // backends and every caller (co-sign's own outbound fetch below,
+      // the admin panel, reserve-bank-demo.html's own poll) for the same
+      // reason the POST route above is: one shared admin-panel page has
+      // to use the one spelling that works against either backend.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/demo/reserve/consortium/mint/') {
         const id = new URLSearchParams(req.url.split('?')[1] || '').get('id');
         if (!id) return sendJson(res, 400, { error: 'id is required' });
         const request = findReserveMintConsortiumRequest(id);
@@ -4301,7 +4319,7 @@ async function main() {
         const { requestingDomain, id } = payload;
         let fetched;
         try {
-          const fetchRes = await fetch(baseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/mint?id=' + encodeURIComponent(id), { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS });
+          const fetchRes = await fetch(baseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/mint/?id=' + encodeURIComponent(id), { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS });
           fetched = await fetchRes.json().catch(() => ({}));
           if (!fetchRes.ok) throw new Error(fetched.error || ('HTTP ' + fetchRes.status));
         } catch (err) {

@@ -33,8 +33,10 @@ if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
 $requestingDomain = $payload['requestingDomain'];
 $id = $payload['id'];
 
+// Trailing slash required, not cosmetic — see atlas/demo/reserve/
+// consortium/mint/index.php's own comment for why.
 try {
-  $fetchRes = atlas_http_request('GET', atlas_base_url($requestingDomain) . '/atlas/demo/reserve/consortium/mint?id=' . rawurlencode($id));
+  $fetchRes = atlas_http_request('GET', atlas_base_url($requestingDomain) . '/atlas/demo/reserve/consortium/mint/?id=' . rawurlencode($id));
 } catch (Exception $e) {
   send_json(502, ['error' => 'could not read the pending request from ' . $requestingDomain . ': ' . $e->getMessage()]);
 }

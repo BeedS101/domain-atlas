@@ -616,7 +616,11 @@
       btn.disabled = true;
       preview.innerHTML = '';
       try {
-        const res = await fetch(consortiumBaseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/mint?id=' + encodeURIComponent(id), { cache: 'no-store' });
+        // Trailing slash required, not cosmetic — see server.js's/store.php's
+        // own route comment: without it, Apache's own directory-redirect
+        // response (missing CORS headers of its own) makes this
+        // cross-origin fetch fail with a plain "Failed to fetch".
+        const res = await fetch(consortiumBaseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/mint/?id=' + encodeURIComponent(id), { cache: 'no-store' });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) return showResult(result, false, body.error || 'Could not fetch that request.');
         const req = body.request;
