@@ -245,6 +245,47 @@
     <div id="decideResult"></div>
   </div>
 
+  <div class="panel" id="consortiumPanel">
+    <h2>Act 8 — a sibling domain must also sign off</h2>
+    <p class="stepnote">
+      The same K-of-N mint as Act 1, except the approvers are other DOMAINS' own servers, not individual
+      officers simulated in this one tab. A domain's approval can only ever come from that domain's own
+      server — it has to sign with that domain's own issuer key — so this is the one genuinely new
+      interaction model on this page, not another officer-committee variant. Picture "Example Reserve
+      Authority" and "Example Reserve Authority — Northern Branch" as two separately-run, separately-hosted
+      parts of the same institution: a mint only goes through once both branches' own infrastructure signs
+      off, so no single compromised branch can mint alone.
+    </p>
+    <div class="panel caution" style="margin: 0.8rem 0;">
+      <p>
+        <strong>Unlike every other act on this page, this one needs a real admin login — on this domain's own
+        admin panel, and on the sibling domain's own admin panel too.</strong> That's not an oversight: a
+        domain's own signature can only come from that domain's own server, which this page has no way to act
+        on behalf of. Open <code>/atlas-admin/</code> on each domain in its own tab to actually co-sign below.
+      </p>
+    </div>
+    <label for="siblingDomainInput">Sibling domain address (host, optionally with port)</label>
+    <input type="text" id="siblingDomainInput" value="domain-atlas.co.za">
+    <label for="consortiumAmountInput">Reserve Credits to mint, once both domains approve</label>
+    <input type="number" id="consortiumAmountInput" min="1" max="1000000" value="20000">
+    <div class="row"><button id="requestConsortiumMintBtn" type="button">Create the pending request</button></div>
+    <div id="consortiumRequestStatus"></div>
+    <div id="consortiumApprovePanel" style="display:none; margin-top:1rem;">
+      <p class="stepnote">
+        Co-sign as <b id="consortiumThisDomainLabel"></b> at
+        <a id="consortiumThisAdminLink" href="/atlas-admin/" target="_blank">this domain's own admin panel</a> —
+        "Consortium mint co-signing," requesting domain <code id="consortiumThisDomainCode"></code>, request id
+        below. Co-sign as <b id="consortiumSiblingDomainLabel"></b> at its own
+        <code id="consortiumSiblingAdminHint"></code> the same way.
+      </p>
+      <label for="consortiumRequestIdDisplay">Request id (copy this into each admin panel)</label>
+      <input type="text" id="consortiumRequestIdDisplay" readonly>
+      <div class="row"><button id="refreshConsortiumBtn" type="button">Refresh status</button></div>
+      <div class="progress"><span id="consortiumProgressText"></span><div class="bar"><div class="fill" id="consortiumProgressFill" style="width:0%;"></div></div></div>
+      <div id="consortiumApproveStatus"></div>
+    </div>
+  </div>
+
   <div class="panel" id="verifyPanel">
     <h2>Verify any credential from this page, independently</h2>
     <p class="stepnote">
@@ -788,6 +829,61 @@
     resultEl.appendChild(rawBox(bal.bankBetaBeta));
     renderLedger();
   });
+
+  // --- Act 8: domain-quorum reserve mint ---
+
+  let consortiumRequestId = null;
+  let consortiumThisDomain = null;
+
+  function updateConsortiumProgress(request) {
+    const need = request.requiredApprovals, have = request.approvals.length;
+    document.getElementById('consortiumProgressText').textContent = request.status === 'executed'
+      ? 'Executed — ' + have + ' of ' + need + ' required domains signed'
+      : have + ' of ' + need + ' required domains signed';
+    document.getElementById('consortiumProgressFill').style.width = Math.min(100, Math.round((have / Math.max(1, need)) * 100)) + '%';
+  }
+
+  document.getElementById('requestConsortiumMintBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('requestConsortiumMintBtn');
+    const status = document.getElementById('consortiumRequestStatus');
+    const sibling = document.getElementById('siblingDomainInput').value.trim();
+    if (!sibling) { status.innerHTML = '<div class="result err">Enter the sibling domain\'s address above first.</div>'; return; }
+    btn.disabled = true;
+    status.textContent = 'Creating the pending consortium mint request…';
+    consortiumThisDomain = location.host;
+    const amount = parseInt(document.getElementById('consortiumAmountInput').value, 10);
+    const res = await postJson('/atlas/demo/reserve/consortium/request-mint', {
+      approverDomains: [consortiumThisDomain, sibling], requiredApprovals: 2,
+      toPublicKey: (await genIdentity()).publicKey, amount, memo: 'Consortium reserve issuance'
+    });
+    if (!res.ok) { status.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
+    consortiumRequestId = res.body.request.id;
+    status.innerHTML = '<div class="result ok">Pending — 2 of 2 domain signatures required.</div>';
+    document.getElementById('consortiumRequestIdDisplay').value = consortiumRequestId;
+    document.getElementById('consortiumThisDomainLabel').textContent = consortiumThisDomain;
+    document.getElementById('consortiumThisDomainCode').textContent = consortiumThisDomain;
+    document.getElementById('consortiumSiblingDomainLabel').textContent = sibling;
+    document.getElementById('consortiumSiblingAdminHint').textContent = '//' + sibling + '/atlas-admin/';
+    updateConsortiumProgress(res.body.request);
+    document.getElementById('consortiumApprovePanel').style.display = '';
+  });
+
+  async function refreshConsortiumStatus() {
+    const statusEl = document.getElementById('consortiumApproveStatus');
+    if (!consortiumRequestId) return;
+    const res = await getJson('/atlas/demo/reserve/consortium/mint?id=' + encodeURIComponent(consortiumRequestId));
+    if (!res.ok) { statusEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; return; }
+    updateConsortiumProgress(res.body.request);
+    if (res.body.request.status === 'executed') {
+      statusEl.innerHTML = '<div class="result ok">Both domains signed — ' + res.body.request.executedCredential.quantity + ' Reserve Credits minted.</div>';
+      statusEl.appendChild(rawBox(res.body.request.executedCredential));
+    } else {
+      const have = res.body.request.approvals.map((a) => a.domain);
+      statusEl.innerHTML = '<div class="result warn">Waiting on: ' +
+        res.body.request.approverDomains.filter((d) => !have.includes(d)).join(', ') + '</div>';
+    }
+  }
+  document.getElementById('refreshConsortiumBtn').addEventListener('click', refreshConsortiumStatus);
 
   document.getElementById('verifyBtn').addEventListener('click', runVerify);
 

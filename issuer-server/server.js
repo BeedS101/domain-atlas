@@ -378,6 +378,32 @@ const DEMO_BANK_ASSET_CLASS = 'atlas.credit.balance'; // the existing spendable-
 // no reason for this demo to allow a wider committee or a bigger single
 // mint than the treasury-transfer demo already does.
 const RESERVE_MINT_APPROVALS_FILE = path.join(STATE_DIR, 'atlas-reserve-mint-approvals-store.json');
+
+// reserve-bank-demo.html's own "sibling domains vote" extension — the
+// same K-of-N mint above, except the N approvers are other DOMAINS' own
+// servers, not individual officers simulated in this one tab. A domain's
+// approval can only ever come from that domain's own server (it has to
+// sign with that domain's own issuer key), so unlike the officer
+// committee above there is no browser-tab shortcut for this one: each
+// approving domain's own admin has to actually act, from that domain's
+// own admin panel (see POST /atlas/demo/reserve/consortium/co-sign
+// below). Kept as its own file for the same reason RESERVE_MINT_APPROVALS_
+// FILE is its own file rather than sharing BANK_APPROVALS_FILE: a
+// different shape (approverDomains + attestation signatures, not raw
+// public keys and raw signatures) that shouldn't contend with either
+// existing committee demo's own pending requests.
+const RESERVE_MINT_CONSORTIUM_FILE = path.join(STATE_DIR, 'atlas-reserve-mint-consortium-store.json');
+// A real multi-domain rollout spans separately-run infrastructure, so
+// getting a human admin at each sibling domain to notice a pending
+// request and act takes longer than getting a simulated officer in the
+// same browser tab to click a button — twice BANK_APPROVAL_TTL_MS's hour.
+const CONSORTIUM_APPROVAL_TTL_MS = 2 * 60 * 60 * 1000;
+// Deliberately smaller than the officer committees above (up to 10): this
+// models a handful of real, separately-run sibling domains, not a large
+// anonymous committee.
+const CONSORTIUM_MIN_DOMAINS = 2;
+const CONSORTIUM_MAX_DOMAINS = 5;
+
 // Governance/voting demo (governance-demo.html): two flat files, same
 // "one JSON file, filter/derive on read" shape as every other demo store
 // above — a membership roster (open enrollment: anyone can mint
@@ -2547,6 +2573,32 @@ function reserveMintApprovalPayloadOf(approval) {
   return { id: approval.id, action: approval.action };
 }
 
+// Domain-quorum reserve-mint requests — same plain-read-write shape as
+// readReserveMintApprovals just above, but each "approval" is a domain's
+// own signed attestation rather than one officer's raw signature. See
+// RESERVE_MINT_CONSORTIUM_FILE's own comment for why this is a separate
+// store.
+function readReserveMintConsortiumRequests() {
+  if (!fs.existsSync(RESERVE_MINT_CONSORTIUM_FILE)) return { requests: [] };
+  const doc = JSON.parse(fs.readFileSync(RESERVE_MINT_CONSORTIUM_FILE, 'utf8'));
+  const now = Date.now();
+  doc.requests = doc.requests.filter((r) => r.status !== 'pending' || new Date(r.expiresAt).getTime() > now);
+  return doc;
+}
+function writeReserveMintConsortiumRequests(doc) {
+  fs.writeFileSync(RESERVE_MINT_CONSORTIUM_FILE, JSON.stringify(doc, null, 2));
+}
+function findReserveMintConsortiumRequest(id) {
+  return readReserveMintConsortiumRequests().requests.find((r) => r.id === id) || null;
+}
+function saveReserveMintConsortiumRequest(request) {
+  const doc = readReserveMintConsortiumRequests();
+  const idx = doc.requests.findIndex((r) => r.id === request.id);
+  if (idx === -1) doc.requests.push(request);
+  else doc.requests[idx] = request;
+  writeReserveMintConsortiumRequests(doc);
+}
+
 // Domain calendar (SPEC.md §12) — same plain read/append/update/remove
 // shape as PENDING_TRADES_FILE/WORLD_DROPS_FILE above. readCalendarEvents
 // is the one GET /atlas/calendar actually calls: filtered to one
@@ -4173,6 +4225,166 @@ async function main() {
         }
         saveReserveMintApproval(approval);
         return sendJson(res, 200, { approval });
+      }
+
+      // POST /atlas/demo/reserve/consortium/request-mint —
+      // reserve-bank-demo.html's own domain-quorum act: same
+      // ungated-to-create, worthless-without-real-signatures posture as
+      // POST /atlas/demo/reserve/request-mint above, except `approverDomains`
+      // names other domains' own hostnames instead of raw public keys. This
+      // domain itself may be one of them — naming itself doesn't skip
+      // anything; it still has to co-sign through the same admin-gated route
+      // every other listed domain does.
+      if (req.method === 'POST' && req.url === '/atlas/demo/reserve/consortium/request-mint') {
+        const { approverDomains, requiredApprovals, toPublicKey, amount, memo } = JSON.parse((await readBody(req)) || '{}');
+        if (!Array.isArray(approverDomains) || !approverDomains.every((d) => typeof d === 'string' && d) || new Set(approverDomains).size !== approverDomains.length) {
+          return sendJson(res, 400, { error: 'approverDomains must be an array of distinct, non-empty domain names' });
+        }
+        if (approverDomains.length < CONSORTIUM_MIN_DOMAINS || approverDomains.length > CONSORTIUM_MAX_DOMAINS) {
+          return sendJson(res, 400, { error: 'approverDomains must list between ' + CONSORTIUM_MIN_DOMAINS + ' and ' + CONSORTIUM_MAX_DOMAINS + ' domains' });
+        }
+        if (!Number.isInteger(requiredApprovals) || requiredApprovals < 2 || requiredApprovals > approverDomains.length) {
+          return sendJson(res, 400, { error: 'requiredApprovals must be an integer between 2 and the number of approver domains' });
+        }
+        if (!toPublicKey) return sendJson(res, 400, { error: 'toPublicKey is required' });
+        if (!Number.isInteger(amount) || amount < 1 || amount > BANK_APPROVAL_MAX_AMOUNT) {
+          return sendJson(res, 400, { error: 'amount must be a positive integer up to ' + BANK_APPROVAL_MAX_AMOUNT });
+        }
+        const now = new Date();
+        const request = {
+          id: 'urn:atlas:reserve-mint-consortium:' + webcrypto.randomUUID(),
+          requestingDomain: DOMAIN,
+          action: { type: 'reserve-mint', toPublicKey, assetClass: DEMO_RESERVE_CLASS, amount, memo: typeof memo === 'string' ? memo.slice(0, 200) : '' },
+          approverDomains,
+          requiredApprovals,
+          approvals: [],
+          status: 'pending',
+          executedCredentialId: null,
+          createdAt: now.toISOString(),
+          expiresAt: new Date(now.getTime() + CONSORTIUM_APPROVAL_TTL_MS).toISOString()
+        };
+        saveReserveMintConsortiumRequest(request);
+        console.log('Demo reserve consortium: requested mint', request.id, '(' + requiredApprovals + '-of-' + approverDomains.length + ' domains)');
+        return sendJson(res, 200, { request });
+      }
+
+      // GET /atlas/demo/reserve/consortium/mint?id=... — ungated read, the
+      // canonical source a sibling domain's own co-sign action (below)
+      // fetches before it ever signs anything — never trusts a locally
+      // supplied action payload.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/demo/reserve/consortium/mint') {
+        const id = new URLSearchParams(req.url.split('?')[1] || '').get('id');
+        if (!id) return sendJson(res, 400, { error: 'id is required' });
+        const request = findReserveMintConsortiumRequest(id);
+        if (!request) return sendJson(res, 404, { error: 'no such consortium mint request (or it already expired)' });
+        return sendJson(res, 200, { request });
+      }
+
+      // POST /atlas/demo/reserve/consortium/co-sign — admin-gated
+      // (requireAdminAuth, same as /atlas/admin/trusted-trade-peers/add
+      // above), called on a SIBLING domain's own server by that domain's
+      // own admin, after reviewing the pending request. Fetches the real
+      // pending request from the requesting domain (never trusts a
+      // caller-supplied action), checks this domain is actually named as
+      // an approver, signs {domain, requestingDomain, id, action} with
+      // THIS domain's own key, and relays that attestation server-to-
+      // server to the requesting domain's own approve route — the exact
+      // outbound shape relayTradeLock/relayTradeSettle already use.
+      if (req.method === 'POST' && req.url === '/atlas/demo/reserve/consortium/co-sign') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !payload.requestingDomain || !payload.id) {
+          return sendJson(res, 400, { error: 'payload.requestingDomain and payload.id are both required' });
+        }
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+
+        const { requestingDomain, id } = payload;
+        let fetched;
+        try {
+          const fetchRes = await fetch(baseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/mint?id=' + encodeURIComponent(id), { cache: 'no-store', headers: OUTBOUND_REQUEST_HEADERS });
+          fetched = await fetchRes.json().catch(() => ({}));
+          if (!fetchRes.ok) throw new Error(fetched.error || ('HTTP ' + fetchRes.status));
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not read the pending request from ' + requestingDomain + ': ' + err.message });
+        }
+        const request = fetched.request;
+        if (!request || request.status !== 'pending') {
+          return sendJson(res, 400, { error: 'that request is not pending at ' + requestingDomain + ' (already executed, or expired)' });
+        }
+        if (!request.approverDomains.includes(DOMAIN)) {
+          return sendJson(res, 403, { error: 'this domain (' + DOMAIN + ') was not named as an approver for that request' });
+        }
+
+        const attestation = { domain: DOMAIN, requestingDomain, id, action: request.action };
+        const attestationSignature = await sign(attestation);
+        let relayRes, relayBody;
+        try {
+          relayRes = await fetch(baseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/approve', {
+            method: 'POST',
+            headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, attestation, attestationSignature })
+          });
+          relayBody = await relayRes.json().catch(() => ({}));
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not reach ' + requestingDomain + ' to relay the co-sign: ' + err.message });
+        }
+        if (!relayRes.ok) return sendJson(res, 400, { error: relayBody.error || (requestingDomain + ' refused the co-sign (HTTP ' + relayRes.status + ')') });
+        console.log('Demo reserve consortium: co-signed', id, 'for', requestingDomain, 'as', DOMAIN);
+        return sendJson(res, 200, { ok: true, request: relayBody.request });
+      }
+
+      // POST /atlas/demo/reserve/consortium/approve — the inbound half of
+      // co-sign above, called BY a sibling domain's own server, ungated in
+      // the general-auth sense but gated by the attestation's own
+      // signature: trust comes from verifying it against that domain's
+      // freshly-fetched published key (fetchDomainPublicKey/
+      // verifyDomainSignature), never from anything the caller merely
+      // asserts — the same trust bootstrap POST /atlas/trade/relay-lock
+      // already uses. Mints the instant the threshold is reached, in the
+      // same request that pushes it over, same as every other K-of-N
+      // demo's own sign route.
+      if (req.method === 'POST' && req.url === '/atlas/demo/reserve/consortium/approve') {
+        const { id, attestation, attestationSignature } = JSON.parse((await readBody(req)) || '{}');
+        if (!id || !attestation || !attestationSignature) return sendJson(res, 400, { error: 'id, attestation, and attestationSignature are all required' });
+        const request = findReserveMintConsortiumRequest(id);
+        if (!request) return sendJson(res, 404, { error: 'no such consortium mint request (or it already expired)' });
+        if (request.status !== 'pending') return sendJson(res, 400, { error: 'this request is already ' + request.status });
+        if (attestation.id !== id || attestation.requestingDomain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'attestation does not name this request and this domain' });
+        }
+        // Binds the attestation to the EXACT pending action, so a domain
+        // can never be tricked into having its signature count toward a
+        // different action than the one it actually reviewed.
+        if (canonicalize(attestation.action) !== canonicalize(request.action)) {
+          return sendJson(res, 400, { error: 'attestation does not name the pending action exactly' });
+        }
+        const domain = attestation.domain;
+        if (!domain || !request.approverDomains.includes(domain)) {
+          return sendJson(res, 403, { error: 'that domain is not named as an approver for this request' });
+        }
+        if (request.approvals.some((a) => a.domain === domain)) {
+          return sendJson(res, 200, { request }); // already approved — idempotent, not an error
+        }
+
+        let domainKey;
+        try {
+          domainKey = await fetchDomainPublicKey(domain);
+        } catch (err) {
+          return sendJson(res, 502, { error: 'could not verify ' + domain + '\'s own published key: ' + err.message });
+        }
+        const attestationOk = await verifyDomainSignature(domainKey, attestation, attestationSignature);
+        if (!attestationOk) return sendJson(res, 400, { error: domain + '\'s attestation signature does not check out' });
+
+        request.approvals.push({ domain, attestationSignature, approvedAt: new Date().toISOString() });
+        if (request.approvals.length >= request.requiredApprovals) {
+          const credential = await mintAssetByClass(request.action.toPublicKey, request.action.assetClass, request.action.amount, null);
+          request.status = 'executed';
+          request.executedCredentialId = credential.id;
+          request.executedCredential = credential;
+          console.log('Demo reserve consortium: mint', request.id, 'executed —', credential.id);
+        }
+        saveReserveMintConsortiumRequest(request);
+        return sendJson(res, 200, { request });
       }
 
       // --- Governance/voting demo (governance-demo.html) ---

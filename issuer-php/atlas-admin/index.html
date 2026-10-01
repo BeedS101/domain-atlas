@@ -165,6 +165,21 @@
       </section>
 
       <section class="panel">
+        <h2>Consortium mint co-signing</h2>
+        <p class="hint">This domain's own half of a domain-quorum reserve mint (reserve-bank-demo.html's Act 8, POST /atlas/demo/reserve/consortium/co-sign) — the admin-gated step a sibling domain's own operator has to take, since a domain's approval can only ever come from that domain's own server signing with its own key. Enter the requesting domain and the pending request's id (both shown on the requesting domain's own reserve-bank-demo.html page), then co-sign: this fetches the real pending action from that domain first and signs exactly that, never a value typed in below.</p>
+        <label for="consortiumRequestingDomain">Requesting domain</label>
+        <input type="text" id="consortiumRequestingDomain" placeholder="evtec.co.za">
+        <label for="consortiumRequestId">Request id</label>
+        <input type="text" id="consortiumRequestId" placeholder="urn:atlas:reserve-mint-consortium:...">
+        <div class="row">
+          <button class="submit" id="consortiumFetchBtn" type="button">Fetch pending request</button>
+          <button class="submit" id="consortiumCoSignBtn" type="button">Co-sign &amp; relay</button>
+        </div>
+        <div class="result" id="consortiumResult"></div>
+        <div id="consortiumPreview"></div>
+      </section>
+
+      <section class="panel">
         <h2>Claw back a credential</h2>
         <p class="hint">Once a suspended report is actually confirmed: revokes the credential wherever it currently sits and mints a fresh one straight to whoever it actually belongs to, in the same act (POST /atlas/clawback). Works on a stolen balance or a unique item alike, and reaches a 'bound' relationship credential (a Post Office or Trading Station membership) the same total way revoke already does — re-pointing that membership's own roster entry automatically if so. Paste the exact credential as it currently stands, wherever it's ended up.</p>
         <label for="clawbackCredential">Credential JSON</label>
@@ -574,6 +589,62 @@
         const res = await postJson('/atlas/admin/trusted-trade-peers/remove', { payload: { domain }, token: session.token });
         showResult(result, res.ok, res.ok ? (res.body.removed ? 'Removed.' : 'Nothing to remove — it was not currently trusted.') : (res.body.error || 'Remove failed.'));
         if (res.ok) await refreshTrustedTradePeers();
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- consortium mint co-signing ----------
+    // Same scheme-by-hostname convention server.js's own baseUrl() and
+    // federation-demo.html's client-side copy already use — needed here
+    // because the requesting domain is a different origin, unlike every
+    // other action on this page which only ever calls this domain's own
+    // relative /atlas/... URLs.
+    function consortiumBaseUrl(domain) {
+      if (domain.startsWith('http')) return domain.replace(/\/$/, '');
+      const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(domain);
+      return ((isLocalHost ? 'http://' : 'https://') + domain).replace(/\/$/, '');
+    }
+
+    document.getElementById('consortiumFetchBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('consortiumFetchBtn');
+      const result = document.getElementById('consortiumResult');
+      const preview = document.getElementById('consortiumPreview');
+      const requestingDomain = document.getElementById('consortiumRequestingDomain').value.trim();
+      const id = document.getElementById('consortiumRequestId').value.trim();
+      if (!requestingDomain || !id) return showResult(result, false, 'Requesting domain and request id are both required.');
+      btn.disabled = true;
+      preview.innerHTML = '';
+      try {
+        const res = await fetch(consortiumBaseUrl(requestingDomain) + '/atlas/demo/reserve/consortium/mint?id=' + encodeURIComponent(id), { cache: 'no-store' });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) return showResult(result, false, body.error || 'Could not fetch that request.');
+        const req = body.request;
+        showResult(result, true, 'Fetched — review the pending action below before co-signing.');
+        preview.innerHTML = '<div class="class-patch-list"><h3>Pending action</h3><ul>' +
+          '<li>Mint <span class="class-patch-name">' + req.action.amount + '</span> of ' + req.action.assetClass + ' to ' + req.action.toPublicKey.slice(0, 20) + '…</li>' +
+          '<li>Approver domains: ' + req.approverDomains.join(', ') + '</li>' +
+          '<li>' + req.approvals.length + ' of ' + req.requiredApprovals + ' required domains signed so far (' + (req.approvals.map((a) => a.domain).join(', ') || 'none yet') + ')</li>' +
+          '<li>Status: ' + req.status + '</li></ul></div>';
+      } catch (err) {
+        showResult(result, false, 'Could not reach ' + requestingDomain + ': ' + err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('consortiumCoSignBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('consortiumCoSignBtn');
+      const result = document.getElementById('consortiumResult');
+      const requestingDomain = document.getElementById('consortiumRequestingDomain').value.trim();
+      const id = document.getElementById('consortiumRequestId').value.trim();
+      if (!requestingDomain || !id) return showResult(result, false, 'Requesting domain and request id are both required.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/demo/reserve/consortium/co-sign', { payload: { requestingDomain, id }, token: session.token });
+        showResult(result, res.ok, res.ok
+          ? (res.body.request && res.body.request.status === 'executed' ? 'Co-signed — threshold reached, the mint executed.' : 'Co-signed and relayed to ' + requestingDomain + '.')
+          : (res.body.error || 'Co-sign failed.'));
       } finally {
         btn.disabled = false;
       }

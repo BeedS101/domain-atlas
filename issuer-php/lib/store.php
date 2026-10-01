@@ -676,6 +676,28 @@ function atlas_reserve_mint_approvals_file() {
   return __DIR__ . '/atlas-reserve-mint-approvals-store.json';
 }
 
+// reserve-bank-demo.html's own "sibling domains vote" extension — mirrors
+// issuer-server/server.js's RESERVE_MINT_CONSORTIUM_FILE. The same K-of-N
+// mint above, except the N approvers are other DOMAINS' own servers, not
+// individual officers simulated in one browser tab — each approving
+// domain's own admin has to actually act, from that domain's own admin
+// panel (see atlas/demo/reserve/consortium/co-sign.php). Own file for the
+// same reason atlas_reserve_mint_approvals_file() is its own file rather
+// than sharing the bank-demo one.
+function atlas_reserve_mint_consortium_file() {
+  return __DIR__ . '/atlas-reserve-mint-consortium-store.json';
+}
+// Twice ATLAS_BANK_APPROVAL_TTL_MS's hour — a real multi-domain rollout
+// spans separately-run infrastructure, so getting a human admin at each
+// sibling domain to notice and act takes longer than one browser tab's
+// own simulated officer clicking a button.
+const ATLAS_CONSORTIUM_APPROVAL_TTL_MS = 7200000;
+// Deliberately smaller than the officer committees above (up to 10): this
+// models a handful of real, separately-run sibling domains, not a large
+// anonymous committee.
+const ATLAS_CONSORTIUM_MIN_DOMAINS = 2;
+const ATLAS_CONSORTIUM_MAX_DOMAINS = 5;
+
 // Governance/voting demo (governance-demo.html) — mirrors
 // issuer-server/server.js's GOVERNANCE_MEMBERS_FILE/GOVERNANCE_PROPOSALS_FILE.
 function atlas_governance_members_file() {
@@ -994,6 +1016,138 @@ function sign_reserve_mint_approval($id, $proof) {
   flock($fh, LOCK_UN);
   fclose($fh);
   return ['approval' => $approval];
+}
+
+// Domain-quorum reserve-mint requests — mirrors issuer-server/server.js's
+// readReserveMintConsortiumRequests()/findReserveMintConsortiumRequest()/
+// saveReserveMintConsortiumRequest(). Same plain-read-write shape as
+// read_reserve_mint_approvals() above, but each "approval" is a domain's
+// own signed attestation rather than one officer's raw signature.
+function atlas_read_reserve_mint_consortium_requests() {
+  $file = atlas_reserve_mint_consortium_file();
+  if (!file_exists($file)) return ['requests' => []];
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return ['requests' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc) || !isset($doc['requests'])) $doc = ['requests' => []];
+  $nowMs = (int) round(microtime(true) * 1000);
+  $doc['requests'] = array_values(array_filter($doc['requests'], function ($r) use ($nowMs) {
+    return ($r['status'] ?? 'pending') !== 'pending' || strtotime($r['expiresAt']) * 1000 > $nowMs;
+  }));
+  return $doc;
+}
+function atlas_find_reserve_mint_consortium_request($id) {
+  foreach (atlas_read_reserve_mint_consortium_requests()['requests'] as $r) {
+    if ($r['id'] === $id) return $r;
+  }
+  return null;
+}
+function atlas_save_reserve_mint_consortium_request($request) {
+  $file = atlas_reserve_mint_consortium_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['requests'])) $doc = ['requests' => []];
+  $found = false;
+  foreach ($doc['requests'] as $i => $r) {
+    if ($r['id'] === $request['id']) { $doc['requests'][$i] = $request; $found = true; break; }
+  }
+  if (!$found) $doc['requests'][] = $request;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// The inbound half of atlas/demo/reserve/consortium/co-sign.php — called
+// by a sibling domain's own server, trust coming from the attestation's
+// own signature (verified against that domain's freshly-fetched published
+// key), never from anything the caller merely asserts. Same
+// one-lock-held-across-the-whole-sequence reasoning as
+// sign_reserve_mint_approval() above, except the domain-key fetch/verify
+// happens BEFORE the lock is taken (it's a network round trip, not pure
+// local computation, so there's no reason to hold the file lock through
+// it). Mints the instant the threshold is reached, in the same request
+// that pushes it over.
+function atlas_approve_reserve_mint_consortium($id, $attestation, $attestationSignature) {
+  $request = atlas_find_reserve_mint_consortium_request($id);
+  if (!$request) return ['error' => 'no such consortium mint request (or it already expired)'];
+  if ($request['status'] !== 'pending') return ['error' => 'this request is already ' . $request['status']];
+  if (($attestation['id'] ?? null) !== $id || ($attestation['requestingDomain'] ?? null) !== atlas_domain()) {
+    return ['error' => 'attestation does not name this request and this domain'];
+  }
+  // Binds the attestation to the EXACT pending action, so a domain can
+  // never be tricked into having its signature count toward a different
+  // action than the one it actually reviewed.
+  if (canonicalize($attestation['action'] ?? null) !== canonicalize($request['action'])) {
+    return ['error' => 'attestation does not name the pending action exactly'];
+  }
+  $domain = $attestation['domain'] ?? null;
+  if (!$domain || !in_array($domain, $request['approverDomains'], true)) {
+    return ['error' => 'that domain is not named as an approver for this request', 'status' => 403];
+  }
+  foreach ($request['approvals'] as $a) {
+    if ($a['domain'] === $domain) return ['request' => $request]; // already approved — idempotent, not an error
+  }
+
+  try {
+    $domainKey = fetch_domain_public_key($domain);
+  } catch (Exception $e) {
+    return ['error' => "could not verify " . $domain . "'s own published key: " . $e->getMessage(), 'status' => 502];
+  }
+  if (!verify_domain_signature($domainKey, $attestation, $attestationSignature)) {
+    return ['error' => $domain . "'s attestation signature does not check out"];
+  }
+
+  $file = atlas_reserve_mint_consortium_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['requests'])) $doc = ['requests' => []];
+  $idx = null;
+  foreach ($doc['requests'] as $i => $r) {
+    if ($r['id'] === $id) { $idx = $i; break; }
+  }
+  if ($idx === null) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'no such consortium mint request (or it already expired)'];
+  }
+  $request = $doc['requests'][$idx];
+  if ($request['status'] !== 'pending') {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'this request is already ' . $request['status']];
+  }
+  foreach ($request['approvals'] as $a) {
+    if ($a['domain'] === $domain) {
+      flock($fh, LOCK_UN);
+      fclose($fh);
+      return ['request' => $request]; // already approved under the lock too — idempotent
+    }
+  }
+  $request['approvals'][] = ['domain' => $domain, 'attestationSignature' => $attestationSignature, 'approvedAt' => iso_now()];
+  if (count($request['approvals']) >= $request['requiredApprovals']) {
+    $kp = atlas_load_keys();
+    $credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $request['action']['toPublicKey'], $request['action']['assetClass'], $request['action']['amount'], null);
+    $request['status'] = 'executed';
+    $request['executedCredentialId'] = $credential['id'];
+    $request['executedCredential'] = $credential;
+  }
+  $doc['requests'][$idx] = $request;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['request' => $request];
 }
 
 // Fixed claim text an attestation-demo.html visitor can request FROM the
