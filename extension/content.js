@@ -525,19 +525,29 @@
     hostScrollLocked = false;
   }
 
+  // startManifestUrl is optional — the toolbar-button listener further
+  // down calls this with none at all, for a page that may not declare a
+  // manifest (or any relationship to Domain Atlas) in the first place.
+  // viewer.js's own startParams()/boot sequence already has a defined,
+  // working path for "no manifest" (every wallet-panel display it shows
+  // is populated before that check even runs) — this only ever needed
+  // the overlay itself to stop requiring a URL to open.
   function openOverlay(startManifestUrl, worldId, anchorId) {
     const existing = document.getElementById('domain-atlas-overlay');
     if (existing) existing.remove();
 
     const iframe = document.createElement('iframe');
     iframe.id = 'domain-atlas-overlay';
-    let src = chrome.runtime.getURL('viewer.html') + '?manifest=' + encodeURIComponent(startManifestUrl);
-    if (worldId) src += '&world=' + encodeURIComponent(worldId);
-    // SPEC.md §3.5 — the specific named point this page's own <link
-    // rel="spatial"> pointed at, if any; viewer.js's startParams()/
-    // enterWorld() are what actually act on it (placing the visitor there
-    // instead of the world's ordinary entry point).
-    if (anchorId) src += '&anchor=' + encodeURIComponent(anchorId);
+    let src = chrome.runtime.getURL('viewer.html');
+    if (startManifestUrl) {
+      src += '?manifest=' + encodeURIComponent(startManifestUrl);
+      if (worldId) src += '&world=' + encodeURIComponent(worldId);
+      // SPEC.md §3.5 — the specific named point this page's own <link
+      // rel="spatial"> pointed at, if any; viewer.js's startParams()/
+      // enterWorld() are what actually act on it (placing the visitor
+      // there instead of the world's ordinary entry point).
+      if (anchorId) src += '&anchor=' + encodeURIComponent(anchorId);
+    }
     iframe.src = src;
     // The viewer is a cross-origin (extension) iframe, so WebAuthn is
     // blocked by default Permissions Policy unless explicitly delegated —
@@ -624,6 +634,19 @@
       // same rewrite correctly leaves an actual file alone. Naming the file
       // sidesteps that ambiguity entirely, on any host.
       location.href = '/atlas-admin/index.html';
+    }
+  });
+
+  // background.js's toolbar-button handler — opens the wallet with no
+  // manifest at all, on any page, regardless of whether this content
+  // script found one above. Never overwrites an overlay that's already
+  // showing: if one's already open (a real manifest entry, or an
+  // earlier toolbar click), openOverlay() would otherwise tear it down
+  // and rebuild it with nothing, discarding whatever world the visitor
+  // was already in.
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message && message.type === 'domain-atlas-open-wallet' && !document.getElementById('domain-atlas-overlay')) {
+      openOverlay();
     }
   });
 })();

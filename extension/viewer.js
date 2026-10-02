@@ -11548,5 +11548,14 @@ if (start.manifest) {
     requestAnimationFrame(render);
   });
 } else {
-  statusEl.textContent = 'No manifest specified.';
+  // Opened with no manifest at all — the toolbar button (background.js/
+  // content.js) does this on purpose, on any page. Every wallet-panel
+  // display above (refreshIdentityDisplay/refreshInventoryDisplay/
+  // refreshMailDisplay) already populated with no world needed, so open
+  // the panel itself immediately instead of leaving placeLabel stuck on
+  // its initial "Loading space…" forever with nothing ever replacing it.
+  placeLabel.textContent = '🎒 Wallet';
+  statusEl.textContent = 'No world entered.';
+  walletPanel.classList.add('open');
+  routeWalletScreen();
 }
