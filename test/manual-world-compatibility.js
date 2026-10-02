@@ -1,4 +1,4 @@
-// Manual check for #151: "only show items compatible with this world" in
+// Manual check for #151: "only show items compatible with this domain" in
 // Wallet -> Inventory -> Yours, plus surfacing the same already-existing
 // manifest data (policy.acceptedItemClasses/policy.trustedIssuers, plus
 // chat/trading) in the two places a visitor sees BEFORE stepping into a
@@ -102,7 +102,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     if (!iron || iron.compatible !== '0') throw new Error('Expected mined iron dataset.compatible === "0" (wrong class for plaza), got: ' + JSON.stringify(iron));
     console.log('PASS: compass compatible, iron not — matches plaza\'s acceptedItemClasses');
 
-    console.log('STEP 2: checking "only show items compatible with this world" hides the iron card, keeps the compass');
+    console.log('STEP 2: checking "only show items compatible with this domain" hides the iron card, keeps the compass');
     await frame.locator('#collectiblesCompatOnlyCheckbox').check();
     await frame.waitForFunction(() => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));

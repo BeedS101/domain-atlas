@@ -5361,7 +5361,7 @@ function renderPropertiesToggle(properties) {
 // shows no quantity at all and offers Load/PvP-loss instead of Split —
 // SPEC.md §5's "false moves whole via §5.2, true splits via §5.4" split,
 // reflected directly in which actions a card offers.
-// Task #151 — "compatible with this world" needs no new manifest field:
+// Task #151 — "compatible with this domain" needs no new manifest field:
 // SPEC.md line 334 already defines policy.acceptedItemClasses as which
 // classes a world recognizes, and policy.trustedIssuers (line 172,
 // orthogonal to class) as whose issuers it trusts at all ("any" | "self" |
@@ -6022,7 +6022,7 @@ async function pickUpDroppedItem(worldDomain, dropId) {
 // (the lists are fully rebuilt each time) and on every search input event.
 // extraMatch (task #151) is an optional (card) => boolean predicate ANDed
 // in alongside the text search — used to layer the "only show items
-// compatible with this world" checkbox on top of whatever's already typed
+// compatible with this domain" checkbox on top of whatever's already typed
 // into the search box, without the two filters stepping on each other's
 // toes (both ultimately just set `card.hidden`, so they have to be combined
 // in one pass rather than applied as two independent overwrites).
@@ -6052,14 +6052,14 @@ function applyListFilter(listEl, rawQuery, extraMatch) {
       noMatchEl.className = 'empty-note filter-empty-note';
       listEl.appendChild(noMatchEl);
     }
-    noMatchEl.textContent = query ? ('No matches for "' + rawQuery.trim() + '".') : 'No items compatible with this world.';
+    noMatchEl.textContent = query ? ('No matches for "' + rawQuery.trim() + '".') : 'No items compatible with this domain.';
   } else if (noMatchEl) {
     noMatchEl.remove();
   }
 }
 
 // Task #151 — the (card) => boolean predicate for each subtab's "only show
-// items compatible with this world" checkbox, or null when it's unchecked
+// items compatible with this domain" checkbox, or null when it's unchecked
 // (meaning applyListFilter falls back to text-search-only). Kept as
 // functions rather than inline at every call site since both the search
 // input's own 'input' listener and the checkbox's 'change' listener below
@@ -6082,7 +6082,7 @@ documentsSearchInput && documentsSearchInput.addEventListener('input', () => {
   applyListFilter(counterpartyDocumentsListEl, documentsSearchInput.value);
 });
 // Only the "Yours" list re-filters here — the checkbox never applies to
-// Counterparty's, since "compatible with this world" is about what YOU
+// Counterparty's, since "compatible with this domain" is about what YOU
 // could meaningfully load/drop here, not what they're holding.
 collectiblesCompatOnlyCheckbox && collectiblesCompatOnlyCheckbox.addEventListener('change', () => {
   applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
