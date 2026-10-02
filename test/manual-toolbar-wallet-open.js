@@ -95,16 +95,20 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     if (!placeLabelText.includes('Wallet')) throw new Error('Expected placeLabel to say something Wallet-related in standalone mode, got: ' + placeLabelText);
     console.log('PASS: placeLabel reflects standalone wallet-only mode, not stuck on "Loading space…"');
 
-    console.log('STEP 1b: no leftover empty "room" — the overlay is a small corner frame, not a full-viewport takeover, and the blank #scene canvas is hidden rather than showing through next to the panel');
+    console.log('STEP 1b: the overlay is a narrow panel pinned to the browser\'s right edge, full height (not a small floating corner box, not a full-viewport takeover), and the blank #scene canvas is hidden rather than showing through next to the panel');
+    const viewportSize = page.viewportSize();
     const overlayBox = await frameHandle.boundingBox();
-    if (!overlayBox || overlayBox.width > 500) throw new Error('Expected a small corner frame in standalone mode, got a bounding box: ' + JSON.stringify(overlayBox));
+    if (!overlayBox || overlayBox.width > 500) throw new Error('Expected a narrow side panel in standalone mode, got a bounding box: ' + JSON.stringify(overlayBox));
+    if (Math.round(overlayBox.y) !== 0) throw new Error('Expected the panel flush with the top of the viewport, got y: ' + overlayBox.y);
+    if (Math.abs(overlayBox.height - viewportSize.height) > 1) throw new Error('Expected the panel to span the full viewport height, got height: ' + overlayBox.height + ' vs viewport ' + viewportSize.height);
+    if (Math.abs(overlayBox.x + overlayBox.width - viewportSize.width) > 1) throw new Error('Expected the panel flush with the right edge of the viewport, got x+width: ' + (overlayBox.x + overlayBox.width) + ' vs viewport width ' + viewportSize.width);
     const sceneDisplay = await frame.locator('#scene').evaluate((el) => getComputedStyle(el).display);
     if (sceneDisplay !== 'none') throw new Error('Expected #scene hidden in standalone mode, got display: ' + sceneDisplay);
     const walletBtnDisplay = await frame.locator('#walletBtn').evaluate((el) => getComputedStyle(el).display);
     if (walletBtnDisplay !== 'none') throw new Error('Expected the wallet-panel toggle button hidden in standalone mode (nothing to toggle back to), got display: ' + walletBtnDisplay);
     const chatWidgetDisplay = await frame.locator('#chatWidget').evaluate((el) => getComputedStyle(el).display);
     if (chatWidgetDisplay !== 'none') throw new Error('Expected #chatWidget hidden in standalone mode (no world\'s chat backs it), got display: ' + chatWidgetDisplay);
-    console.log('PASS: small corner frame, no blank canvas, no toggle button or chat widget showing through behind the panel');
+    console.log('PASS: full-height side panel flush with the right edge, no blank canvas, no toggle button or chat widget showing through behind it');
 
     console.log('STEP 2: a second toolbar message while already open must not tear down the overlay');
     await background.evaluate(async () => {
@@ -138,7 +142,33 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     if (!widgetHidden) throw new Error('Expected #assetViewerWidget to stay hidden on hover in standalone mode (no room to show it beside a card in a 380px frame)');
     console.log('PASS: hovering the asset card did not open the Asset Viewer panel in standalone mode');
 
-    console.log('\nALL CHECKS PASSED — toolbar-button wallet-open works on a manifest-less page, is idempotent while already open, and the Asset Viewer hover panel stays disabled there.');
+    console.log('STEP 4: the left-edge handle drags the panel wider, and the new width survives a fresh page load (chrome.storage.local, not just in-memory state)');
+    const widthBefore = (await frameHandle.boundingBox()).width;
+    const handleBox = await page.locator('#domain-atlas-resize-handle').boundingBox();
+    if (!handleBox) throw new Error('Expected a #domain-atlas-resize-handle element on the host page in standalone mode');
+    const dragBy = 80; // dragging left grows the panel — see content.js's createResizeHandle() comment
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handleBox.x + handleBox.width / 2 - dragBy, handleBox.y + handleBox.height / 2, { steps: 10 });
+    await page.mouse.up();
+    const widthAfter = (await frameHandle.boundingBox()).width;
+    if (Math.abs(widthAfter - (widthBefore + dragBy)) > 2) throw new Error('Expected dragging the handle left by ' + dragBy + 'px to grow the panel by about that much, got ' + widthBefore + ' -> ' + widthAfter);
+    console.log('PASS: dragging the handle resized the panel (' + widthBefore + 'px -> ' + widthAfter + 'px)');
+
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForTimeout(300); // let the fresh content script's chrome.storage.local.get() resolve before it's asked to open anything
+    let background2 = context.serviceWorkers()[0];
+    if (!background2) background2 = await context.waitForEvent('serviceworker');
+    await background2.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      await chrome.tabs.sendMessage(tabs[0].id, { type: 'domain-atlas-open-wallet' });
+    });
+    const frameHandle2 = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
+    const widthAfterReload = (await frameHandle2.boundingBox()).width;
+    if (Math.abs(widthAfterReload - widthAfter) > 2) throw new Error('Expected the dragged width to persist across a fresh page load, got ' + widthAfterReload + 'px vs. ' + widthAfter + 'px before reload');
+    console.log('PASS: the dragged width persisted across a fresh page load (' + widthAfterReload + 'px)');
+
+    console.log('\nALL CHECKS PASSED — toolbar-button wallet-open works on a manifest-less page, is idempotent while already open, the Asset Viewer hover panel stays disabled there, and the panel is drag-resizable with its width persisted.');
   } finally {
     await context.close().catch(() => {});
     server.close();
