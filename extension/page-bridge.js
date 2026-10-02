@@ -34,31 +34,58 @@
   // page calling this before the content script finished attaching) must
   // still resolve rather than hang a caller's await forever — same
   // "fail to the closed/denied state, never to a silent stall" posture
-  // the rest of this bridge already takes.
-  function sendBridgeRequest(action, timeoutMs = 4000) {
+  // the rest of this bridge already takes. timeoutMs/defaultResult are
+  // per-action: getIdentity is a quick, no-human-involved read (a short
+  // timeout is enough), while requestSignature can legitimately sit
+  // waiting on a visitor's own decision for a while — its timeout here is
+  // deliberately longer than content.js's own confirmation-overlay
+  // timeouts (see that file's requestBridgeConfirmation()/
+  // openBridgeConfirmOverlay() comments), so under normal conditions the
+  // real answer always arrives first and this one never actually fires.
+  function sendBridgeRequest(action, payload, timeoutMs, defaultResult) {
     const requestId = nextRequestId++;
     return new Promise((resolve) => {
       pending.set(requestId, { resolve });
-      window.postMessage({ __atlasBridge: true, direction: 'to-content', requestId, action }, location.origin);
+      window.postMessage({ __atlasBridge: true, direction: 'to-content', requestId, action, payload }, location.origin);
       setTimeout(() => {
         if (!pending.has(requestId)) return;
         pending.delete(requestId);
-        resolve({ allowed: false, publicKey: null });
+        resolve(defaultResult);
       }, timeoutMs);
     });
   }
 
   window.atlasWallet = {
-    // SPEC.md §3.8 — read-only for now. Resolves { allowed, publicKey }:
-    // allowed is false whenever this page/domain hasn't been granted
+    // SPEC.md §3.8 — read-only. Resolves { allowed, publicKey }: allowed is
+    // false whenever this page/domain hasn't been granted
     // policy.walletBridge.read (or the manifest-level default), regardless
     // of whether a visitor actually has an identity; publicKey is null
     // either when access isn't allowed or when it is but no identity is
     // currently active. Never throws — a page checking "is Domain Atlas
     // usable here" shouldn't need a try/catch to find out.
     async getIdentity() {
-      const result = await sendBridgeRequest('getIdentity');
+      const result = await sendBridgeRequest('getIdentity', undefined, 4000, { allowed: false, publicKey: null });
       return (result && typeof result === 'object') ? result : { allowed: false, publicKey: null };
+    },
+
+    // SPEC.md §3.8.1 — asks the wallet to sign an application-defined
+    // payload, which MUST carry its own string `purpose` field (checked
+    // against this domain's manifest-declared policy.walletBridge.sign
+    // whitelist before anything else happens — see content.js's
+    // handleBridgeRequest()). Resolves { allowed, result }: allowed is
+    // false only when `purpose` itself isn't on that whitelist (or the
+    // payload is malformed), with no confirmation ever shown in that case;
+    // allowed:true with result:null covers every other way this can come
+    // back empty-handed (the visitor denied it, no identity was active to
+    // sign with, or the request simply timed out) — deliberately
+    // indistinguishable from each other, per SPEC.md §3.8.1, since none of
+    // them is a page's business to tell apart. Never throws.
+    async requestSignature(payload) {
+      if (!payload || typeof payload !== 'object' || typeof payload.purpose !== 'string' || !payload.purpose) {
+        return { allowed: false, result: null };
+      }
+      const result = await sendBridgeRequest('requestSignature', payload, 180000, { allowed: false, result: null });
+      return (result && typeof result === 'object') ? result : { allowed: false, result: null };
     }
   };
 })();

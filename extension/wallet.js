@@ -5755,6 +5755,19 @@ const AtlasWallet = (() => {
   return {
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
     exportIdentity, importIdentity, presentIdentity,
+    // SPEC.md §3.8.1 — exported so confirm-bridge.js (the wallet-bridge
+    // signing confirmation prompt, an extension page like any other) can
+    // sign a page-supplied payload directly once a visitor approves it.
+    // Every other caller of this already went through a purpose-specific
+    // wrapper (presentIdentity's challenge, proposeIntent's offer/want,
+    // adminLoginForDomain's nonce) that builds its own payload shape first;
+    // the bridge is different — the PAGE constructs the whole payload
+    // (required to carry its own `purpose` field, checked against the
+    // manifest's whitelist before this ever runs), so there's no wrapper
+    // left to add here. Exporting the raw primitive is not a new trust
+    // boundary: every extension page already has the same unrestricted
+    // signing access this adds one more caller to.
+    signWithSelf,
     isAdminForDomain, adminLoginForDomain, adminLogoutForDomain,
     getIdentityMode, setIdentityMode, hasLocalIdentity, hasWebAuthnIdentity,
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,

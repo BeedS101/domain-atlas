@@ -39,22 +39,23 @@
     }
   }
 
-  // SPEC.md §3.8 — resolved once, off the same manifest fetch the Enter
-  // button already needs, and awaited by the bridge-request handler below
-  // whenever a page's own script calls window.atlasWallet (page-bridge.js).
-  // Every exit path here — no manifest, a malformed one, a fetch failure —
-  // settles this to false rather than leaving it pending forever; the
-  // overwhelming majority of pages on the web have no manifest at all; a
-  // bridge call on one of them must resolve quickly to "not allowed," never
-  // hang waiting on a fetch that was never going to grant anything anyway.
-  const bridgeReadAllowedPromise = fetch(manifestUrl, { cache: 'no-store' })
+  // SPEC.md §3.8/§3.8.1 — resolved once, off the same manifest fetch the
+  // Enter button already needs, and awaited by the bridge-request handler
+  // below whenever a page's own script calls window.atlasWallet
+  // (page-bridge.js). Every exit path here — no manifest, a malformed one,
+  // a fetch failure — settles this to the fully-denied shape rather than
+  // leaving it pending forever; the overwhelming majority of pages on the
+  // web have no manifest at all; a bridge call on one of them must resolve
+  // quickly to "not allowed," never hang waiting on a fetch that was never
+  // going to grant anything anyway.
+  const bridgePermissionsPromise = fetch(manifestUrl, { cache: 'no-store' })
     .then((res) => (res.ok ? res.json() : null))
     .then((manifest) => {
       if (!manifest || typeof manifest.spec !== 'string' || !manifest.spec.startsWith('domain-atlas/')) {
-        return false; // no declared space here — same as a missing robots.txt, not an error
+        return { read: false, signPurposes: [] }; // no declared space here — same as a missing robots.txt, not an error
       }
       if (!Array.isArray(manifest.worlds) || manifest.worlds.length === 0) {
-        return false; // malformed manifest, nothing to enter and nothing to grant
+        return { read: false, signPurposes: [] }; // malformed manifest, nothing to enter and nothing to grant
       }
       // SPEC.md §3.8 — a world with no `entry` at all declares no enterable
       // space; it exists purely to carry a `policy`, never to be offered as
@@ -82,9 +83,12 @@
       // §3.4.1-shaped field falls straight through to the domain default
       // outside a world context.
       const bridgeWorld = pageTarget ? manifest.worlds.find((w) => w.id === pageTarget.worldId) : null;
-      return effectiveWalletBridgeRead(manifest, bridgeWorld);
+      return {
+        read: effectiveWalletBridgeRead(manifest, bridgeWorld),
+        signPurposes: effectiveWalletBridgeSignPurposes(manifest, bridgeWorld)
+      };
     })
-    .catch(() => false); // unreachable or not JSON — same as no manifest at all
+    .catch(() => ({ read: false, signPurposes: [] })); // unreachable or not JSON — same as no manifest at all
 
   // SPEC.md §3.4.1 — the exact shape effectiveAcceptedItemClasses()
   // (viewer.js, this file's own capabilitySummary() below) already uses:
@@ -100,26 +104,149 @@
     return false;
   }
 
-  // SPEC.md §3.8 — the only thing page-bridge.js's window.atlasWallet
-  // actually does: relay to background.js (which has the real
-  // AtlasWallet.getIdentity(), imported via importScripts — see that
-  // file's own comment) once this page's own manifest-declared permission
-  // is known, never before. 'getIdentity' is the only action this version
-  // specifies; anything else gets the same denied shape an unpermitted
-  // page would.
-  async function handleBridgeRequest(action) {
-    if (action !== 'getIdentity') return { allowed: false, publicKey: null };
-    const allowed = await bridgeReadAllowedPromise;
-    if (!allowed) return { allowed: false, publicKey: null };
-    try {
-      const response = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-read' });
-      return { allowed: true, publicKey: (response && response.publicKey) || null };
-    } catch (err) {
-      // Read access is genuinely allowed here; background.js just didn't
-      // answer (extension reloading, say) — reads as "no identity active"
-      // rather than a third shape every caller would need to special-case.
-      return { allowed: true, publicKey: null };
+  // SPEC.md §3.8.1 — same §3.4.1 composition as effectiveWalletBridgeRead
+  // above, except the world's own value only counts as "present" (and so
+  // wins outright, even when empty — same convention acceptedItemClasses
+  // already established) when it's actually an Array; `sign` is never a
+  // bare boolean the way `read` is, so there's no boolean case to check.
+  function effectiveWalletBridgeSignPurposes(manifest, world) {
+    const worldPolicy = (world && world.policy && world.policy.walletBridge) || null;
+    if (worldPolicy && Array.isArray(worldPolicy.sign)) return worldPolicy.sign;
+    const domainDefault = manifest.walletBridge || null;
+    if (domainDefault && Array.isArray(domainDefault.sign)) return domainDefault.sign;
+    return [];
+  }
+
+  // SPEC.md §3.8/§3.8.1 — the only thing page-bridge.js's window.atlasWallet
+  // actually does: relay onward once this page's own manifest-declared
+  // permission is known, never before. 'getIdentity' relays to background.js
+  // (which has the real AtlasWallet.getIdentity(), imported via
+  // importScripts — see that file's own comment). 'requestSignature' never
+  // touches background.js at all — see requestBridgeConfirmation() below
+  // for why the confirmation prompt signs directly instead. Anything else
+  // gets the same denied shape an unpermitted page would.
+  async function handleBridgeRequest(action, payload) {
+    const permissions = await bridgePermissionsPromise;
+    if (action === 'getIdentity') {
+      if (!permissions.read) return { allowed: false, publicKey: null };
+      try {
+        const response = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-read' });
+        return { allowed: true, publicKey: (response && response.publicKey) || null };
+      } catch (err) {
+        // Read access is genuinely allowed here; background.js just didn't
+        // answer (extension reloading, say) — reads as "no identity active"
+        // rather than a third shape every caller would need to special-case.
+        return { allowed: true, publicKey: null };
+      }
     }
+    if (action === 'requestSignature') {
+      // SPEC.md §3.8.1 — the payload MUST carry its own `purpose`, checked
+      // against the effective whitelist before anything else happens; a
+      // purpose not on that list gets no prompt at all, same "never bothers
+      // the visitor with something not even declared" posture §3.8's read
+      // gate already takes.
+      const purpose = payload && typeof payload === 'object' ? payload.purpose : null;
+      if (typeof purpose !== 'string' || !purpose || !permissions.signPurposes.includes(purpose)) {
+        return { allowed: false, result: null };
+      }
+      const result = await requestBridgeConfirmation(purpose, payload);
+      return { allowed: true, result };
+    }
+    return { allowed: false };
+  }
+
+  // ---------- SPEC.md §3.8.1 — the wallet-bridge signing confirmation ----------
+  //
+  // One iframe at a time, not one per request: a page firing several
+  // requestSignature() calls back to back would otherwise stack several
+  // full-viewport iframes on top of each other, which is confusing for a
+  // visitor and pointless to build UI for. Queued instead; each prior
+  // request's overlay fully closes (approved, denied, or timed out) before
+  // the next one's ever opens.
+  const bridgeConfirmQueue = [];
+  let bridgeConfirmShowing = false;
+
+  function requestBridgeConfirmation(purpose, payload) {
+    return new Promise((resolve) => {
+      bridgeConfirmQueue.push({ purpose, payload, resolve });
+      advanceBridgeConfirmQueue();
+    });
+  }
+
+  function advanceBridgeConfirmQueue() {
+    if (bridgeConfirmShowing || bridgeConfirmQueue.length === 0) return;
+    bridgeConfirmShowing = true;
+    const { purpose, payload, resolve } = bridgeConfirmQueue.shift();
+    openBridgeConfirmOverlay(purpose, payload, (result) => {
+      bridgeConfirmShowing = false;
+      resolve(result);
+      advanceBridgeConfirmQueue();
+    });
+  }
+
+  // confirm-bridge.html (extension-origin, web_accessible_resources) is the
+  // non-spoofable confirmation SPEC.md §3.8/§3.8.1 requires — a real
+  // cross-origin browsing context this host page cannot script into, read
+  // the contents of, or draw over, the same property the world-entry
+  // overlay below (openOverlay()) already relies on for a different
+  // reason. Unlike that overlay, this one deliberately signs the payload
+  // ITSELF (loads wallet.js directly, see confirm-bridge.js's own comment)
+  // rather than asking background.js to — every extension page already has
+  // the same unrestricted AtlasWallet access background.js does, so routing
+  // through one more hop would add a message round trip without adding any
+  // actual trust boundary.
+  //
+  // origin/purpose/payload are handed over by postMessage, never baked into
+  // the iframe's src URL — avoids URL-encoding an arbitrary JSON payload
+  // and keeps it out of any history-like surface a src attribute might
+  // otherwise brush up against, however briefly.
+  function openBridgeConfirmOverlay(purpose, payload, onDone) {
+    const iframe = document.createElement('iframe');
+    iframe.id = 'domain-atlas-bridge-confirm';
+    const src = chrome.runtime.getURL('confirm-bridge.html');
+    iframe.src = src;
+    Object.assign(iframe.style, {
+      position: 'fixed',
+      inset: '0',
+      width: '100vw',
+      height: '100vh',
+      border: 'none',
+      zIndex: 2147483647,
+      background: 'transparent' // the page inside draws its own backdrop+card; nothing to paint out here
+    });
+    document.documentElement.appendChild(iframe);
+    lockHostPageScroll();
+
+    // Defensive only — confirm-bridge.js already auto-denies after its own
+    // shorter inactivity timeout (see that file). This is the backstop for
+    // the iframe failing to ever load or run at all (a reload mid-flight,
+    // a broken build), so a visitor is never left with a queue stuck behind
+    // a prompt that can't resolve itself.
+    const hardTimeout = setTimeout(() => finish(null), 150000);
+
+    function finish(result) {
+      clearTimeout(hardTimeout);
+      window.removeEventListener('message', onMessage);
+      iframe.remove();
+      unlockHostPageScroll();
+      onDone(result);
+    }
+
+    function onMessage(event) {
+      if (event.source !== iframe.contentWindow) return;
+      if (!event.data || typeof event.data !== 'object') return;
+      if (event.data.type === 'domain-atlas-bridge-confirm-ready') {
+        iframe.contentWindow.postMessage(
+          { type: 'domain-atlas-bridge-confirm-init', origin: location.origin, purpose, payload },
+          new URL(src).origin
+        );
+        return;
+      }
+      if (event.data.type === 'domain-atlas-bridge-confirm-decision') {
+        finish(event.data.approved ? (event.data.result || null) : null);
+      }
+    }
+    window.addEventListener('message', onMessage);
   }
 
   // ---------- SPEC.md §3.7 — optional domain identity pinning ----------
@@ -665,8 +792,8 @@
     // (always this page's own, since both worlds share one document).
     if (event.source === window && event.origin === location.origin &&
         event.data && event.data.__atlasBridge === true && event.data.direction === 'to-content') {
-      const { requestId, action } = event.data;
-      handleBridgeRequest(action).then((result) => {
+      const { requestId, action, payload } = event.data;
+      handleBridgeRequest(action, payload).then((result) => {
         window.postMessage({ __atlasBridge: true, direction: 'to-page', requestId, result }, location.origin);
       });
       return;
