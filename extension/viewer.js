@@ -4395,6 +4395,16 @@ function scheduleAssetViewerClose() {
 // Cancels any pending close first — re-entering a card (or the panel) mid-
 // grace-window is exactly what the sticky bridge is for.
 function openAssetViewer(entry, cardEl) {
+  // Standalone mode (no manifest ever loaded this session — see the
+  // toolbar-button "no manifest" branch near the bottom of this file)
+  // runs inside content.js's small corner frame, not the full-viewport
+  // one a real world entry gets. positionAssetViewer()'s math assumes
+  // there's room to either side of the hovered card; in a frame that
+  // narrow there isn't, so the panel ends up clamped on top of the
+  // wallet instead of beside it. Nothing here makes it useful at that
+  // size anyway, so it's simplest to just not open it rather than try
+  // to make a 3D-model preview panel responsive down to a popup.
+  if (!currentManifest) return;
   cancelAssetViewerCloseTimer();
   if (assetViewerCurrentEntry === entry) return; // already showing this exact card — leave its (possibly live) model preview alone
   disposeAssetViewerModelPreview(); // switching assets — never leave the PREVIOUS card's preview context running
