@@ -2955,6 +2955,38 @@ const AtlasWallet = (() => {
     return merged;
   }
 
+  // ---------- Inventory "only show items compatible with this domain"
+  // checkbox settings (#151 follow-up) ----------
+  //
+  // Collectibles and Documents each have their own independent checkbox
+  // on the Inventory screen (see viewer.js's collectiblesCompatMatch()/
+  // documentsCompatMatch()) — this just remembers whether each is
+  // checked. Same device-level display-preference convention as the
+  // settings above: not identity data, so it isn't wiped by lock/unlock
+  // or switching identities, and the checkbox itself only ever filters
+  // the "Yours" list, never Counterparty's.
+  const DEFAULT_INVENTORY_FILTER_SETTINGS = { collectiblesCompatOnly: false, documentsCompatOnly: false };
+
+  function clampInventoryFilterSettings(raw) {
+    const s = raw && typeof raw === 'object' ? raw : {};
+    return {
+      collectiblesCompatOnly: !!s.collectiblesCompatOnly,
+      documentsCompatOnly: !!s.documentsCompatOnly
+    };
+  }
+
+  async function getInventoryFilterSettings() {
+    const { atlasInventoryFilterSettings } = await chrome.storage.local.get('atlasInventoryFilterSettings');
+    return clampInventoryFilterSettings(atlasInventoryFilterSettings);
+  }
+
+  async function setInventoryFilterSettings(patch) {
+    const current = await getInventoryFilterSettings();
+    const merged = clampInventoryFilterSettings(Object.assign({}, current, patch));
+    await chrome.storage.local.set({ atlasInventoryFilterSettings: merged });
+    return merged;
+  }
+
   // ---------- auto-lock on inactivity (#71) ----------
   //
   // Only local-password identity (§6 step 5 of SPEC.md) has any "locked"
@@ -3133,7 +3165,8 @@ const AtlasWallet = (() => {
     // this one back up rather than starting cold on settings too.
     const settingsRaw = await chrome.storage.local.get([
       'atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings',
-      'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes'
+      'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes',
+      'atlasInventoryFilterSettings'
     ]);
 
     return {
@@ -3283,7 +3316,7 @@ const AtlasWallet = (() => {
     // about.
     const s = payload.settings || {};
     const settingsToSet = {};
-    ['atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings', 'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes']
+    ['atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings', 'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes', 'atlasInventoryFilterSettings']
       .forEach((k) => { if (s[k] !== undefined) settingsToSet[k] = s[k]; });
     if (Object.keys(settingsToSet).length) await chrome.storage.local.set(settingsToSet);
 
@@ -5954,6 +5987,7 @@ const AtlasWallet = (() => {
     getChatPanelSettings, setChatPanelSettings, chatMessageContainsBlockedWord,
     getAssetViewerSettings, setAssetViewerSettings,
     getPreviewerWindowSettings, setPreviewerWindowSettings,
+    getInventoryFilterSettings, setInventoryFilterSettings,
     getAutoLockMinutes, setAutoLockMinutes,
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,

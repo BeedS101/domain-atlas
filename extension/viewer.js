@@ -6111,9 +6111,29 @@ documentsSearchInput && documentsSearchInput.addEventListener('input', () => {
 // could meaningfully load/drop here, not what they're holding.
 collectiblesCompatOnlyCheckbox && collectiblesCompatOnlyCheckbox.addEventListener('change', () => {
   applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
+  AtlasWallet.setInventoryFilterSettings({ collectiblesCompatOnly: collectiblesCompatOnlyCheckbox.checked });
 });
 documentsCompatOnlyCheckbox && documentsCompatOnlyCheckbox.addEventListener('change', () => {
   applyListFilter(selfDocumentsListEl, documentsSearchInput.value, documentsCompatMatch());
+  AtlasWallet.setInventoryFilterSettings({ documentsCompatOnly: documentsCompatOnlyCheckbox.checked });
+});
+
+// Restores both checkboxes' persisted state (#151 follow-up — they used
+// to reset to unchecked on every login, since .checked was never
+// anything but transient DOM state until now). Runs once at parse time,
+// same as the other restore-on-load settings calls near the bottom of
+// this file; applyListFilter() calls here re-filter the "Yours" lists
+// refreshInventoryDisplay() already drew, since that initial render ran
+// before this settings fetch could resolve.
+AtlasWallet.getInventoryFilterSettings().then((settings) => {
+  if (collectiblesCompatOnlyCheckbox) {
+    collectiblesCompatOnlyCheckbox.checked = settings.collectiblesCompatOnly;
+    applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
+  }
+  if (documentsCompatOnlyCheckbox) {
+    documentsCompatOnlyCheckbox.checked = settings.documentsCompatOnly;
+    applyListFilter(selfDocumentsListEl, documentsSearchInput.value, documentsCompatMatch());
+  }
 });
 
 // The Settings-screen counterpart to the filtering above: lists every
