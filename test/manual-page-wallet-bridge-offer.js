@@ -1,23 +1,31 @@
-// Manual check: SPEC.md §3.8.2's wallet-bridge asset offers —
-// window.atlasWallet.offerAsset(credential), gated by a manifest-declared
-// policy.walletBridge.offer whitelist of asset classes, with every
-// whitelisted offer still needing the visitor's own explicit approval
-// through confirm-bridge.html's "offer" display mode — and, critically,
-// approval itself never adding the credential straight to the wallet,
-// only into a pending, sandboxed tray a visitor separately Claims or
-// Dismisses.
+// Manual check: SPEC.md §3.8.2's wallet-bridge asset offers, plus §3.8.3's
+// trusted offer domains — window.atlasWallet.offerAsset(credential),
+// gated by a manifest-declared policy.walletBridge.offer whitelist of
+// asset classes, with every whitelisted offer needing the visitor's own
+// explicit approval through confirm-bridge.html's "offer" display mode —
+// and, critically, approval itself never adding the credential straight
+// to the wallet, only into a pending, sandboxed tray a visitor separately
+// Claims or Dismisses — UNLESS the visitor has separately chosen to trust
+// that origin, in which case a later whitelisted offer from it skips both
+// the prompt and the tray entirely.
 //
-// Five things this test exists to prove, in order: (1) a class NOT on the
-// whitelist is refused immediately, with no confirmation prompt ever shown
-// — same posture §3.8.1's signing test already proved for an unlisted
-// purpose; (2) a whitelisted class DOES show the prompt, correctly as the
-// locked state before any identity exists; (3) approving a whitelisted
-// offer queues it into AtlasWallet.getBridgeOffers() WITHOUT adding it to
-// AtlasWallet.getWallet() — the sandbox rule itself; (4) a separate,
-// explicit Claim is what actually adds it to the wallet; (5) Deny at the
-// prompt and a later Dismiss both discard an offer without it ever
-// reaching the wallet, and are told apart from each other and from a
-// claimed offer.
+// Eight things this test exists to prove, in order: (1) a class NOT on
+// the whitelist is refused immediately, with no confirmation prompt ever
+// shown — same posture §3.8.1's signing test already proved for an
+// unlisted purpose; (2) a whitelisted class DOES show the prompt,
+// correctly as the locked state before any identity exists; (3) approving
+// a whitelisted offer queues it into AtlasWallet.getBridgeOffers()
+// WITHOUT adding it to AtlasWallet.getWallet() — the sandbox rule itself;
+// (4) a separate, explicit Claim is what actually adds it to the wallet;
+// (5) Deny at the prompt and a later Dismiss both discard an offer
+// without it ever reaching the wallet, and are told apart from each other
+// and from a claimed offer; (6) checking the prompt's trust checkbox
+// trusts the origin AND claims that specific offer immediately, with no
+// separate Claim step needed; (7) a LATER offer from that now-trusted
+// origin, for a class it's already whitelisted for, skips the
+// confirmation overlay entirely and still lands in the wallet for real;
+// (8) revoking trust makes the very next offer from that origin show the
+// prompt again, same as it never having been trusted at all.
 //
 // Isolated throwaway docroot + issuer-server instance, same pattern as
 // manual-page-wallet-bridge-sign.js (the signing sibling of this test) —
@@ -263,7 +271,63 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     if (walletAfterDismiss.some((e) => e.credential.id === dismissCredential.id)) throw new Error('A dismissed offer must never reach the wallet');
     console.log('PASS: Dismiss removes a pending offer outright, and it never touched the wallet');
 
-    console.log('\nALL CHECKS PASSED — SPEC.md §3.8.2\'s wallet-bridge asset offers refuse a non-whitelisted class with no prompt at all, show a real non-spoofable confirmation naming the real asset and origin for a whitelisted one, correctly reflect whether an identity is actually unlocked, and never add an approved offer straight to the wallet — only a later, separate, explicit Claim does that, with Deny and Dismiss both discarding an offer without it ever arriving.');
+    console.log('STEP 8: checking the prompt\'s trust checkbox and Accepting trusts the origin AND claims that specific offer immediately — no separate Claim step needed');
+    const trustPage = await context.newPage();
+    await trustPage.goto('http://' + DOMAIN + '/page-offer.html', { waitUntil: 'load' });
+    const trustCredential = await mintCredential(trustPage, WHITELISTED_CLASS, realPublicKey);
+    const trustResultPromise = trustPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), trustCredential);
+    trustResultPromise.catch(() => {});
+    await trustPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    const trustFrame = trustPage.frameLocator('#domain-atlas-bridge-confirm');
+    await trustFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
+    await trustFrame.locator('#offerTrustCheckbox').check();
+    await trustFrame.locator('#offerApproveBtn').click();
+    const trustResult = await trustResultPromise;
+    if (trustResult.allowed !== true || !trustResult.result || !trustResult.result.claimed || !trustResult.result.offerId) {
+      throw new Error('Expected {allowed:true, result:{claimed:true, offerId}} when trust-and-accept is used, got: ' + JSON.stringify(trustResult));
+    }
+    const walletAfterTrust = await walletPage.evaluate((owner) => AtlasWallet.getWallet(owner), realPublicKey);
+    if (!walletAfterTrust.some((e) => e.credential.id === trustCredential.id)) throw new Error('Expected the trust-and-accept credential to be in the wallet immediately, with no separate Claim');
+    await trustPage.close();
+    console.log('PASS: trust-and-accept claimed the offered credential immediately, in the same click');
+
+    console.log('STEP 9: a LATER offer from that now-trusted origin, for a class it\'s already whitelisted for, skips the confirmation overlay entirely and still lands in the real wallet');
+    const autoClaimPage = await context.newPage();
+    await autoClaimPage.goto('http://' + DOMAIN + '/page-offer.html', { waitUntil: 'load' });
+    const autoClaimCredential = await mintCredential(autoClaimPage, WHITELISTED_CLASS, realPublicKey);
+    const autoClaimResult = await autoClaimPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), autoClaimCredential);
+    const overlayCountAfterAutoClaim = await autoClaimPage.locator('#domain-atlas-bridge-confirm').count();
+    if (overlayCountAfterAutoClaim !== 0) throw new Error('Expected no confirmation overlay at all for a trusted origin, found ' + overlayCountAfterAutoClaim);
+    if (autoClaimResult.allowed !== true || !autoClaimResult.result || !autoClaimResult.result.claimed) {
+      throw new Error('Expected {allowed:true, result:{claimed:true, ...}} with no prompt for a trusted origin, got: ' + JSON.stringify(autoClaimResult));
+    }
+    const walletAfterAutoClaim = await walletPage.evaluate((owner) => AtlasWallet.getWallet(owner), realPublicKey);
+    if (!walletAfterAutoClaim.some((e) => e.credential.id === autoClaimCredential.id)) throw new Error('Expected the auto-claimed credential to actually be in the wallet, not just reported as claimed');
+    await autoClaimPage.close();
+    console.log('PASS: a trusted origin\'s later whitelisted offer auto-claimed with no prompt shown at all, and the credential genuinely verified and landed in the wallet');
+
+    console.log('STEP 10: revoking trust makes the very next offer from that origin show the prompt again');
+    const trustedOrigin = 'http://' + DOMAIN;
+    const trustedBeforeRevoke = await walletPage.evaluate((owner) => AtlasWallet.getTrustedBridgeDomains(owner), realPublicKey);
+    if (!trustedBeforeRevoke.some((t) => t.origin === trustedOrigin)) throw new Error('Expected the origin to actually be on the trusted list before testing revocation');
+    await walletPage.evaluate(({ owner, origin }) => AtlasWallet.untrustBridgeDomain(owner, origin), { owner: realPublicKey, origin: trustedOrigin });
+    const trustedAfterRevoke = await walletPage.evaluate((owner) => AtlasWallet.getTrustedBridgeDomains(owner), realPublicKey);
+    if (trustedAfterRevoke.some((t) => t.origin === trustedOrigin)) throw new Error('Expected untrustBridgeDomain to actually remove the origin from the trusted list');
+    const revokePage = await context.newPage();
+    await revokePage.goto('http://' + DOMAIN + '/page-offer.html', { waitUntil: 'load' });
+    const revokeCredential = await mintCredential(revokePage, WHITELISTED_CLASS, realPublicKey);
+    const revokeResultPromise = revokePage.evaluate((credential) => window.atlasWallet.offerAsset(credential), revokeCredential);
+    revokeResultPromise.catch(() => {});
+    await revokePage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    const revokeFrame = revokePage.frameLocator('#domain-atlas-bridge-confirm');
+    await revokeFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
+    await revokeFrame.locator('#offerDenyBtn').click();
+    const revokeResult = await revokeResultPromise;
+    if (revokeResult.allowed !== true || revokeResult.result !== null) throw new Error('Expected the ordinary deny shape once trust is revoked, got: ' + JSON.stringify(revokeResult));
+    await revokePage.close();
+    console.log('PASS: revoking trust made the next offer from that origin show the real prompt again, same as an untrusted origin always has');
+
+    console.log('\nALL CHECKS PASSED — SPEC.md §3.8.2\'s wallet-bridge asset offers refuse a non-whitelisted class with no prompt at all, show a real non-spoofable confirmation naming the real asset and origin for a whitelisted one, correctly reflect whether an identity is actually unlocked, and never add an approved offer straight to the wallet by default — only a later, separate, explicit Claim does that, with Deny and Dismiss both discarding an offer without it ever arriving. SPEC.md §3.8.3\'s trusted offer domains correctly let a visitor-granted origin skip the prompt and the sandbox entirely for an already-whitelisted class, with revocation taking effect immediately on the next offer.');
   } finally {
     await context.close().catch(() => {});
     serverProc.kill();

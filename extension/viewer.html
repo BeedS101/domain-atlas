@@ -1779,6 +1779,23 @@
         </div>
       </div>
 
+      <!-- SPEC.md §3.8.3 — domains you've explicitly told the wallet to
+           stop asking every time for a whitelisted asset offer (see the
+           opt-in checkbox on the offer confirmation prompt itself,
+           confirm-bridge.html/.js). Membership here never widens what a
+           domain is allowed to offer at all — that's still entirely
+           policy.walletBridge.offer's own job — it only skips the prompt
+           and the Pending-offers sandbox for a domain already on this
+           list. Revoking here takes effect on that domain's NEXT offer;
+           it never reaches back into anything already claimed. -->
+      <div class="settings-category" data-category="trusted-bridge-domains">
+        <button type="button" class="settings-category-toggle"><span>Trusted sites (asset offers)</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="empty-note">Sites you've told your wallet to stop asking about every time it offers a whitelisted asset — a new offer from one of these goes straight into your wallet with no prompt and nothing to review in Pending offers. Doesn't change what a site is allowed to offer, only whether you're asked about it.</div>
+          <div id="trustedBridgeDomainsList" class="item-list" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
       <!-- Local cache of downloaded world assets (currently just GLB models
            for gltf-mini-v1 worlds — see gltf-mini.js's conditional-GET
            cache). Lives in this extension's own IndexedDB, shared across

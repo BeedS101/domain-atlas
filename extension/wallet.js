@@ -5510,6 +5510,58 @@ const AtlasWallet = (() => {
     await saveBridgeOffers(ownerPublicKey, remaining);
   }
 
+  // SPEC.md §3.8.3 — per-identity trusted offer domains. A plain list of
+  // origins, not classes or purposes — trust here is "I don't need to be
+  // asked by THIS domain again," never "this specific asset class is
+  // always fine," which stays entirely governed by the manifest's own
+  // policy.walletBridge.offer whitelist (checked in content.js exactly as
+  // before; nothing here changes what a domain is PERMITTED to offer,
+  // only whether a visitor still wants to be asked about it every time).
+  // Same encrypted-at-rest treatment as every other per-identity list in
+  // this file.
+  async function getTrustedBridgeDomains(ownerPublicKey) {
+    const { atlasTrustedBridgeDomains } = await chrome.storage.local.get('atlasTrustedBridgeDomains');
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'trustedBridgeDomains', (atlasTrustedBridgeDomains || {})[ownerPublicKey], [], (v) => saveTrustedBridgeDomains(ownerPublicKey, v));
+  }
+
+  async function saveTrustedBridgeDomains(ownerPublicKey, entries) {
+    const { atlasTrustedBridgeDomains } = await chrome.storage.local.get('atlasTrustedBridgeDomains');
+    const all = atlasTrustedBridgeDomains || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'trustedBridgeDomains', entries);
+    await chrome.storage.local.set({ atlasTrustedBridgeDomains: all });
+  }
+
+  // Called only from confirm-bridge.js's own offer-approval handler, when
+  // the visitor explicitly checked the opt-in box on that prompt — never
+  // from anything a page can trigger on its own (see that file's own
+  // comment on the checkbox). A no-op, not an error, if this origin is
+  // somehow already trusted — the same "adding a favorite twice" posture
+  // addFavoriteDomain already takes.
+  async function trustBridgeDomain(ownerPublicKey, origin) {
+    const trusted = await getTrustedBridgeDomains(ownerPublicKey);
+    if (trusted.some((t) => t.origin === origin)) return;
+    trusted.push({ origin, trustedAt: new Date().toISOString() });
+    await saveTrustedBridgeDomains(ownerPublicKey, trusted);
+  }
+
+  async function untrustBridgeDomain(ownerPublicKey, origin) {
+    const trusted = await getTrustedBridgeDomains(ownerPublicKey);
+    const remaining = trusted.filter((t) => t.origin !== origin);
+    await saveTrustedBridgeDomains(ownerPublicKey, remaining);
+  }
+
+  // Called from background.js (the only context that both has AtlasWallet
+  // AND is where content.js's offerAsset handling actually asks this
+  // question — see content.js's own comment on why that round trip exists
+  // at all) to decide, BEFORE ever opening the confirmation overlay,
+  // whether this specific origin can skip it for the active identity.
+  async function isTrustedBridgeDomain(ownerPublicKey, origin) {
+    const trusted = await getTrustedBridgeDomains(ownerPublicKey);
+    return trusted.some((t) => t.origin === origin);
+  }
+
   // Same shape of check as verifyCredential() above, just over a mail
   // payload instead of a credential payload — an unverified message is
   // never trusted or shown, same as an unverified credential.
@@ -5912,6 +5964,12 @@ const AtlasWallet = (() => {
     // above); getBridgeOffers/claimBridgeOffer/dismissBridgeOffer are
     // called by viewer.js to surface and act on what's pending.
     getBridgeOffers, queueBridgeOffer, claimBridgeOffer, dismissBridgeOffer,
+    // SPEC.md §3.8.3 — per-identity trusted offer domains. trustBridgeDomain
+    // is called by confirm-bridge.js on an explicit visitor opt-in;
+    // isTrustedBridgeDomain is called by background.js to decide whether to
+    // skip the prompt at all; getTrustedBridgeDomains/untrustBridgeDomain
+    // are called by viewer.js's Settings list.
+    getTrustedBridgeDomains, trustBridgeDomain, untrustBridgeDomain, isTrustedBridgeDomain,
     getSentMail, deleteSentMailMessage, clearAllSentMail,
     getLastPostOfficeSendDomain, setLastPostOfficeSendDomain,
     getLastPostOfficeSettingsDomain, setLastPostOfficeSettingsDomain,

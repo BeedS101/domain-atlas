@@ -1964,6 +1964,9 @@ const importWalletBtn = document.getElementById('importWalletBtn');
 const importWalletFileInput = document.getElementById('importWalletFileInput');
 const importWalletStatusEl = document.getElementById('importWalletStatus');
 const hiddenAssetsListEl = document.getElementById('hiddenAssetsList');
+// SPEC.md §3.8.3 — per-identity trusted offer domains (see
+// refreshTrustedBridgeDomainsDisplay below).
+const trustedBridgeDomainsListEl = document.getElementById('trustedBridgeDomainsList');
 const chatMutedUsersListEl = document.getElementById('chatMutedUsersList');
 const chatBlockedUsersListEl = document.getElementById('chatBlockedUsersList');
 const recentWorldsListEl = document.getElementById('recentWorldsList');
@@ -6219,6 +6222,41 @@ async function handleChatAdminListClick(e) {
 chatMutedUsersListEl && chatMutedUsersListEl.addEventListener('click', handleChatAdminListClick);
 chatBlockedUsersListEl && chatBlockedUsersListEl.addEventListener('click', handleChatAdminListClick);
 
+// ---------- SPEC.md §3.8.3 — trusted offer domains (Settings) ----------
+
+function renderTrustedBridgeDomainCard(entry, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.innerHTML =
+    '<div class="name mono">' + escapeHtml(entry.origin) + '</div>' +
+    '<div class="meta">Trusted ' + new Date(entry.trustedAt).toLocaleString() + '</div>' +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="untrust-bridge-domain" data-origin="' + escapeHtml(entry.origin) + '" class="danger-btn">Remove</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+async function refreshTrustedBridgeDomainsDisplay() {
+  if (!trustedBridgeDomainsListEl) return;
+  const identity = await AtlasWallet.getIdentity();
+  const trusted = identity ? await AtlasWallet.getTrustedBridgeDomains(identity.publicKey) : [];
+  trustedBridgeDomainsListEl.innerHTML = '';
+  if (trusted.length === 0) {
+    trustedBridgeDomainsListEl.innerHTML = '<div class="empty-note">No trusted sites yet — check the trust box on an asset-offer prompt to add one.</div>';
+  } else {
+    trusted.forEach((entry) => renderTrustedBridgeDomainCard(entry, trustedBridgeDomainsListEl));
+  }
+}
+
+trustedBridgeDomainsListEl && trustedBridgeDomainsListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action="untrust-bridge-domain"]');
+  if (!btn) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  await AtlasWallet.untrustBridgeDomain(identity.publicKey, btn.dataset.origin);
+  await refreshTrustedBridgeDomainsDisplay();
+});
+
 // ---------- recent worlds (Settings -> "Recent worlds") ----------
 
 function renderRecentWorldCard(entry, container) {
@@ -6748,6 +6786,7 @@ walletPanel.addEventListener('click', (e) => {
 async function openSettings() {
   await refreshIdentityModeControls();
   await refreshHiddenAssetsDisplay();
+  await refreshTrustedBridgeDomainsDisplay();
   await refreshCacheDisplay();
   await refreshChatAdminDisplay();
   await refreshAutoBackupDisplay();

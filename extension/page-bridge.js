@@ -88,7 +88,7 @@
       return (result && typeof result === 'object') ? result : { allowed: false, result: null };
     },
 
-    // SPEC.md §3.8.2 — hands the wallet a COMPLETE, already-signed
+    // SPEC.md §3.8.2/§3.8.3 — hands the wallet a COMPLETE, already-signed
     // domain-atlas-asset/1.0 credential this page's own domain minted
     // (this bridge never mints anything itself). Resolves { allowed,
     // result }: allowed is false only when asset.class itself isn't on
@@ -97,10 +97,16 @@
     // case — identical refusal posture to requestSignature's purpose
     // check above. allowed:true with result:null covers every other way
     // this can come back empty-handed (the visitor denied it, dismissed
-    // a locked prompt, or the request simply timed out); result:{queued,
-    // offerId} on approval — approval never means the credential is in
-    // the wallet yet, only that it's now sitting in the visitor's pending
-    // offers for them to separately Claim or Dismiss. Never throws.
+    // a locked prompt, or the request simply timed out); result:
+    // {queued:true, offerId} on an ordinary approval — approval there
+    // never means the credential is in the wallet yet, only that it's now
+    // sitting in the visitor's pending offers for them to separately
+    // Claim or Dismiss. If this origin happens to be on the visitor's own
+    // trusted-offer-domains list for an already-whitelisted class (§3.8.3,
+    // never something this page can set or detect), the prompt may be
+    // skipped entirely and result instead reads {claimed:true, offerId} —
+    // the credential is already in the wallet in that case, no further
+    // action needed. Never throws.
     async offerAsset(credential) {
       if (!credential || typeof credential !== 'object' || credential.credential !== 'domain-atlas-asset/1.0' ||
           !credential.asset || typeof credential.asset.class !== 'string' || !credential.asset.class) {

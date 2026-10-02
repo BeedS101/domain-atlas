@@ -1,5 +1,5 @@
 // Domain Atlas — wallet-bridge confirmation (SPEC.md §3.8.1 signing, §3.8.2
-// asset offers)
+// asset offers, §3.8.3 trusted offer domains)
 //
 // Loaded as an extension-origin iframe by content.js's
 // openBridgeConfirmOverlay() — the host page that injected this iframe is
@@ -17,11 +17,15 @@
 // routing through one more extension context wouldn't add any actual
 // trust boundary here. For 'sign' this means calling
 // AtlasWallet.signWithSelf(); for 'offer' it means calling
-// AtlasWallet.queueBridgeOffer() — SPEC.md §3.8.2 is explicit that
-// approving an offer must NOT add it straight to the wallet, so this is a
-// queue call, not a mint or an adopt, same as every other call site that
-// already respects that rule (claimMailGift's own deferred-verification
-// comment in wallet.js).
+// AtlasWallet.queueBridgeOffer() by default — SPEC.md §3.8.2 is explicit
+// that approving an offer must NOT add it straight to the wallet, so this
+// is a queue call, not a mint or an adopt, same as every other call site
+// that already respects that rule (claimMailGift's own deferred-
+// verification comment in wallet.js) — UNLESS the visitor also checked
+// the offer prompt's own trust checkbox, in which case this calls
+// trustBridgeDomain() then claims immediately: SPEC.md §3.8.3 is explicit
+// that this is a one-time, visitor-initiated decision this exact prompt
+// is the only place allowed to make, never a page-triggered default.
 (function () {
   const readyState = document.getElementById('readyState');
   const offerState = document.getElementById('offerState');
@@ -35,6 +39,9 @@
   const offerAssetClass = document.getElementById('offerAssetClass');
   const offerAssetQtyLine = document.getElementById('offerAssetQtyLine');
   const offerAssetQty = document.getElementById('offerAssetQty');
+  const offerTrustCheckbox = document.getElementById('offerTrustCheckbox');
+  const offerTrustOrigin = document.getElementById('offerTrustOrigin');
+  const offerTrustClass = document.getElementById('offerTrustClass');
   const lockedDetailLine = document.getElementById('lockedDetailLine');
   const approveBtn = document.getElementById('approveBtn');
   const denyBtn = document.getElementById('denyBtn');
@@ -114,6 +121,12 @@
         const quantity = (payload && typeof payload.quantity === 'number') ? payload.quantity : 1;
         offerAssetQtyLine.style.display = quantity > 1 ? 'block' : 'none';
         offerAssetQty.textContent = String(quantity);
+        // SPEC.md §3.8.3 — the checkbox always starts unchecked; checking
+        // it is an affirmative act the visitor takes HERE, on THIS
+        // prompt, never a remembered or page-influenced default.
+        offerTrustCheckbox.checked = false;
+        offerTrustOrigin.textContent = origin;
+        offerTrustClass.textContent = asset.class || detail || '…';
         lockedDetailLine.textContent = 'This site offered to add a "' + (asset.class || detail) + '" asset to your wallet, but there’s nothing active to accept it with.';
       }
       originLockedEl.textContent = origin;
@@ -143,21 +156,36 @@
   });
   denyBtn.addEventListener('click', () => decide(false, null));
 
-  // SPEC.md §3.8.2 — "Accept into Pending" never adds currentPayload (the
-  // credential) to the live wallet itself; queueBridgeOffer only ever
-  // writes to the separate, sandboxed pending-offers store (wallet.js's
-  // own comment on that function). getIdentity() here can't actually
-  // disagree with the isUnlocked() check init already did and used to
-  // show this button in the first place — guarded anyway for the same
-  // locked-mid-prompt race the sign path above guards against.
+  // SPEC.md §3.8.2/§3.8.3 — by default, Accept never adds currentPayload
+  // (the credential) to the live wallet itself; queueBridgeOffer only
+  // ever writes to the separate, sandboxed pending-offers store
+  // (wallet.js's own comment on that function). getIdentity() here can't
+  // actually disagree with the isUnlocked() check init already did and
+  // used to show this button in the first place — guarded anyway for the
+  // same locked-mid-prompt race the sign path above guards against.
+  //
+  // Checking the trust box changes what THIS click does, not what a
+  // future one will need to: trustBridgeDomain() first (so a prompt this
+  // domain never needs to show again is recorded before anything else),
+  // then queue-and-claim immediately in the same click, rather than
+  // leaving this one specific offer sitting in Pending when the visitor
+  // just said they don't need to be asked about this domain going
+  // forward.
   offerApproveBtn.addEventListener('click', async () => {
     offerApproveBtn.disabled = true;
     offerDenyBtn.disabled = true;
     try {
       const identity = await AtlasWallet.getIdentity();
       if (!identity) throw new Error('no active identity');
-      const entry = await AtlasWallet.queueBridgeOffer(identity.publicKey, currentOrigin, currentPayload);
-      decide(true, { queued: true, offerId: entry.id });
+      if (offerTrustCheckbox.checked) {
+        await AtlasWallet.trustBridgeDomain(identity.publicKey, currentOrigin);
+        const entry = await AtlasWallet.queueBridgeOffer(identity.publicKey, currentOrigin, currentPayload);
+        const { verdict } = await AtlasWallet.claimBridgeOffer(identity.publicKey, entry.id);
+        decide(true, { claimed: !!verdict.valid, offerId: entry.id });
+      } else {
+        const entry = await AtlasWallet.queueBridgeOffer(identity.publicKey, currentOrigin, currentPayload);
+        decide(true, { queued: true, offerId: entry.id });
+      }
     } catch (err) {
       decide(false, null);
     }

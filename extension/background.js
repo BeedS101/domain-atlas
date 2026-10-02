@@ -104,5 +104,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ publicKey: null });
     });
     return true;
+  } else if (message && message.type === 'domain-atlas-bridge-offer-trusted') {
+    // SPEC.md §3.8.3 — content.js already checked message.credential's
+    // asset.class against this page's own effective policy.walletBridge.
+    // offer whitelist before ever sending this; this file's only job is
+    // the one thing it has that content.js never could (AtlasWallet): is
+    // message.origin on the ACTIVE identity's own trusted-offer-domains
+    // list. {trusted:false} (no active identity, or this origin was never
+    // trusted for it) tells content.js to fall through to the ordinary
+    // confirmation overlay, unchanged from §3.8.2 — this is deliberately
+    // the only outcome on any failure path below, never a third shape
+    // content.js would need to special-case.
+    //
+    // {trusted:true} means this file does the rest itself, right here,
+    // with no UI at all — every extension context with AtlasWallet access
+    // already has the same unrestricted queueBridgeOffer/claimBridgeOffer
+    // access (see confirm-bridge.js's own, visitor-driven version of this
+    // exact two-call sequence); skipping the prompt is the whole point of
+    // being trusted, so there is nothing left for a human to decide here.
+    (async () => {
+      try {
+        const identity = await AtlasWallet.getIdentity();
+        if (!identity) { sendResponse({ trusted: false }); return; }
+        const trusted = await AtlasWallet.isTrustedBridgeDomain(identity.publicKey, message.origin);
+        if (!trusted) { sendResponse({ trusted: false }); return; }
+        const entry = await AtlasWallet.queueBridgeOffer(identity.publicKey, message.origin, message.credential);
+        try {
+          const { verdict } = await AtlasWallet.claimBridgeOffer(identity.publicKey, entry.id);
+          sendResponse({ trusted: true, claimed: !!verdict.valid, offerId: entry.id });
+        } catch (err) {
+          // Queued fine but the real verification failed (a malformed or
+          // forged credential, say) — the visitor already decided this
+          // domain doesn't need asking, so this stays silent to the page
+          // rather than falling back to a prompt now; it's recorded in
+          // getBridgeOffers() same as any other queued-but-unclaimed entry.
+          sendResponse({ trusted: true, claimed: false, offerId: entry.id });
+        }
+      } catch (err) {
+        sendResponse({ trusted: false });
+      }
+    })();
+    return true;
   }
 });

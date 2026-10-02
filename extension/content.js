@@ -134,15 +134,18 @@
     return [];
   }
 
-  // SPEC.md §3.8/§3.8.1/§3.8.2 — the only thing page-bridge.js's
+  // SPEC.md §3.8/§3.8.1/§3.8.2/§3.8.3 — the only thing page-bridge.js's
   // window.atlasWallet actually does: relay onward once this page's own
   // manifest-declared permission is known, never before. 'getIdentity'
   // relays to background.js (which has the real AtlasWallet.getIdentity(),
   // imported via importScripts — see that file's own comment).
-  // 'requestSignature' and 'offerAsset' never touch background.js at all —
-  // see requestBridgeConfirmation() below for why the confirmation prompt
-  // handles both directly instead. Anything else gets the same denied
-  // shape an unpermitted page would.
+  // 'requestSignature' never touches background.js at all — see
+  // requestBridgeConfirmation() below for why the confirmation prompt
+  // handles it directly instead. 'offerAsset' makes exactly one
+  // background.js round trip first (the §3.8.3 trusted-domain check,
+  // below), and only falls through to that same confirmation prompt when
+  // background.js doesn't say this origin can skip it. Anything else gets
+  // the same denied shape an unpermitted page would.
   async function handleBridgeRequest(action, payload) {
     const permissions = await bridgePermissionsPromise;
     if (action === 'getIdentity') {
@@ -181,6 +184,24 @@
       const assetClass = credential && credential.asset && typeof credential.asset.class === 'string' ? credential.asset.class : null;
       if (!assetClass || !permissions.offerClasses.includes(assetClass)) {
         return { allowed: false, result: null };
+      }
+      // SPEC.md §3.8.3 — before ever opening the confirmation overlay,
+      // ask background.js (the only context here with AtlasWallet) whether
+      // this origin is on the ACTIVE identity's own trusted-offer-domains
+      // list. Only background.js's own {trusted:true} skips the prompt —
+      // a missing response, a thrown error, or an ordinary {trusted:false}
+      // all fall through to the exact §3.8.2 flow below unchanged; failing
+      // toward still asking the visitor is the only direction a broken
+      // round trip here is allowed to fail in.
+      try {
+        const trustedOutcome = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-offer-trusted', origin: location.origin, credential });
+        if (trustedOutcome && trustedOutcome.trusted) {
+          return { allowed: true, result: trustedOutcome.claimed ? { claimed: true, offerId: trustedOutcome.offerId } : null };
+        }
+      } catch (err) {
+        // background.js didn't answer (extension reloading, say) — same
+        // "fail toward the ordinary prompt" posture as every other bridge
+        // round trip in this file.
       }
       const result = await requestBridgeConfirmation('offer', assetClass, credential);
       return { allowed: true, result };
