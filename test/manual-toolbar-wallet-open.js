@@ -102,7 +102,9 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     if (sceneDisplay !== 'none') throw new Error('Expected #scene hidden in standalone mode, got display: ' + sceneDisplay);
     const walletBtnDisplay = await frame.locator('#walletBtn').evaluate((el) => getComputedStyle(el).display);
     if (walletBtnDisplay !== 'none') throw new Error('Expected the wallet-panel toggle button hidden in standalone mode (nothing to toggle back to), got display: ' + walletBtnDisplay);
-    console.log('PASS: small corner frame, no blank canvas, no toggle button back to an empty "room"');
+    const chatWidgetDisplay = await frame.locator('#chatWidget').evaluate((el) => getComputedStyle(el).display);
+    if (chatWidgetDisplay !== 'none') throw new Error('Expected #chatWidget hidden in standalone mode (no world\'s chat backs it), got display: ' + chatWidgetDisplay);
+    console.log('PASS: small corner frame, no blank canvas, no toggle button or chat widget showing through behind the panel');
 
     console.log('STEP 2: a second toolbar message while already open must not tear down the overlay');
     await background.evaluate(async () => {

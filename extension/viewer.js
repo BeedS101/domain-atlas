@@ -11575,8 +11575,18 @@ if (start.manifest) {
   // and a world view, but there's no world view to toggle back to here,
   // so leaving it clickable would let someone close down to that exact
   // same blank canvas a second way.
+  //
+  // #chatWidget has the same unconditional-CSS-display problem #scene
+  // had: refreshChatAvailability() is the only place that ever hides it
+  // (it sets style.display directly, since the widget's own flex layout
+  // needs a real display value to beat the [hidden] attribute — see that
+  // function's own comment), and it only ever runs from enterWorld(),
+  // which standalone mode never reaches. Left alone it would sit there
+  // showing through behind the wallet panel with no world's chat actually
+  // backing it.
   canvas.style.display = 'none';
   walletBtn.style.display = 'none';
+  if (chatWidgetEl) chatWidgetEl.style.display = 'none';
   placeLabel.textContent = '🎒 Wallet';
   statusEl.textContent = 'No world entered.';
   walletPanel.classList.add('open');
