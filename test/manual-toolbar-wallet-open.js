@@ -36,6 +36,16 @@
 // to mint a real asset to hover, so this spins up its own throwaway
 // instance (isolated docroot copy + isolated state dir), same pattern
 // manual-3d-key-anchored-portal.js and its siblings use.
+//
+// STEP 4 covers a live bug report against the side panel itself: entering
+// a real spatial world still let the toolbar button pop the side panel
+// open on top of it, since openPanelOnActionClick is a global behavior
+// with no idea a tab's full-tab world overlay exists. content.js/
+// background.js now disable (and close, if already open) the side panel
+// for exactly that tab for exactly that long — this drives a real
+// Enter-Space click against the same isolated docroot STEP 3 already set
+// up, and checks chrome.sidePanel.getOptions({tabId}) directly rather than
+// trying to click the real toolbar icon (which Playwright still can't do).
 
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -120,7 +130,29 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     if (!widgetHidden) throw new Error('Expected #assetViewerWidget to stay hidden on hover in standalone mode (no room to show it beside a card this narrow)');
     console.log('PASS: hovering the asset card did not open the Asset Viewer panel in standalone mode');
 
-    console.log('\nALL CHECKS PASSED — the toolbar button is wired to open a real Chrome side panel, and viewer.js\'s standalone-mode boot (what that panel actually shows) hides every piece of in-world-only UI and keeps the Asset Viewer hover panel disabled.');
+    console.log('STEP 4: entering a real spatial world (full-tab overlay) disables the side panel for that tab, live bug report — "its working but its doing it in the spatial worlds too"');
+    const worldPage = await context.newPage();
+    await worldPage.goto('http://' + DOMAIN + '/', { waitUntil: 'load' });
+    await worldPage.locator('#domain-atlas-enter-btn').click();
+    const worldFrameHandle = await worldPage.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
+    const worldFrame = await worldFrameHandle.contentFrame();
+    await worldFrame.waitForFunction(() => !document.getElementById('placeLabel').textContent.includes('Loading'), { timeout: 10000 });
+    const worldTabId = await background.evaluate(async (domain) => {
+      const tabs = await chrome.tabs.query({ url: 'http://' + domain + '/*' });
+      return tabs[0] && tabs[0].id;
+    }, DOMAIN);
+    if (typeof worldTabId !== 'number') throw new Error('Expected to find the world tab via chrome.tabs.query');
+    const optionsInWorld = await background.evaluate((tabId) => chrome.sidePanel.getOptions({ tabId }), worldTabId);
+    if (optionsInWorld.enabled !== false) throw new Error('Expected the side panel disabled for a tab with a real world entered, got: ' + JSON.stringify(optionsInWorld));
+    console.log('PASS: side panel disabled for the tab while a real spatial world is open in it');
+
+    await worldFrame.locator('#closeBtn').click();
+    await worldPage.waitForSelector('#domain-atlas-overlay', { state: 'detached', timeout: 10000 });
+    const optionsAfterClose = await background.evaluate((tabId) => chrome.sidePanel.getOptions({ tabId }), worldTabId);
+    if (optionsAfterClose.enabled !== true) throw new Error('Expected the side panel re-enabled for the tab after leaving the world, got: ' + JSON.stringify(optionsAfterClose));
+    console.log('PASS: side panel re-enabled for the tab once the world overlay closes');
+
+    console.log('\nALL CHECKS PASSED — the toolbar button is wired to open a real Chrome side panel, viewer.js\'s standalone-mode boot (what that panel actually shows) hides every piece of in-world-only UI and keeps the Asset Viewer hover panel disabled, and the panel stays out of the way while a real spatial world is open in a tab.');
   } finally {
     await context.close().catch(() => {});
     serverProc.kill();

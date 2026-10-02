@@ -571,6 +571,13 @@
     });
     document.documentElement.appendChild(iframe);
     lockHostPageScroll();
+    // Tells background.js to disable (and close, if one's already open)
+    // the side panel for this specific tab, since openPanelOnActionClick
+    // is a global behavior with no idea this tab's toolbar icon now has a
+    // full-tab world overlay of its own to not collide with. Best-effort,
+    // same as every other extension-messaging call in this file — nothing
+    // useful to do here if it fails.
+    chrome.runtime.sendMessage({ type: 'domain-atlas-world-entered' }).catch(() => {});
   }
 
   // The viewer runs in an extension-origin iframe, cross-origin from the host
@@ -593,6 +600,9 @@
       const overlay = document.getElementById('domain-atlas-overlay');
       if (overlay) overlay.remove();
       unlockHostPageScroll();
+      // Re-enables the side panel for this tab now that the world overlay
+      // it was disabled for is gone — see openOverlay()'s own comment.
+      chrome.runtime.sendMessage({ type: 'domain-atlas-world-exited' }).catch(() => {});
       if (originalDocumentTitle !== null) {
         document.title = originalDocumentTitle;
         originalDocumentTitle = null;
