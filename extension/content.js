@@ -525,114 +525,29 @@
     hostScrollLocked = false;
   }
 
-  // Standalone panel width — draggable, persisted across pages and tabs
-  // via chrome.storage.local (this content script's own origin-independent
-  // storage, same "storage" permission already declared for other wallet
-  // state) since the width is a property of this host-page-owned overlay
-  // iframe, not of anything inside the extension-origin viewer.html it
-  // points at. Loaded once, best-effort, at content-script init below;
-  // openOverlay() falls back to the default if that read hasn't resolved
-  // yet by the time someone clicks the toolbar button right away.
-  const STANDALONE_WIDTH_KEY = 'atlasStandalonePanelWidth';
-  const STANDALONE_DEFAULT_WIDTH = 380;
-  const STANDALONE_MIN_WIDTH = 280;
-  const STANDALONE_MAX_WIDTH = 720;
-  let standaloneWidth = STANDALONE_DEFAULT_WIDTH;
-  function clampStandaloneWidth(width) {
-    return Math.max(STANDALONE_MIN_WIDTH, Math.min(STANDALONE_MAX_WIDTH, width));
-  }
-  try {
-    chrome.storage.local.get([STANDALONE_WIDTH_KEY], (result) => {
-      const stored = result && result[STANDALONE_WIDTH_KEY];
-      if (typeof stored === 'number' && isFinite(stored)) standaloneWidth = clampStandaloneWidth(stored);
-    });
-  } catch (err) {
-    // storage unavailable (rare, privacy-locked-down browser) — stays at
-    // the default width, same as before this feature existed.
-  }
-
-  // The drag handle lives OUTSIDE the overlay iframe, as this host page's
-  // own sibling element right at the iframe's left edge — not inside
-  // viewer.html. A drag that crossed the iframe's cross-origin boundary
-  // mid-gesture would otherwise lose mouse events the moment the cursor
-  // moved over the iframe's own browsing context, the same problem every
-  // iframe-adjacent resizer has. A transparent full-viewport capture layer
-  // during the drag (resizeCaptureEl) is what actually prevents that: it
-  // sits on top of the iframe for the gesture's duration so every
-  // mousemove/mouseup keeps landing on this document, not the iframe's.
-  let resizeHandleEl = null;
-  let resizeCaptureEl = null;
-  let resizeDrag = null; // { startX, startWidth } while a drag is in progress, else null
-  function createResizeHandle(iframe) {
-    removeResizeHandle();
-    resizeHandleEl = document.createElement('div');
-    resizeHandleEl.id = 'domain-atlas-resize-handle';
-    Object.assign(resizeHandleEl.style, {
-      position: 'fixed',
-      top: '0',
-      bottom: '0',
-      right: standaloneWidth + 'px',
-      width: '6px',
-      cursor: 'ew-resize',
-      zIndex: 2147483647
-    });
-    resizeHandleEl.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      resizeDrag = { startX: e.clientX, startWidth: parseInt(iframe.style.width, 10) || standaloneWidth };
-      resizeCaptureEl = document.createElement('div');
-      Object.assign(resizeCaptureEl.style, { position: 'fixed', inset: '0', zIndex: 2147483647, cursor: 'ew-resize' });
-      document.documentElement.appendChild(resizeCaptureEl);
-    });
-    document.documentElement.appendChild(resizeHandleEl);
-  }
-  function removeResizeHandle() {
-    if (resizeHandleEl) { resizeHandleEl.remove(); resizeHandleEl = null; }
-    if (resizeCaptureEl) { resizeCaptureEl.remove(); resizeCaptureEl = null; }
-    resizeDrag = null;
-  }
-  // Dragging LEFT grows the panel (the right edge stays pinned to the
-  // browser edge, so width only ever grows toward the left) — clientX
-  // decreasing is a negative delta, so width = startWidth - delta.
-  document.addEventListener('mousemove', (e) => {
-    if (!resizeDrag) return;
-    const width = clampStandaloneWidth(resizeDrag.startWidth - (e.clientX - resizeDrag.startX));
-    const overlay = document.getElementById('domain-atlas-overlay');
-    if (overlay) overlay.style.width = width + 'px';
-    if (resizeHandleEl) resizeHandleEl.style.right = width + 'px';
-  });
-  document.addEventListener('mouseup', () => {
-    if (!resizeDrag) return;
-    resizeDrag = null;
-    if (resizeCaptureEl) { resizeCaptureEl.remove(); resizeCaptureEl = null; }
-    const overlay = document.getElementById('domain-atlas-overlay');
-    standaloneWidth = clampStandaloneWidth(overlay ? parseInt(overlay.style.width, 10) : standaloneWidth);
-    try { chrome.storage.local.set({ [STANDALONE_WIDTH_KEY]: standaloneWidth }); } catch (err) { /* same best-effort as the read above */ }
-  });
-
-  // startManifestUrl is optional — the toolbar-button listener further
-  // down calls this with none at all, for a page that may not declare a
-  // manifest (or any relationship to Domain Atlas) in the first place.
-  // viewer.js's own startParams()/boot sequence already has a defined,
-  // working path for "no manifest" (every wallet-panel display it shows
-  // is populated before that check even runs) — this only ever needed
-  // the overlay itself to stop requiring a URL to open.
+  // startManifestUrl is always given now — the "no manifest at all" case
+  // (the toolbar button) used to call this with none, rendering a small
+  // overlay frame instead of the full viewport. That path moved to a real
+  // Chrome side panel instead (manifest.json's side_panel.default_path,
+  // opened via background.js's sidePanel.setPanelBehavior), since an
+  // overlay is paint order, not layout — it can only ever draw IN FRONT of
+  // the page, never avoid covering it, no matter how it's sized. A side
+  // panel is a genuinely different browsing context content.js has no
+  // part in at all, so this function only ever needs the real-manifest,
+  // full-viewport case now.
   function openOverlay(startManifestUrl, worldId, anchorId) {
     const existing = document.getElementById('domain-atlas-overlay');
     if (existing) existing.remove();
-    removeResizeHandle();
 
     const iframe = document.createElement('iframe');
     iframe.id = 'domain-atlas-overlay';
-    let src = chrome.runtime.getURL('viewer.html');
-    if (startManifestUrl) {
-      src += '?manifest=' + encodeURIComponent(startManifestUrl);
-      if (worldId) src += '&world=' + encodeURIComponent(worldId);
-      // SPEC.md §3.5 — the specific named point this page's own <link
-      // rel="spatial"> pointed at, if any; viewer.js's startParams()/
-      // enterWorld() are what actually act on it (placing the visitor
-      // there instead of the world's ordinary entry point).
-      if (anchorId) src += '&anchor=' + encodeURIComponent(anchorId);
-    }
+    let src = chrome.runtime.getURL('viewer.html') + '?manifest=' + encodeURIComponent(startManifestUrl);
+    if (worldId) src += '&world=' + encodeURIComponent(worldId);
+    // SPEC.md §3.5 — the specific named point this page's own <link
+    // rel="spatial"> pointed at, if any; viewer.js's startParams()/
+    // enterWorld() are what actually act on it (placing the visitor
+    // there instead of the world's ordinary entry point).
+    if (anchorId) src += '&anchor=' + encodeURIComponent(anchorId);
     iframe.src = src;
     // The viewer is a cross-origin (extension) iframe, so WebAuthn is
     // blocked by default Permissions Policy unless explicitly delegated —
@@ -643,44 +558,19 @@
     // inside a cross-origin iframe turned out to be an unreliable fight
     // not worth having when the browser's own shortcut already works.)
     iframe.allow = 'publickey-credentials-create; publickey-credentials-get';
-    if (startManifestUrl) {
-      // Entering an actual world needs the full viewport — there's a
-      // real 3D scene about to render, and the host page underneath it
-      // isn't meant to stay usable at the same time.
-      Object.assign(iframe.style, {
-        position: 'fixed',
-        inset: '0',
-        width: '100vw',
-        height: '100vh',
-        border: 'none',
-        zIndex: 2147483647
-      });
-      document.documentElement.appendChild(iframe);
-      lockHostPageScroll();
-    } else {
-      // Standalone (toolbar button, no manifest at all): there's no world
-      // to render and no reason to cover the page the visitor was already
-      // reading — a panel pinned to the browser's edge, full height, the
-      // same spirit as a browser extension's own side-panel wallet (not a
-      // floating popup), with the host page left fully visible and
-      // scrollable underneath it. viewer.js's own "no manifest" branch is
-      // what keeps the (otherwise always-visible) #scene canvas and other
-      // in-world-only UI from showing through next to the wallet panel
-      // inside this frame.
-      Object.assign(iframe.style, {
-        position: 'fixed',
-        top: '0',
-        right: '0',
-        bottom: '0',
-        width: standaloneWidth + 'px',
-        height: '100vh',
-        border: 'none',
-        boxShadow: '-8px 0 30px rgba(0,0,0,0.45)',
-        zIndex: 2147483647
-      });
-      document.documentElement.appendChild(iframe);
-      createResizeHandle(iframe);
-    }
+    // Entering an actual world needs the full viewport — there's a real
+    // 3D scene about to render, and the host page underneath it isn't
+    // meant to stay usable at the same time.
+    Object.assign(iframe.style, {
+      position: 'fixed',
+      inset: '0',
+      width: '100vw',
+      height: '100vh',
+      border: 'none',
+      zIndex: 2147483647
+    });
+    document.documentElement.appendChild(iframe);
+    lockHostPageScroll();
   }
 
   // The viewer runs in an extension-origin iframe, cross-origin from the host
@@ -702,7 +592,6 @@
     if (event.data === 'domain-atlas-close') {
       const overlay = document.getElementById('domain-atlas-overlay');
       if (overlay) overlay.remove();
-      removeResizeHandle();
       unlockHostPageScroll();
       if (originalDocumentTitle !== null) {
         document.title = originalDocumentTitle;
@@ -748,19 +637,6 @@
       // same rewrite correctly leaves an actual file alone. Naming the file
       // sidesteps that ambiguity entirely, on any host.
       location.href = '/atlas-admin/index.html';
-    }
-  });
-
-  // background.js's toolbar-button handler — opens the wallet with no
-  // manifest at all, on any page, regardless of whether this content
-  // script found one above. Never overwrites an overlay that's already
-  // showing: if one's already open (a real manifest entry, or an
-  // earlier toolbar click), openOverlay() would otherwise tear it down
-  // and rebuild it with nothing, discarding whatever world the visitor
-  // was already in.
-  chrome.runtime.onMessage.addListener((message) => {
-    if (message && message.type === 'domain-atlas-open-wallet' && !document.getElementById('domain-atlas-overlay')) {
-      openOverlay();
     }
   });
 })();

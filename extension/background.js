@@ -1,19 +1,20 @@
 // Domain Atlas — background service worker
 //
-// Only job: a toolbar-button click opens the wallet on whatever page is
-// currently active, independent of whether that page declares a spatial
-// manifest at all. A service worker has no DOM of its own to show
-// anything in, so this just asks content.js (already injected on every
-// page via manifest.json's content_scripts) to open its overlay — the
-// same overlay a detected manifest's own entry button already opens,
-// just without a manifest to go with it. content.js/viewer.js own the
-// rest of what "no manifest" actually looks like.
-chrome.action.onClicked.addListener((tab) => {
-  if (!tab || typeof tab.id !== 'number') return;
-  // A page the content script never loaded on (chrome://, the extension
-  // gallery, a tab still mid-navigation) has nothing listening on the
-  // other end — sendMessage rejects, not throws, and there's nothing
-  // useful to do about it from here, so this is deliberately silent
-  // rather than surfacing an error for something the user can't act on.
-  chrome.tabs.sendMessage(tab.id, { type: 'domain-atlas-open-wallet' }).catch(() => {});
-});
+// Only job: make the toolbar button open the wallet as a real Chrome side
+// panel, docked beside whatever page is active rather than drawn over it.
+// setPanelBehavior with openPanelOnActionClick is the whole implementation:
+// Chrome itself then wires the action icon to toggle the panel open/closed,
+// no onClicked listener or message-passing to content.js needed for this
+// at all.
+// viewer.html (manifest.json's side_panel.default_path) loads with no
+// manifest/world/anchor query params in this context — viewer.js's own
+// "no manifest" branch (see its own comments) is what that boots into.
+//
+// This replaced an earlier content-script-injected overlay for the same
+// "no manifest" case, which could only ever draw IN FRONT of the page —
+// an overlay is paint order, not layout, so it structurally could never
+// avoid covering content the way a real side panel does. The in-world
+// case (a detected manifest's own Enter-Space button) is unrelated and
+// unchanged: that one still needs the full tab, since a real 3D/2D scene
+// is about to render there.
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});

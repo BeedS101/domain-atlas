@@ -1,36 +1,47 @@
-// Manual check: the wallet opens via the toolbar button's own message
-// (background.js -> content.js) on an ordinary page that declares no
-// spatial manifest at all, and a second click while it's already open
-// is a no-op rather than tearing down what's already showing.
+// Manual check: the toolbar button opens the wallet as a real Chrome side
+// panel (manifest.json's side_panel.default_path -> viewer.html), docked
+// beside the page instead of drawn over it, on a page that declares no
+// spatial manifest at all.
 //
-// Playwright can't click the real browser toolbar icon (it lives outside
-// any page's accessibility tree), so this calls into the extension's own
-// background service worker directly and has IT send the exact message
-// background.js sends on a real click — exercising the real content.js
-// listener and the real openOverlay()/viewer.js standalone-mode path end
-// to end, just without needing to hit browser chrome pixels.
+// This used to test a content-script-injected overlay iframe for the same
+// "no manifest" case — replaced because an overlay is paint order, not
+// layout: it can only ever draw IN FRONT of the page, never avoid covering
+// it, no matter how it's sized or positioned. A real side panel is a
+// genuinely different Chrome browsing context that content.js has no part
+// in at all, so there's nothing left for content.js to do for this case —
+// background.js's whole job now is chrome.sidePanel.setPanelBehavior().
 //
-// STEP 3 covers a second live bug report against this same feature: the
-// Asset Viewer hover panel (task #150) opening over everything when a
-// wallet asset is hovered in this view. openAssetViewer()'s
-// positionAssetViewer() math assumes room beside the hovered card in a
-// roughly full-size viewport; the standalone corner frame (380px wide,
-// see STEP 1b) has none, so the fix is a guard in openAssetViewer()
-// that skips opening the panel at all whenever currentManifest is unset
-// — which is only ever true in this standalone mode, since loadManifest()
-// (the only place that sets it) is never called here. That needs a real
-// asset in the wallet to hover, which needs a live issuer-server, so this
-// test spins up its own throwaway instance the same way
-// manual-3d-key-anchored-portal.js and its siblings do (isolated docroot
-// copy + isolated state dir + isolated Chrome profile, all cleaned up in
-// `finally`), rather than depending on one already running on 8001/8002.
+// Two real Playwright limits shape what this can actually exercise:
+//   1. Playwright can't click the real toolbar icon (it lives outside any
+//      page's accessibility tree) — same limit the old overlay-based
+//      version of this test already worked around differently.
+//   2. chrome.sidePanel.open() throws "may only be called in response to
+//      a user gesture" when called from a service worker's own script
+//      (confirmed live, not assumed) — so even the extension's own
+//      background script can't fake the open the way background.evaluate()
+//      could fake a message send for the old overlay.
+// So this test verifies the two things that together make the real,
+// icon-clicked side panel work correctly: (a) background.js actually
+// registered the click-opens-panel behavior with Chrome, and (b) viewer.js's
+// own "no manifest" branch — which is exactly what loading viewer.html with
+// no query params boots into, regardless of what surface it's shown in —
+// behaves correctly. (a) is unit-testable directly; (b) is tested by
+// loading viewer.html as a plain page, since its own JS has no idea
+// whether it's inside a side panel or an ordinary tab and behaves
+// identically either way.
+//
+// STEP 3 covers the Asset Viewer hover panel (task #150), which also has
+// to stay disabled here: positionAssetViewer() assumes room beside the
+// hovered card that a narrow panel doesn't have. Needs a live issuer-server
+// to mint a real asset to hover, so this spins up its own throwaway
+// instance (isolated docroot copy + isolated state dir), same pattern
+// manual-3d-key-anchored-portal.js and its siblings use.
 
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const http = require('http');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const PORT = 8201; // isolated — distinct from every other manual-*.js test's chosen port
@@ -56,13 +67,6 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
   });
   console.log('PASS: isolated issuer-server up on port ' + PORT);
 
-  const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end('<!doctype html><html><head><title>Plain page</title></head><body>No manifest here.</body></html>');
-  });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const port = server.address().port;
-
   const context = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: false,
     executablePath: '/opt/pw-browsers/chromium',
@@ -70,117 +74,55 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
   });
 
   try {
-    const page = await context.newPage();
-    console.log('SETUP: plain page with no spatial manifest at all');
-    await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
-
-    const hasEnterBtn = await page.evaluate(() => !!document.getElementById('domain-atlas-enter-btn'));
-    if (hasEnterBtn) throw new Error('Expected no Enter-Space button on a manifest-less page');
-    console.log('PASS: no manifest-driven UI on this page, as expected');
-
-    console.log('STEP 1: simulate the toolbar click via the background service worker');
     let background = context.serviceWorkers()[0];
     if (!background) background = await context.waitForEvent('serviceworker');
-    await background.evaluate(async () => {
-      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      await chrome.tabs.sendMessage(tabs[0].id, { type: 'domain-atlas-open-wallet' });
-    });
+    const extensionId = new URL(background.url()).host;
 
-    const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
-    const frame = await frameHandle.contentFrame();
-    await frame.waitForSelector('#walletPanel.open', { timeout: 10000 });
-    console.log('PASS: wallet overlay opened with the panel already showing, no manifest involved');
+    console.log('STEP 1: background.js registered the toolbar icon to open the side panel on click');
+    const behavior = await background.evaluate(() => chrome.sidePanel.getPanelBehavior());
+    if (!behavior || behavior.openPanelOnActionClick !== true) throw new Error('Expected openPanelOnActionClick: true, got: ' + JSON.stringify(behavior));
+    console.log('PASS: chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }) took effect');
 
-    const placeLabelText = await frame.locator('#placeLabel').innerText();
+    console.log('STEP 2: viewer.html with no manifest query param (exactly what the side panel shows) boots into standalone mode');
+    const page = await context.newPage();
+    await page.goto('chrome-extension://' + extensionId + '/viewer.html', { waitUntil: 'load' });
+    await page.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 10000 });
+    const placeLabelText = await page.locator('#placeLabel').innerText();
     if (!placeLabelText.includes('Wallet')) throw new Error('Expected placeLabel to say something Wallet-related in standalone mode, got: ' + placeLabelText);
-    console.log('PASS: placeLabel reflects standalone wallet-only mode, not stuck on "Loading space…"');
+    console.log('PASS: wallet panel open immediately, placeLabel reflects standalone mode, not stuck on "Loading space…"');
 
-    console.log('STEP 1b: the overlay is a narrow panel pinned to the browser\'s right edge, full height (not a small floating corner box, not a full-viewport takeover), and the blank #scene canvas is hidden rather than showing through next to the panel');
-    const viewportSize = page.viewportSize();
-    const overlayBox = await frameHandle.boundingBox();
-    if (!overlayBox || overlayBox.width > 500) throw new Error('Expected a narrow side panel in standalone mode, got a bounding box: ' + JSON.stringify(overlayBox));
-    if (Math.round(overlayBox.y) !== 0) throw new Error('Expected the panel flush with the top of the viewport, got y: ' + overlayBox.y);
-    if (Math.abs(overlayBox.height - viewportSize.height) > 1) throw new Error('Expected the panel to span the full viewport height, got height: ' + overlayBox.height + ' vs viewport ' + viewportSize.height);
-    if (Math.abs(overlayBox.x + overlayBox.width - viewportSize.width) > 1) throw new Error('Expected the panel flush with the right edge of the viewport, got x+width: ' + (overlayBox.x + overlayBox.width) + ' vs viewport width ' + viewportSize.width);
-    const sceneDisplay = await frame.locator('#scene').evaluate((el) => getComputedStyle(el).display);
-    if (sceneDisplay !== 'none') throw new Error('Expected #scene hidden in standalone mode, got display: ' + sceneDisplay);
-    const walletBtnDisplay = await frame.locator('#walletBtn').evaluate((el) => getComputedStyle(el).display);
-    if (walletBtnDisplay !== 'none') throw new Error('Expected the wallet-panel toggle button hidden in standalone mode (nothing to toggle back to), got display: ' + walletBtnDisplay);
-    const chatWidgetDisplay = await frame.locator('#chatWidget').evaluate((el) => getComputedStyle(el).display);
-    if (chatWidgetDisplay !== 'none') throw new Error('Expected #chatWidget hidden in standalone mode (no world\'s chat backs it), got display: ' + chatWidgetDisplay);
-    const hintDisplay = await frame.locator('#hint').evaluate((el) => getComputedStyle(el).display);
-    if (hintDisplay !== 'none') throw new Error('Expected #hint (the portal-color legend) hidden in standalone mode (no portals exist without a world), got display: ' + hintDisplay);
-    console.log('PASS: full-height side panel flush with the right edge, no blank canvas, no toggle button, chat widget, or portal-color hint showing through behind it');
+    console.log('STEP 2b: in-world-only UI that would otherwise show through with nothing behind it stays hidden — #scene, #walletBtn, #closeBtn (meaningless here, see viewer.js\'s own comment), #chatWidget, #hint');
+    for (const selector of ['#scene', '#walletBtn', '#closeBtn', '#chatWidget', '#hint']) {
+      const display = await page.locator(selector).evaluate((el) => getComputedStyle(el).display);
+      if (display !== 'none') throw new Error('Expected ' + selector + ' hidden in standalone mode, got display: ' + display);
+    }
+    console.log('PASS: no blank canvas, world-only toggle, dead close button, orphaned chat widget, or portal-color hint showing through');
 
-    console.log('STEP 2: a second toolbar message while already open must not tear down the overlay');
-    await background.evaluate(async () => {
-      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      await chrome.tabs.sendMessage(tabs[0].id, { type: 'domain-atlas-open-wallet' });
-    });
-    await page.waitForTimeout(300); // give a (wrongly) re-created iframe a moment to appear if it were going to
-    const overlayCountAfter = await page.evaluate(() => document.querySelectorAll('#domain-atlas-overlay').length);
-    if (overlayCountAfter !== 1) throw new Error('Expected exactly one overlay iframe after a second toolbar message, got: ' + overlayCountAfter);
-    console.log('PASS: second toolbar message left the existing overlay alone');
-
-    console.log('STEP 3: a real asset card\'s hover panel stays disabled in this standalone corner frame (task #150 vs. the "empty room" fix\'s 380px frame)');
-    await frame.locator('#chooseNewBtn').click();
-    await frame.locator('#newPasswordInput').fill('toolbar-wallet-test-pw');
-    await frame.locator('#newPasswordConfirmInput').fill('toolbar-wallet-test-pw');
-    await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
-    await frame.locator('#seedConfirmCheck').check();
-    await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
-    await frame.evaluate(async (domain) => {
+    console.log('STEP 3: a real asset card\'s hover panel stays disabled in standalone mode (task #150)');
+    await page.locator('#chooseNewBtn').click();
+    await page.locator('#newPasswordInput').fill('toolbar-wallet-test-pw');
+    await page.locator('#newPasswordConfirmInput').fill('toolbar-wallet-test-pw');
+    await page.locator('#confirmCreateBtn').click();
+    await page.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await page.locator('#seedConfirmCheck').check();
+    await page.locator('#seedConfirmBtn').click();
+    await page.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await page.evaluate(async (domain) => {
       await AtlasWallet.mintAsset('self', domain, 'atlas.element.iron', 20);
       await refreshInventoryDisplay();
     }, DOMAIN);
-    await frame.waitForSelector('#selfCollectiblesList .wallet-item', { timeout: 15000 });
+    await page.waitForSelector('#selfCollectiblesList .wallet-item', { timeout: 15000 });
     console.log('PASS: a real asset card is showing in the standalone wallet');
 
-    await frame.locator('#selfCollectiblesList .wallet-item').first().hover();
+    await page.locator('#selfCollectiblesList .wallet-item').first().hover();
     await page.waitForTimeout(300); // give a (wrongly) opening panel a moment to appear if it were going to
-    const widgetHidden = await frame.locator('#assetViewerWidget').evaluate((el) => el.hidden);
-    if (!widgetHidden) throw new Error('Expected #assetViewerWidget to stay hidden on hover in standalone mode (no room to show it beside a card in a 380px frame)');
+    const widgetHidden = await page.locator('#assetViewerWidget').evaluate((el) => el.hidden);
+    if (!widgetHidden) throw new Error('Expected #assetViewerWidget to stay hidden on hover in standalone mode (no room to show it beside a card this narrow)');
     console.log('PASS: hovering the asset card did not open the Asset Viewer panel in standalone mode');
 
-    console.log('STEP 4: the left-edge handle drags the panel wider, and the new width survives a fresh page load (chrome.storage.local, not just in-memory state)');
-    const widthBefore = (await frameHandle.boundingBox()).width;
-    const handleBox = await page.locator('#domain-atlas-resize-handle').boundingBox();
-    if (!handleBox) throw new Error('Expected a #domain-atlas-resize-handle element on the host page in standalone mode');
-    const dragBy = 80; // dragging left grows the panel — see content.js's createResizeHandle() comment
-    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(handleBox.x + handleBox.width / 2 - dragBy, handleBox.y + handleBox.height / 2, { steps: 10 });
-    await page.mouse.up();
-    const widthAfter = (await frameHandle.boundingBox()).width;
-    if (Math.abs(widthAfter - (widthBefore + dragBy)) > 2) throw new Error('Expected dragging the handle left by ' + dragBy + 'px to grow the panel by about that much, got ' + widthBefore + ' -> ' + widthAfter);
-    console.log('PASS: dragging the handle resized the panel (' + widthBefore + 'px -> ' + widthAfter + 'px)');
-
-    // Live bug report: #hint is centered on the IFRAME's own width, not on
-    // #walletPanel's fixed 360px, so widening the frame opens a gap to the
-    // panel's left where #hint would show through if it weren't hidden.
-    const hintDisplayWide = await frame.locator('#hint').evaluate((el) => getComputedStyle(el).display);
-    if (hintDisplayWide !== 'none') throw new Error('Expected #hint to stay hidden after widening the panel, got display: ' + hintDisplayWide);
-    console.log('PASS: #hint stays hidden in the gap opened up by widening the panel');
-
-    await page.reload({ waitUntil: 'load' });
-    await page.waitForTimeout(300); // let the fresh content script's chrome.storage.local.get() resolve before it's asked to open anything
-    let background2 = context.serviceWorkers()[0];
-    if (!background2) background2 = await context.waitForEvent('serviceworker');
-    await background2.evaluate(async () => {
-      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      await chrome.tabs.sendMessage(tabs[0].id, { type: 'domain-atlas-open-wallet' });
-    });
-    const frameHandle2 = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
-    const widthAfterReload = (await frameHandle2.boundingBox()).width;
-    if (Math.abs(widthAfterReload - widthAfter) > 2) throw new Error('Expected the dragged width to persist across a fresh page load, got ' + widthAfterReload + 'px vs. ' + widthAfter + 'px before reload');
-    console.log('PASS: the dragged width persisted across a fresh page load (' + widthAfterReload + 'px)');
-
-    console.log('\nALL CHECKS PASSED — toolbar-button wallet-open works on a manifest-less page, is idempotent while already open, the Asset Viewer hover panel stays disabled there, and the panel is drag-resizable with its width persisted.');
+    console.log('\nALL CHECKS PASSED — the toolbar button is wired to open a real Chrome side panel, and viewer.js\'s standalone-mode boot (what that panel actually shows) hides every piece of in-world-only UI and keeps the Asset Viewer hover panel disabled.');
   } finally {
     await context.close().catch(() => {});
-    server.close();
     serverProc.kill();
     try { fs.rmSync(DOCROOT_DIR, { recursive: true, force: true }); } catch (err) {}
     try { fs.rmSync(STATE_DIR, { recursive: true, force: true }); } catch (err) {}

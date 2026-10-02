@@ -11558,14 +11558,19 @@ if (start.manifest) {
     requestAnimationFrame(render);
   });
 } else {
-  // Opened with no manifest at all — the toolbar button (background.js/
-  // content.js) does this on purpose, on any page, now inside a small
-  // corner frame rather than the full-viewport overlay a real world
-  // entry gets (see openOverlay() in content.js). Every wallet-panel
-  // display above (refreshIdentityDisplay/refreshInventoryDisplay/
-  // refreshMailDisplay) already populated with no world needed, so open
-  // the panel itself immediately instead of leaving placeLabel stuck on
-  // its initial "Loading space…" forever with nothing ever replacing it.
+  // Opened with no manifest at all — manifest.json's side_panel.default_path
+  // points straight at this file, so this is what boots when the toolbar
+  // button opens Domain Atlas as a real Chrome side panel (background.js's
+  // sidePanel.setPanelBehavior), docked beside the page rather than drawn
+  // over it. A real 3D/2D world view needs the whole tab, which a side
+  // panel structurally can't give it, so that case is unchanged: a
+  // detected manifest's own Enter-Space button still opens the existing
+  // full-viewport overlay (content.js's openOverlay()) instead of this
+  // branch. Every wallet-panel display above (refreshIdentityDisplay/
+  // refreshInventoryDisplay/refreshMailDisplay) already populated with no
+  // world needed, so open the panel itself immediately instead of leaving
+  // placeLabel stuck on its initial "Loading space…" forever with nothing
+  // ever replacing it.
   //
   // #scene defaults to visible (unlike #scene3d/#sceneLoadProgress,
   // which are already display:none until something gives them an
@@ -11575,6 +11580,14 @@ if (start.manifest) {
   // and a world view, but there's no world view to toggle back to here,
   // so leaving it clickable would let someone close down to that exact
   // same blank canvas a second way.
+  //
+  // closeBtn is hidden for a different reason: it works by asking the
+  // page that embedded this one to tear the overlay down (window.parent.
+  // postMessage('domain-atlas-close', ...) — see closeBtn's own listener
+  // below), which only means something for the in-world overlay content.js
+  // creates. A side panel has no such parent to ask — it's dismissed by
+  // clicking the toolbar icon again, Chrome's own side-panel affordance —
+  // so left visible here it would just be a dead button.
   //
   // #chatWidget has the same unconditional-CSS-display problem #scene
   // had: refreshChatAvailability() is the only place that ever hides it
@@ -11588,12 +11601,14 @@ if (start.manifest) {
   // #hint is the same story again: show3DCanvas() is the only place that
   // ever hides it, and that's only ever called from inside enterWorld()'s
   // own 3D/2D switch. Its text (explaining portal colors) is meaningless
-  // with no world loaded anyway, and it's centered on the IFRAME's own
-  // width, not on #walletPanel's fixed 360px — invisible by coincidence
-  // while this panel stayed close to that width, but it reappears in the
-  // gap to #walletPanel's left as soon as the panel is dragged wider.
+  // with no world loaded anyway, and it's centered on this page's own
+  // width, not on #walletPanel's fixed 360px — so it reappears in the gap
+  // to #walletPanel's left if the side panel itself is ever dragged wider
+  // than that by the visitor (Chrome's own native side-panel resize, not
+  // anything this extension draws or controls).
   canvas.style.display = 'none';
   walletBtn.style.display = 'none';
+  closeBtn.style.display = 'none';
   if (chatWidgetEl) chatWidgetEl.style.display = 'none';
   hintEl.style.display = 'none';
   placeLabel.textContent = '🎒 Wallet';
