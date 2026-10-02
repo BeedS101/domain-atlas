@@ -151,14 +151,29 @@ $mailNotice = [
   'body' => "Your open listing of {$offerA['quantity']} {$offerA['class']} for {$wantA['quantity']} {$wantA['class']} was claimed while you were away.",
   'attachedAsset' => $aReceived,
 ];
-if ($issuerADomain === atlas_domain()) {
-  $aSide = fulfill_trade_side_settlement($kp, $balanceA, $offerA['quantity'], $claimantPub, $mailNotice);
-} else {
-  try {
-    $aSide = atlas_relay_trade_settle($kp, $issuerADomain, $tradeId, $balanceA, $offerA['quantity'], $claimantPub, $aReceived);
-  } catch (Exception $e) {
-    send_json(502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ': ' . $e->getMessage()]);
+try {
+  $aSide = $issuerADomain === atlas_domain()
+    ? fulfill_trade_side_settlement($kp, $balanceA, $offerA['quantity'], $claimantPub, $mailNotice)
+    : atlas_relay_trade_settle($kp, $issuerADomain, $tradeId, $balanceA, $offerA['quantity'], $claimantPub, $aReceived);
+} catch (Exception $e) {
+  // B's side already settled above — balanceB is genuinely spent
+  // server-side even though this request is about to report failure.
+  // Refund it when that spend was local (see refund_failed_second_leg()'s
+  // own comment in lib/bootstrap.php); a foreign spend has no refund path
+  // yet, so the claimant is told plainly instead of being left to
+  // discover a silently-revoked balance later.
+  $refund = null;
+  if ($issuerBDomain === atlas_domain()) {
+    try {
+      $refund = refund_failed_second_leg($kp, $aReceived, $offerB, $claimantPub);
+      $refundNote = ' — your ' . $offerB['quantity'] . ' ' . $offerB['class'] . ' was automatically refunded.';
+    } catch (Exception $refundErr) {
+      $refundNote = ' — automatic refund also failed (' . $refundErr->getMessage() . '); contact the domain operator, your balance may be stuck.';
+    }
+  } else {
+    $refundNote = ' — your balance was spent at ' . $issuerBDomain . ' and cannot be automatically refunded from here; contact the domain operator.';
   }
+  send_json(502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ': ' . $e->getMessage() . $refundNote, 'refund' => $refund]);
 }
 $bReceived = $aSide['received'];
 

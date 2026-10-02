@@ -1150,6 +1150,34 @@ function fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwn
   return ['received' => $received, 'remainder' => $remainder];
 }
 
+// Compensates a claimant whose balance was already spent by
+// fulfill_trade_side_settlement() above (the B side, paid first) when the
+// OTHER leg (the A side, paid second) then fails — a network drop, a
+// foreign domain timing out on relay-settle, or any other error after B's
+// spend already committed. Only safe to call when B's side settled
+// LOCALLY (issuerBDomain === atlas_domain()): this domain is then the one
+// that both produced $aReceived (minted to the poster, who was never told
+// about it — the mail notice carrying it is built by the A-side
+// settlement that just failed, so it was never sent) and can safely undo
+// it, since nothing else has touched it in between. A spend on a FOREIGN
+// domain can't be refunded this way — that would need a new cross-domain
+// refund-relay endpoint this protocol doesn't have yet (see
+// atlas/trade/claim.php's own comment on this gap). Mirrors
+// issuer-server/server.js's refundFailedSecondLeg().
+//
+// Revokes $aReceived (the never-delivered credit to the poster) and mints
+// its equivalent back to the claimant: a fresh balance for a fungible
+// class, or the exact same unique item (transferred back, preserving its
+// instance state) for a non-fungible one.
+function refund_failed_second_leg($kp, $aReceived, $offerB, $claimantPublicKey) {
+  atlas_revoke($aReceived['id'], 'refund: counterparty leg of this trade failed to settle');
+  archive_if_audited($aReceived, 'refund: counterparty leg of this trade failed to settle');
+  $isUnique = isset($aReceived['asset']['fungible']) && $aReceived['asset']['fungible'] === false;
+  return $isUnique
+    ? transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $aReceived)
+    : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $offerB['class'], $offerB['quantity'], $aReceived['id']);
+}
+
 // Task #203: sums an owner's VERIFIED current holdings of one class, off
 // whatever balance credentials the wallet chose to present alongside a
 // mint request — used only by the 'holdingCap' check in

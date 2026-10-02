@@ -1928,7 +1928,25 @@ const AtlasWallet = (() => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pendingId: listing.pendingId, membership, intent, balance })
     });
-    if (!res.ok) throw new Error('Claim failed: ' + (await res.text()));
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      // A failed claim can still have spent `balance` server-side (the
+      // OTHER leg of the trade settled first, then the poster's own leg
+      // failed) — see /atlas/trade/claim's own comment on the refund it
+      // attempts in exactly that case. Adopt it the same way a
+      // successful claim's own received/remainder would be, so `balance`
+      // isn't left behind as a silent ghost the next mail/check cycle
+      // discovers already revoked, with nothing in its place.
+      if (errBody.refund) {
+        const owner = await getIdentity();
+        const wallet = (await getWallet(owner.publicKey)).filter((e) => e.credential.id !== balance.id);
+        wallet.push({ credential: errBody.refund, lastVerdict: await verifyCredential(errBody.refund) });
+        await saveWallet(owner.publicKey, wallet);
+        await autoConsolidateAssetWallet(owner.publicKey);
+        await logActivity('trade', 'Trade at ' + issuerDomain + ' failed partway through and was refunded: kept ' + listing.want.quantity + ' ' + listing.want.class);
+      }
+      throw new Error('Claim failed: ' + (errBody.error || ('HTTP ' + res.status)));
+    }
     const result = await res.json();
     const owner = await getIdentity();
 
@@ -5758,10 +5776,38 @@ const AtlasWallet = (() => {
           supersededAt: new Date().toISOString(),
           seen: false
         });
+      } else if (update.status === 'revoked' && update.reason === 'superseded') {
+        // fulfillTradeSideSettlement revokes the spent credential but only
+        // appends an assetUpdates (supersession) record when there's a
+        // remainder — a unique item's sale or a fully-spent fungible
+        // balance always has remainder === null (see that function's own
+        // comment), so this id can only ever show up here as a bare
+        // 'revoked' update, never as the 'superseded'-with-newCredential
+        // case above. Nothing will ever replace it, so leaving it in the
+        // wallet forever as an unexplained "✗ revoked by issuer" ghost
+        // serves no purpose — remove it and leave a notice recording what
+        // happened, the same way a reissue's replacement does above.
+        const oldEntry = wallet[idx];
+        wallet.splice(idx, 1);
+        await unloadItem(update.id); // can't still be equipped in any world's loadout
+        walletChanged = true;
+        noticesChanged = true;
+        notices.push({
+          id: 'urn:atlas:asset-update:' + update.id,
+          oldId: update.id,
+          newId: null,
+          name: oldEntry.credential.asset.name,
+          domain,
+          supersededAt: new Date().toISOString(),
+          seen: false
+        });
       } else if (update.status === 'revoked') {
-        // Not a reissue — just a plain revocation this wallet hadn't
-        // noticed yet. Re-verifying refreshes the displayed verdict
-        // immediately rather than waiting for a manual "Re-verify wallet".
+        // Any OTHER revocation reason (clawback, issuer-request,
+        // demo-self-serve, ...) is something involuntary happening to a
+        // still-held item — keep it visible and flagged rather than
+        // silently removing it, so the owner can see it. Re-verifying
+        // refreshes the displayed verdict immediately rather than waiting
+        // for a manual "Re-verify wallet".
         wallet[idx].lastVerdict = await verifyCredential(wallet[idx].credential);
         walletChanged = true;
       }

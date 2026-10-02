@@ -3516,6 +3516,32 @@ async function main() {
     return { received, remainder };
   }
 
+  // Compensates a claimant whose balance was already spent by
+  // fulfillTradeSideSettlement() above (the B side, paid first) when the
+  // OTHER leg (the A side, paid second) then fails — a network drop, a
+  // foreign domain timing out on relay-settle, or any other error after
+  // B's spend already committed. Only safe to call when B's side settled
+  // LOCALLY (issuerBDomain === DOMAIN): this domain is then the one that
+  // both produced `aReceived` (minted to the poster, who was never told
+  // about it — the mail notice carrying it is built by the A-side
+  // settlement that just failed, so it was never sent) and can safely
+  // undo it, since nothing else has touched it in between. A spend on a
+  // FOREIGN domain can't be refunded this way — that would need a new
+  // cross-domain refund-relay endpoint this protocol doesn't have yet
+  // (see the trade/claim route's own comment on this gap).
+  //
+  // Revokes `aReceived` (the never-delivered credit to the poster) and
+  // mints its equivalent back to the claimant: a fresh balance for a
+  // fungible class, or the exact same unique item (transferred back,
+  // preserving its instance state) for a non-fungible one.
+  async function refundFailedSecondLeg(aReceived, offerB, claimantPublicKey) {
+    revoke(aReceived.id, 'refund: counterparty leg of this trade failed to settle');
+    archiveIfAudited(aReceived, 'refund: counterparty leg of this trade failed to settle');
+    return aReceived.asset.fungible === false
+      ? await transferUniqueAsset(claimantPublicKey, aReceived)
+      : await mintAssetByClass(claimantPublicKey, offerB.class, offerB.quantity, aReceived.id);
+  }
+
   // SPEC.md §7 v1.29 — the OUTBOUND half of the /atlas/trade/relay-lock
   // route below, called by this server's own /atlas/trade/claim handler
   // whenever a trade touches a balance issued by a domain other than this
@@ -5878,7 +5904,24 @@ async function main() {
             ? await fulfillTradeSideSettlement(balanceA, offerA.quantity, claimantPub, mailNotice)
             : await relayTradeSettle(issuerADomain, tradeId, balanceA, offerA.quantity, claimantPub, aReceived);
         } catch (err) {
-          return sendJson(res, 502, { error: "could not settle the poster's balance at " + issuerADomain + ': ' + err.message });
+          // B's side already settled above — balanceB is genuinely spent
+          // server-side even though this request is about to report
+          // failure. Refund it when that spend was local (see
+          // refundFailedSecondLeg()'s own comment); a foreign spend has
+          // no refund path yet, so the claimant is told plainly instead
+          // of being left to discover a silently-revoked balance later.
+          let refund = null, refundNote;
+          if (issuerBDomain === DOMAIN) {
+            try {
+              refund = await refundFailedSecondLeg(aReceived, offerB, claimantPub);
+              refundNote = ' — your ' + offerB.quantity + ' ' + offerB.class + ' was automatically refunded.';
+            } catch (refundErr) {
+              refundNote = ' — automatic refund also failed (' + refundErr.message + '); contact the domain operator, your balance may be stuck.';
+            }
+          } else {
+            refundNote = ' — your balance was spent at ' + issuerBDomain + ' and cannot be automatically refunded from here; contact the domain operator.';
+          }
+          return sendJson(res, 502, { error: "could not settle the poster's balance at " + issuerADomain + ': ' + err.message + refundNote, refund });
         }
         const bReceived = aSide.received;
 
