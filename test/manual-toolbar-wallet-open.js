@@ -108,7 +108,9 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     if (walletBtnDisplay !== 'none') throw new Error('Expected the wallet-panel toggle button hidden in standalone mode (nothing to toggle back to), got display: ' + walletBtnDisplay);
     const chatWidgetDisplay = await frame.locator('#chatWidget').evaluate((el) => getComputedStyle(el).display);
     if (chatWidgetDisplay !== 'none') throw new Error('Expected #chatWidget hidden in standalone mode (no world\'s chat backs it), got display: ' + chatWidgetDisplay);
-    console.log('PASS: full-height side panel flush with the right edge, no blank canvas, no toggle button or chat widget showing through behind it');
+    const hintDisplay = await frame.locator('#hint').evaluate((el) => getComputedStyle(el).display);
+    if (hintDisplay !== 'none') throw new Error('Expected #hint (the portal-color legend) hidden in standalone mode (no portals exist without a world), got display: ' + hintDisplay);
+    console.log('PASS: full-height side panel flush with the right edge, no blank canvas, no toggle button, chat widget, or portal-color hint showing through behind it');
 
     console.log('STEP 2: a second toolbar message while already open must not tear down the overlay');
     await background.evaluate(async () => {
@@ -154,6 +156,13 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     const widthAfter = (await frameHandle.boundingBox()).width;
     if (Math.abs(widthAfter - (widthBefore + dragBy)) > 2) throw new Error('Expected dragging the handle left by ' + dragBy + 'px to grow the panel by about that much, got ' + widthBefore + ' -> ' + widthAfter);
     console.log('PASS: dragging the handle resized the panel (' + widthBefore + 'px -> ' + widthAfter + 'px)');
+
+    // Live bug report: #hint is centered on the IFRAME's own width, not on
+    // #walletPanel's fixed 360px, so widening the frame opens a gap to the
+    // panel's left where #hint would show through if it weren't hidden.
+    const hintDisplayWide = await frame.locator('#hint').evaluate((el) => getComputedStyle(el).display);
+    if (hintDisplayWide !== 'none') throw new Error('Expected #hint to stay hidden after widening the panel, got display: ' + hintDisplayWide);
+    console.log('PASS: #hint stays hidden in the gap opened up by widening the panel');
 
     await page.reload({ waitUntil: 'load' });
     await page.waitForTimeout(300); // let the fresh content script's chrome.storage.local.get() resolve before it's asked to open anything

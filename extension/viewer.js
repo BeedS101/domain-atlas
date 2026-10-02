@@ -11584,9 +11584,18 @@ if (start.manifest) {
   // which standalone mode never reaches. Left alone it would sit there
   // showing through behind the wallet panel with no world's chat actually
   // backing it.
+  //
+  // #hint is the same story again: show3DCanvas() is the only place that
+  // ever hides it, and that's only ever called from inside enterWorld()'s
+  // own 3D/2D switch. Its text (explaining portal colors) is meaningless
+  // with no world loaded anyway, and it's centered on the IFRAME's own
+  // width, not on #walletPanel's fixed 360px — invisible by coincidence
+  // while this panel stayed close to that width, but it reappears in the
+  // gap to #walletPanel's left as soon as the panel is dragged wider.
   canvas.style.display = 'none';
   walletBtn.style.display = 'none';
   if (chatWidgetEl) chatWidgetEl.style.display = 'none';
+  hintEl.style.display = 'none';
   placeLabel.textContent = '🎒 Wallet';
   statusEl.textContent = 'No world entered.';
   walletPanel.classList.add('open');
