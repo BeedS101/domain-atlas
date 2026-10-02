@@ -558,16 +558,42 @@
     // inside a cross-origin iframe turned out to be an unreliable fight
     // not worth having when the browser's own shortcut already works.)
     iframe.allow = 'publickey-credentials-create; publickey-credentials-get';
-    Object.assign(iframe.style, {
-      position: 'fixed',
-      inset: '0',
-      width: '100vw',
-      height: '100vh',
-      border: 'none',
-      zIndex: 2147483647
-    });
-    document.documentElement.appendChild(iframe);
-    lockHostPageScroll();
+    if (startManifestUrl) {
+      // Entering an actual world needs the full viewport — there's a
+      // real 3D scene about to render, and the host page underneath it
+      // isn't meant to stay usable at the same time.
+      Object.assign(iframe.style, {
+        position: 'fixed',
+        inset: '0',
+        width: '100vw',
+        height: '100vh',
+        border: 'none',
+        zIndex: 2147483647
+      });
+      document.documentElement.appendChild(iframe);
+      lockHostPageScroll();
+    } else {
+      // Standalone (toolbar button, no manifest at all): there's no world
+      // to render and no reason to cover the page the visitor was already
+      // reading — a small corner panel, same spirit as any other browser
+      // extension's popup, with the host page left fully visible and
+      // scrollable underneath it. viewer.js's own "no manifest" branch is
+      // what keeps the (otherwise always-visible) #scene canvas from
+      // showing through as blank space alongside the wallet panel inside
+      // this small frame.
+      Object.assign(iframe.style, {
+        position: 'fixed',
+        top: '16px',
+        right: '16px',
+        width: '380px',
+        height: 'min(640px, calc(100vh - 32px))',
+        border: 'none',
+        borderRadius: '10px',
+        boxShadow: '0 8px 30px rgba(0,0,0,0.45)',
+        zIndex: 2147483647
+      });
+      document.documentElement.appendChild(iframe);
+    }
   }
 
   // The viewer runs in an extension-origin iframe, cross-origin from the host

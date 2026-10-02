@@ -11549,11 +11549,24 @@ if (start.manifest) {
   });
 } else {
   // Opened with no manifest at all — the toolbar button (background.js/
-  // content.js) does this on purpose, on any page. Every wallet-panel
+  // content.js) does this on purpose, on any page, now inside a small
+  // corner frame rather than the full-viewport overlay a real world
+  // entry gets (see openOverlay() in content.js). Every wallet-panel
   // display above (refreshIdentityDisplay/refreshInventoryDisplay/
   // refreshMailDisplay) already populated with no world needed, so open
   // the panel itself immediately instead of leaving placeLabel stuck on
   // its initial "Loading space…" forever with nothing ever replacing it.
+  //
+  // #scene defaults to visible (unlike #scene3d/#sceneLoadProgress,
+  // which are already display:none until something gives them an
+  // 'active' class) — with no world ever loading in this mode, it would
+  // otherwise just sit there as a blank canvas next to the wallet panel.
+  // Hiding walletBtn too: it's the real toggle between the wallet panel
+  // and a world view, but there's no world view to toggle back to here,
+  // so leaving it clickable would let someone close down to that exact
+  // same blank canvas a second way.
+  canvas.style.display = 'none';
+  walletBtn.style.display = 'none';
   placeLabel.textContent = '🎒 Wallet';
   statusEl.textContent = 'No world entered.';
   walletPanel.classList.add('open');

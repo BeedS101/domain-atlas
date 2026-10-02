@@ -61,6 +61,15 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     if (!placeLabelText.includes('Wallet')) throw new Error('Expected placeLabel to say something Wallet-related in standalone mode, got: ' + placeLabelText);
     console.log('PASS: placeLabel reflects standalone wallet-only mode, not stuck on "Loading space…"');
 
+    console.log('STEP 1b: no leftover empty "room" — the overlay is a small corner frame, not a full-viewport takeover, and the blank #scene canvas is hidden rather than showing through next to the panel');
+    const overlayBox = await frameHandle.boundingBox();
+    if (!overlayBox || overlayBox.width > 500) throw new Error('Expected a small corner frame in standalone mode, got a bounding box: ' + JSON.stringify(overlayBox));
+    const sceneDisplay = await frame.locator('#scene').evaluate((el) => getComputedStyle(el).display);
+    if (sceneDisplay !== 'none') throw new Error('Expected #scene hidden in standalone mode, got display: ' + sceneDisplay);
+    const walletBtnDisplay = await frame.locator('#walletBtn').evaluate((el) => getComputedStyle(el).display);
+    if (walletBtnDisplay !== 'none') throw new Error('Expected the wallet-panel toggle button hidden in standalone mode (nothing to toggle back to), got display: ' + walletBtnDisplay);
+    console.log('PASS: small corner frame, no blank canvas, no toggle button back to an empty "room"');
+
     console.log('STEP 2: a second toolbar message while already open must not tear down the overlay');
     await background.evaluate(async () => {
       const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
