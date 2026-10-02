@@ -69,7 +69,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (watchedKeys.some((key) => key in changes)) refreshToolbarIcon();
 });
 
-chrome.runtime.onMessage.addListener((message, sender) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!sender.tab || typeof sender.tab.id !== 'number') return;
   const tabId = sender.tab.id;
   if (message && message.type === 'domain-atlas-world-entered') {
@@ -82,5 +82,27 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     if (chrome.sidePanel.close) chrome.sidePanel.close({ tabId }).catch(() => {});
   } else if (message && message.type === 'domain-atlas-world-exited') {
     chrome.sidePanel.setOptions({ tabId, enabled: true, path: 'viewer.html' }).catch(() => {});
+  } else if (message && message.type === 'domain-atlas-bridge-read') {
+    // SPEC.md §3.8 — content.js already checked this page's own manifest-
+    // declared policy.walletBridge.read before ever sending this; this
+    // file's only job is the one thing it has that content.js never could
+    // (AtlasWallet, imported above for the toolbar icon): the actual active
+    // identity, read exactly the same way refreshToolbarIcon() already
+    // does. Read-only, SPEC.md §3.8's own explicit scope — nothing here
+    // signs or mints anything.
+    //
+    // Explicit sendResponse() + return true, not a bare returned promise —
+    // a returned promise was observed (live, in test/manual-page-wallet-
+    // bridge.js) to sometimes resolve to undefined on the sender's side even
+    // though this handler's own promise went on to resolve correctly a few
+    // ms later: the sender's message port had already closed by then. The
+    // explicit callback form is the older, more conservative contract and
+    // doesn't share that race.
+    AtlasWallet.getIdentity().then((identity) => {
+      sendResponse({ publicKey: identity ? identity.publicKey : null });
+    }).catch(() => {
+      sendResponse({ publicKey: null });
+    });
+    return true;
   }
 });

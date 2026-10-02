@@ -39,28 +39,88 @@
     }
   }
 
-  fetch(manifestUrl, { cache: 'no-store' })
+  // SPEC.md §3.8 — resolved once, off the same manifest fetch the Enter
+  // button already needs, and awaited by the bridge-request handler below
+  // whenever a page's own script calls window.atlasWallet (page-bridge.js).
+  // Every exit path here — no manifest, a malformed one, a fetch failure —
+  // settles this to false rather than leaving it pending forever; the
+  // overwhelming majority of pages on the web have no manifest at all; a
+  // bridge call on one of them must resolve quickly to "not allowed," never
+  // hang waiting on a fetch that was never going to grant anything anyway.
+  const bridgeReadAllowedPromise = fetch(manifestUrl, { cache: 'no-store' })
     .then((res) => (res.ok ? res.json() : null))
     .then((manifest) => {
       if (!manifest || typeof manifest.spec !== 'string' || !manifest.spec.startsWith('domain-atlas/')) {
-        return; // no declared space here — same as a missing robots.txt, not an error
+        return false; // no declared space here — same as a missing robots.txt, not an error
       }
       if (!Array.isArray(manifest.worlds) || manifest.worlds.length === 0) {
-        return; // malformed manifest, nothing to enter
+        return false; // malformed manifest, nothing to enter and nothing to grant
       }
-      // A page-named world that doesn't actually exist in this manifest
-      // (a stale link, a typo) falls back to the ordinary default —
+      // SPEC.md §3.8 — a world with no `entry` at all declares no enterable
+      // space; it exists purely to carry a `policy`, never to be offered as
+      // something to walk into. Filtered out here, before defaultWorld/
+      // worlds[0] fallback ever gets a chance to pick one for the Enter
+      // button — the exact same world may still be a page's own
+      // policy-only §3.5 link target for the bridge check below.
+      const enterableWorlds = manifest.worlds.filter((w) => w.entry && w.entry.scene);
+      // A page-named world that doesn't actually exist in this manifest, or
+      // names one with no entry.scene, falls back to the ordinary default —
       // exactly "the existing behavior when it doesn't [opt in]," same as
       // never having the tag at all.
-      const targetWorld = (pageTarget && manifest.worlds.find((w) => w.id === pageTarget.worldId))
-        || manifest.worlds.find((w) => w.id === manifest.defaultWorld)
-        || manifest.worlds[0];
-      const anchorId = (pageTarget && pageTarget.worldId === targetWorld.id) ? pageTarget.anchorId : null;
-      injectButton(manifest, targetWorld, manifestUrl, anchorId);
+      const targetWorld = (pageTarget && enterableWorlds.find((w) => w.id === pageTarget.worldId))
+        || enterableWorlds.find((w) => w.id === manifest.defaultWorld)
+        || enterableWorlds[0];
+      if (targetWorld) {
+        const anchorId = (pageTarget && pageTarget.worldId === targetWorld.id) ? pageTarget.anchorId : null;
+        injectButton(manifest, targetWorld, manifestUrl, anchorId);
+      }
+
+      // SPEC.md §3.8 — the world THIS PAGE's own <link rel="spatial"> names
+      // (entry-less/policy-only or an ordinary spatial one, either is
+      // fine) is the per-world override; no tag at all means there's no
+      // world-level override to check at all, same as every other
+      // §3.4.1-shaped field falls straight through to the domain default
+      // outside a world context.
+      const bridgeWorld = pageTarget ? manifest.worlds.find((w) => w.id === pageTarget.worldId) : null;
+      return effectiveWalletBridgeRead(manifest, bridgeWorld);
     })
-    .catch(() => {
-      // unreachable or not JSON — silently do nothing
-    });
+    .catch(() => false); // unreachable or not JSON — same as no manifest at all
+
+  // SPEC.md §3.4.1 — the exact shape effectiveAcceptedItemClasses()
+  // (viewer.js, this file's own capabilitySummary() below) already uses:
+  // the world's own value wins outright when present, the domain-level
+  // default fills in only when the world's policy omits the field
+  // entirely, and the hard default when neither says anything is "no" —
+  // nothing gets wallet-bridge access for free just by existing.
+  function effectiveWalletBridgeRead(manifest, world) {
+    const worldPolicy = (world && world.policy && world.policy.walletBridge) || null;
+    if (worldPolicy && typeof worldPolicy.read === 'boolean') return worldPolicy.read;
+    const domainDefault = manifest.walletBridge || null;
+    if (domainDefault && typeof domainDefault.read === 'boolean') return domainDefault.read;
+    return false;
+  }
+
+  // SPEC.md §3.8 — the only thing page-bridge.js's window.atlasWallet
+  // actually does: relay to background.js (which has the real
+  // AtlasWallet.getIdentity(), imported via importScripts — see that
+  // file's own comment) once this page's own manifest-declared permission
+  // is known, never before. 'getIdentity' is the only action this version
+  // specifies; anything else gets the same denied shape an unpermitted
+  // page would.
+  async function handleBridgeRequest(action) {
+    if (action !== 'getIdentity') return { allowed: false, publicKey: null };
+    const allowed = await bridgeReadAllowedPromise;
+    if (!allowed) return { allowed: false, publicKey: null };
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-read' });
+      return { allowed: true, publicKey: (response && response.publicKey) || null };
+    } catch (err) {
+      // Read access is genuinely allowed here; background.js just didn't
+      // answer (extension reloading, say) — reads as "no identity active"
+      // rather than a third shape every caller would need to special-case.
+      return { allowed: true, publicKey: null };
+    }
+  }
 
   // ---------- SPEC.md §3.7 — optional domain identity pinning ----------
   //
@@ -596,6 +656,21 @@
   // original rather than the stale one from a previous session.
   let originalDocumentTitle = null;
   window.addEventListener('message', (event) => {
+    // SPEC.md §3.8 — page-bridge.js (the page's own MAIN-world script, not
+    // the overlay iframe every other branch here handles) asking this
+    // isolated-world script to relay a wallet-bridge request. Unlike the
+    // overlay messages below, the "sender" here is the SAME document's own
+    // main-world script, not a cross-origin iframe — event.source is this
+    // same `window` object either way, so origin is checked instead
+    // (always this page's own, since both worlds share one document).
+    if (event.source === window && event.origin === location.origin &&
+        event.data && event.data.__atlasBridge === true && event.data.direction === 'to-content') {
+      const { requestId, action } = event.data;
+      handleBridgeRequest(action).then((result) => {
+        window.postMessage({ __atlasBridge: true, direction: 'to-page', requestId, result }, location.origin);
+      });
+      return;
+    }
     if (event.data === 'domain-atlas-close') {
       const overlay = document.getElementById('domain-atlas-overlay');
       if (overlay) overlay.remove();

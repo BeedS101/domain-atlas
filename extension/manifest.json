@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Domain Atlas — Spatial Web Reader",
-  "version": "1.5.0",
-  "description": "Detects a domain's spatial manifest (/.well-known/spatial.json) and lets you step into the worlds it declares, within a domain or across domains, carrying a real signed-credential wallet — items, loadouts with transfer-on-loss, fungible resources, and trading-station settlement — between them. The wallet itself also opens as a real browser side panel from the toolbar button on any page, independent of whether that page declares a manifest at all — docked beside the page rather than drawn over it.",
+  "version": "1.6.0",
+  "description": "Detects a domain's spatial manifest (/.well-known/spatial.json) and lets you step into the worlds it declares, within a domain or across domains, carrying a real signed-credential wallet — items, loadouts with transfer-on-loss, fungible resources, and trading-station settlement — between them. The wallet itself also opens as a real browser side panel from the toolbar button on any page, independent of whether that page declares a manifest at all — docked beside the page rather than drawn over it. A page may also ask the wallet directly, read-only, whether an identity is active and what its public key is, when its own domain's manifest opts it in (SPEC.md §3.8).",
   "permissions": ["storage", "sidePanel"],
   "host_permissions": ["<all_urls>"],
   "icons": {
@@ -27,6 +27,12 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["page-bridge.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
