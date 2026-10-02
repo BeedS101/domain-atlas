@@ -813,6 +813,26 @@
     display: block; margin-top: 8px; width: 100%; max-width: 240px; height: 160px;
     border-radius: 6px; background: rgba(0,0,0,0.25);
   }
+  /* SPEC.md §3.8.2's own preview-before-claim gap, closed via this modal
+     (viewer.js's openBridgeOfferPreview()) rather than a second caller of
+     the Asset Viewer panel above — that panel bails out entirely outside
+     a live world (see its own comment), which would make it silently
+     useless from the ordinary side panel. z-index 16: above #chessModal
+     (15, an in-progress game shouldn't block reviewing an offer) and
+     below #duplicateJoinModal (20)/#keyAnchorModal (25) — neither of
+     those should ever be able to hide behind a wallet-local decision
+     like this one. */
+  #bridgeOfferPreviewModal { display: none; position: fixed; inset: 0; z-index: 16; align-items: center; justify-content: center; background: rgba(8,13,16,0.72); }
+  #bridgeOfferPreviewModal.active { display: flex; }
+  #bridgeOfferPreviewBox {
+    background: rgba(20,31,38,0.98); border: 1px solid #2c3c44; border-radius: 10px;
+    padding: 18px 20px; max-width: 320px; max-height: calc(100vh - 40px); overflow-y: auto;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+  }
+  #bridgeOfferPreviewBody .name { font-weight: 600; margin-bottom: 2px; }
+  #bridgeOfferPreviewBody .meta { font-size: 11px; color: #a9b8bf; margin-bottom: 6px; }
+  #bridgeOfferPreviewShowModelBtn { margin-top: 8px; width: 100%; }
+  #bridgeOfferPreviewStatus { font-size: 11px; color: #a9b8bf; margin-top: 8px; }
   /* Settings -> Player character's live preview (MiniGLTF.previewCharacter())
      — same sizing/background treatment as the Asset Viewer's own model
      canvas above, just a bit taller since it frames a standing character
@@ -1185,6 +1205,25 @@
         <button id="keyAnchorStayBtn" type="button" class="btn-secondary">Stay here</button>
         <button id="keyAnchorEnterBtn" type="button" class="danger-btn">Enter anyway</button>
       </div>
+    </div>
+  </div>
+  <!-- SPEC.md §3.8.2's own "preview-before-claim" gap. See
+       openBridgeOfferPreview()/renderBridgeOfferPreviewContent() in
+       viewer.js for what populates and opens this, and this file's CSS
+       comment above #bridgeOfferPreviewModal for why this is its own
+       modal rather than a second caller of the Asset Viewer panel. Claim/
+       Dismiss live right here too, so acting on what was just inspected
+       doesn't require closing this first and hunting the same buttons on
+       the card underneath. -->
+  <div id="bridgeOfferPreviewModal">
+    <div id="bridgeOfferPreviewBox">
+      <button type="button" id="bridgeOfferPreviewCloseBtn" class="link-btn" style="float:right;" aria-label="Close">✕</button>
+      <div id="bridgeOfferPreviewBody"></div>
+      <div class="btn-row" style="margin-top:14px;">
+        <button type="button" id="bridgeOfferPreviewDismissBtn" class="danger-btn">Dismiss</button>
+        <button type="button" id="bridgeOfferPreviewClaimBtn" class="btn-secondary">Claim</button>
+      </div>
+      <div id="bridgeOfferPreviewStatus" class="mono"></div>
     </div>
   </div>
   <div id="portalHoverTooltip"></div>

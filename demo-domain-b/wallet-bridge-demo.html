@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Wallet Bridge Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 720px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  .panel.warn { background: var(--red-bg); border-color: var(--red); }
+  .panel.warn h2 { color: var(--red); }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .status { font-size: 0.9rem; padding: 0.55rem 0.7rem; border-radius: 6px; margin-top: 0.7rem; }
+  .status.ok { background: var(--green-bg); color: var(--green); }
+  .status.err { background: var(--red-bg); color: var(--red); }
+  .status.info { background: #eee; color: var(--muted); }
+  .props { font-size: 0.86rem; color: var(--muted); }
+  details.raw { font-size: 0.8rem; margin-top: 0.6rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  ol { padding-left: 1.3rem; }
+  li { margin: 0.2rem 0; }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>A page talking to your wallet, directly</h1>
+  <p class="tag">SPEC.md §3.8 — window.atlasWallet, no spatial world required.</p>
+  <p>
+    Every other demo on this domain is either a spatial world (needs the extension to
+    <em>enter</em> something) or a credential demo that generates its own throwaway key
+    right here in the page (needs no extension at all). This one is different: this
+    ordinary page script asks your <strong>real</strong> wallet — the one the extension
+    already manages — a question, a signature, and finally offers it something to keep,
+    all gated by this domain's own manifest and by you, on a prompt this page can't draw
+    over or fake the contents of.
+  </p>
+
+  <div id="noExtensionPanel" class="panel warn" style="display:none;">
+    <h2>Wallet extension not detected</h2>
+    <p>Nothing below will do anything useful without it.</p>
+    <ol>
+      <li><a href="https://github.com/BeedS101/domain-atlas">Get the extension from the GitHub repo</a> (the <code>extension/</code> folder)</li>
+      <li>In Chrome, open <code>chrome://extensions</code>, turn on <strong>Developer mode</strong>, then <strong>Load unpacked</strong> and select that folder</li>
+      <li>Reload this page</li>
+    </ol>
+  </div>
+
+  <div class="panel pitch">
+    <h2>What this domain actually declared</h2>
+    <p>
+      This domain's manifest carries a <code>policy.walletBridge</code> field —
+      <code>{ read: true, sign: ["demo-login"], offer: ["atlas.wearable.ring"] }</code> —
+      with no <code>&lt;link rel="spatial"&gt;</code> tag on this page, so that's the
+      domain-wide default every page here gets. A page asking for anything outside that
+      (a different signing purpose, a different asset class) is refused immediately, no
+      prompt shown at all — try it from this page's console if you like, nothing here
+      hides that behavior.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Step 1 — is a wallet identity active right now?</h2>
+    <button id="checkBtn" type="button">Check my wallet</button>
+    <div id="checkStatus"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Step 2 — ask it to sign something</h2>
+    <p class="props" style="margin-top:0;">
+      A fresh, disposable payload — a nonce and a timestamp, nothing this page could reuse
+      for anything else — sent for your wallet's own trusted confirmation prompt to show
+      verbatim before it ever signs, every single time, never cached.
+    </p>
+    <button id="signBtn" type="button" disabled>Ask for a signature</button>
+    <div id="signStatus"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Step 3 — offer you something to keep</h2>
+    <p class="props" style="margin-top:0;">
+      This domain mints a real, signed <code>atlas.wearable.ring</code> credential to your
+      own public key, then hands it to your wallet bridge. Approving the prompt does
+      <strong>not</strong> put it in your wallet yet — it only queues into your own
+      sandboxed <strong>Pending offers</strong> (wallet's Mail tab), where you can Preview
+      it, then separately Claim or Dismiss it. Check the prompt's trust box and this
+      domain skips asking next time, for this class, straight into your wallet.
+    </p>
+    <button id="offerBtn" type="button" disabled>Offer me a collectible</button>
+    <div id="offerStatus"></div>
+  </div>
+
+  <p class="footnote">
+    Nothing above is stored by this page. Step 1 and Step 2 never leave your wallet's own
+    extension process except as the two values shown; Step 3's credential is a genuine
+    signed object anyone could verify independently the same way
+    <a href="/business-demo.html">the credential demo</a> already shows. <a href="/">Back
+    to the workshop</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+
+  const checkBtn = document.getElementById('checkBtn');
+  const checkStatus = document.getElementById('checkStatus');
+  const signBtn = document.getElementById('signBtn');
+  const signStatus = document.getElementById('signStatus');
+  const offerBtn = document.getElementById('offerBtn');
+  const offerStatus = document.getElementById('offerStatus');
+  const noExtensionPanel = document.getElementById('noExtensionPanel');
+
+  let knownPublicKey = null;
+
+  function statusBox(container, cls, html) {
+    container.innerHTML = '<div class="status ' + cls + '">' + html + '</div>';
+  }
+
+  function rawDetails(label, value) {
+    return '<details class="raw"><summary>' + label + '</summary><pre>' + JSON.stringify(value, null, 2) + '</pre></details>';
+  }
+
+  // window.atlasWallet is injected unconditionally by the extension's own
+  // page-bridge.js (see that file's top comment) the moment it's installed
+  // and allowed to run on this origin — but only after content.js attaches,
+  // which can land a tick or two after this page's own inline script runs.
+  // Polling briefly rather than checking once avoids a false "not detected"
+  // on a fast reload.
+  function waitForBridge(timeoutMs) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      (function poll() {
+        if (window.atlasWallet) return resolve(true);
+        if (Date.now() - start >= timeoutMs) return resolve(false);
+        setTimeout(poll, 100);
+      })();
+    });
+  }
+
+  waitForBridge(1500).then((found) => {
+    if (!found) {
+      noExtensionPanel.style.display = 'block';
+      return;
+    }
+    checkBtn.disabled = false;
+  });
+
+  checkBtn.addEventListener('click', async () => {
+    checkBtn.disabled = true;
+    statusBox(checkStatus, 'info', 'Asking your wallet…');
+    if (!window.atlasWallet) {
+      statusBox(checkStatus, 'err', 'Wallet extension not detected.');
+      checkBtn.disabled = false;
+      return;
+    }
+    const result = await window.atlasWallet.getIdentity();
+    if (!result.allowed) {
+      statusBox(checkStatus, 'err', 'This domain isn’t allowed to ask that (shouldn’t happen here — this page’s own manifest grants read access).');
+    } else if (!result.publicKey) {
+      statusBox(checkStatus, 'info', 'No wallet identity is active right now. Open the extension and create or unlock one, then click this again.');
+    } else {
+      knownPublicKey = result.publicKey;
+      statusBox(checkStatus, 'ok', 'Active identity: <code>' + result.publicKey.slice(0, 24) + '…</code>' + rawDetails('Raw result', result));
+      signBtn.disabled = false;
+      offerBtn.disabled = false;
+    }
+    checkBtn.disabled = false;
+  });
+
+  signBtn.addEventListener('click', async () => {
+    signBtn.disabled = true;
+    statusBox(signStatus, 'info', 'Waiting on your wallet’s own confirmation prompt…');
+    try {
+      const payload = { purpose: 'demo-login', nonce: crypto.randomUUID(), at: new Date().toISOString() };
+      const result = await window.atlasWallet.requestSignature(payload);
+      if (!result.allowed) {
+        statusBox(signStatus, 'err', 'Refused with no prompt — "demo-login" isn’t on this domain’s signing whitelist (it is, so this means something’s off).');
+      } else if (!result.result) {
+        statusBox(signStatus, 'info', 'No signature came back — denied at the prompt, no identity to sign with, or it timed out. Those all look identical to this page on purpose.');
+      } else {
+        statusBox(signStatus, 'ok', 'Signed.' + rawDetails('Signed proof envelope', result.result));
+      }
+    } catch (err) {
+      // window.atlasWallet.requestSignature() is documented to never throw
+      // — this is a defensive backstop only, same posture the Step 3
+      // handler below already takes, so a genuinely unexpected failure
+      // surfaces here instead of leaving this button stuck disabled with
+      // no explanation at all.
+      statusBox(signStatus, 'err', 'Something went wrong: ' + err.message);
+    }
+    signBtn.disabled = false;
+  });
+
+  offerBtn.addEventListener('click', async () => {
+    offerBtn.disabled = true;
+    statusBox(offerStatus, 'info', 'Minting a real credential, then handing it to your wallet bridge…');
+    if (!knownPublicKey) {
+      statusBox(offerStatus, 'err', 'Check your wallet in Step 1 first — there’s no public key to mint this to yet.');
+      offerBtn.disabled = false;
+      return;
+    }
+    try {
+      const issueRes = await fetch('/atlas/asset/issue', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownerPublicKey: knownPublicKey, assetClass: 'atlas.wearable.ring' })
+      });
+      const credential = await issueRes.json();
+      if (!issueRes.ok) throw new Error(credential.error || ('mint failed: ' + issueRes.status));
+      const result = await window.atlasWallet.offerAsset(credential);
+      if (!result.allowed) {
+        statusBox(offerStatus, 'err', 'Refused with no prompt — "atlas.wearable.ring" isn’t on this domain’s offer whitelist (it is, so this means something’s off).');
+      } else if (!result.result) {
+        statusBox(offerStatus, 'info', 'Nothing was queued — denied at the prompt, dismissed, or it timed out.');
+      } else if (result.result.claimed) {
+        statusBox(offerStatus, 'ok', 'Already in your wallet — this domain is on your trusted offer-domains list for this class, so it skipped straight past the prompt and the sandbox. Check your Inventory.' + rawDetails('Minted credential', credential));
+      } else if (result.result.queued) {
+        statusBox(offerStatus, 'ok', 'Queued. Open the wallet, go to Mail → Pending offers, click Preview to look it over, then Claim it (or Dismiss it) — it’s not in your wallet yet.' + rawDetails('Minted credential', credential));
+      } else {
+        statusBox(offerStatus, 'err', 'Unexpected result shape.' + rawDetails('Raw result', result));
+      }
+    } catch (err) {
+      statusBox(offerStatus, 'err', 'Something went wrong: ' + err.message);
+    }
+    offerBtn.disabled = false;
+  });
+})();
+</script>
+</body>
+</html>

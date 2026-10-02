@@ -1763,6 +1763,14 @@ const mailListEl = document.getElementById('mailList');
 // refreshBridgeOffersDisplay/renderBridgeOfferCard below).
 const bridgeOffersSectionEl = document.getElementById('bridgeOffersSection');
 const bridgeOffersListEl = document.getElementById('bridgeOffersList');
+// SPEC.md §3.8.2's own "preview-before-claim" gap (see
+// openBridgeOfferPreview() below).
+const bridgeOfferPreviewModalEl = document.getElementById('bridgeOfferPreviewModal');
+const bridgeOfferPreviewBodyEl = document.getElementById('bridgeOfferPreviewBody');
+const bridgeOfferPreviewCloseBtn = document.getElementById('bridgeOfferPreviewCloseBtn');
+const bridgeOfferPreviewClaimBtn = document.getElementById('bridgeOfferPreviewClaimBtn');
+const bridgeOfferPreviewDismissBtn = document.getElementById('bridgeOfferPreviewDismissBtn');
+const bridgeOfferPreviewStatusEl = document.getElementById('bridgeOfferPreviewStatus');
 const markAllMailReadBtn = document.getElementById('markAllMailReadBtn');
 const clearAllMailBtn = document.getElementById('clearAllMailBtn');
 const subscribeSectionEl = document.getElementById('subscribeSection');
@@ -7129,7 +7137,8 @@ function renderBridgeOfferCard(entry, container) {
     '<div class="item-actions">' +
     (entry.claimed
       ? '<span class="mail-gift-claimed">(claimed)</span>'
-      : '<button type="button" data-action="claim-bridge-offer">Claim</button>' +
+      : '<button type="button" data-action="preview-bridge-offer">Preview</button>' +
+        '<button type="button" data-action="claim-bridge-offer">Claim</button>' +
         '<button type="button" data-action="dismiss-bridge-offer" class="danger-btn">Dismiss</button>') +
     '</div>';
   container.appendChild(el);
@@ -7155,6 +7164,14 @@ bridgeOffersListEl && bridgeOffersListEl.addEventListener('click', async (e) => 
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
 
+  const previewBtn = e.target.closest('button[data-action="preview-bridge-offer"]');
+  if (previewBtn) {
+    const entries = await AtlasWallet.getBridgeOffers(identity.publicKey);
+    const entry = entries.find((e2) => e2.id === card.dataset.id);
+    if (entry) openBridgeOfferPreview(entry);
+    return;
+  }
+
   const claimBtn = e.target.closest('button[data-action="claim-bridge-offer"]');
   if (claimBtn) {
     try {
@@ -7178,6 +7195,175 @@ bridgeOffersListEl && bridgeOffersListEl.addEventListener('click', async (e) => 
       statusEl.textContent = 'Dismiss failed: ' + err.message;
     }
     return;
+  }
+});
+
+// ---------- SPEC.md §3.8.2's own gap, closed here: preview-before-claim ----------
+//
+// A dedicated, click-triggered modal — NOT a second caller of the
+// Inventory hover panel above (openAssetViewer/renderAssetViewerContent).
+// That panel is deliberately hover-only and bails out entirely outside a
+// live world (see its own "Standalone mode... nothing here makes it
+// useful at that size anyway" comment) — it would silently do nothing
+// from the ordinary side panel, which is exactly where Pending offers is
+// most often actually reviewed from. Duplicates that panel's small
+// thumbnail/model-loading shape below rather than sharing its module-
+// level state, the same reasoning this project already applied once
+// before to keep atlasBridgeOffers a separate store from atlasMail (see
+// wallet.js's own comment on that): conflating two features' mutable
+// state to save a few lines is exactly the kind of shortcut that causes
+// a subtle bug later. renderAssetViewerProperties() and
+// mergedAssetFields() ARE reused as-is below — both are pure functions of
+// an entry's own credential, no shared state to collide with.
+let bridgeOfferPreviewEntry = null; // the pending-offer entry currently shown, or null while closed
+let bridgeOfferPreviewModelPreview = null; // {dispose()} from MiniGLTF.previewModel() — mirrors assetViewerModelPreview, deliberately not shared with it
+let bridgeOfferPreviewModelLoadToken = 0;
+let bridgeOfferPreviewThumbnailLoadToken = 0;
+let bridgeOfferPreviewThumbnailBlobUrl = null;
+
+function renderBridgeOfferPreviewContent(entry) {
+  const credential = entry.credential;
+  const asset = credential.asset;
+  const fungible = !!asset.fungible;
+  let html =
+    '<div class="name">' + escapeHtml(asset.name) + (fungible ? ' ×' + formatMass(credential.quantity) : '') + '</div>' +
+    '<div class="meta">' + escapeHtml(asset.class) + ' · issued by ' + escapeHtml(credential.issuer.domain) + '</div>' +
+    '<div class="meta">Offered by ' + escapeHtml(entry.origin) + '</div>';
+  if (asset.thumbnail) {
+    html += '<div id="bridgeOfferPreviewThumbnailArea"></div>';
+  }
+  html += renderAssetViewerProperties(mergedAssetFields(entry));
+  if (asset.model) {
+    html += '<button type="button" id="bridgeOfferPreviewShowModelBtn" data-model="' + escapeHtml(asset.model) + '">Show model</button>';
+  }
+  html += '<div id="bridgeOfferPreviewModelArea"></div>';
+  bridgeOfferPreviewBodyEl.innerHTML = html;
+  if (asset.thumbnail) {
+    const areaEl = bridgeOfferPreviewBodyEl.querySelector('#bridgeOfferPreviewThumbnailArea');
+    if (areaEl) loadBridgeOfferPreviewThumbnail(asset.thumbnail, areaEl);
+  }
+}
+
+// Same no-broken-image, fetch-fresh-bytes-every-time shape as
+// loadAssetViewerThumbnail() above (task #210's own reasoning applies
+// identically here), just against this modal's own token/blob-URL state.
+async function loadBridgeOfferPreviewThumbnail(url, areaEl) {
+  const token = bridgeOfferPreviewThumbnailLoadToken;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('thumbnail fetch failed: ' + res.status);
+    const blob = await res.blob();
+    if (token !== bridgeOfferPreviewThumbnailLoadToken || !bridgeOfferPreviewBodyEl.contains(areaEl)) return; // the modal moved on while this was in flight — drop it silently
+    if (bridgeOfferPreviewThumbnailBlobUrl) URL.revokeObjectURL(bridgeOfferPreviewThumbnailBlobUrl);
+    bridgeOfferPreviewThumbnailBlobUrl = URL.createObjectURL(blob);
+    const img = document.createElement('img');
+    img.className = 'asset-viewer-thumbnail'; // reuses the Asset Viewer's own CSS class — same visual shape, a separate element
+    img.alt = '';
+    img.src = bridgeOfferPreviewThumbnailBlobUrl;
+    areaEl.replaceWith(img);
+  } catch (err) {
+    if (token !== bridgeOfferPreviewThumbnailLoadToken) return;
+    areaEl.remove();
+  }
+}
+
+function disposeBridgeOfferPreviewModelPreview() {
+  bridgeOfferPreviewModelLoadToken++;
+  if (bridgeOfferPreviewModelPreview) {
+    bridgeOfferPreviewModelPreview.dispose();
+    bridgeOfferPreviewModelPreview = null;
+  }
+  bridgeOfferPreviewThumbnailLoadToken++;
+  if (bridgeOfferPreviewThumbnailBlobUrl) {
+    URL.revokeObjectURL(bridgeOfferPreviewThumbnailBlobUrl);
+    bridgeOfferPreviewThumbnailBlobUrl = null;
+  }
+}
+
+// Same lazy, click-triggered shape as showAssetViewerModel() above —
+// window.MiniGLTF.previewModel(), never .init() (the full world
+// renderer) — against this modal's own state instead of the hover
+// panel's.
+async function showBridgeOfferPreviewModel(url, areaEl) {
+  disposeBridgeOfferPreviewModelPreview();
+  const token = bridgeOfferPreviewModelLoadToken;
+  areaEl.innerHTML = '<div class="asset-viewer-model-status">Loading model…</div>';
+  let buffer;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('Could not fetch model: ' + url);
+    buffer = await res.arrayBuffer();
+  } catch (err) {
+    if (token !== bridgeOfferPreviewModelLoadToken) return;
+    areaEl.innerHTML = '<div class="asset-viewer-model-status">Could not load this model.</div>';
+    return;
+  }
+  if (token !== bridgeOfferPreviewModelLoadToken) return;
+  const canvas = document.createElement('canvas');
+  canvas.className = 'asset-viewer-model-canvas';
+  canvas.width = 240;
+  canvas.height = 160;
+  areaEl.innerHTML = '';
+  areaEl.appendChild(canvas);
+  try {
+    bridgeOfferPreviewModelPreview = window.MiniGLTF.previewModel(canvas, buffer, {});
+  } catch (err) {
+    areaEl.innerHTML = '<div class="asset-viewer-model-status">Could not render this model.</div>';
+  }
+}
+
+bridgeOfferPreviewBodyEl && bridgeOfferPreviewBodyEl.addEventListener('click', (e) => {
+  const btn = e.target.closest('#bridgeOfferPreviewShowModelBtn');
+  if (!btn) return;
+  const area = document.getElementById('bridgeOfferPreviewModelArea');
+  if (area) showBridgeOfferPreviewModel(btn.dataset.model, area);
+});
+
+function openBridgeOfferPreview(entry) {
+  bridgeOfferPreviewEntry = entry;
+  renderBridgeOfferPreviewContent(entry);
+  if (bridgeOfferPreviewStatusEl) bridgeOfferPreviewStatusEl.textContent = '';
+  if (bridgeOfferPreviewModalEl) bridgeOfferPreviewModalEl.classList.add('active');
+}
+
+function closeBridgeOfferPreview() {
+  bridgeOfferPreviewEntry = null;
+  disposeBridgeOfferPreviewModelPreview();
+  if (bridgeOfferPreviewBodyEl) bridgeOfferPreviewBodyEl.innerHTML = '';
+  if (bridgeOfferPreviewModalEl) bridgeOfferPreviewModalEl.classList.remove('active');
+}
+
+bridgeOfferPreviewCloseBtn && bridgeOfferPreviewCloseBtn.addEventListener('click', closeBridgeOfferPreview);
+
+// Claim/Dismiss live directly in the preview too — having just looked at
+// the asset, a visitor shouldn't need to close this and go hunt down the
+// same buttons on the card underneath to act on what they just saw.
+bridgeOfferPreviewClaimBtn && bridgeOfferPreviewClaimBtn.addEventListener('click', async () => {
+  if (!bridgeOfferPreviewEntry) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  try {
+    const { credential } = await AtlasWallet.claimBridgeOffer(identity.publicKey, bridgeOfferPreviewEntry.id);
+    closeBridgeOfferPreview();
+    await refreshInventoryDisplay();
+    await refreshBridgeOffersDisplay(identity);
+    statusEl.textContent = 'Claimed ' + credential.asset.name + '.';
+  } catch (err) {
+    if (bridgeOfferPreviewStatusEl) bridgeOfferPreviewStatusEl.textContent = 'Claim failed: ' + err.message;
+  }
+});
+
+bridgeOfferPreviewDismissBtn && bridgeOfferPreviewDismissBtn.addEventListener('click', async () => {
+  if (!bridgeOfferPreviewEntry) return;
+  if (!confirm('Dismiss this offer without claiming it?')) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  try {
+    await AtlasWallet.dismissBridgeOffer(identity.publicKey, bridgeOfferPreviewEntry.id);
+    closeBridgeOfferPreview();
+    await refreshBridgeOffersDisplay(identity);
+  } catch (err) {
+    if (bridgeOfferPreviewStatusEl) bridgeOfferPreviewStatusEl.textContent = 'Dismiss failed: ' + err.message;
   }
 });
 

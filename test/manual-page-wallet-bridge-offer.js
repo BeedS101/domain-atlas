@@ -9,7 +9,7 @@
 // that origin, in which case a later whitelisted offer from it skips both
 // the prompt and the tray entirely.
 //
-// Eight things this test exists to prove, in order: (1) a class NOT on
+// Ten things this test exists to prove, in order: (1) a class NOT on
 // the whitelist is refused immediately, with no confirmation prompt ever
 // shown — same posture §3.8.1's signing test already proved for an
 // unlisted purpose; (2) a whitelisted class DOES show the prompt,
@@ -25,7 +25,14 @@
 // origin, for a class it's already whitelisted for, skips the
 // confirmation overlay entirely and still lands in the wallet for real;
 // (8) revoking trust makes the very next offer from that origin show the
-// prompt again, same as it never having been trusted at all.
+// prompt again, same as it never having been trusted at all; (9) SPEC.md
+// §3.8.4's preview-before-claim modal opens from a pending offer's own
+// "Preview" button in the side panel, shows the real asset's name, class,
+// and offering origin, and its own in-modal Claim button actually moves
+// the credential into the wallet, closing the modal in the same act; (10)
+// the modal's own Dismiss button discards a pending offer without ever
+// claiming it, identically to the card-level Dismiss already proved in
+// STEP 7.
 //
 // Isolated throwaway docroot + issuer-server instance, same pattern as
 // manual-page-wallet-bridge-sign.js (the signing sibling of this test) —
@@ -327,7 +334,90 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     await revokePage.close();
     console.log('PASS: revoking trust made the next offer from that origin show the real prompt again, same as an untrusted origin always has');
 
-    console.log('\nALL CHECKS PASSED — SPEC.md §3.8.2\'s wallet-bridge asset offers refuse a non-whitelisted class with no prompt at all, show a real non-spoofable confirmation naming the real asset and origin for a whitelisted one, correctly reflect whether an identity is actually unlocked, and never add an approved offer straight to the wallet by default — only a later, separate, explicit Claim does that, with Deny and Dismiss both discarding an offer without it ever arriving. SPEC.md §3.8.3\'s trusted offer domains correctly let a visitor-granted origin skip the prompt and the sandbox entirely for an already-whitelisted class, with revocation taking effect immediately on the next offer.');
+    console.log('STEP 11: SPEC.md §3.8.4 — opening a pending offer\'s "Preview" button in the side panel shows the real asset and origin, and the modal\'s own Claim button actually moves the credential into the wallet');
+    const previewOfferPage = await context.newPage();
+    await previewOfferPage.goto('http://' + DOMAIN + '/page-offer.html', { waitUntil: 'load' });
+    const previewOfferCredential = await mintCredential(previewOfferPage, WHITELISTED_CLASS, realPublicKey);
+    const previewOfferResultPromise = previewOfferPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), previewOfferCredential);
+    previewOfferResultPromise.catch(() => {});
+    await previewOfferPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    const previewOfferFrame = previewOfferPage.frameLocator('#domain-atlas-bridge-confirm');
+    await previewOfferFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
+    // Trust was revoked in STEP 10, so this origin is ordinary again —
+    // approving (no trust checkbox) queues it, same as STEP 4, rather than
+    // auto-claiming it the way STEP 9 showed a still-trusted origin would.
+    await previewOfferFrame.locator('#offerApproveBtn').click();
+    const previewOfferResult = await previewOfferResultPromise;
+    if (!previewOfferResult.result || !previewOfferResult.result.offerId) throw new Error('Expected the preview-test offer to queue, got: ' + JSON.stringify(previewOfferResult));
+    const previewOfferId = previewOfferResult.result.offerId;
+    await previewOfferPage.close();
+
+    // Navigate the side panel to the Mail tab — the same click a visitor
+    // would make to go look at "Pending offers" at all, and the same one
+    // that already refreshes it (socialTabBtn's own click handler calls
+    // refreshMailDisplay(), which refreshBridgeOffersDisplay() rides along
+    // with — see viewer.js).
+    await walletPage.locator('#socialTabBtn').click();
+    const previewCard = walletPage.locator('.wallet-item[data-id="' + previewOfferId + '"]');
+    await previewCard.waitFor({ state: 'visible', timeout: 10000 });
+    await previewCard.locator('button[data-action="preview-bridge-offer"]').click();
+    await walletPage.waitForFunction(() => {
+      const modal = document.getElementById('bridgeOfferPreviewModal');
+      return modal && modal.classList.contains('active');
+    }, { timeout: 10000 });
+    const previewBodyText = await walletPage.locator('#bridgeOfferPreviewBody').innerText();
+    if (!previewBodyText.includes(previewOfferCredential.asset.name)) throw new Error('Expected the preview modal to show the real asset name, got: ' + previewBodyText);
+    if (!previewBodyText.includes(WHITELISTED_CLASS)) throw new Error('Expected the preview modal to show the real asset class, got: ' + previewBodyText);
+    if (!previewBodyText.includes('http://' + DOMAIN)) throw new Error('Expected the preview modal to show the real offering origin, got: ' + previewBodyText);
+    console.log('PASS: the preview modal opened from the card\'s own "Preview" button and showed the real asset name, class, and offering origin');
+
+    await walletPage.locator('#bridgeOfferPreviewClaimBtn').click();
+    await walletPage.waitForFunction(() => {
+      const modal = document.getElementById('bridgeOfferPreviewModal');
+      return modal && !modal.classList.contains('active');
+    }, { timeout: 10000 });
+    const walletAfterPreviewClaim = await walletPage.evaluate((owner) => AtlasWallet.getWallet(owner), realPublicKey);
+    if (!walletAfterPreviewClaim.some((e) => e.credential.id === previewOfferCredential.id)) throw new Error('Expected the in-modal Claim to actually move the credential into the wallet');
+    const pendingAfterPreviewClaim = await walletPage.evaluate((owner) => AtlasWallet.getBridgeOffers(owner), realPublicKey);
+    const previewClaimedEntry = pendingAfterPreviewClaim.find((e) => e.id === previewOfferId);
+    if (!previewClaimedEntry || !previewClaimedEntry.claimed) throw new Error('Expected the previewed offer to now read claimed:true');
+    console.log('PASS: the preview modal\'s own Claim button ran the real verification, added the credential to the wallet, and closed the modal in the same act');
+
+    console.log('STEP 12: the preview modal\'s own Dismiss button discards a pending offer without ever claiming it, same as the card-level Dismiss already proved in STEP 7');
+    const dismissPreviewPage = await context.newPage();
+    await dismissPreviewPage.goto('http://' + DOMAIN + '/page-offer.html', { waitUntil: 'load' });
+    const dismissPreviewCredential = await mintCredential(dismissPreviewPage, WHITELISTED_CLASS, realPublicKey);
+    const dismissPreviewResultPromise = dismissPreviewPage.evaluate((credential) => window.atlasWallet.offerAsset(credential), dismissPreviewCredential);
+    dismissPreviewResultPromise.catch(() => {});
+    await dismissPreviewPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    const dismissPreviewFrame = dismissPreviewPage.frameLocator('#domain-atlas-bridge-confirm');
+    await dismissPreviewFrame.locator('#offerState').waitFor({ state: 'visible', timeout: 10000 });
+    await dismissPreviewFrame.locator('#offerApproveBtn').click();
+    const dismissPreviewResult = await dismissPreviewResultPromise;
+    const dismissPreviewOfferId = dismissPreviewResult.result.offerId;
+    await dismissPreviewPage.close();
+
+    await walletPage.locator('#socialTabBtn').click();
+    const dismissPreviewCard = walletPage.locator('.wallet-item[data-id="' + dismissPreviewOfferId + '"]');
+    await dismissPreviewCard.waitFor({ state: 'visible', timeout: 10000 });
+    await dismissPreviewCard.locator('button[data-action="preview-bridge-offer"]').click();
+    await walletPage.waitForFunction(() => {
+      const modal = document.getElementById('bridgeOfferPreviewModal');
+      return modal && modal.classList.contains('active');
+    }, { timeout: 10000 });
+    walletPage.once('dialog', (d) => d.accept()); // the modal's own Dismiss button runs the same confirm() prompt the card-level one does
+    await walletPage.locator('#bridgeOfferPreviewDismissBtn').click();
+    await walletPage.waitForFunction(() => {
+      const modal = document.getElementById('bridgeOfferPreviewModal');
+      return modal && !modal.classList.contains('active');
+    }, { timeout: 10000 });
+    const pendingAfterPreviewDismiss = await walletPage.evaluate((owner) => AtlasWallet.getBridgeOffers(owner), realPublicKey);
+    if (pendingAfterPreviewDismiss.some((e) => e.id === dismissPreviewOfferId)) throw new Error('Expected the preview-dismissed offer to be removed from getBridgeOffers() entirely');
+    const walletAfterPreviewDismiss = await walletPage.evaluate((owner) => AtlasWallet.getWallet(owner), realPublicKey);
+    if (walletAfterPreviewDismiss.some((e) => e.credential.id === dismissPreviewCredential.id)) throw new Error('A preview-dismissed offer must never reach the wallet');
+    console.log('PASS: the preview modal\'s own Dismiss button removed the pending offer outright, closed the modal, and it never touched the wallet');
+
+    console.log('\nALL CHECKS PASSED — SPEC.md §3.8.2\'s wallet-bridge asset offers refuse a non-whitelisted class with no prompt at all, show a real non-spoofable confirmation naming the real asset and origin for a whitelisted one, correctly reflect whether an identity is actually unlocked, and never add an approved offer straight to the wallet by default — only a later, separate, explicit Claim does that, with Deny and Dismiss both discarding an offer without it ever arriving. SPEC.md §3.8.3\'s trusted offer domains correctly let a visitor-granted origin skip the prompt and the sandbox entirely for an already-whitelisted class, with revocation taking effect immediately on the next offer. SPEC.md §3.8.4\'s preview-before-claim modal shows a pending offer\'s real asset and origin on demand from the side panel, and its own Claim/Dismiss buttons act exactly as the card-level ones already do.');
   } finally {
     await context.close().catch(() => {});
     serverProc.kill();

@@ -9,6 +9,7 @@
   "postOffice": true,
   "chat": true,
   "calendar": true,
+  "walletBridge": { "read": true, "sign": ["demo-login"], "offer": ["atlas.wearable.ring"] },
   "worlds": [
     {
       "id": "workshop",
