@@ -114,8 +114,8 @@ function pageHtml(title, linkTag) {
     await lockedPage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
     const lockedFrame = lockedPage.frameLocator('#domain-atlas-bridge-confirm');
     await lockedFrame.locator('#lockedState').waitFor({ state: 'visible', timeout: 10000 });
-    const lockedPurposeText = await lockedFrame.locator('#purposeTextLocked').innerText();
-    if (lockedPurposeText !== 'login') throw new Error('Expected the locked-state prompt to name the real purpose, got: ' + lockedPurposeText);
+    const lockedDetailText = await lockedFrame.locator('#lockedDetailLine').innerText();
+    if (!lockedDetailText.includes('login')) throw new Error('Expected the locked-state prompt to name the real purpose, got: ' + lockedDetailText);
     await lockedFrame.locator('#dismissBtn').click();
     const lockedResult = await lockedResultPromise;
     if (lockedResult.allowed !== true || lockedResult.result !== null) throw new Error('Expected {allowed:true, result:null} dismissing the locked state, got: ' + JSON.stringify(lockedResult));

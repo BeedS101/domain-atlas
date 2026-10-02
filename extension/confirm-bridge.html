@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>Domain Atlas — confirm</title>
 <style>
-  /* SPEC.md §3.8.1 — this page IS the non-spoofable confirmation prompt.
+  /* SPEC.md §3.8.1/§3.8.2 — this page IS the non-spoofable confirmation prompt.
      It's loaded into an iframe a host page injected (content.js's
      openBridgeConfirmOverlay()), but that host page is a different
      origin from this one and can't script into it, read its DOM, or
@@ -53,8 +53,16 @@
   #denyBtn:hover { background: #38505a; }
   #approveBtn { background: #c05a1f; color: #fff6ef; font-weight: 600; }
   #approveBtn:hover { background: #d4681f; }
+  #offerState { display: none; }
   #lockedState { display: none; }
   #lockedState button { background: #2c3c44; color: #e7edef; }
+  #assetBox {
+    margin-top: 10px; background: #0e161b; border: 1px solid #22303a;
+    border-radius: 8px; padding: 10px 12px; font-size: 13px; line-height: 1.7;
+  }
+  #assetBox .k { color: #8aa6b0; }
+  #offerApproveBtn { background: #1f6b3a; color: #eafff1; font-weight: 600; }
+  #offerApproveBtn:hover { background: #237f44; }
 </style>
 </head>
 <body>
@@ -72,11 +80,26 @@
           <button id="approveBtn" type="button">Approve &amp; sign</button>
         </div>
       </div>
+      <div id="offerState">
+        <div id="offerIcon">🎁</div>
+        <div id="offerHeadline">Asset offer</div>
+        <div id="offerOrigin">…</div>
+        <div id="assetBox">
+          <div><span class="k">Name:</span> <span id="offerAssetName">…</span></div>
+          <div><span class="k">Class:</span> <span id="offerAssetClass">…</span></div>
+          <div id="offerAssetQtyLine"><span class="k">Quantity:</span> <span id="offerAssetQty">…</span></div>
+        </div>
+        <div id="offerNote">This site wants to put the asset above in your wallet. Accepting does NOT add it yet — it only moves into your Pending offers, where you still choose separately whether to Claim or Dismiss it. The requesting site cannot see or change what's shown here.</div>
+        <div id="offerButtons">
+          <button id="offerDenyBtn" type="button">Deny</button>
+          <button id="offerApproveBtn" type="button">Accept into Pending</button>
+        </div>
+      </div>
       <div id="lockedState">
         <div id="iconLocked">🔒</div>
         <div id="headlineLocked">No wallet identity is unlocked right now</div>
         <div id="originLocked">…</div>
-        <div id="purposeLineLocked">This site asked to sign a <b id="purposeTextLocked">…</b> request, but there's nothing active to sign it with.</div>
+        <div id="lockedDetailLine">…</div>
         <div id="buttonsLocked">
           <button id="dismissBtn" type="button" style="flex:1">Dismiss</button>
         </div>

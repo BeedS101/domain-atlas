@@ -5403,6 +5403,113 @@ const AtlasWallet = (() => {
     await saveMail(ownerPublicKey, []);
   }
 
+  // SPEC.md §3.8.2 — pending wallet-bridge asset offers. A SEPARATE
+  // encrypted-at-rest store from atlasMail (storeName 'bridgeOffers', not
+  // 'mail') rather than modeling an offer as a synthetic mail entry: mail
+  // is subject to checkAllMail()/clearAllMail()'s own domain-mail-check
+  // lifecycle, and a live page's bridge offer has nothing to do with any
+  // of that — conflating the two risked exactly the kind of subtle bug
+  // this project's negative-control discipline is meant to catch, for the
+  // sake of reusing a render function that isn't actually hard to write a
+  // second time. getBridgeOffers/saveBridgeOffers otherwise mirror
+  // getMail/saveMail exactly, including the same decryptAtRestAndMigrate
+  // one-time upgrade path every other store here already pays for.
+  async function getBridgeOffers(ownerPublicKey) {
+    const { atlasBridgeOffers } = await chrome.storage.local.get('atlasBridgeOffers');
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'bridgeOffers', (atlasBridgeOffers || {})[ownerPublicKey], [], (v) => saveBridgeOffers(ownerPublicKey, v));
+  }
+
+  async function saveBridgeOffers(ownerPublicKey, entries) {
+    const { atlasBridgeOffers } = await chrome.storage.local.get('atlasBridgeOffers');
+    const all = atlasBridgeOffers || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'bridgeOffers', entries);
+    await chrome.storage.local.set({ atlasBridgeOffers: all });
+  }
+
+  // Called by confirm-bridge.js itself once a visitor approves a
+  // whitelisted offerAsset() request (see that file and content.js's
+  // handleBridgeRequest 'offerAsset' branch) — the same "every extension
+  // page already has the same unrestricted AtlasWallet access
+  // background.js does" reasoning signWithSelf's own export comment gives
+  // applies here too, so this queues directly rather than relaying
+  // through one more hop.
+  //
+  // Deliberately shallow: only enough shape-sanity to render a preview
+  // card (a credential shape, an asset with a name/class) — the real
+  // cryptographic check (verifyCredential, SPEC.md §5 step 1) is deferred
+  // to claimBridgeOffer below, exactly the same deferral claimMailGift
+  // already relies on for an attached gift. Throws on a credential that
+  // isn't even shaped like one, rather than queuing something there'd be
+  // nothing coherent to show in the pending list.
+  async function queueBridgeOffer(ownerPublicKey, origin, credential) {
+    if (!credential || credential.credential !== 'domain-atlas-asset/1.0' || !credential.asset || typeof credential.asset.class !== 'string' || !credential.asset.class) {
+      throw new Error('not a valid asset credential');
+    }
+    const entries = await getBridgeOffers(ownerPublicKey);
+    const entry = {
+      id: 'bridgeoffer:' + b64urlEncode(crypto.getRandomValues(new Uint8Array(16))),
+      origin,
+      credential,
+      queuedAt: new Date().toISOString(),
+      claimed: false
+    };
+    entries.push(entry);
+    await saveBridgeOffers(ownerPublicKey, entries);
+    return entry;
+  }
+
+  // SPEC.md §3.8.2 — the explicit Claim action, the only path a pending
+  // bridge offer ever actually enters the wallet. Mirrors claimMailGift
+  // above field-for-field: same ownership check against the credential's
+  // own signed owner.publicKey, same verifyCredential() call (this is
+  // where the real four-step check, SPEC.md §5 step 1, actually runs —
+  // never earlier), same push onto the live wallet plus
+  // autoConsolidateAssetWallet. Leaves the claimed entry in the list
+  // (flagged, not removed) so a claimed offer still has something to show,
+  // distinct from a dismissed or never-claimed one.
+  async function claimBridgeOffer(ownerPublicKey, offerId) {
+    const entries = await getBridgeOffers(ownerPublicKey);
+    const entry = entries.find((e) => e.id === offerId);
+    if (!entry) throw new Error('bridge offer not found');
+    if (entry.claimed) throw new Error('this offer has already been claimed');
+
+    const credential = entry.credential;
+    if (!credential.owner || credential.owner.publicKey !== ownerPublicKey) {
+      throw new Error('this offer was not addressed to this identity');
+    }
+    const verdict = await verifyCredential(credential);
+    if (!verdict.valid) throw new Error('offer credential does not check out: ' + verdict.reason);
+
+    const wallet = await getWallet(ownerPublicKey);
+    wallet.push({ credential, lastVerdict: verdict });
+    await saveWallet(ownerPublicKey, wallet);
+    await autoConsolidateAssetWallet(ownerPublicKey);
+
+    entry.claimed = true;
+    await saveBridgeOffers(ownerPublicKey, entries);
+    return { credential, verdict };
+  }
+
+  // The visitor's explicit "no thanks" — distinct from both "not
+  // whitelisted" (content.js never even queues one of those) and
+  // "claimed" (claimBridgeOffer above). Removes the entry outright rather
+  // than flagging it dismissed; unlike an unclaimed mail gift's credential
+  // (claimMailGift's own comment on why deleting that message is
+  // blocked), nothing here is the only copy of anything — the offering
+  // page still has, and presumably still holds, the credential it
+  // offered — so there's no "destroying the only copy" risk a disabled
+  // button would need to guard against.
+  async function dismissBridgeOffer(ownerPublicKey, offerId) {
+    const entries = await getBridgeOffers(ownerPublicKey);
+    const entry = entries.find((e) => e.id === offerId);
+    if (!entry) throw new Error('bridge offer not found');
+    if (entry.claimed) throw new Error('this offer has already been claimed');
+    const remaining = entries.filter((e) => e.id !== offerId);
+    await saveBridgeOffers(ownerPublicKey, remaining);
+  }
+
   // Same shape of check as verifyCredential() above, just over a mail
   // payload instead of a credential payload — an unverified message is
   // never trusted or shown, same as an unverified credential.
@@ -5799,6 +5906,12 @@ const AtlasWallet = (() => {
     setAlias, clearAlias, getAlias,
     getMailSettings, setMailCheckInterval, getMail, markMailRead, checkAllMail,
     markAllMailRead, deleteMailMessage, clearAllMail, claimMailGift, sendUserMail, getPostOfficeMemberships,
+    // SPEC.md §3.8.2 — pending wallet-bridge asset offers. queueBridgeOffer
+    // is called by confirm-bridge.js itself on approval (same unrestricted-
+    // AtlasWallet-access reasoning as signWithSelf's own export comment
+    // above); getBridgeOffers/claimBridgeOffer/dismissBridgeOffer are
+    // called by viewer.js to surface and act on what's pending.
+    getBridgeOffers, queueBridgeOffer, claimBridgeOffer, dismissBridgeOffer,
     getSentMail, deleteSentMailMessage, clearAllSentMail,
     getLastPostOfficeSendDomain, setLastPostOfficeSendDomain,
     getLastPostOfficeSettingsDomain, setLastPostOfficeSettingsDomain,

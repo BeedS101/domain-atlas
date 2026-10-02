@@ -86,6 +86,28 @@
       }
       const result = await sendBridgeRequest('requestSignature', payload, 180000, { allowed: false, result: null });
       return (result && typeof result === 'object') ? result : { allowed: false, result: null };
+    },
+
+    // SPEC.md §3.8.2 — hands the wallet a COMPLETE, already-signed
+    // domain-atlas-asset/1.0 credential this page's own domain minted
+    // (this bridge never mints anything itself). Resolves { allowed,
+    // result }: allowed is false only when asset.class itself isn't on
+    // this domain's policy.walletBridge.offer whitelist (or the
+    // credential is malformed), with no confirmation ever shown in that
+    // case — identical refusal posture to requestSignature's purpose
+    // check above. allowed:true with result:null covers every other way
+    // this can come back empty-handed (the visitor denied it, dismissed
+    // a locked prompt, or the request simply timed out); result:{queued,
+    // offerId} on approval — approval never means the credential is in
+    // the wallet yet, only that it's now sitting in the visitor's pending
+    // offers for them to separately Claim or Dismiss. Never throws.
+    async offerAsset(credential) {
+      if (!credential || typeof credential !== 'object' || credential.credential !== 'domain-atlas-asset/1.0' ||
+          !credential.asset || typeof credential.asset.class !== 'string' || !credential.asset.class) {
+        return { allowed: false, result: null };
+      }
+      const result = await sendBridgeRequest('offerAsset', credential, 180000, { allowed: false, result: null });
+      return (result && typeof result === 'object') ? result : { allowed: false, result: null };
     }
   };
 })();

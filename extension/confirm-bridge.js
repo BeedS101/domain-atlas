@@ -1,34 +1,51 @@
-// Domain Atlas — wallet-bridge signing confirmation (SPEC.md §3.8.1)
+// Domain Atlas — wallet-bridge confirmation (SPEC.md §3.8.1 signing, §3.8.2
+// asset offers)
 //
 // Loaded as an extension-origin iframe by content.js's
 // openBridgeConfirmOverlay() — the host page that injected this iframe is
 // a different origin and has no way to script into it, read its contents,
 // or change what's displayed; everything on screen here comes from this
-// file's own code, never from the page that asked for a signature. That's
-// the entire point of this file existing as a separate page rather than
-// being drawn by content.js directly inside the host page's own DOM, where
-// a sufficiently creative page script could at least try to interfere with
-// it.
+// file's own code, never from the page that asked for a signature or
+// offered an asset. That's the entire point of this file existing as a
+// separate page rather than being drawn by content.js directly inside the
+// host page's own DOM, where a sufficiently creative page script could at
+// least try to interfere with it.
 //
-// Signs directly (loads wallet.js via a plain <script> tag, same as
-// viewer.html already does) rather than asking background.js to — see
-// content.js's own comment on openBridgeConfirmOverlay() for why routing
-// through one more extension context wouldn't add any actual trust
-// boundary here.
+// Acts on an approval directly (loads wallet.js via a plain <script> tag,
+// same as viewer.html already does) rather than asking background.js to —
+// see content.js's own comment on openBridgeConfirmOverlay() for why
+// routing through one more extension context wouldn't add any actual
+// trust boundary here. For 'sign' this means calling
+// AtlasWallet.signWithSelf(); for 'offer' it means calling
+// AtlasWallet.queueBridgeOffer() — SPEC.md §3.8.2 is explicit that
+// approving an offer must NOT add it straight to the wallet, so this is a
+// queue call, not a mint or an adopt, same as every other call site that
+// already respects that rule (claimMailGift's own deferred-verification
+// comment in wallet.js).
 (function () {
   const readyState = document.getElementById('readyState');
+  const offerState = document.getElementById('offerState');
   const lockedState = document.getElementById('lockedState');
   const originEl = document.getElementById('origin');
+  const offerOriginEl = document.getElementById('offerOrigin');
   const originLockedEl = document.getElementById('originLocked');
   const purposeText = document.getElementById('purposeText');
-  const purposeTextLocked = document.getElementById('purposeTextLocked');
   const payloadBox = document.getElementById('payloadBox');
+  const offerAssetName = document.getElementById('offerAssetName');
+  const offerAssetClass = document.getElementById('offerAssetClass');
+  const offerAssetQtyLine = document.getElementById('offerAssetQtyLine');
+  const offerAssetQty = document.getElementById('offerAssetQty');
+  const lockedDetailLine = document.getElementById('lockedDetailLine');
   const approveBtn = document.getElementById('approveBtn');
   const denyBtn = document.getElementById('denyBtn');
+  const offerApproveBtn = document.getElementById('offerApproveBtn');
+  const offerDenyBtn = document.getElementById('offerDenyBtn');
   const dismissBtn = document.getElementById('dismissBtn');
 
   let decided = false;
-  let currentPayload = null;
+  let currentKind = null;
+  let currentOrigin = null;
+  let currentPayload = null; // 'sign': the page-supplied payload object. 'offer': the credential.
 
   function decide(approved, result) {
     if (decided) return; // the inactivity timer and a real click can both fire — only the first counts
@@ -62,27 +79,47 @@
     payloadBox.innerHTML = lines.join('');
   }
 
+  function showState(kind, unlocked) {
+    readyState.style.display = (unlocked && kind === 'sign') ? 'block' : 'none';
+    offerState.style.display = (unlocked && kind === 'offer') ? 'block' : 'none';
+    // Explicit 'block'/'none' on all three, not '' — '' only clears an
+    // inline override and falls back to the stylesheet rule, which is
+    // `display: none` for each of these (so every state starts hidden
+    // before this message ever arrives); '' would leave the intended one
+    // hidden forever instead of actually showing it. (This is the exact
+    // bug this file's own history already hit once for the sign/locked
+    // pair — see the private notes.)
+    lockedState.style.display = unlocked ? 'none' : 'block';
+  }
+
   window.addEventListener('message', async (event) => {
     if (event.source !== window.parent) return;
     if (!event.data || event.data.type !== 'domain-atlas-bridge-confirm-init') return;
-    const { origin, purpose, payload } = event.data;
+    const { origin, kind, detail, payload } = event.data;
+    currentKind = kind;
+    currentOrigin = origin;
     currentPayload = payload;
 
     try {
-      originEl.textContent = origin;
+      if (kind === 'sign') {
+        originEl.textContent = origin;
+        purposeText.textContent = detail;
+        renderPayload(payload && typeof payload === 'object' ? payload : {});
+        lockedDetailLine.textContent = 'This site asked to sign a "' + detail + '" request, but there’s nothing active to sign it with.';
+      } else if (kind === 'offer') {
+        const asset = (payload && payload.asset) || {};
+        offerOriginEl.textContent = origin;
+        offerAssetName.textContent = asset.name || detail || '(unnamed asset)';
+        offerAssetClass.textContent = asset.class || detail || '…';
+        const quantity = (payload && typeof payload.quantity === 'number') ? payload.quantity : 1;
+        offerAssetQtyLine.style.display = quantity > 1 ? 'block' : 'none';
+        offerAssetQty.textContent = String(quantity);
+        lockedDetailLine.textContent = 'This site offered to add a "' + (asset.class || detail) + '" asset to your wallet, but there’s nothing active to accept it with.';
+      }
       originLockedEl.textContent = origin;
-      purposeText.textContent = purpose;
-      purposeTextLocked.textContent = purpose;
-      renderPayload(payload && typeof payload === 'object' ? payload : {});
 
       const unlocked = await AtlasWallet.isUnlocked().catch(() => false);
-      // Explicit 'block'/'none' on both, not '' — '' only clears an
-      // inline override and falls back to the stylesheet rule, which is
-      // `display: none` for #lockedState (so the prompt starts hidden
-      // before this message ever arrives); '' would leave it hidden
-      // forever instead of actually showing it.
-      readyState.style.display = unlocked ? 'block' : 'none';
-      lockedState.style.display = unlocked ? 'none' : 'block';
+      showState(kind, unlocked);
     } catch (err) {
       // Nothing sensible to show if even this broke — deny rather than
       // leave a half-rendered prompt sitting there with no way out.
@@ -105,6 +142,28 @@
     }
   });
   denyBtn.addEventListener('click', () => decide(false, null));
+
+  // SPEC.md §3.8.2 — "Accept into Pending" never adds currentPayload (the
+  // credential) to the live wallet itself; queueBridgeOffer only ever
+  // writes to the separate, sandboxed pending-offers store (wallet.js's
+  // own comment on that function). getIdentity() here can't actually
+  // disagree with the isUnlocked() check init already did and used to
+  // show this button in the first place — guarded anyway for the same
+  // locked-mid-prompt race the sign path above guards against.
+  offerApproveBtn.addEventListener('click', async () => {
+    offerApproveBtn.disabled = true;
+    offerDenyBtn.disabled = true;
+    try {
+      const identity = await AtlasWallet.getIdentity();
+      if (!identity) throw new Error('no active identity');
+      const entry = await AtlasWallet.queueBridgeOffer(identity.publicKey, currentOrigin, currentPayload);
+      decide(true, { queued: true, offerId: entry.id });
+    } catch (err) {
+      decide(false, null);
+    }
+  });
+  offerDenyBtn.addEventListener('click', () => decide(false, null));
+
   dismissBtn.addEventListener('click', () => decide(false, null));
 
   window.parent.postMessage({ type: 'domain-atlas-bridge-confirm-ready' }, '*');

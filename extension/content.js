@@ -52,10 +52,10 @@
     .then((res) => (res.ok ? res.json() : null))
     .then((manifest) => {
       if (!manifest || typeof manifest.spec !== 'string' || !manifest.spec.startsWith('domain-atlas/')) {
-        return { read: false, signPurposes: [] }; // no declared space here — same as a missing robots.txt, not an error
+        return { read: false, signPurposes: [], offerClasses: [] }; // no declared space here — same as a missing robots.txt, not an error
       }
       if (!Array.isArray(manifest.worlds) || manifest.worlds.length === 0) {
-        return { read: false, signPurposes: [] }; // malformed manifest, nothing to enter and nothing to grant
+        return { read: false, signPurposes: [], offerClasses: [] }; // malformed manifest, nothing to enter and nothing to grant
       }
       // SPEC.md §3.8 — a world with no `entry` at all declares no enterable
       // space; it exists purely to carry a `policy`, never to be offered as
@@ -85,10 +85,11 @@
       const bridgeWorld = pageTarget ? manifest.worlds.find((w) => w.id === pageTarget.worldId) : null;
       return {
         read: effectiveWalletBridgeRead(manifest, bridgeWorld),
-        signPurposes: effectiveWalletBridgeSignPurposes(manifest, bridgeWorld)
+        signPurposes: effectiveWalletBridgeSignPurposes(manifest, bridgeWorld),
+        offerClasses: effectiveWalletBridgeOfferClasses(manifest, bridgeWorld)
       };
     })
-    .catch(() => ({ read: false, signPurposes: [] })); // unreachable or not JSON — same as no manifest at all
+    .catch(() => ({ read: false, signPurposes: [], offerClasses: [] })); // unreachable or not JSON — same as no manifest at all
 
   // SPEC.md §3.4.1 — the exact shape effectiveAcceptedItemClasses()
   // (viewer.js, this file's own capabilitySummary() below) already uses:
@@ -117,14 +118,31 @@
     return [];
   }
 
-  // SPEC.md §3.8/§3.8.1 — the only thing page-bridge.js's window.atlasWallet
-  // actually does: relay onward once this page's own manifest-declared
-  // permission is known, never before. 'getIdentity' relays to background.js
-  // (which has the real AtlasWallet.getIdentity(), imported via
-  // importScripts — see that file's own comment). 'requestSignature' never
-  // touches background.js at all — see requestBridgeConfirmation() below
-  // for why the confirmation prompt signs directly instead. Anything else
-  // gets the same denied shape an unpermitted page would.
+  // SPEC.md §3.8.2 — identical §3.4.1 composition to
+  // effectiveWalletBridgeSignPurposes above, checking `offer` (a
+  // whitelist of asset classes) instead of `sign` (a whitelist of
+  // purposes). Two separate arrays, not one shared list — a purpose and
+  // an asset class happen to both be strings, but whitelisting "which
+  // signatures this domain will produce" and "which kinds of assets this
+  // domain will let land in a visitor's wallet" are different questions
+  // with different stakes, so a domain opts into each independently.
+  function effectiveWalletBridgeOfferClasses(manifest, world) {
+    const worldPolicy = (world && world.policy && world.policy.walletBridge) || null;
+    if (worldPolicy && Array.isArray(worldPolicy.offer)) return worldPolicy.offer;
+    const domainDefault = manifest.walletBridge || null;
+    if (domainDefault && Array.isArray(domainDefault.offer)) return domainDefault.offer;
+    return [];
+  }
+
+  // SPEC.md §3.8/§3.8.1/§3.8.2 — the only thing page-bridge.js's
+  // window.atlasWallet actually does: relay onward once this page's own
+  // manifest-declared permission is known, never before. 'getIdentity'
+  // relays to background.js (which has the real AtlasWallet.getIdentity(),
+  // imported via importScripts — see that file's own comment).
+  // 'requestSignature' and 'offerAsset' never touch background.js at all —
+  // see requestBridgeConfirmation() below for why the confirmation prompt
+  // handles both directly instead. Anything else gets the same denied
+  // shape an unpermitted page would.
   async function handleBridgeRequest(action, payload) {
     const permissions = await bridgePermissionsPromise;
     if (action === 'getIdentity') {
@@ -149,26 +167,49 @@
       if (typeof purpose !== 'string' || !purpose || !permissions.signPurposes.includes(purpose)) {
         return { allowed: false, result: null };
       }
-      const result = await requestBridgeConfirmation(purpose, payload);
+      const result = await requestBridgeConfirmation('sign', purpose, payload);
+      return { allowed: true, result };
+    }
+    if (action === 'offerAsset') {
+      // SPEC.md §3.8.2 — the page hands over a COMPLETE, already-signed
+      // credential; this bridge never mints anything itself. asset.class
+      // is checked against the effective offer whitelist before anything
+      // else happens, same refusal posture as an unlisted sign purpose
+      // above: not on the list means no prompt, nothing a page can use to
+      // tell "not whitelisted" apart from "capability doesn't exist."
+      const credential = payload && typeof payload === 'object' ? payload : null;
+      const assetClass = credential && credential.asset && typeof credential.asset.class === 'string' ? credential.asset.class : null;
+      if (!assetClass || !permissions.offerClasses.includes(assetClass)) {
+        return { allowed: false, result: null };
+      }
+      const result = await requestBridgeConfirmation('offer', assetClass, credential);
       return { allowed: true, result };
     }
     return { allowed: false };
   }
 
-  // ---------- SPEC.md §3.8.1 — the wallet-bridge signing confirmation ----------
+  // ---------- SPEC.md §3.8.1/§3.8.2 — the wallet-bridge confirmation ----------
   //
   // One iframe at a time, not one per request: a page firing several
-  // requestSignature() calls back to back would otherwise stack several
-  // full-viewport iframes on top of each other, which is confusing for a
-  // visitor and pointless to build UI for. Queued instead; each prior
-  // request's overlay fully closes (approved, denied, or timed out) before
-  // the next one's ever opens.
+  // requestSignature()/offerAsset() calls back to back would otherwise
+  // stack several full-viewport iframes on top of each other, which is
+  // confusing for a visitor and pointless to build UI for. Queued
+  // instead — the SAME queue for both kinds, since the one-at-a-time
+  // guarantee is about not stacking overlays at all, not about keeping
+  // signing requests and offer requests separately ordered; each prior
+  // request's overlay fully closes (approved, denied, or timed out)
+  // before the next one's ever opens.
+  //
+  // kind distinguishes which confirm-bridge.js display mode to show:
+  // 'sign' (detail is the purpose string, payload is the page-supplied
+  // payload object, SPEC.md §3.8.1) or 'offer' (detail is the asset
+  // class, payload is the credential itself, SPEC.md §3.8.2).
   const bridgeConfirmQueue = [];
   let bridgeConfirmShowing = false;
 
-  function requestBridgeConfirmation(purpose, payload) {
+  function requestBridgeConfirmation(kind, detail, payload) {
     return new Promise((resolve) => {
-      bridgeConfirmQueue.push({ purpose, payload, resolve });
+      bridgeConfirmQueue.push({ kind, detail, payload, resolve });
       advanceBridgeConfirmQueue();
     });
   }
@@ -176,8 +217,8 @@
   function advanceBridgeConfirmQueue() {
     if (bridgeConfirmShowing || bridgeConfirmQueue.length === 0) return;
     bridgeConfirmShowing = true;
-    const { purpose, payload, resolve } = bridgeConfirmQueue.shift();
-    openBridgeConfirmOverlay(purpose, payload, (result) => {
+    const { kind, detail, payload, resolve } = bridgeConfirmQueue.shift();
+    openBridgeConfirmOverlay(kind, detail, payload, (result) => {
       bridgeConfirmShowing = false;
       resolve(result);
       advanceBridgeConfirmQueue();
@@ -185,22 +226,24 @@
   }
 
   // confirm-bridge.html (extension-origin, web_accessible_resources) is the
-  // non-spoofable confirmation SPEC.md §3.8/§3.8.1 requires — a real
+  // non-spoofable confirmation SPEC.md §3.8/§3.8.1/§3.8.2 requires — a real
   // cross-origin browsing context this host page cannot script into, read
   // the contents of, or draw over, the same property the world-entry
   // overlay below (openOverlay()) already relies on for a different
-  // reason. Unlike that overlay, this one deliberately signs the payload
-  // ITSELF (loads wallet.js directly, see confirm-bridge.js's own comment)
-  // rather than asking background.js to — every extension page already has
-  // the same unrestricted AtlasWallet access background.js does, so routing
-  // through one more hop would add a message round trip without adding any
-  // actual trust boundary.
+  // reason. Unlike that overlay, this one deliberately acts on an approval
+  // ITSELF — signs the payload directly for 'sign', queues the credential
+  // directly for 'offer' (loads wallet.js directly either way, see
+  // confirm-bridge.js's own comment) — rather than asking background.js
+  // to — every extension page already has the same unrestricted
+  // AtlasWallet access background.js does, so routing through one more hop
+  // would add a message round trip without adding any actual trust
+  // boundary.
   //
-  // origin/purpose/payload are handed over by postMessage, never baked into
-  // the iframe's src URL — avoids URL-encoding an arbitrary JSON payload
-  // and keeps it out of any history-like surface a src attribute might
-  // otherwise brush up against, however briefly.
-  function openBridgeConfirmOverlay(purpose, payload, onDone) {
+  // origin/kind/detail/payload are handed over by postMessage, never baked
+  // into the iframe's src URL — avoids URL-encoding an arbitrary JSON
+  // payload and keeps it out of any history-like surface a src attribute
+  // might otherwise brush up against, however briefly.
+  function openBridgeConfirmOverlay(kind, detail, payload, onDone) {
     const iframe = document.createElement('iframe');
     iframe.id = 'domain-atlas-bridge-confirm';
     const src = chrome.runtime.getURL('confirm-bridge.html');
@@ -237,7 +280,7 @@
       if (!event.data || typeof event.data !== 'object') return;
       if (event.data.type === 'domain-atlas-bridge-confirm-ready') {
         iframe.contentWindow.postMessage(
-          { type: 'domain-atlas-bridge-confirm-init', origin: location.origin, purpose, payload },
+          { type: 'domain-atlas-bridge-confirm-init', origin: location.origin, kind, detail, payload },
           new URL(src).origin
         );
         return;

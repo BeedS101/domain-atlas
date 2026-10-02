@@ -1759,6 +1759,10 @@ const saveAutoLockMinutesBtn = document.getElementById('saveAutoLockMinutesBtn')
 const autoLockMinutesStatusEl = document.getElementById('autoLockMinutesStatus');
 const mailSenderFilterInput = document.getElementById('mailSenderFilterInput');
 const mailListEl = document.getElementById('mailList');
+// SPEC.md §3.8.2 — pending wallet-bridge asset offers (see
+// refreshBridgeOffersDisplay/renderBridgeOfferCard below).
+const bridgeOffersSectionEl = document.getElementById('bridgeOffersSection');
+const bridgeOffersListEl = document.getElementById('bridgeOffersList');
 const markAllMailReadBtn = document.getElementById('markAllMailReadBtn');
 const clearAllMailBtn = document.getElementById('clearAllMailBtn');
 const subscribeSectionEl = document.getElementById('subscribeSection');
@@ -7056,10 +7060,86 @@ async function refreshMailDisplay() {
     if (mailIntervalInput) mailIntervalInput.value = settings.intervalMinutes;
   }
   await updateSocialBadge();
+  await refreshBridgeOffersDisplay(identity);
 }
 
 mailSenderFilterInput && mailSenderFilterInput.addEventListener('change', async () => {
   await refreshMailDisplay();
+});
+
+// SPEC.md §3.8.2 — renders one pending wallet-bridge asset offer. Plain
+// text, no thumbnail, same convention renderMailCard's own gift notice and
+// renderAssetCard already follow for asset.thumbnail. No Delete-blocked-by-
+// gift style guard needed here (see wallet.js's dismissBridgeOffer's own
+// comment on why) — Claim and Dismiss are simply the two live actions
+// until one of them fires, after which only "(claimed)" remains.
+function renderBridgeOfferCard(entry, container) {
+  const el = document.createElement('div');
+  // Reuses .mail-card's existing styling (same as renderSentMailCard
+  // above) purely for the free subject/meta/claimed-span layout it
+  // already defines — this card is not mail and carries none of mail's
+  // own data, just the same visual shape.
+  el.className = 'wallet-item mail-card';
+  el.dataset.id = entry.id;
+  const asset = entry.credential.asset || {};
+  const quantity = typeof entry.credential.quantity === 'number' ? entry.credential.quantity : 1;
+  const queuedAt = new Date(entry.queuedAt).toLocaleString();
+  el.innerHTML =
+    '<div class="mail-subject">' + escapeHtml(asset.name || asset.class || 'Unnamed asset') + (quantity > 1 ? ' ×' + formatMass(quantity) : '') + '</div>' +
+    '<div class="mail-meta">From ' + escapeHtml(entry.origin) + ' · offered ' + queuedAt + '</div>' +
+    '<div class="item-actions">' +
+    (entry.claimed
+      ? '<span class="mail-gift-claimed">(claimed)</span>'
+      : '<button type="button" data-action="claim-bridge-offer">Claim</button>' +
+        '<button type="button" data-action="dismiss-bridge-offer" class="danger-btn">Dismiss</button>') +
+    '</div>';
+  container.appendChild(el);
+}
+
+// identity may already be known by the caller (refreshMailDisplay above
+// looked it up for its own purposes) — accepted optionally so this doesn't
+// re-fetch it on every mail refresh; still looks it up itself when called
+// on its own (e.g. right after a claim/dismiss action below).
+async function refreshBridgeOffersDisplay(identity) {
+  if (identity === undefined) identity = await AtlasWallet.getIdentity();
+  const entries = identity ? await AtlasWallet.getBridgeOffers(identity.publicKey) : [];
+  const pending = entries.filter((e) => !e.claimed);
+  if (!bridgeOffersSectionEl || !bridgeOffersListEl) return;
+  bridgeOffersSectionEl.style.display = pending.length > 0 ? 'block' : 'none';
+  bridgeOffersListEl.innerHTML = '';
+  pending.forEach((entry) => renderBridgeOfferCard(entry, bridgeOffersListEl));
+}
+
+bridgeOffersListEl && bridgeOffersListEl.addEventListener('click', async (e) => {
+  const card = e.target.closest('.wallet-item');
+  if (!card) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+
+  const claimBtn = e.target.closest('button[data-action="claim-bridge-offer"]');
+  if (claimBtn) {
+    try {
+      const { credential } = await AtlasWallet.claimBridgeOffer(identity.publicKey, card.dataset.id);
+      await refreshInventoryDisplay();
+      await refreshBridgeOffersDisplay(identity);
+      statusEl.textContent = 'Claimed ' + credential.asset.name + '.';
+    } catch (err) {
+      statusEl.textContent = 'Claim failed: ' + err.message;
+    }
+    return;
+  }
+
+  const dismissBtn = e.target.closest('button[data-action="dismiss-bridge-offer"]');
+  if (dismissBtn) {
+    if (!confirm('Dismiss this offer without claiming it?')) return;
+    try {
+      await AtlasWallet.dismissBridgeOffer(identity.publicKey, card.dataset.id);
+      await refreshBridgeOffersDisplay(identity);
+    } catch (err) {
+      statusEl.textContent = 'Dismiss failed: ' + err.message;
+    }
+    return;
+  }
 });
 
 // Sent tab: a purely local record (AtlasWallet.getSentMail — see its own

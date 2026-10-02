@@ -2256,6 +2256,21 @@
                redundant "Mail" heading no longer makes sense once this
                whole block is itself titled "Mail"). -->
           <div id="mailBoxInboxSubscreen" class="subscreen active">
+            <!-- SPEC.md §3.8.2 — bridge offers a page queued via
+                 window.atlasWallet.offerAsset(), sitting sandboxed until an
+                 explicit Claim or Dismiss (see AtlasWallet.queueBridgeOffer's
+                 own comment in wallet.js on why this is a SEPARATE store
+                 from ordinary mail, not a synthetic mail entry). Shown above
+                 the mail list itself and hidden entirely when there's
+                 nothing pending (see refreshBridgeOffersDisplay in
+                 viewer.js) — an unclaimed offer is something to decide on,
+                 not just read. -->
+            <div id="bridgeOffersSection" style="display:none;">
+              <h4 style="margin:0 0 4px;">Pending offers</h4>
+              <div class="subhead" style="margin-top:0;">A site you visited offered to put an asset in your wallet. Nothing here is actually yours yet — Claim it to add it for real, or Dismiss it to turn it down.</div>
+              <div id="bridgeOffersList" class="item-list"></div>
+            </div>
+
             <div class="subhead">Checks every domain you hold a credential from — you don't need to be standing in that world for new mail to show up here, just have the wallet open somewhere. Also checks automatically every time you open the Mail tab, and again each time you return to Inbox specifically (even without leaving Mail — see #102).</div>
             <div class="btn-row">
               <button id="checkMailNowBtn" type="button" class="btn-secondary">Check now</button>
