@@ -37,6 +37,11 @@
 // instance (isolated docroot copy + isolated state dir), same pattern
 // manual-3d-key-anchored-portal.js and its siblings use.
 //
+// STEP 1b/3b cover the toolbar icon itself swapping between the grey
+// "locked" set and the colored "active" set as the wallet's own identity
+// state changes, driven by background.js's chrome.storage.onChanged
+// listener rather than anything content.js or this test pokes directly.
+//
 // STEP 4 covers a live bug report against the side panel itself: entering
 // a real spatial world still let the toolbar button pop the side panel
 // open on top of it, since openPanelOnActionClick is a global behavior
@@ -93,6 +98,20 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     if (!behavior || behavior.openPanelOnActionClick !== true) throw new Error('Expected openPanelOnActionClick: true, got: ' + JSON.stringify(behavior));
     console.log('PASS: chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }) took effect');
 
+    console.log('STEP 1b: toolbar icon starts on the locked/grey set with no identity yet');
+    // chrome.action has no getIcon() to read the live icon back, so this
+    // records what setIcon() is actually called with instead of trusting
+    // the call happened at all.
+    await background.evaluate(() => {
+      self.__iconCalls = [];
+      const orig = chrome.action.setIcon.bind(chrome.action);
+      chrome.action.setIcon = (opts) => { self.__iconCalls.push(opts.path); return orig(opts); };
+      return refreshToolbarIcon();
+    });
+    const lockedPath = await background.evaluate(() => self.__iconCalls.at(-1));
+    if (!lockedPath || !lockedPath[16].includes('icon-locked-16')) throw new Error('Expected the locked icon set with no identity yet, got: ' + JSON.stringify(lockedPath));
+    console.log('PASS: locked/grey icon set before any identity exists');
+
     console.log('STEP 2: viewer.html with no manifest query param (exactly what the side panel shows) boots into standalone mode');
     const page = await context.newPage();
     await page.goto('chrome-extension://' + extensionId + '/viewer.html', { waitUntil: 'load' });
@@ -123,6 +142,19 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     }, DOMAIN);
     await page.waitForSelector('#selfCollectiblesList .wallet-item', { timeout: 15000 });
     console.log('PASS: a real asset card is showing in the standalone wallet');
+
+    console.log('STEP 3b: creating that identity flipped the toolbar icon to the active/colored set on its own, via the chrome.storage.onChanged listener (no explicit call from this test)');
+    // background is a service worker, not a page/frame — no waitForFunction,
+    // so poll it directly for the onChanged listener's own setIcon() call.
+    let iconCallCount = 0;
+    for (let i = 0; i < 25 && iconCallCount <= 1; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      iconCallCount = await background.evaluate(() => self.__iconCalls.length);
+    }
+    if (iconCallCount <= 1) throw new Error('Expected a second setIcon() call once an identity was created, got ' + iconCallCount + ' call(s) total');
+    const activePath = await background.evaluate(() => self.__iconCalls.at(-1));
+    if (!activePath || !activePath[16].includes('/icon-16') || activePath[16].includes('locked')) throw new Error('Expected the active icon set once an identity exists, got: ' + JSON.stringify(activePath));
+    console.log('PASS: active/colored icon set automatically once createIdentity() unlocked a real identity');
 
     await page.locator('#selfCollectiblesList .wallet-item').first().hover();
     await page.waitForTimeout(300); // give a (wrongly) opening panel a moment to appear if it were going to

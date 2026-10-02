@@ -29,6 +29,46 @@
 // what content.js already knows.
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
+// Toolbar icon: grey/crossed-out until there's an active wallet identity to
+// use, colored once there is — the same yes/no wallet.js's own isUnlocked()
+// already answers for every other "is self usable right now" check (true
+// for a WebAuthn identity the moment it exists, true for a local-password
+// identity only once unlocked this session). importScripts pulls wallet.js
+// in here just for that read; nothing in the isUnlocked() call path touches
+// navigator.credentials (only createWebAuthnIdentity() and the sign/assert
+// functions do), so it's safe to call from a service worker with no window.
+// This is extension-wide state, not a per-tab one, so a plain setIcon with
+// no tabId is all that's needed.
+importScripts('wallet.js');
+
+const TOOLBAR_ICON_ACTIVE = {
+  16: 'icons/icon-16.png', 32: 'icons/icon-32.png',
+  48: 'icons/icon-48.png', 128: 'icons/icon-128.png'
+};
+const TOOLBAR_ICON_LOCKED = {
+  16: 'icons/icon-locked-16.png', 32: 'icons/icon-locked-32.png',
+  48: 'icons/icon-locked-48.png', 128: 'icons/icon-locked-128.png'
+};
+
+async function refreshToolbarIcon() {
+  const unlocked = await AtlasWallet.isUnlocked();
+  chrome.action.setIcon({ path: unlocked ? TOOLBAR_ICON_ACTIVE : TOOLBAR_ICON_LOCKED }).catch(() => {});
+}
+
+refreshToolbarIcon();
+
+// Covers every way the active identity can change — created, unlocked,
+// locked, or switched between local/WebAuthn — without this file needing
+// to know each call site: all of them land in one of these three keys.
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  const watchedKeys = areaName === 'session'
+    ? ['atlasUnlockedIdentity']
+    : areaName === 'local'
+      ? ['atlasIdentityMode', 'atlasIdentity', 'atlasWebAuthnIdentity']
+      : [];
+  if (watchedKeys.some((key) => key in changes)) refreshToolbarIcon();
+});
+
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (!sender.tab || typeof sender.tab.id !== 'number') return;
   const tabId = sender.tab.id;
