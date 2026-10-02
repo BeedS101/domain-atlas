@@ -1,11 +1,13 @@
 # Domain Atlas
 
-An open protocol for issuing, verifying, and revoking cryptographically
-signed credentials — memberships, tickets, staff badges, loyalty
-vouchers — without a central database of who holds what. A business
-signs a credential straight into someone's wallet; verifying it later
-means checking a signature, not looking anything up, and revoking it is
-one-sided and instant, nothing required from the holder's side.
+A protocol for issuing, verifying, and revoking cryptographically signed
+credentials — memberships, tickets, voting rights, even the currency a
+bank issues — with no central database of who holds what for an attacker
+to breach. A business (or a bank, or an assembly) signs a credential
+straight into someone's wallet with real ECDSA cryptography; verifying
+it later means checking that signature, not looking anything up, and
+revoking it is one-sided and instant, nothing required from the holder's
+side.
 
 **[Try the credential demo live →](https://evtec.co.za/business-demo.html)**
 No install needed — issues you a real, giftable credential on the spot,
