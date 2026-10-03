@@ -212,6 +212,16 @@ function atlas_email_tickets_config() {
     // 'none' (test-only, see lib/smtp.php's own atlas_smtp_send_mail()).
     'smtpSecure' => 'starttls',
     'smtpUser' => null, 'smtpPass' => null, 'fromAddress' => null,
+    // Inbound side (SPEC.md §13.3) — the same mailbox's IMAP credentials.
+    // Unlike issuer-server/server.js (polls on a timer, ATLAS_EMAIL_IMAP_
+    // POLL_MS), this bundle has no long-lived process to run a timer in at
+    // all — a missing imapHost means inbound transfers are off, the same
+    // deliberate-absence posture smtpHost above already takes for
+    // outbound, and atlas/admin/email-tickets/poll-now.php (triggered by
+    // an operator-configured cron job in a real deployment, or a test's
+    // own admin call) is this bundle's entire inbound mechanism.
+    'imapHost' => null, 'imapPort' => 993, 'imapSecure' => 'tls',
+    'imapUser' => null, 'imapPass' => null,
   ];
   if (!file_exists(atlas_email_tickets_config_file())) return $defaults;
   $doc = json_decode(file_get_contents(atlas_email_tickets_config_file()), true);
