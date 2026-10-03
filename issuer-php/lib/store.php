@@ -2052,28 +2052,56 @@ function atlas_revoke($id, $reason) {
 // is the one real piece of logic here — everything else about a
 // suspension is a plain list entry — since "is this id suspended" depends
 // on the clock, not just presence in the list: an entry with a past
-// expiresAt is no longer in effect, the same as if it had been explicitly
-// lifted, without needing a background job to go clean it up first.
-// Mirrors issuer-server/server.js's readSuspensions()/findSuspension()/
-// isSuspended().
+// expiresAt is no longer in effect. What happens next depends on
+// `onExpire` (SPEC.md §13.4): the default, `'lift'` — the only behavior
+// before this field existed — treats it the same as if
+// atlas_unsuspend() had been called, just no longer in effect.
+// `'finalize'` is the opposite: the thing is not meant to come back once
+// its suspension window ends (a door-scanned ticket, suspended for an
+// event's duration rather than instantly revoked, is the first real use
+// of this — see §13.4) — a `'finalize'` entry's expiry revokes the
+// credential outright (reason 'redeemed') instead of silently
+// reactivating it. This resolution lives in read_suspensions() itself,
+// the one shared read path every other function here goes through,
+// rather than duplicated into find_suspension() and atlas_suspend()'s
+// own pruning separately — that would let a 'finalize' entry slip past
+// un-revoked if atlas_suspend() (for some OTHER id) happened to prune it
+// first. Any access resolves every expired entry the same way, same
+// "no background job, lazy cleanup on next access" posture as
+// everything else in this file. Mirrors issuer-server/server.js's
+// readSuspensions()/findSuspension()/isSuspended().
 
 function read_suspensions() {
-  $fh = fopen(atlas_suspensions_file(), 'c+');
+  $file = atlas_suspensions_file();
+  $fh = fopen($file, 'c+');
   if ($fh === false) return ['suspended' => []];
-  flock($fh, LOCK_SH);
+  flock($fh, LOCK_EX);
   $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['suspended' => []];
+  $now = time();
+  $changed = false;
+  $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($now, &$changed) {
+    $expiresAt = $s['expiresAt'] ?? null;
+    if ($expiresAt === null || strtotime($expiresAt) > $now) return true; // still in effect, keep
+    if (($s['onExpire'] ?? 'lift') === 'finalize') atlas_revoke($s['id'], 'redeemed');
+    $changed = true;
+    return false; // expired — drop it either way; 'finalize' already got its revoke above
+  }));
+  if ($changed) {
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
   flock($fh, LOCK_UN);
   fclose($fh);
-  $doc = json_decode($data, true);
-  return is_array($doc) ? $doc : ['suspended' => []];
+  return $doc;
 }
 
 function find_suspension($id) {
-  $now = time();
   foreach (read_suspensions()['suspended'] as $s) {
-    if (($s['id'] ?? null) !== $id) continue;
-    $expiresAt = $s['expiresAt'] ?? null;
-    if ($expiresAt === null || strtotime($expiresAt) > $now) return $s;
+    if (($s['id'] ?? null) === $id) return $s;
   }
   return null;
 }
@@ -2083,24 +2111,23 @@ function is_suspended($id) {
 }
 
 // $expiresAt (a string) is optional — an admin can choose either behavior
-// per suspension: give it a deadline for an automatic lift, or pass null
-// for one that stays in effect until atlas_unsuspend() is called
-// explicitly. Replaces any existing entry for the same id rather than
-// stacking duplicates, and prunes anything already expired on the way in.
-function atlas_suspend($id, $reason, $expiresAt) {
+// per suspension: give it a deadline for an automatic lift/finalize, or
+// pass null for one that stays in effect until atlas_unsuspend() is
+// called explicitly ($onExpire is meaningless without an $expiresAt to
+// trigger it). $onExpire defaults to 'lift' — every call site before
+// this parameter existed keeps its exact original behavior unchanged.
+// Replaces any existing entry for the same id rather than stacking
+// duplicates; read_suspensions() above already resolved anything expired
+// before this function ever sees the list.
+function atlas_suspend($id, $reason, $expiresAt, $onExpire = 'lift') {
   $file = atlas_suspensions_file();
   $fh = fopen($file, 'c+');
   flock($fh, LOCK_EX);
   $data = stream_get_contents($fh);
   $doc = json_decode($data, true);
   if (!is_array($doc)) $doc = ['suspended' => []];
-  $now = time();
-  $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($now, $id) {
-    if (($s['id'] ?? null) === $id) return false;
-    $expiresAt = $s['expiresAt'] ?? null;
-    return $expiresAt === null || strtotime($expiresAt) > $now;
-  }));
-  $doc['suspended'][] = ['id' => $id, 'suspendedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason ?: 'issuer-request', 'expiresAt' => $expiresAt ?: null];
+  $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($id) { return ($s['id'] ?? null) !== $id; }));
+  $doc['suspended'][] = ['id' => $id, 'suspendedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason ?: 'issuer-request', 'expiresAt' => $expiresAt ?: null, 'onExpire' => $onExpire === 'finalize' ? 'finalize' : 'lift'];
   ftruncate($fh, 0);
   rewind($fh);
   fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));

@@ -1948,29 +1948,55 @@ function revoke(id, reason) {
 // real piece of logic — everything else about a suspension is a plain
 // list entry — since "is this id suspended" depends on the clock, not
 // just presence in the list: an entry with a past expiresAt is no longer
-// in effect, the same as if it had been explicitly lifted, without
-// needing a background job to go clean it up first.
+// in effect. What happens next depends on `onExpire` (SPEC.md §13.4): the
+// default, `'lift'` — the only behavior before this field existed —
+// treats it the same as if unsuspend() had been called, just no longer
+// in effect. `'finalize'` is the opposite: the thing is not meant to come
+// back once its suspension window ends (a door-scanned ticket, suspended
+// for an event's duration rather than instantly revoked, is the first
+// real use of this — see §13.4) — a `'finalize'` entry's expiry revokes
+// the credential outright (reason 'redeemed') instead of silently
+// reactivating it. This resolution lives in readSuspensions() itself,
+// the one shared read path every other function here goes through,
+// rather than duplicated into findSuspension() and suspend()'s own
+// pruning separately — that would let a 'finalize' entry slip past
+// un-revoked if suspend() (for some OTHER id) happened to prune it
+// first. Any access resolves every expired entry the same way, same
+// "no background job, lazy cleanup on next access" posture as
+// everything else in this file.
 function readSuspensions() {
-  return JSON.parse(fs.readFileSync(SUSPENSIONS_FILE, 'utf8'));
+  const doc = JSON.parse(fs.readFileSync(SUSPENSIONS_FILE, 'utf8'));
+  const now = Date.now();
+  let changed = false;
+  doc.suspended = doc.suspended.filter((s) => {
+    if (!s.expiresAt || new Date(s.expiresAt).getTime() > now) return true; // still in effect, keep
+    if (s.onExpire === 'finalize') revoke(s.id, 'redeemed');
+    changed = true;
+    return false; // expired — drop it either way; 'finalize' already got its revoke above
+  });
+  if (changed) fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify(doc, null, 2));
+  return doc;
 }
 function findSuspension(id) {
-  const now = Date.now();
-  return readSuspensions().suspended.find((s) => s.id === id && (!s.expiresAt || new Date(s.expiresAt).getTime() > now)) || null;
+  return readSuspensions().suspended.find((s) => s.id === id) || null;
 }
 function isSuspended(id) {
   return findSuspension(id) !== null;
 }
 // `expiresAt` is optional — an admin can choose either behavior per
-// suspension: give it a deadline for an automatic lift (no follow-up
-// action needed), or leave it indefinite until unsuspend() is called
-// explicitly. Replaces any existing entry for the same id rather than
-// stacking duplicates, and prunes anything already expired on the way in
-// so the file doesn't grow forever with dead entries.
-function suspend(id, reason, expiresAt) {
+// suspension: give it a deadline for an automatic lift/finalize (no
+// follow-up action needed), or leave it indefinite until unsuspend() is
+// called explicitly (`onExpire` is meaningless without an `expiresAt` to
+// trigger it). `onExpire` defaults to `'lift'` — every call site before
+// this field existed keeps its exact original behavior unchanged. See
+// readSuspensions()'s own comment above for `onExpire`'s actual
+// semantics — this function doesn't need to care about expiry itself,
+// since readSuspensions() already resolved anything stale before this
+// ever sees it.
+function suspend(id, reason, expiresAt, onExpire) {
   const doc = readSuspensions();
-  const now = Date.now();
-  doc.suspended = doc.suspended.filter((s) => (!s.expiresAt || new Date(s.expiresAt).getTime() > now) && s.id !== id);
-  doc.suspended.push({ id, suspendedAt: new Date().toISOString(), reason: reason || 'issuer-request', expiresAt: expiresAt || null });
+  doc.suspended = doc.suspended.filter((s) => s.id !== id);
+  doc.suspended.push({ id, suspendedAt: new Date().toISOString(), reason: reason || 'issuer-request', expiresAt: expiresAt || null, onExpire: onExpire === 'finalize' ? 'finalize' : 'lift' });
   fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify(doc, null, 2));
 }
 // Returns whether an entry was actually there to remove — lets the
@@ -6484,7 +6510,7 @@ async function main() {
       // beyond signing what it hands back, same as every other endpoint here.
       //
       // `updates` (SPEC.md §5.1.1, additive to the existing mail response
-      // — this endpoint is task #45's mail check-in cycle, reused as the
+      // — this endpoint's existing mail check-in cycle is reused as the
       // transport rather than standing up a second polling mechanism)
       // rides the same request: for each requested id that isn't simply
       // still active, one entry naming what happened to it. A superseded
@@ -6517,12 +6543,12 @@ async function main() {
         (Array.isArray(credentials) ? credentials : []).forEach((c) => { if (c && c.id) presentedById.set(c.id, c); });
 
         const assetUpdates = readAssetUpdates().updates;
-        const revoked = readRevocations().revoked;
+        const revokedBefore = readRevocations().revoked;
         const updates = [];
         for (const id of wanted) {
           const supersession = assetUpdates.find((u) => u.id === id);
           if (supersession) { updates.push(supersession); continue; }
-          const revocation = revoked.find((r) => r.id === id);
+          const revocation = revokedBefore.find((r) => r.id === id);
           if (revocation) { updates.push({ id, status: 'revoked', reason: revocation.reason }); continue; }
           // A suspended id gets its own status rather than being silently
           // indistinguishable from "still fine" — same channel this
@@ -6532,6 +6558,14 @@ async function main() {
           // indefinite (SUSPENSIONS_FILE's own comment above).
           const suspension = findSuspension(id);
           if (suspension) { updates.push({ id, status: 'suspended', reason: suspension.reason, expiresAt: suspension.expiresAt }); continue; }
+          // findSuspension() above resolves any expired suspension as a
+          // side effect, including revoking an expired 'finalize' entry
+          // (SPEC.md §13.4) — which `revokedBefore` was read too early to
+          // catch if it happened for this exact id. Re-checking fresh here,
+          // only for ids that reach this point, reports that revocation in
+          // this same response rather than one call late.
+          const justRevoked = readRevocations().revoked.find((r) => r.id === id);
+          if (justRevoked) { updates.push({ id, status: 'revoked', reason: justRevoked.reason }); continue; }
           const presented = presentedById.get(id);
           if (presented) {
             const applied = await applyClassPatchIfStale(presented);

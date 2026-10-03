@@ -31,7 +31,7 @@ $messages = array_values(array_filter(read_mail()['messages'], function ($m) use
 }));
 
 // `updates` (SPEC.md §5.1.1, additive to the messages above — this
-// endpoint is task #45's mail check-in cycle, reused as the transport for
+// endpoint's existing mail check-in cycle is reused as the transport for
 // asset-update notices rather than standing up a second polling mechanism)
 // rides the same request: for each requested id that isn't simply still
 // active, one entry naming what happened to it. A superseded asset's entry
@@ -61,14 +61,14 @@ if (is_array($presentedCredentials)) {
 }
 
 $assetUpdates = read_asset_updates()['updates'];
-$revoked = read_revocations()['revoked'];
+$revokedBefore = read_revocations()['revoked'];
 $updates = [];
 foreach (array_keys($wanted) as $id) {
   $supersession = null;
   foreach ($assetUpdates as $u) { if ($u['id'] === $id) { $supersession = $u; break; } }
   if ($supersession) { $updates[] = $supersession; continue; }
   $revocation = null;
-  foreach ($revoked as $r) { if ($r['id'] === $id) { $revocation = $r; break; } }
+  foreach ($revokedBefore as $r) { if ($r['id'] === $id) { $revocation = $r; break; } }
   if ($revocation) { $updates[] = ['id' => $id, 'status' => 'revoked', 'reason' => $revocation['reason']]; continue; }
   // A suspended id gets its own status rather than being silently
   // indistinguishable from "still fine" — same channel this endpoint
@@ -76,6 +76,16 @@ foreach (array_keys($wanted) as $id) {
   // Mirrors issuer-server/server.js's /atlas/mail/check extension.
   $suspension = find_suspension($id);
   if ($suspension) { $updates[] = ['id' => $id, 'status' => 'suspended', 'reason' => $suspension['reason'], 'expiresAt' => $suspension['expiresAt'] ?? null]; continue; }
+  // find_suspension() above resolves any expired suspension as a side
+  // effect, including revoking an expired 'finalize' entry (SPEC.md §13.4)
+  // — which $revokedBefore was read too early to catch if it happened for
+  // this exact id. Re-checking fresh here, only for ids that reach this
+  // point, reports that revocation in this same response rather than one
+  // call late. Mirrors issuer-server/server.js's /atlas/mail/check
+  // extension.
+  $justRevoked = null;
+  foreach (read_revocations()['revoked'] as $r) { if ($r['id'] === $id) { $justRevoked = $r; break; } }
+  if ($justRevoked) { $updates[] = ['id' => $id, 'status' => 'revoked', 'reason' => $justRevoked['reason']]; continue; }
   if (isset($presentedById[$id])) {
     $applied = apply_class_patch_if_stale($kp['privateKey'], $kp['publicKeyB64url'], $presentedById[$id]);
     if ($applied) $updates[] = $applied;
