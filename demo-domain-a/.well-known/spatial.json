@@ -8,6 +8,7 @@
   "chat": true,
   "tradingStation": true,
   "calendar": true,
+  "emailTickets": { "intakeAddress": "tickets@example.com" },
   "defaultWorld": "plaza",
   "worlds": [
     {

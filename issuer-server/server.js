@@ -61,6 +61,7 @@ const fs = require('fs');
 const path = require('path');
 const { webcrypto, timingSafeEqual } = require('crypto');
 const { subtle } = webcrypto;
+const { sendMail } = require('./lib-smtp');
 
 // All three of these are overridable by environment variable so the same
 // code runs unchanged in local dev (defaults below) and behind cPanel's
@@ -153,6 +154,28 @@ const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
 // able to crowd out real mail while it's actively happening. Other
 // recipients' mailboxes are never touched by one mailbox hitting its cap.
 const MAILBOX_CAP = parseInt(process.env.ATLAS_MAILBOX_CAP || '200', 10);
+// Email-delivered bearer credentials (SPEC.md §13) — outbound SMTP config
+// for the mailbox named by this domain's own manifest.emailTickets.
+// intakeAddress (§13.1). Deliberately read fresh from the environment
+// rather than from the manifest file itself: the manifest is what a
+// CLIENT discovers this capability through, but a domain's own server
+// gates on whether it's actually operationally configured to send mail
+// right now, which is a fact about this process, not about a JSON file
+// that could say "yes" while the real mailbox credentials are missing or
+// wrong. ATLAS_EMAIL_SMTP_HOST unset means this domain has not actually
+// turned this on yet, whatever its manifest claims — every call site
+// below checks that directly rather than trusting the manifest's say-so.
+const EMAIL_TICKETS_CONFIG = {
+  smtpHost: process.env.ATLAS_EMAIL_SMTP_HOST || null,
+  smtpPort: parseInt(process.env.ATLAS_EMAIL_SMTP_PORT || '587', 10),
+  // 'tls' (encrypted from the first byte, e.g. port 465), 'starttls' (plain
+  // connect then upgrade, e.g. port 587 — the common case), or 'none'
+  // (test-only, see lib-smtp.js's own sendMail() comment).
+  smtpSecure: process.env.ATLAS_EMAIL_SMTP_SECURE || 'starttls',
+  smtpUser: process.env.ATLAS_EMAIL_SMTP_USER || null,
+  smtpPass: process.env.ATLAS_EMAIL_SMTP_PASS || null,
+  fromAddress: process.env.ATLAS_EMAIL_FROM_ADDRESS || null
+};
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // one entry per asset reissue (SPEC.md §5.1.1 — non-fungible only), keyed
 // by the SUPERSEDED credential's id so /atlas/mail/check can answer "what
@@ -1877,6 +1900,22 @@ async function loadOrCreateReviewerKeypair() {
   fs.writeFileSync(REVIEWER_KEY_FILE, JSON.stringify(jwk, null, 2));
   const rawPublic = await subtle.exportKey('raw', pair.publicKey);
   return { privateKey: pair.privateKey, publicKeyB64url: b64url(rawPublic) };
+}
+
+// SPEC.md §13's "entering the system": a credential delivered by email has
+// no wallet on the receiving end, so there is no real public key for
+// owner.publicKey to name — but §5's credential shape still requires the
+// field. Generating a keypair and keeping only the public half satisfies
+// the shape without pretending anyone holds a working private key for it:
+// the private key is never written anywhere, never returned to a caller,
+// and nothing in §13.3's forward-to-transfer or §13.4's redemption ever
+// checks a signature against this field again — authority over an
+// email-delivered credential is bearer-only from this point on (possession
+// of the attachment, or the short token), never this key.
+async function generateDiscardedOwnerPublicKey() {
+  const pair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const rawPublic = await subtle.exportKey('raw', pair.publicKey);
+  return b64url(rawPublic);
 }
 
 function ensureReviewerWellKnownFile(publicKeyB64url) {
@@ -5574,6 +5613,83 @@ async function main() {
         archiveIfAudited(credential, 'transferred');
         console.log('Transferred', credential.asset.class, credential.id, '->', recipientPublicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { status: 'transferred', credential: received });
+      }
+
+      // SPEC.md §13's "entering the system" — transfer's own sibling,
+      // targeting an email address instead of a recipient's public key.
+      // Same eligibility (checkPresentedGiftableAsset, above) and the same
+      // signed-intent authorization; the only real difference is where the
+      // freshly minted credential goes: never into a wallet, delivered
+      // instead as a real MIME attachment (§13.2) to whichever address
+      // intent.payload names, since there is no wallet on the receiving
+      // end to hand it to directly. generateDiscardedOwnerPublicKey()'s own
+      // comment explains why owner.publicKey on the fresh credential is a
+      // key nobody holds.
+      if (req.method === 'POST' && req.url === '/atlas/asset/transfer-to-email') {
+        const { credential, recipientEmail, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !recipientEmail || !intent) return sendJson(res, 400, { error: 'credential, recipientEmail, and intent are all required' });
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) return sendJson(res, 400, { error: 'recipientEmail does not look like an email address' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.credentialId !== credential.id || intent.payload.recipientEmail !== recipientEmail || intent.payload.action !== 'transfer-to-email') {
+          return sendJson(res, 400, { error: 'intent does not authorize transferring this credential to this address' });
+        }
+        if (!EMAIL_TICKETS_CONFIG.smtpHost || !EMAIL_TICKETS_CONFIG.fromAddress) {
+          return sendJson(res, 400, { error: 'this domain has not configured email-delivered tickets (SPEC.md §13)' });
+        }
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const senderPub = intent.proof.publicKey;
+
+        const problem = await checkPresentedGiftableAsset(credential, senderPub, credential.asset && credential.asset.class);
+        if (problem) return sendJson(res, 400, { error: problem });
+
+        const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
+        const minted = await transferUniqueAsset(discardedOwnerKey, credential);
+
+        try {
+          await sendMail({
+            host: EMAIL_TICKETS_CONFIG.smtpHost,
+            port: EMAIL_TICKETS_CONFIG.smtpPort,
+            secure: EMAIL_TICKETS_CONFIG.smtpSecure,
+            user: EMAIL_TICKETS_CONFIG.smtpUser,
+            pass: EMAIL_TICKETS_CONFIG.smtpPass,
+            from: EMAIL_TICKETS_CONFIG.fromAddress,
+            to: recipientEmail,
+            subject: (minted.asset && minted.asset.name) || 'Your ticket',
+            textBody: 'You have been sent "' + ((minted.asset && minted.asset.name) || minted.asset.class) + '" from ' + DOMAIN +
+              '.\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC\'d, is how you pass it on.',
+            attachments: [{
+              filename: 'ticket-' + minted.id.split(':').pop() + '.json',
+              contentType: 'application/json',
+              content: JSON.stringify(minted)
+            }]
+          });
+        } catch (err) {
+          // Delivery check before finalizing (SPEC.md §13.3's own
+          // discipline for the forward-to-transfer step, applied
+          // identically here for this first hop): the sender's original
+          // credential above was never touched, so a send the mail server
+          // never actually accepted leaves them exactly as they were —
+          // nothing lost. The fresh mint nobody will ever hold is undone
+          // the same way a mint anyone abandons always is (§5.7's own
+          // "nothing else fits" bucket) — never a real transfer, so never
+          // 'email-transferred' below.
+          revoke(minted.id, 'issuer-request');
+          console.error('Email-ticket send to', recipientEmail, 'failed, mint undone:', err.message);
+          return sendJson(res, 502, { error: 'could not deliver to ' + recipientEmail + ': ' + err.message });
+        }
+
+        // 'email-transferred' (SPEC.md §13.4) — the same reason §13.3's
+        // later email-to-email forwards will also use, since both tell an
+        // identical story to anyone reading the revocation list: this
+        // credential left here because it became (or moved on as) an
+        // email-delivered bearer credential, not because it was spent,
+        // redeemed, or clawed back.
+        revoke(credential.id, 'email-transferred');
+        archiveIfAudited(credential, 'email-transferred');
+        console.log('Emailed', credential.asset.class, credential.id, '-> delivered to', recipientEmail);
+        return sendJson(res, 200, { status: 'email-transferred', to: recipientEmail });
       }
 
       // POST /atlas/asset/redeem — a holder giving up their own credential,
