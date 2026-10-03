@@ -62,6 +62,8 @@ const path = require('path');
 const { webcrypto, timingSafeEqual } = require('crypto');
 const { subtle } = webcrypto;
 const { sendMail } = require('./lib-smtp');
+const { connectImap } = require('./lib-imap');
+const { parseMimeMessage } = require('./lib-mime-parse');
 
 // All three of these are overridable by environment variable so the same
 // code runs unchanged in local dev (defaults below) and behind cPanel's
@@ -174,7 +176,20 @@ const EMAIL_TICKETS_CONFIG = {
   smtpSecure: process.env.ATLAS_EMAIL_SMTP_SECURE || 'starttls',
   smtpUser: process.env.ATLAS_EMAIL_SMTP_USER || null,
   smtpPass: process.env.ATLAS_EMAIL_SMTP_PASS || null,
-  fromAddress: process.env.ATLAS_EMAIL_FROM_ADDRESS || null
+  fromAddress: process.env.ATLAS_EMAIL_FROM_ADDRESS || null,
+  // Inbound side (SPEC.md §13.3) — the same mailbox's IMAP credentials,
+  // polled on a timer (ATLAS_EMAIL_IMAP_POLL_MS) rather than pushed to
+  // this process, per the "needs only mailbox credentials, nothing to
+  // configure mail-server-side" tradeoff this was chosen for over an
+  // inbound webhook. imapHost unset means inbound transfers are off, the
+  // same deliberate-absence posture smtpHost's own comment above already
+  // takes for outbound.
+  imapHost: process.env.ATLAS_EMAIL_IMAP_HOST || null,
+  imapPort: parseInt(process.env.ATLAS_EMAIL_IMAP_PORT || '993', 10),
+  imapSecure: process.env.ATLAS_EMAIL_IMAP_SECURE || 'tls',
+  imapUser: process.env.ATLAS_EMAIL_IMAP_USER || null,
+  imapPass: process.env.ATLAS_EMAIL_IMAP_PASS || null,
+  pollIntervalMs: parseInt(process.env.ATLAS_EMAIL_IMAP_POLL_MS || '60000', 10)
 };
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // one entry per asset reissue (SPEC.md §5.1.1 — non-fungible only), keyed
@@ -3748,6 +3763,152 @@ async function main() {
     return total;
   }
 
+  // SPEC.md §13.3 — a no-attachment reply, for the denial/failure notices
+  // a forward attempt can produce below. Reuses EMAIL_TICKETS_CONFIG's
+  // outbound SMTP settings exactly like the wallet-to-email send above;
+  // best-effort only (a reply that fails to send is logged, not retried
+  // or surfaced to the inbound poll as an error of its own).
+  async function sendPlainReply(to, subject, textBody) {
+    if (!EMAIL_TICKETS_CONFIG.smtpHost || !EMAIL_TICKETS_CONFIG.fromAddress) return;
+    try {
+      await sendMail({
+        host: EMAIL_TICKETS_CONFIG.smtpHost,
+        port: EMAIL_TICKETS_CONFIG.smtpPort,
+        secure: EMAIL_TICKETS_CONFIG.smtpSecure,
+        user: EMAIL_TICKETS_CONFIG.smtpUser,
+        pass: EMAIL_TICKETS_CONFIG.smtpPass,
+        from: EMAIL_TICKETS_CONFIG.fromAddress,
+        to,
+        subject,
+        textBody
+      });
+    } catch (err) {
+      console.error('Could not send reply to', to, ':', err.message);
+    }
+  }
+
+  // SPEC.md §13.3 — the forward-to-transfer mechanics for one already-
+  // parsed inbound message: possession passes on by forwarding the
+  // original delivery email with the new holder CC'd, the attachment
+  // (not the reply body) carrying the credential. Mint-then-send-then-
+  // revoke, same delivery-check-before-finalizing discipline as the
+  // wallet-to-email send above — a rejected send leaves the forwarded-
+  // from credential completely untouched. Never throws for an ordinary
+  // bad forward; a denial here is a reply email, not an exception.
+  async function processEmailTicketForward(parsed) {
+    let credential = null;
+    for (const att of parsed.attachments) {
+      if (att.contentType !== 'application/json') continue;
+      let candidate;
+      try {
+        candidate = JSON.parse(att.content);
+      } catch (_) {
+        continue;
+      }
+      if (candidate && candidate.credential === 'domain-atlas-asset/1.0' && candidate.issuer && candidate.issuer.domain === DOMAIN) {
+        credential = candidate;
+        break;
+      }
+    }
+    if (!credential) return { outcome: 'ignored', reason: 'no recognized ticket attachment' };
+
+    const signatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+    if (!signatureOk) return { outcome: 'ignored', reason: 'attached credential does not check out' };
+
+    // Deliberately redacted — never names the real current holder or
+    // destination back to whoever forwarded a stale copy, same posture
+    // as /atlas/mail/check already takes for anything it won't confirm.
+    if (isRevoked(credential.id)) {
+      await sendPlainReply(parsed.from, 'Could not forward your ticket',
+        'This ticket has already moved on and can no longer be forwarded from this message.');
+      return { outcome: 'denied', reason: 'already-transferred' };
+    }
+
+    if (parsed.cc.length === 0) return { outcome: 'ignored', reason: 'no CC recipient named' };
+
+    if (parsed.cc.length > 1) {
+      await sendPlainReply(parsed.from, 'Could not forward your ticket',
+        'This ticket can only be forwarded to one new holder at a time — CC exactly one address next time.');
+      return { outcome: 'denied', reason: 'more-than-one-cc' };
+    }
+
+    const recipientEmail = parsed.cc[0];
+    const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
+    const minted = await transferUniqueAsset(discardedOwnerKey, credential);
+
+    try {
+      await sendMail({
+        host: EMAIL_TICKETS_CONFIG.smtpHost,
+        port: EMAIL_TICKETS_CONFIG.smtpPort,
+        secure: EMAIL_TICKETS_CONFIG.smtpSecure,
+        user: EMAIL_TICKETS_CONFIG.smtpUser,
+        pass: EMAIL_TICKETS_CONFIG.smtpPass,
+        from: EMAIL_TICKETS_CONFIG.fromAddress,
+        to: recipientEmail,
+        subject: (minted.asset && minted.asset.name) || 'Your ticket',
+        textBody: 'You have been sent "' + ((minted.asset && minted.asset.name) || minted.asset.class) + '" from ' + DOMAIN +
+          '.\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC\'d, is how you pass it on.',
+        attachments: [{
+          filename: 'ticket-' + minted.id.split(':').pop() + '.json',
+          contentType: 'application/json',
+          content: JSON.stringify(minted)
+        }]
+      });
+    } catch (err) {
+      revoke(minted.id, 'issuer-request');
+      await sendPlainReply(parsed.from, 'Could not forward your ticket',
+        'The new holder\'s address could not be delivered to, so this forward did not go through. Your original ticket is unaffected.');
+      return { outcome: 'failed', reason: err.message };
+    }
+
+    revoke(credential.id, 'email-transferred');
+    archiveIfAudited(credential, 'email-transferred');
+    console.log('Forwarded', credential.asset.class, credential.id, '-> delivered to', recipientEmail);
+    return { outcome: 'transferred', to: recipientEmail };
+  }
+
+  // SPEC.md §13.3's inbound half — checks the mailbox once and processes
+  // every unseen message found, then returns a short summary. Sequential
+  // by message, not parallel: a second forward naming the same credential
+  // within the same pass needs the first forward's revoke() to have
+  // already landed before it's evaluated, so isRevoked() correctly denies
+  // the replay instead of racing it. Used both by the background timer
+  // in main() below and by the admin poll-now endpoint, which needs a
+  // deterministic result to hand back rather than a fire-and-forget timer.
+  async function pollEmailTicketsOnce() {
+    if (!EMAIL_TICKETS_CONFIG.imapHost) return { skipped: true };
+    const summary = { checked: 0, transferred: 0, denied: 0, failed: 0, ignored: 0 };
+    const client = await connectImap({
+      host: EMAIL_TICKETS_CONFIG.imapHost,
+      port: EMAIL_TICKETS_CONFIG.imapPort,
+      secure: EMAIL_TICKETS_CONFIG.imapSecure,
+      user: EMAIL_TICKETS_CONFIG.imapUser,
+      pass: EMAIL_TICKETS_CONFIG.imapPass
+    });
+    try {
+      const unseen = await client.searchUnseen();
+      for (const seq of unseen) {
+        summary.checked++;
+        try {
+          const raw = await client.fetchRfc822(seq);
+          const parsed = parseMimeMessage(raw);
+          const result = await processEmailTicketForward(parsed);
+          if (result.outcome === 'transferred') summary.transferred++;
+          else if (result.outcome === 'denied') summary.denied++;
+          else if (result.outcome === 'failed') summary.failed++;
+          else summary.ignored++;
+        } catch (err) {
+          summary.failed++;
+          console.error('Email-ticket poll: message', seq, 'failed:', err.message);
+        }
+        await client.markSeen(seq);
+      }
+    } finally {
+      await client.logout();
+    }
+    return summary;
+  }
+
   const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
@@ -5692,6 +5853,28 @@ async function main() {
         return sendJson(res, 200, { status: 'email-transferred', to: recipientEmail });
       }
 
+      // Admin-gated (requireAdminAuth, above) — runs one inbound poll pass
+      // (pollEmailTicketsOnce, defined earlier in this function) right now
+      // instead of waiting for the background timer started in main()
+      // below. Doubles as this feature's own test hook: a test can call
+      // this and read back an exact summary rather than racing a real
+      // ATLAS_EMAIL_IMAP_POLL_MS interval.
+      if (req.method === 'POST' && req.url === '/atlas/admin/email-tickets/poll-now') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        if (!EMAIL_TICKETS_CONFIG.imapHost) {
+          return sendJson(res, 400, { error: 'this domain has not configured inbound email tickets (SPEC.md §13.3)' });
+        }
+        try {
+          const summary = await pollEmailTicketsOnce();
+          return sendJson(res, 200, { status: 'polled', summary });
+        } catch (err) {
+          console.error('Email-ticket poll-now failed:', err.message);
+          return sendJson(res, 502, { error: 'poll failed: ' + err.message });
+        }
+      }
+
       // POST /atlas/asset/redeem — a holder giving up their own credential,
       // no recipient involved at all: the plainest possible revocation
       // request, authorized by nothing but the holder's own signature over
@@ -7205,6 +7388,17 @@ async function main() {
   server.listen(PORT, () => {
     console.log(`Issuer + trading station (${DOMAIN}) — listening on port ${PORT}, docroot: ${DEMO_DOMAIN_A}`);
   });
+
+  // Background half of SPEC.md §13.3 — the same pollEmailTicketsOnce()
+  // the admin poll-now endpoint above calls on demand, just run on a
+  // timer here instead. Guarded on imapHost the same way outbound sending
+  // is guarded on smtpHost: starting a timer for a mailbox that was never
+  // configured would just poll nothing, forever, for no reason.
+  if (EMAIL_TICKETS_CONFIG.imapHost) {
+    setInterval(() => {
+      pollEmailTicketsOnce().catch((err) => console.error('Email-ticket background poll failed:', err.message));
+    }, EMAIL_TICKETS_CONFIG.pollIntervalMs);
+  }
 }
 
 main().catch((err) => {
