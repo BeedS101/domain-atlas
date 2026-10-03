@@ -187,6 +187,37 @@ function atlas_mail_file() {
 // reasoning as the Post Office thresholds below.
 const ATLAS_MAILBOX_CAP = 200;
 
+// Email-delivered bearer credentials (SPEC.md §13) — outbound SMTP config
+// for the mailbox named by this domain's own manifest.emailTickets.
+// intakeAddress (§13.1). Unlike issuer-server/server.js's own
+// EMAIL_TICKETS_CONFIG (read fresh from environment variables at every
+// call site), this bundle has no long-lived process to read those from —
+// same reasoning ATLAS_MAILBOX_CAP's own comment above already gives —
+// so this is a small JSON file instead, same "missing file means the
+// empty/disabled case" convention atlas_trusted_trade_peers_file() and
+// atlas_federation_blocklist_file() already use, and hand-edited by the
+// operator the same deliberate way those two are. Lives in lib/, same
+// not-web-reachable reasoning as atlas_mail_file() above. A missing
+// smtpHost means this domain has not actually turned this on yet,
+// whatever its manifest claims — every call site checks that directly
+// rather than trusting the manifest's say-so.
+function atlas_email_tickets_config_file() {
+  return __DIR__ . '/atlas-email-tickets-config.json';
+}
+function atlas_email_tickets_config() {
+  $defaults = [
+    'smtpHost' => null, 'smtpPort' => 587,
+    // 'tls' (encrypted from the first byte, e.g. port 465), 'starttls'
+    // (plain connect then upgrade, e.g. port 587 — the common case), or
+    // 'none' (test-only, see lib/smtp.php's own atlas_smtp_send_mail()).
+    'smtpSecure' => 'starttls',
+    'smtpUser' => null, 'smtpPass' => null, 'fromAddress' => null,
+  ];
+  if (!file_exists(atlas_email_tickets_config_file())) return $defaults;
+  $doc = json_decode(file_get_contents(atlas_email_tickets_config_file()), true);
+  return array_merge($defaults, is_array($doc) ? $doc : []);
+}
+
 // Asset-update store (SPEC.md §5.1.1, non-fungible only) — same "not
 // web-reachable, flock-guarded flat array" shape as atlas_mail_file()
 // above. Each entry is exactly the {id, status, reason, newCredential}
@@ -1946,6 +1977,26 @@ function ensure_well_known_files($publicKeyB64url) {
   if (!file_exists($revFile)) {
     file_put_contents($revFile, json_encode(['revoked' => []], JSON_PRETTY_PRINT), LOCK_EX);
   }
+}
+
+// SPEC.md §13's "entering the system": a credential delivered by email has
+// no wallet on the receiving end, so there is no real public key for
+// owner.publicKey to name — but SPEC.md §5's credential shape still
+// requires the field. Generating a keypair and keeping only the public
+// half satisfies the shape without pretending anyone holds a working
+// private key for it: the private key is never written anywhere, never
+// returned to a caller, and nothing in SPEC.md §13.3's forward-to-transfer
+// or §13.4's redemption ever checks a signature against this field again —
+// authority over an email-delivered credential is bearer-only from this
+// point on (possession of the attachment, or the short token), never this
+// key. Mirrors issuer-server/server.js's generateDiscardedOwnerPublicKey().
+function generate_discarded_owner_public_key() {
+  $pair = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
+  if ($pair === false) throw new Exception('could not generate a discarded keypair: ' . openssl_error_string());
+  $details = openssl_pkey_get_details($pair);
+  $x = str_pad($details['ec']['x'], 32, "\x00", STR_PAD_LEFT);
+  $y = str_pad($details['ec']['y'], 32, "\x00", STR_PAD_LEFT);
+  return b64url_encode("\x04" . $x . $y);
 }
 
 // SPEC.md §5.11's single-domain stand-in for "a second, independent
