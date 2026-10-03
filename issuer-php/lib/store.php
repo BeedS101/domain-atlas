@@ -559,6 +559,26 @@ function atlas_pending_trades_file() {
   return __DIR__ . '/atlas-pending-trades-store.json';
 }
 
+// Relay-settle result store (SPEC.md §7 v1.35), keyed by tradeId — makes
+// POST /atlas/trade/relay-settle idempotent. Without this, a relaying
+// station that genuinely settled a foreign leg but never received the
+// HTTP response (a dropped connection, a timeout after this domain
+// already committed) had no way to tell that apart from the settle
+// never having happened at all — atlas_relay_trade_settle()'s own retry
+// treated BOTH the same way, which meant a caller that then (wrongly)
+// assumed failure could revoke the very mail gift this domain just
+// delivered for real. Recording the result here lets a retry of the
+// EXACT SAME (tradeId, credentialId) replay what already happened
+// instead of erroring on "already revoked" or re-mutating anything —
+// see atlas/trade/relay-settle.php's own comment on where this is
+// consulted. Same flock-guarded flat-array shape as every other store
+// in this file; never pruned, same reasoning as atlas_asset_updates_file()
+// above (a small, slow-growing demo-scale log). Mirrors issuer-server/
+// server.js's RELAY_SETTLE_RESULTS_FILE.
+function atlas_relay_settle_results_file() {
+  return __DIR__ . '/atlas-relay-settle-results-store.json';
+}
+
 // World drops (task #250, SPEC.md §5.5): "others can see it and pick it up"
 // needs a world to actually host and mutate shared state — this is that
 // state, one flat array of currently-live drops across every world this
@@ -2239,6 +2259,39 @@ function append_asset_update($update) {
   $doc = json_decode($data, true);
   if (!is_array($doc)) $doc = ['updates' => []];
   $doc['updates'][] = $update;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// ---------- relay-settle results (same flock-guarded shape as asset updates above) ----------
+
+function find_relay_settle_result($tradeId, $credentialId) {
+  $fh = fopen(atlas_relay_settle_results_file(), 'c+');
+  if ($fh === false) return null;
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  $results = is_array($doc) && isset($doc['results']) ? $doc['results'] : [];
+  foreach ($results as $r) {
+    if ($r['tradeId'] === $tradeId && $r['credentialId'] === $credentialId) return $r;
+  }
+  return null;
+}
+
+function record_relay_settle_result($tradeId, $credentialId, $received, $remainder) {
+  $file = atlas_relay_settle_results_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['results' => []];
+  $doc['results'][] = ['tradeId' => $tradeId, 'credentialId' => $credentialId, 'received' => $received, 'remainder' => $remainder, 'settledAt' => gmdate('Y-m-d\TH:i:s\Z')];
   ftruncate($fh, 0);
   rewind($fh);
   fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));

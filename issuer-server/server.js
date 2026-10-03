@@ -318,6 +318,21 @@ const TRADINGSTATION_MEMBERS_FILE = path.join(STATE_DIR, 'atlas-tradingstation-m
 // (pruned lazily wherever this store is read for matching, not on a
 // timer — same "no background sweep" simplicity as the rest of this demo).
 const PENDING_TRADES_FILE = path.join(STATE_DIR, 'atlas-pending-trades-store.json');
+// Relay-settle results (SPEC.md §7 v1.35), keyed by tradeId — makes
+// /atlas/trade/relay-settle idempotent. Without this, a relaying station
+// that genuinely settled a foreign leg but never received the HTTP
+// response (a dropped connection, a timeout after this domain already
+// committed) had no way to tell that apart from the settle never having
+// happened at all — relayTradeSettle()'s own retry treated BOTH the same
+// way, which meant a caller that then (wrongly) assumed failure could
+// revoke the very mail gift this domain just delivered for real. Recording
+// the result here lets a retry of the EXACT SAME (tradeId, credentialId)
+// replay what already happened instead of erroring on "already revoked"
+// or re-mutating anything — see the /atlas/trade/relay-settle route's own
+// comment on where this is consulted. Same plain-read-write shape as
+// every other store in this file; never pruned, same reasoning as
+// ASSET_UPDATES_FILE right above (a small, slow-growing demo-scale log).
+const RELAY_SETTLE_RESULTS_FILE = path.join(STATE_DIR, 'atlas-relay-settle-results-store.json');
 // World drops (task #250, SPEC.md §5.5): the "others can see it and pick it
 // up" half of dropping an item, deliberately left undone when self-only
 // dropping first shipped (see extension/wallet.js's dropItem() comment) —
@@ -2204,6 +2219,23 @@ function appendAssetUpdate(update) {
   fs.writeFileSync(ASSET_UPDATES_FILE, JSON.stringify(doc, null, 2));
 }
 
+// Relay-settle result store (SPEC.md §7 v1.35) — see
+// RELAY_SETTLE_RESULTS_FILE's own comment for why this exists. One entry
+// per tradeId actually settled via /atlas/trade/relay-settle, read/append
+// shape identical to the stores above.
+function readRelaySettleResults() {
+  if (!fs.existsSync(RELAY_SETTLE_RESULTS_FILE)) return { results: [] };
+  return JSON.parse(fs.readFileSync(RELAY_SETTLE_RESULTS_FILE, 'utf8'));
+}
+function findRelaySettleResult(tradeId, credentialId) {
+  return readRelaySettleResults().results.find((r) => r.tradeId === tradeId && r.credentialId === credentialId) || null;
+}
+function recordRelaySettleResult(tradeId, credentialId, received, remainder) {
+  const doc = readRelaySettleResults();
+  doc.results.push({ tradeId, credentialId, received, remainder, settledAt: new Date().toISOString() });
+  fs.writeFileSync(RELAY_SETTLE_RESULTS_FILE, JSON.stringify(doc, null, 2));
+}
+
 // Merges `patch` onto `target` (never mutates either): a key set to any
 // value but `null` is added/overwritten same as a plain object spread, and
 // a key set to `null` is removed from the result entirely rather than
@@ -3578,23 +3610,51 @@ async function main() {
   // trade's other side offered). `mailDeliverAttachedAsset` is optional —
   // see the /atlas/trade/relay-settle route's own comment on when
   // /atlas/trade/claim needs to pass it.
+  //
+  // Retries ONCE on any failure, with the exact same attestation, before
+  // giving up (SPEC.md §7 v1.35). A dropped connection or a timeout looks
+  // identical whether `domain` never got the request at all or whether it
+  // got it, ran it, and committed it, only for the RESPONSE to be lost —
+  // and those two cases need opposite handling: the first is safe to
+  // retry or give up on, the second must never be treated as "nothing
+  // happened," because it already mailed the poster their payment and
+  // revoking that to issue a refund (which /atlas/trade/claim's own catch
+  // block used to do unconditionally) strands a real, legitimately
+  // delivered gift behind a permanent "revoked by issuer." The retry is
+  // safe either way because the route handler on the other end is now
+  // idempotent for this exact (tradeId, credentialId) pair: if the first
+  // attempt never landed, this one runs the settle for the first time; if
+  // it did land, this one just replays the already-recorded result
+  // instead of re-mutating anything. Only if BOTH attempts fail does the
+  // caller fall back to treating it as a genuine failure.
   async function relayTradeSettle(domain, tradeId, credential, spendQuantity, newOwnerPublicKey, mailDeliverAttachedAsset) {
     const attestation = { relayingDomain: DOMAIN, tradeId, credentialId: credential.id, spendQuantity, newOwnerPublicKey };
     if (mailDeliverAttachedAsset) attestation.mailDeliverAttachedAsset = mailDeliverAttachedAsset;
     const attestationSignature = await sign(attestation);
-    let res;
+    const attempt = async () => {
+      let res;
+      try {
+        res = await fetch(baseUrl(domain) + '/atlas/trade/relay-settle', {
+          method: 'POST',
+          headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ credential, attestation, attestationSignature })
+        });
+      } catch (err) {
+        throw new Error('could not reach ' + domain + ' (' + ((err.cause && err.cause.message) ? err.cause.message : err.message) + ')');
+      }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || (domain + ' refused the trade settle (HTTP ' + res.status + ')'));
+      return body;
+    };
     try {
-      res = await fetch(baseUrl(domain) + '/atlas/trade/relay-settle', {
-        method: 'POST',
-        headers: { ...OUTBOUND_REQUEST_HEADERS, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credential, attestation, attestationSignature })
-      });
-    } catch (err) {
-      throw new Error('could not reach ' + domain + ' (' + ((err.cause && err.cause.message) ? err.cause.message : err.message) + ')');
+      return await attempt();
+    } catch (firstErr) {
+      try {
+        return await attempt();
+      } catch (secondErr) {
+        throw new Error(firstErr.message + ' (retried once, also failed: ' + secondErr.message + ')');
+      }
     }
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || (domain + ' refused the trade settle (HTTP ' + res.status + ')'));
-    return body;
   }
 
   // Task #203: sums an owner's VERIFIED current holdings of one class, off
@@ -6019,13 +6079,6 @@ async function main() {
 
         if (!isTrustedTradePeer(relayingDomain)) return sendJson(res, 403, { error: 'this domain does not accept trade relays from ' + relayingDomain });
 
-        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that balance has already been revoked' });
-        const lock = findSuspension(credential.id);
-        if (!lock || lock.reason !== 'trade-lock:' + tradeId) return sendJson(res, 409, { error: 'that balance was never locked for this trade, or its lock already expired — relay-lock it again first' });
-        if (isExpired(credential)) return sendJson(res, 400, { error: 'that balance has already expired' });
-        const isUnique = credential.asset && credential.asset.fungible === false;
-        if (!isUnique && spendQuantity > credential.quantity) return sendJson(res, 400, { error: 'spendQuantity exceeds this balance\'s own quantity' });
-
         const ownSignatureOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!ownSignatureOk) return sendJson(res, 400, { error: 'credential signature does not check out against this domain\'s own key' });
 
@@ -6037,6 +6090,33 @@ async function main() {
         }
         const attestationOk = await verifyDomainSignature(relayingDomainKey, attestation, attestationSignature);
         if (!attestationOk) return sendJson(res, 400, { error: relayingDomain + '\'s attestation signature does not check out' });
+
+        // Idempotent replay (SPEC.md §7 v1.35), checked only once the
+        // attestation above is confirmed genuinely signed by a trusted
+        // relayingDomain for this exact (tradeId, credentialId) pair —
+        // deliberately AFTER authentication, not before, so replaying a
+        // past result is never something an unauthenticated caller can
+        // trigger. A relaying domain that already got this exact pair
+        // settled — but never received the response, e.g. a dropped
+        // connection — retries with the SAME attestation; without this
+        // check that retry would fall straight into "that balance has
+        // already been revoked" below, indistinguishable from a genuine
+        // failure, and relayTradeSettle()'s own retry has no way to
+        // recover the actual result to relay onward. Replaying the
+        // recorded result instead means a lost response is actually
+        // recoverable rather than looking identical to "never happened."
+        const existingResult = findRelaySettleResult(tradeId, credential.id);
+        if (existingResult) {
+          console.log('Trade balance relay-settle REPLAYED (idempotent retry) for', relayingDomain + ':', credential.asset.class, credential.id);
+          return sendJson(res, 200, { status: 'settled', received: existingResult.received, remainder: existingResult.remainder });
+        }
+
+        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that balance has already been revoked' });
+        const lock = findSuspension(credential.id);
+        if (!lock || lock.reason !== 'trade-lock:' + tradeId) return sendJson(res, 409, { error: 'that balance was never locked for this trade, or its lock already expired — relay-lock it again first' });
+        if (isExpired(credential)) return sendJson(res, 400, { error: 'that balance has already expired' });
+        const isUnique = credential.asset && credential.asset.fungible === false;
+        if (!isUnique && spendQuantity > credential.quantity) return sendJson(res, 400, { error: 'spendQuantity exceeds this balance\'s own quantity' });
 
         // mailDeliverAttachedAsset (optional, SPEC.md §7's "mail delivery
         // for the absent party" case): a credential the trade's OTHER
@@ -6070,6 +6150,11 @@ async function main() {
 
         const settled = await fulfillTradeSideSettlement(credential, spendQuantity, newOwnerPublicKey, mailNotice);
         unsuspend(credential.id);
+        // Recorded BEFORE responding, so a response lost in transit from
+        // this exact point onward is still recoverable by a retry (the
+        // idempotent-replay check above) rather than looking like the
+        // settle itself never ran.
+        recordRelaySettleResult(tradeId, credential.id, settled.received, settled.remainder);
         console.log('Trade balance relay-settled for', relayingDomain + ':', credential.asset.class, credential.id);
         return sendJson(res, 200, { status: 'settled', received: settled.received, remainder: settled.remainder });
       }

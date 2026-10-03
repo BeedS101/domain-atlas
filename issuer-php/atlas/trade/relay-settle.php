@@ -46,21 +46,6 @@ if (!atlas_is_trusted_trade_peer($relayingDomain)) {
   send_json(403, ['error' => 'this domain does not accept trade relays from ' . $relayingDomain]);
 }
 
-if (is_revoked($credential['id'])) {
-  send_json(400, ['error' => 'that balance has already been revoked']);
-}
-$lock = find_suspension($credential['id']);
-if (!$lock || $lock['reason'] !== 'trade-lock:' . $tradeId) {
-  send_json(409, ['error' => 'that balance was never locked for this trade, or its lock already expired — relay-lock it again first']);
-}
-if (is_expired($credential)) {
-  send_json(400, ['error' => 'that balance has already expired']);
-}
-$isUnique = isset($credential['asset']['fungible']) && $credential['asset']['fungible'] === false;
-if (!$isUnique && $spendQuantity > $credential['quantity']) {
-  send_json(400, ['error' => 'spendQuantity exceeds this balance\'s own quantity']);
-}
-
 $ownSignatureOk = verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential));
 if (!$ownSignatureOk) {
   send_json(400, ['error' => "credential signature does not check out against this domain's own key"]);
@@ -74,6 +59,39 @@ try {
 $attestationOk = verify_domain_signature($relayingDomainKey, $attestation, $attestationSignature);
 if (!$attestationOk) {
   send_json(400, ['error' => $relayingDomain . "'s attestation signature does not check out"]);
+}
+
+// Idempotent replay (SPEC.md §7 v1.35), checked only once the
+// attestation above is confirmed genuinely signed by a trusted
+// $relayingDomain for this exact (tradeId, credentialId) pair —
+// deliberately AFTER authentication, not before, so replaying a past
+// result is never something an unauthenticated caller can trigger. A
+// relaying domain that already got this exact pair settled — but never
+// received the response, e.g. a dropped connection — retries with the
+// SAME attestation; without this check that retry would fall straight
+// into "that balance has already been revoked" below, indistinguishable
+// from a genuine failure, and atlas_relay_trade_settle()'s own retry has
+// no way to recover the actual result to relay onward. Replaying the
+// recorded result instead means a lost response is actually recoverable
+// rather than looking identical to "never happened."
+$existingResult = find_relay_settle_result($tradeId, $credential['id']);
+if ($existingResult) {
+  send_json(200, ['status' => 'settled', 'received' => $existingResult['received'], 'remainder' => $existingResult['remainder']]);
+}
+
+if (is_revoked($credential['id'])) {
+  send_json(400, ['error' => 'that balance has already been revoked']);
+}
+$lock = find_suspension($credential['id']);
+if (!$lock || $lock['reason'] !== 'trade-lock:' . $tradeId) {
+  send_json(409, ['error' => 'that balance was never locked for this trade, or its lock already expired — relay-lock it again first']);
+}
+if (is_expired($credential)) {
+  send_json(400, ['error' => 'that balance has already expired']);
+}
+$isUnique = isset($credential['asset']['fungible']) && $credential['asset']['fungible'] === false;
+if (!$isUnique && $spendQuantity > $credential['quantity']) {
+  send_json(400, ['error' => 'spendQuantity exceeds this balance\'s own quantity']);
 }
 
 // mailDeliverAttachedAsset (optional, SPEC.md §7's "mail delivery for the
@@ -108,4 +126,9 @@ if ($mailDeliverAttachedAsset !== null) {
 
 $settled = fulfill_trade_side_settlement($kp, $credential, $spendQuantity, $newOwnerPublicKey, $mailNotice);
 atlas_unsuspend($credential['id']);
+// Recorded BEFORE responding, so a response lost in transit from this
+// exact point onward is still recoverable by a retry (the
+// idempotent-replay check above) rather than looking like the settle
+// itself never ran.
+record_relay_settle_result($tradeId, $credential['id'], $settled['received'], $settled['remainder']);
 send_json(200, ['status' => 'settled', 'received' => $settled['received'], 'remainder' => $settled['remainder']]);

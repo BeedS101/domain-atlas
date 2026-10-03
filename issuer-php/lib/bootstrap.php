@@ -402,6 +402,22 @@ function atlas_relay_trade_lock($kp, $domain, $tradeId, $credential, $expiresAt)
 // comment explains why that's always enough regardless of what the
 // trade's other side offered). $mailDeliverAttachedAsset is optional —
 // see relay-settle.php's own comment on when claim.php needs to pass it.
+// Retries ONCE on any failure, with the exact same attestation, before
+// giving up (SPEC.md §7 v1.35). A dropped connection or a timeout looks
+// identical whether $domain never got the request at all or whether it
+// got it, ran it, and committed it, only for the RESPONSE to be lost —
+// and those two cases need opposite handling: the first is safe to retry
+// or give up on, the second must never be treated as "nothing happened,"
+// because it already mailed the poster their payment and revoking that
+// to issue a refund (which atlas/trade/claim.php's own catch block used
+// to do unconditionally) strands a real, legitimately delivered gift
+// behind a permanent "revoked by issuer." The retry is safe either way
+// because relay-settle.php is now idempotent for this exact (tradeId,
+// credentialId) pair: if the first attempt never landed, this one runs
+// the settle for the first time; if it did land, this one just replays
+// the already-recorded result instead of re-mutating anything. Only if
+// BOTH attempts fail does the caller fall back to treating it as a
+// genuine failure.
 function atlas_relay_trade_settle($kp, $domain, $tradeId, $credential, $spendQuantity, $newOwnerPublicKey, $mailDeliverAttachedAsset = null) {
   $attestation = [
     'relayingDomain' => atlas_domain(),
@@ -412,15 +428,26 @@ function atlas_relay_trade_settle($kp, $domain, $tradeId, $credential, $spendQua
   ];
   if ($mailDeliverAttachedAsset !== null) $attestation['mailDeliverAttachedAsset'] = $mailDeliverAttachedAsset;
   $attestationSignature = atlas_sign($kp['privateKey'], $attestation);
-  $res = atlas_http_post_json(atlas_base_url($domain) . '/atlas/trade/relay-settle', [
-    'credential' => $credential,
-    'attestation' => $attestation,
-    'attestationSignature' => $attestationSignature,
-  ]);
-  if ($res['status'] !== 200) {
-    throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade settle (HTTP ' . $res['status'] . ')'));
+  $attempt = function () use ($domain, $credential, $attestation, $attestationSignature) {
+    $res = atlas_http_post_json(atlas_base_url($domain) . '/atlas/trade/relay-settle', [
+      'credential' => $credential,
+      'attestation' => $attestation,
+      'attestationSignature' => $attestationSignature,
+    ]);
+    if ($res['status'] !== 200) {
+      throw new Exception(isset($res['body']['error']) ? $res['body']['error'] : ($domain . ' refused the trade settle (HTTP ' . $res['status'] . ')'));
+    }
+    return $res['body'];
+  };
+  try {
+    return $attempt();
+  } catch (Exception $firstErr) {
+    try {
+      return $attempt();
+    } catch (Exception $secondErr) {
+      throw new Exception($firstErr->getMessage() . ' (retried once, also failed: ' . $secondErr->getMessage() . ')');
+    }
   }
-  return $res['body'];
 }
 
 // The signed payload shape (SPEC.md §5: canonicalize({id, asset, owner,
