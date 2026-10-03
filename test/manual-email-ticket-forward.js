@@ -35,6 +35,16 @@
 //   5. Delivery-check-before-revoke on the forward path: the mail server
 //      rejecting RCPT TO for the new holder leaves the forwarded-from
 //      credential completely untouched.
+//   6. Ongoing bounce monitoring (VERP): a correlated bounce against a
+//      completed forward revokes the bounced credential (reason
+//      'bounced') and reissues an equivalent one back to whoever sent
+//      the original forward, over real SMTP, without naming the address
+//      delivery actually failed to reach.
+//   7. A bounce-shaped message naming no in-flight send at all (an
+//      unrecognized or forged Return-Path) is a silent no-op.
+//   8. A bounce arriving for a ticket already resolved some other way
+//      (forwarded on again successfully in the meantime) is a no-op too
+//      — its already-recorded status is left exactly as it was.
 //
 // Not part of the permanent suite, same reasoning as every other
 // manual-*.js script.
@@ -295,6 +305,27 @@ function buildForwardMessage(fromAddress, ccAddresses, credential) {
   });
 }
 
+// Mirrors server.js's own verpReturnPathFor() exactly — the address a
+// correlated bounce against `ticketId` would be addressed back to.
+function verpAddressFor(ticketId) {
+  const at = INTAKE_ADDRESS.indexOf('@');
+  const localPart = INTAKE_ADDRESS.slice(0, at);
+  const domainPart = INTAKE_ADDRESS.slice(at + 1);
+  return localPart + '+bounce-' + ticketId.split(':').pop() + '@' + domainPart;
+}
+// A real bounce (DSN) is a lot more elaborate than this, but
+// extractBouncedTicketId() only ever looks at the "To" header, never the
+// body — this is the minimum shape that exercises exactly that.
+function buildBounceMessage(ticketId) {
+  return buildMimeMessage({
+    from: 'mailer-daemon@relay.example',
+    to: verpAddressFor(ticketId),
+    subject: 'Undelivered Mail Returned to Sender',
+    textBody: 'Delivery to the following recipient failed permanently.',
+    attachments: []
+  });
+}
+
 function startIssuer({ port, domain, stateDir, docrootDir, extraEnv }) {
   return new Promise((resolve, reject) => {
     const proc = spawn('node', ['issuer-server/server.js'], {
@@ -425,6 +456,72 @@ function startIssuer({ port, domain, stateDir, docrootDir, extraEnv }) {
     const credential5Status = await mailCheckStatus(BASE, credential5.id);
     assert(credential5Status === null, 'expected the forwarded-from credential to be completely untouched after a rejected delivery, got: ' + JSON.stringify(credential5Status));
     console.log('PASS: rejected forward delivery left the forwarded-from credential untouched');
+
+    console.log('STEP 6: a correlated bounce (VERP) reverses a completed forward — bounced credential revoked, an equivalent one reissued to the original forwarder');
+    const ticket6 = await issueAsset(BASE, owner.publicKey, 'atlas.demo.attestation.filing');
+    await transferToEmail(BASE, ticket6, owner.kp, owner.publicKey, 'holder9@example.com');
+    const credential6 = JSON.parse(parseMimeAttachment(sessions[sessions.length - 1].data, null));
+
+    mailbox.push({ raw: buildForwardMessage('holder9@example.com', ['holder10@example.com'], credential6), seen: false });
+    const poll6a = await pollNow(BASE, admin);
+    assert(poll6a.body.summary.transferred === 1, 'expected the forward itself to transfer cleanly, got: ' + JSON.stringify(poll6a.body.summary));
+    const forwardSession6 = sessions[sessions.length - 1];
+    assert(forwardSession6.rcptTo[0] === '<holder10@example.com>', 'expected the forward to deliver to holder10, got: ' + forwardSession6.rcptTo[0]);
+    const minted6 = JSON.parse(parseMimeAttachment(forwardSession6.data, null));
+
+    const sessionsBeforeBounce6 = sessions.length;
+    mailbox.push({ raw: buildBounceMessage(minted6.id), seen: false });
+    const poll6b = await pollNow(BASE, admin);
+    assert(poll6b.body.summary.bounced === 1, 'expected exactly one bounce reversal, got: ' + JSON.stringify(poll6b.body.summary));
+
+    const minted6Status = await mailCheckStatus(BASE, minted6.id);
+    assert(minted6Status && minted6Status.status === 'revoked' && minted6Status.reason === 'bounced', 'expected the bounced credential revoked with reason "bounced", got: ' + JSON.stringify(minted6Status));
+
+    assert(sessions.length === sessionsBeforeBounce6 + 1, 'expected exactly one new SMTP session for the bounce reissue, got ' + (sessions.length - sessionsBeforeBounce6));
+    const reissueSession = sessions[sessions.length - 1];
+    assert(reissueSession.rcptTo[0] === '<holder9@example.com>', 'expected the reissue to go back to the original forwarder, got: ' + reissueSession.rcptTo[0]);
+    assert(!reissueSession.data.includes('holder10@example.com'), 'expected the reissue notice to never name the address delivery actually failed to reach');
+    const reissuedCredential = JSON.parse(parseMimeAttachment(reissueSession.data, null));
+    assert(reissuedCredential.id !== minted6.id && reissuedCredential.id !== credential6.id, 'expected the reissue to be yet another fresh mint');
+    assert(reissuedCredential.asset.class === credential6.asset.class, 'expected the reissued credential to carry the same asset class, got: ' + reissuedCredential.asset.class);
+    const reissueSigOk = await verifyCredentialSignature(reissuedCredential);
+    assert(reissueSigOk, 'expected the reissued credential\'s signature to verify against this domain\'s own published key');
+    console.log('PASS: bounce reversed — bounced credential revoked, equivalent ticket reissued to', reissueSession.rcptTo[0]);
+
+    console.log('STEP 7: a bounce-shaped message naming no in-flight send at all is a silent no-op');
+    const sessionsBeforePoll7 = sessions.length;
+    mailbox.push({ raw: buildBounceMessage('urn:atlas:asset:' + webcrypto.randomUUID()), seen: false });
+    const poll7 = await pollNow(BASE, admin);
+    assert(poll7.body.summary.ignored === 1, 'expected the unrecognized bounce to be ignored, got: ' + JSON.stringify(poll7.body.summary));
+    assert(sessions.length === sessionsBeforePoll7, 'expected an unrecognized bounce to send nothing at all, got ' + (sessions.length - sessionsBeforePoll7) + ' new SMTP session(s)');
+    console.log('PASS: bounce naming no in-flight send was a true no-op');
+
+    console.log('STEP 8: a bounce for a ticket already resolved some other way leaves its recorded status exactly as it was');
+    const ticket8 = await issueAsset(BASE, owner.publicKey, 'atlas.demo.attestation.filing');
+    await transferToEmail(BASE, ticket8, owner.kp, owner.publicKey, 'holder11@example.com');
+    const credential8 = JSON.parse(parseMimeAttachment(sessions[sessions.length - 1].data, null));
+
+    mailbox.push({ raw: buildForwardMessage('holder11@example.com', ['holder12@example.com'], credential8), seen: false });
+    const poll8a = await pollNow(BASE, admin);
+    assert(poll8a.body.summary.transferred === 1, 'expected the setup forward to transfer cleanly, got: ' + JSON.stringify(poll8a.body.summary));
+    const minted8 = JSON.parse(parseMimeAttachment(sessions[sessions.length - 1].data, null));
+
+    // minted8 moves on again, successfully, before any bounce for it ever
+    // arrives — exactly the "already resolved some other way" case.
+    mailbox.push({ raw: buildForwardMessage('holder12@example.com', ['holder13@example.com'], minted8), seen: false });
+    const poll8b = await pollNow(BASE, admin);
+    assert(poll8b.body.summary.transferred === 1, 'expected the second forward to also transfer cleanly, got: ' + JSON.stringify(poll8b.body.summary));
+    const minted8StatusBeforeBounce = await mailCheckStatus(BASE, minted8.id);
+    assert(minted8StatusBeforeBounce && minted8StatusBeforeBounce.reason === 'email-transferred', 'expected minted8 revoked as "email-transferred" by the second forward, got: ' + JSON.stringify(minted8StatusBeforeBounce));
+
+    const sessionsBeforePoll8c = sessions.length;
+    mailbox.push({ raw: buildBounceMessage(minted8.id), seen: false });
+    const poll8c = await pollNow(BASE, admin);
+    assert(poll8c.body.summary.ignored === 1, 'expected a bounce for an already-resolved ticket to be ignored, got: ' + JSON.stringify(poll8c.body.summary));
+    assert(sessions.length === sessionsBeforePoll8c, 'expected a moot bounce to send nothing at all, got ' + (sessions.length - sessionsBeforePoll8c) + ' new SMTP session(s)');
+    const minted8StatusAfterBounce = await mailCheckStatus(BASE, minted8.id);
+    assert(minted8StatusAfterBounce && minted8StatusAfterBounce.reason === 'email-transferred', 'expected the already-resolved ticket\'s status to stay exactly as it was, got: ' + JSON.stringify(minted8StatusAfterBounce));
+    console.log('PASS: bounce for an already-resolved ticket left its recorded status untouched');
 
     console.log('\nALL EMAIL-TICKET FORWARD CHECKS PASSED');
   } catch (err) {

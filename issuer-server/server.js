@@ -191,6 +191,15 @@ const EMAIL_TICKETS_CONFIG = {
   imapPass: process.env.ATLAS_EMAIL_IMAP_PASS || null,
   pollIntervalMs: parseInt(process.env.ATLAS_EMAIL_IMAP_POLL_MS || '60000', 10)
 };
+// SPEC.md §13.3's "ongoing bounce monitoring" — one entry per forward-to-
+// transfer send still in flight, keyed by the freshly minted credential's
+// own id, carrying everything a later correlated bounce needs to reverse
+// it: the full minted credential (to re-mint an equivalent replacement
+// without needing the bounced copy back) and the address that sent the
+// original forward (who the replacement goes back to). Same "not under
+// .well-known, not web-reachable" reasoning as MAIL_FILE — this is
+// server-process-only bookkeeping, not a public credential store.
+const EMAIL_TICKET_SENDS_FILE = path.join(STATE_DIR, 'atlas-email-ticket-sends-store.json');
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // one entry per asset reissue (SPEC.md §5.1.1 — non-fungible only), keyed
 // by the SUPERSEDED credential's id so /atlas/mail/check can answer "what
@@ -1931,6 +1940,67 @@ async function generateDiscardedOwnerPublicKey() {
   const pair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const rawPublic = await subtle.exportKey('raw', pair.publicKey);
   return b64url(rawPublic);
+}
+
+// SPEC.md §13.3's bounce bookkeeping (EMAIL_TICKET_SENDS_FILE's own
+// comment above explains the shape and why it exists). Same missing-file-
+// means-empty convention every other store in this file already uses.
+function readEmailTicketSends() {
+  if (!fs.existsSync(EMAIL_TICKET_SENDS_FILE)) return { sends: [] };
+  return JSON.parse(fs.readFileSync(EMAIL_TICKET_SENDS_FILE, 'utf8'));
+}
+function writeEmailTicketSends(doc) {
+  fs.writeFileSync(EMAIL_TICKET_SENDS_FILE, JSON.stringify(doc, null, 2));
+}
+function recordPendingEmailTicketSend(credential, returnToAddress) {
+  const doc = readEmailTicketSends();
+  doc.sends.push({ ticketId: credential.id, credential, returnToAddress, sentAt: new Date().toISOString() });
+  writeEmailTicketSends(doc);
+}
+function findPendingEmailTicketSend(ticketId) {
+  return readEmailTicketSends().sends.find((s) => s.ticketId === ticketId) || null;
+}
+// Removed once a bounce for this id has been handled (reversed or found
+// already moot) — the store is only ever meant to hold sends still
+// genuinely in flight, not a permanent log of every send that ever went
+// out clean.
+function removePendingEmailTicketSend(ticketId) {
+  const doc = readEmailTicketSends();
+  doc.sends = doc.sends.filter((s) => s.ticketId !== ticketId);
+  writeEmailTicketSends(doc);
+}
+
+// SPEC.md §13.3's VERP: a unique per-send envelope Return-Path so a later
+// bounce can be correlated back to the exact send that produced it,
+// without ever having to parse a bounce body (which varies too much
+// across mail servers to parse reliably). Built from this domain's own
+// configured fromAddress — `localpart+bounce-<ticketId>@domain` — rather
+// than a separate address, so the bounce is guaranteed to land in the
+// exact same mailbox pollEmailTicketsOnce() already watches, under
+// ordinary mail-provider "+" sub-addressing (the de facto standard way a
+// single mailbox receives mail sent to any tagged variant of its own
+// address).
+function verpReturnPathFor(ticketId) {
+  const at = EMAIL_TICKETS_CONFIG.fromAddress.indexOf('@');
+  const localPart = EMAIL_TICKETS_CONFIG.fromAddress.slice(0, at);
+  const domainPart = EMAIL_TICKETS_CONFIG.fromAddress.slice(at + 1);
+  return localPart + '+bounce-' + ticketId.split(':').pop() + '@' + domainPart;
+}
+// The other half of verpReturnPathFor() — recognizes one of this domain's
+// own VERP addresses among an inbound message's "To" recipients and
+// recovers the ticket id it names, or null if this message isn't a
+// correlated bounce at all.
+function extractBouncedTicketId(parsed) {
+  if (!EMAIL_TICKETS_CONFIG.fromAddress || EMAIL_TICKETS_CONFIG.fromAddress.indexOf('@') === -1) return null;
+  const at = EMAIL_TICKETS_CONFIG.fromAddress.indexOf('@');
+  const prefix = (EMAIL_TICKETS_CONFIG.fromAddress.slice(0, at) + '+bounce-').toLowerCase();
+  const suffix = ('@' + EMAIL_TICKETS_CONFIG.fromAddress.slice(at + 1)).toLowerCase();
+  for (const addr of parsed.to) {
+    if (addr.startsWith(prefix) && addr.endsWith(suffix)) {
+      return 'urn:atlas:asset:' + addr.slice(prefix.length, addr.length - suffix.length);
+    }
+  }
+  return null;
 }
 
 function ensureReviewerWellKnownFile(publicKeyB64url) {
@@ -3844,6 +3914,11 @@ async function main() {
         user: EMAIL_TICKETS_CONFIG.smtpUser,
         pass: EMAIL_TICKETS_CONFIG.smtpPass,
         from: EMAIL_TICKETS_CONFIG.fromAddress,
+        // SPEC.md §13.3's VERP — a bounce against THIS send, arriving any
+        // time after this poll pass, carries this exact Return-Path back
+        // to the mailbox pollEmailTicketsOnce() watches, letting it be
+        // correlated to `minted.id` without parsing the bounce body.
+        envelopeFrom: verpReturnPathFor(minted.id),
         to: recipientEmail,
         subject: (minted.asset && minted.asset.name) || 'Your ticket',
         textBody: 'You have been sent "' + ((minted.asset && minted.asset.name) || minted.asset.class) + '" from ' + DOMAIN +
@@ -3861,10 +3936,74 @@ async function main() {
       return { outcome: 'failed', reason: err.message };
     }
 
+    // Acceptance here only means the recipient's mail server took the
+    // message, not that it actually reached an inbox — recorded as still
+    // in flight so a bounce arriving later can still be traced back to
+    // this exact send and reversed (processInboundBounce, below).
+    recordPendingEmailTicketSend(minted, parsed.from);
     revoke(credential.id, 'email-transferred');
     archiveIfAudited(credential, 'email-transferred');
     console.log('Forwarded', credential.asset.class, credential.id, '-> delivered to', recipientEmail);
     return { outcome: 'transferred', to: recipientEmail };
+  }
+
+  // SPEC.md §13.3's "ongoing bounce monitoring" — handles one inbound
+  // message already identified (by extractBouncedTicketId, in
+  // pollEmailTicketsOnce below) as a correlated bounce against `ticketId`.
+  // A credential already resolved some other way (or with no matching
+  // in-flight record at all — a stale or forged bounce) is left alone
+  // rather than acted on, the same "only touch what's genuinely still
+  // live" posture processEmailTicketForward's own isRevoked() check above
+  // already takes.
+  async function processInboundBounce(ticketId) {
+    const pending = findPendingEmailTicketSend(ticketId);
+    if (!pending || isRevoked(ticketId)) {
+      if (pending) removePendingEmailTicketSend(ticketId);
+      return { outcome: 'ignored', reason: 'no matching in-flight send' };
+    }
+
+    revoke(ticketId, 'bounced');
+    removePendingEmailTicketSend(ticketId);
+
+    const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
+    const replacement = await transferUniqueAsset(discardedOwnerKey, pending.credential);
+
+    try {
+      await sendMail({
+        host: EMAIL_TICKETS_CONFIG.smtpHost,
+        port: EMAIL_TICKETS_CONFIG.smtpPort,
+        secure: EMAIL_TICKETS_CONFIG.smtpSecure,
+        user: EMAIL_TICKETS_CONFIG.smtpUser,
+        pass: EMAIL_TICKETS_CONFIG.smtpPass,
+        from: EMAIL_TICKETS_CONFIG.fromAddress,
+        envelopeFrom: verpReturnPathFor(replacement.id),
+        to: pending.returnToAddress,
+        subject: (replacement.asset && replacement.asset.name) || 'Your ticket',
+        // Never names the address delivery actually failed to reach —
+        // SPEC.md §13.3's own "never name the address the ticket actually
+        // went to" rule, applied here for the identical reason.
+        textBody: 'This ticket was returned to you because delivery to the address you sent it to failed.' +
+          '\n\nThe attached file is your ticket again — forwarding this email, with the new holder CC\'d, is how you pass it on.',
+        attachments: [{
+          filename: 'ticket-' + replacement.id.split(':').pop() + '.json',
+          contentType: 'application/json',
+          content: JSON.stringify(replacement)
+        }]
+      });
+    } catch (err) {
+      // The reissue itself couldn't be delivered either — nothing left to
+      // revoke back to (pending.credential's own trail already ends at
+      // `ticketId`, revoked above), so this is logged rather than retried
+      // further. Same honest limit SPEC.md §13.3 already calls out for
+      // silent spam-foldering: a mechanism built on bounces has nothing to
+      // react to once nothing bounces back at all.
+      revoke(replacement.id, 'issuer-request');
+      console.error('Bounce reissue to', pending.returnToAddress, 'also failed:', err.message);
+      return { outcome: 'failed', reason: err.message };
+    }
+
+    console.log('Bounce reversed', ticketId, '-> reissued', replacement.id, 'back to', pending.returnToAddress);
+    return { outcome: 'bounced', to: pending.returnToAddress };
   }
 
   // SPEC.md §13.3's inbound half — checks the mailbox once and processes
@@ -3877,7 +4016,7 @@ async function main() {
   // deterministic result to hand back rather than a fire-and-forget timer.
   async function pollEmailTicketsOnce() {
     if (!EMAIL_TICKETS_CONFIG.imapHost) return { skipped: true };
-    const summary = { checked: 0, transferred: 0, denied: 0, failed: 0, ignored: 0 };
+    const summary = { checked: 0, transferred: 0, denied: 0, failed: 0, ignored: 0, bounced: 0 };
     const client = await connectImap({
       host: EMAIL_TICKETS_CONFIG.imapHost,
       port: EMAIL_TICKETS_CONFIG.imapPort,
@@ -3892,10 +4031,19 @@ async function main() {
         try {
           const raw = await client.fetchRfc822(seq);
           const parsed = parseMimeMessage(raw);
-          const result = await processEmailTicketForward(parsed);
+          // A correlated bounce (SPEC.md §13.3) is checked for before ever
+          // treating this message as a forward — a real bounce (DSN)
+          // rarely carries this domain's own ticket attachment at all, so
+          // falling through to processEmailTicketForward() for one would
+          // just land on the ordinary "no recognized ticket attachment"
+          // no-op anyway, but checking the Return-Path match first is more
+          // direct about what's actually being recognized here.
+          const bouncedTicketId = extractBouncedTicketId(parsed);
+          const result = bouncedTicketId ? await processInboundBounce(bouncedTicketId) : await processEmailTicketForward(parsed);
           if (result.outcome === 'transferred') summary.transferred++;
           else if (result.outcome === 'denied') summary.denied++;
           else if (result.outcome === 'failed') summary.failed++;
+          else if (result.outcome === 'bounced') summary.bounced++;
           else summary.ignored++;
         } catch (err) {
           summary.failed++;
