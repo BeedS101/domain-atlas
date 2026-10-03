@@ -228,6 +228,69 @@ function atlas_email_tickets_config() {
   return array_merge($defaults, is_array($doc) ? $doc : []);
 }
 
+// SPEC.md §13.3's bounce bookkeeping — one entry per forward send still
+// genuinely in flight (acceptance by the recipient's mail server isn't
+// proof of a real inbox, so a later bounce needs the original credential
+// on hand to reissue). Flock-guarded, same shape as the pending-trades
+// store above. Mirrors issuer-server/server.js's readEmailTicketSends()/
+// recordPendingEmailTicketSend()/findPendingEmailTicketSend()/
+// removePendingEmailTicketSend().
+function atlas_email_ticket_sends_file() {
+  return __DIR__ . '/atlas-email-ticket-sends-store.json';
+}
+function read_email_ticket_sends() {
+  $fh = fopen(atlas_email_ticket_sends_file(), 'r');
+  if ($fh === false) return ['sends' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return is_array($doc) ? $doc : ['sends' => []];
+}
+function record_pending_email_ticket_send($credential, $returnToAddress) {
+  $file = atlas_email_ticket_sends_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['sends' => []];
+  $doc['sends'][] = ['ticketId' => $credential['id'], 'credential' => $credential, 'returnToAddress' => $returnToAddress, 'sentAt' => gmdate('Y-m-d\TH:i:s\Z')];
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+function find_pending_email_ticket_send($ticketId) {
+  foreach (read_email_ticket_sends()['sends'] as $s) {
+    if (($s['ticketId'] ?? null) === $ticketId) return $s;
+  }
+  return null;
+}
+// Removed once a bounce for this id has been handled (reversed or found
+// already moot) — the store is only ever meant to hold sends still
+// genuinely in flight, not a permanent log of every send that ever went
+// out clean.
+function remove_pending_email_ticket_send($ticketId) {
+  $file = atlas_email_ticket_sends_file();
+  $fh = fopen($file, 'c+');
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['sends' => []];
+  $doc['sends'] = array_values(array_filter($doc['sends'], function ($s) use ($ticketId) {
+    return ($s['ticketId'] ?? null) !== $ticketId;
+  }));
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
 // Asset-update store (SPEC.md §5.1.1, non-fungible only) — same "not
 // web-reachable, flock-guarded flat array" shape as atlas_mail_file()
 // above. Each entry is exactly the {id, status, reason, newCredential}
