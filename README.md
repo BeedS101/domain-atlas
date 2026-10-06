@@ -22,6 +22,17 @@ browser, against the same public files any outside system could check.
 above against an isolated instance, for whenever the demo page's look or
 flow changes enough to make it stale.)*
 
+**Running live on two independent domains.** [evtec.co.za](https://evtec.co.za)
+(Domain A's role) and [domain-atlas.co.za](https://domain-atlas.co.za)
+(Domain B's role) are separately registered domains, each running the
+plain-PHP issuer (`issuer-php/`) on ordinary shared hosting with its own
+keypair, over real DNS and TLS. They share no database and no
+coordinating process. When something crosses between them (a world drop,
+a transfer, a federated mail message, a Trading Station settlement), the
+receiving domain fetches the originating domain's
+`/.well-known/atlas-key.json` over HTTPS and verifies the signature on
+the spot.
+
 The rest of this repository is the full prototype behind that one
 endpoint: a browser extension wallet, a spatial 3D client that renders
 issued items as visible objects in a virtual world (one illustrative
@@ -79,17 +90,13 @@ names to try it. Both run a real issuer (Domain B needs one too, for its
 own Post Office — see below); the point either way is that Domain B needs
 zero special integration with Domain A to trust what Domain A hands out.
 
-**Two of those independent domains are real.** `evtec.co.za` (playing
-Domain A's role) and `domain-atlas.co.za` (playing Domain B's role) are
-genuinely separate, independently registered domains, each running this
-project's own PHP port (`issuer-php/`) on ordinary shared hosting, each
-with its own generated keypair — over real DNS and TLS instead of
-`localhost`. World drops, direct transfer, and mail federation already
-cross that real domain boundary the same way they cross the local one,
-and Trading Station settlement does too: each domain's own trusted-peer
-allowlist (SPEC.md §7, managed from the admin panel) names the other, and
-a listing posted on one settles against a balance issued by the other.
-See "[Two genuinely separate domains, and a real message between
+**Two of those independent domains are real** (`evtec.co.za` and
+`domain-atlas.co.za`, described at the top of this file). World drops,
+direct transfer, and mail federation cross that real domain boundary the
+same way they cross the local one, and Trading Station settlement does
+too: each domain's own trusted-peer allowlist (SPEC.md §7, managed from
+the admin panel) names the other, and a listing posted on one settles
+against a balance issued by the other. See "[Two genuinely separate domains, and a real message between
 them](#two-genuinely-separate-domains-and-a-real-message-between-them)"
 below for the one interactive page (`federation-demo.html`) that already
 defaults its own second-domain field to `domain-atlas.co.za`; trading
