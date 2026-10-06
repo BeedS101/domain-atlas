@@ -9,6 +9,17 @@ it later means checking that signature, not looking anything up, and
 revoking it is one-sided and instant, nothing required from the holder's
 side.
 
+**Running live on two independent domains.** [evtec.co.za](https://evtec.co.za)
+(Domain A's role) and [domain-atlas.co.za](https://domain-atlas.co.za)
+(Domain B's role) are separately registered domains, each running the
+plain-PHP issuer (`issuer-php/`) on ordinary shared hosting with its own
+keypair, over real DNS and TLS. They share no database and no
+coordinating process. When something crosses between them (a world drop,
+a transfer, a federated mail message, a Trading Station settlement), the
+receiving domain fetches the originating domain's
+`/.well-known/atlas-key.json` over HTTPS and verifies the signature on
+the spot.
+
 **[Try the credential demo live →](https://evtec.co.za/business-demo.html)**
 No install needed — issues you a real, giftable credential on the spot,
 signed by this exact server. Try sending it to someone else while a
@@ -21,17 +32,6 @@ browser, against the same public files any outside system could check.
 *(`node tools/generate-business-demo-screenshot.js` regenerates the image
 above against an isolated instance, for whenever the demo page's look or
 flow changes enough to make it stale.)*
-
-**Running live on two independent domains.** [evtec.co.za](https://evtec.co.za)
-(Domain A's role) and [domain-atlas.co.za](https://domain-atlas.co.za)
-(Domain B's role) are separately registered domains, each running the
-plain-PHP issuer (`issuer-php/`) on ordinary shared hosting with its own
-keypair, over real DNS and TLS. They share no database and no
-coordinating process. When something crosses between them (a world drop,
-a transfer, a federated mail message, a Trading Station settlement), the
-receiving domain fetches the originating domain's
-`/.well-known/atlas-key.json` over HTTPS and verifies the signature on
-the spot.
 
 The rest of this repository is the full prototype behind that one
 endpoint: a browser extension wallet, a spatial 3D client that renders
