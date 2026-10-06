@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Email Ticket Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #6b7d87; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --amber: #8a5a00; --amber-bg: #fdf3df;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 720px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.6rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.3rem; }
+  input[type=email] {
+    font: inherit; width: 100%; padding: 0.5rem 0.65rem; border: 1px solid var(--line);
+    border-radius: 7px; margin-bottom: 0.8rem;
+  }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .card {
+    border: 1px solid var(--line); border-radius: 9px; padding: 1rem 1.1rem; background: #fbfcfd;
+    display: flex; flex-direction: column; gap: 0.6rem; margin-top: 1rem;
+  }
+  .card h3 { margin: 0; font-size: 1.05rem; }
+  .badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
+    text-transform: uppercase; padding: 0.15em 0.55em; border-radius: 999px; width: fit-content;
+    background: var(--green-bg); color: var(--green);
+  }
+  .props { font-size: 0.86rem; color: var(--muted); }
+  .props div { margin: 0.1rem 0; }
+  .result { font-size: 0.86rem; padding: 0.55rem 0.7rem; border-radius: 6px; margin-top: 0.3rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .result.warn { background: var(--amber-bg); color: var(--amber); }
+  .sent-mock { display: flex; gap: 0.9rem; align-items: center; }
+  .sent-mock img { width: 72px; height: 72px; object-fit: contain; flex: none; }
+  details.raw { font-size: 0.8rem; margin-top: 0.1rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1>Send a ticket by email</h1>
+  <p class="tag">SPEC.md §13 — a credential handed to someone with nothing but an inbox.</p>
+  <p class="lede">
+    Every other demo on this site hands a credential to a <em>wallet</em> — a public key
+    generated right here in the browser. This one doesn't: the idea is a credential that
+    reaches someone with nothing but an inbox, no install, no wallet, no app on the
+    receiving end at all. Step 1 below issues a real, signed voucher. Step 2 is a mockup
+    of what sending it looks like — this page doesn't dispatch a real email itself.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this looks like for a real business</h2>
+    <p>
+      An event ticket bought by a stranger who'll never install anything, a gift voucher
+      a customer should be able to forward to a friend with no app involved at all. The
+      issuer's signing key is all that's required — no derived keys, no custodial
+      account, no per-address identity to manage. Whoever currently holds the one valid
+      copy may act on it, the same bearer rule this site's own self-serve routes already
+      run on, just carried over email instead of a signed HTTP call.
+    </p>
+  </div>
+
+  <div class="panel">
+    <h2>Step 1 — get a demo voucher</h2>
+    <button id="issueBtn">Get my demo voucher</button>
+    <button id="resetBtn" class="secondary" type="button" style="display:none; margin-left:0.6rem;">Start over</button>
+    <p id="issueStatus" class="props" style="margin-top:0.6rem;"></p>
+    <div id="voucherCard"></div>
+  </div>
+
+  <div class="panel" id="sendPanel" style="display:none;">
+    <h2>Step 2 — send it to an inbox</h2>
+    <p class="props" style="margin-top:0;">
+      This part is a mockup: nothing is emailed anywhere, and the voucher above isn't
+      touched. It's here to show what landing in an inbox would look like, without
+      actually putting this domain's mailbox one click away from anyone on the internet.
+    </p>
+    <label for="emailInput">Recipient's email address</label>
+    <input type="email" id="emailInput" placeholder="friend@example.com">
+    <button id="sendBtn">Send the voucher</button>
+    <div id="sendResult"></div>
+  </div>
+
+  <div class="panel" id="howPanel">
+    <h2>What a live deployment does, entirely through email</h2>
+    <p class="props" style="margin-top:0;">
+      None of this runs in the mockup above — it's what this domain's real
+      <code>/atlas/asset/transfer-to-email</code> endpoint (SPEC.md §13.1) does once an
+      operator turns on outbound mail for this mailbox. The voucher is revoked and a
+      fresh one minted and emailed, only once the mail server actually accepts delivery.
+      Whoever receives it can forward that exact message on again — CC the next
+      recipient, done — and this domain's own mailbox notices on its next check and moves
+      the ticket again, the same way. A typo'd or dead address is caught before anything
+      is finalized against it; an address that bounces <em>after</em> delivery was already
+      accepted is caught too — correlated back to the exact send that produced it, and
+      returned to whoever sent it with a plain explanation, never naming where it
+      actually went. Forwarding to more than one address at once is refused outright
+      rather than guessed at.
+    </p>
+  </div>
+
+  <p class="footnote">
+    Nothing on this page is stored in a database anywhere. The voucher is a signature
+    from this domain over a set of facts — verifying it means checking that signature,
+    not looking anything up. <a href="/">Back to Neighbor Workshop</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+  // asset.thumbnail is always an absolute https:// URL (the form a real,
+  // publicly-reachable deployment serves it at) — not necessarily this
+  // page's own origin, which over plain HTTP in local development isn't
+  // https at all. Keeping only the path and resolving it against
+  // location.origin loads correctly however this page itself is served.
+  function sameOriginAssetUrl(thumbnailUrl) {
+    try {
+      return window.location.origin + new URL(thumbnailUrl).pathname;
+    } catch (err) {
+      return thumbnailUrl;
+    }
+  }
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  // Same shape as issuer-server/server.js's canonicalize() and
+  // extension/wallet.js's own copy — sorted-key JSON, no whitespace. Has to
+  // match byte-for-byte or the server's own signature check fails.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function issueAsset(ownerPublicKey, assetClass) {
+    const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
+    return res.body;
+  }
+
+  let you = null;
+  let voucher = null;
+
+  function rawDetails(credential) {
+    const shown = {
+      id: credential.id,
+      owner: credential.owner.publicKey.slice(0, 20) + '…',
+      issuer: credential.issuer.domain,
+      signature: credential.signature.slice(0, 24) + '…',
+      asset: credential.asset
+    };
+    return JSON.stringify(shown, null, 2);
+  }
+
+  function renderVoucherCard(credential) {
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML =
+      '<span class="badge">Giftable</span>' +
+      '<h3>' + credential.asset.name + '</h3>' +
+      '<div class="props">' + Object.entries(credential.asset.properties || {}).map(([k, v]) => '<div>' + k + ': ' + v + '</div>').join('') + '</div>' +
+      '<details class="raw"><summary>View raw signed credential</summary><pre></pre></details>';
+    div.querySelector('pre').textContent = rawDetails(credential);
+    document.getElementById('voucherCard').innerHTML = '';
+    document.getElementById('voucherCard').appendChild(div);
+  }
+
+  document.getElementById('issueBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('issueBtn');
+    const status = document.getElementById('issueStatus');
+    btn.disabled = true;
+    status.textContent = 'Generating a wallet keypair and requesting your voucher…';
+    try {
+      you = await genIdentity();
+      voucher = await issueAsset(you.publicKey, 'atlas.demo.email.ticket');
+      renderVoucherCard(voucher);
+      status.textContent = 'Done — issued to a fresh public key generated just now in this tab.';
+      document.getElementById('resetBtn').style.display = '';
+      document.getElementById('sendPanel').style.display = '';
+    } catch (err) {
+      status.textContent = 'Something went wrong: ' + err.message;
+      btn.disabled = false;
+    }
+  });
+
+  // Deliberately not a real send: a toggle on this page could trigger an
+  // unlimited number of real emails from this domain's own mailbox to any
+  // address typed in, with nothing to tell a human apart from a script
+  // calling the same endpoint directly. The mockup below shows what
+  // landing in an inbox looks like using only the credential this tab
+  // already issued for itself — see the "What a live deployment does"
+  // panel for what actually runs once that endpoint is wired up for real.
+  document.getElementById('sendBtn').addEventListener('click', () => {
+    const btn = document.getElementById('sendBtn');
+    const input = document.getElementById('emailInput');
+    const resultEl = document.getElementById('sendResult');
+    const email = input.value.trim();
+    if (!email || !input.checkValidity()) {
+      resultEl.innerHTML = '<div class="result err">Enter a valid email address first.</div>';
+      return;
+    }
+    btn.disabled = true;
+    input.disabled = true;
+    resultEl.innerHTML = '<div class="result">Sending…</div>';
+    setTimeout(() => {
+      resultEl.innerHTML =
+        '<div class="result ok sent-mock">' +
+          '<img src="' + sameOriginAssetUrl(voucher.asset.thumbnail) + '" alt="">' +
+          '<div>This is a mockup of what ' + escapeHtml(email) + ' would receive: this exact signed ' +
+          'credential attached as a JSON file, with this picture alongside it so a human ' +
+          'recognizes it at a glance. No real email was sent.</div>' +
+        '</div>';
+      document.getElementById('voucherCard').querySelector('.badge').textContent = 'Sent (mockup)';
+    }, 600);
+  });
+
+  // Everything here lives in page-scoped JS variables (you/voucher), so a
+  // second run-through previously meant reloading the whole page — fine
+  // alone, awkward mid-demo in front of someone else. This just re-runs
+  // that same reset without a network round trip.
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    you = null;
+    voucher = null;
+    document.getElementById('voucherCard').innerHTML = '';
+    document.getElementById('issueStatus').textContent = '';
+    document.getElementById('issueBtn').disabled = false;
+    document.getElementById('resetBtn').style.display = 'none';
+    document.getElementById('sendPanel').style.display = 'none';
+    document.getElementById('emailInput').value = '';
+    document.getElementById('emailInput').disabled = false;
+    document.getElementById('sendBtn').disabled = false;
+    document.getElementById('sendResult').innerHTML = '';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+})();
+</script>
+</body>
+</html>

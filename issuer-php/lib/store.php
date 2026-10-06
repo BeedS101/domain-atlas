@@ -1739,6 +1739,23 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'com.example.issuedFor' => 'business demo',
     ],
   ],
+  // SPEC.md §13's email-delivered bearer credential demo
+  // (demo-domain-b/email-ticket-demo.html) — eligible the same way
+  // atlas.demo.coupon above already is: fungible: false and no
+  // tradeScope override (so it defaults to 'local'), the two conditions
+  // §13.1 requires before a class can be offered through
+  // /atlas/asset/transfer-to-email at all. Reuses the ring model/
+  // thumbnail already on hand for demo-domain-b rather than commissioning
+  // new art. Mirrors issuer-server/server.js's ASSET_CATALOG entry of the
+  // same name.
+  'atlas.demo.email.ticket' => [
+    'name' => 'Workshop Visitor Voucher', 'modelPath' => '/assets/ring.glb', 'thumbnailPath' => '/assets/ring.png',
+    'fungible' => false, 'presentation' => 'document',
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.voucherFor' => 'one free Neighbor Workshop visit',
+    ],
+  ],
   // SPEC.md §5.8's spendable balance, for the cafeteria-demo.html example.
   // 'tradeScope' => 'bound' — a top-up is meant to be spent by whoever it
   // was minted for, not gifted, traded, or consolidated away;
