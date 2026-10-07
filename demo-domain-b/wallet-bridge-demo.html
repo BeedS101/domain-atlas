@@ -47,6 +47,14 @@
   }
   ol { padding-left: 1.3rem; }
   li { margin: 0.2rem 0; }
+  .item-card {
+    display: inline-flex; align-items: center; gap: 0.8rem; margin-top: 0.9rem; padding: 0.6rem 0.9rem 0.6rem 0.6rem;
+    border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: default;
+  }
+  .item-card:hover, .item-card:focus-visible { border-color: var(--accent); background: var(--accent-bg); outline: none; }
+  .item-card img { width: 56px; height: 56px; object-fit: contain; border-radius: 8px; background: #f1f4f6; }
+  .item-card .item-name { font-weight: 600; }
+  .item-card .item-class { font-size: 0.8rem; color: var(--muted); }
   .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
   a { color: var(--accent); }
 </style>
@@ -107,15 +115,20 @@
   <div class="panel">
     <h2>Step 3 — offer you something to keep</h2>
     <p class="props" style="margin-top:0;">
-      This domain mints a real, signed <code>atlas.wearable.ring</code> credential to your
-      own public key, then hands it to your wallet bridge. Approving the prompt does
-      <strong>not</strong> put it in your wallet yet — it only queues into your own
-      sandboxed <strong>Pending offers</strong> (wallet's Mail tab), where you can Preview
-      it, then separately Claim or Dismiss it. Check the prompt's trust box and this
-      domain skips asking next time, for this class, straight into your wallet.
+      As soon as Step 1 finds your identity, this domain mints a real, signed
+      <code>atlas.wearable.ring</code> credential to your own public key and shows it below as
+      a card. <strong>Hover the card</strong> and your wallet's own <strong>Previewer</strong>
+      opens in the corner you docked it in, drawn by the extension, not by this page — so you
+      can look the ring over <em>before</em> deciding anything. The button then hands it to
+      your wallet bridge. Approving the prompt does <strong>not</strong> put it in your wallet
+      yet — it only queues into your own sandboxed <strong>Pending offers</strong> (wallet's
+      Mail tab), where you can Preview it again, then separately Claim or Dismiss it. Check
+      the prompt's trust box and this domain skips asking next time, for this class, straight
+      into your wallet.
     </p>
     <button id="offerBtn" type="button" disabled>Offer me a collectible</button>
     <div id="offerStatus"></div>
+    <div id="itemCardHolder"></div>
   </div>
 
   <p class="footnote">
@@ -137,6 +150,7 @@
   const offerBtn = document.getElementById('offerBtn');
   const offerStatus = document.getElementById('offerStatus');
   const noExtensionPanel = document.getElementById('noExtensionPanel');
+  const itemCardHolder = document.getElementById('itemCardHolder');
 
   let knownPublicKey = null;
 
@@ -165,6 +179,56 @@
     });
   }
 
+  // The minted ring as a card on the page. Hovering (or keyboard-focusing)
+  // it asks the wallet to show its Previewer for this credential
+  // (SPEC.md §3.8.5); leaving hides it. The wallet only previews classes
+  // this domain's manifest lists under walletBridge.offer, and drops the
+  // panel on its own after a short while unless this keeps asking, so a
+  // mousemove re-request keeps it up while the pointer is over the card.
+  function showItemCard(credential) {
+    const asset = credential.asset || {};
+    itemCardHolder.textContent = '';
+    const card = document.createElement('div');
+    card.className = 'item-card';
+    card.id = 'itemCard';
+    card.dataset.credentialId = credential.id;
+    card.tabIndex = 0;
+    if (typeof asset.thumbnail === 'string' && asset.thumbnail) {
+      const img = document.createElement('img');
+      img.alt = '';
+      // The credential's thumbnail is an absolute URL on the issuing
+      // domain; load it from this page's own origin so it shows the same
+      // on a plain-http local run.
+      try { img.src = window.location.origin + new URL(asset.thumbnail).pathname; } catch (err) { img.src = asset.thumbnail; }
+      card.appendChild(img);
+    }
+    const text = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'item-name';
+    name.textContent = asset.name || asset.class;
+    const cls = document.createElement('div');
+    cls.className = 'item-class';
+    cls.textContent = asset.class + ' · hover for a preview';
+    text.appendChild(name);
+    text.appendChild(cls);
+    card.appendChild(text);
+
+    let throttle = 0;
+    const show = () => {
+      const now = Date.now();
+      if (now - throttle < 1000) return;
+      throttle = now;
+      window.atlasWallet.previewAsset(credential);
+    };
+    const hide = () => { throttle = 0; window.atlasWallet.hidePreview(); };
+    card.addEventListener('mouseenter', show);
+    card.addEventListener('mousemove', show);
+    card.addEventListener('mouseleave', hide);
+    card.addEventListener('focus', show);
+    card.addEventListener('blur', hide);
+    itemCardHolder.appendChild(card);
+  }
+
   waitForBridge(1500).then((found) => {
     if (!found) {
       noExtensionPanel.style.display = 'block';
@@ -172,6 +236,34 @@
     }
     checkBtn.disabled = false;
   });
+
+  // The ring waiting to be offered. Minted once per identity, before
+  // the visitor decides anything, so its card can be previewed first; the
+  // Offer button then hands this same credential to the wallet bridge.
+  let preparedRing = null;
+
+  async function prepareRing() {
+    if (preparedRing && preparedRing.ownerKey === knownPublicKey) {
+      offerBtn.disabled = false;
+      return;
+    }
+    offerBtn.disabled = true;
+    statusBox(offerStatus, 'info', 'Minting a real ring for your key…');
+    try {
+      const issueRes = await fetch('/atlas/asset/issue', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ownerPublicKey: knownPublicKey, assetClass: 'atlas.wearable.ring' })
+      });
+      const credential = await issueRes.json();
+      if (!issueRes.ok) throw new Error(credential.error || ('mint failed: ' + issueRes.status));
+      preparedRing = { ownerKey: knownPublicKey, credential };
+      showItemCard(credential);
+      statusBox(offerStatus, 'info', 'A real ring is minted for your key and waiting below. Hover its card to preview it in your wallet, then offer it.');
+      offerBtn.disabled = false;
+    } catch (err) {
+      statusBox(offerStatus, 'err', 'Could not mint the ring: ' + err.message);
+    }
+  }
 
   checkBtn.addEventListener('click', async () => {
     checkBtn.disabled = true;
@@ -190,7 +282,7 @@
       knownPublicKey = result.publicKey;
       statusBox(checkStatus, 'ok', 'Active identity: <code>' + result.publicKey.slice(0, 24) + '…</code>' + rawDetails('Raw result', result));
       signBtn.disabled = false;
-      offerBtn.disabled = false;
+      await prepareRing();
     }
     checkBtn.disabled = false;
   });
@@ -221,30 +313,34 @@
 
   offerBtn.addEventListener('click', async () => {
     offerBtn.disabled = true;
-    statusBox(offerStatus, 'info', 'Minting a real credential, then handing it to your wallet bridge…');
-    if (!knownPublicKey) {
-      statusBox(offerStatus, 'err', 'Check your wallet in Step 1 first — there’s no public key to mint this to yet.');
-      offerBtn.disabled = false;
+    if (!knownPublicKey || !preparedRing) {
+      statusBox(offerStatus, 'err', 'Check your wallet in Step 1 first — there’s no ring minted for your key yet.');
       return;
     }
+    statusBox(offerStatus, 'info', 'Handing the ring to your wallet bridge…');
+    const credential = preparedRing.credential;
     try {
-      const issueRes = await fetch('/atlas/asset/issue', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ownerPublicKey: knownPublicKey, assetClass: 'atlas.wearable.ring' })
-      });
-      const credential = await issueRes.json();
-      if (!issueRes.ok) throw new Error(credential.error || ('mint failed: ' + issueRes.status));
+      window.atlasWallet.hidePreview();
       const result = await window.atlasWallet.offerAsset(credential);
+      let done = false;
       if (!result.allowed) {
         statusBox(offerStatus, 'err', 'Refused with no prompt — "atlas.wearable.ring" isn’t on this domain’s offer whitelist (it is, so this means something’s off).');
       } else if (!result.result) {
-        statusBox(offerStatus, 'info', 'Nothing was queued — denied at the prompt, dismissed, or it timed out.');
+        statusBox(offerStatus, 'info', 'Nothing was queued — denied at the prompt, dismissed, or it timed out. The ring is still here if you want to offer it again.');
       } else if (result.result.claimed) {
         statusBox(offerStatus, 'ok', 'Already in your wallet — this domain is on your trusted offer-domains list for this class, so it skipped straight past the prompt and the sandbox. Check your Inventory.' + rawDetails('Minted credential', credential));
+        done = true;
       } else if (result.result.queued) {
         statusBox(offerStatus, 'ok', 'Queued. Open the wallet, go to Mail → Pending offers, click Preview to look it over, then Claim it (or Dismiss it) — it’s not in your wallet yet.' + rawDetails('Minted credential', credential));
+        done = true;
       } else {
         statusBox(offerStatus, 'err', 'Unexpected result shape.' + rawDetails('Raw result', result));
+      }
+      if (done) {
+        // Offered: this ring is spent. "Check my wallet" again mints another.
+        preparedRing = null;
+        itemCardHolder.textContent = '';
+        return;
       }
     } catch (err) {
       statusBox(offerStatus, 'err', 'Something went wrong: ' + err.message);

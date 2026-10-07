@@ -114,6 +114,29 @@
       }
       const result = await sendBridgeRequest('offerAsset', credential, 180000, { allowed: false, result: null });
       return (result && typeof result === 'object') ? result : { allowed: false, result: null };
+    },
+
+    // SPEC.md §3.8.5 — asks the wallet to show a credential this page
+    // already holds in its own preview panel (drawn by the extension, not
+    // this page). Same class gate as offerAsset (the domain's
+    // policy.walletBridge.offer whitelist); no confirmation, since it is
+    // display-only. Resolves { allowed, shown }. The panel hides itself
+    // after a short inactivity limit unless this is called again, so a
+    // hover handler should simply call it on mouseenter/mousemove.
+    // Never throws.
+    async previewAsset(credential) {
+      if (!credential || typeof credential !== 'object' || credential.credential !== 'domain-atlas-asset/1.0' ||
+          !credential.asset || typeof credential.asset.class !== 'string' || !credential.asset.class) {
+        return { allowed: false, shown: false };
+      }
+      const result = await sendBridgeRequest('previewAsset', credential, 4000, { allowed: false, shown: false });
+      return (result && typeof result === 'object') ? result : { allowed: false, shown: false };
+    },
+
+    // SPEC.md §3.8.5 — hides whatever preview this page last showed.
+    async hidePreview() {
+      await sendBridgeRequest('hidePreview', undefined, 2000, { allowed: true });
+      return { hidden: true };
     }
   };
 })();

@@ -104,6 +104,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ publicKey: null });
     });
     return true;
+  } else if (message && message.type === 'domain-atlas-bridge-preview-dock') {
+    // SPEC.md §3.8.5 — which screen corner the visitor docked the world
+    // Previewer in; content.js puts a page-supplied preview in the same one.
+    AtlasWallet.getPreviewerWindowSettings().then((settings) => {
+      sendResponse({ dock: settings.dock });
+    }).catch(() => {
+      sendResponse({ dock: 'bottom-left' });
+    });
+    return true;
   } else if (message && message.type === 'domain-atlas-bridge-offer-trusted') {
     // SPEC.md §3.8.3 — content.js already checked message.credential's
     // asset.class against this page's own effective policy.walletBridge.

@@ -201,6 +201,20 @@ which registers a local admin identity on first use and signs the call
 for you. Then click **Re-verify wallet** again — the item flips to ✗,
 reason "revoked by issuer."
 
+**A plain page talking to the wallet (§3.8).** With Neighbor Workshop's
+issuer running on port 8002 (see below), open
+`http://localhost:8002/wallet-bridge-demo.html`: an ordinary page, no
+spatial world, asks the extension's real wallet for the active identity,
+for a signature, and finally offers it a freshly minted ring that lands in
+the Pending offers tray rather than the wallet. The ring is minted as soon
+as the identity is found and shown as a card on the page, so you can hover
+it and see the wallet's own Previewer open in the corner you docked it in
+before deciding whether to offer it (`atlasWallet.previewAsset()`, §3.8.5 —
+drawn by the extension, labelled as a preview from the page and not in your
+wallet, and gated by the same `walletBridge.offer` class whitelist). Tests:
+`test/manual-demo-domain-b-wallet-bridge.js` and
+`test/manual-page-wallet-bridge-preview.js`.
+
 **Per-page discovery and anchors (§3.5) — a plain page pointing at one exact
 spot instead of the domain's front door.** Everything above enters through
 Example Plaza's own default entry point, because `index.html` never says

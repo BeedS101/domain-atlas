@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Domain Atlas — preview</title>
+<style>
+  /* SPEC.md §3.8.5 — a page-supplied asset preview. Loaded into a
+     display-only iframe by content.js (showBridgePreview()); everything on
+     screen is written by preview-bridge.js with textContent, never as
+     markup. Same look as the world Previewer in viewer.html. */
+  html, body { margin: 0; background: transparent; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; }
+  #panel {
+    background: rgba(20,31,38,0.94); border: 1px solid #2c3c44; border-radius: 10px;
+    overflow: hidden; width: 240px; color: #d7e0e4; line-height: 1.45;
+  }
+  #header {
+    padding: 4px 8px; border-bottom: 1px solid #2c3c44; background: rgba(14,22,27,0.6);
+    font-size: 11px; color: #a9b8bf; font-weight: 600;
+  }
+  #body { padding: 8px 10px; }
+  .name { font-weight: 600; margin-bottom: 2px; overflow-wrap: anywhere; }
+  .meta { font-size: 11px; color: #a9b8bf; margin-bottom: 6px; overflow-wrap: anywhere; }
+  .note {
+    font-size: 11px; color: #e8c766; margin-bottom: 6px; padding: 3px 6px;
+    border-radius: 4px; background: rgba(232, 199, 102, 0.12); display: inline-block;
+  }
+  .thumb {
+    display: block; max-width: 100%; max-height: 100px; object-fit: contain;
+    margin-bottom: 8px; border-radius: 6px; background: rgba(0,0,0,0.2);
+  }
+  .props { font-size: 11px; margin-top: 4px; }
+  .props > div { margin-bottom: 2px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+  <div id="panel">
+    <div id="header">Previewer</div>
+    <div id="body"></div>
+  </div>
+  <script src="preview-bridge.js"></script>
+</body>
+</html>

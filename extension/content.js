@@ -206,7 +206,133 @@
       const result = await requestBridgeConfirmation('offer', assetClass, credential);
       return { allowed: true, result };
     }
+    if (action === 'previewAsset') {
+      // SPEC.md §3.8.5 — display-only, so no confirmation; gated by the same
+      // effective offer whitelist as offerAsset. Only a small flat view of
+      // the credential is ever handed on, not the page's object itself.
+      const credential = payload && typeof payload === 'object' ? payload : null;
+      const view = credential ? bridgePreviewViewOf(credential) : null;
+      if (!view || !permissions.offerClasses.includes(view.assetClass)) {
+        return { allowed: false, shown: false };
+      }
+      const shown = await showBridgePreview(view);
+      return { allowed: true, shown };
+    }
+    if (action === 'hidePreview') {
+      hideBridgePreview();
+      return { allowed: true };
+    }
     return { allowed: false };
+  }
+
+  // ---------- SPEC.md §3.8.5 — page-supplied asset preview ----------
+  //
+  // One extension-origin iframe (preview-bridge.html), docked in the corner
+  // the visitor chose for the world Previewer. It is display-only
+  // (pointer-events: none, so it can never intercept a click meant for the
+  // page) and ends on hidePreview, on a replacing preview, or after
+  // BRIDGE_PREVIEW_AUTOHIDE_MS without a re-request, so a page can only
+  // keep it up by actively continuing to ask.
+  const BRIDGE_PREVIEW_AUTOHIDE_MS = 20000;
+  const BRIDGE_PREVIEW_WIDTH_PX = 240;
+  let bridgePreviewFrame = null;
+  let bridgePreviewReady = false;
+  let bridgePreviewPendingView = null;
+  let bridgePreviewTimer = null;
+
+  // Reduces the page-supplied credential to the few strings and one image
+  // URL the panel shows; anything else the page put in it is dropped here.
+  function bridgePreviewViewOf(credential) {
+    const asset = credential.asset;
+    if (credential.credential !== 'domain-atlas-asset/1.0' || !asset || typeof asset !== 'object') return null;
+    if (typeof asset.class !== 'string' || !asset.class) return null;
+    const clip = (v, n) => String(v).slice(0, n);
+    const properties = [];
+    if (asset.properties && typeof asset.properties === 'object' && !Array.isArray(asset.properties)) {
+      for (const [k, v] of Object.entries(asset.properties).slice(0, 12)) {
+        const text = (v !== null && typeof v === 'object') ? JSON.stringify(v) : String(v);
+        properties.push([clip(k, 40), clip(text, 120)]);
+      }
+    }
+    let thumbnail = null;
+    if (typeof asset.thumbnail === 'string' && /^https?:\/\//i.test(asset.thumbnail)) thumbnail = asset.thumbnail.slice(0, 2000);
+    const issuer = credential.issuer && typeof credential.issuer.domain === 'string' ? credential.issuer.domain : '';
+    return {
+      assetClass: asset.class,
+      name: clip(typeof asset.name === 'string' && asset.name ? asset.name : asset.class, 80),
+      issuer: clip(issuer, 120),
+      quantity: asset.fungible && typeof credential.quantity === 'number' ? credential.quantity : null,
+      thumbnail,
+      properties
+    };
+  }
+
+  async function showBridgePreview(view) {
+    if (!bridgePreviewFrame) {
+      let dock = 'bottom-left';
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-preview-dock' });
+        if (res && typeof res.dock === 'string') dock = res.dock;
+      } catch (err) {
+        // background.js didn't answer — the default corner is fine.
+      }
+      if (!bridgePreviewFrame) createBridgePreviewFrame(dock);
+    }
+    bridgePreviewPendingView = view;
+    if (bridgePreviewReady) deliverBridgePreview();
+    clearTimeout(bridgePreviewTimer);
+    bridgePreviewTimer = setTimeout(hideBridgePreview, BRIDGE_PREVIEW_AUTOHIDE_MS);
+    return true;
+  }
+
+  function createBridgePreviewFrame(dock) {
+    const src = chrome.runtime.getURL('preview-bridge.html');
+    const frame = document.createElement('iframe');
+    frame.id = 'domain-atlas-bridge-preview';
+    frame.src = src;
+    const style = {
+      position: 'fixed', width: BRIDGE_PREVIEW_WIDTH_PX + 'px', height: '120px', border: 'none',
+      zIndex: 2147483646, pointerEvents: 'none', background: 'transparent', colorScheme: 'normal',
+      top: 'auto', bottom: 'auto', left: 'auto', right: 'auto'
+    };
+    const vertical = dock.startsWith('top') ? 'top' : 'bottom';
+    const horizontal = dock.endsWith('right') ? 'right' : 'left';
+    style[vertical] = '16px';
+    style[horizontal] = '16px';
+    Object.assign(frame.style, style);
+    bridgePreviewFrame = frame;
+    bridgePreviewReady = false;
+    window.addEventListener('message', onBridgePreviewMessage);
+    document.documentElement.appendChild(frame);
+  }
+
+  function onBridgePreviewMessage(event) {
+    if (!bridgePreviewFrame || event.source !== bridgePreviewFrame.contentWindow) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object') return;
+    if (data.type === 'domain-atlas-bridge-preview-ready') {
+      bridgePreviewReady = true;
+      deliverBridgePreview();
+    } else if (data.type === 'domain-atlas-bridge-preview-size' && typeof data.height === 'number') {
+      bridgePreviewFrame.style.height = Math.max(40, Math.min(400, Math.ceil(data.height))) + 'px';
+    }
+  }
+
+  function deliverBridgePreview() {
+    if (!bridgePreviewFrame || !bridgePreviewPendingView) return;
+    bridgePreviewFrame.contentWindow.postMessage(
+      { type: 'domain-atlas-bridge-preview-show', origin: location.origin, view: bridgePreviewPendingView },
+      new URL(chrome.runtime.getURL('preview-bridge.html')).origin
+    );
+  }
+
+  function hideBridgePreview() {
+    clearTimeout(bridgePreviewTimer);
+    bridgePreviewTimer = null;
+    bridgePreviewPendingView = null;
+    bridgePreviewReady = false;
+    window.removeEventListener('message', onBridgePreviewMessage);
+    if (bridgePreviewFrame) { bridgePreviewFrame.remove(); bridgePreviewFrame = null; }
   }
 
   // ---------- SPEC.md §3.8.1/§3.8.2 — the wallet-bridge confirmation ----------
