@@ -53,5 +53,9 @@
     render(typeof data.origin === 'string' ? data.origin : 'this page', data.view);
   });
 
+  // Any later change in the panel's height (an image finishing loading, say)
+  // is reported too, so the frame always fits it with no scrollbar.
+  if (typeof ResizeObserver === 'function') new ResizeObserver(reportSize).observe(panelEl);
+
   window.parent.postMessage({ type: 'domain-atlas-bridge-preview-ready' }, parentOrigin);
 })();

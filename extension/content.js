@@ -6,6 +6,12 @@
 (function () {
   const domainManifestUrl = location.origin + '/.well-known/spatial.json';
 
+  // A fresh content script means a fresh document, so no world overlay can
+  // be showing. A reload or navigation while a world was open never sent
+  // that overlay's exit message, which left the side panel disabled for the
+  // tab; this puts it back.
+  chrome.runtime.sendMessage({ type: 'domain-atlas-page-loaded' }).catch(() => {});
+
   // SPEC.md §3.5 — per-page discovery and anchors. A page opts in with one
   // <link rel="spatial" href="/.well-known/spatial.json#worldId[:anchorId]">
   // tag in its own <head> — the same "one <link> tag" pattern
@@ -290,9 +296,11 @@
     const frame = document.createElement('iframe');
     frame.id = 'domain-atlas-bridge-preview';
     frame.src = src;
+    frame.setAttribute('scrolling', 'no');
     const style = {
       position: 'fixed', width: BRIDGE_PREVIEW_WIDTH_PX + 'px', height: '120px', border: 'none',
       zIndex: 2147483646, pointerEvents: 'none', background: 'transparent', colorScheme: 'normal',
+      visibility: 'hidden', // shown once the panel has reported its real height, so no half-sized frame (or scrollbar) ever flashes
       top: 'auto', bottom: 'auto', left: 'auto', right: 'auto'
     };
     const vertical = dock.startsWith('top') ? 'top' : 'bottom';
@@ -314,7 +322,8 @@
       bridgePreviewReady = true;
       deliverBridgePreview();
     } else if (data.type === 'domain-atlas-bridge-preview-size' && typeof data.height === 'number') {
-      bridgePreviewFrame.style.height = Math.max(40, Math.min(400, Math.ceil(data.height))) + 'px';
+      bridgePreviewFrame.style.height = Math.max(40, Math.min(window.innerHeight - 32, Math.ceil(data.height))) + 'px';
+      bridgePreviewFrame.style.visibility = 'visible';
     }
   }
 

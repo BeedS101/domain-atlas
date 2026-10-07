@@ -184,6 +184,23 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     if (optionsAfterClose.enabled !== true) throw new Error('Expected the side panel re-enabled for the tab after leaving the world, got: ' + JSON.stringify(optionsAfterClose));
     console.log('PASS: side panel re-enabled for the tab once the world overlay closes');
 
+    console.log('STEP 5: reloading or leaving the page while a world is open must not leave the side panel disabled');
+    await worldPage.locator('#domain-atlas-enter-btn').click();
+    await worldPage.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
+    await worldPage.waitForFunction(() => !!document.getElementById('domain-atlas-overlay'), undefined, { timeout: 5000 });
+    const optionsInWorldAgain = await background.evaluate((tabId) => chrome.sidePanel.getOptions({ tabId }), worldTabId);
+    if (optionsInWorldAgain.enabled !== false) throw new Error('Expected the side panel disabled again while the world is open, got: ' + JSON.stringify(optionsInWorldAgain));
+    await worldPage.reload({ waitUntil: 'load' });
+    await worldPage.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), undefined, { timeout: 5000 });
+    let optionsAfterReload = null;
+    for (let i = 0; i < 40; i++) {
+      optionsAfterReload = await background.evaluate((tabId) => chrome.sidePanel.getOptions({ tabId }), worldTabId);
+      if (optionsAfterReload.enabled === true) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (optionsAfterReload.enabled !== true) throw new Error('Expected the side panel re-enabled after a reload that destroyed the world overlay, got: ' + JSON.stringify(optionsAfterReload));
+    console.log('PASS: side panel re-enabled after a reload mid-world');
+
     console.log('\nALL CHECKS PASSED — the toolbar button is wired to open a real Chrome side panel, viewer.js\'s standalone-mode boot (what that panel actually shows) hides every piece of in-world-only UI and keeps the Asset Viewer hover panel disabled, and the panel stays out of the way while a real spatial world is open in a tab.');
   } finally {
     await context.close().catch(() => {});

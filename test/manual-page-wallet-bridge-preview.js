@@ -118,6 +118,27 @@ function credentialOf(assetClass, extra) {
     assert(pointerEvents === 'none', 'the preview frame must not intercept the pointer, got ' + pointerEvents);
     console.log('PASS: shown, labelled, pointer-events none');
 
+    console.log('STEP 1b: the frame fits its panel exactly — no scrollbar — including a tall one');
+    const fits = async () => {
+      // Give an image that finished loading a moment to be reported.
+      await sleep(600);
+      return previewFrame().locator('#panel').evaluate((panel) => ({
+        panel: Math.ceil(panel.getBoundingClientRect().height),
+        view: document.documentElement.clientHeight,
+        scroll: document.documentElement.scrollHeight
+      }));
+    };
+    let fit = await fits();
+    assert(fit.scroll <= fit.view && fit.view >= fit.panel, 'expected no overflow for the short panel, got ' + JSON.stringify(fit));
+    const tallProps = {};
+    for (let i = 0; i < 12; i++) tallProps['property' + i] = 'a fairly long value that wraps onto a second line ' + i;
+    await page.evaluate((c) => window.atlasWallet.previewAsset(c), credentialOf('atlas.wearable.ring', { name: 'A Ring With A Very Long Descriptive Name That Wraps', properties: tallProps }));
+    await previewFrame().locator('.props div').nth(11).waitFor({ timeout: 5000 });
+    fit = await fits();
+    assert(fit.panel > 300, 'the tall panel should exceed the old 120px starting height by a lot, got ' + JSON.stringify(fit));
+    assert(fit.scroll <= fit.view && fit.view >= fit.panel, 'expected no overflow for the tall panel, got ' + JSON.stringify(fit));
+    console.log('PASS: no overflow, frame ' + fit.view + 'px for a ' + fit.panel + 'px panel');
+
     console.log('STEP 2: markup in the credential\'s strings is shown as text');
     const hostile = '<img src=x onerror="document.title=\'pwned\'"><b>bold</b>';
     await page.evaluate((c) => window.atlasWallet.previewAsset(c), credentialOf('atlas.wearable.ring', { name: hostile, properties: { '<i>key</i>': '<script>1</script>' } }));

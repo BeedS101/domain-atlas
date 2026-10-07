@@ -80,7 +80,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // tab — setOptions({enabled:false}) alone only stops it from being
     // opened/reopened from here on, not a panel that's already showing.
     if (chrome.sidePanel.close) chrome.sidePanel.close({ tabId }).catch(() => {});
-  } else if (message && message.type === 'domain-atlas-world-exited') {
+  } else if (message && (message.type === 'domain-atlas-world-exited' || message.type === 'domain-atlas-page-loaded')) {
     chrome.sidePanel.setOptions({ tabId, enabled: true, path: 'viewer.html' }).catch(() => {});
   } else if (message && message.type === 'domain-atlas-bridge-read') {
     // SPEC.md §3.8 — content.js already checked this page's own manifest-
