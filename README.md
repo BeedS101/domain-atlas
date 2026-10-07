@@ -2033,13 +2033,21 @@ simplifications are worth naming plainly rather than leaving implicit:
   rendering each world's roster (name, and a truncated public key or
   "anonymous" for guests). No admin action or credential is involved in
   reading it — it's a live aggregation across a genuinely separate service.
+  Every world joins its presence room on entry, 2D (`procedural-v1`) as
+  well as 3D, so this lists visitors in all scenes. A 2D visitor sends no
+  position and draws no avatars — rendering of remote players stays
+  3D-only — but appears in the roster behind the Friends screen's "here
+  now" list and in `GET /presence/status`; on the polling transport the
+  regular sync tick doubles as the heartbeat that keeps a position-less
+  member from being swept as stale. Tested in a real browser against both
+  backends in `test/manual-presence-2d.js` (Node WebSocket, PHP polling).
   It loads once on login and otherwise only reloads on demand (the
   "Refresh" button) — deliberately no polling timer, so it can't fire
   against a page the admin has stepped away from.
 - **Visits.** An anonymous per-world visit counter, shown in the admin
   panel as a table of Today / Last 7 days / Last 30 days per world, an
   "All worlds" total row and a 14-day per-day list. Every time the wallet
-  enters a world — 2D or 3D, which presence never covered for 2D — it
+  enters a world — 2D or 3D, independent of presence — it
   sends `POST /atlas/visit` with `{world}` to the domain named by the
   manifest's `domain` field (skipped for key-anchored worlds, which have
   none; failures are swallowed so a counter outage never blocks entry).

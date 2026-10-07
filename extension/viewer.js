@@ -565,10 +565,9 @@ function currentLocalPose() {
 // so every tick just re-syncs the whole picture instead.
 let presencePollKnownIds = new Set();
 function reconcilePollRoster(roster) {
-  if (!active3D) return;
   const seen = new Set();
-  (roster || []).forEach((m) => { active3D.upsertRemotePlayer(m.id, m); seen.add(m.id); });
-  presencePollKnownIds.forEach((id) => { if (!seen.has(id)) active3D.removeRemotePlayer(id); });
+  (roster || []).forEach((m) => { if (active3D) active3D.upsertRemotePlayer(m.id, m); seen.add(m.id); });
+  presencePollKnownIds.forEach((id) => { if (!seen.has(id) && active3D) active3D.removeRemotePlayer(id); });
   presencePollKnownIds = seen;
 }
 
@@ -636,7 +635,7 @@ function pollPresence(domain, worldId, displayName, httpBase, publicKey) {
     // leave the room we just joined rather than let a visitor "linger"
     // server-side in a world they've already left, and don't touch any
     // state a newer attempt now owns.
-    if (presencePollToken !== token || !active3D) {
+    if (presencePollToken !== token) {
       fetch(base + '/presence/poll/leave', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
       }).catch(() => {});
@@ -724,7 +723,7 @@ function pollPresence(domain, worldId, displayName, httpBase, publicKey) {
   })
     .then((r) => r.json())
     .then((welcome) => {
-      if (presencePollToken !== token || !active3D) {
+      if (presencePollToken !== token) {
         fetch(base + '/presence/poll/leave', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: welcome.id })
         }).catch(() => {});
@@ -821,7 +820,7 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
   });
 
   socket.addEventListener('message', (ev) => {
-    if (presenceSocket !== socket || !active3D) return; // stale connection, or the world already changed out from under it
+    if (presenceSocket !== socket) return; // stale connection, or the world already changed out from under it
     let msg;
     try { msg = JSON.parse(ev.data); } catch (err) { return; }
     if (!msg || typeof msg.type !== 'string') return;
@@ -834,7 +833,7 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
       presenceJoinPendingChallengeId = null;
       hidePresenceJoinWaitingHint();
       window.__atlasPresenceOwnId = msg.id; // test-observability, same convention as window.__atlasActive3D/__atlasScene
-      (msg.roster || []).forEach((m) => { active3D.upsertRemotePlayer(m.id, m); notePresenceRosterMeta(m.id, m.name, m.publicKey); });
+      (msg.roster || []).forEach((m) => { if (active3D) active3D.upsertRemotePlayer(m.id, m); notePresenceRosterMeta(m.id, m.name, m.publicKey); });
       if (socialFriendsTabActive()) refreshFriendsDisplay();
     } else if (msg.type === 'join-pending') {
       // Task #137 — this identity is already active elsewhere in the
@@ -850,13 +849,13 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
       hidePresenceJoinWaitingHint();
       showPresenceTransientHint('The other session chose to stay — join declined.');
     } else if (msg.type === 'joined') {
-      active3D.upsertRemotePlayer(msg.id, msg);
+      if (active3D) active3D.upsertRemotePlayer(msg.id, msg);
       notePresenceRosterMeta(msg.id, msg.name, msg.publicKey);
       if (socialFriendsTabActive()) refreshFriendsDisplay();
     } else if (msg.type === 'moved') {
-      active3D.upsertRemotePlayer(msg.id, msg); // no name/publicKey on a move broadcast — roster meta from join/welcome stands
+      if (active3D) active3D.upsertRemotePlayer(msg.id, msg); // no name/publicKey on a move broadcast — roster meta from join/welcome stands
     } else if (msg.type === 'left') {
-      active3D.removeRemotePlayer(msg.id);
+      if (active3D) active3D.removeRemotePlayer(msg.id);
       presenceRosterMeta.delete(msg.id);
       if (socialFriendsTabActive()) refreshFriendsDisplay();
     } else if (msg.type === 'signal') {
@@ -895,11 +894,9 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
 // ---------- in-world chat (#105-109, polling fallback #110) ----------
 // A read-by-anyone, send-when-unlocked text chat, riding the SAME
 // presence-server process (see server.js's own "chat" section) but as a
-// fully INDEPENDENT WebSocket connection from presence's — presence's own
-// 'message' listener bails out whenever !active3D (see connectPresence
-// above), which would silently break chat for every 2D (procedural-v1)
-// world if chat piggybacked on that connection instead of getting its
-// own. Two tabs, one live stream: the server scopes its room+history by
+// fully INDEPENDENT WebSocket connection from presence's — presence can be
+// down or declined (a pending duplicate-identity join, say) while chat
+// still works, and each reconnects on its own schedule. Two tabs, one live stream: the server scopes its room+history by
 // DOMAIN alone and tags every message with `world`, so "This World" vs
 // "Domain" is purely a client-side filter over the same chatMessages
 // array — see renderChatMessages().
@@ -942,7 +939,7 @@ let chatSocket = null;
 let chatMessages = []; // flat list, each tagged with `world` — see renderChatMessages() for how the active tab filters this same array
 let chatDomain = null;
 let chatWorldId = null;
-let chatOwnPublicKey = null; // this chat connection's own announced identity — independent of presenceOwnPublicKey, since chat can be live in a 2D world where presence never connects at all
+let chatOwnPublicKey = null; // this chat connection's own announced identity — independent of presenceOwnPublicKey, since chat can be live without presence (the presence server being unreachable, say)
 // chatTabs/chatActiveTab (dynamic tab list, replacing the old fixed
 // This-World/Domain pair — see computeChatTabs()/refreshChatAvailability()
 // below): chatTabs is the ordered list of {id, label} entries currently
@@ -1098,11 +1095,11 @@ refreshChatModerationCache();
 // #portalHoverTooltip above: one element, moved and filled in per-hover
 // rather than one per message. "Online" is checked against
 // presenceRosterMeta, the SAME live roster the Friends screen already uses
-// for "people here now" — not a new presence mechanism. That roster is
-// presence's own (3D-world-only, see connectPresence()), so a 2D world (or
-// a sender who was never a 3D presence member, e.g. they've since left)
-// simply won't show up in it; the tooltip words this as "not currently
-// shown as present" rather than a flat "offline" it can't actually prove.
+// for "people here now" — not a new presence mechanism. That roster only
+// covers the world the viewer is in right now, so a sender who has since
+// left (or is in another world) won't show up in it; the tooltip words this
+// as "not currently shown as present" rather than a flat "offline" it can't
+// actually prove.
 function isChatSenderOnline(publicKey) {
   if (!publicKey) return false;
   if (publicKey === chatOwnPublicKey || publicKey === presenceOwnPublicKey) return true; // this viewer's own identity is obviously online right now
@@ -2470,6 +2467,27 @@ function show3DCanvas(active) {
   scene3dInteractHint.classList.remove('active');
 }
 
+// Joins this domain+world's presence room — for 2D and 3D worlds alike. A
+// visitor is announced under their wallet alias, else a short public-key
+// fragment, else "Visitor"; the public key is optional, so an anonymous
+// visitor can still be seen (and counted) but can't be friend-requested.
+// Presence rooms are keyed by manifest.domain, which a key-anchored world
+// (SPEC.md §3.6) doesn't have, so those skip presence and chat entirely.
+// Skipped when the visitor has already moved on to another world while the
+// identity lookup was in flight.
+async function joinPresenceForWorld(manifest, world) {
+  if (!manifest.domain) return;
+  try {
+    const identity = await AtlasWallet.getIdentity();
+    const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
+    const name = alias || (identity ? short(identity.publicKey, 10) : 'Visitor');
+    if (currentWorld !== world) return;
+    connectPresence(manifest.domain, world.id, name, manifest.presence, identity ? identity.publicKey : null);
+  } catch (err) {
+    // Presence is an enhancement layered on entering a world; never fail the entry over it.
+  }
+}
+
 async function enterWorld(worldId, anchorId) {
   portalHitboxes = [];
   await refreshOwnedOncePerUserClassKeys(); // task #227 — fresh snapshot before this world's own hover/proximity checks can run against it
@@ -2542,8 +2560,8 @@ async function enterWorld(worldId, anchorId) {
   // for the 2D path.
   if (active3D) { active3D.destroy(); active3D = null; }
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
-  disconnectPresence(); // leaving whichever world was active before also means leaving its presence room, 3D or not
-  disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), unlike presence which is 3D-only, but ONLY if the new world actually opted in (#111) — see refreshChatAvailability() just below
+  disconnectPresence(); // leaving whichever world was active before also means leaving its presence room
+  disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), but ONLY if the new world actually opted in (#111) — see refreshChatAvailability() just below
   await refreshChatAvailability(manifest, world); // shows/hides the widget + Domain tab for wherever we just landed, whether or not a scene ends up loading successfully below
   refreshCalendarDomainSources(manifest, world); // SPEC.md §12 — rebuilds the Calendar sub-tab's own "Domain" dropdown for wherever we just landed, same "fresh on every world entry" reasoning as refreshChatAvailability() just above
   hideSceneLoadProgress(); // whichever world was active before might have left this showing (#36) — never carry it into the next one
@@ -2741,34 +2759,10 @@ async function enterWorld(worldId, anchorId) {
       statusEl.textContent = 'In sync with ' + manifestLabelOf(manifest) + ' · ' + world.id;
       history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
 
-      // Presence (#66) — join this domain+world's room so other current
-      // visitors show up as walking characters (see gltf-mini.js's
-      // remotePlayers) and this visitor shows up for them too. Uses
-      // whatever alias is set for the active identity if there is one
-      // (same alias a counterparty/trade partner would see), otherwise a
-      // short public-key fragment, otherwise a plain "Visitor" label for
-      // someone with no wallet identity at all — entering a world has
-      // never required one (see #63) and presence shouldn't start
-      // requiring one either.
-      const presenceIdentity = await AtlasWallet.getIdentity();
-      const presenceAlias = presenceIdentity ? await AtlasWallet.getAlias(presenceIdentity.publicKey) : null;
-      const presenceName = presenceAlias || (presenceIdentity ? short(presenceIdentity.publicKey, 10) : 'Visitor');
-      // publicKey is optional (#67) — an anonymous visitor with no
-      // unlocked identity announces none at all, same "presence never
-      // requires an identity" principle #63 established; they simply can't
-      // be friend-requested (nothing stable to add), but everything else
-      // about presence works exactly as before.
-      // SPEC.md §3.6 — presence and chat rooms are keyed by manifest.domain
-      // (see connectPresence/connectChat's own `domain` param), which a
-      // key-anchored world simply doesn't have. Rather than connect either
-      // one under an `undefined` room key, both are skipped entirely for a
-      // key-anchored world in this first cut — out of scope per SPEC.md
-      // §3.6/§3.6.1 (this feature is rendering + disclosure only), not a
-      // claim that presence/chat could never make sense there.
-      if (manifest.domain) {
-        connectPresence(manifest.domain, world.id, presenceName, manifest.presence, presenceIdentity ? presenceIdentity.publicKey : null);
-        if (chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence); // #111 — only if this world (or the whole domain) actually opted in
-      }
+      // Presence and chat both join here for a 3D world; a 2D world does
+      // the same in its own branch below (chat always, presence too).
+      await joinPresenceForWorld(manifest, world);
+      if (manifest.domain && chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence);
     } catch (err) {
       hideSceneLoadProgress(); // a failed load shouldn't leave a stuck progress bar over the error message
       statusEl.textContent = 'Could not load world: ' + err.message;
@@ -2815,13 +2809,11 @@ async function enterWorld(worldId, anchorId) {
 
     statusEl.textContent = 'In sync with ' + manifestLabelOf(manifest) + ' · ' + world.id;
     history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
-    // Chat has no visible character to attach to (unlike presence, #66),
-    // so unlike connectPresence() it isn't gated on the 3D renderer at
-    // all — a 2D (procedural-v1) world gets a live chat room too. Still
-    // gated on the world/domain actually opting in (#111) same as the 3D
-    // branch above. Also gated on manifest.domain itself (SPEC.md §3.6) —
-    // see the 3D branch's own comment on connectPresence/connectChat above
-    // for why a key-anchored world skips chat entirely in this first cut.
+    // A 2D world joins the same presence room a 3D one does, so the
+    // Friends screen and the admin "Online now" view see its visitors; it
+    // just has no avatars to draw (see connectPresence()). Chat is gated
+    // on the world/domain opting in, as in the 3D branch.
+    await joinPresenceForWorld(manifest, world);
     if (manifest.domain && chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence);
   } catch (err) {
     statusEl.textContent = 'Could not load world: ' + err.message;
@@ -9532,7 +9524,7 @@ async function refreshFriendsDisplay() {
   if (friendsHereListEl) {
     friendsHereListEl.innerHTML = '';
     if (!presenceIsConnected()) {
-      friendsHereListEl.innerHTML = '<div class="empty-note">Enter a 3D world to see who\'s here right now.</div>';
+      friendsHereListEl.innerHTML = '<div class="empty-note">Enter a world to see who\'s here right now.</div>';
     } else if (presenceRosterMeta.size === 0) {
       friendsHereListEl.innerHTML = '<div class="empty-note">Nobody else here right now.</div>';
     } else {

@@ -862,7 +862,7 @@ function handleConnection(socket) {
   let alive = true;
   let lastMoveAt = 0;
 
-  let chatJoined = false; // separate from `joined` above — a connection can be chat-joined without ever being presence-joined (a 2D world), or vice versa
+  let chatJoined = false; // separate from `joined` above — a connection can be chat-joined without ever being presence-joined (presence declined or unreachable), or vice versa (a world that didn't opt into chat)
 
   function leaveRoom() {
     if (!joined) return;
