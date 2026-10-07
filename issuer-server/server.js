@@ -240,6 +240,15 @@ const ASSET_HISTORY_FILE = path.join(STATE_DIR, 'atlas-asset-history-store.json'
 // the size of ASSET_CATALOG), never by how many visitors or items exist,
 // so this can't grow the way a per-item ledger would.
 const CLASS_PATCHES_FILE = path.join(STATE_DIR, 'atlas-class-patches-store.json');
+// Anonymous per-world visit counts for the admin panel's Visits section
+// (POST /atlas/visit records one, POST /atlas/admin/visits reads them
+// back). Shape: {days: {"YYYY-MM-DD": {worldId: count}}}, UTC dates. Holds
+// nothing identifying — no keys, no addresses, no timestamps finer than a
+// day — and is bounded by (retention window x number of worlds), never by
+// how many people visit. Not under .well-known, same reasoning as every
+// other store here.
+const VISITS_FILE = path.join(STATE_DIR, 'atlas-visits-store.json');
+const VISITS_RETENTION_DAYS = 90;
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // this is a roster of who subscribed (credential id + owner public key per
 // atlas.membership issuance), not something to expose at a URL anyone can
@@ -2431,6 +2440,47 @@ function mergeProperties(target, patch) {
     else result[key] = patch[key];
   }
   return result;
+}
+
+// Visit-count store (see VISITS_FILE's own comment). Node runs this on one
+// event loop and every read/modify/write below is synchronous, so unlike
+// the PHP bundle's flock-guarded version nothing can interleave here.
+function readVisits() {
+  if (!fs.existsSync(VISITS_FILE)) return { days: {} };
+  try {
+    const doc = JSON.parse(fs.readFileSync(VISITS_FILE, 'utf8'));
+    return doc && typeof doc.days === 'object' && doc.days !== null ? doc : { days: {} };
+  } catch (err) {
+    return { days: {} };
+  }
+}
+function utcDay(date) {
+  return date.toISOString().slice(0, 10);
+}
+// Counts one visit to `worldId` against today's (UTC) bucket and drops any
+// bucket older than the retention window while it's writing anyway.
+function recordVisit(worldId, now) {
+  const doc = readVisits();
+  const today = utcDay(now || new Date());
+  const cutoff = utcDay(new Date((now || new Date()).getTime() - VISITS_RETENTION_DAYS * 86400000));
+  for (const day of Object.keys(doc.days)) {
+    if (day < cutoff) delete doc.days[day];
+  }
+  if (!doc.days[today]) doc.days[today] = {};
+  doc.days[today][worldId] = (doc.days[today][worldId] || 0) + 1;
+  fs.writeFileSync(VISITS_FILE, JSON.stringify(doc, null, 2));
+}
+// The world ids this domain's own manifest declares — the only ids a visit
+// is accepted for, so an unauthenticated endpoint can't be made to grow
+// the store with arbitrary names. Read fresh each time (a small file) so a
+// manifest edit takes effect without a restart.
+function declaredWorldIds() {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(DEMO_DOMAIN_A, '.well-known', 'spatial.json'), 'utf8'));
+    return new Set((Array.isArray(manifest.worlds) ? manifest.worlds : []).map((w) => w && w.id).filter((id) => typeof id === 'string'));
+  } catch (err) {
+    return new Set();
+  }
 }
 
 // Class-patch store (see CLASS_PATCHES_FILE's own comment) — keyed by
@@ -5448,6 +5498,36 @@ async function main() {
         const patch = setClassPatch(assetClass, { properties, tradeScope });
         console.log('Set class patch for', assetClass, '->', JSON.stringify(patch));
         return sendJson(res, 200, { assetClass, patch });
+      }
+
+      // Public and unauthenticated by design: a wallet announces "I just
+      // entered this world" so the operator's admin panel can show how busy
+      // each scene is, 2D and 3D alike. Body is just {world}; nothing about
+      // the visitor is sent or stored. Accepts only a world id this
+      // domain's own manifest declares (declaredWorldIds), so it can't be
+      // used to invent counters. Counts are self-reported, not verified.
+      if (req.method === 'POST' && req.url === '/atlas/visit') {
+        let world;
+        try {
+          world = (JSON.parse((await readBody(req)) || '{}') || {}).world;
+        } catch (err) {
+          return sendJson(res, 400, { error: 'invalid JSON body' });
+        }
+        if (typeof world !== 'string' || !declaredWorldIds().has(world)) {
+          return sendJson(res, 400, { error: 'unknown world' });
+        }
+        recordVisit(world);
+        return sendJson(res, 200, { recorded: true });
+      }
+
+      // Admin-gated (requireAdminAuth): the per-day, per-world counts the
+      // Visits section aggregates. `today` is the server's own UTC date so
+      // the panel never has to trust its browser's clock or timezone.
+      if (req.method === 'POST' && req.url === '/atlas/admin/visits') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        return sendJson(res, 200, { today: utcDay(new Date()), retentionDays: VISITS_RETENTION_DAYS, days: readVisits().days });
       }
 
       // Admin-gated (requireAdminAuth, same as every other admin action):

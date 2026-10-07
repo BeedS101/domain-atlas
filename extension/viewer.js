@@ -2531,6 +2531,11 @@ async function enterWorld(worldId, anchorId) {
   // time a key-anchored world (SPEC.md §3.6) is entered.
   if (manifest.domain) checkItemUpdatesForDomain(manifest.domain);
 
+  // Anonymous visit count for the domain's own admin panel — every world
+  // entry, 2D or 3D, never awaited (same reasoning as the check above).
+  // Same manifest.domain guard: a key-anchored world has no domain to tell.
+  if (manifest.domain) AtlasWallet.recordVisit(manifest.domain, world.id);
+
   // Leaving whichever world was active before — if it was a 3D one, its
   // render loop and input listeners need tearing down before anything else
   // starts, same idea as window.__atlasScene just getting overwritten below

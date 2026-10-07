@@ -2036,6 +2036,29 @@ simplifications are worth naming plainly rather than leaving implicit:
   It loads once on login and otherwise only reloads on demand (the
   "Refresh" button) — deliberately no polling timer, so it can't fire
   against a page the admin has stepped away from.
+- **Visits.** An anonymous per-world visit counter, shown in the admin
+  panel as a table of Today / Last 7 days / Last 30 days per world, an
+  "All worlds" total row and a 14-day per-day list. Every time the wallet
+  enters a world — 2D or 3D, which presence never covered for 2D — it
+  sends `POST /atlas/visit` with `{world}` to the domain named by the
+  manifest's `domain` field (skipped for key-anchored worlds, which have
+  none; failures are swallowed so a counter outage never blocks entry).
+  The endpoint is public but only accepts world ids the domain's own
+  manifest declares, so it can't be used to invent counters. What's stored
+  is only `{days: {"YYYY-MM-DD": {worldId: count}}}` in UTC — no keys, IPs,
+  cookies or timestamps — with buckets older than 90 days dropped on the
+  next write. The count is visits, not unique people: re-entering a world
+  counts again. The panel reads it through the admin-gated
+  `POST /atlas/admin/visits` (`{today, retentionDays, days}`) and counts
+  its windows back from the server's own `today`. Node keeps it in
+  `atlas-visits-store.json` beside the other state; PHP in
+  `issuer-php/lib/atlas-visits-store.json` (flock-guarded, covered by the
+  existing `lib/.htaccess` and `.gitignore` rules). Tests:
+  `test/manual-visit-counter.js` (Node HTTP, incl. validation, pruning and
+  30 simultaneous visits), `manual-visit-counter-php.js` (same against
+  PHP), `manual-visit-counter-wallet.js` (real extension, 2D and 3D worlds,
+  ping body carries only the world id) and `manual-visit-counter-panel.js`
+  (the panel's window edges and totals).
 - **Mail's recipient field is a credential id, not an identity.** Reported
   live: an operator addressed "Send mail" using their own public key, then
   a `handle#domain` address, expecting either to reach their own wallet —

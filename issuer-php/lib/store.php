@@ -2561,6 +2561,74 @@ function clear_class_patch($cls) {
   fclose($fh);
 }
 
+// ---------- visit counts (mirrors issuer-server/server.js's VISITS_FILE) ----------
+//
+// Anonymous per-world visit counts for the admin panel's Visits section
+// (POST /atlas/visit records one, POST /atlas/admin/visits reads them
+// back). Shape: {days: {"YYYY-MM-DD": {worldId: count}}}, UTC dates.
+// Holds nothing identifying — no keys, no addresses, no timestamps finer
+// than a day — and is bounded by (retention window x number of worlds),
+// never by how many people visit. Lives in lib/ next to every other store
+// for the same "not web-reachable" reason.
+const ATLAS_VISITS_RETENTION_DAYS = 90;
+function atlas_visits_file() {
+  return __DIR__ . '/atlas-visits-store.json';
+}
+
+function read_visits() {
+  $file = atlas_visits_file();
+  if (!file_exists($file)) return ['days' => []];
+  $fh = fopen($file, 'r');
+  if ($fh === false) return ['days' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return (is_array($doc) && isset($doc['days']) && is_array($doc['days'])) ? $doc : ['days' => []];
+}
+
+// Counts one visit to $worldId against today's (UTC) bucket and drops any
+// bucket older than the retention window while it's writing anyway. Same
+// flock-guarded read/modify/write shape as the other stores above —
+// concurrent requests are real here, unlike the Node version.
+function record_visit($worldId, $nowTs = null) {
+  $nowTs = $nowTs === null ? time() : $nowTs;
+  $today = gmdate('Y-m-d', $nowTs);
+  $cutoff = gmdate('Y-m-d', $nowTs - ATLAS_VISITS_RETENTION_DAYS * 86400);
+  $fh = fopen(atlas_visits_file(), 'c+');
+  if ($fh === false) return;
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['days']) || !is_array($doc['days'])) $doc = ['days' => []];
+  foreach (array_keys($doc['days']) as $day) {
+    if ($day < $cutoff) unset($doc['days'][$day]);
+  }
+  if (!isset($doc['days'][$today])) $doc['days'][$today] = [];
+  $doc['days'][$today][$worldId] = (isset($doc['days'][$today][$worldId]) ? $doc['days'][$today][$worldId] : 0) + 1;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+}
+
+// The world ids this domain's own manifest declares — the only ids a visit
+// is accepted for, so an unauthenticated endpoint can't be made to grow
+// the store with arbitrary names. Read fresh each time (a small file) so a
+// manifest edit takes effect immediately.
+function declared_world_ids() {
+  $path = atlas_docroot() . '/.well-known/spatial.json';
+  if (!file_exists($path)) return [];
+  $manifest = json_decode(file_get_contents($path), true);
+  $ids = [];
+  foreach ((is_array($manifest) && isset($manifest['worlds']) && is_array($manifest['worlds'])) ? $manifest['worlds'] : [] as $w) {
+    if (is_array($w) && isset($w['id']) && is_string($w['id'])) $ids[] = $w['id'];
+  }
+  return $ids;
+}
+
 // True if $credential disagrees with $patch on any field the patch
 // actually sets. JSON-encode comparison rather than === since a
 // property's value can itself be an array (e.g. a stats bag), not just a

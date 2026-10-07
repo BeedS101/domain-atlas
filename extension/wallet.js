@@ -5817,6 +5817,24 @@ const AtlasWallet = (() => {
     if (noticesChanged) await saveAssetUpdateNotices(ownerPublicKey, notices);
   }
 
+  // Anonymous "I just entered this world" ping for the domain's own admin
+  // panel (POST /atlas/visit — see issuer-server/server.js), so an operator
+  // can see how busy each scene is, 2D and 3D alike. Sends only the world
+  // id: no identity, alias or anything else that could tell one visitor
+  // from another, and no cookies. Best-effort and silent — a domain that
+  // doesn't run the endpoint, or is unreachable, costs the visitor nothing.
+  async function recordVisit(domain, worldId) {
+    if (!domain || !worldId) return;
+    try {
+      await fetch(baseUrl(domain) + '/atlas/visit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ world: worldId }), keepalive: true, credentials: 'omit'
+      });
+    } catch (err) {
+      // Best-effort by design — see above.
+    }
+  }
+
   // The actual periodic check: gathers every domain the current self
   // identity holds a credential from, asks each domain's
   // /atlas/mail/check for anything tied to those specific credential ids,
@@ -5992,7 +6010,7 @@ const AtlasWallet = (() => {
 
   return {
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
-    exportIdentity, importIdentity, presentIdentity,
+    exportIdentity, importIdentity, presentIdentity, recordVisit,
     // SPEC.md §3.8.1 — exported so confirm-bridge.js (the wallet-bridge
     // signing confirmation prompt, an extension page like any other) can
     // sign a page-supplied payload directly once a visitor approves it.

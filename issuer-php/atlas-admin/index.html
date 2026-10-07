@@ -83,6 +83,15 @@
   .world-roster .visitor-name { color: #d7e0e4; }
   .world-roster li.empty { font-style: italic; color: #6c7d85; }
   #onlineError { color: #e08a8a; font-size: 12px; margin-top: 8px; }
+  table.visits { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
+  table.visits th, table.visits td { text-align: right; padding: 5px 8px; border-bottom: 1px solid #202f36; color: #9fb0b8; }
+  table.visits th:first-child, table.visits td:first-child { text-align: left; }
+  table.visits th { color: #d7e0e4; font-weight: 600; }
+  table.visits td:first-child { color: #d7e0e4; }
+  table.visits tr.total td { color: #8fd19e; font-weight: 600; border-bottom: none; }
+  .visits-daily { margin-top: 14px; }
+  .visits-daily h3 { margin: 0 0 6px; font-size: 13px; color: #d7e0e4; font-weight: 600; }
+  #visitsError { color: #e08a8a; font-size: 12px; margin-top: 8px; }
   .class-patch-list { margin-top: 14px; }
   .class-patch-list h3 { margin: 0 0 6px; font-size: 13px; color: #d7e0e4; font-weight: 600; }
   .class-patch-list ul { list-style: none; margin: 0; padding: 0; }
@@ -116,6 +125,24 @@
         </div>
         <div id="onlineWorlds"></div>
         <div id="onlineError"></div>
+      </section>
+
+      <section class="panel" id="visitsPanel">
+        <h2>Visits</h2>
+        <p class="hint">How many times visitors entered each world (POST /atlas/admin/visits). Anonymous counts only — no visitor identity is stored, and a visitor who re-enters a world is counted again, so these are visits, not unique people. Days are UTC; counts older than <span id="visitsRetention">90</span> days are dropped.</p>
+        <div class="online-header">
+          <div class="online-total">Last 7 days: <strong id="visitsWeekTotal">—</strong></div>
+          <button type="button" id="visitsRefreshBtn">Refresh now</button>
+        </div>
+        <table class="visits" id="visitsTable">
+          <thead><tr><th>World</th><th>Today</th><th>Last 7 days</th><th>Last 30 days</th></tr></thead>
+          <tbody id="visitsBody"></tbody>
+        </table>
+        <div class="visits-daily">
+          <h3>Per day (last 14 days, all worlds)</h3>
+          <table class="visits" id="visitsDailyTable"><tbody id="visitsDailyBody"></tbody></table>
+        </div>
+        <div id="visitsError"></div>
       </section>
 
       <section class="panel">
@@ -439,6 +466,109 @@
 
     document.getElementById('onlineRefreshBtn').addEventListener('click', refreshOnlineNow);
 
+    // ---------- visits ----------
+    // POST /atlas/admin/visits returns {today, retentionDays, days} where
+    // days is {"YYYY-MM-DD": {worldId: count}} in UTC. Windows are counted
+    // back from the SERVER's `today` (not this browser's clock), so the
+    // panel agrees with how the buckets were cut. World names come from the
+    // manifest; a world id that has counts but is no longer declared is
+    // still listed, by id, so history isn't silently hidden.
+    function utcDayOffset(todayStr, offset) {
+      const [y, m, d] = todayStr.split('-').map(Number);
+      return new Date(Date.UTC(y, m - 1, d + offset)).toISOString().slice(0, 10);
+    }
+    function sumWorldDays(days, worldId, dayList) {
+      let total = 0;
+      for (const day of dayList) {
+        const bucket = days[day];
+        if (bucket && Number.isInteger(bucket[worldId])) total += bucket[worldId];
+      }
+      return total;
+    }
+    function visitsCell(text) {
+      const td = document.createElement('td');
+      td.textContent = String(text);
+      return td;
+    }
+
+    async function refreshVisits() {
+      const errorEl = document.getElementById('visitsError');
+      try {
+        const manifestRes = await fetch('/.well-known/spatial.json', { cache: 'no-store' });
+        if (!manifestRes.ok) throw new Error("could not read this domain's own manifest");
+        const manifest = await manifestRes.json();
+        const worlds = Array.isArray(manifest.worlds) ? manifest.worlds : [];
+
+        const res = await postJson('/atlas/admin/visits', { token: session && session.token });
+        if (!res.ok) throw new Error(res.body.error || ('HTTP ' + res.status));
+        const { today, retentionDays, days } = res.body;
+        document.getElementById('visitsRetention').textContent = String(retentionDays);
+
+        const windowDays = (n) => Array.from({ length: n }, (_, i) => utcDayOffset(today, -i));
+        const week = windowDays(7);
+        const month = windowDays(30);
+
+        const rows = worlds.map((w) => ({ id: w.id, label: w.name || w.id }));
+        const declared = new Set(rows.map((r) => r.id));
+        const extra = new Set();
+        for (const bucket of Object.values(days)) {
+          for (const id of Object.keys(bucket)) if (!declared.has(id)) extra.add(id);
+        }
+        extra.forEach((id) => rows.push({ id, label: id + ' (no longer declared)' }));
+
+        const body = document.getElementById('visitsBody');
+        body.innerHTML = '';
+        const totals = { today: 0, week: 0, month: 0 };
+        for (const row of rows) {
+          const counts = {
+            today: sumWorldDays(days, row.id, [today]),
+            week: sumWorldDays(days, row.id, week),
+            month: sumWorldDays(days, row.id, month)
+          };
+          totals.today += counts.today; totals.week += counts.week; totals.month += counts.month;
+          const tr = document.createElement('tr');
+          tr.dataset.world = row.id;
+          const nameTd = document.createElement('td');
+          nameTd.textContent = row.label;
+          tr.appendChild(nameTd);
+          tr.appendChild(visitsCell(counts.today));
+          tr.appendChild(visitsCell(counts.week));
+          tr.appendChild(visitsCell(counts.month));
+          body.appendChild(tr);
+        }
+        const totalRow = document.createElement('tr');
+        totalRow.className = 'total';
+        totalRow.dataset.world = '*';
+        const totalName = document.createElement('td');
+        totalName.textContent = 'All worlds';
+        totalRow.appendChild(totalName);
+        totalRow.appendChild(visitsCell(totals.today));
+        totalRow.appendChild(visitsCell(totals.week));
+        totalRow.appendChild(visitsCell(totals.month));
+        body.appendChild(totalRow);
+        document.getElementById('visitsWeekTotal').textContent = String(totals.week);
+
+        const daily = document.getElementById('visitsDailyBody');
+        daily.innerHTML = '';
+        for (const day of windowDays(14)) {
+          const bucket = days[day] || {};
+          const dayTotal = Object.values(bucket).reduce((a, n) => a + (Number.isInteger(n) ? n : 0), 0);
+          const tr = document.createElement('tr');
+          tr.dataset.day = day;
+          const dayTd = document.createElement('td');
+          dayTd.textContent = day + (day === today ? ' (today)' : '');
+          tr.appendChild(dayTd);
+          tr.appendChild(visitsCell(dayTotal));
+          daily.appendChild(tr);
+        }
+        errorEl.textContent = '';
+      } catch (err) {
+        errorEl.textContent = 'Could not load visits: ' + err.message;
+      }
+    }
+
+    document.getElementById('visitsRefreshBtn').addEventListener('click', refreshVisits);
+
     async function verifySessionOrShowLoggedOut() {
       const loggedOutNotice = document.getElementById('loggedOutNotice');
       const main = document.getElementById('hidden-while-logged-out');
@@ -468,6 +598,7 @@
       logoutBtn.style.display = '';
       whoDisplay.textContent = 'Admin: ' + whoami.body.publicKey.slice(0, 20) + '…';
       refreshOnlineNow();
+      refreshVisits();
       refreshClassPatchClassOptions();
       refreshClassPatches();
       refreshTrustedTradePeers();
