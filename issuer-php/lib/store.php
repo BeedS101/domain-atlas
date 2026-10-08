@@ -2848,12 +2848,21 @@ function reconcile_file_export($originalId) {
       continue;
     }
     if ($rec['state'] === 'pending') {
+      // A committed claim that stopped before it finished is finished first,
+      // so the claim record and the export record settle together.
+      $claimRec = file_claim_of(read_file_claims(), $rec['fileId']);
+      if ($claimRec !== null && ($claimRec['state'] ?? null) === 'committed') {
+        finish_file_claim($rec['fileId'], null);
+        return reconcile_file_export($originalId);
+      }
       $fileRevoked = revocation_entry_of($rec['fileId']);
       if ($fileRevoked) {
         if (($fileRevoked['reason'] ?? null) === 'file-claimed') close_export($doc, $originalId, 'claimed', 'file-claimed', ['claimedAt' => $fileRevoked['revokedAt'] ?? atlas_now_iso()]);
         else close_export($doc, $originalId, 'revoked', $fileRevoked['reason'] ?? 'revoked');
         return ['outcome' => $doc['exports'][$originalId]['state'], 'rec' => $doc['exports'][$originalId]];
       }
+      // Listed means still claimable. Not listed, not revoked and no claim
+      // record means a claim from before claim records has not finished.
       return ['outcome' => has_bearer($rec['fileId']) ? 'pending' : 'in-progress', 'rec' => $rec];
     }
     throw new Exception('unknown export state ' . $rec['state']);
@@ -2872,6 +2881,109 @@ function note_file_claimed($fileId, $claimCredentialId) {
     close_export($doc, $id, 'claimed', 'file-claimed', ['claimedAt' => atlas_now_iso(), 'claimCredentialId' => $claimCredentialId]);
     return;
   }
+}
+
+// ---------- file claim records (SPEC.md §13.5.2) ----------
+// Mirrors issuer-server/server.js's claim records. A claim commits a record
+// (claimer key + minted credential) after minting and before the bearer
+// registry or the revocation list is touched; taking the registry entry and
+// revoking the file come after and are repeatable, so any later request for
+// the file finishes the claim and the claimer's retry gets the same
+// credential back. The JSON shape is identical to the Node store's. The
+// endpoints hold atlas_bearer_lock() for the whole request.
+//
+//   committed   record durable; registry entry and revocation may or may
+//               not be written yet
+//   claimed     file taken out of the registry and revoked; the minted
+//               credential is kept for replay until the replay window ends,
+//               then dropped and a compact receipt remains
+function atlas_file_claims_file() {
+  return __DIR__ . '/atlas-file-claims-store.json';
+}
+function atlas_claim_replay_seconds() {
+  $days = (int)getenv('ATLAS_CLAIM_REPLAY_DAYS');
+  return ($days > 0 ? $days : 30) * 86400;
+}
+// The minted credential inside a record is kept as a decoded object so it
+// is returned exactly as it was first sent.
+function read_file_claims() {
+  $file = atlas_file_claims_file();
+  $raw = file_exists($file) ? file_get_contents($file) : '';
+  $decoded = $raw === '' ? null : json_decode($raw, false);
+  $doc = ['version' => 1, 'claims' => []];
+  if (!is_object($decoded)) return $doc;
+  foreach ((isset($decoded->claims) && is_object($decoded->claims)) ? get_object_vars($decoded->claims) : [] as $id => $rec) {
+    $r = get_object_vars($rec);
+    $r['transitions'] = array_map('get_object_vars', isset($r['transitions']) ? $r['transitions'] : []);
+    $doc['claims'][$id] = $r;
+  }
+  return $doc;
+}
+function write_file_claims($doc) {
+  $out = ['version' => 1, 'claims' => (object)$doc['claims']];
+  $file = atlas_file_claims_file();
+  $tmp = $file . '.tmp';
+  file_put_contents($tmp, json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  rename($tmp, $file);
+}
+function file_claim_of($doc, $fileId) {
+  return array_key_exists($fileId, $doc['claims']) ? $doc['claims'][$fileId] : null;
+}
+function set_claim_state(&$doc, $fileId, $state) {
+  $at = atlas_now_iso();
+  $doc['claims'][$fileId]['state'] = $state;
+  $doc['claims'][$fileId]['updatedAt'] = $at;
+  $doc['claims'][$fileId]['transitions'][] = ['state' => $state, 'at' => $at];
+  write_file_claims($doc);
+}
+// Drops the stored credential from claims old enough that nobody is still
+// expected to ask for it again; the receipt stays.
+function compact_file_claims(&$doc) {
+  $changed = false;
+  $limit = time() - atlas_claim_replay_seconds();
+  foreach ($doc['claims'] as $id => $rec) {
+    if (($rec['state'] ?? null) === 'claimed' && isset($rec['minted']) && !empty($rec['claimedAt']) && strtotime($rec['claimedAt']) < $limit) {
+      unset($doc['claims'][$id]['minted']);
+      $changed = true;
+    }
+  }
+  if ($changed) write_file_claims($doc);
+}
+// The caller must have just checked that the file has no claim record.
+function create_file_claim($file, $minted, $claimantPublicKey) {
+  $doc = read_file_claims();
+  compact_file_claims($doc);
+  $at = atlas_now_iso();
+  $doc['claims'][$file['id']] = [
+    'claimId' => 'urn:atlas:file-claim:' . bin2hex(random_bytes(16)),
+    'fileId' => $file['id'], 'mintedId' => $minted['id'], 'claimantPublicKey' => $claimantPublicKey,
+    'class' => $file['asset']['class'] ?? null,
+    'state' => 'committed', 'createdAt' => $at, 'updatedAt' => $at, 'transitions' => [['state' => 'committed', 'at' => $at]],
+    'minted' => json_decode(json_encode($minted), false)
+  ];
+  write_file_claims($doc);
+  file_export_fault_point('claim:committed');
+}
+// Finishes a committed claim: takes the registry entry if it is still there,
+// revokes the file if it is not revoked yet, marks the record claimed.
+// Repeatable from any point. $file (an array) is only needed to archive the
+// file the first time. Returns the record, or null when there is none.
+function finish_file_claim($fileId, $file) {
+  $doc = read_file_claims();
+  $rec = file_claim_of($doc, $fileId);
+  if ($rec === null) return null;
+  if ($rec['state'] === 'claimed') return $rec;
+  take_bearer($fileId);
+  file_export_fault_point('claim:bearer-taken');
+  if (revocation_entry_of($fileId) === null) atlas_revoke($fileId, 'file-claimed');
+  file_export_fault_point('claim:revoked');
+  if ($file !== null && find_archived_asset($fileId) === null) archive_if_audited($file, 'file-claimed');
+  $revoked = revocation_entry_of($fileId);
+  $doc['claims'][$fileId]['claimedAt'] = ($revoked && isset($revoked['revokedAt'])) ? $revoked['revokedAt'] : atlas_now_iso();
+  set_claim_state($doc, $fileId, 'claimed');
+  try { note_file_claimed($fileId, $rec['mintedId']); } catch (Throwable $e) { /* the receipt is derived at the next recovery instead */ }
+  file_export_fault_point('claim:claimed');
+  return $doc['claims'][$fileId];
 }
 
 // Recovery challenges: stateless HMAC over the credential id, a random nonce

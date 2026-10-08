@@ -3,8 +3,11 @@
 // route (SPEC.md §13.5). The claimer signs an intent with the key that
 // should own the asset. The file's credential must be listed in the bearer
 // registry: anyone can copy any credential, so being validly signed by this
-// domain is not enough. The registry entry is consumed before anything is
-// minted, so simultaneous claims of one file have exactly one winner.
+// domain is not enough. The claim is committed (a record holding the
+// claimer's key and the minted credential, SPEC.md §13.5.2) before the
+// registry entry is consumed, so simultaneous claims have exactly one winner
+// and a claim that stopped part-way is finished by the next request for the
+// file.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
@@ -49,6 +52,22 @@ if (($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0' || !isset($
 if (!verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential))) {
   send_json(400, ['error' => 'asset signature does not check out', 'code' => 'not-claimable']);
 }
+
+// A claim already committed for this file is finished first, whoever is
+// asking. The key that committed it gets its credential again; any other key
+// is told the file is claimed.
+if (file_claim_of(read_file_claims(), $credential['id']) !== null) {
+  $done = finish_file_claim($credential['id'], $credential);
+  if ($done['claimantPublicKey'] === $newOwner && isset($done['minted'])) {
+    send_json(200, ['status' => 'claimed', 'credential' => $done['minted']]);
+  }
+  $answer = ['error' => 'this file has already been claimed or withdrawn', 'code' => 'already-claimed'];
+  if ($done['claimantPublicKey'] === $newOwner) {
+    $answer['receipt'] = ['claimId' => $done['claimId'], 'mintedId' => $done['mintedId'], 'claimedAt' => $done['claimedAt'] ?? null];
+  }
+  send_json(409, $answer);
+}
+
 if (is_revoked($credential['id'])) send_json(409, ['error' => 'this file has already been claimed or withdrawn', 'code' => 'already-claimed']);
 if (is_suspended($credential['id'])) send_json(409, ['error' => 'this asset is currently suspended pending review', 'code' => 'suspended']);
 if (is_expired($credential)) send_json(400, ['error' => 'asset has expired', 'code' => 'expired']);
@@ -58,18 +77,16 @@ if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible']
 if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
   send_json(400, ['error' => 'asset is bound and cannot be claimed from a file', 'code' => 'not-claimable']);
 }
+if (!has_bearer($credential['id'])) send_json(400, ['error' => 'this is not a transfer file issued by this domain', 'code' => 'not-claimable']);
 
-// The reservation: from here on no other claim can take this id.
-$taken = take_bearer($credential['id']);
-if ($taken === null) send_json(400, ['error' => 'this is not a transfer file issued by this domain', 'code' => 'not-claimable']);
-
+// Nothing has been written yet, so a failed mint changes nothing. From the
+// record write onwards the claim is committed.
 try {
   $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $newOwner, $credential);
 } catch (Exception $e) {
-  restore_bearer($credential['id'], $taken);
   send_json(500, ['error' => 'could not mint the claimed asset']);
 }
-atlas_revoke($credential['id'], 'file-claimed');
-archive_if_audited($credential, 'file-claimed');
-try { note_file_claimed($credential['id'], $minted['id']); } catch (Throwable $e) { /* the receipt is derived at the next recovery instead */ }
+file_export_fault_point('claim:minted');
+create_file_claim($credential, $minted, $newOwner);
+finish_file_claim($credential['id'], $credential);
 send_json(200, ['status' => 'claimed', 'credential' => $minted]);

@@ -2174,16 +2174,18 @@ function reconcileFileExport(originalId) {
       continue;
     }
     if (rec.state === 'pending') {
+      // A committed claim that stopped before it finished is finished first,
+      // so the claim record and the export record settle together.
+      const claimRec = fileClaimOf(readFileClaims(), rec.fileId);
+      if (claimRec && claimRec.state === 'committed') {
+        finishFileClaim(rec.fileId, null);
+        return reconcileFileExport(originalId);
+      }
       const fileRevoked = revocationEntryOf(rec.fileId);
       if (fileRevoked) {
         if (fileRevoked.reason === 'file-claimed') closeExport(doc, rec, 'claimed', 'file-claimed', { claimedAt: fileRevoked.revokedAt });
         else closeExport(doc, rec, 'revoked', fileRevoked.reason || 'revoked');
         return { outcome: rec.state, rec };
-      }
-      // A committed claim that stopped before it finished is finished here.
-      if (fileClaimOf(readFileClaims(), rec.fileId)) {
-        finishFileClaim(rec.fileId, null);
-        return reconcileFileExport(originalId);
       }
       // Listed means still claimable. Not listed, not revoked and no claim
       // record means a claim from before claim records has not finished.

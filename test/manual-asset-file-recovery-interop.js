@@ -14,6 +14,12 @@
 // the issuer that signed a file can claim it). A claimed receipt written by
 // one backend is also read by the other.
 //
+// The claim records (SPEC.md §13.5.2) get the same treatment: the source is
+// stopped dead at each step of a claim after the commit point; the other
+// issuer finishes the half-finished claim through the export recovery
+// endpoint; the state is copied back and the claimer's repeat claim at the
+// source returns the stored credential byte for byte.
+//
 // Not part of the permanent suite, same reasoning as the other manual-*.js
 // scripts.
 
@@ -75,7 +81,8 @@ function makeSide(name, port) {
     files: {
       exports: path.join(stateDir, 'atlas-file-exports-store.json'),
       bearers: path.join(stateDir, 'atlas-bearer-store.json'),
-      revocations: path.join(docroot, '.well-known', 'atlas-revocations.json')
+      revocations: path.join(docroot, '.well-known', 'atlas-revocations.json'),
+      claims: path.join(stateDir, 'atlas-file-claims-store.json')
     },
     start(extraEnv) {
       return new Promise((resolve, reject) => {
@@ -192,6 +199,43 @@ function readJson(file, fallback) {
         const claimed = await source.claim(bob, backAtSource.body.file);
         assert(claimed.status === 200, point + ': the file should be claimable at ' + source.name + ', got ' + claimed.text);
         console.log('  PASS: ' + source.name + ' stopped at ' + point + ' -> ' + target.name + ' finished it -> ' + source.name + ' claimed it');
+      }
+
+      console.log('STEP: claim records written by ' + source.name + ' are finished by ' + target.name + ' and back');
+      for (const point of ['claim:committed', 'claim:bearer-taken', 'claim:revoked', 'claim:claimed']) {
+        const ring = await source.mint(alice);
+        await source.restart();
+        const exportPayload = { credentialId: ring.id, action: 'transfer-to-file' };
+        const exp = await source.post('/atlas/asset/transfer-to-file', { credential: ring, intent: { payload: exportPayload, proof: await proofFor(alice, exportPayload) } });
+        assert(exp.status === 200 && exp.body.file, point + ': export failed ' + exp.text);
+        const file = exp.body.file;
+        await source.restart({ ATLAS_TEST_CRASH_AT: point });
+        let cut = true;
+        try { const r = await source.claim(bob, file); cut = !(r.status === 200 && r.body.credential); } catch (err) { cut = true; }
+        assert(cut, point + ': the claim should have been cut off');
+        await source.stop();
+        const record = readJson(source.files.claims, { claims: {} }).claims[file.id];
+        assert(record && record.minted && record.claimantPublicKey === bob.publicKey, source.name + ' should have committed a claim record by ' + point);
+        const expectedState = point === 'claim:claimed' ? 'claimed' : 'committed';
+        assert(record.state === expectedState, source.name + ' wrote state ' + record.state + ' at ' + point);
+
+        copyState(source, target);
+        await target.restart();
+        const seen = await target.recover(alice, ring.id);
+        assert(seen.status === 409 && seen.body.code === 'already-claimed', point + ': ' + target.name + ' should report the file claimed, got ' + seen.text);
+        const finished = readJson(target.files.claims, { claims: {} }).claims[file.id];
+        assert(finished && finished.state === 'claimed' && finished.claimId === record.claimId && finished.mintedId === record.mintedId, point + ': ' + target.name + ' should have finished the record');
+        assert(canonicalize(finished.minted) === canonicalize(record.minted), point + ': ' + target.name + ' must keep the stored credential unchanged');
+        assert(!Object.prototype.hasOwnProperty.call(readJson(target.files.bearers, { bearers: {} }).bearers, file.id), point + ': the file should be out of the registry');
+        assert(readJson(target.files.revocations, { revoked: [] }).revoked.some((r) => r.id === file.id), point + ': the file should be revoked');
+
+        copyState(target, source);
+        await source.restart();
+        const again = await source.claim(bob, file);
+        assert(again.status === 200 && canonicalize(again.body.credential) === canonicalize(record.minted), point + ': the claimer should get the stored credential back at ' + source.name + ', got ' + again.text);
+        const stranger = await source.claim(alice, file);
+        assert(stranger.status === 409 && !stranger.text.includes(record.mintedId), point + ': another key must be refused with nothing disclosed');
+        console.log('  PASS: ' + source.name + ' stopped at ' + point + ' -> ' + target.name + ' finished it -> ' + source.name + ' returned the same credential');
       }
 
       // A receipt written by the source (after a claim) is read by the target.

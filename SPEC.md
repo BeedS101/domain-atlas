@@ -1157,4 +1157,4 @@ A claim is several separate writes, and the new credential would otherwise exist
 
 **Receipt.** The stored credential is kept for a replay window (30 days by default) after the claim, then dropped; the record keeps `claimId`, `fileId`, `mintedId`, the claimer's key, the outcome and the transition timestamps. A retry after that is answered `already-claimed` with a `receipt` of `claimId`, `mintedId` and `claimedAt`, for the key that claimed and for no other. `GET /atlas/asset/file-status` reports `claimed` as soon as the claim is committed.
 
-The claim store uses the same JSON shapes in every implementation, so a domain can move its state files between implementations mid-claim.
+The claim store uses the same JSON shapes in every implementation, so a domain can move its state files between implementations mid-claim. Export recovery (§13.5.1) finishes a committed claim before it settles the export record, so the claim record and the export record end together whichever request gets there first.

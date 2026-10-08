@@ -12,7 +12,9 @@ if (!is_string($id) || $id === '') send_json(400, ['error' => 'id is required'])
 
 $reason = revocation_reason_of($id);
 $state = 'unknown';
-if ($reason !== null) {
+if (file_claim_of(read_file_claims(), $id) !== null) {
+  $state = 'claimed';
+} elseif ($reason !== null) {
   $state = $reason === 'file-claimed' ? 'claimed' : 'revoked';
 } elseif (has_bearer($id)) {
   $state = is_suspended($id) ? 'suspended' : 'claimable';
