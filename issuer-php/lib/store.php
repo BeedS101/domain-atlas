@@ -1402,29 +1402,23 @@ const ATLAS_ASSET_CATALOG_BASE = [
   'atlas.wearable.ring' => [
     'name' => "Merchant's Signet Ring", 'modelPath' => '/assets/ring.glb', 'thumbnailPath' => '/assets/ring.png',
     'fungible' => false, 'presentation' => 'collectible',
-    // Task #42 demo class: serialized + capped. `serialized => true` has
+    // Serialized + capped demo class. `serialized => true` has
     // mint_asset_by_class() stamp a running per-instance atlas.serial/
     // atlas.editionSize onto every genuinely new mint (never onto a
-    // split/consolidate/trade re-mint — those pass a non-null $supersedes,
-    // see reserve_supply() below); `maxSupply` caps total instances
-    // ever issued. Deliberately NOT applied to the two fungible element
-    // classes below — this feature is orthogonal to them and there's no
-    // reason to touch a passing surface for a demo-only feature. Mirrors
+    // split/consolidate/trade re-mint, which pass a non-null $supersedes,
+    // see reserve_supply()); `maxSupply` caps total instances ever issued.
+    // Not applied to the fungible element classes. Mirrors
     // issuer-server/server.js's ASSET_CATALOG entry of the same name.
     //
-    // Raised 5 -> 20 (Bruno's own request, alongside making this class
-    // tradeable at the Trading Station — see check_presented_unique_asset()
-    // below): 5 was too tight to ever have more than a couple of rings
-    // loose enough to actually list/claim through an open Trading Station
-    // listing without immediately running the demo dry. reserve_supply()'s
-    // running count only ever compares against the CURRENT maxSupply, so
-    // already-issued rings keep the serial/editionSize they were minted
-    // with; editionSize on any new mint reflects the new cap of 20.
+    // The cap is large enough that the demo pages can hand rings out
+    // without selling out. reserve_supply() only compares its running
+    // count against the CURRENT maxSupply, so rings already issued under a
+    // smaller cap keep the editionSize they were minted with; only NEW
+    // mints carry the current cap.
     'serialized' => true,
-    'maxSupply' => 20,
-    // Task #250 fourth follow-up (Bruno's own request): rarity/
-    // enchantments/stats used to be these same three fixed values on EVERY
-    // mint. 'randomizeProperties' (see random_ring_properties() below, and
+    'maxSupply' => 30000,
+    // Rarity/enchantments/stats differ per ring rather than being fixed
+    // per class. 'randomizeProperties' (see random_ring_properties() below, and
     // RING_RARITY_TIERS/RING_ENCHANTMENT_POOL near reserve_supply() in this
     // same file) is consulted by mint_asset_by_class() for every genuinely
     // new mint and overrides atlas.rarity/com.example.enchantments/
