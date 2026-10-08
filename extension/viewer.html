@@ -2594,8 +2594,29 @@
           <div id="friendsHereList" class="item-list"></div>
 
           <h3>Friend requests</h3>
-          <div class="subhead">Only live while you're still in the same world as whoever sent it — a request can't be answered after either of you leaves.</div>
+          <div class="subhead">Requests from people in this same world are live only — they can't be answered once either of you leaves. Requests sent to you by handle stay here until you answer them.</div>
           <div id="friendRequestsList" class="item-list"></div>
+          <div id="federatedFriendRequestsList" class="item-list"></div>
+
+          <!-- Friend request by handle: delivered through the Post Office,
+               across domains, so neither of you needs to be online or in
+               the same world, or a member of the same Post Office. The
+               contact is only added once they accept. -->
+          <h3>Send a friend request</h3>
+          <div class="subhead">Know their handle (like bruno#example.com)? Send a request — they can be on a different Post Office. They're added to your contacts once they accept.</div>
+          <input type="text" id="friendReqNameInput" placeholder="Name for this contact" maxlength="24" style="margin-top:8px;">
+          <input type="text" id="friendReqHandleInput" placeholder="Their handle (e.g. bruno#example.com)" style="margin-top:8px;">
+          <label class="subhead" for="friendReqViaSelect" style="display:block;margin-top:8px;">Send through</label>
+          <select id="friendReqViaSelect" style="margin-top:2px;"></select>
+          <input type="text" id="friendReqNoteInput" placeholder="Optional note (up to 140 characters)" maxlength="140" style="margin-top:8px;">
+          <div class="btn-row" style="margin-top:8px;">
+            <button id="friendReqSendBtn" type="button" class="btn-secondary">Send request</button>
+          </div>
+          <div id="friendReqStatus" class="empty-note" style="margin-top:6px;"></div>
+
+          <h3>Requests you've sent</h3>
+          <div class="subhead">Waiting for an answer. Declined requests are not reported back, so a request stays here until it's accepted or you cancel it.</div>
+          <div id="sentFriendRequestsList" class="item-list"></div>
 
           <!-- Manual add-by-address (new): the one way to add a contact
                that needs neither of you to be standing in the same world

@@ -659,7 +659,25 @@ separate, purely local, personal-organization layer on top of the same
 saved-contacts list — for sorting people into your own categories, nothing
 that's ever sent anywhere.
 
-This deliberately does NOT go through the existing mail system. Mail
+**Friend requests by handle (works across Post Offices).** The Add
+Contact sub-tab's "Send a friend request" form takes a `handle#domain`
+address and a Post Office you've joined to send it through. The person you're
+asking can be a member of a different Post Office, and neither of you needs
+to be online or in the same world: the request travels as Post Office mail
+over the existing federation relay (SPEC.md §11.4-11.5), told apart from
+ordinary mail by a reserved subject, so no issuer change was needed. It shows
+up for them under "Friend requests" with Accept/Decline and a count on the
+tab. Neither side is added until they accept: accepting adds you to their
+contacts and sends an acceptance back, and your wallet adds them (under the
+name you chose) when it arrives. Declining sends nothing, so a decline looks
+the same as a request not yet seen. If you ask each other at the same
+time, you both end up as contacts without clicking Accept. Your pending
+requests are listed under "Requests you've sent" with a Cancel button. Their
+block list and friends-only mode apply as for any mail. Verified by
+`test/manual-federated-friend-request.js` (Node, two issuers) and
+`test/manual-federated-friend-request-php.js` (two PHP bundles).
+
+The live in-room flow described above deliberately does NOT go through the existing mail system. Mail
 (`AtlasWallet.checkAllMail`) is domain-issuer-to-subscriber only —
 messages are addressed by `credentialId` and fetched per-domain from
 credentials the wallet already holds, and there's no way to even discover

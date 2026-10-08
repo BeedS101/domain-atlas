@@ -3917,7 +3917,7 @@ const AtlasWallet = (() => {
       wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
       friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
       mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
-      chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles
+      chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles, friendRequests
     ] = await Promise.all([
       // Task #250: dropped items no longer have a local-only "still
       // secretly mine" state to back up — a drop now genuinely leaves this
@@ -3937,7 +3937,10 @@ const AtlasWallet = (() => {
       getActivityLog(),
       // Saved transfer files hold the only copy of an exported asset until
       // someone claims it, so a restore must bring them back.
-      getAssetFiles(owner)
+      getAssetFiles(owner),
+      // Pending friend requests (both directions) and undelivered
+      // acceptances; without them a restore would forget who is waiting.
+      getFriendRequestState(owner)
     ]);
 
     // Low-sensitivity per-owner bookkeeping that was never wrapped in
@@ -3970,7 +3973,7 @@ const AtlasWallet = (() => {
         wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
         friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
         mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
-        chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles,
+        chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles, friendRequests,
         deletedMailIds: (deletedMailIdsAll.atlasDeletedMailIds || {})[owner] || [],
         deletedChatIds: (deletedChatIdsAll.atlasDeletedChatIds || {})[owner] || [],
         lastChatSendDomain: (lastChatSendDomainAll.atlasLastChatSendDomain || {})[owner] || null,
@@ -4083,7 +4086,8 @@ const AtlasWallet = (() => {
       // Carries the restored identity's own activity history back in, same
       // as every other data family here, rather than starting blank.
       saveActivityLog(owner, d.activityLog || []),
-      saveAssetFiles(owner, d.assetFiles || [])
+      saveAssetFiles(owner, d.assetFiles || []),
+      withMessageLock(() => saveFriendRequestState(owner, d.friendRequests))
     ]);
 
     // Low-sensitivity bookkeeping — restored as a raw per-owner slot
@@ -5119,7 +5123,11 @@ const AtlasWallet = (() => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ payload, proof })
     });
-    if (!res.ok) throw new Error('Send failed: ' + (await res.text()));
+    if (!res.ok) {
+      const err = new Error('Send failed: ' + (await res.text()));
+      err.status = res.status;
+      throw err;
+    }
     return res.json();
   }
 
@@ -6472,6 +6480,260 @@ const AtlasWallet = (() => {
     }
   }
 
+  // ---------- Friend requests over the Post Office ----------
+  //
+  // A friend request by handle (bruno#example.com) travels as ordinary Post
+  // Office mail, so it crosses domains through the same relay as any other
+  // message (SPEC.md §11.4) and needs nothing new from an issuer. Like Chat,
+  // it is told apart by a reserved subject: no person can type a leading NUL
+  // into a subject line, and checkAllMail() diverts a marked message into
+  // atlasFriendRequests instead of the Mail inbox. The body is a small JSON
+  // object, {v: 1, type: 'request', note?} or {v: 1, type: 'accepted'}.
+  //
+  // Consent is two-sided. The sender is NOT added to anyone's contacts when
+  // the request goes out; it waits in `outgoing` until an 'accepted' notice
+  // comes back from that same key, and only then does the sender's wallet
+  // add the contact. The recipient adds the contact only on Accept. A decline
+  // sends nothing, so a stranger cannot tell "declined" from "not seen yet"
+  // (the same rule SPEC.md §11.3 step 3 applies to blocks). If both people
+  // send each other a request, the second one to arrive is treated as an
+  // acceptance. An 'accepted' notice from a key that was never sent a request
+  // is ignored, so nobody can push themselves into a contact list.
+  //
+  // Per-owner state, encrypted at rest like the other personal stores:
+  //   incoming: requests waiting for Accept/Decline
+  //   outgoing: requests sent and not yet answered
+  //   notices:  'accepted' replies not yet delivered (retried by
+  //             flushFriendNotices on every mail check)
+  //   seen:     ids of processed marker messages, so a poll never replays one
+  const FRIEND_SUBJECT_MARKER = '\u0000atlas.friend.v1';
+  const FRIEND_NOTE_MAX = 140;
+  const FRIEND_INCOMING_CAP = 200;
+  const FRIEND_SEEN_CAP = 2000;
+  const FRIEND_NOTICE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+  function isFriendTransportMessage(subject) {
+    return subject === FRIEND_SUBJECT_MARKER;
+  }
+
+  function normalizeFriendRequestState(state) {
+    const s = (state && typeof state === 'object') ? state : {};
+    return {
+      incoming: Array.isArray(s.incoming) ? s.incoming : [],
+      outgoing: Array.isArray(s.outgoing) ? s.outgoing : [],
+      notices: Array.isArray(s.notices) ? s.notices : [],
+      seen: Array.isArray(s.seen) ? s.seen : []
+    };
+  }
+
+  async function getFriendRequestState(ownerPublicKey) {
+    const { atlasFriendRequests } = await chrome.storage.local.get('atlasFriendRequests');
+    const identity = await getIdentity();
+    const state = await decryptAtRestAndMigrate(identity, 'friendRequests', (atlasFriendRequests || {})[ownerPublicKey], null, (v) => saveFriendRequestState(ownerPublicKey, normalizeFriendRequestState(v)));
+    return normalizeFriendRequestState(state);
+  }
+
+  async function saveFriendRequestState(ownerPublicKey, state) {
+    const { atlasFriendRequests } = await chrome.storage.local.get('atlasFriendRequests');
+    const all = atlasFriendRequests || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'friendRequests', normalizeFriendRequestState(state));
+    await chrome.storage.local.set({ atlasFriendRequests: all });
+  }
+
+  // Read-modify-write of the state under the same lock that guards mail and
+  // chat, so a mail check and a click on Accept cannot overwrite each other.
+  function updateFriendRequestState(ownerPublicKey, mutate) {
+    return withMessageLock(async () => {
+      const state = await getFriendRequestState(ownerPublicKey);
+      const result = await mutate(state);
+      await saveFriendRequestState(ownerPublicKey, state);
+      return result;
+    });
+  }
+
+  async function getIncomingFriendRequests(ownerPublicKey) {
+    return (await getFriendRequestState(ownerPublicKey)).incoming;
+  }
+
+  async function getOutgoingFriendRequests(ownerPublicKey) {
+    return (await getFriendRequestState(ownerPublicKey)).outgoing;
+  }
+
+  function cleanFriendNote(note) {
+    return String(note || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, FRIEND_NOTE_MAX);
+  }
+
+  function parseFriendBody(body) {
+    try {
+      const parsed = JSON.parse(body);
+      if (!parsed || parsed.v !== 1) return null;
+      if (parsed.type === 'request') return { type: 'request', note: cleanFriendNote(parsed.note) };
+      if (parsed.type === 'accepted') return { type: 'accepted' };
+    } catch (err) {
+      // not one of ours
+    }
+    return null;
+  }
+
+  // handle#domain as shown to the person; `domain` is the sender's home
+  // (from.homeDomain on a relayed message, else the domain it arrived from).
+  function friendDisplayName(entry) {
+    return entry.handle ? entry.handle + '#' + entry.homeDomain : null;
+  }
+
+  // Sends a friend request. Give either {handle, recipientDomain} (looked up
+  // at the recipient's own Post Office) or {publicKey, recipientDomain}.
+  // `viaDomain` must be a Post Office this wallet is a member of; the
+  // recipient does not have to be a member of it.
+  async function sendFriendRequest({ viaDomain, handle, publicKey, recipientDomain, name, note }) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Set up or unlock an identity first.');
+    if (!viaDomain) throw new Error('Choose a Post Office to send through.');
+    const memberships = await getPostOfficeMemberships(identity.publicKey);
+    if (!memberships.some((m) => m.domain === viaDomain)) {
+      throw new Error('You have not joined ' + viaDomain + '\'s Post Office yet.');
+    }
+    let key = publicKey;
+    const homeDomain = recipientDomain || viaDomain;
+    if (!key) {
+      if (!handle) throw new Error('Enter their handle.');
+      const resolved = await resolvePostOfficeHandle(homeDomain, handle);
+      key = resolved.publicKey;
+    }
+    if (key === identity.publicKey) throw new Error('That is your own address.');
+    const friends = await getFriends();
+    if (friends.some((f) => f.publicKey === key)) throw new Error('They are already in your contacts.');
+
+    const displayName = (name || '').trim().slice(0, MAX_ALIAS_LENGTH) || handle || 'Friend';
+
+    // They already asked us: answering with our own request is an acceptance.
+    const state = await getFriendRequestState(identity.publicKey);
+    if (state.incoming.some((r) => r.publicKey === key)) {
+      await acceptFriendRequest(key, displayName);
+      return { accepted: true, publicKey: key };
+    }
+
+    const body = JSON.stringify({ v: 1, type: 'request', note: cleanFriendNote(note) });
+    await postOfficeSendRaw(viaDomain, { publicKey: key, domain: homeDomain }, FRIEND_SUBJECT_MARKER, body);
+    await updateFriendRequestState(identity.publicKey, (s) => {
+      s.outgoing = s.outgoing.filter((r) => r.publicKey !== key);
+      s.outgoing.push({ publicKey: key, name: displayName, handle: handle || null, recipientDomain: homeDomain, viaDomain, note: cleanFriendNote(note), sentAt: new Date().toISOString() });
+    });
+    return { accepted: false, publicKey: key };
+  }
+
+  async function cancelOutgoingFriendRequest(publicKey) {
+    const identity = await getIdentity();
+    if (!identity) return;
+    await updateFriendRequestState(identity.publicKey, (s) => { s.outgoing = s.outgoing.filter((r) => r.publicKey !== publicKey); });
+  }
+
+  // Accept: add the contact, then tell the sender. The notice is queued
+  // before it is sent so a failed send is retried rather than lost.
+  async function acceptFriendRequest(publicKey, name) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Set up or unlock an identity first.');
+    let request = null;
+    await updateFriendRequestState(identity.publicKey, (s) => {
+      request = s.incoming.find((r) => r.publicKey === publicKey) || null;
+    });
+    if (!request) throw new Error('No pending request from that person.');
+    const label = (name || '').trim() || friendDisplayName(request) || 'Friend';
+    await addFriend(publicKey, label);
+    await updateFriendRequestState(identity.publicKey, (s) => {
+      s.incoming = s.incoming.filter((r) => r.publicKey !== publicKey);
+      queueFriendNotice(s, request.publicKey, request.homeDomain, request.via);
+    });
+    try { await flushFriendNotices(); } catch (err) { /* stays queued, retried on the next mail check */ }
+    return { publicKey };
+  }
+
+  // Decline sends nothing at all.
+  async function declineFriendRequest(publicKey) {
+    const identity = await getIdentity();
+    if (!identity) return;
+    await updateFriendRequestState(identity.publicKey, (s) => { s.incoming = s.incoming.filter((r) => r.publicKey !== publicKey); });
+  }
+
+  function queueFriendNotice(state, publicKey, toDomain, viaDomain) {
+    state.notices = state.notices.filter((n) => n.publicKey !== publicKey);
+    state.notices.push({ publicKey, toDomain: toDomain || null, via: viaDomain, queuedAt: new Date().toISOString() });
+  }
+
+  // Delivers queued 'accepted' notices. A rejection from the other side (4xx
+  // other than 429) is final and drops the notice; a network error, 5xx or
+  // 429 keeps it for the next attempt, up to FRIEND_NOTICE_MAX_AGE_MS.
+  async function flushFriendNotices() {
+    const identity = await getIdentity();
+    if (!identity) return 0;
+    const state = await getFriendRequestState(identity.publicKey);
+    if (!state.notices.length) return 0;
+    const done = new Set();
+    let delivered = 0;
+    for (const notice of state.notices) {
+      const age = Date.now() - new Date(notice.queuedAt).getTime();
+      if (age > FRIEND_NOTICE_MAX_AGE_MS) { done.add(notice.publicKey); continue; }
+      try {
+        await postOfficeSendRaw(notice.via, { publicKey: notice.publicKey, domain: notice.toDomain }, FRIEND_SUBJECT_MARKER, JSON.stringify({ v: 1, type: 'accepted' }));
+        done.add(notice.publicKey);
+        delivered++;
+      } catch (err) {
+        if (err && err.status && err.status >= 400 && err.status < 500 && err.status !== 429) done.add(notice.publicKey);
+      }
+    }
+    if (done.size) {
+      await updateFriendRequestState(identity.publicKey, (s) => { s.notices = s.notices.filter((n) => !done.has(n.publicKey)); });
+    }
+    return delivered;
+  }
+
+  // Applies friend-marker messages that checkAllMail() collected. Each item
+  // is {id, publicKey, handle, homeDomain, via, sentAt, body}.
+  async function processFriendMessages(identity, items) {
+    if (!items.length) return;
+    const friends = await getFriends();
+    const friendKeys = new Set(friends.map((f) => f.publicKey));
+    const toAdd = [];
+    await updateFriendRequestState(identity.publicKey, (s) => {
+      const seen = new Set(s.seen);
+      items.sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
+      for (const item of items) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        if (!item.publicKey || item.publicKey === identity.publicKey) continue;
+        const parsed = parseFriendBody(item.body);
+        if (!parsed) continue;
+        const pending = s.outgoing.find((r) => r.publicKey === item.publicKey);
+        if (parsed.type === 'accepted') {
+          if (!pending) continue; // never asked: ignore
+          s.outgoing = s.outgoing.filter((r) => r.publicKey !== item.publicKey);
+          toAdd.push({ publicKey: item.publicKey, name: pending.name });
+          friendKeys.add(item.publicKey);
+          continue;
+        }
+        // type === 'request'
+        if (friendKeys.has(item.publicKey)) {
+          // Already contacts (they may have lost us): confirm so they re-add.
+          queueFriendNotice(s, item.publicKey, item.homeDomain, item.via);
+          continue;
+        }
+        if (pending) {
+          s.outgoing = s.outgoing.filter((r) => r.publicKey !== item.publicKey);
+          toAdd.push({ publicKey: item.publicKey, name: pending.name });
+          friendKeys.add(item.publicKey);
+          queueFriendNotice(s, item.publicKey, item.homeDomain, item.via);
+          continue;
+        }
+        s.incoming = s.incoming.filter((r) => r.publicKey !== item.publicKey);
+        s.incoming.push({ publicKey: item.publicKey, handle: item.handle || null, homeDomain: item.homeDomain, via: item.via, note: parsed.note, receivedAt: new Date().toISOString(), messageId: item.id });
+      }
+      if (s.incoming.length > FRIEND_INCOMING_CAP) s.incoming = s.incoming.slice(-FRIEND_INCOMING_CAP);
+      s.seen = Array.from(seen).slice(-FRIEND_SEEN_CAP);
+    });
+    for (const entry of toAdd) await addFriend(entry.publicKey, entry.name);
+  }
+
   // ---------- asset update notices (SPEC.md §5.1.1) ----------
   //
   // A durable, per-owner record of assets this wallet has adopted a
@@ -6712,12 +6974,17 @@ const AtlasWallet = (() => {
     // or as part of clearing/deleting a whole thread) must stay gone
     // across future checks too, same reasoning as mail's own list.
     const deletedChatIds = new Set(await getDeletedChatIds(identity.publicKey));
-    const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds, ...existingChat.map((e) => e.id), ...deletedChatIds]);
+    // Friend-request marker messages never land in `existing` either (they go
+    // to atlasFriendRequests), so the ids already processed are folded in
+    // from that store.
+    const friendState = await getFriendRequestState(identity.publicKey);
+    const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds, ...existingChat.map((e) => e.id), ...deletedChatIds, ...friendState.seen]);
     // New arrivals are collected here and merged into the stored lists at
     // the end, under the lock, against a fresh read; `existing` and
     // `existingChat` above are only used to recognise what is already known.
     const incomingMail = [];
     const incomingChat = [];
+    const incomingFriend = [];
 
     for (const [domain, idSet] of byDomain) {
       try {
@@ -6764,6 +7031,23 @@ const AtlasWallet = (() => {
           const ok = await verifyMailMessage(domain, message);
           if (!ok) continue; // never surface anything that doesn't check out
           knownIds.add(message.id);
+          // Friend requests and their acceptances (see FRIEND_SUBJECT_MARKER).
+          // Like chat, these need `from` (they only travel through a Post
+          // Office); a marked message without it is dropped, never shown as mail.
+          if (isFriendTransportMessage(message.subject)) {
+            if (message.from && message.from.publicKey) {
+              incomingFriend.push({
+                id: message.id,
+                publicKey: message.from.publicKey,
+                handle: message.from.handle || null,
+                homeDomain: message.from.homeDomain || domain,
+                via: domain,
+                sentAt: message.sentAt,
+                body: message.body
+              });
+            }
+            continue;
+          }
           // The ONLY branch point checkAllMail gained for Chats: a message
           // whose subject is the reserved CHAT_SUBJECT_MARKER is diverted
           // into atlasChatMessages instead of atlasMail — everything else
@@ -6850,6 +7134,10 @@ const AtlasWallet = (() => {
         }
       }
     });
+    // Outside the lock above: processFriendMessages takes it itself, and
+    // flushFriendNotices does network I/O.
+    await processFriendMessages(identity, incomingFriend);
+    try { await flushFriendNotices(); } catch (err) { /* retried on the next check */ }
     const settings = await getMailSettings();
     settings.lastCheckedAt = new Date().toISOString();
     await chrome.storage.local.set({ atlasMailSettings: settings });
@@ -6881,6 +7169,9 @@ const AtlasWallet = (() => {
     getFileTransferSupport, assetFileExportProblem, exportAssetToFile, getAssetFiles, saveAssetFiles, getInterruptedExports, recoverInterruptedExport, recoverInterruptedExports, dismissLostExport, EXPORT_RECOVERY_GRACE_MS, inspectAssetFile, claimAssetFile, getInterruptedClaims, recoverInterruptedClaim, recoverInterruptedClaims, dismissClaimRecord, restoreAssetCopy,
     getPendingExports, checkPendingExport, reclaimPendingExport, forgetPendingExport,
     exportFullBackup, importFullBackup,
+    // Friend requests by handle, delivered through the Post Office (federated).
+    sendFriendRequest, getIncomingFriendRequests, getOutgoingFriendRequests,
+    acceptFriendRequest, declineFriendRequest, cancelOutgoingFriendRequest, flushFriendNotices,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
     writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,
     getIdentitySyncBackupSettings, enableIdentitySyncBackup, disableIdentitySyncBackup,

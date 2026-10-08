@@ -1824,6 +1824,14 @@ const manualAddPublicKeyInput = document.getElementById('manualAddPublicKeyInput
 const manualAddToggleRawKeyBtn = document.getElementById('manualAddToggleRawKeyBtn');
 const manualAddContactBtn = document.getElementById('manualAddContactBtn');
 const manualAddContactStatusEl = document.getElementById('manualAddContactStatus');
+const federatedFriendRequestsListEl = document.getElementById('federatedFriendRequestsList');
+const sentFriendRequestsListEl = document.getElementById('sentFriendRequestsList');
+const friendReqNameInput = document.getElementById('friendReqNameInput');
+const friendReqHandleInput = document.getElementById('friendReqHandleInput');
+const friendReqViaSelect = document.getElementById('friendReqViaSelect');
+const friendReqNoteInput = document.getElementById('friendReqNoteInput');
+const friendReqSendBtn = document.getElementById('friendReqSendBtn');
+const friendReqStatusEl = document.getElementById('friendReqStatus');
 
 // Groups sub-tab (new, local-only — see AtlasWallet.getContactGroups et al.
 // in wallet.js).
@@ -7848,20 +7856,23 @@ async function updateSocialBadge() {
   const unreadMail = entries.filter((e) => !e.read).length;
   const calendarEvents = await AtlasWallet.getCalendarEvents();
   const calendarDueSoon = countCalendarEventsDueSoon(calendarEvents);
+  // Live (same-world) requests plus the ones that arrived by handle.
+  const federatedIncoming = identity ? await AtlasWallet.getIncomingFriendRequests(identity.publicKey) : [];
+  const pendingRequestCount = presencePendingIncoming.length + federatedIncoming.length;
   if (friendRequestsBadge) {
-    friendRequestsBadge.textContent = String(presencePendingIncoming.length);
-    friendRequestsBadge.classList.toggle('show', presencePendingIncoming.length > 0);
+    friendRequestsBadge.textContent = String(pendingRequestCount);
+    friendRequestsBadge.classList.toggle('show', pendingRequestCount > 0);
   }
   if (addContactBadge) {
-    addContactBadge.textContent = String(presencePendingIncoming.length);
-    addContactBadge.classList.toggle('show', presencePendingIncoming.length > 0);
+    addContactBadge.textContent = String(pendingRequestCount);
+    addContactBadge.classList.toggle('show', pendingRequestCount > 0);
   }
   if (calendarBadge) {
     calendarBadge.textContent = String(calendarDueSoon);
     calendarBadge.classList.toggle('show', calendarDueSoon > 0);
   }
   if (socialBadge) {
-    const total = unreadMail + presencePendingIncoming.length + calendarDueSoon;
+    const total = unreadMail + pendingRequestCount + calendarDueSoon;
     socialBadge.textContent = String(total);
     socialBadge.classList.toggle('show', total > 0);
   }
@@ -9833,13 +9844,70 @@ function renderIncomingRequestCard(req, container) {
   const el = document.createElement('div');
   el.className = 'info-card';
   el.innerHTML =
-    '<div class="name">' + req.name + '</div>' +
+    '<div class="name">' + escapeHtml(req.name) + '</div>' +
     '<div class="meta">' + (req.publicKey ? short(req.publicKey, 20) : '') + '</div>' +
     '<div class="item-actions">' +
     '<button type="button" data-action="accept-request" data-from="' + req.from + '">Accept</button>' +
     '<button type="button" data-action="decline-request" data-from="' + req.from + '" class="danger-btn">Decline</button>' +
     '</div>';
   container.appendChild(el);
+}
+
+// A friend request that arrived by handle (through a Post Office, possibly
+// from another domain). Everything shown comes from the signed relayed
+// message or the sender's optional note, so it is escaped.
+function renderFederatedRequestCard(req, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.dataset.requestKey = req.publicKey;
+  const address = req.handle ? req.handle + '#' + req.homeDomain : null;
+  el.innerHTML =
+    '<div class="name">' + escapeHtml(address || 'Someone at ' + req.homeDomain) + '</div>' +
+    '<div class="meta">' + short(req.publicKey, 20) + '</div>' +
+    (req.note ? '<div class="empty-note" style="margin-top:4px;">“' + escapeHtml(req.note) + '”</div>' : '') +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="accept-federated-request" data-key="' + escapeHtml(req.publicKey) + '">Accept</button>' +
+    '<button type="button" data-action="decline-federated-request" data-key="' + escapeHtml(req.publicKey) + '" class="danger-btn">Decline</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+function renderSentRequestCard(req, container) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.dataset.requestKey = req.publicKey;
+  const address = req.handle ? req.handle + '#' + req.recipientDomain : short(req.publicKey, 20);
+  el.innerHTML =
+    '<div class="name">' + escapeHtml(req.name) + '</div>' +
+    '<div class="meta">' + escapeHtml(address) + ' · waiting for an answer</div>' +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="cancel-sent-request" data-key="' + escapeHtml(req.publicKey) + '" class="link-btn">Cancel</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+// Fills the "Send through" list with the Post Offices this wallet belongs to,
+// keeping the current choice (or the last one used for sending mail).
+async function refreshFriendRequestViaOptions(identity) {
+  if (!friendReqViaSelect) return;
+  const previous = friendReqViaSelect.value;
+  friendReqViaSelect.innerHTML = '';
+  const memberships = identity ? await AtlasWallet.getPostOfficeMemberships(identity.publicKey) : [];
+  const domains = Array.from(new Set(memberships.map((m) => m.domain)));
+  if (domains.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'Join a Post Office first (Mail tab)';
+    friendReqViaSelect.appendChild(opt);
+    return;
+  }
+  domains.forEach((d) => {
+    const opt = document.createElement('option');
+    opt.value = d;
+    opt.textContent = d;
+    friendReqViaSelect.appendChild(opt);
+  });
+  if (previous && domains.includes(previous)) friendReqViaSelect.value = previous;
 }
 
 // Contacts sub-tab's own card (task #67 follow-up): now carries a search
@@ -9897,6 +9965,27 @@ async function refreshFriendsDisplay() {
       presencePendingIncoming.forEach((req) => renderIncomingRequestCard(req, friendRequestsListEl));
     }
   }
+
+  const requestIdentity = await AtlasWallet.getIdentity();
+  const federatedIncoming = requestIdentity ? await AtlasWallet.getIncomingFriendRequests(requestIdentity.publicKey) : [];
+  const sentRequests = requestIdentity ? await AtlasWallet.getOutgoingFriendRequests(requestIdentity.publicKey) : [];
+  if (federatedFriendRequestsListEl) {
+    federatedFriendRequestsListEl.innerHTML = '';
+    federatedIncoming.forEach((req) => renderFederatedRequestCard(req, federatedFriendRequestsListEl));
+  }
+  if (friendRequestsListEl && federatedIncoming.length > 0 && presencePendingIncoming.length === 0) {
+    // The "No pending requests." line would contradict the cards below it.
+    friendRequestsListEl.innerHTML = '';
+  }
+  if (sentFriendRequestsListEl) {
+    sentFriendRequestsListEl.innerHTML = '';
+    if (sentRequests.length === 0) {
+      sentFriendRequestsListEl.innerHTML = '<div class="empty-note">No requests waiting.</div>';
+    } else {
+      sentRequests.forEach((req) => renderSentRequestCard(req, sentFriendRequestsListEl));
+    }
+  }
+  await refreshFriendRequestViaOptions(requestIdentity);
 
   if (contactsListEl) {
     contactsListEl.innerHTML = '';
@@ -9975,6 +10064,28 @@ socialScreen && socialScreen.addEventListener('click', async (e) => {
       try { await AtlasWallet.addFriend(req.publicKey, req.name || 'Friend'); } catch (err) {}
     }
     sendSignal(from, 'friend-request-accepted', presenceOwnPublicKey, presenceOwnName || 'Visitor');
+    await refreshFriendsDisplay();
+    return;
+  }
+
+  if (action === 'accept-federated-request') {
+    try {
+      await AtlasWallet.acceptFriendRequest(btn.dataset.key);
+    } catch (err) {
+      if (friendReqStatusEl) friendReqStatusEl.textContent = 'Accept failed: ' + err.message;
+    }
+    await refreshFriendsDisplay();
+    return;
+  }
+
+  if (action === 'decline-federated-request') {
+    await AtlasWallet.declineFriendRequest(btn.dataset.key);
+    await refreshFriendsDisplay();
+    return;
+  }
+
+  if (action === 'cancel-sent-request') {
+    await AtlasWallet.cancelOutgoingFriendRequest(btn.dataset.key);
     await refreshFriendsDisplay();
     return;
   }
@@ -10150,6 +10261,54 @@ manualAddToggleRawKeyBtn && manualAddToggleRawKeyBtn.addEventListener('click', (
   manualAddHandleInput.hidden = !showingRawKey;
   manualAddToggleRawKeyBtn.textContent = showingRawKey ? 'Paste a raw public key instead' : 'Use a handle instead';
   (showingRawKey ? manualAddPublicKeyInput : manualAddHandleInput).value = '';
+});
+
+// Send a friend request by handle. The handle's own domain says where the
+// recipient lives; "Send through" is one of this wallet's own Post Offices.
+// The recipient can belong to a different one — it is relayed (SPEC.md §11.4).
+friendReqSendBtn && friendReqSendBtn.addEventListener('click', async () => {
+  const name = (friendReqNameInput.value || '').trim();
+  const raw = (friendReqHandleInput.value || '').trim();
+  const hashIndex = raw.indexOf('#');
+  const viaDomain = friendReqViaSelect ? friendReqViaSelect.value : '';
+  if (hashIndex <= 0 || hashIndex === raw.length - 1) {
+    friendReqStatusEl.textContent = 'Enter a full address like bruno#example.com.';
+    return;
+  }
+  if (!viaDomain) {
+    friendReqStatusEl.textContent = 'Join a Post Office first — a request is sent through one you belong to.';
+    return;
+  }
+  const handle = raw.slice(0, hashIndex).trim();
+  const recipientDomain = raw.slice(hashIndex + 1).trim();
+  friendReqSendBtn.disabled = true;
+  friendReqStatusEl.textContent = 'Sending…';
+  try {
+    const result = await AtlasWallet.sendFriendRequest({ viaDomain, handle, recipientDomain, name: name || handle, note: friendReqNoteInput.value });
+    friendReqStatusEl.textContent = result.accepted
+      ? 'They had already asked to be your friend — added to your contacts.'
+      : 'Request sent to ' + raw + '. They\'ll appear in your contacts once they accept.';
+    friendReqNameInput.value = '';
+    friendReqHandleInput.value = '';
+    friendReqNoteInput.value = '';
+    await refreshFriendsDisplay();
+  } catch (err) {
+    friendReqStatusEl.textContent = err.message;
+  } finally {
+    friendReqSendBtn.disabled = false;
+  }
+});
+
+// Requests and acceptances arrive during a mail check, wherever it was
+// triggered from; refresh the lists and badge when the stored state changes.
+chrome.storage.onChanged.addListener(async (changes, areaName) => {
+  if (areaName !== 'local' || !changes.atlasFriendRequests) return;
+  try {
+    if (socialFriendsTabActive()) await refreshFriendsDisplay();
+    else await updateSocialBadge();
+  } catch (err) {
+    // locked or no identity: nothing to show
+  }
 });
 
 // Unlike Compose (which has its own Post Office domain dropdown to fall
