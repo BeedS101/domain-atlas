@@ -143,7 +143,10 @@ function atlas_delivery_begin($spec) {
     $key = $spec['key'] ?? null;
     if ($key && isset($doc['byKey'][$key]) && isset($doc['deliveries'][$doc['byKey'][$key]])) {
       $prior = $doc['deliveries'][$doc['byKey'][$key]];
-      if (!in_array($prior['state'], ATLAS_DELIVERY_TERMINAL, true)) return ['existing' => $prior];
+      // An unfinished delivery for the key, or one that already completed:
+      // either way the key is not delivered a second time. Only a
+      // rolled-back delivery leaves the key free to try again.
+      if ($prior['state'] !== 'rolled-back') return ['existing' => $prior];
     }
     $at = atlas_now_iso();
     $uuid = bin2hex(random_bytes(16));
@@ -219,8 +222,19 @@ function atlas_delivery_hold_original(&$rec) {
     $entry = revocation_entry_of($rec['originalId']);
     if ($entry && ($entry['reason'] ?? null) !== 'email-transferred') return false; // spent some other way
     if ($rec['kind'] === 'bearer-original' && has_bearer($rec['originalId'])) {
+      // Removing the registry entry is the first durable change to the
+      // original, so what is needed to put it back is written first: a stop
+      // between the removal and the 'held' state must still leave rollback
+      // able to restore the entry.
+      if (empty($rec['heldBearer'])) {
+        $listed = read_bearers();
+        $rec['heldBearer'] = $listed['bearers'][$rec['originalId']] ?? null;
+        atlas_delivery_save($rec);
+        file_export_fault_point('delivery:bearer-recorded');
+      }
       $taken = take_bearer($rec['originalId']);
       if ($taken) $rec['heldBearer'] = $taken;
+      file_export_fault_point('delivery:bearer-taken');
     }
     if (!$entry && find_suspension($rec['originalId']) === null) atlas_suspend($rec['originalId'], ATLAS_DELIVERY_HOLD_REASON, null);
   }

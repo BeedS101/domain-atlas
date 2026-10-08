@@ -4427,6 +4427,7 @@ async function main() {
     fault: faultPoint,
     revoke, isRevoked, revocationEntryOf, suspend, unsuspend, findSuspension,
     registerBearer, takeBearer, restoreBearer, hasBearer,
+    bearerEntryOf: (id) => readBearers().bearers[id] || null,
     archive: (cred, reason) => { if (!findArchivedAsset(cred.id)) archiveIfAudited(cred, reason); },
     maxAttempts: parseInt(process.env.ATLAS_DELIVERY_MAX_ATTEMPTS || '3', 10),
     retryBackoffMs: parseInt(process.env.ATLAS_DELIVERY_RETRY_BACKOFF_MS || '500', 10),
@@ -6646,8 +6647,14 @@ async function main() {
         });
         if (began.existing) {
           // Another request got there between the checks and here; the
-          // credential minted above was never recorded or listed.
+          // credential minted above was never recorded or listed. If that
+          // delivery has already finished, the answer is the one the first
+          // request gets.
           revoke(minted.id, 'issuer-request');
+          if (began.existing.state === 'delivered') {
+            if (sameRequest(began.existing)) return sendJson(res, 200, { status: 'email-transferred', to: recipientEmail });
+            return sendJson(res, 409, { error: 'this asset has already been delivered', code: 'already-delivered' });
+          }
           return sendJson(res, 409, { error: 'a delivery of this asset is already in progress', code: 'in-progress' });
         }
         const outcome = await deliveryEngine.run(began.rec.deliveryId);
@@ -6713,7 +6720,15 @@ async function main() {
         faultPoint('delivery:minted');
         const began = deliveryEngine.begin({ key: deliveryKey, kind: 'fresh-mint', class: assetClass, ownerPublicKey: auth.publicKey, minted, recipient: recipientEmail });
         if (began.existing) {
+          // The key was taken between the check above and here. The mint was
+          // never recorded or listed, so it is undone, and a send that has
+          // already finished is answered as the first request was.
           revoke(minted.id, 'issuer-request');
+          const other = began.existing;
+          if (other.recipientHash !== deliveryEngine.hashRecipient(recipientEmail) || other.class !== assetClass) {
+            return sendJson(res, 409, { error: 'this idempotencyKey was already used for a different send', code: 'idempotency-conflict' });
+          }
+          if (other.state === 'delivered') return answerAdminSend(other);
           return sendJson(res, 409, { error: 'a send with this idempotencyKey is already in progress', code: 'in-progress' });
         }
         const outcome = await deliveryEngine.run(began.rec.deliveryId);

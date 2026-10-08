@@ -92,8 +92,13 @@ $began = atlas_delivery_begin([
 ]);
 if (isset($began['existing'])) {
   // Another request got there between the checks and here; the credential
-  // minted above was never recorded or listed.
+  // minted above was never recorded or listed. If that delivery has already
+  // finished, the answer is the one the first request gets.
   atlas_revoke($minted['id'], 'issuer-request');
+  if (($began['existing']['state'] ?? null) === 'delivered') {
+    if ($sameRequest($began['existing'])) send_json(200, ['status' => 'email-transferred', 'to' => $recipientEmail]);
+    send_json(409, ['error' => 'this asset has already been delivered', 'code' => 'already-delivered']);
+  }
   send_json(409, ['error' => 'a delivery of this asset is already in progress', 'code' => 'in-progress']);
 }
 $outcome = atlas_delivery_run($began['rec']['deliveryId']);

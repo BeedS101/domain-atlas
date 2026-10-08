@@ -65,7 +65,7 @@ function createDeliveryEngine(deps) {
   const {
     storeFile, fault = () => {}, now = () => new Date(),
     revoke, isRevoked, revocationEntryOf, suspend, unsuspend, findSuspension,
-    registerBearer, takeBearer, restoreBearer, hasBearer, archive, send,
+    registerBearer, takeBearer, restoreBearer, hasBearer, bearerEntryOf, archive, send,
     onDelivered = () => {}, onRolledBack = () => {}
   } = deps;
   const maxAttempts = deps.maxAttempts || 3;
@@ -121,14 +121,17 @@ function createDeliveryEngine(deps) {
     return !!rec.key && rec.attempts < maxAttempts && now().getTime() - Date.parse(rec.createdAt) < resumeTtlMs;
   }
 
-  // Creates a record. Refuses (returns {existing}) when an unfinished
-  // delivery already exists for the key. Synchronous end to end, so no other
-  // request can interleave.
+  // Creates a record. Refuses (returns {existing}) when an unfinished or
+  // completed delivery already exists for the key. Synchronous end to end,
+  // so no other request can interleave.
   function begin(spec) {
     const doc = read();
     if (spec.key) {
       const prior = doc.byKey[spec.key] ? doc.deliveries[doc.byKey[spec.key]] : null;
-      if (prior && !TERMINAL.has(prior.state)) return { existing: prior };
+      // An unfinished delivery for the key, or one that already completed:
+      // either way the key is not delivered a second time. Only a
+      // rolled-back delivery leaves the key free to try again.
+      if (prior && prior.state !== 'rolled-back') return { existing: prior };
     }
     const at = now().toISOString();
     const rec = {
@@ -164,7 +167,17 @@ function createDeliveryEngine(deps) {
       const entry = revocationEntryOf(rec.originalId);
       if (entry && entry.reason !== 'email-transferred') return false; // spent some other way
       if (rec.kind === 'bearer-original' && hasBearer(rec.originalId)) {
+        // Removing the registry entry is the first durable change to the
+        // original, so what is needed to put it back is written first: a
+        // stop between the removal and the 'held' state must still leave
+        // rollback able to restore the entry.
+        if (!rec.heldBearer && bearerEntryOf) {
+          rec.heldBearer = bearerEntryOf(rec.originalId);
+          write(doc);
+          fault('delivery:bearer-recorded');
+        }
         rec.heldBearer = takeBearer(rec.originalId) || rec.heldBearer;
+        fault('delivery:bearer-taken');
       }
       if (!entry && !findSuspension(rec.originalId)) suspend(rec.originalId, HOLD_REASON);
     }

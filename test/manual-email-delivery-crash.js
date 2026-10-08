@@ -11,7 +11,11 @@
 //                      idempotencyKey (a fresh mint straight to an address)
 //         admin-nokey  the same without a key (no client retry: that would be a
 //                      second send)
-//   default: wallet. ASSET_CLASS overrides the class (any unique, giftable,
+//   default: wallet. SMTP_AFTER_CRASH=reject makes the mail server refuse every
+//   message once the issuer has come back, so each stop before acceptance ends
+//   in a rollback; the original must then be exactly as it was (spendable,
+//   and listed again if it is a bearer credential) and no copy claimable.
+//   ASSET_CLASS overrides the class (any unique, giftable,
 //   non-bound class works; the default is not a ticket).
 //
 // The issuer is made to stop dead (ATLAS_TEST_CRASH_AT) at each step of the
@@ -59,7 +63,13 @@ const USES_IMAP = FLOW === 'forward';
 const ALL_POINTS = 'delivery:minted,delivery:prepared,delivery:held,delivery:sending,delivery:sent-unrecorded,delivery:accepted,delivery:original-revoke-fact,delivery:original-revoked,delivery:bearer-registered,delivery:delivered';
 // A fresh mint has no original to revoke.
 const NOT_APPLICABLE = HAS_ORIGINAL ? [] : ['delivery:original-revoke-fact', 'delivery:original-revoked'];
-const POINTS = (process.env.CRASH_POINTS || ALL_POINTS).split(',').filter((p) => !NOT_APPLICABLE.includes(p));
+// Only a bearer original is taken out of the bearer registry. (bearer-recorded is
+// only reached when the caller gives the engine no copy of the entry, which the
+// forward route always does; manual-delivery-hold-recovery.js covers it.)
+const BEARER_POINTS = FLOW === 'forward' ? ['delivery:bearer-taken'] : [];
+const ROLLBACK_VARIANT = process.env.SMTP_AFTER_CRASH === 'reject';
+const PAST_ACCEPTANCE = ['delivery:accepted', 'delivery:original-revoke-fact', 'delivery:original-revoked', 'delivery:bearer-registered', 'delivery:delivered'];
+const POINTS = (process.env.CRASH_POINTS || ALL_POINTS + (BEARER_POINTS.length ? ',' + BEARER_POINTS.join(',') : '')).split(',').filter((p) => !NOT_APPLICABLE.includes(p));
 const FROZEN_POINTS = ['delivery:held', 'delivery:sending', 'delivery:sent-unrecorded', 'delivery:accepted'];
 
 async function startIssuer(location, env) {
@@ -94,7 +104,13 @@ async function judge(location, original, smtp) {
     delivered.push({ id: cred.id, claimable: !!(st.body && st.body.claimable) });
   }
   const claimableIds = new Set(delivered.filter((d) => d.claimable).map((d) => d.id));
+  let originalListed = null;
+  if (original && FLOW === 'forward') {
+    const st = await H.getJson(BASE, '/atlas/asset/file-status?id=' + encodeURIComponent(original.id));
+    originalListed = !!(st.body && st.body.claimable);
+  }
   return {
+    originalListed,
     multiplication: claimableIds.size > 1,
     limbo: !!originalStatus && originalStatus.status === 'suspended',
     open: openDeliveries(location),
@@ -147,7 +163,8 @@ function flowOps(ctx) {
 }
 
 async function runPoint(point) {
-  const smtp = await H.startFakeSmtp(SMTP_PORT, () => 'accept');
+  let smtpMode = 'accept';
+  const smtp = await H.startFakeSmtp(SMTP_PORT, () => smtpMode);
   const imap = USES_IMAP ? await H.startFakeImap(IMAP_PORT, { user: 'tickets@test-domain.local', pass: 'imap-test-pass' }) : null;
   const owner = await H.genIdentity();
   const location = { admin: owner };
@@ -174,6 +191,7 @@ async function runPoint(point) {
     const crashed = KIND === 'node' ? issuer.proc.exitCode === 86 : (first.status !== 200 || (first.body && first.body.raw === ''));
     H.assert(crashed, 'expected the issuer to stop at ' + point + ', request answered ' + JSON.stringify(first));
     await H.stopIssuer(issuer);
+    if (ROLLBACK_VARIANT) smtpMode = 'reject';
 
     // Node's automatic sweeps are off for this restart so the state the stop
     // left behind can be inspected (and poked at) before recovery runs.
@@ -182,7 +200,7 @@ async function runPoint(point) {
     // While the delivery is unresolved, can someone spend the original
     // somewhere else? From the moment it is frozen the answer must be no.
     let spent = false;
-    if (ops.spend) {
+    if (ops.spend && !ROLLBACK_VARIANT) {
       const thief = await H.genIdentity();
       const spend = await ops.spend(thief).catch(() => ({ status: 0 }));
       spent = spend.status === 200;
@@ -224,9 +242,14 @@ async function runPoint(point) {
     if (end.loss) problems.push('LOSS at end');
     if (end.limbo) problems.push('LIMBO at end');
     if (end.open) problems.push('LIMBO: ' + end.open + ' delivery record(s) left open');
+    if (ROLLBACK_VARIANT && HAS_ORIGINAL && !PAST_ACCEPTANCE.includes(point)) {
+      if (!end.originalUsable) problems.push('ROLLBACK: original not restored (' + end.originalStatus + ')');
+      if (FLOW === 'forward' && !end.originalListed) problems.push('ROLLBACK: bearer original not listed again');
+      if (distinctClaimable(end) > 0) problems.push('ROLLBACK: a copy is still claimable');
+    }
     if (FLOW === 'admin') {
-      if (retried.status !== 200) problems.push('KEYED SEND: retry answered ' + retried.status + ' ' + JSON.stringify(retried.body));
-      if (distinctClaimable(end) !== 1) problems.push('KEYED SEND: expected exactly one claimable ticket, found ' + distinctClaimable(end));
+      if (!ROLLBACK_VARIANT && retried.status !== 200) problems.push('KEYED SEND: retry answered ' + retried.status + ' ' + JSON.stringify(retried.body));
+      if (!ROLLBACK_VARIANT && distinctClaimable(end) !== 1) problems.push('KEYED SEND: expected exactly one claimable ticket, found ' + distinctClaimable(end));
     }
     if (problems.length) failures++;
     console.log((problems.length ? 'FAIL' : 'PASS') + ': crash at ' + point + (spent ? ' [original spent meanwhile]' : '') + ' -> after restart: original ' + afterRestart.originalStatus +

@@ -81,7 +81,15 @@ $minted = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $discar
 file_export_fault_point('delivery:minted');
 $began = atlas_delivery_begin(['key' => $deliveryKey, 'kind' => 'fresh-mint', 'class' => $assetClass, 'ownerPublicKey' => $auth['publicKey'] ?? null, 'minted' => $minted, 'recipient' => $recipientEmail]);
 if (isset($began['existing'])) {
+  // The key was taken between the check above and here. The mint was never
+  // recorded or listed, so it is undone, and a send that has already
+  // finished is answered as the first request was.
   atlas_revoke($minted['id'], 'issuer-request');
+  $other = $began['existing'];
+  if (($other['recipientHash'] ?? null) !== atlas_delivery_hash_recipient($recipientEmail) || ($other['class'] ?? null) !== $assetClass) {
+    send_json(409, ['error' => 'this idempotencyKey was already used for a different send', 'code' => 'idempotency-conflict']);
+  }
+  if (($other['state'] ?? null) === 'delivered') $answerAdminSend($other);
   send_json(409, ['error' => 'a send with this idempotencyKey is already in progress', 'code' => 'in-progress']);
 }
 $outcome = atlas_delivery_run($began['rec']['deliveryId']);
