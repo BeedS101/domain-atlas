@@ -999,6 +999,22 @@ const AtlasWallet = (() => {
     walletChangeListeners.forEach((cb) => { try { cb(ownerPublicKey); } catch (err) { /* an observer's own bug is not this save's problem */ } });
   }
 
+  // The wallet list is rewritten whole by every change. Changes that wait on
+  // something in the middle (a verification, a network call) and then write
+  // back what they read earlier would undo anything changed in between: an
+  // item just claimed, or a spent original just removed. Those changes run
+  // one at a time under this lock and re-read the list inside it. Not
+  // re-entrant: a function holding it must not call another that takes it.
+  let walletWriteChain = Promise.resolve();
+  function withWalletLock(fn) {
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      return navigator.locks.request('atlas-wallet-list', fn);
+    }
+    const run = walletWriteChain.then(fn, fn);
+    walletWriteChain = run.catch(() => {});
+    return run;
+  }
+
   async function saveWallet(ownerPublicKey, entries) {
     const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
     const wallets = atlasWallets || {};
@@ -3044,9 +3060,13 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     const counterparty = await getCounterparty();
     for (const who of [identity, counterparty].filter(Boolean)) {
-      const wallet = await getWallet(who.publicKey);
-      for (const entry of wallet) entry.lastVerdict = await verifyCredential(entry.credential);
-      await saveWallet(who.publicKey, wallet);
+      const verdicts = new Map();
+      for (const entry of await getWallet(who.publicKey)) verdicts.set(entry.credential.id, await verifyCredential(entry.credential));
+      await withWalletLock(async () => {
+        const wallet = await getWallet(who.publicKey);
+        for (const entry of wallet) if (verdicts.has(entry.credential.id)) entry.lastVerdict = verdicts.get(entry.credential.id);
+        await saveWallet(who.publicKey, wallet);
+      });
     }
   }
 
@@ -3324,7 +3344,9 @@ const AtlasWallet = (() => {
   }
 
   async function removeFromWalletList(ownerPublicKey, credentialId) {
-    await saveWallet(ownerPublicKey, (await getWallet(ownerPublicKey)).filter((e) => e.credential.id !== credentialId));
+    await withWalletLock(async () => {
+      await saveWallet(ownerPublicKey, (await getWallet(ownerPublicKey)).filter((e) => e.credential.id !== credentialId));
+    });
     await unloadItem(credentialId);
   }
 
@@ -3474,9 +3496,10 @@ const AtlasWallet = (() => {
   // it, without changing anything. `relation` is one of: invalid,
   // wallet-export, already-in-wallet, previously-claimed, revoked,
   // already-claimed, suspended, not-a-file, not-eligible, unreachable,
-  // backup-copy, own-pending-export, claimable.
+  // backup-copy, own-pending-export, claim-interrupted, claim-receipt-only,
+  // claimable.
   async function inspectAssetFile(text) {
-    const out = (relation, headline, extra) => ({ relation, headline, details: [], credential: null, verdict: null, canClaim: false, canRestore: false, ...(extra || {}) });
+    const out = (relation, headline, extra) => ({ relation, headline, details: [], credential: null, verdict: null, canClaim: false, canRestore: false, canFinishClaim: false, ...(extra || {}) });
     if (typeof text !== 'string' || text.length === 0) return out('invalid', 'The file is empty.');
     if (text.length > ASSET_FILE_MAX_BYTES) return out('invalid', 'The file is too large to be an asset file.');
     let credential;
@@ -3504,6 +3527,14 @@ const AtlasWallet = (() => {
     if (claimedBefore) {
       const stillHeld = wallet.some((e) => e.credential.id === claimedBefore.newId);
       return out('previously-claimed', 'You already claimed this file on ' + new Date(claimedBefore.at).toLocaleString() + (stillHeld ? '; the item is in your wallet.' : '; the item has since left your wallet.'), base);
+    }
+
+    const claiming = ledger.find((r) => r.direction === 'claiming' && r.fileId === credential.id);
+    if (claiming) {
+      if (claiming.state === 'receipt-only') {
+        return out('claim-receipt-only', 'You claimed this file with your key, but the issuer no longer keeps the credential. Contact ' + credential.issuer.domain + ' with claim ' + claiming.receipt.claimId + '.', base);
+      }
+      return out('claim-interrupted', 'You already started claiming this file and the issuer\'s reply was lost. Finishing it gives you the same item; nothing is claimed twice.', { ...base, canFinishClaim: true });
     }
 
     const verdict = await verifyCredential(credential);
@@ -3544,21 +3575,41 @@ const AtlasWallet = (() => {
     return out('claimable', 'This file can be claimed.', { ...base, verdict, details: verified.concat(['Claimable right now at ' + domain]), canClaim: true });
   }
 
+  // Safe to run twice for the same claim (a retry that finishes after
+  // another one already has): the item and the ledger entry are added once.
   async function addClaimedToWallet(identity, minted, fileCredential) {
-    const wallet = await getWallet(identity.publicKey);
-    wallet.push({ credential: minted, lastVerdict: await verifyCredential(minted) });
-    await saveWallet(identity.publicKey, wallet);
-    const ledger = await getAssetFiles(identity.publicKey);
-    ledger.unshift({
-      fileId: fileCredential.id, direction: 'claimed', newId: minted.id,
-      name: fileCredential.asset.name, class: fileCredential.asset.class, domain: fileCredential.issuer.domain, at: new Date().toISOString()
+    const lastVerdict = await verifyCredential(minted);
+    await withWalletLock(async () => {
+      const wallet = await getWallet(identity.publicKey);
+      if (!wallet.some((e) => e.credential.id === minted.id)) {
+        wallet.push({ credential: minted, lastVerdict });
+        await saveWallet(identity.publicKey, wallet);
+      }
     });
-    await saveAssetFiles(identity.publicKey, ledger);
+    const ledger = await getAssetFiles(identity.publicKey);
+    if (!ledger.some((r) => r.direction === 'claimed' && r.fileId === fileCredential.id)) {
+      ledger.unshift({
+        fileId: fileCredential.id, direction: 'claimed', newId: minted.id,
+        name: fileCredential.asset.name, class: fileCredential.asset.class, domain: fileCredential.issuer.domain, at: new Date().toISOString()
+      });
+      await saveAssetFiles(identity.publicKey, ledger);
+    }
   }
 
   // Claims the file's credential for this wallet's key. The issuer decides:
   // the first claim wins and every other copy of the file stops working.
   // Failures carry the issuer's `code` (already-claimed, not-claimable, ...).
+  //
+  // A claim is recorded in the ledger BEFORE it is sent, together with the
+  // file, as {direction:'claiming', state, fileId, file, ...}. The issuer
+  // commits a claim before it answers (SPEC.md §13.5.2), so if the reply is
+  // lost the same request, repeated, returns the same credential. Such a
+  // record is settled by recoverInterruptedClaim():
+  //   claiming     sent, no answer seen yet
+  //   interrupted  the reply was lost or unreadable; retried automatically
+  //   receipt-only the issuer minted the item for this key but no longer
+  //                keeps the credential (its replay window ended); the
+  //                receipt is kept for the person to take to the issuer
   async function claimAssetFile(credential) {
     const identity = await getIdentity();
     if (!identity) throw new Error('Unlock your wallet first.');
@@ -3566,26 +3617,186 @@ const AtlasWallet = (() => {
     if (problem) throw new Error(problem);
     if (credential.asset.fungible !== false || credential.asset.tradeScope === 'bound') throw new Error('This item cannot be claimed from a file.');
 
-    const payload = { credentialId: credential.id, newOwnerPublicKey: identity.publicKey, action: 'claim-from-file' };
-    const proof = await signWithSelf(payload);
-    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/claim-from-file', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ credential, intent: { payload, proof } })
+    await recordClaimAttempt(identity.publicKey, credential);
+    let result = await attemptClaim(credential.id);
+    if (result.outcome === 'waiting') result = await attemptClaim(credential.id);
+    return claimResultOrThrow(result, credential);
+  }
+
+  function claimResultOrThrow(result, credential) {
+    if (result.outcome === 'claimed') return result.credential;
+    let err;
+    if (result.outcome === 'claimed-by-other') {
+      err = new Error('Someone else has already claimed this file.');
+      err.code = 'already-claimed';
+    } else if (result.outcome === 'receipt-only') {
+      err = new Error('This file was claimed by your key, but the issuer no longer keeps the credential. Contact ' + credential.issuer.domain + ' with claim ' + result.receipt.claimId + '.');
+      err.code = 'already-claimed';
+      err.receipt = result.receipt;
+    } else if (result.outcome === 'refused') {
+      err = new Error(result.error);
+      err.code = result.code || null;
+    } else {
+      err = new Error('The reply from ' + credential.issuer.domain + ' was lost, so it is not certain whether the claim went through. Your wallet keeps checking and will add the item as soon as the issuer confirms.');
+      err.interrupted = true;
+    }
+    throw err;
+  }
+
+  async function recordClaimAttempt(ownerPublicKey, file) {
+    const ledger = await getAssetFiles(ownerPublicKey);
+    const existing = ledger.find((r) => r.direction === 'claiming' && r.fileId === file.id);
+    if (existing) {
+      if (existing.state === 'receipt-only') {
+        const err = new Error('This file was claimed by your key earlier; see "Saved transfer files".');
+        err.code = 'already-claimed';
+        err.receipt = existing.receipt;
+        throw err;
+      }
+      if (!existing.file) existing.file = file;
+      await saveAssetFiles(ownerPublicKey, ledger);
+      return;
+    }
+    ledger.unshift({
+      direction: 'claiming', state: 'claiming', fileId: file.id, file,
+      name: file.asset.name, class: file.asset.class, domain: file.issuer.domain, at: new Date().toISOString()
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const err = new Error(data.error || ('Claim failed: ' + res.status));
-      err.code = data.code || null;
-      throw err;
+    await saveAssetFiles(ownerPublicKey, ledger);
+  }
+
+  async function dropClaimRecord(ownerPublicKey, fileId) {
+    const ledger = await getAssetFiles(ownerPublicKey);
+    await saveAssetFiles(ownerPublicKey, ledger.filter((r) => !(r.direction === 'claiming' && r.fileId === fileId)));
+  }
+
+  // One request for a recorded claim. Returns
+  //   {kind:'claimed', credential}
+  //   {kind:'unsure', reason}                  no usable answer
+  //   {kind:'other'}                           someone else holds the claim
+  //   {kind:'receipt', receipt}                this key claimed it, replay window over
+  //   {kind:'refused', code, error}            the issuer refused; nothing was claimed
+  async function sendClaim(identity, file) {
+    const payload = { credentialId: file.id, newOwnerPublicKey: identity.publicKey, action: 'claim-from-file' };
+    const proof = await signWithSelf(payload);
+    let res;
+    let data = null;
+    try {
+      res = await fetch(baseUrl(file.issuer.domain) + '/atlas/asset/claim-from-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential: file, intent: { payload, proof } })
+      });
+      data = await res.json().catch(() => null);
+    } catch (err) {
+      return { kind: 'unsure', reason: 'No reply from ' + file.issuer.domain + '.' };
     }
-    const minted = data.credential;
-    if (!minted || !minted.owner || minted.owner.publicKey !== identity.publicKey) {
-      throw new Error('The issuer returned a credential that does not belong to this wallet.');
+    if (res.status === 200 && data && data.status === 'claimed') {
+      const minted = data.credential;
+      if (!minted || !minted.owner || minted.owner.publicKey !== identity.publicKey || minted.supersedes !== file.id) {
+        return { kind: 'unsure', reason: 'The issuer returned a credential that does not belong to this wallet.' };
+      }
+      return { kind: 'claimed', credential: minted };
     }
-    await addClaimedToWallet(identity, minted, credential);
-    await logActivity('asset', 'Claimed ' + credential.asset.name + ' from a transfer file', { fileId: credential.id, newId: minted.id });
-    return minted;
+    if (!data || res.status >= 500 || [200, 408, 425, 429].includes(res.status)) {
+      return { kind: 'unsure', reason: 'Unexpected reply from ' + file.issuer.domain + ' (' + res.status + ').' };
+    }
+    if (res.status === 409 && !data.code) return { kind: 'unsure', reason: data.error || 'The issuer is busy with this item.' };
+    if (res.status === 409 && data.code === 'already-claimed') {
+      if (data.receipt && typeof data.receipt.claimId === 'string') return { kind: 'receipt', receipt: data.receipt };
+      return { kind: 'other' };
+    }
+    return { kind: 'refused', code: data.code || null, error: data.error || ('Claim failed: ' + res.status) };
+  }
+
+  // Sends the recorded claim for `fileId` once and settles the record.
+  // Concurrent calls for one file share a single request. Returns
+  //   {outcome:'claimed', credential} | {outcome:'claimed-by-other'}
+  //   {outcome:'receipt-only', receipt} | {outcome:'refused', code, error}
+  //   {outcome:'waiting', reason}   no answer; the record stays
+  const claimsInFlight = new Map();
+  function attemptClaim(fileId) {
+    const running = claimsInFlight.get(fileId);
+    if (running) return running;
+    const promise = (async () => {
+      const identity = await getIdentity();
+      if (!identity) throw new Error('Unlock your wallet first.');
+      const record = (await getAssetFiles(identity.publicKey)).find((r) => r.direction === 'claiming' && r.fileId === fileId && r.file);
+      if (!record) throw new Error('No interrupted claim with that id.');
+      if (!validAssetFileDomain(record.domain) || record.file.issuer.domain !== record.domain) throw new Error('This claim names an issuer domain this wallet will not contact.');
+      const sent = await sendClaim(identity, record.file);
+      if (sent.kind === 'claimed') {
+        await addClaimedToWallet(identity, sent.credential, record.file);
+        await dropClaimRecord(identity.publicKey, fileId);
+        await updateAssetFileRecord(identity.publicKey, fileId, 'exported', (r) => { if (r.state === 'pending') { r.state = 'reclaimed'; delete r.file; } });
+        await logActivity('asset', 'Claimed ' + record.name + ' from a transfer file', { fileId, newId: sent.credential.id });
+        return { outcome: 'claimed', credential: sent.credential };
+      }
+      if (sent.kind === 'unsure') {
+        const ledger = await getAssetFiles(identity.publicKey);
+        const r = ledger.find((x) => x.direction === 'claiming' && x.fileId === fileId);
+        if (r) { r.state = 'interrupted'; r.lastError = sent.reason; await saveAssetFiles(identity.publicKey, ledger); }
+        return { outcome: 'waiting', reason: sent.reason };
+      }
+      if (sent.kind === 'receipt') {
+        const ledger = await getAssetFiles(identity.publicKey);
+        const r = ledger.find((x) => x.direction === 'claiming' && x.fileId === fileId);
+        if (r) { r.state = 'receipt-only'; r.receipt = sent.receipt; delete r.file; delete r.lastError; await saveAssetFiles(identity.publicKey, ledger); }
+        return { outcome: 'receipt-only', receipt: sent.receipt };
+      }
+      await dropClaimRecord(identity.publicKey, fileId);
+      if (sent.kind === 'other') {
+        await updateAssetFileRecord(identity.publicKey, fileId, 'exported', (r) => { if (r.state === 'pending') { r.state = 'claimed-by-other'; delete r.file; } });
+        return { outcome: 'claimed-by-other' };
+      }
+      return { outcome: 'refused', code: sent.code, error: sent.error };
+    })();
+    claimsInFlight.set(fileId, promise);
+    const clear = () => { if (claimsInFlight.get(fileId) === promise) claimsInFlight.delete(fileId); };
+    promise.then(clear, clear);
+    return promise;
+  }
+
+  // Claims whose outcome this wallet has not yet seen, including those that
+  // ended as a receipt only.
+  async function getInterruptedClaims(ownerPublicKey) {
+    return (await getAssetFiles(ownerPublicKey)).filter((r) => r.direction === 'claiming');
+  }
+
+  // Settles one recorded claim (the person pressed "Check again", or the
+  // claim dialog was reopened for the same file).
+  async function recoverInterruptedClaim(fileId) {
+    return attemptClaim(fileId);
+  }
+
+  // Settles every recorded claim. `auto` is for background use: it skips
+  // identities whose signature needs a person present (a passkey) and tries
+  // each claim at most once every 20 seconds.
+  const claimRecoveryAttempts = new Map();
+  async function recoverInterruptedClaims(options) {
+    const auto = !(options && options.auto === false);
+    const identity = await getIdentity();
+    if (!identity) return [];
+    if (auto && (await getIdentityMode()) === 'webauthn') return [];
+    const results = [];
+    for (const record of await getInterruptedClaims(identity.publicKey)) {
+      if (record.state === 'receipt-only' || !record.file) continue;
+      const last = claimRecoveryAttempts.get(record.fileId) || 0;
+      if (auto && Date.now() - last < 20000) continue;
+      claimRecoveryAttempts.set(record.fileId, Date.now());
+      try {
+        results.push({ fileId: record.fileId, ...(await attemptClaim(record.fileId)) });
+      } catch (err) {
+        results.push({ fileId: record.fileId, error: err.message });
+      }
+    }
+    return results;
+  }
+
+  // Removes the note about a claim that ended as a receipt only.
+  async function dismissClaimRecord(fileId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    await dropClaimRecord(identity.publicKey, fileId);
   }
 
   // A file whose credential is already owned by this wallet's key (a copy
@@ -3641,7 +3852,7 @@ const AtlasWallet = (() => {
     try {
       minted = await claimAssetFile(record.file);
     } catch (err) {
-      if (err.code === 'already-claimed') {
+      if (err.code === 'already-claimed' && !err.receipt) {
         await updateAssetFileRecord(identity.publicKey, fileId, 'exported', (r) => { r.state = 'claimed-by-other'; delete r.file; });
       }
       throw err;
@@ -6343,8 +6554,12 @@ const AtlasWallet = (() => {
     if (changed) await saveSubmittedTrades(ownerPublicKey, records);
   }
 
-  async function processAssetUpdates(ownerPublicKey, domain, updates) {
-    if (!updates || updates.length === 0) return;
+  function processAssetUpdates(ownerPublicKey, domain, updates) {
+    if (!updates || updates.length === 0) return Promise.resolve();
+    return withWalletLock(() => processAssetUpdatesLocked(ownerPublicKey, domain, updates));
+  }
+
+  async function processAssetUpdatesLocked(ownerPublicKey, domain, updates) {
     const wallet = await getWallet(ownerPublicKey);
     const notices = await getAssetUpdateNotices(ownerPublicKey);
     let walletChanged = false;
@@ -6663,7 +6878,7 @@ const AtlasWallet = (() => {
     getCounterparty, createCounterparty,
     getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     // SPEC.md §13.5 single-asset transfer files.
-    getFileTransferSupport, assetFileExportProblem, exportAssetToFile, getAssetFiles, saveAssetFiles, getInterruptedExports, recoverInterruptedExport, recoverInterruptedExports, dismissLostExport, EXPORT_RECOVERY_GRACE_MS, inspectAssetFile, claimAssetFile, restoreAssetCopy,
+    getFileTransferSupport, assetFileExportProblem, exportAssetToFile, getAssetFiles, saveAssetFiles, getInterruptedExports, recoverInterruptedExport, recoverInterruptedExports, dismissLostExport, EXPORT_RECOVERY_GRACE_MS, inspectAssetFile, claimAssetFile, getInterruptedClaims, recoverInterruptedClaim, recoverInterruptedClaims, dismissClaimRecord, restoreAssetCopy,
     getPendingExports, checkPendingExport, reclaimPendingExport, forgetPendingExport,
     exportFullBackup, importFullBackup,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,

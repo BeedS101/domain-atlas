@@ -292,7 +292,7 @@ async function statusText(frame) {
     const unlocked = await alice.frame.evaluate(() => AtlasWallet.getIdentity().then((i) => !!i));
     assert(unlocked, 'the wallet should still be unlocked for the new page');
     await alice.frame.locator('#walletBtn').click();
-    await waitAsync(alice.frame, async (id) => { const i = await AtlasWallet.getIdentity(); return (await AtlasWallet.getAssetFiles(i.publicKey)).some((r) => r.sourceId === id && r.state === 'pending' && r.file); }, ring3.id, 20000);
+    await waitAsync(alice.frame, async (id) => { const i = await AtlasWallet.getIdentity(); return (await AtlasWallet.getAssetFiles(i.publicKey)).some((r) => r.sourceId === id && r.state === 'pending' && r.file) && !(await AtlasWallet.getWallet(i.publicKey)).some((e) => e.credential.id === id); }, ring3.id, 20000);
     assert((await holdings(alice.frame)).every((h) => h.id !== ring3.id), 'the ring should have left the wallet without any click');
     await installFaults(alice.frame);
     console.log('PASS: reopening the wallet settled it automatically');

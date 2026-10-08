@@ -7554,6 +7554,18 @@ importAssetFileInput && importAssetFileInput.addEventListener('change', async ()
       await refreshInventoryDisplay();
       importAssetFileStatusEl.textContent = 'Added ' + credential.asset.name + ' to your wallet.';
     };
+  } else if (result.canFinishClaim) {
+    primaryLabel = 'Finish claiming';
+    onPrimary = async () => {
+      const settled = await AtlasWallet.recoverInterruptedClaim(credential.id);
+      if (settled.outcome === 'waiting') throw new Error(settled.reason || 'The issuer has not answered yet. Your wallet keeps trying.');
+      if (settled.outcome === 'claimed-by-other') throw new Error('Someone else claimed this file first.');
+      if (settled.outcome === 'receipt-only') throw new Error('The issuer no longer keeps the credential for this claim. See "Saved transfer files".');
+      if (settled.outcome === 'refused') throw new Error(settled.error);
+      closeBridgeOfferPreview();
+      await refreshInventoryDisplay();
+      importAssetFileStatusEl.textContent = 'Added ' + credential.asset.name + ' to your wallet.';
+    };
   } else if (result.canRestore) {
     primaryLabel = 'Add to my wallet';
     onPrimary = async () => {
@@ -7576,7 +7588,8 @@ async function refreshPendingExportsDisplay() {
   if (identity && !recoveringExports) {
     recoveringExports = true;
     try {
-      const results = await AtlasWallet.recoverInterruptedExports({ auto: true });
+      const results = (await AtlasWallet.recoverInterruptedExports({ auto: true }))
+        .concat(await AtlasWallet.recoverInterruptedClaims({ auto: true }));
       if (results.some((r) => r.outcome && r.outcome !== 'waiting')) {
         // Settling an export changes the wallet; redraw it, then fall
         // through to draw this list.
@@ -7590,8 +7603,28 @@ async function refreshPendingExportsDisplay() {
   }
   const pending = identity ? await AtlasWallet.getPendingExports(identity.publicKey) : [];
   const unsettled = identity ? await AtlasWallet.getInterruptedExports(identity.publicKey) : [];
-  pendingExportsSectionEl.hidden = pending.length === 0 && unsettled.length === 0;
+  const claims = identity ? await AtlasWallet.getInterruptedClaims(identity.publicKey) : [];
+  pendingExportsSectionEl.hidden = pending.length === 0 && unsettled.length === 0 && claims.length === 0;
   pendingExportsListEl.innerHTML = '';
+  claims.forEach((record) => {
+    const el = document.createElement('div');
+    el.className = 'wallet-item';
+    el.dataset.claimFileId = record.fileId;
+    const receiptOnly = record.state === 'receipt-only';
+    el.innerHTML =
+      '<div class="name"><span>' + escapeHtml(record.name) + '</span></div>' +
+      '<div class="meta">' + escapeHtml(record.class) + ' · ' + (receiptOnly ? 'claimed, credential not kept' : 'claim interrupted') + ' · ' + escapeHtml(new Date(record.at).toLocaleString()) + '</div>' +
+      '<div class="meta">' + escapeHtml(receiptOnly
+        ? 'The issuer gave this item to your key but no longer keeps the credential. Contact ' + record.domain + ' with claim ' + (record.receipt && record.receipt.claimId) + ' and item ' + (record.receipt && record.receipt.mintedId) + '.'
+        : 'Waiting to hear from ' + record.domain + ' whether this claim went through. Nothing is lost: the wallet keeps checking and will add the item.') + '</div>' +
+      '<div class="item-actions">' +
+      (receiptOnly
+        ? '<button type="button" data-action="cl-dismiss" class="danger-btn">Dismiss</button>'
+        : '<button type="button" data-action="cl-retry" class="btn-secondary">Check again</button>') +
+      '</div>' +
+      '<div class="mono pe-status"></div>';
+    pendingExportsListEl.appendChild(el);
+  });
   unsettled.forEach((record) => {
     const el = document.createElement('div');
     el.className = 'wallet-item';
@@ -7638,6 +7671,27 @@ pendingExportsListEl && pendingExportsListEl.addEventListener('click', async (e)
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
   try {
+    if (btn.dataset.action === 'cl-retry') {
+      statusLine.textContent = 'Checking…';
+      const result = await AtlasWallet.recoverInterruptedClaim(card.dataset.claimFileId);
+      if (result.outcome === 'waiting') {
+        statusLine.textContent = result.reason || 'Still waiting.';
+        return;
+      }
+      await refreshInventoryDisplay();
+      importAssetFileStatusEl.textContent = {
+        claimed: 'The issuer confirmed the claim. The item is in your wallet.',
+        'claimed-by-other': 'Someone else claimed that file first.',
+        'receipt-only': 'The issuer gave you this item but no longer keeps the credential.',
+        refused: result.error || 'The issuer refused the claim.'
+      }[result.outcome] || '';
+      return;
+    }
+    if (btn.dataset.action === 'cl-dismiss') {
+      await AtlasWallet.dismissClaimRecord(card.dataset.claimFileId);
+      await refreshPendingExportsDisplay();
+      return;
+    }
     if (btn.dataset.action === 'pe-retry') {
       statusLine.textContent = 'Checking…';
       const result = await AtlasWallet.recoverInterruptedExport(card.dataset.sourceId);
