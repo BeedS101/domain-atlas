@@ -7484,12 +7484,26 @@ async function beginSaveAssetToFile(credentialId) {
     notes: [
       'This takes the item out of your wallet and puts it in a file.',
       'Anyone who gets the file can claim the item, and the first person to claim it owns it. If you give the file to several people, only one of them gets the item.',
-      'A copy of the file stays in this wallet under "Saved transfer files" until someone claims it, so you can save it again or claim the item back.'
+      'A copy of the file stays in this wallet under "Saved transfer files" until someone claims it, so you can save it again or claim the item back.',
+      'If the connection drops while saving, the wallet checks with the issuer afterwards, so the item is not lost.'
     ],
     primaryLabel: 'Save file…',
     secondaryLabel: 'Cancel',
     onPrimary: async () => {
-      const file = await AtlasWallet.exportAssetToFile(credentialId);
+      let file;
+      try {
+        file = await AtlasWallet.exportAssetToFile(credentialId);
+      } catch (err) {
+        if (err.interrupted) {
+          // The issuer may have finished; the wallet keeps checking and the
+          // item shows under Saved transfer files once it confirms.
+          closeBridgeOfferPreview();
+          await refreshInventoryDisplay();
+          statusEl.textContent = err.message;
+          return;
+        }
+        throw err;
+      }
       const filename = downloadAssetFile(file);
       closeBridgeOfferPreview();
       await refreshInventoryDisplay();
@@ -7552,12 +7566,51 @@ importAssetFileInput && importAssetFileInput.addEventListener('change', async ()
   openAssetFileDialog({ credential, originLabel: 'From a file · issued by ' + credential.issuer.domain, notes, primaryLabel, onPrimary, secondaryLabel: 'Close' });
 });
 
+// Set while a recovery pass is in progress, so the inventory refresh that
+// follows a recovery does not start another one.
+let recoveringExports = false;
+
 async function refreshPendingExportsDisplay() {
   if (!pendingExportsListEl) return;
   const identity = await AtlasWallet.getIdentity();
+  if (identity && !recoveringExports) {
+    recoveringExports = true;
+    try {
+      const results = await AtlasWallet.recoverInterruptedExports({ auto: true });
+      if (results.some((r) => r.outcome && r.outcome !== 'waiting')) {
+        // Settling an export changes the wallet; redraw it, then fall
+        // through to draw this list.
+        await refreshInventoryDisplay();
+      }
+    } catch (err) {
+      /* shown per item below */
+    } finally {
+      recoveringExports = false;
+    }
+  }
   const pending = identity ? await AtlasWallet.getPendingExports(identity.publicKey) : [];
-  pendingExportsSectionEl.hidden = pending.length === 0;
+  const unsettled = identity ? await AtlasWallet.getInterruptedExports(identity.publicKey) : [];
+  pendingExportsSectionEl.hidden = pending.length === 0 && unsettled.length === 0;
   pendingExportsListEl.innerHTML = '';
+  unsettled.forEach((record) => {
+    const el = document.createElement('div');
+    el.className = 'wallet-item';
+    el.dataset.sourceId = record.sourceId;
+    const lost = record.state === 'lost';
+    el.innerHTML =
+      '<div class="name"><span>' + escapeHtml(record.name) + '</span></div>' +
+      '<div class="meta">' + escapeHtml(record.class) + ' · ' + (lost ? 'could not be accounted for' : 'save interrupted') + ' · ' + escapeHtml(new Date(record.at).toLocaleString()) + '</div>' +
+      '<div class="meta">' + escapeHtml(lost
+        ? (record.lastError || 'The issuer has no record of this save.') + ' Contact ' + record.domain + ' with this item\'s id: ' + record.sourceId
+        : 'Waiting to hear from ' + record.domain + ' whether this item was saved. It is not lost: the wallet keeps checking.') + '</div>' +
+      '<div class="item-actions">' +
+      (lost
+        ? '<button type="button" data-action="pe-dismiss" class="danger-btn">Dismiss</button>'
+        : '<button type="button" data-action="pe-retry" class="btn-secondary">Check again</button>') +
+      '</div>' +
+      '<div class="mono pe-status"></div>';
+    pendingExportsListEl.appendChild(el);
+  });
   pending.forEach((record) => {
     const el = document.createElement('div');
     el.className = 'wallet-item';
@@ -7585,6 +7638,29 @@ pendingExportsListEl && pendingExportsListEl.addEventListener('click', async (e)
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
   try {
+    if (btn.dataset.action === 'pe-retry') {
+      statusLine.textContent = 'Checking…';
+      const result = await AtlasWallet.recoverInterruptedExport(card.dataset.sourceId);
+      if (result.outcome === 'waiting') {
+        statusLine.textContent = result.reason || 'Still waiting.';
+        return;
+      }
+      await refreshInventoryDisplay();
+      importAssetFileStatusEl.textContent = {
+        recovered: 'The issuer confirmed the save. The item is listed below with its file.',
+        'not-exported': 'The save never went through. Nothing was lost: the item is still in your wallet.',
+        claimed: 'The file was already claimed by someone.',
+        revoked: 'That file is no longer valid.',
+        abandoned: 'The save was cancelled because the item was used elsewhere first.',
+        lost: 'The issuer could not account for this save.'
+      }[result.outcome] || '';
+      return;
+    }
+    if (btn.dataset.action === 'pe-dismiss') {
+      await AtlasWallet.dismissLostExport(card.dataset.sourceId);
+      await refreshPendingExportsDisplay();
+      return;
+    }
     if (btn.dataset.action === 'pe-save') {
       const record = (await AtlasWallet.getPendingExports(identity.publicKey)).find((r) => r.fileId === fileId);
       if (record) statusLine.textContent = 'Saved as ' + downloadAssetFile(record.file) + '.';

@@ -1920,8 +1920,17 @@ async function loadOrCreateKeypair() {
 
 function ensureWellKnownFiles(publicKeyB64url) {
   fs.mkdirSync(path.join(DEMO_DOMAIN_A, '.well-known'), { recursive: true });
-  const keyDoc = { keys: [{ publicKey: publicKeyB64url, validFrom: new Date().toISOString(), validUntil: null }] };
-  fs.writeFileSync(PUBLIC_KEY_FILE, JSON.stringify(keyDoc, null, 2));
+  // An unchanged key keeps its published validFrom; rewriting it on every
+  // start would make everything issued before a restart fail the
+  // "key valid at issuedAt" check.
+  let published = null;
+  try { published = JSON.parse(fs.readFileSync(PUBLIC_KEY_FILE, 'utf8')); } catch (err) { /* absent or unreadable: write it */ }
+  const alreadyListed = published && Array.isArray(published.keys) && published.keys.length === 1 &&
+    published.keys[0].publicKey === publicKeyB64url && !published.keys[0].validUntil;
+  if (!alreadyListed) {
+    const keyDoc = { keys: [{ publicKey: publicKeyB64url, validFrom: new Date().toISOString(), validUntil: null }] };
+    fs.writeFileSync(PUBLIC_KEY_FILE, JSON.stringify(keyDoc, null, 2));
+  }
   if (!fs.existsSync(REVOCATIONS_FILE)) {
     fs.writeFileSync(REVOCATIONS_FILE, JSON.stringify({ revoked: [] }, null, 2));
   }

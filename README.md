@@ -1353,6 +1353,17 @@ whether the file is still claimable) and only adds the item when the holder
 confirms. Fungible balances, bound items and classes outside the allowlist
 never offer it.
 
+If the connection drops while saving, the wallet has already written down
+what it asked for. It asks the issuer what happened straight away and again
+whenever the wallet is opened; until the issuer answers, the item stays in
+the wallet and shows under **Saved transfer files** as "save interrupted"
+with a **Check again** button. The issuer-side mechanism is SPEC.md §13.5.1;
+on the PHP host also upload `atlas/asset/recover-file-export.php` and
+`atlas/asset/recover-file-export-challenge.php`. The Node issuer now keeps
+its published key's `validFrom` across restarts.
+`test/manual-asset-file-wallet-recovery.js` drives the interrupted cases in
+the browser.
+
 `test/manual-asset-file-transfer.js [php]` drives the issuer API (claim
 races, replayed files, refused cases) and `test/manual-asset-file-wallet.js`
 drives the wallet UI with two profiles.

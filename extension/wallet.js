@@ -3110,9 +3110,18 @@ const AtlasWallet = (() => {
   //             state 'pending' keeps the file itself, because after an
   //             export the exporter no longer owns the asset and a lost file
   //             would otherwise be a lost asset. Any other state drops it.
+  //             An export is recorded as 'requesting' (with a copy of the
+  //             original credential, and no fileId yet) BEFORE the request
+  //             is sent. If no file comes back it becomes 'interrupted' and
+  //             is settled by recoverInterruptedExport(), which asks the
+  //             issuer for the export it recorded (SPEC.md §13.5.1).
   //   claimed:  {fileId, direction:'claimed', newId, ...}, so importing the
   //             same file again is recognised instead of retried.
   const ASSET_FILE_MAX_BYTES = 256 * 1024;
+  // An issuer that has no record of an export is only believed once the
+  // request is this old: a request still travelling could reach the issuer
+  // after it said so.
+  const EXPORT_RECOVERY_GRACE_MS = 2 * 60 * 1000;
   const ASSET_FILE_LEDGER_MAX = 500;
 
   async function getAssetFiles(ownerPublicKey) {
@@ -3131,6 +3140,15 @@ const AtlasWallet = (() => {
 
   async function getPendingExports(ownerPublicKey) {
     return (await getAssetFiles(ownerPublicKey)).filter((r) => r.direction === 'exported' && r.state === 'pending' && r.file);
+  }
+
+  // Exports whose outcome this wallet has not yet seen: the request was
+  // recorded and (maybe) sent, but no file came back. 'requesting' is the
+  // record written before sending; 'interrupted' means the reply was lost or
+  // unreadable; 'lost' means the issuer has no record of the export but the
+  // item was revoked, which needs the issuer's help.
+  async function getInterruptedExports(ownerPublicKey) {
+    return (await getAssetFiles(ownerPublicKey)).filter((r) => r.direction === 'exported' && ['requesting', 'interrupted', 'lost'].includes(r.state) && r.sourceId);
   }
 
   // An issuer domain taken from an untrusted file is fetched from, so it
@@ -3202,9 +3220,12 @@ const AtlasWallet = (() => {
     return null;
   }
 
-  // Moves one held unique asset into a claimable file. Nothing local changes
-  // unless the issuer accepts; once it does, the pending-export record
-  // (holding the file) is written before the asset leaves the wallet list.
+  // Moves one held unique asset into a claimable file. The export is written
+  // to the ledger before anything is sent, so a lost reply, a crash or a
+  // failed save afterwards leaves a record to settle instead of an item that
+  // has vanished: the issuer may already have revoked the original. Nothing
+  // else changes locally until a file is in hand; then the file is stored
+  // before the asset leaves the wallet list.
   async function exportAssetToFile(credentialId) {
     const identity = await getIdentity();
     if (!identity) throw new Error('Unlock your wallet first.');
@@ -3213,29 +3234,240 @@ const AtlasWallet = (() => {
     const credential = entry.credential;
     const problem = await assetFileExportProblem(credential);
     if (problem) throw new Error(problem);
+    if ((await getInterruptedExports(identity.publicKey)).some((r) => r.sourceId === credential.id)) {
+      throw new Error('An earlier attempt to save this item is still being settled with ' + credential.issuer.domain + '.');
+    }
 
     const payload = { credentialId: credential.id, action: 'transfer-to-file' };
     const proof = await signWithSelf(payload);
-    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/transfer-to-file', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ credential, intent: { payload, proof } })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || ('Saving to a file failed: ' + res.status));
-    const file = data.file;
-    if (!file || !file.id) throw new Error('The issuer did not return a file.');
 
     const ledger = await getAssetFiles(identity.publicKey);
     ledger.unshift({
-      fileId: file.id, direction: 'exported', state: 'pending', file, sourceId: credential.id,
+      direction: 'exported', state: 'requesting', sourceId: credential.id, credential,
       name: credential.asset.name, class: credential.asset.class, domain: credential.issuer.domain, at: new Date().toISOString()
     });
     await saveAssetFiles(identity.publicKey, ledger);
-    await saveWallet(identity.publicKey, (await getWallet(identity.publicKey)).filter((e) => e.credential.id !== credential.id));
-    await unloadItem(credential.id);
-    await logActivity('asset', 'Saved ' + credential.asset.name + ' to a transfer file', { fileId: file.id, sourceId: credential.id });
-    return file;
+
+    let data = null;
+    let status = 0;
+    let reached = false;
+    try {
+      const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/transfer-to-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential, intent: { payload, proof } })
+      });
+      status = res.status;
+      reached = true;
+      data = await res.json().catch(() => null);
+    } catch (err) {
+      // no usable reply
+    }
+
+    if (reached && status === 200 && data && data.file && data.file.id) {
+      try {
+        await finishExport(identity.publicKey, credential.id, data.file, credential);
+        return data.file;
+      } catch (err) {
+        await markExportInterrupted(identity.publicKey, credential.id, 'The file arrived but could not be saved: ' + err.message);
+        return settleOrThrowInterrupted(credential);
+      }
+    }
+    if (reached && data && typeof data.error === 'string' && assetFileRefusalIsDefinite(status, data)) {
+      await dropExportRecord(identity.publicKey, credential.id);
+      throw new Error(data.error);
+    }
+    await markExportInterrupted(identity.publicKey, credential.id, reached ? 'Unexpected reply (' + status + ').' : 'No reply from ' + credential.issuer.domain + '.');
+    return settleOrThrowInterrupted(credential);
+  }
+
+  // A refusal that proves the issuer did nothing: a client error with an
+  // error message from the issuer itself. A conflict means another request
+  // may be mid-flight, so it is settled like a lost reply instead.
+  function assetFileRefusalIsDefinite(status, data) {
+    if (status < 400 || status >= 500) return false;
+    if ([408, 409, 425, 429].includes(status)) return false;
+    return data.code !== 'already-exported';
+  }
+
+  // Tries recovery straight away. Returns the file if it works; otherwise
+  // throws an error flagged `interrupted` that says the wallet will keep
+  // checking.
+  async function settleOrThrowInterrupted(credential) {
+    let outcome = null;
+    try {
+      outcome = await recoverInterruptedExport(credential.id);
+    } catch (err) {
+      // stays interrupted
+    }
+    if (outcome && outcome.file) return outcome.file;
+    if (outcome && outcome.outcome === 'not-exported') {
+      throw new Error('The save did not go through. Nothing was lost: the item is still in your wallet.');
+    }
+    const err = new Error('The reply from ' + credential.issuer.domain + ' was lost, so it is not certain whether the item was saved. Your wallet keeps checking and will list it under "Saved transfer files" once the issuer confirms.');
+    err.interrupted = true;
+    throw err;
+  }
+
+  async function markExportInterrupted(ownerPublicKey, sourceId, reason) {
+    const ledger = await getAssetFiles(ownerPublicKey);
+    const record = ledger.find((r) => r.direction === 'exported' && r.sourceId === sourceId && ['requesting', 'interrupted'].includes(r.state));
+    if (!record) return;
+    record.state = 'interrupted';
+    record.lastError = reason;
+    await saveAssetFiles(ownerPublicKey, ledger);
+  }
+
+  async function dropExportRecord(ownerPublicKey, sourceId) {
+    const ledger = await getAssetFiles(ownerPublicKey);
+    await saveAssetFiles(ownerPublicKey, ledger.filter((r) => !(r.direction === 'exported' && r.sourceId === sourceId && ['requesting', 'interrupted', 'lost'].includes(r.state))));
+  }
+
+  async function removeFromWalletList(ownerPublicKey, credentialId) {
+    await saveWallet(ownerPublicKey, (await getWallet(ownerPublicKey)).filter((e) => e.credential.id !== credentialId));
+    await unloadItem(credentialId);
+  }
+
+  // Turns the record for `sourceId` into a pending export holding `file`,
+  // then takes the original out of the wallet. Safe to run again: if the
+  // record is already pending it only finishes the removal.
+  async function finishExport(ownerPublicKey, sourceId, file, originalCredential) {
+    const ledger = await getAssetFiles(ownerPublicKey);
+    let existing = ledger.find((r) => r.direction === 'exported' && r.sourceId === sourceId);
+    if (!existing) {
+      // The record was settled elsewhere while the reply was on its way; the
+      // file in hand is the truth, so record it.
+      if (!originalCredential) throw new Error('No record of this export.');
+      existing = {
+        direction: 'exported', state: 'requesting', sourceId, credential: originalCredential,
+        name: originalCredential.asset.name, class: originalCredential.asset.class, domain: originalCredential.issuer.domain, at: new Date().toISOString()
+      };
+      ledger.unshift(existing);
+    }
+    const original = existing.credential || originalCredential || null;
+    if (existing.state !== 'pending') {
+      existing.fileId = file.id;
+      existing.state = 'pending';
+      existing.file = file;
+      delete existing.credential;
+      delete existing.lastError;
+      existing.at = new Date().toISOString();
+      await saveAssetFiles(ownerPublicKey, ledger);
+    }
+    await removeFromWalletList(ownerPublicKey, sourceId);
+    await logActivity('asset', 'Saved ' + (existing.name || (original && original.asset.name) || 'an item') + ' to a transfer file', { fileId: file.id, sourceId });
+  }
+
+  // Asks the issuer what became of an export this wallet recorded but never
+  // saw the result of (SPEC.md §13.5.1). Authorized by a signature over a
+  // fresh single-use challenge from the issuer. Returns
+  //   {outcome: 'recovered', file}  the export finished; the file is stored
+  //   {outcome: 'not-exported'}     the issuer never did it; nothing lost
+  //   {outcome: 'claimed'|'revoked'|'abandoned'}  settled without a file
+  //   {outcome: 'lost'}             needs the issuer's help
+  //   {outcome: 'waiting', reason}  suspended or mid-claim; try again later
+  // and throws if the issuer cannot be reached (the record stays as it is).
+  async function recoverInterruptedExport(sourceId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const record = (await getInterruptedExports(identity.publicKey)).find((r) => r.sourceId === sourceId && r.state !== 'lost');
+    if (!record) throw new Error('No interrupted export with that id.');
+    if (!validAssetFileDomain(record.domain)) throw new Error('This export names an issuer domain this wallet will not contact.');
+    const base = baseUrl(record.domain);
+
+    const challengeRes = await fetch(base + '/atlas/asset/recover-file-export-challenge', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentialId: sourceId })
+    });
+    const challengeData = await challengeRes.json().catch(() => null);
+    if (!challengeRes.ok || !challengeData || typeof challengeData.challenge !== 'string') throw new Error('The issuer could not give a recovery challenge (' + challengeRes.status + ').');
+
+    const payload = { credentialId: sourceId, action: 'recover-file-export', challenge: challengeData.challenge };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(base + '/atlas/asset/recover-file-export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ intent: { payload, proof } })
+    });
+    const data = await res.json().catch(() => null);
+    if (!data) throw new Error('Unreadable reply from the issuer (' + res.status + ').');
+
+    if (res.status === 200 && data.status === 'pending') {
+      const file = data.file;
+      const problem = assetFileShapeProblem(file);
+      if (problem || file.supersedes !== sourceId || file.issuer.domain !== record.domain) {
+        throw new Error('The issuer returned a file that does not match this export.');
+      }
+      const verdict = await verifyCredential(file);
+      if (!verdict.valid) throw new Error('The issuer returned a file that does not verify: ' + verdict.reason + '.');
+      await finishExport(identity.publicKey, sourceId, file);
+      return { outcome: 'recovered', file };
+    }
+    if (res.status === 404 && data.code === 'not-found') {
+      // The issuer has no export for this item. If the original is still
+      // good, the request never took effect and nothing was lost.
+      if (Date.now() - Date.parse(record.at) < EXPORT_RECOVERY_GRACE_MS) {
+        return { outcome: 'waiting', reason: 'The issuer has no record of this save yet. Checking again shortly.' };
+      }
+      const original = record.credential;
+      const verdict = original ? await verifyCredential(original) : { valid: false, reason: 'no copy of the original' };
+      if (verdict.valid) {
+        await dropExportRecord(identity.publicKey, sourceId);
+        return { outcome: 'not-exported' };
+      }
+      const ledger = await getAssetFiles(identity.publicKey);
+      const r = ledger.find((x) => x.direction === 'exported' && x.sourceId === sourceId && ['requesting', 'interrupted'].includes(x.state));
+      if (r) { r.state = 'lost'; r.lastError = 'The issuer has no record of this save, and the item is no longer valid (' + verdict.reason + ').'; await saveAssetFiles(identity.publicKey, ledger); }
+      return { outcome: 'lost' };
+    }
+    if (res.status === 409 && data.code) {
+      if (data.code === 'already-claimed' || data.code === 'file-revoked' || data.code === 'export-abandoned') {
+        const outcome = data.code === 'already-claimed' ? 'claimed' : data.code === 'file-revoked' ? 'revoked' : 'abandoned';
+        const ledger = await getAssetFiles(identity.publicKey);
+        const r = ledger.find((x) => x.direction === 'exported' && x.sourceId === sourceId && ['requesting', 'interrupted'].includes(x.state));
+        if (r) {
+          r.state = outcome === 'claimed' ? 'claimed-by-other' : outcome === 'revoked' ? 'revoked' : 'abandoned';
+          r.fileId = data.receipt && data.receipt.fileId;
+          delete r.credential;
+          delete r.lastError;
+          await saveAssetFiles(identity.publicKey, ledger);
+        }
+        if (outcome !== 'abandoned') await removeFromWalletList(identity.publicKey, sourceId);
+        return { outcome };
+      }
+      if (data.code === 'suspended' || data.code === 'in-progress') return { outcome: 'waiting', reason: data.error || data.code };
+    }
+    throw new Error(data.error || ('Recovery failed: ' + res.status));
+  }
+
+  // Settles every interrupted export. `auto` is for background use: it
+  // skips identities whose signature needs a person present (a passkey) and
+  // tries each export at most once every 20 seconds. Returns one entry per
+  // export tried: {sourceId, outcome | error}.
+  const exportRecoveryAttempts = new Map();
+  async function recoverInterruptedExports(options) {
+    const auto = !(options && options.auto === false);
+    const identity = await getIdentity();
+    if (!identity) return [];
+    if (auto && (await getIdentityMode()) === 'webauthn') return [];
+    const results = [];
+    for (const record of await getInterruptedExports(identity.publicKey)) {
+      if (record.state === 'lost') continue;
+      const last = exportRecoveryAttempts.get(record.sourceId) || 0;
+      if (auto && Date.now() - last < 20000) continue;
+      exportRecoveryAttempts.set(record.sourceId, Date.now());
+      try {
+        const r = await recoverInterruptedExport(record.sourceId);
+        results.push({ sourceId: record.sourceId, ...r });
+      } catch (err) {
+        results.push({ sourceId: record.sourceId, error: err.message });
+      }
+    }
+    return results;
+  }
+
+  // Removes the note about an export the issuer could not account for.
+  async function dismissLostExport(sourceId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    await dropExportRecord(identity.publicKey, sourceId);
   }
 
   // Looks at a file's text and says what it is and what can be done with
@@ -6365,7 +6597,7 @@ const AtlasWallet = (() => {
     getCounterparty, createCounterparty,
     getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     // SPEC.md §13.5 single-asset transfer files.
-    getFileTransferSupport, assetFileExportProblem, exportAssetToFile, inspectAssetFile, claimAssetFile, restoreAssetCopy,
+    getFileTransferSupport, assetFileExportProblem, exportAssetToFile, getAssetFiles, saveAssetFiles, getInterruptedExports, recoverInterruptedExport, recoverInterruptedExports, dismissLostExport, EXPORT_RECOVERY_GRACE_MS, inspectAssetFile, claimAssetFile, restoreAssetCopy,
     getPendingExports, checkPendingExport, reclaimPendingExport, forgetPendingExport,
     exportFullBackup, importFullBackup,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
