@@ -2008,7 +2008,11 @@ function removePendingEmailTicketSend(ticketId) {
 // read and write) so two simultaneous claims cannot both succeed.
 function readBearers() {
   if (!fs.existsSync(BEARER_FILE)) return { bearers: {} };
-  return JSON.parse(fs.readFileSync(BEARER_FILE, 'utf8'));
+  const doc = JSON.parse(fs.readFileSync(BEARER_FILE, 'utf8'));
+  // An empty registry written by issuer-php can read back as [] rather than
+  // {}; an array would silently drop every entry added to it.
+  if (!doc.bearers || Array.isArray(doc.bearers)) doc.bearers = {};
+  return doc;
 }
 function writeBearers(doc) {
   fs.writeFileSync(BEARER_FILE, JSON.stringify(doc, null, 2));
@@ -2067,8 +2071,8 @@ const RECOVERY_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 function readFileExports() {
   if (!fs.existsSync(FILE_EXPORTS_FILE)) return { version: 1, exports: {}, usedChallenges: {} };
   const doc = JSON.parse(fs.readFileSync(FILE_EXPORTS_FILE, 'utf8'));
-  if (!doc.exports) doc.exports = {};
-  if (!doc.usedChallenges) doc.usedChallenges = {};
+  if (!doc.exports || Array.isArray(doc.exports)) doc.exports = {};
+  if (!doc.usedChallenges || Array.isArray(doc.usedChallenges)) doc.usedChallenges = {};
   return doc;
 }
 // Written to a temporary file and renamed, so a stop mid-write never leaves
@@ -6429,7 +6433,7 @@ async function main() {
       // SPEC.md §13.5.1 — step one of recovering an interrupted export: a
       // single-use challenge for the owner to sign. Stateless and
       // unauthenticated, and identical for any id, so it reveals nothing.
-      if (req.method === 'POST' && req.url === '/atlas/asset/recover-file-export/challenge') {
+      if (req.method === 'POST' && req.url === '/atlas/asset/recover-file-export-challenge') {
         const { credentialId } = JSON.parse((await readBody(req)) || '{}');
         if (typeof credentialId !== 'string' || !credentialId || credentialId.length > 512) return sendJson(res, 400, { error: 'credentialId is required' });
         return sendJson(res, 200, issueRecoveryChallenge(credentialId));

@@ -5,12 +5,14 @@
 // restarts on the same state folder.
 //
 //   node test/manual-asset-file-recovery.js          # issuer-server (Node)
+//   node test/manual-asset-file-recovery.js php      # issuer-php
 //
 // An export is several separate writes (the export record, revoking the
 // owner's credential, listing the file in the bearer registry). The issuer
 // can be made to stop dead right after any one of them with
-// ATLAS_TEST_CRASH_AT=<point>; this test does that at every point and checks
-// what is on disk and what recovery then does.
+// ATLAS_TEST_CRASH_AT=<point> (the Node process exits; a PHP request ends with
+// no answer); this test does that at every point and checks what is on disk
+// and what recovery then does.
 //
 // Checks:
 //   1. A reply lost in transit (a proxy forwards the request and swallows the
@@ -34,8 +36,10 @@
 //   6. A stop after `prepared` followed by the owner spending the original
 //      elsewhere: recovery abandons the export, the file is never listed, and
 //      a receipt says so.
-//   7. Eight simultaneous recoveries from a half-finished state all return
-//      the same file and advance each state exactly once.
+//   7. Eight simultaneous recoveries from a half-finished state (stopped
+//      right after `prepared`) all return the same file, revoke the original
+//      exactly once and advance each state exactly once. Eight identical
+//      simultaneous requests (one challenge) produce exactly one answer.
 //   8. Recovery, claim and re-export racing each other: exactly one claim
 //      wins, no recovery ever returns a file other than the original, no
 //      second file is created.
@@ -51,16 +55,17 @@ const fs = require('fs');
 const { webcrypto, createHmac } = require('crypto');
 const { subtle } = webcrypto;
 
-const BACKEND = 'node';
-const PORT = 8231;
-const PROXY_PORT = 8232;
+const BACKEND = process.argv[2] === 'php' ? 'php' : 'node';
+const PORT = BACKEND === 'php' ? 8233 : 8231; // isolated, distinct from every other manual-*.js test
+const PROXY_PORT = BACKEND === 'php' ? 8234 : 8232;
 const BASE = 'http://localhost:' + PORT;
 const PROXY_BASE = 'http://localhost:' + PROXY_PORT;
 const DOMAIN = 'localhost:' + PORT;
 const REPO = path.resolve(__dirname, '..');
 const TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-file-recovery-'));
-const DOCROOT = path.join(TMP_ROOT, 'docroot');
-const STATE_DIR = path.join(TMP_ROOT, 'state');
+// issuer-php keeps its state in lib/ inside the bundle, which is also its docroot.
+const DOCROOT = BACKEND === 'php' ? path.join(TMP_ROOT, 'domain') : path.join(TMP_ROOT, 'docroot');
+const STATE_DIR = BACKEND === 'php' ? path.join(DOCROOT, 'lib') : path.join(TMP_ROOT, 'state');
 const MANIFEST = path.join(DOCROOT, '.well-known', 'spatial.json');
 const REVOCATIONS = path.join(DOCROOT, '.well-known', 'atlas-revocations.json');
 const BEARER_STORE = path.join(STATE_DIR, 'atlas-bearer-store.json');
@@ -115,7 +120,7 @@ async function claim(identity, credential) {
   return post('/atlas/asset/claim-from-file', { credential, intent: { payload, proof: await proofFor(identity, payload) } });
 }
 async function getChallenge(credentialId) {
-  const r = await post('/atlas/asset/recover-file-export/challenge', { credentialId });
+  const r = await post('/atlas/asset/recover-file-export-challenge', { credentialId });
   assert(r.status === 200 && typeof r.body.challenge === 'string', 'challenge request failed: ' + r.text);
   return r.body.challenge;
 }
@@ -156,26 +161,38 @@ function assertNeverBothLive(originalId, fileId, when) {
 let serverProc = null;
 function startServer(extraEnv) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('node', ['issuer-server/server.js'], {
-      cwd: REPO,
-      env: { ...process.env, PORT: String(PORT), ATLAS_DOMAIN: DOMAIN, ATLAS_STATE_DIR: STATE_DIR, ATLAS_DOCROOT: DOCROOT, ...(extraEnv || {}) },
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    const timer = setTimeout(() => reject(new Error('issuer-server did not start in time')), 10000);
-    proc.stdout.on('data', (d) => { if (d.toString().includes('listening')) { clearTimeout(timer); serverProc = proc; resolve(proc); } });
-    proc.on('exit', (code) => { if (serverProc === proc) serverProc = null; });
+    let proc;
+    if (BACKEND === 'php') {
+      // Several workers so the simultaneous requests below genuinely overlap.
+      proc = spawn('php', ['-S', 'localhost:' + PORT, 'test-router.php'], {
+        cwd: DOCROOT, detached: true, env: { ...process.env, PHP_CLI_SERVER_WORKERS: '8', ...(extraEnv || {}) }, stdio: ['ignore', 'pipe', 'pipe']
+      });
+      const timer = setTimeout(() => reject(new Error('php -S did not start in time')), 5000);
+      proc.stderr.on('data', (d) => { if (d.toString().includes('started')) { clearTimeout(timer); serverProc = proc; resolve(proc); } });
+    } else {
+      proc = spawn('node', ['issuer-server/server.js'], {
+        cwd: REPO, detached: true,
+        env: { ...process.env, PORT: String(PORT), ATLAS_DOMAIN: DOMAIN, ATLAS_STATE_DIR: STATE_DIR, ATLAS_DOCROOT: DOCROOT, ...(extraEnv || {}) },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      const timer = setTimeout(() => reject(new Error('issuer-server did not start in time')), 10000);
+      proc.stdout.on('data', (d) => { if (d.toString().includes('listening')) { clearTimeout(timer); serverProc = proc; resolve(proc); } });
+    }
+    proc.on('exit', () => { if (serverProc === proc) serverProc = null; });
   });
 }
+// Kills the whole process group, so PHP's workers go with the server.
 function stopServer() {
   return new Promise((resolve) => {
     if (!serverProc) return resolve();
     const proc = serverProc;
-    proc.once('exit', () => resolve());
-    proc.kill('SIGKILL');
+    proc.once('exit', () => setTimeout(resolve, 50));
+    try { process.kill(-proc.pid, 'SIGKILL'); } catch (err) { proc.kill('SIGKILL'); }
   });
 }
 function waitForExit(proc) {
   return new Promise((resolve) => {
+    if (BACKEND === 'php') return resolve(86); // a PHP request ends; the server keeps running
     if (proc.exitCode !== null) return resolve(proc.exitCode);
     proc.once('exit', (code) => resolve(code));
   });
@@ -184,13 +201,28 @@ async function restartServer(extraEnv) {
   await stopServer();
   return startServer(extraEnv);
 }
+// True when an export request was cut off before any file reached the caller.
+async function exportCutOff(identity, credential) {
+  try {
+    const r = await exportToFile(identity, credential);
+    return !(r.status === 200 && r.body && r.body.file);
+  } catch (err) {
+    return true;
+  }
+}
 
 // Forwards a request to the issuer and swallows the answer, so the caller
 // sees a dropped connection although the issuer completed the work.
 function startDroppingProxy() {
   const server = net.createServer((client) => {
     const upstream = net.connect(PORT, '127.0.0.1');
-    client.on('data', (d) => upstream.write(d));
+    // issuer-php takes its domain from the Host header, so the proxy presents
+    // itself as the issuer.
+    let first = true;
+    client.on('data', (d) => {
+      if (first) { first = false; upstream.write(Buffer.from(d.toString('latin1').replace(/^Host: .*$/mi, 'Host: localhost:' + PORT), 'latin1')); }
+      else upstream.write(d);
+    });
     upstream.on('data', () => { client.destroy(); upstream.destroy(); });
     client.on('error', () => upstream.destroy());
     upstream.on('error', () => client.destroy());
@@ -216,8 +248,14 @@ function expiredChallengeFor(credentialId) {
 
 (async () => {
   console.log('SETUP: isolated ' + BACKEND + ' issuer on port ' + PORT);
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.cpSync(path.join(REPO, 'demo-domain-a'), DOCROOT, { recursive: true });
+  if (BACKEND === 'php') {
+    fs.cpSync(path.join(REPO, 'issuer-php'), DOCROOT, { recursive: true });
+    fs.mkdirSync(path.join(DOCROOT, '.well-known'), { recursive: true });
+    fs.copyFileSync(path.join(REPO, 'demo-domain-a', '.well-known', 'spatial.json'), MANIFEST);
+  } else {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.cpSync(path.join(REPO, 'demo-domain-a'), DOCROOT, { recursive: true });
+  }
   setManifest({ fileTransfer: { classes: [RING] } });
   await startServer();
   const proxy = await startDroppingProxy();
@@ -281,6 +319,12 @@ function expiredChallengeFor(credentialId) {
     const replay = await post('/atlas/asset/recover-file-export', captured);
     assert(first.status === 200, 'the genuine request should succeed, got ' + first.text);
     assert(replay.status === 400 && replay.body.code === 'challenge-used' && !replay.text.includes(file1.id), 'a replayed request must be refused without the file, got ' + replay.text);
+    // The same captured request sent eight times at once: single use means
+    // exactly one answer carries the file.
+    const burstReq = await recoveryBody(alice, ring1.id);
+    const burstOut = await Promise.all(Array.from({ length: 8 }, () => post('/atlas/asset/recover-file-export', burstReq)));
+    assert(burstOut.filter((b) => b.status === 200).length === 1, 'exactly one of eight identical simultaneous requests should be answered, got ' + burstOut.map((b) => b.status).join(','));
+    assert(burstOut.filter((b) => b.status !== 200).every((b) => b.body.code === 'challenge-used'), 'the others should read challenge-used');
     await restartServer();
     const replayAfterRestart = await post('/atlas/asset/recover-file-export', captured);
     assert(replayAfterRestart.status === 400 && replayAfterRestart.body.code === 'challenge-used', 'a replay must still be refused after a restart, got ' + replayAfterRestart.text);
@@ -326,9 +370,7 @@ function expiredChallengeFor(credentialId) {
       const ring = await mint(alice, RING);
       const crashing = await restartServer({ ATLAS_TEST_CRASH_AT: point });
       const exited = waitForExit(crashing);
-      let failed = null;
-      try { await exportToFile(alice, ring); } catch (err) { failed = err; }
-      assert(failed, point + ': the export request should have been cut off');
+      assert(await exportCutOff(alice, ring), point + ': the export request should have been cut off');
       assert((await exited) === 86, point + ': the issuer should have stopped at the fault point');
       const stopped = exportRecord(ring.id);
       assert(stopped && stopped.state === expectedState, point + ': expected the record to read ' + expectedState + ', got ' + (stopped && stopped.state));
@@ -336,12 +378,12 @@ function expiredChallengeFor(credentialId) {
       assertNeverBothLive(ring.id, fileId, 'after a stop at ' + point);
       if (!bearerHas(fileId)) {
         // Not listed yet: even somebody holding the file could not claim it.
-        await startServer();
+        await restartServer();
         const early = await claim(bob, stopped.file);
         assert(early.status === 400 && early.body.code === 'not-claimable', point + ': an unlisted file must not be claimable, got ' + early.text);
         assert(!revocationOf(fileId), point + ': a refused claim must not revoke the file');
       } else {
-        await startServer();
+        await restartServer();
       }
       const recovered = await recover(alice, ring.id);
       assert(recovered.status === 200 && recovered.body.file.id === fileId, point + ': recovery should return the file, got ' + recovered.text);
@@ -361,11 +403,11 @@ function expiredChallengeFor(credentialId) {
     const ring6 = await mint(alice, RING);
     const crash6 = await restartServer({ ATLAS_TEST_CRASH_AT: 'export:prepared' });
     const exit6 = waitForExit(crash6);
-    try { await exportToFile(alice, ring6); } catch (err) { /* expected */ }
+    assert(await exportCutOff(alice, ring6), 'the export request should have been cut off');
     await exit6;
     const prepared6 = exportRecord(ring6.id);
     assert(prepared6 && prepared6.state === 'prepared', 'expected a prepared record');
-    await startServer();
+    await restartServer();
     const redeemPayload = { credentialId: ring6.id, action: 'redeem' };
     const redeemed = await post('/atlas/asset/redeem', { credential: ring6, intent: { payload: redeemPayload, proof: await proofFor(alice, redeemPayload) } });
     assert(redeemed.status === 200, 'the owner should be able to spend the original, got ' + redeemed.text);
@@ -381,19 +423,26 @@ function expiredChallengeFor(credentialId) {
     console.log('PASS: abandoned, file never listed, receipt kept');
 
     console.log('STEP 7: simultaneous recoveries from a half-finished export');
-    const ring7 = await mint(alice, RING);
-    const crash7 = await restartServer({ ATLAS_TEST_CRASH_AT: 'export:original-revoked' });
-    const exit7 = waitForExit(crash7);
-    try { await exportToFile(alice, ring7); } catch (err) { /* expected */ }
-    await exit7;
-    const half = exportRecord(ring7.id);
-    await startServer();
-    const burst = await Promise.all(Array.from({ length: 8 }, () => recover(alice, ring7.id)));
-    assert(burst.every((b) => b.status === 200 && b.body.file.id === half.fileId), 'all eight should return the same file, got ' + burst.map((b) => b.status).join(','));
-    const settled = exportRecord(ring7.id);
-    assert(settled.transitions.map((t) => t.state).join(',') === 'prepared,original-revoked,pending', 'each state must be entered exactly once, got ' + settled.transitions.map((t) => t.state).join(','));
-    assert(readJson(REVOCATIONS, { revoked: [] }).revoked.filter((r) => r.id === ring7.id).length === 1, 'the original must be revoked exactly once');
-    console.log('PASS: eight simultaneous recoveries, one outcome, each state entered once');
+    for (let round = 1; round <= 3; round++) {
+      const ring7 = await mint(alice, RING);
+      const crash7 = await restartServer({ ATLAS_TEST_CRASH_AT: 'export:prepared' });
+      const exit7 = waitForExit(crash7);
+      assert(await exportCutOff(alice, ring7), 'the export request should have been cut off');
+      await exit7;
+      const half = exportRecord(ring7.id);
+      assert(half.state === 'prepared' && !revocationOf(ring7.id), 'expected a prepared record with the original still live');
+      await restartServer();
+      const burst = await Promise.all(Array.from({ length: 12 }, () => recover(alice, ring7.id)));
+      assert(burst.every((b) => b.status === 200 && b.body.file.id === half.fileId), 'round ' + round + ': all twelve should return the same file, got ' + burst.map((b) => b.status).join(','));
+      const settled = exportRecord(ring7.id);
+      assert(settled.transitions.map((t) => t.state).join(',') === 'prepared,original-revoked,pending', 'round ' + round + ': each state must be entered exactly once, got ' + settled.transitions.map((t) => t.state).join(','));
+      assert(readJson(REVOCATIONS, { revoked: [] }).revoked.filter((r) => r.id === ring7.id).length === 1, 'round ' + round + ': the original must be revoked exactly once');
+      // Twelve identical requests sharing one challenge: exactly one is answered.
+      const sameReq = await recoveryBody(alice, ring7.id);
+      const sameOut = await Promise.all(Array.from({ length: 12 }, () => post('/atlas/asset/recover-file-export', sameReq)));
+      assert(sameOut.filter((b) => b.status === 200).length === 1, 'round ' + round + ': exactly one of twelve identical requests should be answered, got ' + sameOut.map((b) => b.status).join(','));
+    }
+    console.log('PASS: three rounds of twelve simultaneous recoveries: one outcome, original revoked once, each state entered once, one challenge used once');
 
     console.log('STEP 8: recovery, claim and re-export racing each other');
     for (let round = 1; round <= 3; round++) {

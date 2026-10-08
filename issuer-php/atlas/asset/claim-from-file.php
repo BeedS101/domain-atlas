@@ -71,4 +71,5 @@ try {
 }
 atlas_revoke($credential['id'], 'file-claimed');
 archive_if_audited($credential, 'file-claimed');
+try { note_file_claimed($credential['id'], $minted['id']); } catch (Throwable $e) { /* the receipt is derived at the next recovery instead */ }
 send_json(200, ['status' => 'claimed', 'credential' => $minted]);

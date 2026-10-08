@@ -2638,7 +2638,11 @@ function atlas_bearer_modify($fn) {
   $result = $fn($doc);
   ftruncate($fh, 0);
   rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  // Always an object, even when empty, so the file reads the same in
+  // issuer-server.
+  $out = $doc;
+  $out['bearers'] = (object)$doc['bearers'];
+  fwrite($fh, json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
   fflush($fh);
   flock($fh, LOCK_UN);
   fclose($fh);
@@ -2684,6 +2688,198 @@ function restore_bearer($id, $entry) {
   atlas_bearer_modify(function (&$doc) use ($id, $entry) {
     $doc['bearers'][$id] = $entry;
   });
+}
+
+// ---------- file export records (SPEC.md §13.5.1) ----------
+// Mirrors issuer-server/server.js's export records: one entry per exported
+// credential, advanced through prepared -> original-revoked -> pending ->
+// claimed | abandoned | revoked, the original revoked BEFORE the file is
+// listed so the two are never both live. The JSON shape is identical to the
+// Node store's, so either issuer can read the other's file. The endpoints
+// hold atlas_bearer_lock() for the whole request, which serializes every
+// step below against every other export, recovery and claim.
+function atlas_file_exports_file() {
+  return __DIR__ . '/atlas-file-exports-store.json';
+}
+function atlas_recovery_secret_file() {
+  return __DIR__ . '/atlas-recovery-secret.json';
+}
+function atlas_now_iso() {
+  return gmdate('Y-m-d\TH:i:s\Z');
+}
+
+// The file and original credential inside a record are kept as decoded
+// objects (not arrays) so an empty `{}` is not turned into `[]` on the way
+// through: the file returned by a recovery must be byte-for-byte the one the
+// export first returned.
+function read_file_exports() {
+  $file = atlas_file_exports_file();
+  $raw = file_exists($file) ? file_get_contents($file) : '';
+  $decoded = $raw === '' ? null : json_decode($raw, false);
+  $doc = ['version' => 1, 'exports' => [], 'usedChallenges' => []];
+  if (!is_object($decoded)) return $doc;
+  foreach ((isset($decoded->exports) && is_object($decoded->exports)) ? get_object_vars($decoded->exports) : [] as $id => $rec) {
+    $r = get_object_vars($rec);
+    $r['transitions'] = array_map('get_object_vars', isset($r['transitions']) ? $r['transitions'] : []);
+    $doc['exports'][$id] = $r;
+  }
+  if (isset($decoded->usedChallenges) && is_object($decoded->usedChallenges)) $doc['usedChallenges'] = get_object_vars($decoded->usedChallenges);
+  return $doc;
+}
+// Written to a temporary file and renamed, so a stop mid-write never leaves
+// a half-written store.
+function write_file_exports($doc) {
+  $out = ['version' => 1, 'exports' => (object)$doc['exports'], 'usedChallenges' => (object)$doc['usedChallenges']];
+  $file = atlas_file_exports_file();
+  $tmp = $file . '.tmp';
+  file_put_contents($tmp, json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  rename($tmp, $file);
+}
+function file_export_of($doc, $id) {
+  return array_key_exists($id, $doc['exports']) ? $doc['exports'][$id] : null;
+}
+function set_export_state(&$doc, $id, $state) {
+  $at = atlas_now_iso();
+  $doc['exports'][$id]['state'] = $state;
+  $doc['exports'][$id]['updatedAt'] = $at;
+  $doc['exports'][$id]['transitions'][] = ['state' => $state, 'at' => $at];
+  write_file_exports($doc);
+}
+function close_export(&$doc, $id, $state, $reason, $extra = []) {
+  $doc['exports'][$id]['outcomeReason'] = $reason;
+  $doc['exports'][$id]['closedAt'] = atlas_now_iso();
+  foreach ($extra as $k => $v) $doc['exports'][$id][$k] = $v;
+  unset($doc['exports'][$id]['file'], $doc['exports'][$id]['original']);
+  set_export_state($doc, $id, $state);
+}
+function revocation_entry_of($id) {
+  foreach (read_revocations()['revoked'] as $r) {
+    if (isset($r['id']) && $r['id'] === $id) return $r;
+  }
+  return null;
+}
+// Test-only: ATLAS_TEST_CRASH_AT=<point> makes the request stop dead right
+// after that step has been written, with no response, as if it had crashed.
+function file_export_fault_point($name) {
+  if (getenv('ATLAS_TEST_CRASH_AT') === $name) exit(86);
+}
+
+// Creates the record for a freshly minted file.
+function create_file_export($credential, $minted, $ownerPublicKey, $assetClass) {
+  $doc = read_file_exports();
+  $at = atlas_now_iso();
+  $doc['exports'][$credential['id']] = [
+    'exportId' => 'urn:atlas:file-export:' . bin2hex(random_bytes(16)),
+    'originalId' => $credential['id'], 'fileId' => $minted['id'], 'ownerPublicKey' => $ownerPublicKey, 'class' => $assetClass,
+    'state' => 'prepared', 'createdAt' => $at, 'updatedAt' => $at, 'transitions' => [['state' => 'prepared', 'at' => $at]],
+    'original' => $credential, 'file' => $minted
+  ];
+  write_file_exports($doc);
+  file_export_fault_point('export:prepared');
+}
+
+// Advances the export for $originalId as far as it safely can and says where
+// it stands: ['outcome' => 'pending' | 'in-progress' | 'claimed' | 'abandoned'
+// | 'revoked' | 'not-found', 'rec' => record].
+function reconcile_file_export($originalId) {
+  $doc = read_file_exports();
+  if (file_export_of($doc, $originalId) === null) return ['outcome' => 'not-found'];
+  for ($guard = 0; $guard < 8; $guard++) {
+    $rec = $doc['exports'][$originalId];
+    $terminal = ['claimed', 'abandoned', 'revoked'];
+    if (in_array($rec['state'], $terminal, true)) return ['outcome' => $rec['state'], 'rec' => $rec];
+    if ($rec['state'] === 'prepared') {
+      $origRevoked = revocation_entry_of($rec['originalId']);
+      if ($origRevoked && ($origRevoked['reason'] ?? null) !== 'file-transferred') {
+        close_export($doc, $originalId, 'abandoned', 'original-spent');
+        return ['outcome' => 'abandoned', 'rec' => $doc['exports'][$originalId]];
+      }
+      if (!$origRevoked) {
+        atlas_revoke($rec['originalId'], 'file-transferred');
+        file_export_fault_point('export:original-revoked-fact');
+      }
+      if (find_archived_asset($rec['originalId']) === null) {
+        archive_if_audited(json_decode(json_encode($rec['original']), true), 'file-transferred');
+      }
+      set_export_state($doc, $originalId, 'original-revoked');
+      file_export_fault_point('export:original-revoked');
+      continue;
+    }
+    if ($rec['state'] === 'original-revoked') {
+      if (!has_bearer($rec['fileId']) && revocation_entry_of($rec['fileId']) === null) register_bearer($rec['fileId'], $rec['class']);
+      file_export_fault_point('export:bearer-registered');
+      $doc['exports'][$originalId]['armedAt'] = atlas_now_iso();
+      set_export_state($doc, $originalId, 'pending');
+      file_export_fault_point('export:pending');
+      continue;
+    }
+    if ($rec['state'] === 'pending') {
+      $fileRevoked = revocation_entry_of($rec['fileId']);
+      if ($fileRevoked) {
+        if (($fileRevoked['reason'] ?? null) === 'file-claimed') close_export($doc, $originalId, 'claimed', 'file-claimed', ['claimedAt' => $fileRevoked['revokedAt'] ?? atlas_now_iso()]);
+        else close_export($doc, $originalId, 'revoked', $fileRevoked['reason'] ?? 'revoked');
+        return ['outcome' => $doc['exports'][$originalId]['state'], 'rec' => $doc['exports'][$originalId]];
+      }
+      return ['outcome' => has_bearer($rec['fileId']) ? 'pending' : 'in-progress', 'rec' => $rec];
+    }
+    throw new Exception('unknown export state ' . $rec['state']);
+  }
+  throw new Exception('export state machine did not settle');
+}
+
+// Called by claim-from-file.php once a file has been claimed, so the receipt
+// is written and the file body dropped right away. reconcile_file_export()
+// derives the same outcome from the revocation list if this never runs.
+function note_file_claimed($fileId, $claimCredentialId) {
+  $doc = read_file_exports();
+  foreach ($doc['exports'] as $id => $rec) {
+    if ($rec['fileId'] !== $fileId) continue;
+    if (in_array($rec['state'], ['claimed', 'abandoned', 'revoked'], true)) return;
+    close_export($doc, $id, 'claimed', 'file-claimed', ['claimedAt' => atlas_now_iso(), 'claimCredentialId' => $claimCredentialId]);
+    return;
+  }
+}
+
+// Recovery challenges: stateless HMAC over the credential id, a random nonce
+// and an expiry; the nonce is recorded when used and forgotten after expiry.
+// See issuer-server/server.js for the reasoning.
+const ATLAS_RECOVERY_CHALLENGE_TTL = 300;
+function recovery_secret() {
+  $file = atlas_recovery_secret_file();
+  if (!file_exists($file)) {
+    file_put_contents($file, json_encode(['secret' => b64url_encode(random_bytes(32))]));
+    @chmod($file, 0600);
+  }
+  return b64url_decode(json_decode(file_get_contents($file), true)['secret']);
+}
+function recovery_mac($credentialId, $nonce, $expiryMs) {
+  return b64url_encode(hash_hmac('sha256', 'recover-file-export|v1|' . $credentialId . '|' . $nonce . '|' . $expiryMs, recovery_secret(), true));
+}
+function issue_recovery_challenge($credentialId) {
+  $nonce = b64url_encode(random_bytes(16));
+  $expiryMs = (int)round(microtime(true) * 1000) + ATLAS_RECOVERY_CHALLENGE_TTL * 1000;
+  return ['challenge' => $nonce . '.' . $expiryMs . '.' . recovery_mac($credentialId, $nonce, $expiryMs), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', intdiv($expiryMs, 1000))];
+}
+// -> ['nonce' =>, 'expiry' =>] when well-formed, signed by this issuer for
+// this id and unexpired; else ['error' => 'invalid-challenge' | 'expired-challenge'].
+function check_recovery_challenge($credentialId, $challenge) {
+  if (!is_string($challenge)) return ['error' => 'invalid-challenge'];
+  $parts = explode('.', $challenge);
+  if (count($parts) !== 3 || !preg_match('/^\d+$/', $parts[1])) return ['error' => 'invalid-challenge'];
+  list($nonce, $expiryText, $mac) = $parts;
+  if (!hash_equals(recovery_mac($credentialId, $nonce, $expiryText), $mac)) return ['error' => 'invalid-challenge'];
+  if ((int)round(microtime(true) * 1000) > (int)$expiryText) return ['error' => 'expired-challenge'];
+  return ['nonce' => $nonce, 'expiry' => (int)$expiryText];
+}
+// Records a challenge as used. False if it already was.
+function consume_recovery_challenge($nonce, $expiryMs) {
+  $doc = read_file_exports();
+  $now = (int)round(microtime(true) * 1000);
+  foreach ($doc['usedChallenges'] as $n => $e) if ($e < $now) unset($doc['usedChallenges'][$n]);
+  if (array_key_exists($nonce, $doc['usedChallenges'])) return false;
+  $doc['usedChallenges'][$nonce] = $expiryMs;
+  write_file_exports($doc);
+  return true;
 }
 
 // The revocation reason recorded for $id, or null if it is not revoked.

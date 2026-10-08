@@ -4,7 +4,8 @@
 // claimable file. The owner signs an intent; the domain mints a fresh
 // credential owned by a discarded key, lists its id in the bearer registry,
 // revokes the owner's credential (reason 'file-transferred') and returns
-// the new credential as `file`. Whoever claims the file first
+// the new credential as `file`, recording each step so an interrupted
+// export can be recovered (SPEC.md §13.5.1). Whoever claims the file first
 // (claim-from-file.php) becomes its owner.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
@@ -48,12 +49,25 @@ if ($fileConfig['classes'] !== null && !in_array($assetClass, $fileConfig['class
 // waits here, then finds it revoked.
 $lock = atlas_bearer_lock();
 
+// An export already exists for this credential: it is never exported
+// twice. The owner recovers the file instead (SPEC.md §13.5.1).
+if (file_export_of(read_file_exports(), $credential['id']) !== null) {
+  send_json(409, ['error' => 'this asset has already been exported; recover the file with /atlas/asset/recover-file-export', 'code' => 'already-exported']);
+}
+
 $problem = check_presented_giftable_asset($kp['publicKeyB64url'], $credential, $senderPub, $assetClass);
 if ($problem) send_json(400, ['error' => $problem]);
 
 $discardedOwnerKey = generate_discarded_owner_public_key();
 $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $discardedOwnerKey, $credential);
-register_bearer($minted['id'], $assetClass);
-atlas_revoke($credential['id'], 'file-transferred');
-archive_if_audited($credential, 'file-transferred');
-send_json(200, ['status' => 'file-transferred', 'file' => $minted]);
+
+// The record is written first, then the original is revoked, then the file is
+// listed (reconcile_file_export), so an interruption at any point leaves a
+// state the owner can recover and the original and a claimable file are never
+// both live.
+create_file_export($credential, $minted, $senderPub, $assetClass);
+$result = reconcile_file_export($credential['id']);
+if ($result['outcome'] !== 'pending') {
+  send_json(409, ['error' => 'export did not complete (' . $result['outcome'] . ')', 'code' => 'in-progress']);
+}
+send_json(200, ['status' => 'file-transferred', 'file' => $result['rec']['file'], 'exportId' => $result['rec']['exportId']]);
