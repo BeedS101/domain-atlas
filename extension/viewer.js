@@ -1768,6 +1768,12 @@ const bridgeOfferPreviewCloseBtn = document.getElementById('bridgeOfferPreviewCl
 const bridgeOfferPreviewClaimBtn = document.getElementById('bridgeOfferPreviewClaimBtn');
 const bridgeOfferPreviewDismissBtn = document.getElementById('bridgeOfferPreviewDismissBtn');
 const bridgeOfferPreviewStatusEl = document.getElementById('bridgeOfferPreviewStatus');
+// SPEC.md §13.5 single-asset transfer files (see openAssetFileDialog()).
+const importAssetFileBtn = document.getElementById('importAssetFileBtn');
+const importAssetFileInput = document.getElementById('importAssetFileInput');
+const importAssetFileStatusEl = document.getElementById('importAssetFileStatus');
+const pendingExportsSectionEl = document.getElementById('pendingExportsSection');
+const pendingExportsListEl = document.getElementById('pendingExportsList');
 const markAllMailReadBtn = document.getElementById('markAllMailReadBtn');
 const clearAllMailBtn = document.getElementById('clearAllMailBtn');
 const subscribeSectionEl = document.getElementById('subscribeSection');
@@ -4237,7 +4243,7 @@ function renderAssetViewerProperties(properties) {
   const entries = Object.entries(properties);
   if (entries.length === 0) return '';
   return '<div class="asset-viewer-properties">' +
-    entries.map(([key, value]) => '<div>' + key + ': ' + formatPropertyValue(value) + '</div>').join('') +
+    entries.map(([key, value]) => '<div>' + escapeHtml(key) + ': ' + escapeHtml(formatPropertyValue(value)) + '</div>').join('') +
     '</div>';
 }
 
@@ -4245,8 +4251,8 @@ function renderAssetViewerContent(entry) {
   const asset = entry.credential.asset;
   const fungible = !!asset.fungible;
   let html =
-    '<div class="name">' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</div>' +
-    '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + '</div>';
+    '<div class="name">' + escapeHtml(asset.name) + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</div>' +
+    '<div class="meta">' + escapeHtml(asset.class) + ' · issued by ' + escapeHtml(entry.credential.issuer.domain) + '</div>';
   // Graceful fallback: both fields are optional per SPEC.md §5 — an
   // issuer may set neither, so a class minted without them just skips
   // straight to properties with no image area and no button, never a
@@ -5533,6 +5539,13 @@ function renderAssetCard(entry, container, opts) {
     const wearingTheseShoes = opts.equippedAvatarShoesAssetId === entry.credential.id;
     actionsHtml += '<button data-action="toggle-avatar-shoes" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingTheseShoes ? 'Take off shoes' : 'Wear as my shoes') + '</button>';
   }
+  // SPEC.md §13.5 — opens a dialog that either explains why this item can't
+  // be saved to a file (the domain hasn't enabled it, wrong kind of item) or
+  // lets the owner do it, so the control is offered for every unique,
+  // unbound item on a self card.
+  if (opts.fileExportEnabled && !fungible && asset.tradeScope !== 'bound') {
+    actionsHtml += '<button data-action="save-file" data-id="' + entry.credential.id + '" class="btn-secondary">Save to a file…</button>';
+  }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
   const menuHtml =
     '<div class="card-menu">' +
@@ -5541,10 +5554,10 @@ function renderAssetCard(entry, container, opts) {
     '</div>';
 
   const html =
-    '<div class="name"><span>' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</span>' + menuHtml + '</div>' +
-    '<div class="meta">' + asset.class + ' · issued by ' + entry.credential.issuer.domain + supersedesNote + '</div>' +
+    '<div class="name"><span>' + escapeHtml(asset.name) + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</span>' + menuHtml + '</div>' +
+    '<div class="meta">' + escapeHtml(asset.class) + ' · issued by ' + escapeHtml(entry.credential.issuer.domain) + supersedesNote + '</div>' +
     renderPropertiesToggle(mergedAssetFields(entry)) +
-    '<div class="verdict ' + (v.valid ? 'valid' : 'invalid') + '">' + (v.valid ? '✓ ' : '✗ ') + v.reason + '</div>';
+    '<div class="verdict ' + (v.valid ? 'valid' : 'invalid') + '">' + (v.valid ? '✓ ' : '✗ ') + escapeHtml(v.reason) + '</div>';
   el.innerHTML = html;
   container.appendChild(el);
 
@@ -5849,7 +5862,7 @@ async function refreshInventoryDisplay() {
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
   }
   counterpartyCollectiblesListEl.innerHTML = '';
   if (cpCollectibles.length === 0) {
@@ -5867,7 +5880,7 @@ async function refreshInventoryDisplay() {
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
   }
   counterpartyDocumentsListEl.innerHTML = '';
   if (cpDocuments.length === 0) {
@@ -5893,6 +5906,7 @@ async function refreshInventoryDisplay() {
   await refreshRecentWorldsDisplay();
   await refreshActivityLogDisplay();
   await refreshAssetUpdatesBadge();
+  await refreshPendingExportsDisplay();
 }
 
 // The Wallet tab's own small notification (SPEC.md §5.1.1) — same
@@ -7245,7 +7259,8 @@ function renderBridgeOfferPreviewContent(entry) {
   let html =
     '<div class="name">' + escapeHtml(asset.name) + (fungible ? ' ×' + formatMass(credential.quantity) : '') + '</div>' +
     '<div class="meta">' + escapeHtml(asset.class) + ' · issued by ' + escapeHtml(credential.issuer.domain) + '</div>' +
-    '<div class="meta">Offered by ' + escapeHtml(entry.origin) + '</div>';
+    '<div class="meta">' + escapeHtml(entry.originLabel || ('Offered by ' + entry.origin)) + '</div>' +
+    (entry.noteHtml || '');
   if (asset.thumbnail) {
     html += '<div id="bridgeOfferPreviewThumbnailArea"></div>';
   }
@@ -7345,6 +7360,7 @@ function openBridgeOfferPreview(entry) {
 
 function closeBridgeOfferPreview() {
   bridgeOfferPreviewEntry = null;
+  resetAssetFileDialogButtons();
   disposeBridgeOfferPreviewModelPreview();
   if (bridgeOfferPreviewBodyEl) bridgeOfferPreviewBodyEl.innerHTML = '';
   if (bridgeOfferPreviewModalEl) bridgeOfferPreviewModalEl.classList.remove('active');
@@ -7356,6 +7372,7 @@ bridgeOfferPreviewCloseBtn && bridgeOfferPreviewCloseBtn.addEventListener('click
 // the asset, a visitor shouldn't need to close this and go hunt down the
 // same buttons on the card underneath to act on what they just saw.
 bridgeOfferPreviewClaimBtn && bridgeOfferPreviewClaimBtn.addEventListener('click', async () => {
+  if (assetFileDialog) { await runAssetFileDialogPrimary(); return; }
   if (!bridgeOfferPreviewEntry) return;
   const identity = await AtlasWallet.getIdentity();
   if (!identity) return;
@@ -7371,6 +7388,7 @@ bridgeOfferPreviewClaimBtn && bridgeOfferPreviewClaimBtn.addEventListener('click
 });
 
 bridgeOfferPreviewDismissBtn && bridgeOfferPreviewDismissBtn.addEventListener('click', async () => {
+  if (assetFileDialog) { closeBridgeOfferPreview(); return; }
   if (!bridgeOfferPreviewEntry) return;
   if (!confirm('Dismiss this offer without claiming it?')) return;
   const identity = await AtlasWallet.getIdentity();
@@ -7381,6 +7399,213 @@ bridgeOfferPreviewDismissBtn && bridgeOfferPreviewDismissBtn.addEventListener('c
     await refreshBridgeOffersDisplay(identity);
   } catch (err) {
     if (bridgeOfferPreviewStatusEl) bridgeOfferPreviewStatusEl.textContent = 'Dismiss failed: ' + err.message;
+  }
+});
+
+// SPEC.md §13.5 single-asset transfer files. The preview-before-claim modal
+// above is reused for the two places a person has to look at an item and
+// then decide: saving one of their items to a file, and opening a file
+// someone gave them. While one of these is showing, `assetFileDialog` holds
+// its button actions and the modal's Claim/Dismiss buttons run those
+// instead of the bridge-offer ones.
+let assetFileDialog = null;
+
+function resetAssetFileDialogButtons() {
+  assetFileDialog = null;
+  if (bridgeOfferPreviewClaimBtn) { bridgeOfferPreviewClaimBtn.textContent = 'Claim'; bridgeOfferPreviewClaimBtn.style.display = ''; bridgeOfferPreviewClaimBtn.disabled = false; }
+  if (bridgeOfferPreviewDismissBtn) { bridgeOfferPreviewDismissBtn.textContent = 'Dismiss'; bridgeOfferPreviewDismissBtn.className = 'danger-btn'; }
+}
+
+// options: {credential, originLabel, notes: [string], primaryLabel,
+// onPrimary, secondaryLabel}. Every string is shown as text.
+function openAssetFileDialog(options) {
+  assetFileDialog = options;
+  const noteHtml = (options.notes || []).map((n) => '<div class="meta" style="margin:4px 0;">' + escapeHtml(n) + '</div>').join('');
+  bridgeOfferPreviewEntry = { credential: options.credential, originLabel: options.originLabel, noteHtml };
+  renderBridgeOfferPreviewContent(bridgeOfferPreviewEntry);
+  bridgeOfferPreviewClaimBtn.textContent = options.primaryLabel || '';
+  bridgeOfferPreviewClaimBtn.style.display = options.primaryLabel ? '' : 'none';
+  bridgeOfferPreviewClaimBtn.disabled = false;
+  bridgeOfferPreviewDismissBtn.textContent = options.secondaryLabel || 'Close';
+  bridgeOfferPreviewDismissBtn.className = 'btn-secondary';
+  bridgeOfferPreviewStatusEl.textContent = '';
+  bridgeOfferPreviewModalEl.classList.add('active');
+}
+
+async function runAssetFileDialogPrimary() {
+  const dialog = assetFileDialog;
+  if (!dialog || !dialog.onPrimary) return;
+  bridgeOfferPreviewClaimBtn.disabled = true;
+  bridgeOfferPreviewStatusEl.textContent = 'Working…';
+  try {
+    await dialog.onPrimary();
+  } catch (err) {
+    if (assetFileDialog === dialog) {
+      bridgeOfferPreviewStatusEl.textContent = err.message;
+      bridgeOfferPreviewClaimBtn.disabled = false;
+    }
+  }
+}
+
+function assetFileName(credential) {
+  const slug = String(credential.asset.name || 'asset').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'asset';
+  const serial = credential.asset.properties && credential.asset.properties['atlas.serial'];
+  const tag = serial !== undefined ? '-' + String(serial).replace(/[^a-z0-9]/gi, '') : '-' + String(credential.id).replace(/[^a-z0-9]/gi, '').slice(-8);
+  return slug + tag + '.atlas-asset.json';
+}
+
+function downloadAssetFile(credential) {
+  const blob = new Blob([JSON.stringify(credential, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = assetFileName(credential);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return a.download;
+}
+
+async function beginSaveAssetToFile(credentialId) {
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  const entry = (await AtlasWallet.getWallet(identity.publicKey)).find((e) => e.credential.id === credentialId);
+  if (!entry) return;
+  const credential = entry.credential;
+  const problem = await AtlasWallet.assetFileExportProblem(credential);
+  if (problem) {
+    openAssetFileDialog({ credential, originLabel: 'Save to a transfer file', notes: [problem], secondaryLabel: 'Close' });
+    return;
+  }
+  openAssetFileDialog({
+    credential,
+    originLabel: 'Save to a transfer file',
+    notes: [
+      'This takes the item out of your wallet and puts it in a file.',
+      'Anyone who gets the file can claim the item, and the first person to claim it owns it. If you give the file to several people, only one of them gets the item.',
+      'A copy of the file stays in this wallet under "Saved transfer files" until someone claims it, so you can save it again or claim the item back.'
+    ],
+    primaryLabel: 'Save file…',
+    secondaryLabel: 'Cancel',
+    onPrimary: async () => {
+      const file = await AtlasWallet.exportAssetToFile(credentialId);
+      const filename = downloadAssetFile(file);
+      closeBridgeOfferPreview();
+      await refreshInventoryDisplay();
+      statusEl.textContent = 'Saved ' + credential.asset.name + ' as ' + filename + '. Keep the file safe: anyone who has it can claim the item.';
+    }
+  });
+}
+
+importAssetFileBtn && importAssetFileBtn.addEventListener('click', () => importAssetFileInput.click());
+
+importAssetFileInput && importAssetFileInput.addEventListener('change', async () => {
+  const file = importAssetFileInput.files && importAssetFileInput.files[0];
+  importAssetFileInput.value = '';
+  if (!file) return;
+  importAssetFileStatusEl.textContent = 'Checking the file…';
+  if (file.size > 262144) {
+    importAssetFileStatusEl.textContent = 'That file is too large to be an asset file.';
+    return;
+  }
+  let result;
+  try {
+    result = await AtlasWallet.inspectAssetFile(await file.text());
+  } catch (err) {
+    importAssetFileStatusEl.textContent = 'Could not check the file: ' + err.message;
+    return;
+  }
+  if (!result.credential) {
+    importAssetFileStatusEl.textContent = result.headline;
+    return;
+  }
+  importAssetFileStatusEl.textContent = '';
+  const credential = result.credential;
+  const notes = [result.headline].concat(result.details);
+  let primaryLabel = null;
+  let onPrimary = null;
+  if (result.canClaim) {
+    notes.push('Claiming uses up the file: the issuer gives the item to your key and every copy of the file stops working. If someone else claims it first, you get nothing.');
+    const ownPending = result.relation === 'own-pending-export';
+    primaryLabel = ownPending ? 'Claim it back' : 'Claim into my wallet';
+    onPrimary = async () => {
+      try {
+        if (ownPending) await AtlasWallet.reclaimPendingExport(credential.id);
+        else await AtlasWallet.claimAssetFile(credential);
+      } catch (err) {
+        throw new Error(err.code === 'already-claimed' ? 'Someone else claimed this file first.' : err.message);
+      }
+      closeBridgeOfferPreview();
+      await refreshInventoryDisplay();
+      importAssetFileStatusEl.textContent = 'Added ' + credential.asset.name + ' to your wallet.';
+    };
+  } else if (result.canRestore) {
+    primaryLabel = 'Add to my wallet';
+    onPrimary = async () => {
+      await AtlasWallet.restoreAssetCopy(credential);
+      closeBridgeOfferPreview();
+      await refreshInventoryDisplay();
+      importAssetFileStatusEl.textContent = 'Added ' + credential.asset.name + ' to your wallet.';
+    };
+  }
+  openAssetFileDialog({ credential, originLabel: 'From a file · issued by ' + credential.issuer.domain, notes, primaryLabel, onPrimary, secondaryLabel: 'Close' });
+});
+
+async function refreshPendingExportsDisplay() {
+  if (!pendingExportsListEl) return;
+  const identity = await AtlasWallet.getIdentity();
+  const pending = identity ? await AtlasWallet.getPendingExports(identity.publicKey) : [];
+  pendingExportsSectionEl.hidden = pending.length === 0;
+  pendingExportsListEl.innerHTML = '';
+  pending.forEach((record) => {
+    const el = document.createElement('div');
+    el.className = 'wallet-item';
+    el.dataset.fileId = record.fileId;
+    el.innerHTML =
+      '<div class="name"><span>' + escapeHtml(record.name) + '</span></div>' +
+      '<div class="meta">' + escapeHtml(record.class) + ' · saved ' + escapeHtml(new Date(record.at).toLocaleString()) + '</div>' +
+      '<div class="item-actions">' +
+      '<button type="button" data-action="pe-save" class="btn-secondary">Save file again</button>' +
+      '<button type="button" data-action="pe-check" class="btn-secondary">Check if claimed</button>' +
+      '<button type="button" data-action="pe-claim-back" class="btn-secondary">Claim it back</button>' +
+      '<button type="button" data-action="pe-forget" class="danger-btn">Forget</button>' +
+      '</div>' +
+      '<div class="mono pe-status"></div>';
+    pendingExportsListEl.appendChild(el);
+  });
+}
+
+pendingExportsListEl && pendingExportsListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn || !btn.dataset.action) return;
+  const card = btn.closest('.wallet-item');
+  const fileId = card.dataset.fileId;
+  const statusLine = card.querySelector('.pe-status');
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  try {
+    if (btn.dataset.action === 'pe-save') {
+      const record = (await AtlasWallet.getPendingExports(identity.publicKey)).find((r) => r.fileId === fileId);
+      if (record) statusLine.textContent = 'Saved as ' + downloadAssetFile(record.file) + '.';
+    } else if (btn.dataset.action === 'pe-check') {
+      statusLine.textContent = 'Checking…';
+      const state = await AtlasWallet.checkPendingExport(fileId);
+      if (state === 'claimable') statusLine.textContent = 'Not claimed yet.';
+      else { await refreshPendingExportsDisplay(); importAssetFileStatusEl.textContent = state === 'claimed' ? 'Someone has claimed that file.' : 'That file is no longer valid.'; }
+    } else if (btn.dataset.action === 'pe-claim-back') {
+      statusLine.textContent = 'Claiming…';
+      await AtlasWallet.reclaimPendingExport(fileId);
+      await refreshInventoryDisplay();
+      importAssetFileStatusEl.textContent = 'The item is back in your wallet.';
+    } else if (btn.dataset.action === 'pe-forget') {
+      if (!confirm('Throw away the stored copy of this file? If you have not given the file to anyone and nobody has claimed it, the item will be lost for good.')) return;
+      await AtlasWallet.forgetPendingExport(fileId);
+      await refreshPendingExportsDisplay();
+    }
+  } catch (err) {
+    statusLine.textContent = err.code === 'already-claimed' ? 'Someone else claimed this file first.' : err.message;
+    if (err.code === 'already-claimed') await refreshPendingExportsDisplay();
   }
 });
 
@@ -11540,6 +11765,8 @@ function assetActionHandler(listEl, role, toRole) {
       } else {
         beginDropPlacement(id, null);
       }
+    } else if (btn.dataset.action === 'save-file') {
+      if (role === 'self') await beginSaveAssetToFile(id);
     } else if (btn.dataset.action === 'hide') {
       await AtlasWallet.hideAsset(who.publicKey, id);
       await refreshInventoryDisplay();

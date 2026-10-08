@@ -9,6 +9,7 @@
   "tradingStation": true,
   "calendar": true,
   "emailTickets": { "intakeAddress": "tickets@example.com" },
+  "fileTransfer": { "classes": ["atlas.wearable.ring"] },
   "defaultWorld": "plaza",
   "worlds": [
     {

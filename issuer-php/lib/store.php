@@ -2608,6 +2608,112 @@ function record_visit($worldId, $nowTs = null) {
   fclose($fh);
 }
 
+// ---------- bearer registry (SPEC.md §13.5) ----------
+// Mirrors issuer-server/server.js's bearer registry: {bearers: {<credentialId>:
+// {class, registeredAt}}}. A credential in an exported file is claimable only
+// while its id is listed here; see SPEC.md §13.5 for why the credential's own
+// validity can't be what authorizes a claim. Lives in lib/ with every other
+// store.
+function atlas_bearer_file() {
+  return __DIR__ . '/atlas-bearer-store.json';
+}
+
+// Exports and claims run one at a time. Held for the whole request by the
+// endpoints, so a second export or claim of the same credential waits and
+// then finds the first one's result (a revoked credential) instead of racing
+// it. Released when the request ends.
+function atlas_bearer_lock() {
+  $fh = fopen(atlas_bearer_file() . '.lock', 'c');
+  if ($fh === false) throw new Exception('could not open the bearer lock');
+  flock($fh, LOCK_EX);
+  return $fh;
+}
+
+function atlas_bearer_modify($fn) {
+  $fh = fopen(atlas_bearer_file(), 'c+');
+  if ($fh === false) throw new Exception('could not open the bearer registry');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc) || !isset($doc['bearers']) || !is_array($doc['bearers'])) $doc = ['bearers' => []];
+  $result = $fn($doc);
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $result;
+}
+
+function read_bearers() {
+  $file = atlas_bearer_file();
+  if (!file_exists($file)) return ['bearers' => []];
+  $fh = fopen($file, 'r');
+  if ($fh === false) return ['bearers' => []];
+  flock($fh, LOCK_SH);
+  $data = stream_get_contents($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  $doc = json_decode($data, true);
+  return (is_array($doc) && isset($doc['bearers']) && is_array($doc['bearers'])) ? $doc : ['bearers' => []];
+}
+
+function register_bearer($id, $assetClass) {
+  atlas_bearer_modify(function (&$doc) use ($id, $assetClass) {
+    $doc['bearers'][$id] = ['class' => $assetClass, 'registeredAt' => gmdate('Y-m-d\TH:i:s\Z')];
+  });
+}
+
+function has_bearer($id) {
+  $doc = read_bearers();
+  return array_key_exists($id, $doc['bearers']);
+}
+
+// Removes and returns the entry, or null if the id is not listed. The
+// removal is the claim's reservation.
+function take_bearer($id) {
+  return atlas_bearer_modify(function (&$doc) use ($id) {
+    if (!array_key_exists($id, $doc['bearers'])) return null;
+    $entry = $doc['bearers'][$id];
+    unset($doc['bearers'][$id]);
+    return $entry;
+  });
+}
+
+function restore_bearer($id, $entry) {
+  atlas_bearer_modify(function (&$doc) use ($id, $entry) {
+    $doc['bearers'][$id] = $entry;
+  });
+}
+
+// The revocation reason recorded for $id, or null if it is not revoked.
+function revocation_reason_of($id) {
+  foreach (read_revocations()['revoked'] as $r) {
+    if (isset($r['id']) && $r['id'] === $id) return isset($r['reason']) ? $r['reason'] : '';
+  }
+  return null;
+}
+
+// SPEC.md §13.5's manifest opt-in: the top-level `fileTransfer` field.
+// Returns null when the domain has not opted in, else ['classes' => list|null]
+// (null = every eligible class). Read fresh each call so an edit to the
+// manifest takes effect immediately.
+function file_transfer_config() {
+  $path = atlas_docroot() . '/.well-known/spatial.json';
+  if (!file_exists($path)) return null;
+  $manifest = json_decode(file_get_contents($path), true);
+  if (!is_array($manifest) || !isset($manifest['fileTransfer'])) return null;
+  $cfg = $manifest['fileTransfer'];
+  // An empty JSON object decodes to an empty array here, which is an
+  // opt-in with no class limit; a JSON list or scalar is not a valid opt-in.
+  if (!is_array($cfg) || ($cfg !== [] && array_keys($cfg) === range(0, count($cfg) - 1))) return null;
+  $classes = null;
+  if (isset($cfg['classes']) && is_array($cfg['classes'])) {
+    $classes = array_values(array_filter($cfg['classes'], 'is_string'));
+  }
+  return ['classes' => $classes];
+}
+
 // The world ids this domain's own manifest declares — the only ids a visit
 // is accepted for, so an unauthenticated endpoint can't be made to grow
 // the store with arbitrary names. Read fresh each time (a small file) so a

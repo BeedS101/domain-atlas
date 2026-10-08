@@ -42,6 +42,7 @@ demo-domain-b/.well-known/atlas-reviewer-key.json
 # are source; they're rebuilt fresh by the PHP backend on first use.
 issuer-php/lib/issuer-private-key.pem
 issuer-php/lib/atlas-*.json
+issuer-php/lib/atlas-*.json.lock
 issuer-php/.well-known/atlas-key.json
 issuer-php/.well-known/atlas-revocations.json
 issuer-php/.well-known/atlas-suspensions.json

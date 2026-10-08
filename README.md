@@ -1324,6 +1324,39 @@ involved, stamping a sale to flip the status to Active, a further stamp
 flipping it to Expired, a genuine transfer preserving every fact, and
 independent verification.
 
+## Moving one item through a file
+
+A domain can let its holders save a single unique item to a file and hand
+that file to anyone, who then claims it into their own wallet (SPEC.md
+§13.5). Think of it as a bearer note: whoever claims it first owns it, and
+the file stops working for everybody else.
+
+Opt in by adding a top-level `fileTransfer` object to the domain's
+`.well-known/spatial.json`; an optional `classes` array limits it to those
+asset classes (omit it to allow every unique, non-bound class):
+
+```json
+"fileTransfer": { "classes": ["atlas.wearable.ring"] }
+```
+
+On the PHP host upload `atlas/asset/transfer-to-file.php`,
+`atlas/asset/claim-from-file.php`, `atlas/asset/file-status.php` and the
+updated `lib/store.php`. The Node server needs only the updated
+`server.js`.
+
+In the wallet, an item's menu offers **Save to a file…** when its domain has
+opted in. The item leaves the wallet and appears under **Saved transfer
+files (not yet claimed)** in Inventory, where the file can be saved again,
+checked, claimed back, or forgotten. **Import an asset file…** opens a
+preview first (name, class, issuer, properties, signature verdict, and
+whether the file is still claimable) and only adds the item when the holder
+confirms. Fungible balances, bound items and classes outside the allowlist
+never offer it.
+
+`test/manual-asset-file-transfer.js [php]` drives the issuer API (claim
+races, replayed files, refused cases) and `test/manual-asset-file-wallet.js`
+drives the wallet UI with two profiles.
+
 ## Walking a credential's own history back to its original mint
 
 Every credential already carries `supersedes`, a signed pointer to

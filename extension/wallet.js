@@ -3096,6 +3096,337 @@ const AtlasWallet = (() => {
     return { assetsAdded, assetsSkippedDuplicate, assetsSkippedNotOwned };
   }
 
+  // ---------- single-asset transfer files (SPEC.md §13.5) ----------
+  //
+  // A held non-fungible asset can be exported to a file; whoever claims the
+  // file first becomes its owner. The issuer does the swap (see
+  // /atlas/asset/transfer-to-file and /atlas/asset/claim-from-file), so this
+  // wallet never decides on its own who owns what: it signs intents, shows
+  // the person what a file contains, and records what it did.
+  //
+  // The ledger below (atlasAssetFiles, encrypted at rest like the wallet)
+  // holds two kinds of record per owner:
+  //   exported: {fileId, direction:'exported', state, file?, sourceId, ...}
+  //             state 'pending' keeps the file itself, because after an
+  //             export the exporter no longer owns the asset and a lost file
+  //             would otherwise be a lost asset. Any other state drops it.
+  //   claimed:  {fileId, direction:'claimed', newId, ...}, so importing the
+  //             same file again is recognised instead of retried.
+  const ASSET_FILE_MAX_BYTES = 256 * 1024;
+  const ASSET_FILE_LEDGER_MAX = 500;
+
+  async function getAssetFiles(ownerPublicKey) {
+    const { atlasAssetFiles } = await chrome.storage.local.get('atlasAssetFiles');
+    const identity = await getIdentity();
+    return decryptAtRestAndMigrate(identity, 'assetFiles', (atlasAssetFiles || {})[ownerPublicKey], [], (v) => saveAssetFiles(ownerPublicKey, v));
+  }
+
+  async function saveAssetFiles(ownerPublicKey, records) {
+    const { atlasAssetFiles } = await chrome.storage.local.get('atlasAssetFiles');
+    const all = atlasAssetFiles || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'assetFiles', records.slice(0, ASSET_FILE_LEDGER_MAX));
+    await chrome.storage.local.set({ atlasAssetFiles: all });
+  }
+
+  async function getPendingExports(ownerPublicKey) {
+    return (await getAssetFiles(ownerPublicKey)).filter((r) => r.direction === 'exported' && r.state === 'pending' && r.file);
+  }
+
+  // An issuer domain taken from an untrusted file is fetched from, so it
+  // must be a plain host[:port]: no scheme, path or credentials, and no IP
+  // literal other than loopback.
+  function validAssetFileDomain(domain) {
+    if (typeof domain !== 'string' || domain.length === 0 || domain.length > 253) return false;
+    const m = /^([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*)(:\d{1,5})?$/i.exec(domain);
+    if (!m) return false;
+    const host = m[1].toLowerCase();
+    if (/^\d+(\.\d+){3}$/.test(host)) return host === '127.0.0.1';
+    return host === 'localhost' || host.includes('.');
+  }
+
+  // Returns a short reason, or null if the credential has the shape of a
+  // unique asset credential this wallet can reason about. Says nothing
+  // about whether it is genuine; verifyCredential() does that.
+  function assetFileShapeProblem(c) {
+    if (!c || typeof c !== 'object' || Array.isArray(c)) return 'This file is not an asset credential.';
+    if (c.credential !== 'domain-atlas-asset/1.0') return 'This file is not an asset credential.';
+    if (typeof c.id !== 'string' || !c.id || c.id.length > 200) return 'This file has no valid credential id.';
+    if (typeof c.signature !== 'string' || typeof c.issuedAt !== 'string') return 'This file is not signed.';
+    if (!c.asset || typeof c.asset !== 'object' || typeof c.asset.class !== 'string' || typeof c.asset.name !== 'string') return 'This file has no valid asset.';
+    if (!c.owner || typeof c.owner.publicKey !== 'string') return 'This file has no owner key.';
+    if (!c.issuer || typeof c.issuer.publicKey !== 'string' || !validAssetFileDomain(c.issuer.domain)) return 'This file names an issuer domain this wallet will not contact.';
+    return null;
+  }
+
+  async function fetchAssetFileStatus(domain, id) {
+    const res = await fetch(baseUrl(domain) + '/atlas/asset/file-status?id=' + encodeURIComponent(id), { cache: 'no-store' });
+    if (!res.ok) throw new Error('status check failed: ' + res.status);
+    return res.json();
+  }
+
+  // Whether `domain`'s manifest has opted in to file transfers (the
+  // top-level fileTransfer field), and for which classes. Cached briefly so
+  // rendering an inventory of many items does not refetch the manifest.
+  const fileTransferSupportCache = new Map();
+  async function getFileTransferSupport(domain) {
+    if (!validAssetFileDomain(domain)) return { enabled: false, classes: null };
+    const cached = fileTransferSupportCache.get(domain);
+    if (cached && Date.now() - cached.at < 60000) return cached.value;
+    let value = { enabled: false, classes: null };
+    try {
+      const res = await fetch(baseUrl(domain) + '/.well-known/spatial.json', { cache: 'no-store' });
+      if (res.ok) {
+        const manifest = await res.json();
+        const cfg = manifest && manifest.fileTransfer;
+        if (cfg && typeof cfg === 'object' && !Array.isArray(cfg)) {
+          value = { enabled: true, classes: Array.isArray(cfg.classes) ? cfg.classes.filter((c) => typeof c === 'string') : null };
+        }
+      }
+    } catch (err) {
+      // unreachable or not JSON: treated as not opted in
+    }
+    fileTransferSupportCache.set(domain, { at: Date.now(), value });
+    return value;
+  }
+
+  // Why a held credential cannot be exported to a file, or null if it can
+  // (as far as this wallet can tell without asking the issuer).
+  async function assetFileExportProblem(credential) {
+    if (!credential || !credential.asset) return 'Nothing to export.';
+    if (credential.asset.fungible !== false) return 'Only a single unique item can be saved to a file. Split a balance first.';
+    if (credential.asset.tradeScope === 'bound') return 'This item is bound to you and cannot be given to anyone else.';
+    const support = await getFileTransferSupport(credential.issuer.domain);
+    if (!support.enabled) return credential.issuer.domain + ' has not enabled saving items to a file.';
+    if (support.classes && !support.classes.includes(credential.asset.class)) return credential.issuer.domain + ' does not allow this kind of item to be saved to a file.';
+    return null;
+  }
+
+  // Moves one held unique asset into a claimable file. Nothing local changes
+  // unless the issuer accepts; once it does, the pending-export record
+  // (holding the file) is written before the asset leaves the wallet list.
+  async function exportAssetToFile(credentialId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const entry = (await getWallet(identity.publicKey)).find((e) => e.credential.id === credentialId);
+    if (!entry) throw new Error('That item is not in this wallet.');
+    const credential = entry.credential;
+    const problem = await assetFileExportProblem(credential);
+    if (problem) throw new Error(problem);
+
+    const payload = { credentialId: credential.id, action: 'transfer-to-file' };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/transfer-to-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential, intent: { payload, proof } })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('Saving to a file failed: ' + res.status));
+    const file = data.file;
+    if (!file || !file.id) throw new Error('The issuer did not return a file.');
+
+    const ledger = await getAssetFiles(identity.publicKey);
+    ledger.unshift({
+      fileId: file.id, direction: 'exported', state: 'pending', file, sourceId: credential.id,
+      name: credential.asset.name, class: credential.asset.class, domain: credential.issuer.domain, at: new Date().toISOString()
+    });
+    await saveAssetFiles(identity.publicKey, ledger);
+    await saveWallet(identity.publicKey, (await getWallet(identity.publicKey)).filter((e) => e.credential.id !== credential.id));
+    await unloadItem(credential.id);
+    await logActivity('asset', 'Saved ' + credential.asset.name + ' to a transfer file', { fileId: file.id, sourceId: credential.id });
+    return file;
+  }
+
+  // Looks at a file's text and says what it is and what can be done with
+  // it, without changing anything. `relation` is one of: invalid,
+  // wallet-export, already-in-wallet, previously-claimed, revoked,
+  // already-claimed, suspended, not-a-file, not-eligible, unreachable,
+  // backup-copy, own-pending-export, claimable.
+  async function inspectAssetFile(text) {
+    const out = (relation, headline, extra) => ({ relation, headline, details: [], credential: null, verdict: null, canClaim: false, canRestore: false, ...(extra || {}) });
+    if (typeof text !== 'string' || text.length === 0) return out('invalid', 'The file is empty.');
+    if (text.length > ASSET_FILE_MAX_BYTES) return out('invalid', 'The file is too large to be an asset file.');
+    let credential;
+    try {
+      credential = JSON.parse(text);
+    } catch (err) {
+      return out('invalid', 'The file is not valid JSON.');
+    }
+    if (credential && credential.format === 'atlas-wallet-export/1.0') {
+      return out('wallet-export', 'This is a whole-wallet export. Use "Import wallet file" in Settings for those.');
+    }
+    const shapeProblem = assetFileShapeProblem(credential);
+    if (shapeProblem) return out('invalid', shapeProblem);
+
+    const identity = await getIdentity();
+    if (!identity) return out('invalid', 'Unlock your wallet first.');
+    const base = { credential };
+
+    const wallet = await getWallet(identity.publicKey);
+    if (wallet.some((e) => e.credential.id === credential.id)) {
+      return out('already-in-wallet', 'This item is already in your wallet.', base);
+    }
+    const ledger = await getAssetFiles(identity.publicKey);
+    const claimedBefore = ledger.find((r) => r.direction === 'claimed' && r.fileId === credential.id);
+    if (claimedBefore) {
+      const stillHeld = wallet.some((e) => e.credential.id === claimedBefore.newId);
+      return out('previously-claimed', 'You already claimed this file on ' + new Date(claimedBefore.at).toLocaleString() + (stillHeld ? '; the item is in your wallet.' : '; the item has since left your wallet.'), base);
+    }
+
+    const verdict = await verifyCredential(credential);
+    const domain = credential.issuer.domain;
+    if (!verdict.valid) {
+      if (verdict.reason === 'revoked by issuer') {
+        let state = 'revoked';
+        try { state = (await fetchAssetFileStatus(domain, credential.id)).state; } catch (err) { /* keep 'revoked' */ }
+        if (state === 'claimed') return out('already-claimed', 'Someone has already claimed this file.', { ...base, verdict });
+        return out('revoked', 'This credential has been revoked by its issuer, so it no longer counts for anything.', { ...base, verdict });
+      }
+      return out('invalid', 'This file could not be verified: ' + verdict.reason + '.', { ...base, verdict });
+    }
+    const verified = ['Signed by ' + domain + ' (checked against its published key)', 'Not revoked, not expired'];
+
+    if (credential.owner.publicKey === identity.publicKey) {
+      return out('backup-copy', 'This is a copy of an item that belongs to your key. Adding it puts it back in your wallet.', { ...base, verdict, details: verified, canRestore: true });
+    }
+    if (credential.asset.fungible !== false) return out('not-eligible', 'Only a single unique item can be claimed from a file.', { ...base, verdict, details: verified });
+    if (credential.asset.tradeScope === 'bound') return out('not-eligible', 'This item is bound to its owner and cannot be claimed from a file.', { ...base, verdict, details: verified });
+
+    let status;
+    try {
+      status = await fetchAssetFileStatus(domain, credential.id);
+    } catch (err) {
+      return out('unreachable', 'Could not reach ' + domain + ' to check whether this file can still be claimed.', { ...base, verdict, details: verified });
+    }
+    if (status.state === 'claimed') return out('already-claimed', 'Someone has already claimed this file.', { ...base, verdict, details: verified });
+    if (status.state === 'suspended') return out('suspended', 'This item is suspended by its issuer right now and cannot be claimed.', { ...base, verdict, details: verified });
+    if (status.state === 'revoked') return out('revoked', 'This credential has been revoked by its issuer.', { ...base, verdict, details: verified });
+    if (status.state !== 'claimable') {
+      return out('not-a-file', 'This is a genuine credential, but it belongs to another wallet and was not issued as a transfer file, so it cannot be claimed.', { ...base, verdict, details: verified });
+    }
+    const pending = ledger.find((r) => r.direction === 'exported' && r.state === 'pending' && r.fileId === credential.id);
+    if (pending) {
+      return out('own-pending-export', 'This is a file you saved yourself and nobody has claimed it. Claiming it puts the item back in your wallet.', { ...base, verdict, details: verified.concat(['Claimable right now at ' + domain]), canClaim: true });
+    }
+    return out('claimable', 'This file can be claimed.', { ...base, verdict, details: verified.concat(['Claimable right now at ' + domain]), canClaim: true });
+  }
+
+  async function addClaimedToWallet(identity, minted, fileCredential) {
+    const wallet = await getWallet(identity.publicKey);
+    wallet.push({ credential: minted, lastVerdict: await verifyCredential(minted) });
+    await saveWallet(identity.publicKey, wallet);
+    const ledger = await getAssetFiles(identity.publicKey);
+    ledger.unshift({
+      fileId: fileCredential.id, direction: 'claimed', newId: minted.id,
+      name: fileCredential.asset.name, class: fileCredential.asset.class, domain: fileCredential.issuer.domain, at: new Date().toISOString()
+    });
+    await saveAssetFiles(identity.publicKey, ledger);
+  }
+
+  // Claims the file's credential for this wallet's key. The issuer decides:
+  // the first claim wins and every other copy of the file stops working.
+  // Failures carry the issuer's `code` (already-claimed, not-claimable, ...).
+  async function claimAssetFile(credential) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const problem = assetFileShapeProblem(credential);
+    if (problem) throw new Error(problem);
+    if (credential.asset.fungible !== false || credential.asset.tradeScope === 'bound') throw new Error('This item cannot be claimed from a file.');
+
+    const payload = { credentialId: credential.id, newOwnerPublicKey: identity.publicKey, action: 'claim-from-file' };
+    const proof = await signWithSelf(payload);
+    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/claim-from-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ credential, intent: { payload, proof } })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || ('Claim failed: ' + res.status));
+      err.code = data.code || null;
+      throw err;
+    }
+    const minted = data.credential;
+    if (!minted || !minted.owner || minted.owner.publicKey !== identity.publicKey) {
+      throw new Error('The issuer returned a credential that does not belong to this wallet.');
+    }
+    await addClaimedToWallet(identity, minted, credential);
+    await logActivity('asset', 'Claimed ' + credential.asset.name + ' from a transfer file', { fileId: credential.id, newId: minted.id });
+    return minted;
+  }
+
+  // A file whose credential is already owned by this wallet's key (a copy
+  // saved earlier): nothing to claim, just put it back after verifying it.
+  async function restoreAssetCopy(credential) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const problem = assetFileShapeProblem(credential);
+    if (problem) throw new Error(problem);
+    if (credential.owner.publicKey !== identity.publicKey) throw new Error('This copy belongs to a different key.');
+    const verdict = await verifyCredential(credential);
+    if (!verdict.valid) throw new Error('This copy is no longer valid: ' + verdict.reason + '.');
+    const wallet = await getWallet(identity.publicKey);
+    if (wallet.some((e) => e.credential.id === credential.id)) throw new Error('This item is already in your wallet.');
+    wallet.push({ credential, lastVerdict: verdict });
+    await saveWallet(identity.publicKey, wallet);
+    await logActivity('asset', 'Restored ' + credential.asset.name + ' from a saved copy', { id: credential.id });
+    return credential;
+  }
+
+  async function updateAssetFileRecord(ownerPublicKey, fileId, direction, mutate) {
+    const ledger = await getAssetFiles(ownerPublicKey);
+    const record = ledger.find((r) => r.fileId === fileId && r.direction === direction);
+    if (!record) return null;
+    mutate(record);
+    await saveAssetFiles(ownerPublicKey, ledger);
+    return record;
+  }
+
+  // Asks the issuer whether a file this wallet saved is still unclaimed.
+  // Once someone else has claimed it the file is worthless, so the stored
+  // copy is dropped. Returns the issuer's state.
+  async function checkPendingExport(fileId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const record = (await getPendingExports(identity.publicKey)).find((r) => r.fileId === fileId);
+    if (!record) throw new Error('No pending export with that id.');
+    const status = await fetchAssetFileStatus(record.domain, fileId);
+    if (status.state === 'claimed' || status.state === 'revoked') {
+      await updateAssetFileRecord(identity.publicKey, fileId, 'exported', (r) => { r.state = status.state === 'claimed' ? 'claimed-by-other' : 'revoked'; delete r.file; });
+    }
+    return status.state;
+  }
+
+  // Claims back a file this wallet saved earlier, racing anyone else who
+  // holds a copy of it.
+  async function reclaimPendingExport(fileId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const record = (await getPendingExports(identity.publicKey)).find((r) => r.fileId === fileId);
+    if (!record) throw new Error('No pending export with that id.');
+    let minted;
+    try {
+      minted = await claimAssetFile(record.file);
+    } catch (err) {
+      if (err.code === 'already-claimed') {
+        await updateAssetFileRecord(identity.publicKey, fileId, 'exported', (r) => { r.state = 'claimed-by-other'; delete r.file; });
+      }
+      throw err;
+    }
+    await updateAssetFileRecord(identity.publicKey, fileId, 'exported', (r) => { r.state = 'reclaimed'; delete r.file; });
+    return minted;
+  }
+
+  // Throws away the stored copy of a saved file. Only sensible once the
+  // person has confirmed someone claimed it or has decided to let it go.
+  async function forgetPendingExport(fileId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    await updateAssetFileRecord(identity.publicKey, fileId, 'exported', (r) => { r.state = 'forgotten'; delete r.file; });
+    await logActivity('asset', 'Discarded the stored copy of a transfer file', { fileId });
+  }
+
   // ---------- full account backup / restore (task #122) ----------
   //
   // exportWallet()/importWallet() above only ever moved PUBLIC asset
@@ -3143,7 +3474,7 @@ const AtlasWallet = (() => {
       wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
       friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
       mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
-      chatE2eeKeyPair, chatE2eePeerKeys, activityLog
+      chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles
     ] = await Promise.all([
       // Task #250: dropped items no longer have a local-only "still
       // secretly mine" state to back up — a drop now genuinely leaves this
@@ -3160,7 +3491,10 @@ const AtlasWallet = (() => {
       getChatE2eeKeyPair(identity), getE2eePeerKeysForOwner(identity),
       // The activity log is a data family like any other above: a restore
       // should bring someone's history back with it, not reset it.
-      getActivityLog()
+      getActivityLog(),
+      // Saved transfer files hold the only copy of an exported asset until
+      // someone claims it, so a restore must bring them back.
+      getAssetFiles(owner)
     ]);
 
     // Low-sensitivity per-owner bookkeeping that was never wrapped in
@@ -3193,7 +3527,7 @@ const AtlasWallet = (() => {
         wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
         friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
         mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
-        chatE2eeKeyPair, chatE2eePeerKeys, activityLog,
+        chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles,
         deletedMailIds: (deletedMailIdsAll.atlasDeletedMailIds || {})[owner] || [],
         deletedChatIds: (deletedChatIdsAll.atlasDeletedChatIds || {})[owner] || [],
         lastChatSendDomain: (lastChatSendDomainAll.atlasLastChatSendDomain || {})[owner] || null,
@@ -3305,7 +3639,8 @@ const AtlasWallet = (() => {
       saveE2eePeerKeysForOwner(owner, d.chatE2eePeerKeys || {}),
       // Carries the restored identity's own activity history back in, same
       // as every other data family here, rather than starting blank.
-      saveActivityLog(owner, d.activityLog || [])
+      saveActivityLog(owner, d.activityLog || []),
+      saveAssetFiles(owner, d.assetFiles || [])
     ]);
 
     // Low-sensitivity bookkeeping — restored as a raw per-owner slot
@@ -6029,6 +6364,9 @@ const AtlasWallet = (() => {
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
     getCounterparty, createCounterparty,
     getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
+    // SPEC.md §13.5 single-asset transfer files.
+    getFileTransferSupport, assetFileExportProblem, exportAssetToFile, inspectAssetFile, claimAssetFile, restoreAssetCopy,
+    getPendingExports, checkPendingExport, reclaimPendingExport, forgetPendingExport,
     exportFullBackup, importFullBackup,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
     writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,

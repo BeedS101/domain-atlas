@@ -145,6 +145,10 @@ const REVIEWER_PUBLIC_KEY_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-
 // next to the private key file for the same "server-process-only state"
 // reason, not in the public docroot.
 const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
+// Credentials this domain minted as claimable files (SPEC.md §13.5): the
+// ids a claim-from-file may consume. Server-process-only state next to the
+// mail store, never in the public docroot.
+const BEARER_FILE = path.join(STATE_DIR, 'atlas-bearer-store.json');
 // Hard per-recipient mailbox cap — defense in depth against unbounded mail
 // storage, which applies equally to a local /atlas/postoffice/send and a
 // federated /atlas/postoffice/relay (readMail()/appendMail() never pruned
@@ -1988,6 +1992,47 @@ function removePendingEmailTicketSend(ticketId) {
   writeEmailTicketSends(doc);
 }
 
+// SPEC.md §13.5's bearer registry: {bearers: {<credentialId>: {class,
+// registeredAt}}}. A credential in a file is claimable only while its id is
+// listed here. Credentials are public claims that anyone can copy, so
+// "valid and signed by this domain" can never be what authorizes a claim;
+// the issuer's own record that it minted this id as a file is. The claim
+// consumes the entry, and takeBearer() is synchronous (no await between its
+// read and write) so two simultaneous claims cannot both succeed.
+function readBearers() {
+  if (!fs.existsSync(BEARER_FILE)) return { bearers: {} };
+  return JSON.parse(fs.readFileSync(BEARER_FILE, 'utf8'));
+}
+function writeBearers(doc) {
+  fs.writeFileSync(BEARER_FILE, JSON.stringify(doc, null, 2));
+}
+function registerBearer(id, assetClass) {
+  const doc = readBearers();
+  doc.bearers[id] = { class: assetClass, registeredAt: new Date().toISOString() };
+  writeBearers(doc);
+}
+function hasBearer(id) {
+  return Object.prototype.hasOwnProperty.call(readBearers().bearers, id);
+}
+// Removes and returns the entry, or null if the id is not listed.
+function takeBearer(id) {
+  const doc = readBearers();
+  if (!Object.prototype.hasOwnProperty.call(doc.bearers, id)) return null;
+  const entry = doc.bearers[id];
+  delete doc.bearers[id];
+  writeBearers(doc);
+  return entry;
+}
+function restoreBearer(id, entry) {
+  const doc = readBearers();
+  doc.bearers[id] = entry;
+  writeBearers(doc);
+}
+// Credential ids with an export or claim currently in progress. Requests
+// for the same id are serialized by refusing the second outright rather
+// than queuing it.
+const bearerInFlight = new Set();
+
 // SPEC.md §13.3's VERP: a unique per-send envelope Return-Path so a later
 // bounce can be correlated back to the exact send that produced it,
 // without ever having to parse a bounce body (which varies too much
@@ -2470,6 +2515,23 @@ function declaredWorldIds() {
     return new Set((Array.isArray(manifest.worlds) ? manifest.worlds : []).map((w) => w && w.id).filter((id) => typeof id === 'string'));
   } catch (err) {
     return new Set();
+  }
+}
+
+// SPEC.md §13.5: the top-level manifest field `fileTransfer` is the domain's
+// opt-in to exporting a held asset as a claimable file. Its presence enables
+// exports; an optional `classes` array restricts them to those asset
+// classes. Read from the manifest on every call so an operator's edit takes
+// effect without a restart. Returns null when the domain has not opted in.
+function fileTransferConfig() {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(DEMO_DOMAIN_A, '.well-known', 'spatial.json'), 'utf8'));
+    const cfg = manifest.fileTransfer;
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return null;
+    const classes = Array.isArray(cfg.classes) ? cfg.classes.filter((c) => typeof c === 'string') : null;
+    return { classes };
+  } catch (err) {
+    return null;
   }
 }
 
@@ -6088,6 +6150,125 @@ async function main() {
         archiveIfAudited(credential, 'email-transferred');
         console.log('Emailed', credential.asset.class, credential.id, '-> delivered to', recipientEmail);
         return sendJson(res, 200, { status: 'email-transferred', to: recipientEmail });
+      }
+
+      // SPEC.md §13.5 — export a held asset as a claimable file. The owner
+      // signs an intent; the domain mints a fresh credential owned by a
+      // discarded key, lists its id in the bearer registry, revokes the
+      // owner's credential, and returns the new credential as the file.
+      // Whoever claims the file first (POST /atlas/asset/claim-from-file)
+      // becomes the owner.
+      if (req.method === 'POST' && req.url === '/atlas/asset/transfer-to-file') {
+        const { credential, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !intent) return sendJson(res, 400, { error: 'credential and intent are both required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        if (intent.payload.credentialId !== credential.id || intent.payload.action !== 'transfer-to-file') {
+          return sendJson(res, 400, { error: 'intent does not authorize exporting this credential to a file' });
+        }
+        const fileConfig = fileTransferConfig();
+        if (!fileConfig) return sendJson(res, 400, { error: 'this domain has not enabled file transfers (SPEC.md §13.5)', code: 'not-enabled' });
+
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const senderPub = intent.proof.publicKey;
+
+        const assetClass = credential.asset && credential.asset.class;
+        if (fileConfig.classes && !fileConfig.classes.includes(assetClass)) {
+          return sendJson(res, 400, { error: 'this domain does not allow ' + assetClass + ' to be exported to a file', code: 'class-not-allowed' });
+        }
+
+        if (bearerInFlight.has(credential.id)) return sendJson(res, 409, { error: 'this asset is already being exported', code: 'in-progress' });
+        bearerInFlight.add(credential.id);
+        try {
+          const problem = await checkPresentedGiftableAsset(credential, senderPub, assetClass);
+          if (problem) return sendJson(res, 400, { error: problem });
+
+          const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
+          const minted = await transferUniqueAsset(discardedOwnerKey, credential);
+          // The mint awaited; make sure nothing else spent the original in
+          // the meantime before committing to the swap.
+          if (isRevoked(credential.id)) {
+            revoke(minted.id, 'issuer-request');
+            return sendJson(res, 409, { error: 'asset already revoked', code: 'in-progress' });
+          }
+          registerBearer(minted.id, assetClass);
+          revoke(credential.id, 'file-transferred');
+          archiveIfAudited(credential, 'file-transferred');
+          console.log('Exported', assetClass, credential.id, 'to a file as', minted.id);
+          return sendJson(res, 200, { status: 'file-transferred', file: minted });
+        } finally {
+          bearerInFlight.delete(credential.id);
+        }
+      }
+
+      // SPEC.md §13.5 — claim an exported file. The claimer signs an intent
+      // with the key that should own the asset. The file's credential must
+      // be listed in the bearer registry: anyone can copy any credential,
+      // so being a valid credential signed by this domain is not enough.
+      // The registry entry is consumed before anything is minted, so
+      // simultaneous claims of one file have exactly one winner.
+      if (req.method === 'POST' && req.url === '/atlas/asset/claim-from-file') {
+        const { credential, intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!credential || !intent) return sendJson(res, 400, { error: 'credential and intent are both required' });
+        if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        const newOwner = intent.payload.newOwnerPublicKey;
+        if (intent.payload.credentialId !== credential.id || intent.payload.action !== 'claim-from-file' || typeof newOwner !== 'string' || !newOwner) {
+          return sendJson(res, 400, { error: 'intent does not authorize claiming this credential' });
+        }
+        if (intent.proof.publicKey !== newOwner) return sendJson(res, 400, { error: 'the claim must be signed by the key that will own the asset' });
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+
+        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
+          return sendJson(res, 400, { error: 'this file was issued by another domain; claim it there', code: 'wrong-domain' });
+        }
+        if (bearerInFlight.has(credential.id)) return sendJson(res, 409, { error: 'this file is already being claimed', code: 'already-claimed' });
+        bearerInFlight.add(credential.id);
+        let taken = null;
+        try {
+          if (credential.credential !== 'domain-atlas-asset/1.0' || !credential.asset) return sendJson(res, 400, { error: 'not an asset credential', code: 'not-claimable' });
+          const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
+          if (!sigOk) return sendJson(res, 400, { error: 'asset signature does not check out', code: 'not-claimable' });
+          if (isRevoked(credential.id)) return sendJson(res, 409, { error: 'this file has already been claimed or withdrawn', code: 'already-claimed' });
+          if (isSuspended(credential.id)) return sendJson(res, 409, { error: 'this asset is currently suspended pending review', code: 'suspended' });
+          if (isExpired(credential)) return sendJson(res, 400, { error: 'asset has expired', code: 'expired' });
+          if (credential.asset.fungible !== false) return sendJson(res, 400, { error: 'only a unique item can be claimed from a file', code: 'not-claimable' });
+          if (credential.asset.tradeScope === 'bound') return sendJson(res, 400, { error: 'asset is bound and cannot be claimed from a file', code: 'not-claimable' });
+
+          // The reservation: from here on no other claim can take this id.
+          taken = takeBearer(credential.id);
+          if (!taken) return sendJson(res, 400, { error: 'this is not a transfer file issued by this domain', code: 'not-claimable' });
+
+          let minted;
+          try {
+            minted = await transferUniqueAsset(newOwner, credential);
+          } catch (err) {
+            restoreBearer(credential.id, taken);
+            taken = null;
+            throw err;
+          }
+          taken = null;
+          revoke(credential.id, 'file-claimed');
+          archiveIfAudited(credential, 'file-claimed');
+          console.log('Claimed', credential.asset.class, credential.id, '->', newOwner.slice(0, 16) + '...');
+          return sendJson(res, 200, { status: 'claimed', credential: minted });
+        } finally {
+          bearerInFlight.delete(credential.id);
+        }
+      }
+
+      // SPEC.md §13.5 — read-only: is this file's credential still
+      // claimable? Lets a wallet show "already claimed" before offering a
+      // claim. Reveals nothing beyond what the public revocation list and
+      // this domain's own registry already determine for an id.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/asset/file-status') {
+        const id = new URLSearchParams(req.url.split('?')[1] || '').get('id');
+        if (!id) return sendJson(res, 400, { error: 'id is required' });
+        const revokedEntry = readRevocations().revoked.find((r) => r.id === id);
+        let state = 'unknown';
+        if (revokedEntry) state = revokedEntry.reason === 'file-claimed' ? 'claimed' : 'revoked';
+        else if (hasBearer(id)) state = isSuspended(id) ? 'suspended' : 'claimable';
+        return sendJson(res, 200, { id, state, claimable: state === 'claimable' });
       }
 
       // Admin-gated (requireAdminAuth, above) — runs one inbound poll pass

@@ -2021,8 +2021,19 @@
           <div class="btn-col">
             <button id="requestItemBtn" type="button">Request item from this world</button>
             <button id="reverifyBtn" type="button">Re-verify wallet against current issuers</button>
+            <button id="importAssetFileBtn" type="button">Import an asset file…</button>
           </div>
+          <input type="file" id="importAssetFileInput" accept=".json,application/json" style="display:none;">
+          <div id="importAssetFileStatus" class="mono"></div>
           <div id="loadoutNote"></div>
+
+          <!-- SPEC.md §13.5: items this wallet saved to a transfer file
+               that nobody has claimed yet. The wallet keeps the file so a
+               lost download is not a lost item; hidden when there are none. -->
+          <div id="pendingExportsSection" hidden>
+            <div class="subhead">Saved transfer files (not yet claimed)</div>
+            <div id="pendingExportsList" class="item-list"></div>
+          </div>
 
           <div id="inventorySubtabBar" class="subtab-bar">
             <button id="collectiblesSubtabBtn" type="button">Collectibles</button>
