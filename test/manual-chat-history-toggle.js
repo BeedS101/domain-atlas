@@ -28,6 +28,9 @@
 //   4. B then sends a third, live message. C sees it immediately — proves
 //      the toggle only ever affects the JOIN batch, never live traffic.
 //
+// The presence-server keeps recent chat history between runs, and these
+// checks count messages, so start it fresh for each run.
+//
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
 
@@ -139,6 +142,8 @@ async function setHistoryOnJoin(frame, on) {
 
     console.log('STEP 2: C (fresh, historyOnJoin defaults to true) joins the Plaza and sees BOTH messages via history');
     const c = await openOverlay(contextC, 'Visitor C');
+    // Walking through a portal needs an unlocked identity.
+    await createIdentity(c.frame, 'chat-history-test-password-c');
     await waitForCondition(c.frame, () => document.querySelectorAll('#chatMessages .chat-line').length === 2, 'C to receive both of B\'s messages via join history', 8000);
     const cLinesAfterJoin = await chatLines(c.frame);
     if (!cLinesAfterJoin[0].includes('first history message') || !cLinesAfterJoin[1].includes('second history message')) {

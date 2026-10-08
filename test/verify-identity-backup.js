@@ -137,7 +137,13 @@ function shot(name) {
     if (exported.format !== 'atlas-identity-export/1.0') throw new Error('Wrong export format tag');
     if (!exported.salt || !exported.iv || !exported.ciphertext) throw new Error('Export is missing expected encrypted fields');
     if (JSON.stringify(exported).includes(PASSWORD)) throw new Error('Exported file leaks the plaintext password');
-    if (seedPhrase.split(' ').some((w) => JSON.stringify(exported).includes(w))) throw new Error('Exported file leaks a plaintext seed word');
+    // A short word can turn up by chance inside base64 ciphertext, so the
+    // words are checked against the readable fields only; the whole file is
+    // checked for the full phrase and for any long word.
+    const readableFields = JSON.stringify({ ...exported, salt: undefined, iv: undefined, ciphertext: undefined });
+    const exportedText = JSON.stringify(exported);
+    if (seedPhrase.split(' ').some((w) => readableFields.includes(w))) throw new Error('Exported file leaks a plaintext seed word');
+    if (exportedText.includes(seedPhrase) || seedPhrase.split(' ').some((w) => w.length >= 8 && exportedText.includes(w))) throw new Error('Exported file leaks a plaintext seed word');
     console.log('PASS: exported file is encrypted — no plaintext trace of the password or seed phrase in it');
 
     console.log('STEP 9: simulating a brand-new device — clearing local AND session storage for this identity');

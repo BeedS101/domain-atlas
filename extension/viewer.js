@@ -6680,8 +6680,10 @@ unlockBtn.addEventListener('click', async () => {
     await AtlasWallet.unlockIdentity(unlockPasswordInput.value);
     unlockPasswordInput.value = '';
     unlockScreenStatus.textContent = '';
-    showWalletScreen('mainWalletScreen');
+    // The identity label is refreshed before the screen is shown, so the
+    // main screen never appears still reading "Locked.".
     await refreshIdentityDisplay();
+    showWalletScreen('mainWalletScreen');
     await refreshInventoryDisplay();
     // A world with policy.identityRequired: false (or no policy at all) lets
     // a visitor stand in it while still locked — enterWorld()'s own

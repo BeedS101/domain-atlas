@@ -48,6 +48,9 @@
 //      pre-filled with B's raw public key (chat has no handles), reusing
 //      openComposeReply()/Quick Reply's exact pre-fill logic.
 //
+// The presence-server keeps recent chat history between runs, and these
+// checks count messages, so start it fresh for each run.
+//
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
 

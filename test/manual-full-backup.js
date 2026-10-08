@@ -169,7 +169,12 @@ function shot(name) {
     if (!exported.salt || !exported.iv || !exported.ciphertext) throw new Error('Export is missing expected encrypted fields');
     const rawExportText = JSON.stringify(exported);
     if (rawExportText.includes(PASSWORD)) throw new Error('Exported file leaks the plaintext password');
-    if (seedPhrase.split(' ').some((w) => rawExportText.includes(w))) throw new Error('Exported file leaks a plaintext seed word');
+    // A short word can turn up by chance inside base64 ciphertext, so the
+    // words are checked against the readable fields only; the whole file is
+    // checked for the full phrase and for any long word.
+    const readableFields = JSON.stringify({ ...exported, salt: undefined, iv: undefined, ciphertext: undefined });
+    if (seedPhrase.split(' ').some((w) => readableFields.includes(w))) throw new Error('Exported file leaks a plaintext seed word');
+    if (rawExportText.includes(seedPhrase) || seedPhrase.split(' ').some((w) => w.length >= 8 && rawExportText.includes(w))) throw new Error('Exported file leaks a plaintext seed word');
     if (rawExportText.includes('Test Friend') || rawExportText.includes('Backup test event') || rawExportText.includes('Counterparty Nickname')) {
       throw new Error('Exported file leaks plaintext personal data outside the encrypted ciphertext field');
     }

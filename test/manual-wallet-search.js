@@ -154,11 +154,11 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     const itemCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Bronze Compass' });
     const itemPropsLink = itemCard.locator('.properties-link');
     const itemPropsDetail = itemCard.locator('.properties-detail');
-    // 11 merged protocol-level fields (fungible, presentation, tradeScope,
-    // quantity, model, thumbnail, id, issuedAt, supersedes, issuer.publicKey,
-    // owner.publicKey — see mergedAssetFields()) plus this item's own 4
+    // 12 merged protocol-level fields (fungible, presentation, tradeScope,
+    // quantity, model, thumbnail, id, issuedAt, expiresAt, supersedes,
+    // issuer.publicKey, owner.publicKey — see mergedAssetFields()) plus this item's own 4
     // custom properties.
-    if (!(await itemPropsLink.textContent()).includes('Properties (15)')) throw new Error('Expected the item\'s properties link to read "Properties (15)" (11 merged protocol fields + atlas.rarity + com.example.era + com.example.material + com.example.condition)');
+    if (!(await itemPropsLink.textContent()).includes('Properties (16)')) throw new Error('Expected the item\'s properties link to read "Properties (16)" (12 merged protocol fields + atlas.rarity + com.example.era + com.example.material + com.example.condition)');
     if (!(await itemPropsDetail.isHidden())) throw new Error('Expected the item\'s properties detail to start collapsed');
     await itemPropsLink.click();
     await frame.waitForFunction(() => {
