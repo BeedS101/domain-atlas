@@ -29,6 +29,10 @@ $token = $body['token'] ?? null;
 $auth = require_admin_auth($payload, $proof, $token);
 if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
 
+// Deliveries left part-way by a stop are finished on every pass.
+require_once __DIR__ . '/../../../lib/delivery.php';
+try { atlas_delivery_sweep(); } catch (Exception $e) { /* reported by the next pass */ }
+
 $config = atlas_email_tickets_config();
 if (!$config['imapHost']) {
   send_json(400, ['error' => 'this domain has not configured inbound email tickets (SPEC.md §13.3)']);

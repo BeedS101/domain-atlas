@@ -65,6 +65,8 @@ const { subtle } = webcrypto;
 const { sendMail } = require('./lib-smtp');
 const { connectImap } = require('./lib-imap');
 const { parseMimeMessage } = require('./lib-mime-parse');
+const { evaluateTransferPolicy, evaluateDeliveryGate, evaluateMintForDelivery } = require('./lib-transfer-policy');
+const { createDeliveryEngine } = require('./lib-delivery');
 
 // All three of these are overridable by environment variable so the same
 // code runs unchanged in local dev (defaults below) and behind cPanel's
@@ -213,6 +215,8 @@ const EMAIL_TICKETS_CONFIG = {
 // .well-known, not web-reachable" reasoning as MAIL_FILE — this is
 // server-process-only bookkeeping, not a public credential store.
 const EMAIL_TICKET_SENDS_FILE = path.join(STATE_DIR, 'atlas-email-ticket-sends-store.json');
+// Durable delivery records (lib-delivery.js): one per credential handed to a recipient over a channel the issuer cannot confirm.
+const DELIVERIES_FILE = path.join(STATE_DIR, 'atlas-deliveries-store.json');
 // Same "not under .well-known, not web-reachable" reasoning as MAIL_FILE —
 // one entry per asset reissue (SPEC.md §5.1.1 — non-fungible only), keyed
 // by the SUPERSEDED credential's id so /atlas/mail/check can answer "what
@@ -1980,6 +1984,34 @@ async function generateDiscardedOwnerPublicKey() {
   const pair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const rawPublic = await subtle.exportKey('raw', pair.publicKey);
   return b64url(rawPublic);
+}
+
+// The forward-to-transfer variant of mailTicketTo(): sent with a VERP
+// envelope sender (SPEC.md §13.3), so a later bounce against THIS send can
+// be correlated to `minted.id` without parsing the bounce body.
+function mailForwardedTicketTo(minted, recipientEmail) {
+  return sendMail({
+    host: EMAIL_TICKETS_CONFIG.smtpHost,
+    port: EMAIL_TICKETS_CONFIG.smtpPort,
+    secure: EMAIL_TICKETS_CONFIG.smtpSecure,
+    user: EMAIL_TICKETS_CONFIG.smtpUser,
+    pass: EMAIL_TICKETS_CONFIG.smtpPass,
+    from: EMAIL_TICKETS_CONFIG.fromAddress,
+    envelopeFrom: verpReturnPathFor(minted.id),
+    to: recipientEmail,
+    subject: (minted.asset && minted.asset.name) || 'Your ticket',
+    textBody: 'You have been sent "' + ((minted.asset && minted.asset.name) || minted.asset.class) + '" from ' + DOMAIN +
+      '.\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC\'d, is how you pass it on.',
+    attachments: [{
+      filename: 'ticket-' + minted.id.split(':').pop() + '.json',
+      contentType: 'application/json',
+      content: JSON.stringify(minted)
+    }]
+  });
+}
+
+function emailDeliveryConfigured() {
+  return !!(EMAIL_TICKETS_CONFIG.smtpHost && EMAIL_TICKETS_CONFIG.fromAddress);
 }
 
 // Sends a freshly minted ticket to an address as a MIME attachment (SPEC.md
@@ -4049,20 +4081,40 @@ async function main() {
   // added later the same way World Drops' relay-claim already shows how).
   // Same checks as checkPresentedUniqueAsset, just worded for "send" rather
   // than "trade" so a rejected demo visitor gets the right verb back.
-  async function checkPresentedGiftableAsset(credential, expectedOwner, expectedClass) {
+  // The shared facts transfer policy decisions are made from (see
+  // lib-transfer-policy.js). Gathered for a well-formed credential only.
+  async function gatherTransferFacts(credential) {
+    const wellFormed = !!credential && credential.credential === 'domain-atlas-asset/1.0' && !!credential.asset && !!credential.id;
+    if (!wellFormed) return { revoked: false, suspended: false, expired: false, signatureValid: false, listedBearer: false };
+    let signatureValid = false;
+    try { signatureValid = !!(await verifyOwnCredentialSignature(credential, assetPayloadOf(credential))); } catch (_) { signatureValid = false; }
+    return {
+      revoked: isRevoked(credential.id),
+      suspended: isSuspended(credential.id),
+      expired: isExpired(credential),
+      signatureValid,
+      listedBearer: hasBearer(credential.id)
+    };
+  }
+  function classTransferPolicy(assetClass) {
+    const entry = ASSET_CATALOG[assetClass];
+    return (entry && entry.transfer) || null;
+  }
+
+  async function checkPresentedGiftableAsset(credential, expectedOwner, expectedClass, transport) {
     const busy = credential && credential.id ? await lockSpend(credential.id) : null;
     if (busy) return busy;
-    if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
-    if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
-    if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
-    if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be sent to anyone else';
-    if (credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only transfers a unique item';
-    if (isRevoked(credential.id)) return 'asset already revoked';
-    if (isSuspended(credential.id)) return 'asset is currently suspended pending review';
-    if (isExpired(credential)) return 'asset has expired';
-    const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
-    if (!ok) return 'asset signature does not check out';
-    return null;
+    const decision = evaluateTransferPolicy({
+      profile: 'holder-send',
+      credential,
+      expectedOwner,
+      expectedClass,
+      facts: await gatherTransferFacts(credential),
+      classPolicy: credential && credential.asset ? classTransferPolicy(credential.asset.class) : null,
+      operation: 'transfer',
+      transport: transport || 'wallet'
+    });
+    return decision.ok ? null : decision.message;
   }
 
   // checkPresentedGiftableAsset's own sibling for POST /atlas/asset/redeem
@@ -4368,6 +4420,40 @@ async function main() {
     return total;
   }
 
+  // Delivery engine (lib-delivery.js) wired to this issuer's own revocation
+  // list, suspensions, bearer registry and mail sender.
+  const deliveryEngine = createDeliveryEngine({
+    storeFile: DELIVERIES_FILE,
+    fault: faultPoint,
+    revoke, isRevoked, revocationEntryOf, suspend, unsuspend, findSuspension,
+    registerBearer, takeBearer, restoreBearer, hasBearer,
+    archive: (cred, reason) => { if (!findArchivedAsset(cred.id)) archiveIfAudited(cred, reason); },
+    maxAttempts: parseInt(process.env.ATLAS_DELIVERY_MAX_ATTEMPTS || '3', 10),
+    retryBackoffMs: parseInt(process.env.ATLAS_DELIVERY_RETRY_BACKOFF_MS || '500', 10),
+    send: (minted, recipient, rec) => (rec.kind === 'bearer-original' ? mailForwardedTicketTo(minted, recipient) : mailTicketTo(minted, recipient)),
+    onDelivered: async (rec) => {
+      // A forwarded ticket is tracked until a later bounce can no longer
+      // arrive, so the bounce can be reversed to whoever forwarded it.
+      if (rec.kind === 'bearer-original' && rec.returnTo && !findPendingEmailTicketSend(rec.mintedId)) recordPendingEmailTicketSend(rec.minted, rec.returnTo);
+    },
+    onRolledBack: async (rec) => {
+      if (rec.kind === 'bearer-original' && rec.returnTo) {
+        await sendPlainReply(rec.returnTo, 'Could not forward your ticket',
+          'The new holder\'s address could not be delivered to, so this forward did not go through. Your original ticket is unaffected.');
+      }
+    }
+  });
+  const forwardsInFlight = new Set();
+
+  // The HTTP answer for a finished delivery. A delivery that was rolled
+  // back left the sender exactly as they were.
+  function answerEmailDelivery(res, rec, recipientEmail, extra) {
+    if (rec && rec.state === 'delivered') return sendJson(res, 200, Object.assign({ status: 'email-transferred', to: recipientEmail }, extra || {}));
+    const why = (rec && rec.lastError) || 'delivery was not completed';
+    console.error('Email delivery to', recipientEmail, 'did not complete, rolled back:', why);
+    return sendJson(res, 502, { error: 'could not deliver to ' + recipientEmail + ': ' + why });
+  }
+
   // SPEC.md §13.3 — a no-attachment reply, for the denial/failure notices
   // a forward attempt can produce below. Reuses EMAIL_TICKETS_CONFIG's
   // outbound SMTP settings exactly like the wallet-to-email send above;
@@ -4440,65 +4526,51 @@ async function main() {
     // Only a credential this domain itself minted as an email ticket is
     // forwardable (SPEC.md §13.3): it is listed in the bearer registry when
     // it is minted. An ordinary wallet credential is a public claim anyone
-    // can copy, so a valid signature alone must never move it. Taking the
-    // entry also makes two forwards of one ticket mutually exclusive. No
-    // reply is sent: answering would tell a stranger which credential ids
-    // this domain has issued as tickets.
-    const taken = takeBearer(credential.id);
-    if (!taken) return { outcome: 'ignored', reason: 'attached credential is not an email ticket' };
-
+    // can copy, so a valid signature alone must never move it. A forward
+    // already under way for this ticket makes any other forward of it
+    // mutually exclusive. No reply is sent: answering would tell a stranger
+    // which credential ids this domain has issued as tickets.
     const recipientEmail = parsed.cc[0];
-    let minted;
+    const priorForward = deliveryEngine.latestForKey(credential.id);
+    if (priorForward && priorForward.state !== 'rolled-back' && priorForward.state !== 'delivered') {
+      // Left part-way by an earlier stop: finish it rather than start again.
+      const resumed = await deliveryEngine.run(priorForward.deliveryId);
+      if (resumed.busy) return { outcome: 'ignored', reason: 'attached credential is not an email ticket' };
+      return resumed.rec && resumed.rec.state === 'delivered'
+        ? { outcome: 'transferred', to: recipientEmail }
+        : { outcome: 'failed', reason: (resumed.rec && resumed.rec.lastError) || 'delivery was not completed' };
+    }
+    if (forwardsInFlight.has(credential.id) || !hasBearer(credential.id)) {
+      return { outcome: 'ignored', reason: 'attached credential is not an email ticket' };
+    }
+    forwardsInFlight.add(credential.id);
     try {
+      const heldEntry = readBearers().bearers[credential.id];
       const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
-      minted = await transferUniqueAsset(discardedOwnerKey, credential);
-    } catch (err) {
-      restoreBearer(credential.id, taken);
-      throw err;
-    }
-    registerBearer(minted.id, taken.class);
-
-    try {
-      await sendMail({
-        host: EMAIL_TICKETS_CONFIG.smtpHost,
-        port: EMAIL_TICKETS_CONFIG.smtpPort,
-        secure: EMAIL_TICKETS_CONFIG.smtpSecure,
-        user: EMAIL_TICKETS_CONFIG.smtpUser,
-        pass: EMAIL_TICKETS_CONFIG.smtpPass,
-        from: EMAIL_TICKETS_CONFIG.fromAddress,
-        // SPEC.md §13.3's VERP — a bounce against THIS send, arriving any
-        // time after this poll pass, carries this exact Return-Path back
-        // to the mailbox pollEmailTicketsOnce() watches, letting it be
-        // correlated to `minted.id` without parsing the bounce body.
-        envelopeFrom: verpReturnPathFor(minted.id),
-        to: recipientEmail,
-        subject: (minted.asset && minted.asset.name) || 'Your ticket',
-        textBody: 'You have been sent "' + ((minted.asset && minted.asset.name) || minted.asset.class) + '" from ' + DOMAIN +
-          '.\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC\'d, is how you pass it on.',
-        attachments: [{
-          filename: 'ticket-' + minted.id.split(':').pop() + '.json',
-          contentType: 'application/json',
-          content: JSON.stringify(minted)
-        }]
+      const minted = await transferUniqueAsset(discardedOwnerKey, credential);
+      faultPoint('delivery:minted');
+      const began = deliveryEngine.begin({
+        key: credential.id, kind: 'bearer-original', class: heldEntry.class, original: credential, minted,
+        recipient: recipientEmail, returnTo: parsed.from, heldBearer: heldEntry
       });
-    } catch (err) {
-      takeBearer(minted.id);
-      revoke(minted.id, 'issuer-request');
-      restoreBearer(credential.id, taken);
-      await sendPlainReply(parsed.from, 'Could not forward your ticket',
-        'The new holder\'s address could not be delivered to, so this forward did not go through. Your original ticket is unaffected.');
-      return { outcome: 'failed', reason: err.message };
+      if (began.existing) {
+        revoke(minted.id, 'issuer-request');
+        return { outcome: 'ignored', reason: 'attached credential is not an email ticket' };
+      }
+      // Acceptance by the recipient's mail server only means it took the
+      // message, not that it reached an inbox, so a delivered forward is
+      // tracked until a later bounce can no longer arrive (the engine's
+      // onDelivered hook records it) and a rejected one is rolled back with
+      // a notice to the sender (its onRolledBack hook).
+      const outcome = await deliveryEngine.run(began.rec.deliveryId);
+      if (outcome.rec && outcome.rec.state === 'delivered') {
+        console.log('Forwarded', credential.asset.class, credential.id, '-> delivered to', recipientEmail);
+        return { outcome: 'transferred', to: recipientEmail };
+      }
+      return { outcome: 'failed', reason: (outcome.rec && outcome.rec.lastError) || 'delivery was not completed' };
+    } finally {
+      forwardsInFlight.delete(credential.id);
     }
-
-    // Acceptance here only means the recipient's mail server took the
-    // message, not that it actually reached an inbox — recorded as still
-    // in flight so a bounce arriving later can still be traced back to
-    // this exact send and reversed (processInboundBounce, below).
-    recordPendingEmailTicketSend(minted, parsed.from);
-    revoke(credential.id, 'email-transferred');
-    archiveIfAudited(credential, 'email-transferred');
-    console.log('Forwarded', credential.asset.class, credential.id, '-> delivered to', recipientEmail);
-    return { outcome: 'transferred', to: recipientEmail };
   }
 
   // SPEC.md §13.3's "ongoing bounce monitoring" — handles one inbound
@@ -6534,54 +6606,52 @@ async function main() {
         if (intent.payload.credentialId !== credential.id || intent.payload.recipientEmail !== recipientEmail || intent.payload.action !== 'transfer-to-email') {
           return sendJson(res, 400, { error: 'intent does not authorize transferring this credential to this address' });
         }
-        if (!EMAIL_TICKETS_CONFIG.smtpHost || !EMAIL_TICKETS_CONFIG.fromAddress) {
-          return sendJson(res, 400, { error: 'this domain has not configured email-delivered tickets (SPEC.md §13)' });
-        }
+        const emailGate = evaluateDeliveryGate({ transport: 'email', stage: 'enabled', config: { emailConfigured: emailDeliveryConfigured() } });
+        if (!emailGate.ok) return sendJson(res, 400, { error: emailGate.message });
 
         const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
         if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
         const senderPub = intent.proof.publicKey;
         // The domain sends this mail from its own mailbox, so only a
         // registered domain admin may ask for it.
-        if (!isAdminKey(senderPub)) return sendJson(res, 403, { error: 'only a domain admin can send a ticket to an email address' });
+        const actorGate = evaluateDeliveryGate({ transport: 'email', stage: 'actor', actor: { isAdmin: isAdminKey(senderPub) } });
+        if (!actorGate.ok) return sendJson(res, actorGate.status || 403, { error: actorGate.message });
 
-        const problem = await checkPresentedGiftableAsset(credential, senderPub, credential.asset && credential.asset.class);
+        // A delivery of this credential already exists: it is never started
+        // twice. The same signer asking again for the same address gets the
+        // same answer the first request would have; anything else is told
+        // why not.
+        const sameRequest = (rec) => rec.ownerPublicKey === senderPub && rec.recipientHash === deliveryEngine.hashRecipient(recipientEmail);
+        const prior = deliveryEngine.latestForKey(credential.id);
+        if (prior && prior.state === 'delivered') {
+          if (sameRequest(prior)) return sendJson(res, 200, { status: 'email-transferred', to: recipientEmail });
+          return sendJson(res, 409, { error: 'this asset has already been delivered', code: 'already-delivered' });
+        }
+        if (prior && prior.state !== 'rolled-back') {
+          if (!sameRequest(prior)) return sendJson(res, 409, { error: 'a delivery of this asset is already in progress', code: 'in-progress' });
+          const resumed = await deliveryEngine.run(prior.deliveryId);
+          if (resumed.busy) return sendJson(res, 409, { error: 'a delivery of this asset is already in progress', code: 'in-progress' });
+          return answerEmailDelivery(res, resumed.rec, recipientEmail);
+        }
+
+        const problem = await checkPresentedGiftableAsset(credential, senderPub, credential.asset && credential.asset.class, 'email');
         if (problem) return sendJson(res, 400, { error: problem });
 
         const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
         const minted = await transferUniqueAsset(discardedOwnerKey, credential);
-        // Listed as a bearer ticket from the moment it exists: §13.3's
-        // forward step accepts only ids in this registry.
-        registerBearer(minted.id, credential.asset && credential.asset.class);
-
-        try {
-          await mailTicketTo(minted, recipientEmail);
-        } catch (err) {
-          // Delivery check before finalizing (SPEC.md §13.3's own
-          // discipline for the forward-to-transfer step, applied
-          // identically here for this first hop): the sender's original
-          // credential above was never touched, so a send the mail server
-          // never actually accepted leaves them exactly as they were —
-          // nothing lost. The fresh mint nobody will ever hold is undone
-          // the same way a mint anyone abandons always is (§5.7's own
-          // "nothing else fits" bucket) — never a real transfer, so never
-          // 'email-transferred' below.
-          takeBearer(minted.id);
+        faultPoint('delivery:minted');
+        const began = deliveryEngine.begin({
+          key: credential.id, kind: 'wallet-original', class: credential.asset && credential.asset.class,
+          ownerPublicKey: senderPub, original: credential, minted, recipient: recipientEmail
+        });
+        if (began.existing) {
+          // Another request got there between the checks and here; the
+          // credential minted above was never recorded or listed.
           revoke(minted.id, 'issuer-request');
-          console.error('Email-ticket send to', recipientEmail, 'failed, mint undone:', err.message);
-          return sendJson(res, 502, { error: 'could not deliver to ' + recipientEmail + ': ' + err.message });
+          return sendJson(res, 409, { error: 'a delivery of this asset is already in progress', code: 'in-progress' });
         }
-
-        // 'email-transferred' (SPEC.md §13.4) — the same reason §13.3's
-        // later email-to-email forwards will also use, since both tell an
-        // identical story to anyone reading the revocation list: this
-        // credential left here because it became (or moved on as) an
-        // email-delivered bearer credential, not because it was spent,
-        // redeemed, or clawed back.
-        revoke(credential.id, 'email-transferred');
-        archiveIfAudited(credential, 'email-transferred');
-        console.log('Emailed', credential.asset.class, credential.id, '-> delivered to', recipientEmail);
-        return sendJson(res, 200, { status: 'email-transferred', to: recipientEmail });
+        const outcome = await deliveryEngine.run(began.rec.deliveryId);
+        return answerEmailDelivery(res, outcome.rec, recipientEmail);
       }
 
       // POST /atlas/admin/send-ticket-to-email — admin-gated. For an
@@ -6604,28 +6674,53 @@ async function main() {
         }
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) return sendJson(res, 400, { error: 'Unknown assetClass.' });
-        if (catalogEntry.fungible) return sendJson(res, 400, { error: 'only a unique (non-fungible) item can be sent as an email ticket' });
-        if (catalogEntry.tradeScope === 'bound') return sendJson(res, 400, { error: 'a bound item cannot be sent as an email ticket' });
+        const mintGate = evaluateMintForDelivery({ catalogEntry, transport: 'email' });
+        if (!mintGate.ok) return sendJson(res, 400, { error: mintGate.message });
         if (properties !== undefined && (typeof properties !== 'object' || properties === null || Array.isArray(properties))) {
           return sendJson(res, 400, { error: "properties, when given, must be a patch object onto the class's own base properties" });
         }
-        if (!EMAIL_TICKETS_CONFIG.smtpHost || !EMAIL_TICKETS_CONFIG.fromAddress) {
-          return sendJson(res, 400, { error: 'this domain has not configured email-delivered tickets (SPEC.md §13)' });
+        const adminEmailGate = evaluateDeliveryGate({ transport: 'email', stage: 'enabled', config: { emailConfigured: emailDeliveryConfigured() } });
+        if (!adminEmailGate.ok) return sendJson(res, 400, { error: adminEmailGate.message });
+
+        // An optional client-chosen idempotency key makes a retry after a lost
+        // answer safe: the same key and address resume the one delivery
+        // instead of minting a second ticket. Without a key every request is
+        // its own delivery, and one left unconfirmed by a stop is rolled back.
+        const idempotencyKey = payload && payload.idempotencyKey;
+        if (idempotencyKey !== undefined && (typeof idempotencyKey !== 'string' || idempotencyKey.length < 1 || idempotencyKey.length > 128)) {
+          return sendJson(res, 400, { error: 'idempotencyKey, when given, must be a string of 1 to 128 characters' });
+        }
+        const deliveryKey = idempotencyKey ? 'admin-send:' + idempotencyKey : null;
+        const answerAdminSend = (rec) => {
+          if (rec && rec.state === 'delivered') return sendJson(res, 200, { status: 'email-sent', to: recipientEmail, ticketId: rec.mintedId, assetClass });
+          const why = (rec && rec.lastError) || 'delivery was not completed';
+          console.error('Admin email-ticket send to', recipientEmail, 'failed, mint undone:', why);
+          return sendJson(res, 502, { error: 'could not deliver to ' + recipientEmail + ': ' + why });
+        };
+        const priorSend = deliveryEngine.latestForKey(deliveryKey);
+        if (priorSend && priorSend.state !== 'rolled-back') {
+          if (priorSend.recipientHash !== deliveryEngine.hashRecipient(recipientEmail) || priorSend.class !== assetClass) {
+            return sendJson(res, 409, { error: 'this idempotencyKey was already used for a different send', code: 'idempotency-conflict' });
+          }
+          if (priorSend.state === 'delivered') return answerAdminSend(priorSend);
+          const resumed = await deliveryEngine.run(priorSend.deliveryId);
+          if (resumed.busy) return sendJson(res, 409, { error: 'a send with this idempotencyKey is already in progress', code: 'in-progress' });
+          return answerAdminSend(resumed.rec);
         }
 
         const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
         const minted = await mintAssetByClass(discardedOwnerKey, assetClass, 1, null, properties);
-        registerBearer(minted.id, assetClass);
-        try {
-          await mailTicketTo(minted, recipientEmail);
-        } catch (err) {
-          takeBearer(minted.id);
+        faultPoint('delivery:minted');
+        const began = deliveryEngine.begin({ key: deliveryKey, kind: 'fresh-mint', class: assetClass, ownerPublicKey: auth.publicKey, minted, recipient: recipientEmail });
+        if (began.existing) {
           revoke(minted.id, 'issuer-request');
-          console.error('Admin email-ticket send to', recipientEmail, 'failed, mint undone:', err.message);
-          return sendJson(res, 502, { error: 'could not deliver to ' + recipientEmail + ': ' + err.message });
+          return sendJson(res, 409, { error: 'a send with this idempotencyKey is already in progress', code: 'in-progress' });
         }
-        console.log('Admin-sent', assetClass, minted.id, '-> delivered to', recipientEmail, 'by admin', auth.publicKey.slice(0, 16) + '...');
-        return sendJson(res, 200, { status: 'email-sent', to: recipientEmail, ticketId: minted.id, assetClass });
+        const outcome = await deliveryEngine.run(began.rec.deliveryId);
+        if (outcome.rec && outcome.rec.state === 'delivered') {
+          console.log('Admin-sent', assetClass, outcome.rec.mintedId, '-> delivered to', recipientEmail, 'by admin', auth.publicKey.slice(0, 16) + '...');
+        }
+        return answerAdminSend(outcome.rec);
       }
 
       // SPEC.md §13.5 — export a held asset as a claimable file. The owner
@@ -6642,16 +6737,16 @@ async function main() {
           return sendJson(res, 400, { error: 'intent does not authorize exporting this credential to a file' });
         }
         const fileConfig = fileTransferConfig();
-        if (!fileConfig) return sendJson(res, 400, { error: 'this domain has not enabled file transfers (SPEC.md §13.5)', code: 'not-enabled' });
+        const fileGateOpen = evaluateDeliveryGate({ transport: 'file', stage: 'enabled', config: { fileTransfer: fileConfig } });
+        if (!fileGateOpen.ok) return sendJson(res, 400, { error: fileGateOpen.message, code: fileGateOpen.code });
 
         const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
         if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
         const senderPub = intent.proof.publicKey;
 
         const assetClass = credential.asset && credential.asset.class;
-        if (fileConfig.classes && !fileConfig.classes.includes(assetClass)) {
-          return sendJson(res, 400, { error: 'this domain does not allow ' + assetClass + ' to be exported to a file', code: 'class-not-allowed' });
-        }
+        const fileGateClass = evaluateDeliveryGate({ transport: 'file', stage: 'class', config: { fileTransfer: fileConfig }, assetClass });
+        if (!fileGateClass.ok) return sendJson(res, 400, { error: fileGateClass.message, code: fileGateClass.code });
 
         if (bearerInFlight.has(credential.id)) return sendJson(res, 409, { error: 'this asset is already being exported', code: 'in-progress' });
         bearerInFlight.add(credential.id);
@@ -6661,7 +6756,7 @@ async function main() {
           if (fileExportOf(readFileExports(), credential.id)) {
             return sendJson(res, 409, { error: 'this asset has already been exported; recover the file with /atlas/asset/recover-file-export', code: 'already-exported' });
           }
-          const problem = await checkPresentedGiftableAsset(credential, senderPub, assetClass);
+          const problem = await checkPresentedGiftableAsset(credential, senderPub, assetClass, 'file');
           if (problem) return sendJson(res, 400, { error: problem });
 
           const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
@@ -6755,9 +6850,9 @@ async function main() {
           return sendJson(res, 400, { error: 'this file was issued by another domain; claim it there', code: 'wrong-domain' });
         }
         {
-          if (credential.credential !== 'domain-atlas-asset/1.0' || !credential.asset) return sendJson(res, 400, { error: 'not an asset credential', code: 'not-claimable' });
-          const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
-          if (!sigOk) return sendJson(res, 400, { error: 'asset signature does not check out', code: 'not-claimable' });
+          const claimFacts = await gatherTransferFacts(credential);
+          const identity = evaluateTransferPolicy({ profile: 'bearer-claim:identity', credential, facts: claimFacts });
+          if (!identity.ok) return sendJson(res, 400, { error: identity.message, code: identity.wireCode });
           { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
 
           // A claim already committed for this file is finished first, whoever
@@ -6773,12 +6868,16 @@ async function main() {
             return sendJson(res, 409, { error: 'this file has already been claimed or withdrawn', code: 'already-claimed', ...(receipt ? { receipt } : {}) });
           }
 
-          if (isRevoked(credential.id)) return sendJson(res, 409, { error: 'this file has already been claimed or withdrawn', code: 'already-claimed' });
-          if (isSuspended(credential.id)) return sendJson(res, 409, { error: 'this asset is currently suspended pending review', code: 'suspended' });
-          if (isExpired(credential)) return sendJson(res, 400, { error: 'asset has expired', code: 'expired' });
-          if (credential.asset.fungible !== false) return sendJson(res, 400, { error: 'only a unique item can be claimed from a file', code: 'not-claimable' });
-          if (credential.asset.tradeScope === 'bound') return sendJson(res, 400, { error: 'asset is bound and cannot be claimed from a file', code: 'not-claimable' });
-          if (!hasBearer(credential.id)) return sendJson(res, 400, { error: 'this is not a transfer file issued by this domain', code: 'not-claimable' });
+          // State is read again now that this request holds the lock.
+          const state = evaluateTransferPolicy({
+            profile: 'bearer-claim:state',
+            credential,
+            facts: await gatherTransferFacts(credential),
+            classPolicy: classTransferPolicy(credential.asset.class),
+            operation: 'transfer',
+            transport: 'file'
+          });
+          if (!state.ok) return sendJson(res, state.wireCode === 'already-claimed' || state.wireCode === 'suspended' ? 409 : 400, { error: state.message, code: state.wireCode });
 
           // Nothing has been written yet, so a failed mint changes nothing.
           // From the record write onwards the claim is committed.
@@ -6816,6 +6915,8 @@ async function main() {
         const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
         const auth = await requireAdminAuth(payload, proof, token);
         if (auth.error) return sendJson(res, 401, { error: auth.error });
+        // Deliveries left part-way by a stop are finished on every pass.
+        await deliveryEngine.sweep().catch((err) => console.error('Delivery sweep failed:', err.message));
         if (!EMAIL_TICKETS_CONFIG.imapHost) {
           return sendJson(res, 400, { error: 'this domain has not configured inbound email tickets (SPEC.md §13.3)' });
         }
@@ -8344,6 +8445,17 @@ async function main() {
   server.listen(PORT, () => {
     console.log(`Issuer + trading station (${DOMAIN}) — listening on port ${PORT}, docroot: ${DEMO_DOMAIN_A}`);
   });
+
+  // Deliveries a stopped process left part-way are finished at start-up and
+  // then on a timer (only while any are unfinished).
+  // (ATLAS_DELIVERY_NO_SWEEP=1 turns the automatic sweeps off so a test can
+  // look at the state a stop left behind before recovery runs.)
+  if (process.env.ATLAS_DELIVERY_NO_SWEEP !== '1') {
+    deliveryEngine.sweep().catch((err) => console.error('Delivery sweep failed:', err.message));
+    setInterval(() => {
+      if (deliveryEngine.pendingCount() > 0) deliveryEngine.sweep().catch((err) => console.error('Delivery sweep failed:', err.message));
+    }, parseInt(process.env.ATLAS_DELIVERY_SWEEP_MS || '30000', 10)).unref();
+  }
 
   // Background half of SPEC.md §13.3 — the same pollEmailTicketsOnce()
   // the admin poll-now endpoint above calls on demand, just run on a

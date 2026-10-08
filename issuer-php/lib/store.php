@@ -228,6 +228,12 @@ function atlas_email_tickets_config() {
   return array_merge($defaults, is_array($doc) ? $doc : []);
 }
 
+// Whether this domain can actually send mail right now.
+function atlas_email_delivery_configured() {
+  $config = atlas_email_tickets_config();
+  return !empty($config['smtpHost']) && !empty($config['fromAddress']);
+}
+
 // SPEC.md §13.3's bounce bookkeeping — one entry per forward send still
 // genuinely in flight (acceptance by the recipient's mail server isn't
 // proof of a real inbox, so a later bounce needs the original credential

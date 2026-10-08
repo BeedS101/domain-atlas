@@ -1,0 +1,1530 @@
+{
+ "about": "Decision table shared by issuer-server/lib-transfer-policy.js and issuer-php/lib/transfer-policy.php. Each case is an input and the exact result expected from both.",
+ "cases": [
+  {
+   "group": "policy",
+   "name": "holder-send: a plain unique item is allowed",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: transport and operation named explicitly still allowed",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "operation": "transfer",
+    "transport": "email"
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: not an asset credential (wrong tag)",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "something-else",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "not-an-asset",
+    "message": "not an asset credential"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: credential is not an object",
+   "input": {
+    "profile": "holder-send",
+    "credential": "nope",
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "not-an-asset",
+    "message": "not an asset credential"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: signer is not the owner",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "SOMEONE-ELSE",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "wrong-owner",
+    "message": "asset does not belong to this signer"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: owner missing",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "wrong-owner",
+    "message": "asset does not belong to this signer"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: wrong class",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.other",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "wrong-class",
+    "message": "asset is the wrong class"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: asset block missing",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "wrong-class",
+    "message": "asset is the wrong class"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: bound",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false,
+      "tradeScope": "bound"
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "bound",
+    "message": "asset is bound to its owner and cannot be sent to anyone else"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: tradeScope local is fine",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false,
+      "tradeScope": "local"
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: fungible",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": true
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "fungible",
+    "message": "asset class is fungible — this endpoint only transfers a unique item"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: fungible flag absent counts as not unique",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item"
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "fungible",
+    "message": "asset class is fungible — this endpoint only transfers a unique item"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: revoked",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": true,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "revoked",
+    "message": "asset already revoked"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: suspended",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": true,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "suspended",
+    "message": "asset is currently suspended pending review"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: expired",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": true,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "expired",
+    "message": "asset has expired"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: bad signature",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": false,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "bad-signature",
+    "message": "asset signature does not check out"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: order — bound is reported before revoked",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false,
+      "tradeScope": "bound"
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": true,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "bound",
+    "message": "asset is bound to its owner and cannot be sent to anyone else"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: order — revoked is reported before a bad signature",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": true,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": false,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "revoked",
+    "message": "asset already revoked"
+   }
+  },
+  {
+   "group": "policy",
+   "name": "holder-send: order — wrong owner before wrong class",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "X",
+    "expectedClass": "y",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "wrong-owner",
+    "message": "asset does not belong to this signer"
+   }
+  },
+  {
+   "group": "class-policy",
+   "name": "class policy absent: built-in rules only",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "classPolicy": null
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "class-policy",
+   "name": "class policy lists the operation and transport: allowed",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "classPolicy": {
+     "operations": [
+      "transfer"
+     ],
+     "transports": [
+      "email",
+      "file"
+     ]
+    },
+    "transport": "email"
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "class-policy",
+   "name": "class policy excludes the transport",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "classPolicy": {
+     "transports": [
+      "file"
+     ]
+    },
+    "transport": "email"
+   },
+   "expect": {
+    "ok": false,
+    "code": "class-policy",
+    "message": "this asset class does not permit delivery by email"
+   }
+  },
+  {
+   "group": "class-policy",
+   "name": "class policy excludes the operation",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "classPolicy": {
+     "operations": [
+      "copy"
+     ]
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "class-policy",
+    "message": "this asset class does not permit transfer"
+   }
+  },
+  {
+   "group": "class-policy",
+   "name": "class policy cannot widen: bound stays refused",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false,
+      "tradeScope": "bound"
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "classPolicy": {
+     "operations": [
+      "transfer"
+     ],
+     "transports": [
+      "wallet",
+      "email",
+      "file"
+     ]
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "bound",
+    "message": "asset is bound to its owner and cannot be sent to anyone else"
+   }
+  },
+  {
+   "group": "class-policy",
+   "name": "class policy cannot widen: fungible stays refused",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": true
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "classPolicy": {
+     "operations": [
+      "transfer"
+     ]
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "fungible",
+    "message": "asset class is fungible — this endpoint only transfers a unique item"
+   }
+  },
+  {
+   "group": "class-policy",
+   "name": "class policy with empty lists permits nothing",
+   "input": {
+    "profile": "holder-send",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "expectedOwner": "OWNER",
+    "expectedClass": "org.example.item",
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "classPolicy": {
+     "operations": []
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "class-policy",
+    "message": "this asset class does not permit transfer"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "identity: valid",
+   "input": {
+    "profile": "bearer-claim:identity",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "claim",
+   "name": "identity: wrong tag",
+   "input": {
+    "profile": "bearer-claim:identity",
+    "credential": {
+     "credential": "x",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "not-an-asset",
+    "message": "not an asset credential",
+    "wireCode": "not-claimable"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "identity: asset missing",
+   "input": {
+    "profile": "bearer-claim:identity",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "not-an-asset",
+    "message": "not an asset credential",
+    "wireCode": "not-claimable"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "identity: bad signature",
+   "input": {
+    "profile": "bearer-claim:identity",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": false,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "bad-signature",
+    "message": "asset signature does not check out",
+    "wireCode": "not-claimable"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: claimable",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: revoked means already claimed",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": true,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "revoked",
+    "message": "this file has already been claimed or withdrawn",
+    "wireCode": "already-claimed"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: suspended",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": true,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "suspended",
+    "message": "this asset is currently suspended pending review",
+    "wireCode": "suspended"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: expired",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": true,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "expired",
+    "message": "asset has expired",
+    "wireCode": "expired"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: fungible",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": true
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "fungible",
+    "message": "only a unique item can be claimed from a file",
+    "wireCode": "not-claimable"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: bound",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false,
+      "tradeScope": "bound"
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "bound",
+    "message": "asset is bound and cannot be claimed from a file",
+    "wireCode": "not-claimable"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: not in the bearer registry",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": false
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "not-bearer",
+    "message": "this is not a transfer file issued by this domain",
+    "wireCode": "not-claimable"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: order — revoked before not-bearer",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": true,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": false
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "revoked",
+    "message": "this file has already been claimed or withdrawn",
+    "wireCode": "already-claimed"
+   }
+  },
+  {
+   "group": "claim",
+   "name": "state: class policy excludes file",
+   "input": {
+    "profile": "bearer-claim:state",
+    "credential": {
+     "credential": "domain-atlas-asset/1.0",
+     "id": "urn:atlas:asset:test",
+     "owner": {
+      "publicKey": "OWNER"
+     },
+     "asset": {
+      "class": "org.example.item",
+      "fungible": false
+     },
+     "quantity": 1
+    },
+    "facts": {
+     "revoked": false,
+     "suspended": false,
+     "expired": false,
+     "signatureValid": true,
+     "listedBearer": true
+    },
+    "classPolicy": {
+     "transports": [
+      "email"
+     ]
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "class-policy",
+    "message": "this asset class does not permit delivery by file",
+    "wireCode": "not-claimable"
+   }
+  },
+  {
+   "group": "gate",
+   "name": "file: not enabled",
+   "input": {
+    "kind": "gate",
+    "transport": "file",
+    "stage": "enabled",
+    "config": {
+     "fileTransfer": null
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "not-enabled",
+    "message": "this domain has not enabled file transfers (SPEC.md §13.5)"
+   }
+  },
+  {
+   "group": "gate",
+   "name": "file: enabled with no class limit",
+   "input": {
+    "kind": "gate",
+    "transport": "file",
+    "stage": "enabled",
+    "config": {
+     "fileTransfer": {
+      "classes": null
+     }
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "gate",
+   "name": "file: class inside the allowlist",
+   "input": {
+    "kind": "gate",
+    "transport": "file",
+    "stage": "class",
+    "config": {
+     "fileTransfer": {
+      "classes": [
+       "a.b"
+      ]
+     }
+    },
+    "assetClass": "a.b"
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "gate",
+   "name": "file: class outside the allowlist",
+   "input": {
+    "kind": "gate",
+    "transport": "file",
+    "stage": "class",
+    "config": {
+     "fileTransfer": {
+      "classes": [
+       "a.b"
+      ]
+     }
+    },
+    "assetClass": "c.d"
+   },
+   "expect": {
+    "ok": false,
+    "code": "class-not-allowed",
+    "message": "this domain does not allow c.d to be exported to a file"
+   }
+  },
+  {
+   "group": "gate",
+   "name": "file: no allowlist permits every class",
+   "input": {
+    "kind": "gate",
+    "transport": "file",
+    "stage": "class",
+    "config": {
+     "fileTransfer": {
+      "classes": null
+     }
+    },
+    "assetClass": "c.d"
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "gate",
+   "name": "email: not configured",
+   "input": {
+    "kind": "gate",
+    "transport": "email",
+    "stage": "enabled",
+    "config": {
+     "emailConfigured": false
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "not-configured",
+    "message": "this domain has not configured email-delivered tickets (SPEC.md §13)"
+   }
+  },
+  {
+   "group": "gate",
+   "name": "email: configured",
+   "input": {
+    "kind": "gate",
+    "transport": "email",
+    "stage": "enabled",
+    "config": {
+     "emailConfigured": true
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "gate",
+   "name": "email: signer is not an admin",
+   "input": {
+    "kind": "gate",
+    "transport": "email",
+    "stage": "actor",
+    "actor": {
+     "isAdmin": false
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "not-admin",
+    "status": 403,
+    "message": "only a domain admin can send a ticket to an email address"
+   }
+  },
+  {
+   "group": "gate",
+   "name": "email: signer is an admin",
+   "input": {
+    "kind": "gate",
+    "transport": "email",
+    "stage": "actor",
+    "actor": {
+     "isAdmin": true
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "gate",
+   "name": "file: actor stage has no admin requirement",
+   "input": {
+    "kind": "gate",
+    "transport": "file",
+    "stage": "actor",
+    "actor": {
+     "isAdmin": false
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "mint",
+   "name": "catalog: unique class",
+   "input": {
+    "kind": "mint",
+    "catalogEntry": {
+     "fungible": false
+    }
+   },
+   "expect": {
+    "ok": true
+   }
+  },
+  {
+   "group": "mint",
+   "name": "catalog: fungible class refused",
+   "input": {
+    "kind": "mint",
+    "catalogEntry": {
+     "fungible": true
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "fungible",
+    "message": "only a unique (non-fungible) item can be sent as an email ticket"
+   }
+  },
+  {
+   "group": "mint",
+   "name": "catalog: bound class refused",
+   "input": {
+    "kind": "mint",
+    "catalogEntry": {
+     "fungible": false,
+     "tradeScope": "bound"
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "bound",
+    "message": "a bound item cannot be sent as an email ticket"
+   }
+  },
+  {
+   "group": "mint",
+   "name": "catalog: class policy excludes email",
+   "input": {
+    "kind": "mint",
+    "catalogEntry": {
+     "fungible": false,
+     "transfer": {
+      "transports": [
+       "file"
+      ]
+     }
+    }
+   },
+   "expect": {
+    "ok": false,
+    "code": "class-policy",
+    "message": "this asset class does not permit delivery by email"
+   }
+  }
+ ]
+}

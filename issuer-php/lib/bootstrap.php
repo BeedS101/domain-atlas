@@ -8,6 +8,7 @@
 
 require_once __DIR__ . '/crypto.php';
 require_once __DIR__ . '/store.php';
+require_once __DIR__ . '/transfer-policy.php';
 
 function cors_headers() {
   header('Access-Control-Allow-Origin: *');
@@ -988,30 +989,20 @@ function check_presented_transferable_asset($publicKeyB64url, $credential, $expe
 // here). Same checks as check_presented_unique_asset(), just worded for
 // "send" rather than "trade". Mirrors issuer-server/server.js's
 // checkPresentedGiftableAsset().
-function check_presented_giftable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+function check_presented_giftable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass, $transport = 'wallet') {
   $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
   if ($busy !== null) return $busy;
-  if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
-    return 'not an asset credential';
-  }
-  if (!isset($credential['owner']['publicKey']) || $credential['owner']['publicKey'] !== $expectedOwner) {
-    return 'asset does not belong to this signer';
-  }
-  if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
-    return 'asset is the wrong class';
-  }
-  if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
-    return 'asset is bound to its owner and cannot be sent to anyone else';
-  }
-  if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
-    return 'asset class is fungible — this endpoint only transfers a unique item';
-  }
-  if (is_revoked($credential['id'])) return 'asset already revoked';
-  if (is_suspended($credential['id'])) return 'asset is currently suspended pending review';
-  if (is_expired($credential)) return 'asset has expired';
-  $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
-  if (!$ok) return 'asset signature does not check out';
-  return null;
+  $decision = atlas_evaluate_transfer_policy([
+    'profile' => 'holder-send',
+    'credential' => $credential,
+    'expectedOwner' => $expectedOwner,
+    'expectedClass' => $expectedClass,
+    'facts' => atlas_gather_transfer_facts($publicKeyB64url, $credential),
+    'classPolicy' => (is_array($credential) && isset($credential['asset']['class'])) ? atlas_class_transfer_policy($credential['asset']['class']) : null,
+    'operation' => 'transfer',
+    'transport' => $transport,
+  ]);
+  return $decision['ok'] ? null : $decision['message'];
 }
 
 // check_presented_giftable_asset()'s own sibling for POST

@@ -10,6 +10,8 @@
 // exactly once per call, driven entirely by atlas/admin/email-tickets/
 // poll-now.php, itself meant to be cron-triggered in a real deployment.
 
+require_once __DIR__ . '/delivery.php';
+
 // A unique per-send envelope Return-Path so a later bounce can be
 // correlated back to the exact send that produced it, without ever
 // having to parse a bounce body (which varies too much across mail
@@ -114,59 +116,38 @@ function process_email_ticket_forward($kp, $config, $parsed) {
   // entry also makes two forwards of one ticket mutually exclusive. No
   // reply is sent: answering would tell a stranger which credential ids
   // this domain has issued as tickets.
-  $taken = take_bearer($credential['id']);
-  if (!$taken) return ['outcome' => 'ignored', 'reason' => 'attached credential is not an email ticket'];
-
   $recipientEmail = $parsed['cc'][0];
-  try {
-    $discardedOwnerKey = generate_discarded_owner_public_key();
-    $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $discardedOwnerKey, $credential);
-  } catch (Exception $e) {
-    restore_bearer($credential['id'], $taken);
-    throw $e;
+  $priorForward = atlas_delivery_latest_for_key($credential['id']);
+  if ($priorForward !== null && !in_array($priorForward['state'], ['delivered', 'rolled-back'], true)) {
+    // Left part-way by an earlier stop: finish it rather than start again.
+    $resumed = atlas_delivery_run($priorForward['deliveryId'], ['waitSeconds' => 2]);
+    if ($resumed['busy']) return ['outcome' => 'ignored', 'reason' => 'attached credential is not an email ticket'];
+    return (($resumed['rec']['state'] ?? null) === 'delivered')
+      ? ['outcome' => 'transferred', 'to' => $recipientEmail]
+      : ['outcome' => 'failed', 'reason' => ($resumed['rec']['lastError'] ?? null) ?: 'delivery was not completed'];
   }
-  register_bearer($minted['id'], $taken['class'] ?? null);
+  $bearers = read_bearers()['bearers'];
+  if (!array_key_exists($credential['id'], $bearers)) return ['outcome' => 'ignored', 'reason' => 'attached credential is not an email ticket'];
+  $heldEntry = $bearers[$credential['id']];
 
-  try {
-    atlas_smtp_send_mail([
-      'host' => $config['smtpHost'],
-      'port' => $config['smtpPort'],
-      'secure' => $config['smtpSecure'],
-      'user' => $config['smtpUser'],
-      'pass' => $config['smtpPass'],
-      'from' => $config['fromAddress'],
-      // SPEC.md §13.3's VERP — a bounce against THIS send, arriving any
-      // time after this poll pass, carries this exact Return-Path back
-      // to the mailbox poll_email_tickets_once() watches, letting it be
-      // correlated to $minted['id'] without parsing the bounce body.
-      'envelopeFrom' => verp_return_path_for($config, $minted['id']),
-      'to' => $recipientEmail,
-      'subject' => $minted['asset']['name'] ?? 'Your ticket',
-      'textBody' => 'You have been sent "' . ($minted['asset']['name'] ?? $minted['asset']['class']) . '" from ' . atlas_domain() .
-        ".\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC'd, is how you pass it on.",
-      'attachments' => [[
-        'filename' => 'ticket-' . substr($minted['id'], strrpos($minted['id'], ':') + 1) . '.json',
-        'contentType' => 'application/json',
-        'content' => json_encode($minted, JSON_UNESCAPED_SLASHES),
-      ]],
-    ]);
-  } catch (Exception $e) {
-    take_bearer($minted['id']);
+  $discardedOwnerKey = generate_discarded_owner_public_key();
+  $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $discardedOwnerKey, $credential);
+  file_export_fault_point('delivery:minted');
+  $began = atlas_delivery_begin([
+    'key' => $credential['id'], 'kind' => 'bearer-original', 'class' => $heldEntry['class'] ?? null, 'original' => $credential,
+    'minted' => $minted, 'recipient' => $recipientEmail, 'returnTo' => $parsed['from'], 'heldBearer' => $heldEntry,
+  ]);
+  if (isset($began['existing'])) {
     atlas_revoke($minted['id'], 'issuer-request');
-    restore_bearer($credential['id'], $taken);
-    send_plain_reply($config, $parsed['from'], 'Could not forward your ticket',
-      "The new holder's address could not be delivered to, so this forward did not go through. Your original ticket is unaffected.");
-    return ['outcome' => 'failed', 'reason' => $e->getMessage()];
+    return ['outcome' => 'ignored', 'reason' => 'attached credential is not an email ticket'];
   }
-
-  // Acceptance here only means the recipient's mail server took the
-  // message, not that it actually reached an inbox — recorded as still
-  // in flight so a bounce arriving later can still be traced back to
-  // this exact send and reversed (process_inbound_bounce, below).
-  record_pending_email_ticket_send($minted, $parsed['from']);
-  atlas_revoke($credential['id'], 'email-transferred');
-  archive_if_audited($credential, 'email-transferred');
-  return ['outcome' => 'transferred', 'to' => $recipientEmail];
+  // Acceptance by the recipient's mail server only means it took the
+  // message, not that it reached an inbox, so a delivered forward is tracked
+  // until a later bounce can no longer arrive and a rejected one is rolled
+  // back with a notice to the sender (both done by the delivery engine).
+  $outcome = atlas_delivery_run($began['rec']['deliveryId']);
+  if (($outcome['rec']['state'] ?? null) === 'delivered') return ['outcome' => 'transferred', 'to' => $recipientEmail];
+  return ['outcome' => 'failed', 'reason' => ($outcome['rec']['lastError'] ?? null) ?: 'delivery was not completed'];
 }
 
 // SPEC.md §13.3's "ongoing bounce monitoring" — handles one inbound

@@ -46,12 +46,8 @@ if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !
 // here, then finds it revoked.
 $lock = atlas_bearer_lock();
 
-if (($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0' || !isset($credential['asset']) || !is_array($credential['asset'])) {
-  send_json(400, ['error' => 'not an asset credential', 'code' => 'not-claimable']);
-}
-if (!verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential))) {
-  send_json(400, ['error' => 'asset signature does not check out', 'code' => 'not-claimable']);
-}
+$identity = atlas_evaluate_transfer_policy(['profile' => 'bearer-claim:identity', 'credential' => $credential, 'facts' => atlas_gather_transfer_facts($kp['publicKeyB64url'], $credential)]);
+if (!$identity['ok']) send_json(400, ['error' => $identity['message'], 'code' => $identity['wireCode'] ?? null]);
 
 // A claim already committed for this file is finished first, whoever is
 // asking. The key that committed it gets its credential again; any other key
@@ -68,16 +64,18 @@ if (file_claim_of(read_file_claims(), $credential['id']) !== null) {
   send_json(409, $answer);
 }
 
-if (is_revoked($credential['id'])) send_json(409, ['error' => 'this file has already been claimed or withdrawn', 'code' => 'already-claimed']);
-if (is_suspended($credential['id'])) send_json(409, ['error' => 'this asset is currently suspended pending review', 'code' => 'suspended']);
-if (is_expired($credential)) send_json(400, ['error' => 'asset has expired', 'code' => 'expired']);
-if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
-  send_json(400, ['error' => 'only a unique item can be claimed from a file', 'code' => 'not-claimable']);
+$state = atlas_evaluate_transfer_policy([
+  'profile' => 'bearer-claim:state',
+  'credential' => $credential,
+  'facts' => atlas_gather_transfer_facts($kp['publicKeyB64url'], $credential),
+  'classPolicy' => atlas_class_transfer_policy($credential['asset']['class'] ?? null),
+  'operation' => 'transfer',
+  'transport' => 'file',
+]);
+if (!$state['ok']) {
+  $wire = $state['wireCode'] ?? null;
+  send_json(($wire === 'already-claimed' || $wire === 'suspended') ? 409 : 400, ['error' => $state['message'], 'code' => $wire]);
 }
-if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
-  send_json(400, ['error' => 'asset is bound and cannot be claimed from a file', 'code' => 'not-claimable']);
-}
-if (!has_bearer($credential['id'])) send_json(400, ['error' => 'this is not a transfer file issued by this domain', 'code' => 'not-claimable']);
 
 // Nothing has been written yet, so a failed mint changes nothing. From the
 // record write onwards the claim is committed.

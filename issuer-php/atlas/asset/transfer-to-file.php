@@ -32,18 +32,16 @@ if (($payload['credentialId'] ?? null) !== $credential['id'] || ($payload['actio
 }
 
 $fileConfig = file_transfer_config();
-if (!$fileConfig) {
-  send_json(400, ['error' => 'this domain has not enabled file transfers (SPEC.md §13.5)', 'code' => 'not-enabled']);
-}
+$fileGateOpen = atlas_evaluate_delivery_gate(['transport' => 'file', 'stage' => 'enabled', 'config' => ['fileTransfer' => $fileConfig]]);
+if (!$fileGateOpen['ok']) send_json(400, ['error' => $fileGateOpen['message'], 'code' => $fileGateOpen['code']]);
 
 $envelopeOk = verify_envelope($payload, $intent['proof']);
 if (!$envelopeOk) send_json(400, ['error' => 'intent signature does not check out']);
 $senderPub = $intent['proof']['publicKey'];
 
 $assetClass = $credential['asset']['class'] ?? null;
-if ($fileConfig['classes'] !== null && !in_array($assetClass, $fileConfig['classes'], true)) {
-  send_json(400, ['error' => 'this domain does not allow ' . $assetClass . ' to be exported to a file', 'code' => 'class-not-allowed']);
-}
+$fileGateClass = atlas_evaluate_delivery_gate(['transport' => 'file', 'stage' => 'class', 'config' => ['fileTransfer' => $fileConfig], 'assetClass' => $assetClass]);
+if (!$fileGateClass['ok']) send_json(400, ['error' => $fileGateClass['message'], 'code' => $fileGateClass['code']]);
 
 // Exports and claims run one at a time: a second export of this credential
 // waits here, then finds it revoked.
@@ -55,7 +53,7 @@ if (file_export_of(read_file_exports(), $credential['id']) !== null) {
   send_json(409, ['error' => 'this asset has already been exported; recover the file with /atlas/asset/recover-file-export', 'code' => 'already-exported']);
 }
 
-$problem = check_presented_giftable_asset($kp['publicKeyB64url'], $credential, $senderPub, $assetClass);
+$problem = check_presented_giftable_asset($kp['publicKeyB64url'], $credential, $senderPub, $assetClass, 'file');
 if ($problem) send_json(400, ['error' => $problem]);
 
 $discardedOwnerKey = generate_discarded_owner_public_key();

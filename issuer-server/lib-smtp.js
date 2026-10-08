@@ -11,6 +11,9 @@ const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
 
+// How long to wait for any one reply from the mail server.
+const REPLY_TIMEOUT_MS = parseInt(process.env.ATLAS_SMTP_REPLY_TIMEOUT_MS || '30000', 10);
+
 function b64(s) {
   return Buffer.from(s, 'utf8').toString('base64');
 }
@@ -23,6 +26,13 @@ function b64(s) {
 function readReply(socket) {
   return new Promise((resolve, reject) => {
     let buffer = '';
+    // A mail server that stops answering, or drops the connection part-way
+    // through a reply, must not leave the caller waiting forever: the
+    // outcome is unknown and the caller has to be told so it can decide.
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('SMTP server did not answer within ' + REPLY_TIMEOUT_MS + ' ms'));
+    }, REPLY_TIMEOUT_MS);
     function onData(chunk) {
       buffer += chunk.toString('utf8');
       const lines = buffer.split('\r\n').filter(Boolean);
@@ -36,12 +46,21 @@ function readReply(socket) {
       cleanup();
       reject(err);
     }
+    function onClose() {
+      cleanup();
+      reject(new Error('SMTP connection closed unexpectedly'));
+    }
     function cleanup() {
+      clearTimeout(timer);
       socket.removeListener('data', onData);
       socket.removeListener('error', onError);
+      socket.removeListener('close', onClose);
+      socket.removeListener('end', onClose);
     }
     socket.on('data', onData);
     socket.on('error', onError);
+    socket.on('close', onClose);
+    socket.on('end', onClose);
   });
 }
 

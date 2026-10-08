@@ -18,6 +18,7 @@
 // accepts leaves the sender exactly as they were.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 require_once __DIR__ . '/../../lib/smtp.php';
+require_once __DIR__ . '/../../lib/delivery.php';
 handle_preflight();
 require_post();
 $kp = atlas_load_keys();
@@ -45,40 +46,55 @@ if (($payload['credentialId'] ?? null) !== $credential['id'] || ($payload['recip
   send_json(400, ['error' => 'intent does not authorize transferring this credential to this address']);
 }
 
-$config = atlas_email_tickets_config();
-if (!$config['smtpHost'] || !$config['fromAddress']) {
-  send_json(400, ['error' => 'this domain has not configured email-delivered tickets (SPEC.md §13)']);
-}
+$emailGate = atlas_evaluate_delivery_gate(['transport' => 'email', 'stage' => 'enabled', 'config' => ['emailConfigured' => atlas_email_delivery_configured()]]);
+if (!$emailGate['ok']) send_json(400, ['error' => $emailGate['message']]);
 
 $envelopeOk = verify_envelope($payload, $intent['proof']);
 if (!$envelopeOk) send_json(400, ['error' => 'intent signature does not check out']);
 $senderPub = $intent['proof']['publicKey'];
 // The domain sends this mail from its own mailbox, so only a registered
 // domain admin may ask for it.
-if (!is_admin_key($senderPub)) send_json(403, ['error' => 'only a domain admin can send a ticket to an email address']);
+$actorGate = atlas_evaluate_delivery_gate(['transport' => 'email', 'stage' => 'actor', 'actor' => ['isAdmin' => is_admin_key($senderPub)]]);
+if (!$actorGate['ok']) send_json($actorGate['status'] ?? 403, ['error' => $actorGate['message']]);
 
-$problem = check_presented_giftable_asset($kp['publicKeyB64url'], $credential, $senderPub, $credential['asset']['class'] ?? null);
+// Taken before anything else is read, so a second request for the same
+// credential waits here and then sees what the first one did.
+$busy = atlas_spend_lock($credential['id']);
+if ($busy !== null) send_json(400, ['error' => $busy]);
+
+// A delivery of this credential already exists: it is never started twice.
+// The same signer asking again for the same address gets the same answer the
+// first request would have; anything else is told why not.
+$sameRequest = function ($rec) use ($senderPub, $recipientEmail) {
+  return ($rec['ownerPublicKey'] ?? null) === $senderPub && ($rec['recipientHash'] ?? null) === atlas_delivery_hash_recipient($recipientEmail);
+};
+$prior = atlas_delivery_latest_for_key($credential['id']);
+if ($prior !== null && $prior['state'] === 'delivered') {
+  if ($sameRequest($prior)) send_json(200, ['status' => 'email-transferred', 'to' => $recipientEmail]);
+  send_json(409, ['error' => 'this asset has already been delivered', 'code' => 'already-delivered']);
+}
+if ($prior !== null && $prior['state'] !== 'rolled-back') {
+  if (!$sameRequest($prior)) send_json(409, ['error' => 'a delivery of this asset is already in progress', 'code' => 'in-progress']);
+  $resumed = atlas_delivery_run($prior['deliveryId'], ['waitSeconds' => 2]);
+  if ($resumed['busy']) send_json(409, ['error' => 'a delivery of this asset is already in progress', 'code' => 'in-progress']);
+  atlas_answer_email_delivery($resumed['rec'], $recipientEmail);
+}
+
+$problem = check_presented_giftable_asset($kp['publicKeyB64url'], $credential, $senderPub, $credential['asset']['class'] ?? null, 'email');
 if ($problem) send_json(400, ['error' => $problem]);
 
 $discardedOwnerKey = generate_discarded_owner_public_key();
 $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $discardedOwnerKey, $credential);
-// Listed as a bearer ticket from the moment it exists: the forward step
-// (lib/email-tickets.php) accepts only ids in this registry.
-register_bearer($minted['id'], $credential['asset']['class'] ?? null);
-
-try {
-  atlas_mail_ticket_to($minted, $recipientEmail);
-} catch (Exception $e) {
-  // Delivery check before finalizing: the sender's original credential
-  // above was never touched, so a send the mail server never actually
-  // accepted leaves them exactly as they were. The fresh mint nobody will
-  // ever hold is undone the same way any abandoned mint always is — never
-  // a real transfer, so never 'email-transferred' below.
-  take_bearer($minted['id']);
+file_export_fault_point('delivery:minted');
+$began = atlas_delivery_begin([
+  'key' => $credential['id'], 'kind' => 'wallet-original', 'class' => $credential['asset']['class'] ?? null,
+  'ownerPublicKey' => $senderPub, 'original' => $credential, 'minted' => $minted, 'recipient' => $recipientEmail,
+]);
+if (isset($began['existing'])) {
+  // Another request got there between the checks and here; the credential
+  // minted above was never recorded or listed.
   atlas_revoke($minted['id'], 'issuer-request');
-  send_json(502, ['error' => 'could not deliver to ' . $recipientEmail . ': ' . $e->getMessage()]);
+  send_json(409, ['error' => 'a delivery of this asset is already in progress', 'code' => 'in-progress']);
 }
-
-atlas_revoke($credential['id'], 'email-transferred');
-archive_if_audited($credential, 'email-transferred');
-send_json(200, ['status' => 'email-transferred', 'to' => $recipientEmail]);
+$outcome = atlas_delivery_run($began['rec']['deliveryId']);
+atlas_answer_email_delivery($outcome['rec'], $recipientEmail);
