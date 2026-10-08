@@ -4051,8 +4051,8 @@ const AtlasWallet = (() => {
     const owner = publicKey;
     const d = payload.data || {};
     await Promise.all([
-      saveWallet(owner, d.wallet || []),
-      saveMail(owner, d.mail || []),
+      withWalletLock(() => saveWallet(owner, d.wallet || [])),
+      withMessageLock(() => saveMail(owner, d.mail || [])),
       saveSentMail(owner, d.sentMail || []),
       saveSubmittedTrades(owner, d.submittedTrades || []),
       // Task #250: no saveDroppedItems() anymore — an OLDER backup file's
@@ -4070,7 +4070,7 @@ const AtlasWallet = (() => {
       saveMutedChatUsers(owner, d.mutedChatUsers || []),
       saveBlockedChatUsers(owner, d.blockedChatUsers || []),
       setLoadout(d.loadout || []),
-      saveChatMessages(owner, d.chatMessages || []),
+      withMessageLock(() => saveChatMessages(owner, d.chatMessages || [])),
       saveCounterparty(d.counterparty || null),
       // Task #158 — restoring the SAME e2ee keypair (not generating a
       // fresh one) is what keeps this identity able to decrypt its past

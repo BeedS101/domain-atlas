@@ -217,8 +217,18 @@ function shot(name) {
     console.log('PASS: loading a full-backup file into the identity-only import button fails clearly, no silent partial restore');
 
     console.log('STEP 9: restoring for real via "Restore full backup instead" — correct password AND correct seed phrase');
+    // The restore rewrites the wallet, mail and chat lists, so it must wait
+    // for anyone else holding their write locks (a mail check, a claim).
+    await frame.evaluate(() => {
+      window.__lockHeldUntil = Date.now() + 2500;
+      for (const name of ['atlas-messages', 'atlas-wallet-list']) {
+        navigator.locks.request(name, () => new Promise((resolve) => setTimeout(resolve, 2500)));
+      }
+    });
     await frame.locator('#restoreFullBackupBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 15000 });
+    const waitedPastLocks = await frame.evaluate(() => Date.now() >= window.__lockHeldUntil - 100);
+    if (!waitedPastLocks) throw new Error('The restore wrote the wallet, mail or chat lists while another writer held their lock');
     const restoredLabel = await frame.locator('#walletIdentity').textContent();
     if (restoredLabel !== originalIdentityLabel) throw new Error('Restored identity label does not match original: ' + restoredLabel + ' vs ' + originalIdentityLabel);
     console.log('PASS: identity restored — label matches original ->', restoredLabel);
