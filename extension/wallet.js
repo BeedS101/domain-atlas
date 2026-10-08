@@ -4745,6 +4745,23 @@ const AtlasWallet = (() => {
     await chrome.storage.local.set({ atlasMailSettings: settings });
   }
 
+  // Every change to the stored mail or chat lists is read-modify-write over
+  // the whole list, and a mail check holds network waits in the middle. All
+  // such changes run one at a time under this lock (Web Locks, so it also
+  // holds across the extension's pages; a promise chain where unavailable),
+  // and each one re-reads the list inside the lock. A caller that read the
+  // list earlier and wrote it back later would undo anything changed in
+  // between, e.g. a message marked read while a check was running.
+  let messageWriteChain = Promise.resolve();
+  function withMessageLock(fn) {
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      return navigator.locks.request('atlas-messages', fn);
+    }
+    const run = messageWriteChain.then(fn, fn);
+    messageWriteChain = run.catch(() => {});
+    return run;
+  }
+
   // Encrypted at rest (2026-09-14, second round) — see decryptAtRestAndMigrate's
   // own comment for the opportunistic-migration behavior on pre-existing
   // plaintext mail.
@@ -4763,17 +4780,21 @@ const AtlasWallet = (() => {
   }
 
   async function markMailRead(ownerPublicKey, messageId) {
-    const entries = await getMail(ownerPublicKey);
-    const entry = entries.find((e) => e.message.id === messageId);
-    if (!entry) return;
-    entry.read = true;
-    await saveMail(ownerPublicKey, entries);
+    await withMessageLock(async () => {
+      const entries = await getMail(ownerPublicKey);
+      const entry = entries.find((e) => e.message.id === messageId);
+      if (!entry || entry.read) return;
+      entry.read = true;
+      await saveMail(ownerPublicKey, entries);
+    });
   }
 
   async function markAllMailRead(ownerPublicKey) {
-    const entries = await getMail(ownerPublicKey);
-    entries.forEach((e) => { e.read = true; });
-    await saveMail(ownerPublicKey, entries);
+    await withMessageLock(async () => {
+      const entries = await getMail(ownerPublicKey);
+      entries.forEach((e) => { e.read = true; });
+      await saveMail(ownerPublicKey, entries);
+    });
   }
 
   // Task #59: adds a mail message's attached gift to the wallet — the
@@ -4809,9 +4830,14 @@ const AtlasWallet = (() => {
     await saveWallet(ownerPublicKey, wallet);
     await autoConsolidateAssetWallet(ownerPublicKey);
 
-    entry.claimed = true;
-    entry.read = true; // clicking Claim is at least as strong a "seen it" signal as opening the card
-    await saveMail(ownerPublicKey, entries);
+    await withMessageLock(async () => {
+      const latest = await getMail(ownerPublicKey);
+      const current = latest.find((e) => e.message.id === messageId);
+      if (!current) return;
+      current.claimed = true;
+      current.read = true; // clicking Claim is at least as strong a "seen it" signal as opening the card
+      await saveMail(ownerPublicKey, latest);
+    });
     return { credential, verdict };
   }
 
@@ -5170,15 +5196,17 @@ const AtlasWallet = (() => {
   }
 
   async function markChatThreadRead(ownerPublicKey, counterpartyPublicKey) {
-    const entries = await getChatMessages(ownerPublicKey);
-    let changed = false;
-    entries.forEach((e) => {
-      if (e.counterpartyPublicKey === counterpartyPublicKey && e.direction === 'in' && !e.read) {
-        e.read = true;
-        changed = true;
-      }
+    await withMessageLock(async () => {
+      const entries = await getChatMessages(ownerPublicKey);
+      let changed = false;
+      entries.forEach((e) => {
+        if (e.counterpartyPublicKey === counterpartyPublicKey && e.direction === 'in' && !e.read) {
+          e.read = true;
+          changed = true;
+        }
+      });
+      if (changed) await saveChatMessages(ownerPublicKey, entries);
     });
-    if (changed) await saveChatMessages(ownerPublicKey, entries);
   }
 
   async function getChatUnreadCount(ownerPublicKey) {
@@ -5447,6 +5475,8 @@ const AtlasWallet = (() => {
     const result = await postOfficeSendRaw(toDomain, toPublicKey, CHAT_SUBJECT_MARKER, wireBody);
 
     if (identity && result && result.id) {
+      const sentBody = await encryptChatBody(identity, body);
+      await withMessageLock(async () => {
       const entries = await getChatMessages(identity.publicKey);
       entries.push({
         id: result.id,
@@ -5458,11 +5488,12 @@ const AtlasWallet = (() => {
         // is now whatever wireBody was (the E2EE envelope, or plaintext if
         // this identity can't do E2EE at all), and this wallet's own
         // sent-message record should obviously always be human-readable.
-        body: await encryptChatBody(identity, body),
+        body: sentBody,
         sentAt: result.sentAt || new Date().toISOString(),
         read: true // this wallet's own outgoing message — nothing to mark unread
       });
       await saveChatMessages(identity.publicKey, entries);
+      });
       await setLastChatSendDomain(identity.publicKey, toDomain);
     }
     return result;
@@ -5667,12 +5698,14 @@ const AtlasWallet = (() => {
   // (chat view) and "delete chat" (main view) both call this directly;
   // the only difference is what the UI does afterward (stay vs. go back).
   async function deleteChatThread(ownerPublicKey, counterpartyPublicKey) {
-    const entries = await getChatMessages(ownerPublicKey);
-    const toDelete = entries.filter((e) => e.counterpartyPublicKey === counterpartyPublicKey);
-    if (toDelete.length === 0) return;
-    const remaining = entries.filter((e) => e.counterpartyPublicKey !== counterpartyPublicKey);
-    await saveChatMessages(ownerPublicKey, remaining);
-    await addDeletedChatIds(ownerPublicKey, toDelete.map((e) => e.id));
+    await withMessageLock(async () => {
+      const entries = await getChatMessages(ownerPublicKey);
+      const toDelete = entries.filter((e) => e.counterpartyPublicKey === counterpartyPublicKey);
+      if (toDelete.length === 0) return;
+      const remaining = entries.filter((e) => e.counterpartyPublicKey !== counterpartyPublicKey);
+      await addDeletedChatIds(ownerPublicKey, toDelete.map((e) => e.id));
+      await saveChatMessages(ownerPublicKey, remaining);
+    });
   }
 
   // Chats' own "last domain used" memory — separate storage key from Mail
@@ -6009,16 +6042,20 @@ const AtlasWallet = (() => {
   }
 
   async function deleteMailMessage(ownerPublicKey, messageId) {
-    const entries = await getMail(ownerPublicKey);
-    const remaining = entries.filter((e) => e.message.id !== messageId);
-    await saveMail(ownerPublicKey, remaining);
-    await addDeletedMailIds(ownerPublicKey, [messageId]);
+    await withMessageLock(async () => {
+      const entries = await getMail(ownerPublicKey);
+      const remaining = entries.filter((e) => e.message.id !== messageId);
+      await addDeletedMailIds(ownerPublicKey, [messageId]);
+      await saveMail(ownerPublicKey, remaining);
+    });
   }
 
   async function clearAllMail(ownerPublicKey) {
-    const entries = await getMail(ownerPublicKey);
-    await addDeletedMailIds(ownerPublicKey, entries.map((e) => e.message.id));
-    await saveMail(ownerPublicKey, []);
+    await withMessageLock(async () => {
+      const entries = await getMail(ownerPublicKey);
+      await addDeletedMailIds(ownerPublicKey, entries.map((e) => e.message.id));
+      await saveMail(ownerPublicKey, []);
+    });
   }
 
   // SPEC.md §3.8.2 — pending wallet-bridge asset offers. A SEPARATE
@@ -6461,8 +6498,11 @@ const AtlasWallet = (() => {
     // across future checks too, same reasoning as mail's own list.
     const deletedChatIds = new Set(await getDeletedChatIds(identity.publicKey));
     const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds, ...existingChat.map((e) => e.id), ...deletedChatIds]);
-    let newCount = 0;
-    let chatChanged = false;
+    // New arrivals are collected here and merged into the stored lists at
+    // the end, under the lock, against a fresh read; `existing` and
+    // `existingChat` above are only used to recognise what is already known.
+    const incomingMail = [];
+    const incomingChat = [];
 
     for (const [domain, idSet] of byDomain) {
       try {
@@ -6527,7 +6567,7 @@ const AtlasWallet = (() => {
             // along the way), then let it go through the exact same
             // at-rest encryption every chat message already got.
             const plainBody = await unwrapChatMessageFromWire(identity, message.from.publicKey, message.body);
-            existingChat.push({
+            incomingChat.push({
               id: message.id,
               direction: 'in',
               counterpartyPublicKey: message.from.publicKey,
@@ -6537,7 +6577,6 @@ const AtlasWallet = (() => {
               sentAt: message.sentAt,
               read: false
             });
-            chatChanged = true;
           } else {
             // This feature: an ordinary message's wire subject/body may be
             // one of two encrypted shapes — a Post Office user-to-user
@@ -6552,8 +6591,7 @@ const AtlasWallet = (() => {
             const resolved = (message.from && message.from.publicKey)
               ? await unwrapMailFromWire(identity, message.from.publicKey, message.subject, message.body)
               : await unwrapDomainMailFromWire(identity, message.subject, message.body);
-            existing.push({ message: { ...message, subject: resolved.subject, body: resolved.body, domain }, read: false, receivedAt: new Date().toISOString() });
-            newCount++;
+            incomingMail.push({ message: { ...message, subject: resolved.subject, body: resolved.body, domain }, read: false, receivedAt: new Date().toISOString() });
           }
         }
         await processAssetUpdates(identity.publicKey, domain, updates);
@@ -6563,12 +6601,40 @@ const AtlasWallet = (() => {
       }
     }
 
-    existing.sort((a, b) => new Date(b.message.sentAt) - new Date(a.message.sentAt));
-    await saveMail(identity.publicKey, existing);
-    if (chatChanged) {
-      existingChat.sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
-      await saveChatMessages(identity.publicKey, existingChat);
-    }
+    let newCount = 0;
+    await withMessageLock(async () => {
+      if (incomingMail.length) {
+        const latest = await getMail(identity.publicKey);
+        const have = new Set(latest.map((e) => e.message.id));
+        const gone = new Set(await getDeletedMailIds(identity.publicKey));
+        for (const entry of incomingMail) {
+          if (have.has(entry.message.id) || gone.has(entry.message.id)) continue;
+          latest.push(entry);
+          have.add(entry.message.id);
+          newCount++;
+        }
+        if (newCount) {
+          latest.sort((a, b) => new Date(b.message.sentAt) - new Date(a.message.sentAt));
+          await saveMail(identity.publicKey, latest);
+        }
+      }
+      if (incomingChat.length) {
+        const latest = await getChatMessages(identity.publicKey);
+        const have = new Set(latest.map((e) => e.id));
+        const gone = new Set(await getDeletedChatIds(identity.publicKey));
+        let added = false;
+        for (const entry of incomingChat) {
+          if (have.has(entry.id) || gone.has(entry.id)) continue;
+          latest.push(entry);
+          have.add(entry.id);
+          added = true;
+        }
+        if (added) {
+          latest.sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
+          await saveChatMessages(identity.publicKey, latest);
+        }
+      }
+    });
     const settings = await getMailSettings();
     settings.lastCheckedAt = new Date().toISOString();
     await chrome.storage.local.set({ atlasMailSettings: settings });

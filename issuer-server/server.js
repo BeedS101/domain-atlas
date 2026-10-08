@@ -3226,6 +3226,16 @@ function findMemberByHandle(doc, handle) {
   return doc.members.find((m) => m.handle && m.handle.toLowerCase() === target && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
 }
 
+// The member currently holding a handle for the purpose of claiming it. A
+// suspended member still holds theirs, since suspension is lifted by the
+// operator and two members must not end up sharing a name when it is; only
+// a revoked membership releases its handle. Resolving a handle for delivery
+// stays live-only (findMemberByHandle).
+function findHandleHolder(doc, handle) {
+  const target = handle.toLowerCase();
+  return doc.members.find((m) => m.handle && m.handle.toLowerCase() === target && !isRevoked(m.credentialId));
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -8017,7 +8027,7 @@ async function main() {
         });
       }
 
-      // Task #94 (handle addressing): lets a member claim, change, or
+      // Handle addressing: lets a member claim, change, or
       // clear their own handle at this domain — self-signed the same way
       // as mailmode/block/unblock above, so a caller can only ever touch
       // their own membership. payload.handle is either a string to claim
@@ -8025,7 +8035,7 @@ async function main() {
       // empty string/null to release whatever handle this member currently
       // holds. Re-submitting your OWN current handle is a no-op success,
       // not a "taken" conflict — the uniqueness check below excludes the
-      // caller's own live entry from the collision search.
+      // caller's own entry from the collision search (findHandleHolder).
       if (req.method === 'POST' && req.url === '/atlas/postoffice/handle') {
         const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
         if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
@@ -8043,7 +8053,7 @@ async function main() {
 
         if (!wantsClear) {
           const doc = readPostOfficeMembers();
-          const existing = findMemberByHandle(doc, payload.handle);
+          const existing = findHandleHolder(doc, payload.handle);
           if (existing && existing.ownerPublicKey !== proof.publicKey) {
             return sendJson(res, 400, { error: 'that handle is already taken at this Post Office — try another' });
           }

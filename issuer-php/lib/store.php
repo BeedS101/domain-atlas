@@ -3771,6 +3771,49 @@ function update_postoffice_member($ownerPublicKey, callable $mutate) {
   return $found;
 }
 
+// Claims a handle for the caller's live membership. The "is it taken" check
+// and the write happen under one exclusive lock, so two members claiming
+// the same name at once cannot both succeed. A suspended member still holds
+// their handle (the operator can lift the suspension, and two members must
+// not share a name then); only a revoked membership releases it.
+// Returns ['ok' => true, 'member' => ...], ['error' => 'taken'] or
+// ['error' => 'not-a-member'].
+function claim_postoffice_handle($ownerPublicKey, $handle) {
+  $file = atlas_postoffice_members_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return ['error' => 'not-a-member'];
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+
+  $target = strtolower($handle);
+  $own = null;
+  foreach ($doc['members'] as $i => $m) {
+    if (!empty($m['handle']) && strtolower($m['handle']) === $target && !is_revoked($m['credentialId']) && ($m['ownerPublicKey'] ?? null) !== $ownerPublicKey) {
+      flock($fh, LOCK_UN);
+      fclose($fh);
+      return ['error' => 'taken'];
+    }
+    if ($own === null && ($m['ownerPublicKey'] ?? null) === $ownerPublicKey && !is_revoked($m['credentialId']) && !is_suspended($m['credentialId'])) {
+      $own = $i;
+    }
+  }
+  if ($own === null) {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return ['error' => 'not-a-member'];
+  }
+  $doc['members'][$own]['handle'] = $handle;
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['ok' => true, 'member' => $doc['members'][$own]];
+}
+
 // Task #94 (handle addressing, the last remaining Post Office piece —
 // "hide the raw public key from users", per direct instruction): a member
 // can register a short handle at a domain's Post Office instead of handing
