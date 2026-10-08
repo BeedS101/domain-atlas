@@ -21,9 +21,11 @@
 //      against itself.
 //   2. Opening the overlay and landing at Plaza sets the REAL host-page tab
 //      title to "localhost:8001: Example Plaza".
-//   3. Walking Plaza -> Arena updates the title to
-//      "localhost:8001: Example Arena" — proves every world-entry landing
-//      re-sends the message, not just the very first one.
+//   3. Walking Plaza -> Museum updates the title to
+//      "localhost:8001: Example Museum" — proves every world-entry landing
+//      re-sends the message, not just the very first one. (The Museum
+//      rather than the Arena: the Arena requires an identity, which this
+//      test never creates.)
 //   4. Closing the overlay restores the host page's title to exactly what
 //      it was before the overlay was ever opened ("Domain Atlas Alpha
 //      Node" — the page's own <title>, unrelated to the world names above).
@@ -93,11 +95,11 @@ async function waitForPortal(frame, predicate, description, timeoutMs = 8000) {
     await page.waitForFunction((expected) => document.title === expected, 'localhost:8001: Example Plaza', { timeout: 5000 });
     console.log('PASS: host page tab title is now "' + (await page.title()) + '"');
 
-    console.log('STEP 3: walking Plaza -> Arena updates the title again');
-    const toArena = await waitForPortal(frame, (p) => p.to === 'arena', 'the Arena portal from Plaza');
-    await frame.locator('#scene').click({ position: { x: toArena.sx, y: toArena.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
-    await page.waitForFunction((expected) => document.title === expected, 'localhost:8001: Example Arena', { timeout: 5000 });
+    console.log('STEP 3: walking Plaza -> Museum updates the title again');
+    const toMuseum = await waitForPortal(frame, (p) => p.to === 'museum', 'the Museum portal from Plaza');
+    await frame.locator('#scene').click({ position: { x: toMuseum.sx, y: toMuseum.sy } });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Museum'), null, { timeout: 10000 });
+    await page.waitForFunction((expected) => document.title === expected, 'localhost:8001: Example Museum', { timeout: 5000 });
     console.log('PASS: host page tab title updated to "' + (await page.title()) + '" on a same-domain world switch');
 
     console.log('STEP 4: closing the overlay restores the host page\'s ORIGINAL title exactly');

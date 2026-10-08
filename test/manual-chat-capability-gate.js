@@ -183,6 +183,21 @@ async function setDefaultTabPreference(frame, value) {
   await frame.waitForFunction(() => document.getElementById('chatSettingsPopover').hidden, null, { timeout: 5000 });
 }
 
+// The Market requires an identity (policy.identityRequired), so a visitor
+// has to exist before STEP 2 can walk into it.
+async function createIdentity(frame, password) {
+  await frame.locator('#walletBtn').click();
+  await frame.locator('#chooseNewBtn').click();
+  await frame.locator('#newPasswordInput').fill(password);
+  await frame.locator('#newPasswordConfirmInput').fill(password);
+  await frame.locator('#confirmCreateBtn').click();
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
+  await frame.locator('#seedConfirmCheck').check();
+  await frame.locator('#seedConfirmBtn').click();
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
+  await frame.locator('#walletBtn').click();
+}
+
 (async () => {
   const userDataDir = path.resolve(__dirname, '.chrome-profile-chat-gate');
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -199,6 +214,7 @@ async function setDefaultTabPreference(frame, value) {
     const frame = await frameHandle.contentFrame();
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await waitForActiveChatTab(frame, 'world:plaza'); // initial page load — same async-settle race as every later world entry
+    await createIdentity(frame, 'chat-gate-test-password');
 
     console.log('STEP 1: Plaza (own flag + domain-wide flag) — widget shows, 3 tabs [Domain, Example Plaza, Example Arena], "Example Plaza" is current+active');
     if (!(await chatWidgetVisible(frame))) throw new Error('Expected chat widget visible at Plaza');

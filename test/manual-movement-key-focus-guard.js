@@ -120,7 +120,10 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.keyboard.down('KeyW'); // start holding — do NOT release yet
     await page.waitForTimeout(150);
     const posMidHold = await readPos();
-    await frame.locator('#chatTextInput').click(); // focus change while W is still physically "held" from Playwright's perspective
+    // Focused with .focus() rather than a click: holding W walks the camera
+    // up to the Lobby's crate, whose item previewer then opens over the chat
+    // input and would intercept the click. focusin fires the same either way.
+    await frame.evaluate(() => document.getElementById('chatTextInput').focus()); // focus change while W is still physically "held" from Playwright's perspective
     await frame.waitForFunction(() => document.activeElement && document.activeElement.id === 'chatTextInput', null, { timeout: 2000 });
     const posRightAfterFocus = await readPos();
     await page.waitForTimeout(250); // if the key were still stuck "on", the character would keep sliding during this window

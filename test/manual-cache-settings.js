@@ -6,9 +6,15 @@
 // manual-*.js scripts.
 
 const { chromium } = require('playwright');
+const fs = require('fs');
 const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+// The Lobby's unique model count, read from its scene so this stays right when
+// a model is added or removed.
+const LOBBY_MODEL_COUNT = new Set(
+  JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'demo-domain-a', 'spatial', 'lobby', 'scene.json'), 'utf8')).objects.map((o) => o.model)
+).size;
 
 async function projectPortals(frame) {
   return frame.evaluate(() => {
@@ -64,7 +70,7 @@ async function openCacheCategory(frame) {
     const toLobby = portals.find((p) => p.to === 'lobby');
     await frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
-    await page.waitForTimeout(4000); // let all 19 GLBs finish downloading + caching
+    await page.waitForTimeout(4000); // let all the GLBs finish downloading + caching
     console.log('PASS: entered the Lobby, assets should now be cached');
 
     console.log('STEP 1: opening Settings -> Cache shows a real total and one site (localhost:8001)');
@@ -87,10 +93,10 @@ async function openCacheCategory(frame) {
     const siteCards = frame.locator('#cacheSitesList .info-card');
     if (await siteCards.count() !== 1) throw new Error('Expected exactly one site card');
     const siteMeta = await siteCards.first().locator('.meta').textContent();
-    if (!siteMeta.includes('19 files')) throw new Error('Expected 19 cached files for localhost:8001, got: ' + siteMeta);
+    if (!siteMeta.includes(LOBBY_MODEL_COUNT + ' files')) throw new Error('Expected ' + LOBBY_MODEL_COUNT + ' cached files for localhost:8001, got: ' + siteMeta);
     console.log('PASS: Cache category shows a real total and the right per-site breakdown ->', siteMeta);
 
-    console.log('STEP 2: exporting the cache — should download a real file with 19 entries');
+    console.log('STEP 2: exporting the cache — should download a real file with one entry per Lobby model');
     const downloadPromise = page.waitForEvent('download');
     await frame.locator('#exportCacheBtn').click();
     const download = await downloadPromise;
@@ -99,9 +105,9 @@ async function openCacheCategory(frame) {
     const fs = require('fs');
     const exported = JSON.parse(fs.readFileSync(exportPath, 'utf8'));
     if (exported.format !== 'domain-atlas-asset-cache/1.0') throw new Error('Unexpected export format: ' + exported.format);
-    if (exported.entries.length !== 19) throw new Error('Expected 19 exported entries, got: ' + exported.entries.length);
+    if (exported.entries.length !== LOBBY_MODEL_COUNT) throw new Error('Expected ' + LOBBY_MODEL_COUNT + ' exported entries, got: ' + exported.entries.length);
     if (!exported.entries.every((e) => e.url && e.lastModified && e.bytesBase64)) throw new Error('Some exported entry is missing url/lastModified/bytesBase64');
-    console.log('PASS: exported a real file — 19 entries, each with url/lastModified/bytesBase64');
+    console.log('PASS: exported a real file — ' + LOBBY_MODEL_COUNT + ' entries, each with url/lastModified/bytesBase64');
 
     console.log('STEP 3: clearing localhost:8001\'s cache — site disappears, total goes to zero');
     page.once('dialog', (d) => d.accept());
@@ -109,14 +115,14 @@ async function openCacheCategory(frame) {
     await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent === 'Nothing cached yet.', null, { timeout: 5000 });
     console.log('PASS: cache cleared for that site, total line confirms nothing left');
 
-    console.log('STEP 4: importing the previously exported file — 19 entries restored');
+    console.log('STEP 4: importing the previously exported file — every entry restored');
     await frame.locator('#importCacheBtn').click();
     await frame.locator('#importCacheFileInput').setInputFiles(exportPath);
-    await frame.waitForFunction(() => document.getElementById('importCacheStatus').textContent.includes('19 cached file(s) imported'), null, { timeout: 5000 });
+    await frame.waitForFunction((n) => document.getElementById('importCacheStatus').textContent.includes(n + ' cached file(s) imported'), LOBBY_MODEL_COUNT, { timeout: 5000 });
     await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent.includes('1 site'), null, { timeout: 5000 });
     const restoredMeta = await frame.locator('#cacheSitesList .info-card').first().locator('.meta').textContent();
-    if (!restoredMeta.includes('19 files')) throw new Error('Expected 19 files restored after import, got: ' + restoredMeta);
-    console.log('PASS: import round-tripped correctly — same site, same 19 files ->', restoredMeta);
+    if (!restoredMeta.includes(LOBBY_MODEL_COUNT + ' files')) throw new Error('Expected ' + LOBBY_MODEL_COUNT + ' files restored after import, got: ' + restoredMeta);
+    console.log('PASS: import round-tripped correctly — same site, same ' + LOBBY_MODEL_COUNT + ' files ->', restoredMeta);
 
     fs.unlinkSync(exportPath);
 

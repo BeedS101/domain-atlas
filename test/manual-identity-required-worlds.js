@@ -166,10 +166,10 @@ async function projectInteractables(frame) {
     // window.__atlasScene's contents — projectPortals()'s own wait only
     // checks .length truthy, which Arena's leftover single-portal scene
     // object can still satisfy for a moment after "Example Plaza" already
-    // shows. Plaza's own scene.json declares exactly 5 portalMarkers, so
+    // shows. Plaza's own scene.json declares exactly 6 portalMarkers, so
     // waiting for that exact count is a cheap, specific way to know the
     // NEW scene has actually landed before trusting its portal data.
-    await frame.waitForFunction(() => window.__atlasScene && window.__atlasScene.portalMarkers.length === 5, null, { timeout: 10000 });
+    await frame.waitForFunction(() => window.__atlasScene && window.__atlasScene.portalMarkers.length === 6, null, { timeout: 10000 });
     portals = await projectPortals(frame);
     const toMarket = portals.find((p) => p.to === 'market');
     if (!toMarket) throw new Error('Expected a portal to Market from the Plaza');

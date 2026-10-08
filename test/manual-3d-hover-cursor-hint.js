@@ -158,15 +158,19 @@ function pixelForAngle(canvasBox, aspect, angleRad) {
     if (promptWhileFarHover !== null) throw new Error('Expected no E-press prompt while merely hovering from far away, got: ' + JSON.stringify(promptWhileFarHover));
     console.log('PASS: cursor became a pointer at long range, and the E-prompt/Previewer stayed completely untouched — hover is purely a cursor hint, exactly as specced');
 
-    console.log('STEP 2: an earlier version lit the cursor up well before the mouse was actually over the object, because the raw walk-up radius (1.7 for this crate) was reused as-is for the hover sphere. Standing closer (so the angular math is comfortable) and looking at the crate dead-on, a mouse position 12deg off-center sits OUTSIDE the tightened hover radius (~5.8deg angular footprint after the shrink) but would have been comfortably INSIDE the old raw radius\'s ~20deg footprint — the cursor should stay put, not go pointer');
+    console.log('STEP 2: an earlier version lit the cursor up well before the mouse was actually over the object, because the raw walk-up radius (1.7 for this crate) was reused as-is for the hover sphere. Standing closer (so the angular math is comfortable) and looking at the crate dead-on, a mouse position 9deg to the LEFT of center sits OUTSIDE the tightened hover radius (~6deg angular footprint after the shrink) but would have been comfortably INSIDE the old raw radius\'s ~20deg footprint — the cursor should stay put, not go pointer');
     await aimAt(frame, NEAR_STAND.x, NEAR_STAND.z, CRATE.position);
     await frame.waitForTimeout(100);
     const aspect = await frame.evaluate(() => { const c = document.getElementById('scene3d'); return c.width / c.height; });
-    const offCenterPos = pixelForAngle(canvasBox, aspect, 12 * Math.PI / 180);
+    // The offset goes to the left because the Lobby's other crates sit on
+    // the right of this line of sight (z = -1.5 and -2.0 as seen from
+    // NEAR_STAND) and the left side is empty between roughly -7deg and -12deg,
+    // so a miss here can only come from the crate under test.
+    const offCenterPos = pixelForAngle(canvasBox, aspect, -9 * Math.PI / 180);
     await frame.locator('#scene3d').hover({ position: offCenterPos });
     await frame.waitForTimeout(150); // no waitForFunction target here — proving a NEGATIVE (cursor never becomes pointer), so give it a beat and check once
     const cursorAtModerateOffset = await cursorStyle(frame);
-    if (cursorAtModerateOffset === 'pointer') throw new Error('Expected the cursor to stay off the crate at a 12deg offset (outside the tightened hover radius) — got pointer, meaning the hit sphere is still too wide');
+    if (cursorAtModerateOffset === 'pointer') throw new Error('Expected the cursor to stay off the crate at a 9deg offset (outside the tightened hover radius) — got pointer, meaning the hit sphere is still too wide');
     console.log('PASS: at a moderate offset that used to fall inside the old wide radius, the cursor no longer lights up — the hint now tracks the object much more closely');
 
     console.log('STEP 3: back to dead-center from the same near stand point — should still hit (sanity check that STEP 2\'s miss is about the offset, not the closer distance)');

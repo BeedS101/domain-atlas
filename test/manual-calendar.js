@@ -509,7 +509,11 @@ async function deleteAllCalendarEvents(page, frame) {
     let sawDecToJan = false;
     let sawFeb = false;
     for (let step = 0; step < 14; step++) {
+      const labelBefore = (await gridInfo(frame)).label;
       await frame.locator('#calendarPrevMonthBtn').click();
+      // The handler re-renders after an async wallet read, so wait for the
+      // label to change rather than sampling it straight after the click.
+      await frame.waitForFunction((before) => document.getElementById('calendarMonthLabel').textContent !== before, labelBefore, { timeout: 5000 });
       const info = await gridInfo(frame);
       const parsed = parseLabel(info.label);
       const stepsBack = (prevParsed.year * 12 + prevParsed.month) - (parsed.year * 12 + parsed.month);
@@ -532,6 +536,7 @@ async function deleteAllCalendarEvents(page, frame) {
     for (let step = 0; step < 14; step++) {
       await frame.locator('#calendarNextMonthBtn').click();
     }
+    await frame.waitForFunction((expected) => document.getElementById('calendarMonthLabel').textContent === expected, expectedLabel, { timeout: 5000 }).catch(() => {});
     const backToLabel = (await gridInfo(frame)).label;
     if (backToLabel !== expectedLabel) throw new Error('Expected 14 › clicks to undo the 14 ‹ clicks and land back on ' + expectedLabel + ', got ' + backToLabel);
     console.log('PASS: › undid ‹ exactly, back on ' + expectedLabel);

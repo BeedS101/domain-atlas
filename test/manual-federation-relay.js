@@ -60,6 +60,11 @@ const path = require('path');
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const DOMAIN_A = 'localhost:8001';
 const DOMAIN_B = 'localhost:8002';
+// Handles are unique per domain and persist in the issuer's state between
+// runs, so each run registers its own.
+const RUN_SUFFIX = Date.now().toString(36).slice(-5);
+const HANDLE_ALICE = 'alice' + RUN_SUFFIX;
+const HANDLE_BOB = 'bob' + RUN_SUFFIX;
 const MAIL_STORE_B_PATH = path.resolve(__dirname, '..', 'issuer-server', 'domain-b-state', 'atlas-mail-store.json');
 const BLOCKLIST_B_PATH = path.resolve(__dirname, '..', 'issuer-server', 'domain-b-state', 'atlas-federation-blocklist.json');
 
@@ -122,12 +127,12 @@ async function createIdentity(frame, password) {
     const pkBob = await createIdentity(bob.frame, 'federation-test-password-bob');
     await alice.frame.evaluate((domain) => AtlasWallet.mintAsset('self', domain, 'atlas.postoffice.membership'), DOMAIN_A);
     await bob.frame.evaluate((domain) => AtlasWallet.mintAsset('self', domain, 'atlas.postoffice.membership'), DOMAIN_B);
-    await alice.frame.evaluate((domain) => AtlasWallet.setPostOfficeHandle(domain, 'alice'), DOMAIN_A);
-    await bob.frame.evaluate((domain) => AtlasWallet.setPostOfficeHandle(domain, 'bob'), DOMAIN_B);
+    await alice.frame.evaluate((a) => AtlasWallet.setPostOfficeHandle(a.domain, a.handle), { domain: DOMAIN_A, handle: HANDLE_ALICE });
+    await bob.frame.evaluate((a) => AtlasWallet.setPostOfficeHandle(a.domain, a.handle), { domain: DOMAIN_B, handle: HANDLE_BOB });
     console.log('PASS: Alice is a member only at ' + DOMAIN_A + ' (handle alice), Bob only at ' + DOMAIN_B + ' (handle bob)');
 
     console.log('STEP 1: Alice resolves bob#localhost:8002 and sends through HER OWN home domain, addressed to Bob\'s home domain');
-    const resolved = await alice.frame.evaluate((domain) => AtlasWallet.resolvePostOfficeHandle(domain, 'bob'), DOMAIN_B);
+    const resolved = await alice.frame.evaluate((a) => AtlasWallet.resolvePostOfficeHandle(a.domain, a.handle), { domain: DOMAIN_B, handle: HANDLE_BOB });
     if (resolved.publicKey !== pkBob) throw new Error('Resolved the wrong public key for bob#' + DOMAIN_B);
     let beforeCount = readServerMailStoreB().length;
     const sendResult = await alice.frame.evaluate(
@@ -140,9 +145,18 @@ async function createIdentity(frame, password) {
     console.log('STEP 2: Domain B\'s OWN on-disk mail store shows from.homeDomain as Alice\'s REAL home domain, not Domain B mislabeling its own delivery');
     const raw = await newestServerMessageB(beforeCount);
     if (raw.from.publicKey !== pkAlice) throw new Error('Expected from.publicKey to be Alice\'s real key, got: ' + raw.from.publicKey);
-    if (raw.from.handle !== 'alice') throw new Error('Expected from.handle "alice" (registered at her home domain), got: ' + raw.from.handle);
+    if (raw.from.handle !== HANDLE_ALICE) throw new Error('Expected from.handle "' + HANDLE_ALICE + '" (registered at her home domain), got: ' + raw.from.handle);
     if (raw.from.homeDomain !== DOMAIN_A) throw new Error('Expected from.homeDomain to be ' + DOMAIN_A + ' (Alice\'s real home), got: ' + raw.from.homeDomain);
-    if (raw.body !== 'This message was relayed from localhost:8001 to localhost:8002.') throw new Error('Body did not survive the relay unchanged: ' + raw.body);
+    // wallet.js wraps ordinary mail in an envelope. This is Alice's first
+    // message to Bob, so no shared key exists yet: it carries her key
+    // announcement and the text unencrypted. The relay must hand it over
+    // exactly as the sender's domain returned it.
+    if (raw.body !== sendResult.body) throw new Error('Body did not survive the relay unchanged: ' + raw.body);
+    const envelope = JSON.parse(raw.body);
+    const inner = envelope && envelope.plaintext ? JSON.parse(envelope.plaintext) : null;
+    if (!envelope || envelope.v !== 1 || !inner || inner.body !== 'This message was relayed from localhost:8001 to localhost:8002.') {
+      throw new Error('Expected the first-contact envelope to carry the original text, got: ' + raw.body);
+    }
     console.log('PASS: Domain B\'s own stored copy correctly attributes the message to alice#' + DOMAIN_A);
 
     console.log('STEP 3: Bob\'s ordinary mail check picks it up, and the Mail tab actually RENDERS "alice#localhost:8001" (the homeDomain display fix)');
@@ -152,10 +166,10 @@ async function createIdentity(frame, password) {
     await bob.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await bob.frame.waitForFunction(() => document.getElementById('mailList').textContent.includes('Cross-domain hello'), null, { timeout: 10000 });
     const mailListText = await bob.frame.locator('#mailList').textContent();
-    if (!mailListText.includes('alice#' + DOMAIN_A)) {
+    if (!mailListText.includes(HANDLE_ALICE + '#' + DOMAIN_A)) {
       throw new Error('REGRESSION: expected the Mail tab to show "alice#' + DOMAIN_A + '", got: ' + mailListText);
     }
-    if (mailListText.includes('alice#' + DOMAIN_B)) {
+    if (mailListText.includes(HANDLE_ALICE + '#' + DOMAIN_B)) {
       throw new Error('REGRESSION: Mail tab misattributed the relayed sender to Domain B (its own delivery domain) instead of Alice\'s real home');
     }
     console.log('PASS: Bob sees the message, correctly attributed to alice#' + DOMAIN_A + ', not misattributed to ' + DOMAIN_B);

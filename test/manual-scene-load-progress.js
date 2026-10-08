@@ -1,6 +1,6 @@
 // Manual check for the scene asset download progress bar (#36) — shown
 // while a gltf-mini-v1 world's GLB models are downloading, so a scene with
-// many assets (the Lobby has 19 unique models across 20 placements — see
+// many assets (the Lobby has 20 unique models across 28 placements — see
 // demo-domain-a/spatial/lobby/scene.json) gives real feedback instead of a
 // blank canvas with only the top bar's "Fetching scene…" text to go on.
 //
@@ -8,14 +8,14 @@
 // interception) so the load is slow enough to actually observe
 // intermediate progress instead of it completing before the first poll —
 // on a real deployment (or even this repo's own localhost demo without the
-// delay) 19 small models load fast enough that the bar might only ever be
+// delay) 20 small models load fast enough that the bar might only ever be
 // visible for a moment, which is exactly the case this test needs to slow
 // down to check at all.
 //
 // Checks:
 //   1. Before entering a 3D world, the progress overlay is not showing.
 //   2. While the Lobby's models are loading (artificially slowed), the
-//      overlay becomes visible, reports the correct total (19 — the
+//      overlay becomes visible, reports the correct total (the Lobby's unique model count — the
 //      Lobby's UNIQUE model count, not the 20 placed objects), and the
 //      loaded count advances (strictly increases) over several samples
 //      rather than jumping straight to done or sitting frozen.
@@ -38,9 +38,13 @@
 // manual-*.js scripts.
 
 const { chromium } = require('playwright');
+const fs = require('fs');
 const path = require('path');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+const LOBBY_MODEL_COUNT = new Set(
+  JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'demo-domain-a', 'spatial', 'lobby', 'scene.json'), 'utf8')).objects.map((o) => o.model)
+).size;
 
 async function projectPortals(frame) {
   return frame.evaluate(() => {
@@ -82,7 +86,7 @@ function readProgress(frame) {
 
   try {
     const page = await context.newPage();
-    // Delay every model fetch so 19 small local files don't all resolve
+    // Delay every model fetch so ~20 small local files don't all resolve
     // before the test gets a chance to poll — see the file header comment.
     await page.route('**/*.glb', async (route) => {
       await new Promise((r) => setTimeout(r, 120));
@@ -100,7 +104,7 @@ function readProgress(frame) {
     if (before.active) throw new Error('Expected the progress overlay to be inactive before entering any 3D world, got: ' + JSON.stringify(before));
     console.log('PASS: overlay inactive at Example Plaza (a 2D world, no GLBs to load anyway)');
 
-    console.log('STEP 2: entering the Lobby — the overlay shows real, advancing progress toward 19 unique models');
+    console.log('STEP 2: entering the Lobby — the overlay shows real, advancing progress toward ' + LOBBY_MODEL_COUNT + ' unique models');
     const portals = await projectPortals(frame);
     const toLobby = portals.find((p) => p.to === 'lobby');
     const clickPromise = frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
@@ -118,8 +122,8 @@ function readProgress(frame) {
 
     if (samples.length === 0) throw new Error('Never observed the progress overlay active while the Lobby was loading — expected several samples');
     const totals = new Set(samples.map((s) => s.total));
-    if (totals.size !== 1 || !totals.has(19)) throw new Error('Expected every sample to report a total of 19 (the Lobby\'s unique model count), got totals: ' + JSON.stringify(Array.from(totals)));
-    console.log('PASS: overlay active with total=19 across ' + samples.length + ' samples');
+    if (totals.size !== 1 || !totals.has(LOBBY_MODEL_COUNT)) throw new Error('Expected every sample to report a total of ' + LOBBY_MODEL_COUNT + ' (the Lobby\'s unique model count), got totals: ' + JSON.stringify(Array.from(totals)));
+    console.log('PASS: overlay active with total=' + LOBBY_MODEL_COUNT + ' across ' + samples.length + ' samples');
 
     let sawIncrease = false;
     for (let i = 1; i < samples.length; i++) {
@@ -127,7 +131,7 @@ function readProgress(frame) {
       if (samples[i].loaded < samples[i - 1].loaded) throw new Error('Progress went BACKWARDS between samples: ' + JSON.stringify(samples[i - 1]) + ' -> ' + JSON.stringify(samples[i]));
     }
     if (!sawIncrease) throw new Error('Expected the loaded count to advance across samples, but it never increased: ' + JSON.stringify(samples));
-    console.log('PASS: loaded count advanced monotonically (0 -> ' + samples[samples.length - 1].loaded + ' of 19), never went backwards');
+    console.log('PASS: loaded count advanced monotonically (0 -> ' + samples[samples.length - 1].loaded + ' of ' + LOBBY_MODEL_COUNT + '), never went backwards');
 
     console.log('STEP 3: loading finished — the overlay hides itself once active3D.ready resolves');
     await frame.evaluate(() => window.__atlasActive3D.ready);

@@ -158,6 +158,12 @@ async function openMailBoxComposeSubtab(frame) {
   if (!alreadyOpen) await frame.locator('#mailBoxComposeSubtabBtn').click();
 }
 
+// Handles are unique per domain and persist in the issuer's state between
+// runs, so each run uses its own.
+const RUN_SUFFIX = Date.now().toString(36).slice(-5);
+const BOB = 'bob' + RUN_SUFFIX;
+const ALICE = 'alice' + RUN_SUFFIX;
+
 (async () => {
   const dirA = path.resolve(__dirname, '.chrome-profile-postoffice-handle-a');
   const dirB = path.resolve(__dirname, '.chrome-profile-postoffice-handle-b');
@@ -181,11 +187,11 @@ async function openMailBoxComposeSubtab(frame) {
     await openMailSettingsSubtab(b.frame);
     await b.frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
     await b.frame.waitForFunction(() => document.getElementById('postOfficeYourHandleDisplay').textContent.includes('No handle set'), null, { timeout: 5000 });
-    await b.frame.locator('#postOfficeHandleInput').fill('bob');
+    await b.frame.locator('#postOfficeHandleInput').fill(BOB);
     await b.frame.locator('#postOfficeSaveHandleBtn').click();
     await b.frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), null, { timeout: 5000 });
     const handleDisplay = await b.frame.locator('#postOfficeYourHandleDisplay').textContent();
-    if (!handleDisplay.includes('bob#localhost:8002')) throw new Error('Expected the handle display to read "bob#localhost:8002", got: ' + handleDisplay);
+    if (!handleDisplay.includes(BOB + '#localhost:8002')) throw new Error('Expected the handle display to read ' + BOB + '#localhost:8002, got: ' + handleDisplay);
     console.log('PASS: B is now', handleDisplay);
 
     console.log('STEP 2: A sends to B using JUST the bare handle "bob" — no raw public key typed');
@@ -199,7 +205,7 @@ async function openMailBoxComposeSubtab(frame) {
     await a.frame.locator('#postOfficeToDomainInput').selectOption('localhost:8002');
     const rawKeyHiddenByDefault = await a.frame.evaluate(() => document.getElementById('postOfficeToPublicKeyInput').hidden);
     if (!rawKeyHiddenByDefault) throw new Error('Expected the raw-key field to be hidden by default (handle-first)');
-    await a.frame.locator('#postOfficeToHandleInput').fill('bob');
+    await a.frame.locator('#postOfficeToHandleInput').fill(BOB);
     await a.frame.locator('#postOfficeSubjectInput').fill('Hello via handle');
     await a.frame.locator('#postOfficeBodyInput').fill('sent using just "bob", no public key typed');
     await a.frame.locator('#postOfficeSendBtn').click();
@@ -218,18 +224,18 @@ async function openMailBoxComposeSubtab(frame) {
     if (card1Text.includes('#localhost:8002')) throw new Error('Did not expect a handle-style From line yet — A has not registered one: ' + card1Text);
     console.log('PASS: falls back to raw key correctly when the sender has no handle');
 
-    console.log('STEP 4: A registers "alice", then sends addressed as the FULL "bob#localhost:8002" string');
+    console.log('STEP 4: A registers "alice", then sends addressed as the FULL ' + BOB + '#localhost:8002 string');
     await openMailSettingsSubtab(a.frame);
     await a.frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
-    await a.frame.locator('#postOfficeHandleInput').fill('alice');
+    await a.frame.locator('#postOfficeHandleInput').fill(ALICE);
     await a.frame.locator('#postOfficeSaveHandleBtn').click();
     await a.frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), null, { timeout: 5000 });
     await openMailInboxSubtab(a.frame);
     await openMailBoxComposeSubtab(a.frame);
     await a.frame.locator('#postOfficeToDomainInput').selectOption(''); // clear the dropdown to prove the full address alone drives it
-    await a.frame.locator('#postOfficeToHandleInput').fill('bob#localhost:8002');
+    await a.frame.locator('#postOfficeToHandleInput').fill(BOB + '#localhost:8002');
     await a.frame.locator('#postOfficeSubjectInput').fill('Hello via full address');
-    await a.frame.locator('#postOfficeBodyInput').fill('sent using "bob#localhost:8002" in one field');
+    await a.frame.locator('#postOfficeBodyInput').fill('sent using ' + BOB + '#localhost:8002 in one field');
     await a.frame.locator('#postOfficeSendBtn').click();
     await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', null, { timeout: 10000 });
     const dropdownAfterParse = await a.frame.locator('#postOfficeToDomainInput').inputValue();
@@ -241,7 +247,7 @@ async function openMailBoxComposeSubtab(frame) {
     await b.frame.waitForFunction(() => [...document.querySelectorAll('#mailList .mail-card')].some((el) => el.textContent.includes('Hello via full address')), null, { timeout: 10000 });
     const card2 = b.frame.locator('#mailList .mail-card', { hasText: 'Hello via full address' });
     const card2Text = await card2.textContent();
-    if (!card2Text.includes('alice#localhost:8002')) throw new Error('Expected "From alice#localhost:8002", got: ' + card2Text);
+    if (!card2Text.includes(ALICE + '#localhost:8002')) throw new Error('Expected "From alice#localhost:8002", got: ' + card2Text);
     console.log('PASS: relaying domain auto-stamped the handle, client rendered it in place of the raw key');
 
     console.log('STEP 6: the "paste a raw public key instead" toggle still works');
