@@ -107,9 +107,25 @@ function process_email_ticket_forward($kp, $config, $parsed) {
     return ['outcome' => 'denied', 'reason' => 'more-than-one-cc'];
   }
 
+  // Only a credential this domain itself minted as an email ticket is
+  // forwardable (SPEC.md §13.3): it is listed in the bearer registry when
+  // it is minted. An ordinary wallet credential is a public claim anyone
+  // can copy, so a valid signature alone must never move it. Taking the
+  // entry also makes two forwards of one ticket mutually exclusive. No
+  // reply is sent: answering would tell a stranger which credential ids
+  // this domain has issued as tickets.
+  $taken = take_bearer($credential['id']);
+  if (!$taken) return ['outcome' => 'ignored', 'reason' => 'attached credential is not an email ticket'];
+
   $recipientEmail = $parsed['cc'][0];
-  $discardedOwnerKey = generate_discarded_owner_public_key();
-  $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $discardedOwnerKey, $credential);
+  try {
+    $discardedOwnerKey = generate_discarded_owner_public_key();
+    $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $discardedOwnerKey, $credential);
+  } catch (Exception $e) {
+    restore_bearer($credential['id'], $taken);
+    throw $e;
+  }
+  register_bearer($minted['id'], $taken['class'] ?? null);
 
   try {
     atlas_smtp_send_mail([
@@ -135,7 +151,9 @@ function process_email_ticket_forward($kp, $config, $parsed) {
       ]],
     ]);
   } catch (Exception $e) {
+    take_bearer($minted['id']);
     atlas_revoke($minted['id'], 'issuer-request');
+    restore_bearer($credential['id'], $taken);
     send_plain_reply($config, $parsed['from'], 'Could not forward your ticket',
       "The new holder's address could not be delivered to, so this forward did not go through. Your original ticket is unaffected.");
     return ['outcome' => 'failed', 'reason' => $e->getMessage()];
@@ -171,6 +189,7 @@ function process_inbound_bounce($kp, $config, $ticketId) {
 
   $discardedOwnerKey = generate_discarded_owner_public_key();
   $replacement = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $discardedOwnerKey, $pending['credential']);
+  register_bearer($replacement['id'], $replacement['asset']['class'] ?? null);
 
   try {
     atlas_smtp_send_mail([
@@ -199,6 +218,7 @@ function process_inbound_bounce($kp, $config, $ticketId) {
     // revoke back to ($pending['credential']'s own trail already ends
     // at $ticketId, revoked above), so this is logged by the caller's
     // summary rather than retried further.
+    take_bearer($replacement['id']);
     atlas_revoke($replacement['id'], 'issuer-request');
     return ['outcome' => 'failed', 'reason' => $e->getMessage()];
   }

@@ -59,6 +59,9 @@ if ($problem) send_json(400, ['error' => $problem]);
 
 $discardedOwnerKey = generate_discarded_owner_public_key();
 $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $discardedOwnerKey, $credential);
+// Listed as a bearer ticket from the moment it exists: the forward step
+// (lib/email-tickets.php) accepts only ids in this registry.
+register_bearer($minted['id'], $credential['asset']['class'] ?? null);
 
 try {
   atlas_smtp_send_mail([
@@ -84,6 +87,7 @@ try {
   // accepted leaves them exactly as they were. The fresh mint nobody will
   // ever hold is undone the same way any abandoned mint always is — never
   // a real transfer, so never 'email-transferred' below.
+  take_bearer($minted['id']);
   atlas_revoke($minted['id'], 'issuer-request');
   send_json(502, ['error' => 'could not deliver to ' . $recipientEmail . ': ' . $e->getMessage()]);
 }

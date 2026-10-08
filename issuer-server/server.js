@@ -4023,9 +4023,26 @@ async function main() {
       return { outcome: 'denied', reason: 'more-than-one-cc' };
     }
 
+    // Only a credential this domain itself minted as an email ticket is
+    // forwardable (SPEC.md §13.3): it is listed in the bearer registry when
+    // it is minted. An ordinary wallet credential is a public claim anyone
+    // can copy, so a valid signature alone must never move it. Taking the
+    // entry also makes two forwards of one ticket mutually exclusive. No
+    // reply is sent: answering would tell a stranger which credential ids
+    // this domain has issued as tickets.
+    const taken = takeBearer(credential.id);
+    if (!taken) return { outcome: 'ignored', reason: 'attached credential is not an email ticket' };
+
     const recipientEmail = parsed.cc[0];
-    const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
-    const minted = await transferUniqueAsset(discardedOwnerKey, credential);
+    let minted;
+    try {
+      const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
+      minted = await transferUniqueAsset(discardedOwnerKey, credential);
+    } catch (err) {
+      restoreBearer(credential.id, taken);
+      throw err;
+    }
+    registerBearer(minted.id, taken.class);
 
     try {
       await sendMail({
@@ -4051,7 +4068,9 @@ async function main() {
         }]
       });
     } catch (err) {
+      takeBearer(minted.id);
       revoke(minted.id, 'issuer-request');
+      restoreBearer(credential.id, taken);
       await sendPlainReply(parsed.from, 'Could not forward your ticket',
         'The new holder\'s address could not be delivered to, so this forward did not go through. Your original ticket is unaffected.');
       return { outcome: 'failed', reason: err.message };
@@ -4088,6 +4107,7 @@ async function main() {
 
     const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
     const replacement = await transferUniqueAsset(discardedOwnerKey, pending.credential);
+    registerBearer(replacement.id, replacement.asset && replacement.asset.class);
 
     try {
       await sendMail({
@@ -4118,6 +4138,7 @@ async function main() {
       // further. Same honest limit SPEC.md §13.3 already calls out for
       // silent spam-foldering: a mechanism built on bounces has nothing to
       // react to once nothing bounces back at all.
+      takeBearer(replacement.id);
       revoke(replacement.id, 'issuer-request');
       console.error('Bounce reissue to', pending.returnToAddress, 'also failed:', err.message);
       return { outcome: 'failed', reason: err.message };
@@ -6106,6 +6127,9 @@ async function main() {
 
         const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
         const minted = await transferUniqueAsset(discardedOwnerKey, credential);
+        // Listed as a bearer ticket from the moment it exists: §13.3's
+        // forward step accepts only ids in this registry.
+        registerBearer(minted.id, credential.asset && credential.asset.class);
 
         try {
           await sendMail({
@@ -6135,6 +6159,7 @@ async function main() {
           // the same way a mint anyone abandons always is (§5.7's own
           // "nothing else fits" bucket) — never a real transfer, so never
           // 'email-transferred' below.
+          takeBearer(minted.id);
           revoke(minted.id, 'issuer-request');
           console.error('Email-ticket send to', recipientEmail, 'failed, mint undone:', err.message);
           return sendJson(res, 502, { error: 'could not deliver to ' + recipientEmail + ': ' + err.message });

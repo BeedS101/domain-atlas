@@ -36,6 +36,9 @@
 //   8. A bounce arriving for a ticket already resolved some other way
 //      (forwarded on again successfully in the meantime) is a no-op too
 //      — its already-recorded status is left exactly as it was.
+//   9. An ordinary credential (never minted as an email ticket) emailed
+//      in with a CC is ignored: nothing sent, nothing revoked.
+//  10. A ticket reissued after a bounce forwards once; a replay is refused.
 //
 // Not part of the permanent suite, same reasoning as every other
 // manual-*.js script.
@@ -507,6 +510,39 @@ function startPhp(port, bundleDir) {
     const minted8StatusAfterBounce = await mailCheckStatus(PHP_BASE, minted8.id);
     assert(minted8StatusAfterBounce && minted8StatusAfterBounce.reason === 'email-transferred', 'expected the already-resolved ticket\'s status to stay exactly as it was, got: ' + JSON.stringify(minted8StatusAfterBounce));
     console.log('PASS: bounce for an already-resolved ticket left its recorded status untouched');
+
+    console.log('STEP 9: an ordinary credential (not minted as an email ticket) cannot be moved by emailing it in');
+    const ordinary = await issueAsset(PHP_BASE, owner.publicKey, 'atlas.demo.attestation.filing');
+    const sessionsBeforePoll9 = sessions.length;
+    mailbox.push({ raw: buildForwardMessage('thief@example.com', ['accomplice@example.com'], ordinary), seen: false });
+    const poll9 = await pollNow(PHP_BASE, admin);
+    assert(poll9.body.summary.ignored === 1 && !poll9.body.summary.transferred, 'expected the ordinary credential to be ignored, got: ' + JSON.stringify(poll9.body.summary));
+    assert(sessions.length === sessionsBeforePoll9, 'expected nothing to be sent for an ordinary credential, got ' + (sessions.length - sessionsBeforePoll9) + ' new SMTP session(s)');
+    const ordinaryStatus = await mailCheckStatus(PHP_BASE, ordinary.id);
+    assert(ordinaryStatus === null, 'expected the ordinary credential to be untouched, got: ' + JSON.stringify(ordinaryStatus));
+    console.log('PASS: ordinary credential ignored, nothing sent, nothing revoked');
+
+    console.log('STEP 10: a ticket reissued after a bounce can itself be forwarded, and only once');
+    const ticket10 = await issueAsset(PHP_BASE, owner.publicKey, 'atlas.demo.attestation.filing');
+    await transferToEmail(PHP_BASE, ticket10, owner.kp, owner.publicKey, 'holder14@example.com');
+    const credential10 = JSON.parse(parseMimeAttachment(sessions[sessions.length - 1].data, null));
+    mailbox.push({ raw: buildForwardMessage('holder14@example.com', ['holder15@example.com'], credential10), seen: false });
+    await pollNow(PHP_BASE, admin);
+    const minted10 = JSON.parse(parseMimeAttachment(sessions[sessions.length - 1].data, null));
+    mailbox.push({ raw: buildBounceMessage(minted10.id), seen: false });
+    const poll10b = await pollNow(PHP_BASE, admin);
+    assert(poll10b.body.summary.bounced === 1, 'expected the bounce to be reversed, got: ' + JSON.stringify(poll10b.body.summary));
+    const reissued10 = JSON.parse(parseMimeAttachment(sessions[sessions.length - 1].data, null));
+    mailbox.push({ raw: buildForwardMessage('holder14@example.com', ['holder16@example.com'], reissued10), seen: false });
+    const poll10c = await pollNow(PHP_BASE, admin);
+    assert(poll10c.body.summary.transferred === 1, 'expected the reissued ticket to forward, got: ' + JSON.stringify(poll10c.body.summary));
+    assert(sessions[sessions.length - 1].rcptTo[0] === '<holder16@example.com>', 'expected delivery to holder16, got: ' + sessions[sessions.length - 1].rcptTo[0]);
+    const sessionsBeforePoll10d = sessions.length;
+    mailbox.push({ raw: buildForwardMessage('holder14@example.com', ['holder17@example.com'], reissued10), seen: false });
+    const poll10d = await pollNow(PHP_BASE, admin);
+    assert(!poll10d.body.summary.transferred, 'expected a second forward of the same ticket not to transfer, got: ' + JSON.stringify(poll10d.body.summary));
+    assert(!sessions.slice(sessionsBeforePoll10d).some((x) => x.rcptTo.includes('<holder17@example.com>')), 'expected nothing delivered to holder17');
+    console.log('PASS: reissued ticket forwarded once; a replay was refused');
 
     console.log('\nALL EMAIL-TICKET FORWARD (PHP) CHECKS PASSED');
   } catch (err) {
