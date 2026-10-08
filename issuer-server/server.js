@@ -157,6 +157,7 @@ const BEARER_FILE = path.join(STATE_DIR, 'atlas-bearer-store.json');
 const FILE_EXPORTS_FILE = path.join(STATE_DIR, 'atlas-file-exports-store.json');
 // HMAC key for stateless recovery challenges. Created on first use.
 const RECOVERY_SECRET_FILE = path.join(STATE_DIR, 'atlas-recovery-secret.json');
+const FILE_CLAIMS_FILE = path.join(STATE_DIR, 'atlas-file-claims-store.json');
 // Hard per-recipient mailbox cap — defense in depth against unbounded mail
 // storage, which applies equally to a local /atlas/postoffice/send and a
 // federated /atlas/postoffice/relay (readMail()/appendMail() never pruned
@@ -2049,9 +2050,9 @@ function restoreBearer(id, entry) {
   doc.bearers[id] = entry;
   writeBearers(doc);
 }
-// Credential ids with an export or claim currently in progress. Requests
-// for the same id are serialized by refusing the second outright rather
-// than queuing it.
+// Credential ids with an export currently in progress. A second request for
+// the same id is refused outright rather than queued. (Claims are serialized
+// by the per-credential spend lock instead.)
 const bearerInFlight = new Set();
 
 // ---------- file export records (SPEC.md §13.5.1) ----------
@@ -2179,8 +2180,13 @@ function reconcileFileExport(originalId) {
         else closeExport(doc, rec, 'revoked', fileRevoked.reason || 'revoked');
         return { outcome: rec.state, rec };
       }
-      // Listed means still claimable. Not listed and not revoked means a
-      // claim has taken the entry and has not finished.
+      // A committed claim that stopped before it finished is finished here.
+      if (fileClaimOf(readFileClaims(), rec.fileId)) {
+        finishFileClaim(rec.fileId, null);
+        return reconcileFileExport(originalId);
+      }
+      // Listed means still claimable. Not listed, not revoked and no claim
+      // record means a claim from before claim records has not finished.
       return { outcome: hasBearer(rec.fileId) ? 'pending' : 'in-progress', rec };
     }
     throw new Error('unknown export state ' + rec.state);
@@ -2197,6 +2203,97 @@ function noteFileClaimed(fileId, claimCredentialId) {
   const rec = Object.values(doc.exports).find((r) => r.fileId === fileId);
   if (!rec || FILE_EXPORT_TERMINAL.has(rec.state)) return;
   closeExport(doc, rec, 'claimed', 'file-claimed', { claimedAt: new Date().toISOString(), claimCredentialId });
+}
+
+// ---------- file claim records (SPEC.md §13.5.2) ----------
+// A claim takes the file out of the bearer registry, mints the claimer's new
+// credential and revokes the file; the new credential used to exist only in
+// the reply, so a stop after the registry entry was taken, or a lost reply,
+// left a file nobody could claim and a claimer with nothing. A claim now
+// commits first: after minting, and before the registry or the revocation
+// list is touched, a record holding the claimer's key and the minted
+// credential is written. That write is the reservation. Everything after it
+// (taking the registry entry, revoking the file) is repeatable, so any later
+// request for the file finishes it, and the claimer's own retry gets the same
+// credential back.
+//
+//   committed   record durable; the registry entry and revocation may or may
+//               not have been written yet
+//   claimed     file taken out of the registry and revoked; the minted
+//               credential is kept for replay until CLAIM_REPLAY_MS after the
+//               claim, then dropped and a compact receipt remains
+const CLAIM_REPLAY_MS = (Number(process.env.ATLAS_CLAIM_REPLAY_DAYS) || 30) * 24 * 60 * 60 * 1000;
+
+function readFileClaims() {
+  if (!fs.existsSync(FILE_CLAIMS_FILE)) return { version: 1, claims: {} };
+  const doc = JSON.parse(fs.readFileSync(FILE_CLAIMS_FILE, 'utf8'));
+  if (!doc.claims || Array.isArray(doc.claims)) doc.claims = {};
+  return doc;
+}
+function writeFileClaims(doc) {
+  const tmp = FILE_CLAIMS_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 2));
+  fs.renameSync(tmp, FILE_CLAIMS_FILE);
+}
+function fileClaimOf(doc, fileId) {
+  return Object.prototype.hasOwnProperty.call(doc.claims, fileId) ? doc.claims[fileId] : null;
+}
+function setClaimState(doc, rec, state) {
+  const at = new Date().toISOString();
+  rec.state = state;
+  rec.updatedAt = at;
+  rec.transitions.push({ state, at });
+  writeFileClaims(doc);
+}
+// Drops the stored credential from claims old enough that nobody is still
+// expected to ask for it again; the receipt stays.
+function compactFileClaims(doc) {
+  const now = Date.now();
+  let changed = false;
+  for (const rec of Object.values(doc.claims)) {
+    if (rec.state === 'claimed' && rec.minted && rec.claimedAt && now - Date.parse(rec.claimedAt) > CLAIM_REPLAY_MS) {
+      delete rec.minted;
+      changed = true;
+    }
+  }
+  if (changed) writeFileClaims(doc);
+}
+// The caller must have just checked, with no await since, that the file has
+// no claim record.
+function createFileClaim(file, minted, claimantPublicKey) {
+  const doc = readFileClaims();
+  compactFileClaims(doc);
+  const at = new Date().toISOString();
+  const rec = {
+    claimId: 'urn:atlas:file-claim:' + webcrypto.randomUUID(),
+    fileId: file.id, mintedId: minted.id, claimantPublicKey, class: file.asset && file.asset.class,
+    state: 'committed', createdAt: at, updatedAt: at, transitions: [{ state: 'committed', at }],
+    minted
+  };
+  doc.claims[file.id] = rec;
+  writeFileClaims(doc);
+  faultPoint('claim:committed');
+  return rec;
+}
+// Finishes a committed claim: takes the registry entry if it is still there,
+// revokes the file if it is not revoked yet, and marks the record claimed.
+// Repeatable from any point. `file` is only needed to archive the file the
+// first time.
+function finishFileClaim(fileId, file) {
+  const doc = readFileClaims();
+  const rec = fileClaimOf(doc, fileId);
+  if (!rec) return null;
+  if (rec.state === 'claimed') return rec;
+  takeBearer(fileId);
+  faultPoint('claim:bearer-taken');
+  if (!revocationEntryOf(fileId)) revoke(fileId, 'file-claimed');
+  faultPoint('claim:revoked');
+  if (file && !findArchivedAsset(fileId)) archiveIfAudited(file, 'file-claimed');
+  rec.claimedAt = (revocationEntryOf(fileId) || {}).revokedAt || new Date().toISOString();
+  setClaimState(doc, rec, 'claimed');
+  try { noteFileClaimed(fileId, rec.mintedId); } catch (err) { console.error('Could not write the export receipt:', err.message); }
+  faultPoint('claim:claimed');
+  return rec;
 }
 
 // Recovery challenges are stateless: an HMAC over the credential id, a random
@@ -6583,8 +6680,10 @@ async function main() {
       // with the key that should own the asset. The file's credential must
       // be listed in the bearer registry: anyone can copy any credential,
       // so being a valid credential signed by this domain is not enough.
-      // The registry entry is consumed before anything is minted, so
-      // simultaneous claims of one file have exactly one winner.
+      // The claim is committed (a record holding the claimer's key and the
+      // minted credential, SPEC.md §13.5.2) before the registry entry is
+      // consumed, so simultaneous claims have exactly one winner and a claim
+      // that stopped part-way is finished by the next request for the file.
       if (req.method === 'POST' && req.url === '/atlas/asset/claim-from-file') {
         const { credential, intent } = JSON.parse((await readBody(req)) || '{}');
         if (!credential || !intent) return sendJson(res, 400, { error: 'credential and intent are both required' });
@@ -6600,40 +6699,40 @@ async function main() {
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'this file was issued by another domain; claim it there', code: 'wrong-domain' });
         }
-        if (bearerInFlight.has(credential.id)) return sendJson(res, 409, { error: 'this file is already being claimed', code: 'already-claimed' });
-        bearerInFlight.add(credential.id);
-        let taken = null;
-        try {
+        {
           if (credential.credential !== 'domain-atlas-asset/1.0' || !credential.asset) return sendJson(res, 400, { error: 'not an asset credential', code: 'not-claimable' });
           const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
           if (!sigOk) return sendJson(res, 400, { error: 'asset signature does not check out', code: 'not-claimable' });
           { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
+
+          // A claim already committed for this file is finished first, whoever
+          // is asking. The key that committed it gets its credential again;
+          // any other key is told the file is claimed.
+          const earlier = fileClaimOf(readFileClaims(), credential.id);
+          if (earlier) {
+            const done = finishFileClaim(credential.id, credential);
+            if (done.claimantPublicKey === newOwner && done.minted) {
+              return sendJson(res, 200, { status: 'claimed', credential: done.minted });
+            }
+            const receipt = done.claimantPublicKey === newOwner ? { claimId: done.claimId, mintedId: done.mintedId, claimedAt: done.claimedAt } : undefined;
+            return sendJson(res, 409, { error: 'this file has already been claimed or withdrawn', code: 'already-claimed', ...(receipt ? { receipt } : {}) });
+          }
+
           if (isRevoked(credential.id)) return sendJson(res, 409, { error: 'this file has already been claimed or withdrawn', code: 'already-claimed' });
           if (isSuspended(credential.id)) return sendJson(res, 409, { error: 'this asset is currently suspended pending review', code: 'suspended' });
           if (isExpired(credential)) return sendJson(res, 400, { error: 'asset has expired', code: 'expired' });
           if (credential.asset.fungible !== false) return sendJson(res, 400, { error: 'only a unique item can be claimed from a file', code: 'not-claimable' });
           if (credential.asset.tradeScope === 'bound') return sendJson(res, 400, { error: 'asset is bound and cannot be claimed from a file', code: 'not-claimable' });
+          if (!hasBearer(credential.id)) return sendJson(res, 400, { error: 'this is not a transfer file issued by this domain', code: 'not-claimable' });
 
-          // The reservation: from here on no other claim can take this id.
-          taken = takeBearer(credential.id);
-          if (!taken) return sendJson(res, 400, { error: 'this is not a transfer file issued by this domain', code: 'not-claimable' });
-
-          let minted;
-          try {
-            minted = await transferUniqueAsset(newOwner, credential);
-          } catch (err) {
-            restoreBearer(credential.id, taken);
-            taken = null;
-            throw err;
-          }
-          taken = null;
-          revoke(credential.id, 'file-claimed');
-          archiveIfAudited(credential, 'file-claimed');
-          try { noteFileClaimed(credential.id, minted.id); } catch (err) { console.error('Could not write the export receipt:', err.message); }
+          // Nothing has been written yet, so a failed mint changes nothing.
+          // From the record write onwards the claim is committed.
+          const minted = await transferUniqueAsset(newOwner, credential);
+          faultPoint('claim:minted');
+          createFileClaim(credential, minted, newOwner);
+          finishFileClaim(credential.id, credential);
           console.log('Claimed', credential.asset.class, credential.id, '->', newOwner.slice(0, 16) + '...');
           return sendJson(res, 200, { status: 'claimed', credential: minted });
-        } finally {
-          bearerInFlight.delete(credential.id);
         }
       }
 
@@ -6646,7 +6745,8 @@ async function main() {
         if (!id) return sendJson(res, 400, { error: 'id is required' });
         const revokedEntry = readRevocations().revoked.find((r) => r.id === id);
         let state = 'unknown';
-        if (revokedEntry) state = revokedEntry.reason === 'file-claimed' ? 'claimed' : 'revoked';
+        if (fileClaimOf(readFileClaims(), id)) state = 'claimed';
+        else if (revokedEntry) state = revokedEntry.reason === 'file-claimed' ? 'claimed' : 'revoked';
         else if (hasBearer(id)) state = isSuspended(id) ? 'suspended' : 'claimable';
         return sendJson(res, 200, { id, state, claimable: state === 'claimable' });
       }

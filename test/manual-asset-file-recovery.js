@@ -457,7 +457,10 @@ function expiredChallengeFor(credentialId) {
       for (let i = 0; i < 3; i++) jobs.push(exportToFile(alice, ring).then((r) => ({ kind: 'export', r })));
       const out = await Promise.all(jobs);
       const wins = out.filter((o) => o.kind === 'claim' && o.r.status === 200);
-      assert(wins.length === 1, 'round ' + round + ': exactly one claim should win, got ' + wins.length);
+      // Two claims by the same key are the same claim, so they may both be
+      // answered, with the same credential; two different keys never both win.
+      assert(wins.length >= 1 && new Set(wins.map((o) => o.r.body.credential.id)).size === 1 && new Set(wins.map((o) => o.r.body.credential.owner.publicKey)).size === 1,
+        'round ' + round + ': claims should produce one credential for one claimant, got ' + wins.map((o) => o.r.body.credential.id + '@' + o.r.body.credential.owner.publicKey.slice(0, 6)).join(','));
       for (const o of out.filter((x) => x.kind === 'recover')) {
         assert(o.r.status === 200 || o.r.status === 409, 'round ' + round + ': unexpected recovery status ' + o.r.status);
         if (o.r.status === 200) assert(canonicalize(o.r.body.file) === canonicalize(file), 'round ' + round + ': a recovery returned a different file');
@@ -472,7 +475,7 @@ function expiredChallengeFor(credentialId) {
       assert(allFiles.length === 1, 'round ' + round + ': exactly one export record expected');
       assert(revocationOf(file.id) && revocationOf(file.id).reason === 'file-claimed', 'round ' + round + ': the file should be revoked as claimed');
     }
-    console.log('PASS: three rounds of 6 recoveries + 4 claims + 3 re-exports: one claim winner, one record, no second file');
+    console.log('PASS: three rounds of 6 recoveries + 4 claims + 3 re-exports: one claimant, one credential, one record, no second file');
 
     console.log('\nALL FILE EXPORT RECOVERY CHECKS PASSED (' + BACKEND + ')');
   } catch (err) {
