@@ -149,6 +149,13 @@ const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
 // ids a claim-from-file may consume. Server-process-only state next to the
 // mail store, never in the public docroot.
 const BEARER_FILE = path.join(STATE_DIR, 'atlas-bearer-store.json');
+// Durable record of every file export (SPEC.md §13.5.1): one entry per
+// exported credential, advanced through an explicit state machine so an
+// export interrupted at any step can be finished or abandoned safely, and a
+// compact receipt kept afterwards. Same state-folder reasoning as above.
+const FILE_EXPORTS_FILE = path.join(STATE_DIR, 'atlas-file-exports-store.json');
+// HMAC key for stateless recovery challenges. Created on first use.
+const RECOVERY_SECRET_FILE = path.join(STATE_DIR, 'atlas-recovery-secret.json');
 // Hard per-recipient mailbox cap — defense in depth against unbounded mail
 // storage, which applies equally to a local /atlas/postoffice/send and a
 // federated /atlas/postoffice/relay (readMail()/appendMail() never pruned
@@ -2032,6 +2039,194 @@ function restoreBearer(id, entry) {
 // for the same id are serialized by refusing the second outright rather
 // than queuing it.
 const bearerInFlight = new Set();
+
+// ---------- file export records (SPEC.md §13.5.1) ----------
+// An export is several separate writes (the export record, revoking the
+// owner's credential, listing the file in the bearer registry) and a process
+// can stop between any two of them. Each export therefore has a record with
+// an explicit state, and every step is written in an order that never leaves
+// the original and the file both spendable:
+//
+//   prepared          record durable; original still spendable; file NOT in
+//                     the registry, so not claimable
+//   original-revoked  original revoked; file not yet claimable (neither is
+//                     spendable)
+//   pending           file listed in the registry: claimable, original dead.
+//                     The file is released to its owner only from this state.
+//   claimed | abandoned | revoked   terminal; the file body is dropped and a
+//                     compact receipt kept
+//
+// reconcileFileExport() advances a record from whatever state it finds to the
+// furthest safe one; it is idempotent and runs both on the normal export path
+// and when the owner asks for recovery. Everything between reading and
+// writing it does is synchronous, so in this single-threaded server no other
+// request can interleave with a step.
+const FILE_EXPORT_TERMINAL = new Set(['claimed', 'abandoned', 'revoked']);
+const RECOVERY_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+
+function readFileExports() {
+  if (!fs.existsSync(FILE_EXPORTS_FILE)) return { version: 1, exports: {}, usedChallenges: {} };
+  const doc = JSON.parse(fs.readFileSync(FILE_EXPORTS_FILE, 'utf8'));
+  if (!doc.exports) doc.exports = {};
+  if (!doc.usedChallenges) doc.usedChallenges = {};
+  return doc;
+}
+// Written to a temporary file and renamed, so a stop mid-write never leaves
+// a half-written store.
+function writeFileExports(doc) {
+  const tmp = FILE_EXPORTS_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(doc, null, 2));
+  fs.renameSync(tmp, FILE_EXPORTS_FILE);
+}
+function fileExportOf(doc, id) {
+  return Object.prototype.hasOwnProperty.call(doc.exports, id) ? doc.exports[id] : null;
+}
+function setExportState(doc, rec, state) {
+  const at = new Date().toISOString();
+  rec.state = state;
+  rec.updatedAt = at;
+  rec.transitions.push({ state, at });
+  writeFileExports(doc);
+}
+function closeExport(doc, rec, state, reason, extra) {
+  rec.outcomeReason = reason;
+  rec.closedAt = new Date().toISOString();
+  Object.assign(rec, extra || {});
+  delete rec.file;
+  delete rec.original;
+  setExportState(doc, rec, state);
+}
+function revocationEntryOf(id) {
+  return readRevocations().revoked.find((r) => r.id === id) || null;
+}
+// Test-only: ATLAS_TEST_CRASH_AT=<point> makes the process stop dead right
+// after that step has been written, as if it had crashed there.
+function faultPoint(name) {
+  if (process.env.ATLAS_TEST_CRASH_AT === name) process.exit(86);
+}
+
+// Creates the record for a freshly minted file. The caller must have just
+// confirmed, with no await since, that the original is not revoked and has no
+// record.
+function createFileExport(credential, minted, ownerPublicKey, assetClass) {
+  const doc = readFileExports();
+  const at = new Date().toISOString();
+  const rec = {
+    exportId: 'urn:atlas:file-export:' + webcrypto.randomUUID(),
+    originalId: credential.id, fileId: minted.id, ownerPublicKey, class: assetClass,
+    state: 'prepared', createdAt: at, updatedAt: at, transitions: [{ state: 'prepared', at }],
+    original: credential, file: minted
+  };
+  doc.exports[credential.id] = rec;
+  writeFileExports(doc);
+  faultPoint('export:prepared');
+  return rec;
+}
+
+// Advances the export for `originalId` as far as it safely can and says where
+// it stands: {outcome: 'pending', rec} | {outcome: 'in-progress', rec} |
+// {outcome: 'claimed' | 'abandoned' | 'revoked', rec} | {outcome: 'not-found'}.
+function reconcileFileExport(originalId) {
+  const doc = readFileExports();
+  const rec = fileExportOf(doc, originalId);
+  if (!rec) return { outcome: 'not-found' };
+  for (let guard = 0; guard < 8; guard++) {
+    if (FILE_EXPORT_TERMINAL.has(rec.state)) return { outcome: rec.state, rec };
+    if (rec.state === 'prepared') {
+      const origRevoked = revocationEntryOf(rec.originalId);
+      if (origRevoked && origRevoked.reason !== 'file-transferred') {
+        // The owner spent the original some other way before the export
+        // completed. The file was never released or listed, so it is simply
+        // dropped.
+        closeExport(doc, rec, 'abandoned', 'original-spent');
+        return { outcome: 'abandoned', rec };
+      }
+      if (!origRevoked) {
+        revoke(rec.originalId, 'file-transferred');
+        faultPoint('export:original-revoked-fact');
+      }
+      if (!findArchivedAsset(rec.originalId)) archiveIfAudited(rec.original, 'file-transferred');
+      setExportState(doc, rec, 'original-revoked');
+      faultPoint('export:original-revoked');
+      continue;
+    }
+    if (rec.state === 'original-revoked') {
+      if (!hasBearer(rec.fileId) && !revocationEntryOf(rec.fileId)) registerBearer(rec.fileId, rec.class);
+      faultPoint('export:bearer-registered');
+      rec.armedAt = new Date().toISOString();
+      setExportState(doc, rec, 'pending');
+      faultPoint('export:pending');
+      continue;
+    }
+    if (rec.state === 'pending') {
+      const fileRevoked = revocationEntryOf(rec.fileId);
+      if (fileRevoked) {
+        if (fileRevoked.reason === 'file-claimed') closeExport(doc, rec, 'claimed', 'file-claimed', { claimedAt: fileRevoked.revokedAt });
+        else closeExport(doc, rec, 'revoked', fileRevoked.reason || 'revoked');
+        return { outcome: rec.state, rec };
+      }
+      // Listed means still claimable. Not listed and not revoked means a
+      // claim has taken the entry and has not finished.
+      return { outcome: hasBearer(rec.fileId) ? 'pending' : 'in-progress', rec };
+    }
+    throw new Error('unknown export state ' + rec.state);
+  }
+  throw new Error('export state machine did not settle');
+}
+
+// Called by the claim handler once a file has been claimed, so the receipt
+// is written and the file body dropped right away rather than at the next
+// recovery request. Best-effort: reconcileFileExport() derives the same
+// outcome from the revocation list if this never runs.
+function noteFileClaimed(fileId, claimCredentialId) {
+  const doc = readFileExports();
+  const rec = Object.values(doc.exports).find((r) => r.fileId === fileId);
+  if (!rec || FILE_EXPORT_TERMINAL.has(rec.state)) return;
+  closeExport(doc, rec, 'claimed', 'file-claimed', { claimedAt: new Date().toISOString(), claimCredentialId });
+}
+
+// Recovery challenges are stateless: an HMAC over the credential id, a random
+// nonce and an expiry, so issuing one writes nothing and reveals nothing
+// about whether an export exists. A challenge is accepted once; the nonce is
+// recorded when it is used and forgotten after it would have expired anyway.
+function recoverySecret() {
+  if (!fs.existsSync(RECOVERY_SECRET_FILE)) {
+    fs.writeFileSync(RECOVERY_SECRET_FILE, JSON.stringify({ secret: Buffer.from(webcrypto.getRandomValues(new Uint8Array(32))).toString('base64url') }), { mode: 0o600 });
+  }
+  return Buffer.from(JSON.parse(fs.readFileSync(RECOVERY_SECRET_FILE, 'utf8')).secret, 'base64url');
+}
+function recoveryMac(credentialId, nonce, expiry) {
+  return require('crypto').createHmac('sha256', recoverySecret()).update('recover-file-export|v1|' + credentialId + '|' + nonce + '|' + expiry).digest('base64url');
+}
+function issueRecoveryChallenge(credentialId) {
+  const nonce = Buffer.from(webcrypto.getRandomValues(new Uint8Array(16))).toString('base64url');
+  const expiry = Date.now() + RECOVERY_CHALLENGE_TTL_MS;
+  return { challenge: nonce + '.' + expiry + '.' + recoveryMac(credentialId, nonce, expiry), expiresAt: new Date(expiry).toISOString() };
+}
+// -> {nonce, expiry} when well-formed, signed by this issuer for this id and
+// unexpired; else {error: 'invalid-challenge' | 'expired-challenge'}.
+function checkRecoveryChallenge(credentialId, challenge) {
+  if (typeof challenge !== 'string') return { error: 'invalid-challenge' };
+  const parts = challenge.split('.');
+  if (parts.length !== 3 || !/^\d+$/.test(parts[1])) return { error: 'invalid-challenge' };
+  const [nonce, expiryText, mac] = parts;
+  const expected = Buffer.from(recoveryMac(credentialId, nonce, expiryText));
+  const given = Buffer.from(mac);
+  if (expected.length !== given.length || !timingSafeEqual(expected, given)) return { error: 'invalid-challenge' };
+  const expiry = Number(expiryText);
+  if (Date.now() > expiry) return { error: 'expired-challenge' };
+  return { nonce, expiry };
+}
+// Records a challenge as used. False if it already was.
+function consumeRecoveryChallenge(nonce, expiry) {
+  const doc = readFileExports();
+  const now = Date.now();
+  for (const [n, e] of Object.entries(doc.usedChallenges)) if (e < now) delete doc.usedChallenges[n];
+  if (Object.prototype.hasOwnProperty.call(doc.usedChallenges, nonce)) return false;
+  doc.usedChallenges[nonce] = expiry;
+  writeFileExports(doc);
+  return true;
+}
 
 // SPEC.md §13.3's VERP: a unique per-send envelope Return-Path so a later
 // bounce can be correlated back to the exact send that produced it,
@@ -6205,25 +6400,78 @@ async function main() {
         if (bearerInFlight.has(credential.id)) return sendJson(res, 409, { error: 'this asset is already being exported', code: 'in-progress' });
         bearerInFlight.add(credential.id);
         try {
+          // An export already exists for this credential: it is never
+          // exported twice. The owner recovers the file instead.
+          if (fileExportOf(readFileExports(), credential.id)) {
+            return sendJson(res, 409, { error: 'this asset has already been exported; recover the file with /atlas/asset/recover-file-export', code: 'already-exported' });
+          }
           const problem = await checkPresentedGiftableAsset(credential, senderPub, assetClass);
           if (problem) return sendJson(res, 400, { error: problem });
 
           const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
           const minted = await transferUniqueAsset(discardedOwnerKey, credential);
-          // The mint awaited; make sure nothing else spent the original in
-          // the meantime before committing to the swap.
-          if (isRevoked(credential.id)) {
-            revoke(minted.id, 'issuer-request');
+          // The mint awaited; make sure nothing else spent or exported the
+          // original in the meantime. From here to the response there is no
+          // await, so nothing in this process can interleave.
+          if (isRevoked(credential.id) || fileExportOf(readFileExports(), credential.id)) {
             return sendJson(res, 409, { error: 'asset already revoked', code: 'in-progress' });
           }
-          registerBearer(minted.id, assetClass);
-          revoke(credential.id, 'file-transferred');
-          archiveIfAudited(credential, 'file-transferred');
+          createFileExport(credential, minted, senderPub, assetClass);
+          const result = reconcileFileExport(credential.id);
+          if (result.outcome !== 'pending') return sendJson(res, 409, { error: 'export did not complete (' + result.outcome + ')', code: 'in-progress' });
           console.log('Exported', assetClass, credential.id, 'to a file as', minted.id);
-          return sendJson(res, 200, { status: 'file-transferred', file: minted });
+          return sendJson(res, 200, { status: 'file-transferred', file: result.rec.file, exportId: result.rec.exportId });
         } finally {
           bearerInFlight.delete(credential.id);
         }
+      }
+
+      // SPEC.md §13.5.1 — step one of recovering an interrupted export: a
+      // single-use challenge for the owner to sign. Stateless and
+      // unauthenticated, and identical for any id, so it reveals nothing.
+      if (req.method === 'POST' && req.url === '/atlas/asset/recover-file-export/challenge') {
+        const { credentialId } = JSON.parse((await readBody(req)) || '{}');
+        if (typeof credentialId !== 'string' || !credentialId || credentialId.length > 512) return sendJson(res, 400, { error: 'credentialId is required' });
+        return sendJson(res, 200, issueRecoveryChallenge(credentialId));
+      }
+
+      // SPEC.md §13.5.1 — step two: the owner of an export, proven by a
+      // signature from the key recorded when the export was made over a
+      // fresh challenge, gets the export finished or reported. Safe to repeat:
+      // while the file is claimable every call returns the same file;
+      // afterwards it returns the receipt outcome. Never mints anything.
+      if (req.method === 'POST' && req.url === '/atlas/asset/recover-file-export') {
+        const { intent } = JSON.parse((await readBody(req)) || '{}');
+        if (!intent || !intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
+        const { credentialId, action, challenge } = intent.payload;
+        if (action !== 'recover-file-export' || typeof credentialId !== 'string' || !credentialId) {
+          return sendJson(res, 400, { error: 'intent does not authorize recovering an export' });
+        }
+        const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
+        if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
+        const checked = checkRecoveryChallenge(credentialId, challenge);
+        if (checked.error) return sendJson(res, 400, { error: checked.error === 'expired-challenge' ? 'the challenge has expired; request a new one' : 'the challenge is not valid', code: checked.error });
+
+        // No await from here on. An unknown id and somebody else's export
+        // answer identically.
+        const existing = fileExportOf(readFileExports(), credentialId);
+        if (!existing || existing.ownerPublicKey !== intent.proof.publicKey) {
+          return sendJson(res, 404, { error: 'no export of this credential by this key', code: 'not-found' });
+        }
+        if (!consumeRecoveryChallenge(checked.nonce, checked.expiry)) {
+          return sendJson(res, 400, { error: 'the challenge has already been used; request a new one', code: 'challenge-used' });
+        }
+        const result = reconcileFileExport(credentialId);
+        const rec = result.rec;
+        const receipt = { exportId: rec.exportId, fileId: rec.fileId, state: rec.state, createdAt: rec.createdAt, closedAt: rec.closedAt || null };
+        if (result.outcome === 'pending') {
+          if (isSuspended(rec.fileId)) return sendJson(res, 409, { error: 'this file is currently suspended pending review', code: 'suspended', receipt });
+          return sendJson(res, 200, { status: 'pending', file: rec.file, exportId: rec.exportId });
+        }
+        if (result.outcome === 'in-progress') return sendJson(res, 409, { error: 'the file is being claimed right now', code: 'in-progress', receipt });
+        if (result.outcome === 'claimed') return sendJson(res, 409, { error: 'the file has been claimed', code: 'already-claimed', receipt });
+        if (result.outcome === 'abandoned') return sendJson(res, 409, { error: 'the export did not complete and was abandoned; the original was spent elsewhere', code: 'export-abandoned', receipt });
+        return sendJson(res, 409, { error: 'the file was revoked', code: 'file-revoked', receipt });
       }
 
       // SPEC.md §13.5 — claim an exported file. The claimer signs an intent
@@ -6275,6 +6523,7 @@ async function main() {
           taken = null;
           revoke(credential.id, 'file-claimed');
           archiveIfAudited(credential, 'file-claimed');
+          try { noteFileClaimed(credential.id, minted.id); } catch (err) { console.error('Could not write the export receipt:', err.message); }
           console.log('Claimed', credential.asset.class, credential.id, '->', newOwner.slice(0, 16) + '...');
           return sendJson(res, 200, { status: 'claimed', credential: minted });
         } finally {
