@@ -84,6 +84,8 @@ if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !
 if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
   send_json(400, ['error' => "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential"]);
 }
+$busy = atlas_spend_lock($credential['id']);
+if ($busy !== null) send_json(409, ['error' => $busy]);
 if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked']);
 if (is_suspended($credential['id'])) send_json(400, ['error' => 'credential is currently suspended pending review']);
 

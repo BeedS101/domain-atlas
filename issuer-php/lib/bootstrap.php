@@ -684,6 +684,8 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
 // holds even for a credential minted under a since-changed catalog entry.
 // Mirrors issuer-server/server.js's checkPresentedAsset().
 function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass, $minQuantity) {
+  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+  if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
   }
@@ -746,6 +748,8 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
 // atlas/trade/claim.php, and transfer_unique_asset() for how the actual
 // instance (not a fresh catalog-derived stand-in) is what changes hands.
 function check_presented_unique_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+  if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
   }
@@ -822,6 +826,8 @@ function validate_trade_side_shape($side, $label) {
 // signature checks out against this issuer's own key. Mirrors
 // issuer-server/server.js's checkPresentedMembership().
 function check_presented_membership($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+  if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
   }
@@ -939,6 +945,8 @@ function verify_foreign_asset_credential($credential) {
 // verify_foreign_asset_credential() just above. Mirrors issuer-server/
 // server.js's checkPresentedTransferableAsset().
 function check_presented_transferable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+  if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
   }
@@ -981,6 +989,8 @@ function check_presented_transferable_asset($publicKeyB64url, $credential, $expe
 // "send" rather than "trade". Mirrors issuer-server/server.js's
 // checkPresentedGiftableAsset().
 function check_presented_giftable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+  if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
   }
@@ -1012,6 +1022,8 @@ function check_presented_giftable_asset($publicKeyB64url, $credential, $expected
 // single-credential action here shares. Mirrors issuer-server/server.js's
 // checkPresentedRedeemableAsset().
 function check_presented_redeemable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass) {
+  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+  if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
   }
@@ -1041,6 +1053,8 @@ function check_presented_redeemable_asset($publicKeyB64url, $credential, $expect
 // credential outright, just for a quantity instead of the whole thing.
 // Mirrors issuer-server/server.js's checkPresentedSpendableAsset().
 function check_presented_spendable_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass, $amount) {
+  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+  if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
   }
@@ -1072,6 +1086,8 @@ function check_presented_spendable_asset($publicKeyB64url, $credential, $expecte
 // applies to redemption. Mirrors issuer-server/server.js's
 // checkPresentedFulfillableAsset().
 function check_presented_fulfillable_asset($publicKeyB64url, $credential) {
+  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+  if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
   }

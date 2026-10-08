@@ -79,6 +79,8 @@ if ($existingResult) {
   send_json(200, ['status' => 'settled', 'received' => $existingResult['received'], 'remainder' => $existingResult['remainder']]);
 }
 
+$busy = atlas_spend_lock($credential['id']);
+if ($busy !== null) send_json(409, ['error' => $busy]);
 if (is_revoked($credential['id'])) {
   send_json(400, ['error' => 'that balance has already been revoked']);
 }

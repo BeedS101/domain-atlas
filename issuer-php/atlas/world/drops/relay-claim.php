@@ -33,6 +33,8 @@ if (empty($credential['asset']) || empty($credential['issuer']) || $credential['
 if (($attestation['credentialId'] ?? null) !== $credential['id']) {
   send_json(400, ['error' => 'attestation does not name the credential it was sent with']);
 }
+$busy = atlas_spend_lock($credential['id']);
+if ($busy !== null) send_json(409, ['error' => $busy]);
 if (is_revoked($credential['id'])) {
   send_json(400, ['error' => 'that credential has already been revoked — nothing to claim']);
 }

@@ -30,6 +30,8 @@ foreach ($doc['attestations'] as $a) {
   if ($a['id'] === $id) { $credential = $a; break; }
 }
 if (!$credential) send_json(400, ['error' => 'this domain has no attestation with that id']);
+$busy = atlas_spend_lock($id);
+if ($busy !== null) send_json(409, ['error' => $busy]);
 if (is_revoked($id)) send_json(400, ['error' => 'attestation is already revoked']);
 
 $sigOk = verify_own_credential_signature($reviewerKp['publicKeyB64url'], $credential, attestation_payload_of($credential));

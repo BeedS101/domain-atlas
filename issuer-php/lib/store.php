@@ -2629,6 +2629,40 @@ function atlas_bearer_lock() {
   return $fh;
 }
 
+// Per-credential spend lock. Spending a credential is check (not revoked,
+// owner matches), then a signature check or mint, then revoke, so two
+// requests for the same credential could both pass the check. A request takes
+// this lock on each credential it is about to spend before it checks it and
+// keeps it until the request ends; a second request for the same credential
+// waits, then finds it revoked and is refused in the usual way.
+//
+// The lock is one of 64 files chosen by a hash of the credential id, so no
+// per-credential files pile up (two ids sharing a file only wait for each
+// other). A stripe this request already holds is not taken again. Waiting is
+// bounded: a request that cannot get the lock in 15 seconds (two requests
+// locking the same credentials in opposite order, or a stuck one) gets the
+// returned message rather than hanging. Order against the bearer lock above:
+// bearer lock first, then this.
+// Returns null when held, or a message when it could not be taken.
+function atlas_spend_lock($credentialId) {
+  static $held = [];
+  if (!is_string($credentialId) || $credentialId === '') return null;
+  $stripe = abs(crc32($credentialId)) % 64;
+  if (isset($held[$stripe])) return null;
+  $fh = fopen(__DIR__ . '/atlas-spend-lock-' . $stripe . '.lock', 'c');
+  if ($fh === false) return 'could not take the spend lock';
+  $deadline = microtime(true) + 15;
+  while (!flock($fh, LOCK_EX | LOCK_NB)) {
+    if (microtime(true) > $deadline) {
+      fclose($fh);
+      return 'this item is being used by another request right now - try again';
+    }
+    usleep(2000);
+  }
+  $held[$stripe] = $fh;
+  return null;
+}
+
 function atlas_bearer_modify($fn) {
   $fh = fopen(atlas_bearer_file(), 'c+');
   if ($fh === false) throw new Exception('could not open the bearer registry');

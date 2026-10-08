@@ -34,6 +34,8 @@ if (!in_array($credential['asset']['class'] ?? null, atlas_demo_suspendable_clas
 if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !== atlas_domain()) {
   send_json(400, ['error' => 'this domain did not issue this credential']);
 }
+$busy = atlas_spend_lock($credential['id']);
+if ($busy !== null) send_json(409, ['error' => $busy]);
 if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked']);
 $sigOk = verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential));
 if (!$sigOk) send_json(400, ['error' => "credential signature does not check out against this issuer's key"]);

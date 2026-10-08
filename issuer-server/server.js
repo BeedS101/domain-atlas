@@ -57,6 +57,7 @@
 // project, not a one-off. See issuer-php/README.txt's own note near its top.
 
 const http = require('http');
+const { AsyncLocalStorage } = require('async_hooks');
 const fs = require('fs');
 const path = require('path');
 const { webcrypto, timingSafeEqual } = require('crypto');
@@ -2333,6 +2334,63 @@ function readRevocations() {
 function isRevoked(id) {
   return readRevocations().revoked.some((r) => r.id === id);
 }
+// Per-credential spend lock. Spending a credential is check (not revoked,
+// owner matches) then await (signature, mint) then revoke, so two requests
+// for the same credential could both pass the check. A request takes the lock
+// on each credential it is about to spend before it checks it, and keeps it
+// until its response has been sent; a second request for the same credential
+// waits, then finds it revoked and is refused in the usual way. A request that
+// cannot get a lock in SPEND_LOCK_WAIT_MS (two requests locking the same
+// credentials in opposite order, or a stuck request) gets 'busy' instead of
+// waiting forever.
+const spendContext = new AsyncLocalStorage();
+const SPEND_LOCK_WAIT_MS = 15000;
+const SPEND_LOCK_HOLD_MS = 60000;
+const spendQueues = new Map();
+
+function acquireSpendLock(id, waitMs) {
+  const prev = spendQueues.get(id) || Promise.resolve();
+  let release;
+  const mine = new Promise((resolve) => { release = resolve; });
+  const tail = prev.then(() => mine);
+  spendQueues.set(id, tail);
+  tail.then(() => { if (spendQueues.get(id) === tail) spendQueues.delete(id); });
+  return new Promise((resolve) => {
+    let gaveUp = false;
+    const timer = setTimeout(() => { gaveUp = true; release(); resolve(null); }, waitMs);
+    prev.then(() => {
+      if (gaveUp) return;
+      clearTimeout(timer);
+      resolve(release);
+    });
+  });
+}
+
+// Returns null when the lock is held (or there is no request to hang it on),
+// or a message when it could not be taken.
+async function lockSpend(id) {
+  const ctx = spendContext.getStore();
+  if (!ctx || !id || ctx.held.has(id)) return null;
+  const release = await acquireSpendLock(id, SPEND_LOCK_WAIT_MS);
+  if (!release) return 'this item is being used by another request right now - try again';
+  ctx.held.add(id);
+  if (!ctx.releases) {
+    ctx.releases = [];
+    const releaseAll = () => {
+      if (ctx.released) return;
+      ctx.released = true;
+      clearTimeout(ctx.holdTimer);
+      ctx.releases.forEach((r) => r());
+    };
+    ctx.holdTimer = setTimeout(releaseAll, SPEND_LOCK_HOLD_MS);
+    ctx.res.once('finish', releaseAll);
+    ctx.res.once('close', releaseAll);
+  }
+  ctx.releases.push(release);
+  if (ctx.released) release();
+  return null;
+}
+
 function revoke(id, reason) {
   const doc = readRevocations();
   doc.revoked.push({ id, revokedAt: new Date().toISOString(), reason });
@@ -3545,6 +3603,7 @@ async function main() {
     if (!credential.issuer || credential.issuer.domain !== DOMAIN) return null;
     const patch = classPatchOf(credential.asset.class);
     if (!patch || !isCredentialStaleAgainstClassPatch(credential, patch)) return null;
+    if (await lockSpend(credential.id)) return null;
     if (isRevoked(credential.id)) return null; // already handled by /atlas/mail/check's own revocation check — defensive only
     const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!sigOk) return null; // never act on anything that isn't genuinely this domain's own signed credential
@@ -3656,6 +3715,8 @@ async function main() {
   // asset.fungible field, not re-derived from ASSET_CATALOG, so this holds
   // even for a credential minted under a since-changed catalog entry.
   async function checkPresentedAsset(credential, expectedOwner, expectedClass, minQuantity) {
+    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+    if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
@@ -3708,6 +3769,8 @@ async function main() {
   // transferUniqueAsset() for how the actual instance (not a fresh
   // catalog-derived stand-in) is what changes hands on settlement.
   async function checkPresentedUniqueAsset(credential, expectedOwner, expectedClass) {
+    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+    if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
@@ -3740,6 +3803,8 @@ async function main() {
   // else is the same discipline: right shape, right owner, right class,
   // not revoked, signature checks out against this issuer's own key.
   async function checkPresentedMembership(credential, expectedOwner, expectedClass) {
+    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+    if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'membership does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'membership is the wrong class';
@@ -3830,6 +3895,8 @@ async function main() {
   // well have come from somewhere else entirely — see
   // verifyForeignAssetCredential() just above.
   async function checkPresentedTransferableAsset(credential, expectedOwner, expectedClass) {
+    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+    if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
@@ -3862,6 +3929,8 @@ async function main() {
   // Same checks as checkPresentedUniqueAsset, just worded for "send" rather
   // than "trade" so a rejected demo visitor gets the right verb back.
   async function checkPresentedGiftableAsset(credential, expectedOwner, expectedClass) {
+    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+    if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
@@ -3885,6 +3954,8 @@ async function main() {
   // shares — redeeming part of a balance would need a quantity argument
   // this endpoint doesn't take.
   async function checkPresentedRedeemableAsset(credential, expectedOwner, expectedClass) {
+    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+    if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
@@ -3910,6 +3981,8 @@ async function main() {
   // purchase costs, derived from the catalog's own price, never from
   // anything the presented credential or the request itself claims.
   async function checkPresentedSpendableAsset(credential, expectedOwner, expectedClass, amount) {
+    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+    if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class to pay with';
@@ -3933,6 +4006,8 @@ async function main() {
   // only, same "one specific instance handed over" scope
   // checkPresentedRedeemableAsset already applies to redemption.
   async function checkPresentedFulfillableAsset(credential) {
+    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+    if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.issuer || credential.issuer.domain !== DOMAIN) return 'this domain did not issue this credential';
     if (!credential.asset || credential.asset.fungible !== false) return 'asset class is fungible — this endpoint only fulfills a single held instance';
@@ -4417,7 +4492,7 @@ async function main() {
     return summary;
   }
 
-  const server = http.createServer(async (req, res) => {
+  const server = http.createServer((req, res) => spendContext.run({ res, held: new Set() }, async () => {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
         'Access-Control-Allow-Origin': '*',
@@ -4652,6 +4727,7 @@ async function main() {
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'credential was not issued by this domain' });
         }
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
@@ -4697,6 +4773,7 @@ async function main() {
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'this domain did not issue this credential' });
         }
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
@@ -4800,6 +4877,7 @@ async function main() {
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'this domain did not issue this credential' });
         }
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
@@ -4856,6 +4934,7 @@ async function main() {
         if (toPublicKey === credential.owner.publicKey) {
           return sendJson(res, 400, { error: "toPublicKey already matches the credential's current owner — nothing to claw back" });
         }
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked — nothing to claw back' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
@@ -5697,6 +5776,7 @@ async function main() {
         if (!credential.asset || credential.asset.fungible !== false) {
           return sendJson(res, 400, { error: "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential" });
         }
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
         if (isSuspended(credential.id)) return sendJson(res, 400, { error: 'credential is currently suspended pending review' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
@@ -6047,6 +6127,7 @@ async function main() {
         if (toPublicKey === credential.owner.publicKey) {
           return sendJson(res, 400, { error: "toPublicKey already matches the credential's current owner — nothing to claw back" });
         }
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked — nothing to claw back' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
@@ -6436,6 +6517,7 @@ async function main() {
           // The mint awaited; make sure nothing else spent or exported the
           // original in the meantime. From here to the response there is no
           // await, so nothing in this process can interleave.
+          { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
           if (isRevoked(credential.id) || fileExportOf(readFileExports(), credential.id)) {
             return sendJson(res, 409, { error: 'asset already revoked', code: 'in-progress' });
           }
@@ -6525,6 +6607,7 @@ async function main() {
           if (credential.credential !== 'domain-atlas-asset/1.0' || !credential.asset) return sendJson(res, 400, { error: 'not an asset credential', code: 'not-claimable' });
           const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
           if (!sigOk) return sendJson(res, 400, { error: 'asset signature does not check out', code: 'not-claimable' });
+          { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
           if (isRevoked(credential.id)) return sendJson(res, 409, { error: 'this file has already been claimed or withdrawn', code: 'already-claimed' });
           if (isSuspended(credential.id)) return sendJson(res, 409, { error: 'this asset is currently suspended pending review', code: 'suspended' });
           if (isExpired(credential)) return sendJson(res, 400, { error: 'asset has expired', code: 'expired' });
@@ -7060,6 +7143,7 @@ async function main() {
         const relayingDomain = attestation.relayingDomain;
         if (!isTrustedTradePeer(relayingDomain)) return sendJson(res, 403, { error: 'this domain does not accept trade relays from ' + relayingDomain });
 
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that balance has already been revoked' });
         // Any existing suspension that isn't THIS exact trade's own lock —
         // whether it's a different pending trade or an unrelated admin
@@ -7151,6 +7235,7 @@ async function main() {
           return sendJson(res, 200, { status: 'settled', received: existingResult.received, remainder: existingResult.remainder });
         }
 
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that balance has already been revoked' });
         const lock = findSuspension(credential.id);
         if (!lock || lock.reason !== 'trade-lock:' + tradeId) return sendJson(res, 409, { error: 'that balance was never locked for this trade, or its lock already expired — relay-lock it again first' });
@@ -7359,6 +7444,7 @@ async function main() {
         if (!credential || !attestation || !attestationSignature) return sendJson(res, 400, { error: 'credential, attestation, and attestationSignature are all required' });
         if (!credential.asset || !credential.issuer || credential.issuer.domain !== DOMAIN) return sendJson(res, 400, { error: 'this domain did not issue that credential' });
         if (attestation.credentialId !== credential.id) return sendJson(res, 400, { error: 'attestation does not name the credential it was sent with' });
+        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'that credential has already been revoked — nothing to claim' });
         if (isSuspended(credential.id)) return sendJson(res, 400, { error: 'that credential is currently suspended pending review — nothing to claim' });
 
@@ -8098,7 +8184,7 @@ async function main() {
       console.error(err);
       sendJson(res, err.statusCode || 500, { error: err.message });
     }
-  });
+  }));
 
   server.listen(PORT, () => {
     console.log(`Issuer + trading station (${DOMAIN}) — listening on port ${PORT}, docroot: ${DEMO_DOMAIN_A}`);

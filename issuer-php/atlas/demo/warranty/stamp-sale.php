@@ -34,6 +34,8 @@ if (!is_array($properties)) {
 if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !== atlas_domain()) {
   send_json(400, ['error' => 'credential was not issued by this domain']);
 }
+$busy = atlas_spend_lock($credential['id']);
+if ($busy !== null) send_json(409, ['error' => $busy]);
 if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked']);
 
 $sigOk = verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential));

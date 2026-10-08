@@ -50,6 +50,8 @@ if (!atlas_is_trusted_trade_peer($relayingDomain)) {
   send_json(403, ['error' => 'this domain does not accept trade relays from ' . $relayingDomain]);
 }
 
+$busy = atlas_spend_lock($credential['id']);
+if ($busy !== null) send_json(409, ['error' => $busy]);
 if (is_revoked($credential['id'])) {
   send_json(400, ['error' => 'that balance has already been revoked']);
 }
