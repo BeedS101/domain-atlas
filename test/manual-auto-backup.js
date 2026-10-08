@@ -83,20 +83,20 @@ function assert(cond, message) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, null, { timeout: 10000 });
 
     const PASSWORD = 'auto-backup-test-password-1';
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#chooseNewBtn').click();
-    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#newPasswordInput').fill(PASSWORD);
     await frame.locator('#newPasswordConfirmInput').fill(PASSWORD);
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     const step1 = await frame.evaluate(async () => {
       await AtlasWallet.addFriend('friend-public-key-abc123', 'Auto Backup Friend');
@@ -141,9 +141,9 @@ function assert(cond, message) {
       await chrome.storage.session.clear();
     });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: fresh "device" state confirmed — routed back to onboarding');
 
     console.log('STEP 6: restoring the automatic backup file for real onto the fresh device');
@@ -258,7 +258,7 @@ function assert(cond, message) {
     await autoMinimizePage.waitForFunction(() => {
       const el = document.getElementById('doneScreen');
       return el && !el.classList.contains('hidden');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     const noteText = await autoMinimizePage.evaluate(() => {
       const el = document.querySelector('#doneScreen p.tip');
       return el ? el.textContent : null;
@@ -269,7 +269,7 @@ function assert(cond, message) {
     const calledTooSoon = await autoMinimizePage.evaluate(() => window.__minimizeCalls.length);
     assert(calledTooSoon === 0, 'expected no minimize call yet, immediately after the screen appeared, got ' + calledTooSoon);
 
-    await autoMinimizePage.waitForFunction(() => window.__minimizeCalls.length > 0, { timeout: 8000 });
+    await autoMinimizePage.waitForFunction(() => window.__minimizeCalls.length > 0, null, { timeout: 8000 });
     const afterDelay = await autoMinimizePage.evaluate(() => window.__minimizeCalls);
     assert(afterDelay.length === 1, 'expected exactly one auto-minimize call, got ' + afterDelay.length + ': ' + JSON.stringify(afterDelay));
     assert(afterDelay[0].info && afterDelay[0].info.state === 'minimized', 'expected the auto-minimize call to request the minimized state, got: ' + JSON.stringify(afterDelay[0]));
@@ -287,7 +287,7 @@ function assert(cond, message) {
     await manualMinimizePage.waitForFunction(() => {
       const el = document.getElementById('doneScreen');
       return el && !el.classList.contains('hidden');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     await manualMinimizePage.locator('#minimizeBtn').click();
     const afterClick = await manualMinimizePage.evaluate(() => window.__minimizeCalls.length);
     assert(afterClick === 1, 'expected the manual click to fire the minimize call immediately, got ' + afterClick);

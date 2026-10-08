@@ -126,15 +126,15 @@ function pageHtml(title, linkTag) {
     console.log('STEP 3: creating a real wallet identity (side panel, standalone mode)');
     const walletPage = await context.newPage();
     await walletPage.goto('chrome-extension://' + extensionId + '/viewer.html', { waitUntil: 'load' });
-    await walletPage.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 10000 });
+    await walletPage.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 10000 });
     await walletPage.locator('#chooseNewBtn').click();
     await walletPage.locator('#newPasswordInput').fill('bridge-sign-test-pw');
     await walletPage.locator('#newPasswordConfirmInput').fill('bridge-sign-test-pw');
     await walletPage.locator('#confirmCreateBtn').click();
-    await walletPage.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await walletPage.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await walletPage.locator('#seedConfirmCheck').check();
     await walletPage.locator('#seedConfirmBtn').click();
-    await walletPage.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await walletPage.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const realPublicKey = await walletPage.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       return identity ? identity.publicKey : null;

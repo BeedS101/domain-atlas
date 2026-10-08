@@ -43,7 +43,7 @@ function fakeEntry(cls, issuerDomain) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     console.log('SETUP: in Example Plaza, currentManifest/currentWorld live');
 
     console.log('STEP 1: classMatchesAny — trailing ".*" matches the whole family, exact entries still match only themselves');

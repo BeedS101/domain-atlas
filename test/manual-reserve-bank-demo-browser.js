@@ -71,55 +71,55 @@ function assert(cond, message) {
 
     console.log('STEP 1: Act 1 — set up the committee, request the mint, 2 of 3 officers approve');
     await page.locator('#setupBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#officerCards .officer').length === 3, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#officerCards .officer').length === 3, null, { timeout: 10000 });
     await page.locator('#requestMintBtn').click();
     await page.waitForSelector('#approveButtons button', { timeout: 10000 });
     await page.locator('#approveButtons button').nth(0).click();
-    await page.waitForFunction(() => document.getElementById('approveStatus').textContent.includes('Waiting on 1 more'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('approveStatus').textContent.includes('Waiting on 1 more'), null, { timeout: 10000 });
     await page.locator('#approveButtons button').nth(1).click();
-    await page.waitForFunction(() => document.getElementById('issuancePanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('issuancePanel').style.display !== 'none', null, { timeout: 10000 });
     const approveStatusText = await page.locator('#approveStatus').textContent();
     assert(approveStatusText.includes('100000 Reserve Credits minted'), 'expected the mint to report 100000 Reserve Credits minted, got: ' + approveStatusText);
     console.log('PASS:', approveStatusText);
 
     console.log('STEP 2: Act 2 — wholesale issuance to both banks');
     await page.locator('#issueAlphaBtn').click();
-    await page.waitForFunction(() => !document.getElementById('issueBetaBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('issueBetaBtn').disabled, null, { timeout: 10000 });
     await page.locator('#issueBetaBtn').click();
-    await page.waitForFunction(() => document.getElementById('conversionPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('conversionPanel').style.display !== 'none', null, { timeout: 10000 });
     const issuanceText = await page.locator('#issuanceResult').textContent();
     assert(issuanceText.includes('Bank Alpha now holds 40000') && issuanceText.includes('Bank Beta now holds 40000') && issuanceText.includes('keeps 20000 unallocated'), 'unexpected issuance result: ' + issuanceText);
     console.log('PASS: both banks issued 40,000 reserves each, treasury keeps 20,000');
 
     console.log('STEP 3: Act 3 — retail conversion into each bank\'s own currency');
     await page.locator('#convertAlphaBtn').click();
-    await page.waitForFunction(() => !document.getElementById('convertBetaBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('convertBetaBtn').disabled, null, { timeout: 10000 });
     await page.locator('#convertBetaBtn').click();
-    await page.waitForFunction(() => document.getElementById('retailPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('retailPanel').style.display !== 'none', null, { timeout: 10000 });
     const conversionText = await page.locator('#conversionResult').textContent();
     assert(conversionText.includes('20000 Alpha Dollars') && conversionText.includes('20000 Beta Dollars'), 'unexpected conversion result: ' + conversionText);
     console.log('PASS: both banks converted 20,000 reserves into their own retail currency');
 
     console.log('STEP 4: Act 4 — banks credit customers, Alice pays Charlie');
     await page.locator('#creditAliceBtn').click();
-    await page.waitForFunction(() => !document.getElementById('creditBobBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('creditBobBtn').disabled, null, { timeout: 10000 });
     await page.locator('#creditBobBtn').click();
-    await page.waitForFunction(() => !document.getElementById('payCharlieBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('payCharlieBtn').disabled, null, { timeout: 10000 });
     await page.locator('#payCharlieBtn').click();
-    await page.waitForFunction(() => document.getElementById('tradePanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('tradePanel').style.display !== 'none', null, { timeout: 10000 });
     const retailText = await page.locator('#retailResult').textContent();
     assert(retailText.includes('Alice now holds 5000') && retailText.includes('Bob now holds 5000') && retailText.includes('Alice paid Charlie 1,200'), 'unexpected retail result: ' + retailText);
-    await page.waitForFunction(() => document.getElementById('ledger').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('ledger').style.display !== 'none', null, { timeout: 10000 });
     assert(await page.locator('#ledger .acct').count() >= 6, 'expected the ledger to render at least 6 account cards');
     console.log('PASS:', retailText);
 
     console.log('STEP 5: Act 5 — Trading Station cross-currency settlement');
     await page.locator('#joinStationBtn').click();
-    await page.waitForFunction(() => !document.getElementById('postListingBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('postListingBtn').disabled, null, { timeout: 10000 });
     await page.locator('#postListingBtn').click();
-    await page.waitForFunction(() => !document.getElementById('claimListingBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('claimListingBtn').disabled, null, { timeout: 10000 });
     await page.locator('#claimListingBtn').click();
-    await page.waitForFunction(() => document.getElementById('tradeResult').textContent.includes('Settled'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('tradeResult').textContent.includes('Settled'), null, { timeout: 10000 });
     const tradeText = await page.locator('#tradeResult').textContent();
     assert(tradeText.includes('300') && tradeText.includes('Beta Dollars'), 'unexpected trade settlement result: ' + tradeText);
     console.log('PASS: cross-currency settlement completed —', tradeText.match(/Settled[^.]*\./)[0]);
@@ -134,11 +134,11 @@ function assert(cond, message) {
 
     console.log('STEP 7: Act 7 — simulate the theft, then suspend + clawback recover it');
     await page.locator('#fraudBtn').click();
-    await page.waitForFunction(() => document.getElementById('decideRow').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('decideRow').style.display !== 'none', null, { timeout: 10000 });
     const fraudText = await page.locator('#fraudResult').textContent();
     assert(fraudText.includes('15,000 Beta Dollars'), 'unexpected fraud result: ' + fraudText);
     await page.locator('#clawbackBtn').click();
-    await page.waitForFunction(() => document.getElementById('decideResult').textContent.includes('no longer valid') || document.getElementById('decideResult').textContent.includes('unexpected'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('decideResult').textContent.includes('no longer valid') || document.getElementById('decideResult').textContent.includes('unexpected'), null, { timeout: 10000 });
     const decideText = await page.locator('#decideResult').textContent();
     // "Consolidated" only appears when Bank Beta still held a separate
     // leftover balance to merge with the recovered one — the theft in this
@@ -151,7 +151,7 @@ function assert(cond, message) {
     const recoveredRawBox = page.locator('#decideResult details.raw').last();
     await recoveredRawBox.locator('summary').click();
     await recoveredRawBox.locator('button').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
     const verifyText = await page.locator('#verifyResult').textContent();
     console.log('PASS:', verifyText);
 

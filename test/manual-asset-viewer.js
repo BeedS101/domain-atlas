@@ -77,24 +77,24 @@ const COMPASS_GLB = path.resolve(__dirname, '..', 'demo-domain-a', 'assets', 'co
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('asset-viewer-test-pw');
     await frame.locator('#newPasswordConfirmInput').fill('asset-viewer-test-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 15000 });
     console.log('PASS: identity + Bronze Compass ready');
 
     console.log('STEP 1: hovering the card opens the Asset Viewer with the correct name/class/issuer/properties');
     const card = frame.locator('#selfCollectiblesList .wallet-item').first();
     await card.hover();
-    await frame.waitForFunction(() => document.getElementById('assetViewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('assetViewerWidget').hidden === false, null, { timeout: 3000 });
     const content = await frame.evaluate(() => ({
       name: document.querySelector('#assetViewerBody .name').textContent,
       meta: document.querySelector('#assetViewerBody .meta').textContent,
@@ -113,7 +113,7 @@ const COMPASS_GLB = path.resolve(__dirname, '..', 'demo-domain-a', 'assets', 'co
     await frame.waitForFunction(() => {
       const img = document.querySelector('#assetViewerBody .asset-viewer-thumbnail');
       return !!img && img.complete && img.naturalWidth > 0;
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: thumbnail image is present and actually loaded (not a broken image)');
 
     console.log('STEP 3: the Bronze Compass HAS a model — "Show model" is offered');
@@ -133,7 +133,7 @@ const COMPASS_GLB = path.resolve(__dirname, '..', 'demo-domain-a', 'assets', 'co
     await frame.waitForFunction(() => {
       const c = document.querySelector('.asset-viewer-model-canvas');
       return !!c && c.width > 0 && c.height > 0;
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const glInfo = await frame.evaluate(() => {
       const c = document.querySelector('.asset-viewer-model-canvas');
       const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
@@ -190,9 +190,9 @@ const COMPASS_GLB = path.resolve(__dirname, '..', 'demo-domain-a', 'assets', 'co
 
     console.log('STEP 8: changing the opacity/text-size sliders persists across a reload of the wallet panel');
     await card.hover();
-    await frame.waitForFunction(() => document.getElementById('assetViewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('assetViewerWidget').hidden === false, null, { timeout: 3000 });
     await frame.locator('#assetViewerSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('assetViewerSettingsPopover').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('assetViewerSettingsPopover').hidden === false, null, { timeout: 3000 });
     await frame.locator('#assetViewerOpacityInput').evaluate((el) => { el.value = '0.55'; el.dispatchEvent(new Event('input', { bubbles: true })); });
     await frame.locator('#assetViewerTextSizeInput').evaluate((el) => { el.value = '17'; el.dispatchEvent(new Event('input', { bubbles: true })); });
     await frame.page().waitForTimeout(200); // let setAssetViewerSettings()/chrome.storage round-trip settle, same margin manual-chat-history-toggle.js uses for its own settings write
@@ -205,7 +205,7 @@ const COMPASS_GLB = path.resolve(__dirname, '..', 'demo-domain-a', 'assets', 'co
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle2 = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame2 = await frameHandle2.contentFrame();
-    await frame2.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame2.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame2.page().waitForTimeout(300); // let AtlasWallet.getAssetViewerSettings().then(applyAssetViewerSettings) run at startup
     const restoredSettings = await frame2.evaluate(() => AtlasWallet.getAssetViewerSettings());
     if (restoredSettings.opacity !== 0.55 || restoredSettings.textSize !== 17) {

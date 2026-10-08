@@ -57,18 +57,18 @@ const DOCROOT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-shot-docro
 
     console.log('STEP: issuing the two demo credentials');
     await page.locator('#issueBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 2, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 2, null, { timeout: 10000 });
 
     console.log('STEP: sending the coupon to a friend');
     const couponCard = page.locator('#youCards .card', { hasText: '10% Off Coupon' });
     await couponCard.locator('.sendBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#friendCards .card').length === 1, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#friendCards .card').length === 1, null, { timeout: 10000 });
 
     console.log('STEP: independently verifying the friend\'s fresh copy');
     const friendCard = page.locator('#friendCards .card', { hasText: '10% Off Coupon' });
     await friendCard.locator('details.raw summary').click();
     await friendCard.locator('.fillVerifyBtn').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
 
     fs.mkdirSync(path.dirname(OUT_PATH), { recursive: true });
     await page.screenshot({ path: OUT_PATH, fullPage: true });

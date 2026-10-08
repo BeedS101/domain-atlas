@@ -62,22 +62,22 @@ function assert(cond, message) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, null, { timeout: 10000 });
 
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#chooseNewBtn').click();
-    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#newPasswordInput').fill('tabbar-sticky-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('tabbar-sticky-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: on the Settings screen, tab bar should now be visible');
 
     const barVisible = await frame.evaluate(() => document.getElementById('walletTabBar').classList.contains('visible'));
@@ -114,7 +114,7 @@ function assert(cond, message) {
 
     console.log('STEP 4: the tab bar is still visibly on top and clickable after scrolling, not covered by scrolled-under content');
     await frame.locator('#walletTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: clicking "Wallet" in the sticky bar, post-scroll, correctly switched screens');
 
     console.log('\nALL WALLET TAB BAR STICKINESS CHECKS PASSED');

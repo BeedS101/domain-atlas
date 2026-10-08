@@ -35,7 +35,7 @@ async function projectPortals(frame) {
 
 async function openCacheCategory(frame) {
   await frame.locator('#settingsTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
   const category = frame.locator('.settings-category[data-category="cache"]');
   if (!(await category.evaluate((el) => el.classList.contains('open')))) {
     await category.locator('.settings-category-toggle').click();
@@ -58,29 +58,29 @@ async function openCacheCategory(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     let portals = await projectPortals(frame);
     const toLobby = portals.find((p) => p.to === 'lobby');
     await frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
     await page.waitForTimeout(4000); // let all 19 GLBs finish downloading + caching
     console.log('PASS: entered the Lobby, assets should now be cached');
 
     console.log('STEP 1: opening Settings -> Cache shows a real total and one site (localhost:8001)');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('cache-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('cache-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     await openCacheCategory(frame);
-    await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent.includes('total across'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent.includes('total across'), null, { timeout: 5000 });
     const totalLine = await frame.locator('#cacheTotalLine').textContent();
     console.log('  cache total line ->', totalLine);
     if (!totalLine.includes('1 site')) throw new Error('Expected exactly 1 site so far, got: ' + totalLine);
@@ -106,14 +106,14 @@ async function openCacheCategory(frame) {
     console.log('STEP 3: clearing localhost:8001\'s cache — site disappears, total goes to zero');
     page.once('dialog', (d) => d.accept());
     await siteCards.first().locator('button[data-action="clear-site"]').click();
-    await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent === 'Nothing cached yet.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent === 'Nothing cached yet.', null, { timeout: 5000 });
     console.log('PASS: cache cleared for that site, total line confirms nothing left');
 
     console.log('STEP 4: importing the previously exported file — 19 entries restored');
     await frame.locator('#importCacheBtn').click();
     await frame.locator('#importCacheFileInput').setInputFiles(exportPath);
-    await frame.waitForFunction(() => document.getElementById('importCacheStatus').textContent.includes('19 cached file(s) imported'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent.includes('1 site'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('importCacheStatus').textContent.includes('19 cached file(s) imported'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent.includes('1 site'), null, { timeout: 5000 });
     const restoredMeta = await frame.locator('#cacheSitesList .info-card').first().locator('.meta').textContent();
     if (!restoredMeta.includes('19 files')) throw new Error('Expected 19 files restored after import, got: ' + restoredMeta);
     console.log('PASS: import round-tripped correctly — same site, same 19 files ->', restoredMeta);

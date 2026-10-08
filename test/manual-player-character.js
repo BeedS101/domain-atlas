@@ -49,7 +49,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     const portals = await frame.evaluate(() => {
       return new Promise((resolve) => {
@@ -69,7 +69,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     });
     const toLobby = portals.find((p) => p.to === 'lobby');
     await frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
     await page.waitForTimeout(1000);
     console.log('PASS: in the Lobby, 3D render loop running');
 
@@ -173,18 +173,18 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     console.log('STEP 8: Settings -> Player character -> Size slider persists, clamps, and live-updates the 3D model');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('player-scale-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('player-scale-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     const scaleCategory = frame.locator('.settings-category[data-category="player-character"]');
     if (!(await scaleCategory.evaluate((el) => el.classList.contains('open')))) {
       await scaleCategory.locator('.settings-category-toggle').click();
@@ -213,9 +213,9 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     console.log('  re-opening Settings shows the persisted value');
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     const scaleReopened = await frame.locator('#characterScaleInput').inputValue();
     if (Math.abs(Number(scaleReopened) - 0.6) > 0.001) throw new Error('Expected the slider to reflect the persisted 0.6 on re-open, got: ' + scaleReopened);
     console.log('PASS: size slider persists (' + scaleReopened + '), clamps, and live-updates the model');

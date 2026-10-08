@@ -74,7 +74,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -85,10 +85,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#walletBtn').click();
 }
 
@@ -113,13 +113,13 @@ async function chatLines(frame) {
 
 async function setHistoryOnJoin(frame, on) {
   await frame.locator('#chatSettingsBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('chatSettingsPopover').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('chatSettingsPopover').hidden, null, { timeout: 5000 });
   const checkbox = frame.locator('#chatHistoryOnJoinInput');
   const isChecked = await checkbox.isChecked();
   if (isChecked !== on) await checkbox.click();
   await frame.page().waitForTimeout(150); // let setChatPanelSettings()/applyChatPanelSize() round-trip settle
   await frame.locator('#chatSettingsBtn').click();
-  await frame.waitForFunction(() => document.getElementById('chatSettingsPopover').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('chatSettingsPopover').hidden, null, { timeout: 5000 });
 }
 
 (async () => {
@@ -155,10 +155,10 @@ async function setHistoryOnJoin(frame, on) {
     await setHistoryOnJoin(c.frame, false);
     const toArena = await waitForPortal(c.frame, (p) => p.to === 'arena', 'the Arena portal from Plaza (C)');
     await c.frame.locator('#scene').click({ position: { x: toArena.sx, y: toArena.sy } });
-    await c.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await c.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     const backToPlaza = await waitForPortal(c.frame, (p) => p.to === 'plaza', 'the Plaza portal from Arena (C)');
     await c.frame.locator('#scene').click({ position: { x: backToPlaza.sx, y: backToPlaza.sy } });
-    await c.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await c.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     // Give connectChat() a moment to actually join and (if it were going to)
     // receive/render the history batch, then assert it's still empty.
     await c.page.waitForTimeout(1500);

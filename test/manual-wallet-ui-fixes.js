@@ -29,21 +29,21 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('ui-fixes-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('ui-fixes-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: identity ready');
 
     console.log('#53: mail check-frequency input is labeled with its unit');
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const intervalRowText = await frame.locator('#mailIntervalInput').locator('xpath=..').textContent();
     if (!intervalRowText.toLowerCase().includes('minute')) throw new Error('Expected "minutes" to appear next to the interval input: ' + intervalRowText);
     console.log('PASS: interval input labeled ->', intervalRowText.trim());
@@ -55,7 +55,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     if (oldFooterCount !== 0) throw new Error('Expected #walletPanelFooter to be gone entirely, found ' + oldFooterCount);
     // Settings must still be reachable — just only via the top tab now.
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: old button/footer gone, Settings still reachable via the top tab');
 
     console.log('#55: locking and reopening the wallet auto-focuses the password field');
@@ -64,7 +64,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     // real click sequence — routeWalletScreen() is what does the focusing.
     await frame.locator('#walletBtn').click(); // close (it was left open)
     await frame.locator('#walletBtn').click(); // reopen -> routes to unlockScreen
-    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), null, { timeout: 5000 });
     const isFocused = await frame.evaluate(() => document.activeElement && document.activeElement.id === 'unlockPasswordInput');
     if (!isFocused) throw new Error('Expected #unlockPasswordInput to be the focused element on reopening a locked wallet');
     console.log('PASS: password field auto-focused on reopening a locked wallet');

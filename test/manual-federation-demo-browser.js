@@ -89,7 +89,7 @@ function assert(cond, message) {
     console.log('STEP 1: point the page at Domain B, then Act 1 — Alice joins Domain A\'s Post Office');
     await page.locator('#domainBInput').fill(DOMAIN_B);
     await page.locator('#setupAliceBtn').click();
-    await page.waitForFunction(() => document.getElementById('bobPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('bobPanel').style.display !== 'none', null, { timeout: 10000 });
     const aliceText = await page.locator('#aliceResult').textContent();
     assert(aliceText.includes(DOMAIN_A) && aliceText.includes('Post Office'), 'unexpected Alice setup result: ' + aliceText);
     assert(await page.locator('#aliceCard .identity').count() === 1, 'expected an Alice identity card to render');
@@ -97,7 +97,7 @@ function assert(cond, message) {
 
     console.log('STEP 2: Act 2 — Bob joins Domain B\'s Post Office (a genuine cross-origin call)');
     await page.locator('#setupBobBtn').click();
-    await page.waitForFunction(() => document.getElementById('sendPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('sendPanel').style.display !== 'none', null, { timeout: 10000 });
     const bobText = await page.locator('#bobResult').textContent();
     assert(bobText.includes(DOMAIN_B) && bobText.includes('separate server'), 'unexpected Bob setup result: ' + bobText);
     assert(await page.locator('#bobCard .identity').count() === 1, 'expected a Bob identity card to render');
@@ -105,7 +105,7 @@ function assert(cond, message) {
 
     console.log('STEP 3: Act 3 — Alice sends across domains through her own home domain');
     await page.locator('#sendBtn').click();
-    await page.waitForFunction(() => document.getElementById('checkPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('checkPanel').style.display !== 'none', null, { timeout: 10000 });
     const sendText = await page.locator('#sendResult').textContent();
     assert(sendText.includes('Sent') && sendText.includes(DOMAIN_B), 'unexpected send result: ' + sendText);
     assert(await page.locator('#sendResult details.raw').count() === 1, 'expected a raw relay-response box');
@@ -113,7 +113,7 @@ function assert(cond, message) {
 
     console.log('STEP 4: Act 4 — Bob checks his own mail directly at Domain B, with independent verification');
     await page.locator('#checkBobMailBtn').click();
-    await page.waitForFunction(() => document.getElementById('privacyPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('privacyPanel').style.display !== 'none', null, { timeout: 10000 });
     const checkText = await page.locator('#checkResult').textContent();
     assert(checkText.includes('alice') && checkText.includes(DOMAIN_A), 'expected the message to be attributed to alice#' + DOMAIN_A + ', got: ' + checkText);
     assert(checkText.includes('✓') && checkText.includes('signature verified'), 'expected a successful independent verification, got: ' + checkText);
@@ -122,15 +122,15 @@ function assert(cond, message) {
 
     console.log('STEP 5: Act 5 — Bob blocks Alice, a retry is rejected, Bob unblocks, the next send succeeds');
     await page.locator('#blockBtn').click();
-    await page.waitForFunction(() => !document.getElementById('retrySendBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('retrySendBtn').disabled, null, { timeout: 10000 });
     await page.locator('#retrySendBtn').click();
-    await page.waitForFunction(() => !document.getElementById('unblockBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('unblockBtn').disabled, null, { timeout: 10000 });
     const afterBlockText = await page.locator('#privacyResult').textContent();
     assert(afterBlockText.includes('Rejected') && afterBlockText.includes('not accepting mail from you'), 'expected a rejection worded like a plain non-member case, got: ' + afterBlockText);
     await page.locator('#unblockBtn').click();
-    await page.waitForFunction(() => !document.getElementById('resendBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('resendBtn').disabled, null, { timeout: 10000 });
     await page.locator('#resendBtn').click();
-    await page.waitForFunction(() => document.getElementById('privacyResult').textContent.includes('working again'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('privacyResult').textContent.includes('working again'), null, { timeout: 10000 });
     const finalText = await page.locator('#privacyResult').textContent();
     assert(finalText.includes('Delivered again, immediately'), 'expected the final resend to succeed, got: ' + finalText);
     console.log('PASS: block correctly rejects, unblock correctly restores delivery immediately');
@@ -139,7 +139,7 @@ function assert(cond, message) {
     const rawBoxDetails = page.locator('#checkResult details.raw').last();
     await rawBoxDetails.locator('summary').click();
     await rawBoxDetails.locator('button').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
     const verifyText = await page.locator('#verifyResult').textContent();
     assert((await page.locator('#verifyDomainInput').inputValue()) === DOMAIN_B, 'expected the verify panel to auto-fill Domain B as the delivering domain');
     console.log('PASS:', verifyText);

@@ -60,12 +60,12 @@ async function projectPortals(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     const portals = await projectPortals(frame);
     const toLobby = portals.find((p) => p.to === 'lobby');
     await frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
     await page.waitForTimeout(1500);
     console.log('PASS: in the Lobby, 3D render loop running');
 
@@ -108,15 +108,15 @@ async function projectPortals(frame) {
     // Wallet starts closed on entering a world — open it first so Escape
     // has something to close.
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#scene3d').click({ position: { x: 5, y: 5 } }); // focus back on the scene, not a wallet input
     await page.keyboard.press('Escape');
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     console.log('PASS: Escape closed the wallet panel');
 
     console.log('STEP 5: Escape again brings the wallet back');
     await page.keyboard.press('Escape');
-    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     console.log('PASS: Escape reopened the wallet panel');
 
     console.log('STEP 6: no Fullscreen API integration left (#51) — just a plain "F11" hint in the 3D scene');

@@ -52,22 +52,22 @@ function shot(name) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
 
     const PASSWORD = 'full-backup-test-password-1';
     await frame.locator('#chooseNewBtn').click();
-    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#newPasswordInput').fill(PASSWORD);
     await frame.locator('#newPasswordConfirmInput').fill(PASSWORD);
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     const seedPhrase = (await frame.locator('#seedPhraseText').textContent()).trim();
     if (seedPhrase.split(/\s+/).length !== 16) throw new Error('Expected a 16-word seed phrase, got: ' + seedPhrase);
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const originalIdentityLabel = await frame.locator('#walletIdentity').textContent();
     const originalPublicKey = await frame.evaluate(async () => (await AtlasWallet.getIdentity()).publicKey);
     console.log('PASS: identity created ->', originalIdentityLabel);
@@ -133,14 +133,14 @@ function shot(name) {
 
     console.log('STEP 3: export attempt with the correct password but a malformed seed phrase — distinct validation message');
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('.settings-category[data-category="full-backup"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="full-backup"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="full-backup"]').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#fullBackupExportPasswordInput').fill(PASSWORD);
     await frame.locator('#fullBackupExportSeedInput').fill('only two words');
     await frame.locator('#exportFullBackupBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('fullBackupExportStatus').textContent === 'Export failed: Enter the full seed phrase you were shown when you created this identity.',
+      () => document.getElementById('fullBackupExportStatus').textContent === 'Export failed: Enter the full seed phrase you were shown when you created this identity.', null,
       { timeout: 10000 }
     );
     console.log('PASS: malformed seed phrase rejected with its own distinct message');
@@ -150,7 +150,7 @@ function shot(name) {
     await frame.locator('#fullBackupExportSeedInput').fill(seedPhrase);
     await frame.locator('#exportFullBackupBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('fullBackupExportStatus').textContent === 'Export failed: Incorrect password.',
+      () => document.getElementById('fullBackupExportStatus').textContent === 'Export failed: Incorrect password.', null,
       { timeout: 10000 }
     );
     console.log('PASS: wrong password rejected — full backup export re-verifies the password, same as identity export');
@@ -189,21 +189,21 @@ function shot(name) {
       await chrome.storage.session.clear();
     });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: fresh "device" state confirmed — routed back to onboarding');
 
     console.log('STEP 7: restore attempt with a WRONG seed phrase (correct password) — same generic failure as identity import');
     await frame.locator('#chooseImportBtn').click();
-    await frame.waitForFunction(() => document.getElementById('importScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('importScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#onboardImportFileInput').setInputFiles(exportPath);
-    await frame.waitForFunction(() => document.getElementById('importScreenStatus').textContent.includes('loaded'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('importScreenStatus').textContent.includes('loaded'), null, { timeout: 5000 });
     await frame.locator('#onboardImportPasswordInput').fill(PASSWORD);
     await frame.locator('#onboardImportSeedInput').fill('wrong seed phrase entirely not the real one nope nope nope');
     await frame.locator('#restoreFullBackupBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('importScreenStatus').textContent === 'Incorrect password or seed phrase.',
+      () => document.getElementById('importScreenStatus').textContent === 'Incorrect password or seed phrase.', null,
       { timeout: 10000 }
     );
     if (await frame.locator('#importScreen').getAttribute('class').then((c) => !c.includes('active'))) {
@@ -216,7 +216,7 @@ function shot(name) {
     await frame.locator('#onboardImportSeedInput').fill(seedPhrase);
     await frame.locator('#confirmImportBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('importScreenStatus').textContent === 'Not an Atlas identity file.',
+      () => document.getElementById('importScreenStatus').textContent === 'Not an Atlas identity file.', null,
       { timeout: 10000 }
     );
     console.log('PASS: loading a full-backup file into the identity-only import button fails clearly, no silent partial restore');
@@ -231,7 +231,7 @@ function shot(name) {
       }
     });
     await frame.locator('#restoreFullBackupBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 15000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 15000 });
     const waitedPastLocks = await frame.evaluate(() => Date.now() >= window.__lockHeldUntil - 100);
     if (!waitedPastLocks) throw new Error('The restore wrote the wallet, mail or chat lists while another writer held their lock');
     const restoredLabel = await frame.locator('#walletIdentity').textContent();
@@ -311,9 +311,9 @@ function shot(name) {
     console.log('STEP 11: proving the restored identity can actually sign — present identity');
     const identityCategoryOpen = await frame.locator('.settings-category[data-category="identity"]').evaluate((el) => el.classList.contains('open'));
     if (!identityCategoryOpen) await frame.locator('.settings-category[data-category="identity"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity"]').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#presentBtn').click();
-    await frame.waitForFunction(() => document.getElementById('presentBtn').textContent.includes('verified'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('presentBtn').textContent.includes('verified'), null, { timeout: 10000 });
     console.log('PASS: restored identity produced a signature that verified against its own public key');
 
     console.log('\nALL FULL BACKUP/RESTORE CHECKS PASSED');

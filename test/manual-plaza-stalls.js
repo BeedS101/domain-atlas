@@ -57,18 +57,18 @@ async function projectInteractables(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('plaza-stall-password');
     await frame.locator('#newPasswordConfirmInput').fill('plaza-stall-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     console.log('PASS: identity created');
 
     const [compassStall, ringStall] = await projectInteractables(frame);
@@ -77,18 +77,18 @@ async function projectInteractables(frame) {
 
     console.log('STEP 1: clicking the Compass Stall collects a Bronze Compass');
     await frame.locator('#scene').click({ position: { x: compassStall.sx, y: compassStall.sy } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), null, { timeout: 10000 });
     const statusAfterFirstCompass = await frame.locator('#status').textContent();
     if (!statusAfterFirstCompass.includes('Bronze Compass')) throw new Error('Expected the status to mention the Bronze Compass: ' + statusAfterFirstCompass);
     console.log('PASS:', statusAfterFirstCompass);
 
     console.log('STEP 2: clicking the Compass Stall again does NOT issue a second one (oncePerUser)');
     await frame.locator('#scene').click({ position: { x: compassStall.sx, y: compassStall.sy } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Already collected'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Already collected'), null, { timeout: 10000 });
     const statusAfterSecondCompass = await frame.locator('#status').textContent();
     console.log('PASS:', statusAfterSecondCompass);
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 5000 });
     const compassCount = await frame.evaluate(() => {
       return [...document.querySelectorAll('#selfCollectiblesList .wallet-item .name')].filter((el) => el.textContent.includes('Bronze Compass')).length;
     });
@@ -97,16 +97,16 @@ async function projectInteractables(frame) {
 
     console.log('STEP 3: clicking the Ring Stall collects a Signet Ring with a rich properties bag');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#scene').click({ position: { x: ringStall.sx, y: ringStall.sy } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), null, { timeout: 10000 });
     const statusAfterRing = await frame.locator('#status').textContent();
     if (!statusAfterRing.includes('Signet Ring')) throw new Error('Expected the status to mention the Signet Ring: ' + statusAfterRing);
     console.log('PASS:', statusAfterRing);
 
     console.log('STEP 4: the ring card\'s Properties panel shows the array value readably, not as "a,b,c"');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const ringCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Signet Ring' });
     await ringCard.locator('button[data-action="toggle-properties"]').click();
     const detailText = await ringCard.locator('.properties-detail').textContent();

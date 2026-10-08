@@ -123,16 +123,16 @@ function postJson(port, urlPath, body) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('legacy-migration-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('legacy-migration-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const identity = await frame.evaluate(() => AtlasWallet.getIdentity());
     console.log('PASS: identity ready ->', identity.publicKey.slice(0, 16) + '…');
 
@@ -173,15 +173,15 @@ function postJson(port, urlPath, body) {
 
     console.log('STEP 2: opening the wallet does not render either stale entry');
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const cardCount = await frame.evaluate(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length);
     if (cardCount !== 0) throw new Error('Expected 0 cards rendered (both seeded entries are pre-merge and unrenderable), got: ' + cardCount);
     console.log('PASS: neither stale entry rendered — no broken cards, nothing silently half-shown');
 
     console.log('STEP 3: "Request item" is enabled, not stuck on "Already collected" because of the now-invisible legacy item');
-    await frame.waitForFunction(() => !document.getElementById('requestItemBtn').disabled, { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('requestItemBtn').disabled, null, { timeout: 5000 });
     const btnText = await frame.locator('#requestItemBtn').textContent();
     if (!btnText.includes('Request')) throw new Error('Expected the button to read "Request …", got: ' + btnText);
     console.log('PASS: request button reads "' + btnText.trim() + '" — the stale legacy item is no longer blocking a fresh request');
@@ -196,7 +196,7 @@ function postJson(port, urlPath, body) {
 
     console.log('STEP 5: requesting fresh now actually works — a real domain-atlas-asset/1.0 credential gets issued and held');
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, null, { timeout: 15000 });
     const held1 = await frame.evaluate(async () => {
       const wallet = await AtlasWallet.getWallet((await AtlasWallet.getIdentity()).publicKey);
       return wallet[0].credential;
@@ -219,7 +219,7 @@ function postJson(port, urlPath, body) {
     }
     console.log('  issuer signed a replacement ->', reissue.newCredential.id, 'supersedes', held1.id);
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#checkMailNowBtn').click();
     await frame.waitForFunction((oldId) => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));

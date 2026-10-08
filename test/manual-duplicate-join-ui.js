@@ -79,7 +79,7 @@ async function enterPlaza(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' entered Plaza');
   return { page, frame };
 }
@@ -88,7 +88,7 @@ async function walkToLobby(frame, label) {
   const portals = await projectPortals(frame);
   const toLobby = portals.find((p) => p.to === 'lobby');
   await frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
   await new Promise((r) => setTimeout(r, 300)); // let presence's connect actually settle, same pacing manual-multiplayer-presence.js uses
   console.log('SETUP: ' + label + ' walked into the Lobby');
 }
@@ -170,7 +170,7 @@ async function waitForCondition(frame, fn, description, timeoutMs = 8000) {
     await b.page.locator('#domain-atlas-enter-btn').click();
     const bFrameHandle2 = await b.page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const bFrame2 = await bFrameHandle2.contentFrame();
-    await bFrame2.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await bFrame2.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await walkToLobby(bFrame2, 'B (retry)');
     await waitForCondition(a.frame, () => document.getElementById('duplicateJoinModal').classList.contains('active'), "A's #duplicateJoinModal to open a SECOND time for B's retry");
     console.log('PASS: B\'s retry opened a fresh challenge on A');

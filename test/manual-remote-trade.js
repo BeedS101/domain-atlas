@@ -88,7 +88,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -99,10 +99,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click(); // close the panel — STEP 3 re-opens it via the same toggle
   return publicKey;
@@ -123,7 +123,7 @@ async function openTradingSubtab(frame, subtabBtnId, subscreenId) {
   const panelOpen = await frame.evaluate(() => document.getElementById('walletPanel').classList.contains('open'));
   if (!panelOpen) await frame.locator('#walletBtn').click();
   await frame.locator('#tradeTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('tradeScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('tradeScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#' + subtabBtnId).click();
   await frame.waitForFunction((id) => document.getElementById(id).classList.contains('active'), subscreenId, { timeout: 5000 });
 }
@@ -181,10 +181,10 @@ async function setSellQuantities(frame, offerQty, wantQty) {
 async function joinTradingStationIfNeeded(frame) {
   const alreadyJoined = await frame.evaluate(() => document.getElementById('tradingStationJoinSection').hidden);
   if (alreadyJoined) return;
-  await frame.waitForFunction(() => !document.getElementById('tradingStationJoinSection').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('tradingStationJoinSection').hidden, null, { timeout: 5000 });
   await frame.locator('#tradingStationJoinBtn').click();
-  await frame.waitForFunction(() => document.getElementById('tradingStationJoinSection').hidden, { timeout: 10000 });
-  await frame.waitForFunction(() => Array.from(document.getElementById('remoteTradeStationDomainSelect').options).some((o) => o.value === 'localhost:8001'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('tradingStationJoinSection').hidden, null, { timeout: 10000 });
+  await frame.waitForFunction(() => Array.from(document.getElementById('remoteTradeStationDomainSelect').options).some((o) => o.value === 'localhost:8001'), null, { timeout: 5000 });
 }
 
 (async () => {
@@ -217,9 +217,9 @@ async function joinTradingStationIfNeeded(frame) {
     // branch in viewer.js. refreshInventoryDisplay() is called explicitly
     // since this bypasses the click handler that normally triggers it.
     await a.frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
-    await a.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×20 g'), { timeout: 15000 });
+    await a.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×20 g'), null, { timeout: 15000 });
     await b.frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.gold', 10); await refreshInventoryDisplay(); });
-    await b.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Gold (Au) ×10 g'), { timeout: 15000 });
+    await b.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Gold (Au) ×10 g'), null, { timeout: 15000 });
     console.log('PASS: A holds 20 iron, B holds 10 gold — each in their own wallet, no counterparty involved');
 
     console.log('STEP 2: task #160 sanity check — a bound credential (atlas.membership) cannot be traded at all');
@@ -240,13 +240,13 @@ async function joinTradingStationIfNeeded(frame) {
     // "You offer" is a dropdown of A's own held fungible balances (v1.14
     // tweak) rather than free text — wait for it to actually populate with
     // the 20-iron balance minted back in STEP 1 before selecting it.
-    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellOfferClassSelect').options).some((o) => o.value === 'atlas.element.iron'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellOfferClassSelect').options).some((o) => o.value === 'atlas.element.iron'), null, { timeout: 10000 });
     await pickSearchable(a.frame, 'tradingSellOfferClassSelect', 'atlas.element.iron');
     // Task #202 — "You want" is now fetched live from GET /atlas/trade/catalog
     // (refreshTradingSellWantOptions) instead of the old hardcoded 3-option
     // list, so it needs the same "wait for it to actually populate" treatment
     // as the offer dropdown just above rather than an instant selectOption.
-    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellWantClassSelect').options).some((o) => o.value === 'atlas.element.gold'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellWantClassSelect').options).some((o) => o.value === 'atlas.element.gold'), null, { timeout: 10000 });
     await pickSearchable(a.frame, 'tradingSellWantClassSelect', 'atlas.element.gold');
 
     // Task #207 — both quantity fields default to 0, and typing a real
@@ -263,14 +263,14 @@ async function joinTradingStationIfNeeded(frame) {
       throw new Error('Expected both Sell quantity fields to default to 0, got: ' + JSON.stringify(bothZeroInitially));
     }
     await a.frame.locator('#tradingSellOfferQtyInput').fill('20');
-    await a.frame.waitForFunction(() => document.getElementById('tradingSellWantQtyInput').value === '1', { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('tradingSellWantQtyInput').value === '1', null, { timeout: 5000 });
     await a.frame.locator('#tradingSellWantQtyInput').fill('3');
-    await a.frame.waitForFunction(() => document.getElementById('tradingSellOfferQtyInput').value === '60', { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('tradingSellOfferQtyInput').value === '60', null, { timeout: 5000 });
     console.log('PASS: quantity auto-suggestion works both ways at this domain\'s 20:1 iron:gold rate (0/0 default, 20->1, 3->60)');
 
     await setSellQuantities(a.frame, 10, 5);
     await a.frame.locator('#tradingSellSubmitBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('tradingSellStatus').textContent.startsWith('✓ Posted'), { timeout: 15000 });
+    await a.frame.waitForFunction(() => document.getElementById('tradingSellStatus').textContent.startsWith('✓ Posted'), null, { timeout: 15000 });
     console.log('PASS: A\'s listing is posted ->', await a.frame.locator('#tradingSellStatus').textContent());
 
     console.log('STEP 5: B\'s Buy tab shows A\'s listing (ungated browse) and claims it — settles immediately since B is live right now');
@@ -278,12 +278,12 @@ async function joinTradingStationIfNeeded(frame) {
     const buyRow = b.frame.locator('#tradingBuyList .wallet-item', { hasText: '10 g atlas.element.iron' });
     await buyRow.waitFor({ timeout: 15000 });
     await buyRow.locator('.trading-claim-btn').click();
-    await b.frame.waitForFunction(() => document.getElementById('tradingBuyStatus').textContent.startsWith('✓ Traded'), { timeout: 15000 });
+    await b.frame.waitForFunction(() => document.getElementById('tradingBuyStatus').textContent.startsWith('✓ Traded'), null, { timeout: 15000 });
     console.log('PASS:', await b.frame.locator('#tradingBuyStatus').textContent());
 
     await b.frame.waitForFunction(
       () => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×10 g') &&
-            document.getElementById('selfCollectiblesList').textContent.includes('Gold (Au) ×5 g'),
+            document.getElementById('selfCollectiblesList').textContent.includes('Gold (Au) ×5 g'), null,
       { timeout: 10000 }
     );
     console.log('PASS: B\'s own wallet updated immediately — received 10 iron, kept a 5-gold remainder');
@@ -297,7 +297,7 @@ async function joinTradingStationIfNeeded(frame) {
     console.log('STEP 7: checking A\'s mail delivers the remainder (via asset-update) and surfaces the received gold as a claimable gift');
     await a.frame.locator('#socialTabBtn').click();
     await a.frame.locator('#checkMailNowBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×10 g'), { timeout: 15000 });
+    await a.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×10 g'), null, { timeout: 15000 });
     console.log('PASS: A\'s iron balance superseded to the 10-iron remainder automatically');
 
     const giftCard = a.frame.locator('#mailList .mail-card', { hasText: 'Listing claimed at localhost:8001' });
@@ -313,7 +313,7 @@ async function joinTradingStationIfNeeded(frame) {
     console.log('PASS: unclaimed gift card is unread with Delete disabled');
 
     await giftCard.locator('button[data-action="claim-gift"]').click();
-    await a.frame.waitForFunction(() => document.getElementById('status').textContent.includes('Claimed'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('status').textContent.includes('Claimed'), null, { timeout: 5000 });
     console.log('PASS: settlement notice mail received and gold claimed ->', giftCardText.trim());
 
     // Tweak: clicking Claim should mark the mail read AND unblock Delete.
@@ -332,15 +332,15 @@ async function joinTradingStationIfNeeded(frame) {
 
     console.log('STEP 8: A posts a second listing, then withdraws it via Listings -> Cancel — it disappears from both A\'s Listings and B\'s Buy browse');
     await openTradingSubtab(a.frame, 'tradingSellSubtabBtn', 'tradingSellSubscreen');
-    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellOfferClassSelect').options).some((o) => o.value === 'atlas.element.iron'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellOfferClassSelect').options).some((o) => o.value === 'atlas.element.iron'), null, { timeout: 10000 });
     await pickSearchable(a.frame, 'tradingSellOfferClassSelect', 'atlas.element.iron');
-    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellWantClassSelect').options).some((o) => o.value === 'atlas.element.gold'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellWantClassSelect').options).some((o) => o.value === 'atlas.element.gold'), null, { timeout: 10000 });
     await pickSearchable(a.frame, 'tradingSellWantClassSelect', 'atlas.element.gold');
     // Task #207 — see setSellQuantities' own comment: "3 iron for 1 gold"
     // isn't rate-consistent either, so both values are set directly.
     await setSellQuantities(a.frame, 3, 1);
     await a.frame.locator('#tradingSellSubmitBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('tradingSellStatus').textContent.startsWith('✓ Posted'), { timeout: 15000 });
+    await a.frame.waitForFunction(() => document.getElementById('tradingSellStatus').textContent.startsWith('✓ Posted'), null, { timeout: 15000 });
 
     await openTradingSubtab(b.frame, 'tradingBuySubtabBtn', 'tradingBuySubscreen');
     await b.frame.locator('#tradingBuyRefreshBtn').click();
@@ -353,14 +353,14 @@ async function joinTradingStationIfNeeded(frame) {
     await listingsRow.waitFor({ timeout: 10000 });
     await listingsRow.locator('.trading-cancel-btn').click();
     await a.frame.waitForFunction(
-      () => Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron') && el.textContent.includes('canceled')),
+      () => Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron') && el.textContent.includes('canceled')), null,
       { timeout: 10000 }
     );
     console.log('PASS: A\'s second listing shows canceled in Listings');
 
     await b.frame.locator('#tradingBuyRefreshBtn').click();
     await b.frame.waitForFunction(
-      () => !Array.from(document.querySelectorAll('#tradingBuyList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron')),
+      () => !Array.from(document.querySelectorAll('#tradingBuyList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron')), null,
       { timeout: 10000 }
     );
     console.log('PASS: the withdrawn listing is gone from B\'s Buy browse too');
@@ -373,7 +373,7 @@ async function joinTradingStationIfNeeded(frame) {
     if (!settledRowText.includes('settled')) throw new Error('Expected A\'s first listing to show settled status, got: ' + settledRowText);
     await settledRow.locator('.trading-delete-listing-btn').click();
     await a.frame.waitForFunction(
-      () => !Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('10 g atlas.element.iron')),
+      () => !Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('10 g atlas.element.iron')), null,
       { timeout: 10000 }
     );
     console.log('PASS: deleting the settled listing removed it from A\'s Listings');
@@ -385,7 +385,7 @@ async function joinTradingStationIfNeeded(frame) {
     if (!canceledRowText.includes('canceled')) throw new Error('Expected A\'s second listing to still show canceled status, got: ' + canceledRowText);
     await canceledRow.locator('.trading-delete-listing-btn').click();
     await a.frame.waitForFunction(
-      () => !Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron')),
+      () => !Array.from(document.querySelectorAll('#tradingListingsList .wallet-item')).some((el) => el.textContent.includes('3 g atlas.element.iron')), null,
       { timeout: 10000 }
     );
     console.log('PASS: deleting the canceled listing removed it from A\'s Listings');

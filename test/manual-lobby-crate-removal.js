@@ -65,14 +65,14 @@ async function enterLobbyFromPlaza(frame) {
     check();
   }));
   await frame.locator('#scene').click({ position: { x: lobbyHb.sx, y: lobbyHb.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
-  await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
+  await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 10000 });
   await frame.evaluate(() => window.__atlasActive3D.ready);
 }
 
 async function openCrate(frame, crate) {
   await teleport(frame, crate.x, crate.z);
-  await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', { timeout: 5000 });
+  await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', null, { timeout: 5000 });
   await pressE(frame);
   await frame.waitForFunction((cls) => new Promise((resolve) => {
     AtlasWallet.getIdentity().then((identity) => AtlasWallet.getWallet(identity.publicKey)).then((w) => {
@@ -95,19 +95,19 @@ async function openCrate(frame, crate) {
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
     frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('lobby-crate-removal-password');
     await frame.locator('#newPasswordConfirmInput').fill('lobby-crate-removal-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     await enterLobbyFromPlaza(frame);
     console.log('PASS: entered the 3D lobby with a fresh wallet');

@@ -31,7 +31,7 @@ function shot(name) { return path.resolve(__dirname, name); }
     const frame = await frameHandle.contentFrame();
     frame.on('console', (msg) => console.log('FRAME:', msg.type(), msg.text()));
     frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     console.log('PASS: plaza loaded');
 
     // Check WebGL is actually available in this browser context.
@@ -61,9 +61,9 @@ function shot(name) { return path.resolve(__dirname, name); }
     if (!lobbyPortal) throw new Error('No lobby portal found on plaza scene: ' + JSON.stringify(portals));
     await frame.locator('#scene').click({ position: { x: lobbyPortal.sx, y: lobbyPortal.sy } });
 
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
     console.log('PASS: entered lobby world');
-    await frame.waitForFunction(() => document.getElementById('scene3d').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('scene3d').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: 3D canvas is active');
 
     // Poll classList + any status text over the loading window to see

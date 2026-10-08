@@ -69,30 +69,30 @@ async function expectWholeLabelSelectedOnFocus(frame, selectId) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('trade-combobox-focus-pw');
     await frame.locator('#newPasswordConfirmInput').fill('trade-combobox-focus-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 15000 });
     console.log('PASS: identity + iron balance ready');
 
     console.log('STEP 1: opening Trade -> Sell and joining this domain\'s Trading Station');
     await frame.locator('#tradeTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('tradeScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('tradeScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#tradingSellSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('tradingSellSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('tradingSellSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const alreadyJoined = await frame.evaluate(() => document.getElementById('tradingStationJoinSection').hidden);
     if (!alreadyJoined) {
-      await frame.waitForFunction(() => !document.getElementById('tradingStationJoinSection').hidden, { timeout: 5000 });
+      await frame.waitForFunction(() => !document.getElementById('tradingStationJoinSection').hidden, null, { timeout: 5000 });
       await frame.locator('#tradingStationJoinBtn').click();
-      await frame.waitForFunction(() => document.getElementById('tradingStationJoinSection').hidden, { timeout: 10000 });
+      await frame.waitForFunction(() => document.getElementById('tradingStationJoinSection').hidden, null, { timeout: 10000 });
     }
     // "You offer" is populated from the wallet's own held fungible
     // balances (no membership needed for that part) — wait for the real
@@ -103,7 +103,7 @@ async function expectWholeLabelSelectedOnFocus(frame, selectId) {
       const offer = document.getElementById('tradingSellOfferClassSelect');
       const want = document.getElementById('tradingSellWantClassSelect');
       return offer && offer.value && want && want.value;
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     console.log('PASS: Trading Station joined, "You offer"/"You want" both settled on a real class');
 
     console.log('STEP 2: focusing "You offer" selects its whole current label');
@@ -116,12 +116,12 @@ async function expectWholeLabelSelectedOnFocus(frame, selectId) {
 
     console.log('STEP 4: opening Trade -> Convert');
     await frame.locator('#tradingConvertSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('tradingConvertSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('tradingConvertSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.waitForFunction(() => {
       const from = document.getElementById('tradingConvertFromClassSelect');
       const to = document.getElementById('tradingConvertToClassSelect');
       return from && from.value && to && to.value;
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     console.log('PASS: "Convert from"/"Convert to" both settled on a real class');
 
     console.log('STEP 5: focusing "Convert from" selects its whole current label');

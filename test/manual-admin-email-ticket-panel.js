@@ -172,23 +172,23 @@ function stopIssuer() {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('admin-email-ticket-password');
     await frame.locator('#newPasswordConfirmInput').fill('admin-email-ticket-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const identity = await frame.evaluate(() => AtlasWallet.getIdentity());
     fs.writeFileSync(path.join(STATE_DIR, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: identity.publicKey, addedAt: new Date().toISOString() }] }));
     await frame.evaluate(() => refreshAdminButtonVisibility());
-    await frame.waitForFunction(() => document.getElementById('adminBtn').style.display !== 'none', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('adminBtn').style.display !== 'none', null, { timeout: 5000 });
     await frame.locator('#adminBtn').click();
     await page.waitForURL('**/atlas-admin/**', { timeout: 10000 });
-    await page.waitForFunction(() => !document.getElementById('loggedOutNotice') || document.getElementById('loggedOutNotice').style.display === 'none', { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('loggedOutNotice') || document.getElementById('loggedOutNotice').style.display === 'none', null, { timeout: 10000 });
     console.log('SETUP: logged in to the admin panel');
 
     const requests = [];
@@ -203,15 +203,15 @@ function stopIssuer() {
 
     console.log('STEP 1: the page refuses a bad address or a bad properties patch itself');
     await send('atlas.demo.attestation.filing', 'not-an-address');
-    await page.waitForFunction(() => /valid email address/.test(document.getElementById('emailTicketResult').textContent), { timeout: 5000 });
+    await page.waitForFunction(() => /valid email address/.test(document.getElementById('emailTicketResult').textContent), null, { timeout: 5000 });
     await send('atlas.demo.attestation.filing', 'guest@example.com', '{nope');
-    await page.waitForFunction(() => /does not parse/.test(document.getElementById('emailTicketResult').textContent), { timeout: 5000 });
+    await page.waitForFunction(() => /does not parse/.test(document.getElementById('emailTicketResult').textContent), null, { timeout: 5000 });
     assert(requests.length === 0 && sessions.length === 0, 'neither mistake may reach the server or send mail');
     console.log('PASS: refused in the page, nothing sent');
 
     console.log('STEP 2: a valid send reaches the mail server with a ticket carrying the starting fact');
     await send('atlas.demo.attestation.filing', 'guest@example.com', '{"com.example.seat": "A-12"}');
-    await page.waitForFunction(() => /^Sent /.test(document.getElementById('emailTicketResult').textContent), { timeout: 15000 });
+    await page.waitForFunction(() => /^Sent /.test(document.getElementById('emailTicketResult').textContent), null, { timeout: 15000 });
     assert(/ok/.test((await result().getAttribute('class')) || ''), 'the result should be styled as a success');
     assert(sessions.length === 1 && sessions[0].rcptTo[0] === '<guest@example.com>', 'expected one message to guest@example.com, got ' + JSON.stringify(sessions.map((s) => s.rcptTo)));
     const ticket = JSON.parse(parseMimeAttachment(sessions[0].data, null));
@@ -220,9 +220,9 @@ function stopIssuer() {
 
     console.log('STEP 3: the issuer\'s refusals are shown in the page');
     await send('atlas.element.gold', 'guest@example.com');
-    await page.waitForFunction(() => /unique/.test(document.getElementById('emailTicketResult').textContent), { timeout: 10000 });
+    await page.waitForFunction(() => /unique/.test(document.getElementById('emailTicketResult').textContent), null, { timeout: 10000 });
     await send('atlas.demo.attestation.filing', REJECT_RECIPIENT);
-    await page.waitForFunction(() => /could not deliver/.test(document.getElementById('emailTicketResult').textContent), { timeout: 15000 });
+    await page.waitForFunction(() => /could not deliver/.test(document.getElementById('emailTicketResult').textContent), null, { timeout: 15000 });
     assert(/err/.test((await result().getAttribute('class')) || ''), 'the failure should be styled as an error');
     console.log('PASS: fungible class and rejected delivery both reported');
 

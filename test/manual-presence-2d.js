@@ -147,7 +147,7 @@ async function runBackend(kind) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => !document.getElementById('placeLabel').textContent.includes('Loading'), { timeout: 10000 });
+    await frame.waitForFunction(() => !document.getElementById('placeLabel').textContent.includes('Loading'), null, { timeout: 10000 });
 
     console.log('STEP 1 ' + tag + 'entering plaza (2D) puts one anonymous visitor in its presence room');
     assert(!(await frame.evaluate(() => !!window.__atlasActive3D)), 'plaza must be a 2D world for this check to mean what it says');
@@ -165,11 +165,11 @@ async function runBackend(kind) {
 
     console.log('STEP 3 ' + tag + 'plaza -> lobby (3D) -> market (2D): the visitor is in exactly one room at a time');
     await frame.evaluate(() => enterWorld('lobby'));
-    await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 15000 });
+    await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 15000 });
     await waitForCount(presenceBase, 'lobby', 1, 'in lobby');
     await waitForCount(presenceBase, 'plaza', 0, 'plaza after leaving it');
     await frame.evaluate(() => enterWorld('market'));
-    await frame.waitForFunction(() => currentWorld && currentWorld.id === 'market' && !window.__atlasActive3D, { timeout: 15000 });
+    await frame.waitForFunction(() => currentWorld && currentWorld.id === 'market' && !window.__atlasActive3D, null, { timeout: 15000 });
     await waitForCount(presenceBase, 'market', 1, 'in market');
     await waitForCount(presenceBase, 'lobby', 0, 'lobby after leaving it');
     console.log('PASS: lobby 1 -> market 1, previous rooms emptied');
@@ -184,7 +184,7 @@ async function runBackend(kind) {
 
     console.log('STEP 5 ' + tag + 'leaving a 2D world removes the visitor from its room');
     await frame.evaluate(() => enterWorld('arena'));
-    await frame.waitForFunction(() => currentWorld && currentWorld.id === 'arena', { timeout: 15000 });
+    await frame.waitForFunction(() => currentWorld && currentWorld.id === 'arena', null, { timeout: 15000 });
     await waitForCount(presenceBase, 'arena', 1, 'in arena');
     await waitForCount(presenceBase, 'market', 0, 'market after leaving it');
     console.log('PASS: arena 1, market 0');
@@ -209,7 +209,7 @@ async function runBackend(kind) {
       presenceProc.kill();
       await sleep(500);
       await frame.evaluate(() => enterWorld('museum'));
-      await frame.waitForFunction(() => currentWorld && currentWorld.id === 'museum' && !document.getElementById('placeLabel').textContent.includes('Loading'), { timeout: 15000 });
+      await frame.waitForFunction(() => currentWorld && currentWorld.id === 'museum' && !document.getElementById('placeLabel').textContent.includes('Loading'), null, { timeout: 15000 });
       const label = await frame.textContent('#status').catch(() => '');
       assert(!/Could not load world/.test(label || ''), 'museum must still load with presence down, status: ' + label);
       console.log('PASS: museum loaded with presence down');

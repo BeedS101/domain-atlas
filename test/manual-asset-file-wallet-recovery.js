@@ -84,7 +84,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay');
   return { page, frame };
 }
@@ -95,10 +95,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click();
   await frame.locator('#walletBtn').click();
@@ -148,7 +148,7 @@ async function openCardMenu(card) {
   await card.locator('.card-menu-items.show').waitFor({ state: 'visible', timeout: 3000 });
 }
 async function waitForDialog(frame) {
-  await frame.waitForFunction(() => document.getElementById('bridgeOfferPreviewModal').classList.contains('active'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('bridgeOfferPreviewModal').classList.contains('active'), null, { timeout: 10000 });
   return frame.locator('#bridgeOfferPreviewBox').innerText();
 }
 async function startSave(frame) {
@@ -227,7 +227,7 @@ async function statusText(frame) {
 
     console.log('STEP 1: a lost reply is recovered inside the same click');
     await mintRing(alice.frame);
-    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, null, { timeout: 15000 });
     const ring1 = (await holdings(alice.frame)).find((h) => h.cls === RING);
     await setFault(alice.frame, 'export', 'drop-reply');
     await startSave(alice.frame);
@@ -236,7 +236,7 @@ async function statusText(frame) {
     await download1.saveAs(file1Path);
     const file1 = JSON.parse(fs.readFileSync(file1Path, 'utf8'));
     assert(file1.supersedes === ring1.id, 'the downloaded file should be the export of the ring: ' + JSON.stringify(file1.supersedes));
-    await alice.frame.waitForFunction(() => !document.getElementById('pendingExportsSection').hidden, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => !document.getElementById('pendingExportsSection').hidden, null, { timeout: 15000 });
     assert((await holdings(alice.frame)).every((h) => h.cls !== RING), 'the ring should have left the wallet');
     const rec1 = await pendingFile(alice.frame, ring1.id);
     assert(rec1 && rec1.fileId === file1.id && !rec1.credential, 'the ledger should hold the pending export without the old copy: ' + JSON.stringify(rec1 && Object.keys(rec1)));
@@ -247,14 +247,14 @@ async function statusText(frame) {
 
     console.log('STEP 2: a lost reply with the issuer unreachable leaves an interrupted entry, then "Check again" settles it');
     await mintRing(alice.frame);
-    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, null, { timeout: 15000 });
     const ring2 = (await holdings(alice.frame)).find((h) => h.cls === RING);
     await setFault(alice.frame, 'export', 'drop-reply');
     await setFault(alice.frame, 'recover', 'unreachable');
     await startSave(alice.frame);
     await alice.frame.locator('#bridgeOfferPreviewClaimBtn').click();
-    await alice.frame.waitForFunction(() => !document.getElementById('bridgeOfferPreviewModal').classList.contains('active'), { timeout: 15000 });
-    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), { timeout: 5000 });
+    await alice.frame.waitForFunction(() => !document.getElementById('bridgeOfferPreviewModal').classList.contains('active'), null, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), null, { timeout: 5000 });
     assert((await holdings(alice.frame)).some((h) => h.id === ring2.id), 'the ring must stay in the wallet until the issuer confirms');
     const listText = await alice.frame.locator('#pendingExportsList').innerText();
     assert(/save interrupted/.test(listText) && /Check again/.test(listText), 'expected an interrupted entry with a retry button: ' + listText);
@@ -278,14 +278,14 @@ async function statusText(frame) {
 
     console.log('STEP 3: an interrupted export is finished by itself when the wallet is opened again');
     await mintRing(alice.frame);
-    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, null, { timeout: 15000 });
     const ring3 = (await holdings(alice.frame)).find((h) => h.cls === RING);
     await setFault(alice.frame, 'export', 'drop-reply');
     await setFault(alice.frame, 'recover', 'unreachable');
     await startSave(alice.frame);
     await alice.frame.evaluate(() => { document.getElementById('status').textContent = ''; });
     await alice.frame.locator('#bridgeOfferPreviewClaimBtn').click();
-    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), { timeout: 15000 });
+    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
     assert((await ledger(alice.frame)).find((r) => r.sourceId === ring3.id).state === 'interrupted', 'expected an interrupted record');
     await alice.page.close();
     alice = await openOverlay(aliceCtx, 'Alice (reopened)');
@@ -299,14 +299,14 @@ async function statusText(frame) {
 
     console.log('STEP 4: an answer that arrives but cannot be stored is settled the same way');
     await mintRing(alice.frame);
-    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, null, { timeout: 15000 });
     const ring4 = (await holdings(alice.frame)).find((h) => h.cls === RING);
     await setFault(alice.frame, 'export', 'fail-save');
     await setFault(alice.frame, 'recover', 'unreachable');
     await startSave(alice.frame);
     await alice.frame.evaluate(() => { document.getElementById('status').textContent = ''; });
     await alice.frame.locator('#bridgeOfferPreviewClaimBtn').click();
-    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), { timeout: 15000 });
+    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
     const l4 = (await ledger(alice.frame)).find((r) => r.sourceId === ring4.id);
     assert(l4 && l4.state === 'interrupted', 'expected an interrupted record after the failed save, got ' + (l4 && l4.state));
     assert((await holdings(alice.frame)).some((h) => h.id === ring4.id), 'the ring must not leave the wallet when its file was not stored');
@@ -319,12 +319,12 @@ async function statusText(frame) {
 
     console.log('STEP 5: a clear refusal leaves nothing behind');
     await mintRing(alice.frame);
-    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, null, { timeout: 15000 });
     const ring5 = (await holdings(alice.frame)).find((h) => h.cls === RING);
     await setFault(alice.frame, 'export', 'refuse');
     await startSave(alice.frame);
     await alice.frame.locator('#bridgeOfferPreviewClaimBtn').click();
-    await alice.frame.waitForFunction(() => /refused by the test issuer/.test(document.getElementById('bridgeOfferPreviewStatus').textContent), { timeout: 10000 });
+    await alice.frame.waitForFunction(() => /refused by the test issuer/.test(document.getElementById('bridgeOfferPreviewStatus').textContent), null, { timeout: 10000 });
     assert(!(await ledger(alice.frame)).some((r) => r.sourceId === ring5.id), 'a refusal must not leave a record');
     assert((await holdings(alice.frame)).some((h) => h.id === ring5.id), 'the ring should still be in the wallet');
     await alice.frame.locator('#bridgeOfferPreviewDismissBtn').click();
@@ -336,15 +336,15 @@ async function statusText(frame) {
     await startSave(alice.frame);
     await alice.frame.evaluate(() => { document.getElementById('status').textContent = ''; });
     await alice.frame.locator('#bridgeOfferPreviewClaimBtn').click();
-    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), { timeout: 15000 });
+    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
     assert((await ledger(alice.frame)).find((r) => r.sourceId === ring5.id).state === 'interrupted', 'expected an interrupted record');
     await setFault(alice.frame, 'export', null);
     await alice.frame.locator('#pendingExportsList button[data-action="pe-retry"]').click();
-    await alice.frame.waitForFunction(() => /Checking again shortly/.test(document.querySelector('#pendingExportsList .pe-status').textContent), { timeout: 10000 });
+    await alice.frame.waitForFunction(() => /Checking again shortly/.test(document.querySelector('#pendingExportsList .pe-status').textContent), null, { timeout: 10000 });
     assert((await ledger(alice.frame)).some((r) => r.sourceId === ring5.id && r.state === 'interrupted'), 'a young record must not be dropped on the issuer\'s say-so');
     await backdate(alice.frame, ring5.id, 3 * 60 * 1000);
     await alice.frame.locator('#pendingExportsList button[data-action="pe-retry"]').click();
-    await alice.frame.waitForFunction(() => document.getElementById('pendingExportsList').querySelectorAll('[data-action="pe-retry"]').length === 0, { timeout: 10000 });
+    await alice.frame.waitForFunction(() => document.getElementById('pendingExportsList').querySelectorAll('[data-action="pe-retry"]').length === 0, null, { timeout: 10000 });
     assert(!(await ledger(alice.frame)).some((r) => r.sourceId === ring5.id), 'the record should be gone');
     assert((await holdings(alice.frame)).some((h) => h.id === ring5.id), 'the ring should still be in the wallet');
     await startSave(alice.frame);
@@ -354,14 +354,14 @@ async function statusText(frame) {
 
     console.log('STEP 7: someone else claimed the file while the wallet was in the dark');
     await mintRing(alice.frame);
-    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, null, { timeout: 15000 });
     const ring7 = (await holdings(alice.frame)).find((h) => h.cls === RING);
     await setFault(alice.frame, 'export', 'drop-reply');
     await setFault(alice.frame, 'recover', 'unreachable');
     await startSave(alice.frame);
     await alice.frame.evaluate(() => { document.getElementById('status').textContent = ''; });
     await alice.frame.locator('#bridgeOfferPreviewClaimBtn').click();
-    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), { timeout: 15000 });
+    await alice.frame.waitForFunction(() => /was lost/.test(document.getElementById('status').textContent), null, { timeout: 15000 });
     // The file reaches Bob by some other route: the owner's own signed recovery request, made outside the wallet UI.
     const stolen = await alice.frame.evaluate(async ([id, base]) => {
       const c = await (await window.__realFetch(base + '/atlas/asset/recover-file-export-challenge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentialId: id }) })).json();

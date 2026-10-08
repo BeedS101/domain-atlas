@@ -67,7 +67,7 @@ function assert(cond, message) {
 
     console.log('STEP 1: Act 1 — ship a widget to the Distributor');
     await page.locator('#mintBtn').click();
-    await page.waitForFunction(() => document.getElementById('transferPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('transferPanel').style.display !== 'none', null, { timeout: 10000 });
     const mintText = await page.locator('#mintResult').textContent();
     assert(mintText.includes('minted to the Distributor'), 'unexpected mint result: ' + mintText);
     assert(await page.locator('#mintResult details.raw').count() === 1, 'expected a raw-widget box on the mint result');
@@ -75,18 +75,18 @@ function assert(cond, message) {
 
     console.log('STEP 2: Act 2 — Distributor -> Retailer -> Customer');
     await page.locator('#transfer1Btn').click();
-    await page.waitForFunction(() => !document.getElementById('transfer2Btn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('transfer2Btn').disabled, null, { timeout: 10000 });
     const t1Text = await page.locator('#transfer1Result').textContent();
     assert(t1Text.includes('Transferred to the Retailer'), 'unexpected first transfer result: ' + t1Text);
     await page.locator('#transfer2Btn').click();
-    await page.waitForFunction(() => document.getElementById('historyPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('historyPanel').style.display !== 'none', null, { timeout: 10000 });
     const t2Text = await page.locator('#transfer2Result').textContent();
     assert(t2Text.includes('final owner'), 'unexpected second transfer result: ' + t2Text);
     console.log('PASS: both transfers landed, widget now with the Customer');
 
     console.log('STEP 3: Act 3 — trace the widget\'s full supply chain');
     await page.locator('#traceBtn').click();
-    await page.waitForFunction(() => document.getElementById('recallPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('recallPanel').style.display !== 'none', null, { timeout: 10000 });
     const traceText = await page.locator('#traceResult').textContent();
     assert(traceText.includes('2 earlier links'), 'unexpected trace result: ' + traceText);
     assert(await page.locator('#traceResult details.raw').count() === 2, 'expected two raw link boxes in the traced chain');
@@ -94,7 +94,7 @@ function assert(cond, message) {
 
     console.log('STEP 4: Act 4 — the manufacturer issues a recall');
     await page.locator('#issueRecallBtn').click();
-    await page.waitForFunction(() => document.getElementById('checkinPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('checkinPanel').style.display !== 'none', null, { timeout: 10000 });
     const recallText = await page.locator('#recallResult').textContent();
     assert(recallText.includes('Recall issued'), 'unexpected recall result: ' + recallText);
     assert(await page.locator('#recallResult details.raw').count() === 1, 'expected a raw class-patch box on the recall result');
@@ -102,14 +102,14 @@ function assert(cond, message) {
 
     console.log('STEP 5: Act 5 — a tampered check-in is ignored, then a real one lands the recall');
     await page.locator('#tamperCheckinBtn').click();
-    await page.waitForFunction(() => document.getElementById('checkinResult').textContent.includes('Correctly ignored'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('checkinResult').textContent.includes('Correctly ignored'), null, { timeout: 10000 });
     const tamperText = await page.locator('#checkinResult').textContent();
     assert(!tamperText.includes('Unexpected'), 'tampered check-in should have been ignored, got: ' + tamperText);
     assert(await page.locator('#breakPanel').isHidden(), 'break panel should stay hidden until a real check-in actually lands the recall');
     console.log('PASS:', tamperText);
 
     await page.locator('#realCheckinBtn').click();
-    await page.waitForFunction(() => document.getElementById('breakPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('breakPanel').style.display !== 'none', null, { timeout: 10000 });
     const checkinText = await page.locator('#checkinResult').textContent();
     assert(checkinText.includes('The recall landed'), 'unexpected real check-in result: ' + checkinText);
     assert(await page.locator('#checkinResult details.raw').count() === 1, 'expected a raw reissued-widget box on the real check-in result');
@@ -117,7 +117,7 @@ function assert(cond, message) {
 
     console.log('STEP 6: Act 6 — try to break it: resell the now-bound widget');
     await page.locator('#resaleBtn').click();
-    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('Rejected'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('Rejected'), null, { timeout: 10000 });
     const breakText = await page.locator('#breakResult').textContent();
     assert(!breakText.includes('Unexpected'), 'resale of a recalled widget should have been rejected, got: ' + breakText);
     assert(breakText.includes('bound to its owner'), 'unexpected resale rejection text: ' + breakText);
@@ -127,7 +127,7 @@ function assert(cond, message) {
     const rawBox = page.locator('#checkinResult details.raw');
     await rawBox.locator('summary').click();
     await rawBox.locator('button').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
     const verifyText = await page.locator('#verifyResult').textContent();
     console.log('PASS:', verifyText);
 

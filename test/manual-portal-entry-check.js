@@ -30,7 +30,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     const frame = await frameHandle.contentFrame();
 
     // Get into the lobby the same way manual-lobby-check.js does.
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     const portals = await frame.evaluate(() => new Promise((resolve) => {
       const check = () => {
         if (window.__atlasScene && window.__atlasScene.portalMarkers.length) {
@@ -47,7 +47,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     }));
     const lobbyPortal = portals.find((p) => p.to === 'lobby');
     await frame.locator('#scene').click({ position: { x: lobbyPortal.sx, y: lobbyPortal.sy } });
-    await frame.waitForFunction(() => document.getElementById('scene3d').classList.contains('active'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('scene3d').classList.contains('active'), null, { timeout: 10000 });
     console.log('PASS: entered lobby, 3D canvas active');
 
     // Confirm it did NOT immediately bounce back (the old bug).

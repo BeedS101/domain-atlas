@@ -105,7 +105,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -116,10 +116,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#walletBtn').click(); // close the panel — later steps re-open it via the same toggle
 }
 
@@ -127,9 +127,9 @@ async function openCalendarModeSubtab(frame, subtabBtnId, subscreenId) {
   const panelOpen = await frame.evaluate(() => document.getElementById('walletPanel').classList.contains('open'));
   if (!panelOpen) await frame.locator('#walletBtn').click();
   await frame.locator('#socialTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('socialScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('socialScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#calendarSubtabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#' + subtabBtnId).click();
   await frame.waitForFunction((id) => document.getElementById(id).classList.contains('active'), subscreenId, { timeout: 5000 });
 }
@@ -181,7 +181,7 @@ async function openCalendarModeSubtab(frame, subtabBtnId, subscreenId) {
       domain: 'localhost:8002', manifestUrl: 'http://localhost:8002/.well-known/spatial.json', worldId: 'workshop', worldName: 'Neighbor Workshop'
     }));
     await openCalendarModeSubtab(frame, 'calendarRemoteSubtabBtn', 'calendarRemoteSubscreen');
-    await frame.waitForFunction(() => Array.from(document.getElementById('calendarRemoteFavoriteSelect').options).some((o) => o.value === 'localhost:8002'), { timeout: 5000 });
+    await frame.waitForFunction(() => Array.from(document.getElementById('calendarRemoteFavoriteSelect').options).some((o) => o.value === 'localhost:8002'), null, { timeout: 5000 });
     await frame.locator('#calendarRemoteFavoriteSelect').selectOption('localhost:8002');
     await frame.waitForFunction((tag) => document.getElementById('calendarRemoteEventsList').textContent.includes('Workshop Open House ' + tag), RUN_TAG, { timeout: 10000 });
     const remoteDomainInputValue = await frame.locator('#calendarRemoteDomainInput').inputValue();
@@ -214,7 +214,7 @@ async function openCalendarModeSubtab(frame, subtabBtnId, subscreenId) {
     console.log('STEP 6: an unreachable domain shows a clean error instead of a stale render or a thrown exception');
     await frame.locator('#calendarRemoteDomainInput').fill('localhost:9999');
     await frame.locator('#calendarRemoteFetchBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarRemoteStatus').textContent.includes('Could not reach'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('calendarRemoteStatus').textContent.includes('Could not reach'), null, { timeout: 10000 });
     const remoteListAfterError = await frame.locator('#calendarRemoteEventsList').textContent();
     if (remoteListAfterError.includes('Plaza Meetup') || remoteListAfterError.includes('All-Domain Festival')) throw new Error('Expected the stale render to be cleared on a failed fetch');
     const sourcePickerHiddenAfterError = await frame.locator('#calendarRemoteSourceSelect').isHidden();

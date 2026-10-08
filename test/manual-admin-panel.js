@@ -150,16 +150,16 @@ function postJson(port, urlPath, body) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('admin-panel-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('admin-panel-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const identity = await frame.evaluate(() => AtlasWallet.getIdentity());
     console.log('PASS: identity ready ->', identity.publicKey.slice(0, 16) + '…');
 
@@ -171,13 +171,13 @@ function postJson(port, urlPath, body) {
     console.log('STEP 2: seeding the roster with this identity, then re-checking visibility, makes the button appear');
     seedAdmin(identity.publicKey);
     await frame.evaluate(() => refreshAdminButtonVisibility());
-    await frame.waitForFunction(() => document.getElementById('adminBtn').style.display !== 'none', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('adminBtn').style.display !== 'none', null, { timeout: 5000 });
     console.log('PASS: Admin button now visible');
 
     console.log('STEP 3: clicking Admin logs in and hands off to the top-level admin panel page');
     await frame.locator('#adminBtn').click();
     await page.waitForURL('**/atlas-admin/**', { timeout: 10000 });
-    await page.waitForFunction(() => !document.getElementById('loggedOutNotice') || document.getElementById('loggedOutNotice').style.display === 'none', { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('loggedOutNotice') || document.getElementById('loggedOutNotice').style.display === 'none', null, { timeout: 10000 });
     const whoText = await page.locator('#whoDisplay').textContent();
     if (!whoText.includes(identity.publicKey.slice(0, 20))) {
       throw new Error('Expected the admin panel to show this identity as the logged-in admin, got: ' + whoText);
@@ -188,7 +188,7 @@ function postJson(port, urlPath, body) {
     const joinRes = await postJson(PRESENCE_PORT, '/presence/poll/join', { domain: 'localhost:8001', world: 'plaza', name: 'Admin Panel Test Visitor' });
     if (!joinRes.id) throw new Error('Setup failed: could not join an anonymous visitor into the presence server, got: ' + JSON.stringify(joinRes));
     await page.evaluate(() => refreshOnlineNow());
-    await page.waitForFunction(() => document.getElementById('onlineTotal').textContent === '1', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('onlineTotal').textContent === '1', null, { timeout: 10000 });
     const rosterText = await page.locator('#onlineWorlds').textContent();
     if (!rosterText.includes('Admin Panel Test Visitor')) {
       throw new Error('Expected the anonymous visitor\'s name in the rendered "Online now" roster, got: ' + rosterText);
@@ -201,7 +201,7 @@ function postJson(port, urlPath, body) {
     await page.locator('#revokeId').fill(issued.id);
     await page.locator('#revokeReason').fill('admin-panel-test');
     await page.locator('#revokeBtn').click();
-    await page.waitForFunction(() => document.getElementById('revokeResult').textContent.includes('Revoked'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('revokeResult').textContent.includes('Revoked'), null, { timeout: 10000 });
     const revocationsPath = path.resolve(__dirname, '..', 'demo-domain-a', '.well-known', 'atlas-revocations.json');
     const revocations = JSON.parse(fs.readFileSync(revocationsPath, 'utf8'));
     if (!revocations.revoked.some((r) => r.id === issued.id)) {
@@ -214,7 +214,7 @@ function postJson(port, urlPath, body) {
     await page.locator('#mailSubject').fill('admin-panel-test-subject');
     await page.locator('#mailBody').fill('admin-panel-test-body');
     await page.locator('#mailBtn').click();
-    await page.waitForFunction(() => document.getElementById('mailResult').textContent.includes("doesn't look like a credential id"), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('mailResult').textContent.includes("doesn't look like a credential id"), null, { timeout: 10000 });
     const mailResultClassAfterKey = await page.locator('#mailResult').getAttribute('class');
     if (!mailResultClassAfterKey || !mailResultClassAfterKey.includes('err')) {
       throw new Error('Expected the public-key "recipient" to be flagged as an error, got class: ' + mailResultClassAfterKey);
@@ -225,7 +225,7 @@ function postJson(port, urlPath, body) {
     if (!mailTarget.id) throw new Error('Setup failed: could not issue a credential to mail, got: ' + JSON.stringify(mailTarget));
     await page.locator('#mailCredentialId').fill(mailTarget.id);
     await page.locator('#mailBtn').click();
-    await page.waitForFunction(() => document.getElementById('mailResult').textContent === 'Sent.', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('mailResult').textContent === 'Sent.', null, { timeout: 10000 });
     const mailResultClassAfterRealId = await page.locator('#mailResult').getAttribute('class');
     if (!mailResultClassAfterRealId || !mailResultClassAfterRealId.includes('ok')) {
       throw new Error('Expected a real credential id to send cleanly with no warning, got class: ' + mailResultClassAfterRealId);
@@ -266,7 +266,7 @@ function postJson(port, urlPath, body) {
     await page.locator('#calendarEndDateTime').fill('2026-11-01T20:00:00Z');
     await page.locator('#calendarNotes').fill('added to prove the Event id dropdown fills the form back in');
     await page.locator('#calendarBtn').click();
-    await page.waitForFunction(() => document.getElementById('calendarResult').textContent.includes('Done'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('calendarResult').textContent.includes('Done'), null, { timeout: 10000 });
     const newEventId = await page.evaluate(() => JSON.parse(document.getElementById('calendarResult').textContent.slice(document.getElementById('calendarResult').textContent.indexOf('{'))).id);
     await page.waitForFunction(
       (id) => Array.from(document.querySelectorAll('#calendarEventOptions option')).some((o) => o.value === id),
@@ -285,7 +285,7 @@ function postJson(port, urlPath, body) {
     await page.locator('#calendarEndDateTime').fill('');
     await page.locator('#calendarNotes').fill('');
     await page.locator('#calendarEventId').fill(newEventId);
-    await page.waitForFunction(() => document.getElementById('calendarTitle').value === 'Admin panel dropdown test event', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('calendarTitle').value === 'Admin panel dropdown test event', null, { timeout: 10000 });
     const refilled = await page.evaluate(() => ({
       title: document.getElementById('calendarTitle').value,
       dateTime: document.getElementById('calendarDateTime').value,
@@ -345,7 +345,7 @@ function postJson(port, urlPath, body) {
     await page.locator('#logoutBtn').click();
     await page.waitForURL((url) => !url.pathname.includes('atlas-admin'), { timeout: 10000 });
     await page.goto('http://localhost:8001/atlas-admin/index.html', { waitUntil: 'load' });
-    await page.waitForFunction(() => document.getElementById('loggedOutNotice').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('loggedOutNotice').style.display !== 'none', null, { timeout: 10000 });
     console.log('PASS: logged-out notice shown again after logout — no stale session left behind');
 
     console.log('\nALL ADMIN PANEL END-TO-END CHECKS PASSED');

@@ -115,19 +115,19 @@ function pixelForAngle(canvasBox, aspect, angleRad) {
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
     frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('3d-hover-cursor-hint-password');
     await frame.locator('#newPasswordConfirmInput').fill('3d-hover-cursor-hint-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     const lobbyHb = await frame.evaluate(() => new Promise((resolve) => {
       const check = () => {
@@ -140,8 +140,8 @@ function pixelForAngle(canvasBox, aspect, angleRad) {
       check();
     }));
     await frame.locator('#scene').click({ position: { x: lobbyHb.sx, y: lobbyHb.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
-    await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 10000 });
     await frame.evaluate(() => window.__atlasActive3D.ready);
     console.log('PASS: entered the 3D lobby with a fresh wallet');
 
@@ -153,7 +153,7 @@ function pixelForAngle(canvasBox, aspect, angleRad) {
     await aimAt(frame, FAR_AWAY.x, FAR_AWAY.z, CRATE.position);
     await frame.waitForTimeout(100); // let a render frame settle camera.pos[1] back to EYE_Y
     await frame.locator('#scene3d').hover({ position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } });
-    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor === 'pointer', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor === 'pointer', null, { timeout: 5000 });
     const promptWhileFarHover = await frame.evaluate(() => window.__atlasActive3D.getInteractPrompt());
     if (promptWhileFarHover !== null) throw new Error('Expected no E-press prompt while merely hovering from far away, got: ' + JSON.stringify(promptWhileFarHover));
     console.log('PASS: cursor became a pointer at long range, and the E-prompt/Previewer stayed completely untouched — hover is purely a cursor hint, exactly as specced');
@@ -171,17 +171,17 @@ function pixelForAngle(canvasBox, aspect, angleRad) {
 
     console.log('STEP 3: back to dead-center from the same near stand point — should still hit (sanity check that STEP 2\'s miss is about the offset, not the closer distance)');
     await frame.locator('#scene3d').hover({ position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } });
-    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor === 'pointer', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor === 'pointer', null, { timeout: 5000 });
     console.log('PASS: dead-center still hits from the closer distance too');
 
     console.log('STEP 4: moving the mouse to a far corner of the canvas points the ray well away from the crate — the cursor should reset');
     await frame.locator('#scene3d').hover({ position: { x: 2, y: 2 } });
-    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor !== 'pointer', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor !== 'pointer', null, { timeout: 5000 });
     console.log('PASS: cursor reset once the ray no longer points at anything interactable');
 
     console.log('STEP 5: hovering back over the crate\'s on-screen position brings the pointer cursor right back (proves this is live per-mousemove tracking, not a one-shot state)');
     await frame.locator('#scene3d').hover({ position: { x: canvasBox.width / 2, y: canvasBox.height / 2 } });
-    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor === 'pointer', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('scene3d').style.cursor === 'pointer', null, { timeout: 5000 });
     console.log('PASS: cursor tracks the mouse live');
 
     console.log('STEP 6: dragging to look around (mouse button held) suppresses the hover ray entirely, so it never fights with camera rotation');

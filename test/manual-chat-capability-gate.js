@@ -172,7 +172,7 @@ async function setDefaultTabPreference(frame, value) {
   // — not a direct AtlasWallet call — since #113 asks for this control to
   // be wired the same way the existing opacity/text-size inputs are.
   await frame.locator('#chatSettingsBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('chatSettingsPopover').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('chatSettingsPopover').hidden, null, { timeout: 5000 });
   await frame.locator('#chatDefaultTabInput').selectOption(value);
   await frame.page().waitForTimeout(150); // let the change handler's setChatPanelSettings()/applyChatPanelSize() round-trip settle
   // Close the popover again — left open, it sits (z-index 8) directly over
@@ -180,7 +180,7 @@ async function setDefaultTabPreference(frame, value) {
   // eat a later portal click aimed at a marker that happens to project
   // into that same screen region instead of ever reaching the canvas.
   await frame.locator('#chatSettingsBtn').click();
-  await frame.waitForFunction(() => document.getElementById('chatSettingsPopover').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('chatSettingsPopover').hidden, null, { timeout: 5000 });
 }
 
 (async () => {
@@ -197,7 +197,7 @@ async function setDefaultTabPreference(frame, value) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await waitForActiveChatTab(frame, 'world:plaza'); // initial page load — same async-settle race as every later world entry
 
     console.log('STEP 1: Plaza (own flag + domain-wide flag) — widget shows, 3 tabs [Domain, Example Plaza, Example Arena], "Example Plaza" is current+active');
@@ -215,7 +215,7 @@ async function setDefaultTabPreference(frame, value) {
     console.log('STEP 2: Market (neither flag set individually, domain-wide IS set) — widget shows; tab LIST is the same domain-manifest-wide set (tabs are declared per-manifest, not scoped to which world you happen to be standing in), but Market has no dedicated tab of its own to be "(current)", so nothing is suffixed and the default falls back to Domain');
     const toMarket = await waitForPortal(frame, (p) => p.to === 'market', 'the Market portal from Plaza');
     await frame.locator('#scene').click({ position: { x: toMarket.sx, y: toMarket.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), null, { timeout: 10000 });
     await waitForActiveChatTab(frame, 'domain'); // let refreshChatAvailability() settle (it's async — see that helper's own comment)
     if (!(await chatWidgetVisible(frame))) throw new Error('Expected chat widget VISIBLE at Market — domain-wide manifest.chat cascades even though Market has no individual flag');
     ids = await chatTabIds(frame);
@@ -230,7 +230,7 @@ async function setDefaultTabPreference(frame, value) {
     console.log('STEP 3: back to Plaza — all 3 tabs return, "Example Plaza" current+active again');
     const backToPlaza = await waitForPortal(frame, (p) => p.to === 'plaza', 'the Plaza portal from Market');
     await frame.locator('#scene').click({ position: { x: backToPlaza.sx, y: backToPlaza.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await waitForActiveChatTab(frame, 'world:plaza');
     ids = await chatTabIds(frame);
     if (JSON.stringify(ids) !== JSON.stringify(['domain', 'world:plaza', 'world:arena'])) throw new Error('Expected all 3 tabs back at Plaza, got: ' + JSON.stringify(ids));
@@ -241,7 +241,7 @@ async function setDefaultTabPreference(frame, value) {
     console.log('STEP 4: walk Plaza -> Arena — same 3 tabs, but "(current)" MOVES from Example Plaza to Example Arena');
     const toArena = await waitForPortal(frame, (p) => p.to === 'arena', 'the Arena portal from Plaza');
     await frame.locator('#scene').click({ position: { x: toArena.sx, y: toArena.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     await waitForActiveChatTab(frame, 'world:arena');
     labels = await chatTabLabels(frame);
     if (labels[1] !== 'Example Plaza') throw new Error('Expected "Example Plaza" to LOSE its "(current)" suffix at Arena, got: ' + JSON.stringify(labels));
@@ -254,10 +254,10 @@ async function setDefaultTabPreference(frame, value) {
     // Plaza's own domain portal to Workshop.
     const arenaBackToPlaza = await waitForPortal(frame, (p) => p.to === 'plaza', 'the Plaza portal from Arena');
     await frame.locator('#scene').click({ position: { x: arenaBackToPlaza.sx, y: arenaBackToPlaza.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     const toWorkshopFromPlaza = await waitForPortal(frame, (p) => p.kind === 'domain' && p.to === 'localhost:8002', 'the domain portal to Neighbor Workshop from Plaza');
     await frame.locator('#scene').click({ position: { x: toWorkshopFromPlaza.sx, y: toWorkshopFromPlaza.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
     await waitForActiveChatTab(frame, 'domain');
     if (!(await chatWidgetVisible(frame))) throw new Error('Expected chat widget visible at Workshop (manifest.chat: true)');
     ids = await chatTabIds(frame);
@@ -270,7 +270,7 @@ async function setDefaultTabPreference(frame, value) {
     console.log('STEP 6: defaultTabPreference = "domain" — back at Plaza (which has both tabs to choose from), re-entering selects Domain over its own world tab');
     const backToDomainA = await waitForPortal(frame, (p) => p.kind === 'domain' && p.to === 'localhost:8001', 'the domain portal back to Domain A from Workshop');
     await frame.locator('#scene').click({ position: { x: backToDomainA.sx, y: backToDomainA.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await setDefaultTabPreference(frame, 'domain');
     // Re-trigger a fresh world entry (walk away and back) so
     // refreshChatAvailability() actually re-picks the initial tab under
@@ -278,10 +278,10 @@ async function setDefaultTabPreference(frame, value) {
     // retroactively applied to whatever's already showing.
     const toArena2 = await waitForPortal(frame, (p) => p.to === 'arena', 'the Arena portal from Plaza (2nd time)');
     await frame.locator('#scene').click({ position: { x: toArena2.sx, y: toArena2.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     const arenaBackToPlaza2 = await waitForPortal(frame, (p) => p.to === 'plaza', 'the Plaza portal from Arena (2nd time)');
     await frame.locator('#scene').click({ position: { x: arenaBackToPlaza2.sx, y: arenaBackToPlaza2.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await waitForActiveChatTab(frame, 'domain');
     console.log('PASS: "domain" preference wins over the current world\'s own tab when both are available');
 
@@ -289,10 +289,10 @@ async function setDefaultTabPreference(frame, value) {
     await setDefaultTabPreference(frame, 'world');
     const toArena3 = await waitForPortal(frame, (p) => p.to === 'arena', 'the Arena portal from Plaza (3rd time)');
     await frame.locator('#scene').click({ position: { x: toArena3.sx, y: toArena3.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     const arenaBackToPlaza3 = await waitForPortal(frame, (p) => p.to === 'plaza', 'the Plaza portal from Arena (3rd time)');
     await frame.locator('#scene').click({ position: { x: arenaBackToPlaza3.sx, y: arenaBackToPlaza3.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await waitForActiveChatTab(frame, 'world:plaza');
     console.log('PASS: "world" preference wins over Domain when both are available');
 

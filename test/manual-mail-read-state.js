@@ -137,16 +137,16 @@ async function checkWhile(frame, during) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('mail-read-state-password');
     await frame.locator('#newPasswordConfirmInput').fill('mail-read-state-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     const membership = await frame.evaluate((d) => AtlasWallet.mintAsset('self', d, 'atlas.membership'), DOMAIN);
     const credentialId = membership.credential.id;
@@ -206,7 +206,7 @@ async function checkWhile(frame, during) {
 
     console.log('STEP 5: the badge in the Social tab matches the stored unread count after all that');
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#checkMailNowBtn').click();
     await frame.waitForTimeout(800);
     const unread = (await mailState(frame)).filter((m) => !m.read).length;

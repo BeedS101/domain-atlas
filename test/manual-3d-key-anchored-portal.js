@@ -126,11 +126,11 @@ async function teleportTo(frame, position) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     console.log('SETUP: entering the Lobby directly (same loadManifest() path a Lobby portal click already uses)');
     await frame.evaluate(() => loadManifest(currentManifestUrl, 'lobby', null));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby') && !!window.__atlasActive3D, { timeout: 15000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby') && !!window.__atlasActive3D, null, { timeout: 15000 });
 
     console.log('STEP 1: both Lobby portals resolve to the right kind');
     const kind0 = await frame.evaluate(() => window.__atlasActive3D.getPortalTriggerKind(0));
@@ -141,13 +141,13 @@ async function teleportTo(frame, position) {
 
     console.log('STEP 2 (regression): walking into the ordinary same-domain portal still auto-enters Plaza, no disclosure');
     await teleportTo(frame, [0.3, 1.6, 3.9]); // inside portal 0's radius ([0,0,4.2], radius 0.8)
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     if (await keyAnchorModalActive(frame)) throw new Error('Expected no disclosure at all for an ordinary same-domain portal');
     console.log('PASS: ordinary walk-in portal still enters directly, unaffected by the kind rework');
 
     console.log('SETUP: back into the Lobby for the key-anchored portal checks');
     await frame.evaluate(() => loadManifest(currentManifestUrl, 'lobby', null));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby') && !!window.__atlasActive3D, { timeout: 15000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby') && !!window.__atlasActive3D, null, { timeout: 15000 });
 
     console.log('STEP 3: walking into the key-anchored portal fetches+verifies the manifest and opens the mandatory disclosure — the Lobby is not left yet');
     await teleportTo(frame, [1.6, 1.6, -0.2]); // inside portal 1's radius ([1.6,0,-0.2], radius 0.8)
@@ -173,7 +173,7 @@ async function teleportTo(frame, position) {
 
     console.log('STEP 6: "Enter anyway" actually enters — no domain shown, persistent amber badge');
     await frame.locator('#keyAnchorEnterBtn').click();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Unlisted Atrium'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Unlisted Atrium'), null, { timeout: 10000 });
     if (await keyAnchorModalActive(frame)) throw new Error('Expected the disclosure to be closed once inside');
     const label = await placeLabelText(frame);
     if (label.includes('localhost')) throw new Error('Expected NO domain string anywhere in the place label, got: ' + label);

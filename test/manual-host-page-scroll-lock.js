@@ -74,7 +74,7 @@ function assert(cond, message) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, null, { timeout: 10000 });
     const locked = await page.evaluate(() => ({
       html: document.documentElement.style.overflow,
       body: document.body.style.overflow
@@ -84,7 +84,7 @@ function assert(cond, message) {
 
     console.log('STEP 3: closing the overlay restores the host page\'s original overflow values');
     await frame.locator('#closeBtn').click();
-    await page.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), { timeout: 5000 });
+    await page.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), null, { timeout: 5000 });
     const restored = await page.evaluate(() => ({
       html: document.documentElement.style.overflow,
       body: document.body.style.overflow
@@ -100,14 +100,14 @@ function assert(cond, message) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle2 = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame2 = await frameHandle2.contentFrame();
-    await frame2.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, { timeout: 10000 });
+    await frame2.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, null, { timeout: 10000 });
     const lockedAgain = await page.evaluate(() => ({
       html: document.documentElement.style.overflow,
       body: document.body.style.overflow
     }));
     assert(lockedAgain.html === 'hidden' && lockedAgain.body === 'hidden', 'expected a second open to lock scroll the same way, got: ' + JSON.stringify(lockedAgain));
     await frame2.locator('#closeBtn').click();
-    await page.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), { timeout: 5000 });
+    await page.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), null, { timeout: 5000 });
     const restoredAgain = await page.evaluate(() => ({
       html: document.documentElement.style.overflow,
       body: document.body.style.overflow

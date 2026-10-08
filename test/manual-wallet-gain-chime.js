@@ -65,17 +65,17 @@ async function chimeCount(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('wallet-chime-password');
     await frame.locator('#newPasswordConfirmInput').fill('wallet-chime-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     // Patched AFTER identity creation's own refreshInventoryDisplay()
     // calls have already run and established the (silent) baseline for
@@ -87,15 +87,15 @@ async function chimeCount(frame) {
 
     console.log('STEP 1: confirm Settings -> Sound defaults ON');
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     const soundDefault = await frame.locator('#walletSoundEnabledInput').isChecked();
     if (!soundDefault) throw new Error('Expected the wallet-sound checkbox to default to checked (enabled)');
     console.log('PASS: sound defaults on');
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     const plazaHb = await frame.evaluate(() => new Promise((resolve) => {
       const check = () => {
@@ -108,7 +108,7 @@ async function chimeCount(frame) {
       check();
     }));
     await frame.locator('#scene').click({ position: { x: plazaHb.sx, y: plazaHb.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), null, { timeout: 10000 });
     console.log('PASS: reached the Trading Post, no chime fired yet ->', await chimeCount(frame));
     if ((await chimeCount(frame)) !== 0) throw new Error('Expected 0 chimes before minting anything');
 
@@ -137,9 +137,9 @@ async function chimeCount(frame) {
 
     console.log('STEP 4: turning the Settings -> Sound toggle OFF suppresses further chimes, even on a real gain');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     // Sound is inside a collapsed settings-category — open it before
     // interacting with the checkbox inside, same as the checkbox itself
     // requiring its category to be open to even be visible/checkable.
@@ -149,9 +149,9 @@ async function chimeCount(frame) {
     }
     await frame.locator('#walletSoundEnabledInput').uncheck();
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     const statusBeforeSilver = await frame.locator('#status').textContent();
     await frame.locator('#scene').click({ position: { x: silverStall.sx, y: silverStall.sy } });
@@ -174,14 +174,14 @@ async function chimeCount(frame) {
 
     console.log('STEP 5: turning it back ON, a further gain chimes again');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletSoundEnabledInput').check();
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     const [, , , membershipDesk] = await projectInteractables(frame);
     const statusBeforeMembership = await frame.locator('#status').textContent();

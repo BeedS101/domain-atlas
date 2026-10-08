@@ -69,7 +69,7 @@ async function projectPortals(frame) {
     await btn.click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     console.log('PASS: viewer rendered Plaza world (localhost:8001 · plaza)');
     await page.waitForTimeout(500);
     await page.screenshot({ path: shot('02-plaza-world.png') });
@@ -79,7 +79,7 @@ async function projectPortals(frame) {
     let portals = await projectPortals(frame);
     const toMuseum = portals.find((p) => p.kind === 'world');
     await frame.locator('#scene').click({ position: { x: toMuseum.sx, y: toMuseum.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Museum'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Museum'), null, { timeout: 10000 });
     await page.waitForTimeout(500);
     const fetchesAfterWorldPortal = manifestFetches.length;
     console.log('PASS: rendered Museum world (localhost:8001 · museum)');
@@ -93,15 +93,15 @@ async function projectPortals(frame) {
     portals = await projectPortals(frame);
     const backToPlaza = portals.find((p) => p.kind === 'world');
     await frame.locator('#scene').click({ position: { x: backToPlaza.sx, y: backToPlaza.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
-    await frame.waitForFunction(() => window.__atlasScene && window.__atlasScene.portalMarkers.some((m) => m.portal && m.portal.kind === 'domain'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => window.__atlasScene && window.__atlasScene.portalMarkers.some((m) => m.portal && m.portal.kind === 'domain'), null, { timeout: 10000 });
 
     portals = await projectPortals(frame);
     const toNeighbor = portals.find((p) => p.kind === 'domain');
     const fetchesBeforeDomainPortal = manifestFetches.length;
     await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), null, { timeout: 10000 });
     const fetchesAfterDomainPortal = manifestFetches.length;
     console.log('PASS: crossed to localhost:8002 · workshop (Neighbor Workshop)');
     if (fetchesAfterDomainPortal <= fetchesBeforeDomainPortal) {
@@ -115,7 +115,7 @@ async function projectPortals(frame) {
     portals = await projectPortals(frame);
     const backToDomainA = portals.find((p) => p.kind === 'domain');
     await frame.locator('#scene').click({ position: { x: backToDomainA.sx, y: backToDomainA.sy } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), null, { timeout: 10000 });
     console.log('PASS: back at localhost:8001 · plaza (defaultWorld resolved correctly on re-entry)');
 
     console.log('\nManifest fetches observed over the whole run:', manifestFetches.length, '—', JSON.stringify(manifestFetches));

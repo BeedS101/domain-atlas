@@ -90,19 +90,19 @@ async function createIdentityAndEnterLobby(context, password, label) {
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
   frame.on('pageerror', (err) => console.log(label + ' FRAMEERROR:', String(err)));
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
   await frame.locator('#walletBtn').click();
   await frame.locator('#chooseNewBtn').click();
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
   await enterLobbyFromPlaza(frame);
   console.log('SETUP: ' + label + ' created an identity and entered the lobby');
@@ -121,14 +121,14 @@ async function enterLobbyFromPlaza(frame) {
     check();
   }));
   await frame.locator('#scene').click({ position: { x: lobbyHb.sx, y: lobbyHb.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
-  await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
+  await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 10000 });
   await frame.evaluate(() => window.__atlasActive3D.ready);
 }
 
 async function leaveLobbyToPlaza(frame) {
   await teleport(frame, 0, 4.2);
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 }
 
 // Waits for a genuine credential of `crate.class` to land in the wallet,
@@ -138,7 +138,7 @@ async function leaveLobbyToPlaza(frame) {
 // tell them apart. Checking the wallet directly is unambiguous either way.
 async function openCrate(frame, crate) {
   await teleport(frame, crate.x, crate.z);
-  await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', { timeout: 5000 });
+  await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', null, { timeout: 5000 });
   await pressE(frame);
   // The mint is a real network round trip to the issuer (handleInteractable
   // -> mintAsset -> a POST that only then lands in wallet storage) — give
@@ -163,7 +163,7 @@ async function openCrate(frame, crate) {
 // 'toggle-avatar-shoes' — the three independent wallet-card equip actions.
 async function toggleFromWallet(frame, assetName, action, expectSubstring) {
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
   // Opening the wallet panel triggers routeWalletScreen's own
   // refreshInventoryDisplay() (a full innerHTML rebuild of the self
   // collectibles list) — the panel's 'open' class flips before that async
@@ -197,21 +197,21 @@ async function toggleFromWallet(frame, assetName, action, expectSubstring) {
     return c && c.textContent.includes(substr);
   }, { name: assetName, substr: expectSubstring }, { timeout: 5000 });
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 }
 
 async function openSettingsScreen(frame) {
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
   await frame.locator('#settingsTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
-  await frame.waitForFunction(() => !!window.__atlasCharacterPreview, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
+  await frame.waitForFunction(() => !!window.__atlasCharacterPreview, null, { timeout: 5000 });
 }
 
 async function closeSettingsAndWallet(frame) {
   await frame.locator('#backFromSettingsBtn').click();
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 }
 
 (async () => {
@@ -271,7 +271,7 @@ async function closeSettingsAndWallet(frame) {
 
     console.log('STEP 5: taking the shoes back off leaves the hat and outfit equipped — independence in the other direction');
     await toggleFromWallet(frameA, BOOTS_CRATE.name, 'toggle-avatar-shoes', 'Wear as my shoes');
-    await frameA.waitForFunction(() => window.__atlasActive3D.getLocalAvatarShoeColor() === null, { timeout: 5000 });
+    await frameA.waitForFunction(() => window.__atlasActive3D.getLocalAvatarShoeColor() === null, null, { timeout: 5000 });
     const hatStillOnAfterShoesOff = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarHatColor());
     const outfitStillOnAfterShoesOff = await frameA.evaluate(() => window.__atlasActive3D.getLocalAvatarColors());
     if (!colorsMatch(hatStillOnAfterShoesOff, expectedHat)) {
@@ -303,7 +303,7 @@ async function closeSettingsAndWallet(frame) {
     console.log('STEP 7: a second visitor sees the first visitor\'s shoes, alongside their hat and outfit, on the remote character');
     contextB = await chromium.launchPersistentContext(dirB, { headless: false, executablePath: '/opt/pw-browsers/chromium', args: LAUNCH_ARGS });
     const { frame: frameB } = await createIdentityAndEnterLobby(contextB, 'avatar-shoes-password-b', 'B');
-    await frameB.waitForFunction(() => window.__atlasActive3D.getRemotePlayerCount() >= 1, { timeout: 8000 });
+    await frameB.waitForFunction(() => window.__atlasActive3D.getRemotePlayerCount() >= 1, null, { timeout: 8000 });
     const idOfA = await frameB.evaluate(() => window.__atlasActive3D.getRemotePlayerIds()[0]);
     await frameB.waitForFunction(({ id, shoes, hat, shirt, pants }) => {
       const rp = window.__atlasActive3D.getRemotePlayerRenderState(id);

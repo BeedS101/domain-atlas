@@ -63,13 +63,13 @@ async function enterLobbyFromFreshPage(page, context, glbResponses) {
   await btn.click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
   const portals = await projectPortals(frame);
   const toLobby = portals.find((p) => p.to === 'lobby');
   if (!toLobby) throw new Error('Plaza has no portal to lobby — check demo-domain-a/spatial/plaza/scene.json');
   await frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
 
   // Wait for the GLB requests to settle: poll until the response count stops
   // growing for a short quiet window, rather than assuming a fixed count

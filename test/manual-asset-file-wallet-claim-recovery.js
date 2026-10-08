@@ -85,7 +85,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay');
   return { page, frame };
 }
@@ -96,10 +96,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click();
   await frame.locator('#walletBtn').click();
@@ -222,7 +222,7 @@ async function ringsHeld(frame) {
     assert(inspected.relation === 'claim-interrupted' && inspected.canFinishClaim && !inspected.canClaim, 'opening the file should offer to finish the claim, got ' + JSON.stringify(inspected));
     await bob.frame.locator('#walletBtn').click();
     await bob.frame.locator('#walletBtn').click();
-    await bob.frame.waitForFunction(() => /claim interrupted/.test(document.getElementById('pendingExportsList').innerText), { timeout: 15000 });
+    await bob.frame.waitForFunction(() => /claim interrupted/.test(document.getElementById('pendingExportsList').innerText), null, { timeout: 15000 });
     await setFault(bob.frame, null);
     await bob.frame.locator('#pendingExportsList button[data-action="cl-retry"]').click();
     await waitAsync(bob.frame, async () => { const i = await AtlasWallet.getIdentity(); return (await AtlasWallet.getWallet(i.publicKey)).some((e) => e.credential.asset.class === 'atlas.wearable.ring'); }, null, 15000);
@@ -294,7 +294,7 @@ async function ringsHeld(frame) {
     const again5 = await bobClaim(bob, file5);
     assert(!again5.ok && again5.code === 'already-claimed' && again5.receipt, 'claiming again should show the receipt, got ' + JSON.stringify(again5));
     await bob.frame.locator('#pendingExportsList button[data-action="cl-dismiss"]').click();
-    await bob.frame.waitForFunction(() => !/credential not kept/.test(document.getElementById('pendingExportsList').innerText), { timeout: 10000 });
+    await bob.frame.waitForFunction(() => !/credential not kept/.test(document.getElementById('pendingExportsList').innerText), null, { timeout: 10000 });
     assert((await claimingRecords(bob.frame)).length === 0, 'dismissed');
     console.log('PASS: receipt shown, no item invented, entry dismissable');
 

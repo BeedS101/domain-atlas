@@ -89,20 +89,20 @@ async function waitForPortal(frame, predicate, description, timeoutMs = 8000) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await page.waitForFunction((expected) => document.title === expected, 'localhost:8001: Example Plaza', { timeout: 5000 });
     console.log('PASS: host page tab title is now "' + (await page.title()) + '"');
 
     console.log('STEP 3: walking Plaza -> Arena updates the title again');
     const toArena = await waitForPortal(frame, (p) => p.to === 'arena', 'the Arena portal from Plaza');
     await frame.locator('#scene').click({ position: { x: toArena.sx, y: toArena.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     await page.waitForFunction((expected) => document.title === expected, 'localhost:8001: Example Arena', { timeout: 5000 });
     console.log('PASS: host page tab title updated to "' + (await page.title()) + '" on a same-domain world switch');
 
     console.log('STEP 4: closing the overlay restores the host page\'s ORIGINAL title exactly');
     await frame.locator('#closeBtn').click();
-    await page.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), { timeout: 5000 });
+    await page.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), null, { timeout: 5000 });
     await page.waitForFunction((expected) => document.title === expected, originalTitle, { timeout: 5000 });
     console.log('PASS: host page title restored to "' + (await page.title()) + '"');
 
@@ -110,10 +110,10 @@ async function waitForPortal(frame, predicate, description, timeoutMs = 8000) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle2 = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame2 = await frameHandle2.contentFrame();
-    await frame2.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame2.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await page.waitForFunction((expected) => document.title === expected, 'localhost:8001: Example Plaza', { timeout: 5000 });
     await frame2.locator('#closeBtn').click();
-    await page.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), { timeout: 5000 });
+    await page.waitForFunction(() => !document.getElementById('domain-atlas-overlay'), null, { timeout: 5000 });
     await page.waitForFunction((expected) => document.title === expected, originalTitle, { timeout: 5000 });
     console.log('PASS: a second open/close cycle captures and restores a fresh original correctly, "' + (await page.title()) + '"');
 

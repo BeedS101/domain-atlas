@@ -157,7 +157,7 @@ function startTamperedManifestServer(manifest) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     console.log('STEP 1: hovering the key-anchored portal shows the amber "no domain" warning before any click');
     const keyPortal = await waitForPortal(frame, (p) => p.kind === 'key', 'the key-anchored portal from Plaza');
@@ -187,7 +187,7 @@ function startTamperedManifestServer(manifest) {
     await frame.locator('#scene').click({ position: { x: keyPortal.sx, y: keyPortal.sy } });
     await waitFor(frame, () => document.getElementById('keyAnchorModal').classList.contains('active'), 'the disclosure to reopen');
     await frame.locator('#keyAnchorEnterBtn').click();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Unlisted Atrium'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Unlisted Atrium'), null, { timeout: 10000 });
     if (await keyAnchorModalActive(frame)) throw new Error('Expected the disclosure to be closed once inside');
     const label = await placeLabelText(frame);
     if (label.includes('localhost')) throw new Error('Expected NO domain string anywhere in the place label, got: ' + label);
@@ -198,7 +198,7 @@ function startTamperedManifestServer(manifest) {
     console.log('STEP 5: the key-anchored world\'s own "domain" portal leads cleanly back to Plaza; the badge disappears once back');
     const leavePortal = await waitForPortal(frame, (p) => p.kind === 'domain' && p.to === 'localhost:8001', 'the return portal out of the Unlisted Atrium');
     await frame.locator('#scene').click({ position: { x: leavePortal.sx, y: leavePortal.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     if (await keyAnchorBadgePresent(frame)) throw new Error('Expected the key-anchor badge to be gone back at Plaza');
     // placeLabel updates synchronously well before Plaza's own scene.json
     // fetch even starts (see enterWorld() in viewer.js), so window.__atlasScene

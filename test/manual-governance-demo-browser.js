@@ -67,8 +67,8 @@ function assert(cond, message) {
 
     console.log('STEP 1: Act 1 — the assembly is open to anyone');
     await page.locator('#joinBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#memberCards .member').length === 3, { timeout: 10000 });
-    await page.waitForFunction(() => document.getElementById('proposePanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#memberCards .member').length === 3, null, { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('proposePanel').style.display !== 'none', null, { timeout: 10000 });
     const joinText = await page.locator('#joinResult').textContent();
     assert(joinText.includes('All three joined'), 'unexpected join result: ' + joinText);
     console.log('PASS:', joinText);
@@ -76,8 +76,8 @@ function assert(cond, message) {
     console.log('STEP 2: Act 2 — Alice proposes, with a shortened 5s deadline so the countdown closes quickly');
     await page.locator('#deadlineInput').fill('5');
     await page.locator('#proposeBtn').click();
-    await page.waitForFunction(() => document.getElementById('countdown').style.display !== 'none', { timeout: 10000 });
-    await page.waitForFunction(() => document.getElementById('votePanel').style.display !== 'none' && document.getElementById('breakPanel').style.display !== 'none' && document.getElementById('finalizePanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('countdown').style.display !== 'none', null, { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('votePanel').style.display !== 'none' && document.getElementById('breakPanel').style.display !== 'none' && document.getElementById('finalizePanel').style.display !== 'none', null, { timeout: 10000 });
     const proposeText = await page.locator('#proposeResult').textContent();
     assert(proposeText.includes("Extend the plaza market's opening hours"), 'unexpected propose result: ' + proposeText);
     assert(await page.locator('#finalizeBtn').isDisabled(), 'expected the finalize button to start out disabled, before the deadline passes');
@@ -85,41 +85,41 @@ function assert(cond, message) {
 
     console.log('STEP 3: Act 3 — one member, one vote, tallied live');
     await page.locator('#aliceYesBtn').click();
-    await page.waitForFunction(() => document.getElementById('tallyCounts').textContent.includes('1') && document.getElementById('tallyBox').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('tallyCounts').textContent.includes('1') && document.getElementById('tallyBox').style.display !== 'none', null, { timeout: 10000 });
     let tallyText = await page.locator('#tallyCounts').textContent();
     assert(/1.*yes.*0.*no/.test(tallyText) || tallyText.includes('1') , 'unexpected tally after first vote: ' + tallyText);
 
     await page.locator('#bobYesBtn').click();
-    await page.waitForFunction(() => document.getElementById('tallyCounts').textContent.includes('2 of 3'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('tallyCounts').textContent.includes('2 of 3'), null, { timeout: 10000 });
     tallyText = await page.locator('#tallyCounts').textContent();
     console.log('  tally after 2 votes:', tallyText);
 
     await page.locator('#charlieNoBtn').click();
-    await page.waitForFunction(() => document.getElementById('tallyCounts').textContent.includes('3 of 3'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('tallyCounts').textContent.includes('3 of 3'), null, { timeout: 10000 });
     tallyText = await page.locator('#tallyCounts').textContent();
     assert(tallyText.includes('2') && tallyText.includes('1') && tallyText.includes('3 of 3'), 'unexpected final tally: ' + tallyText);
     console.log('PASS: live tally after all three votes ->', tallyText);
 
     console.log('STEP 4: Act 4 — try to break it');
     await page.locator('#doubleVoteBtn').click();
-    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('Rejected'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('Rejected'), null, { timeout: 10000 });
     let breakText = await page.locator('#breakResult').textContent();
     assert(!breakText.includes('Unexpected'), 'double vote should have been rejected, got: ' + breakText);
     assert(breakText.includes('already voted'), 'unexpected double-vote rejection text: ' + breakText);
 
     await page.locator('#nonMemberVoteBtn').click();
-    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('join first'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('join first'), null, { timeout: 10000 });
     breakText = await page.locator('#breakResult').textContent();
     assert(!breakText.includes('Unexpected'), 'non-member vote should have been rejected, got: ' + breakText);
     console.log('PASS: both double-vote and non-member-vote were correctly rejected');
 
     console.log('STEP 5: Act 5 — the deadline passes on its own, then the signed decision is requested');
-    await page.waitForFunction(() => document.getElementById('countdown').className.includes('closed'), { timeout: 15000 });
-    await page.waitForFunction(() => !document.getElementById('finalizeBtn').disabled, { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('countdown').className.includes('closed'), null, { timeout: 15000 });
+    await page.waitForFunction(() => !document.getElementById('finalizeBtn').disabled, null, { timeout: 10000 });
     console.log('PASS: countdown closed itself and enabled the finalize button, nobody had to click anything to end voting');
 
     await page.locator('#finalizeBtn').click();
-    await page.waitForFunction(() => document.getElementById('finalizeResult').textContent.includes('Outcome'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('finalizeResult').textContent.includes('Outcome'), null, { timeout: 10000 });
     const finalizeText = await page.locator('#finalizeResult').textContent();
     assert(finalizeText.includes('PASSED'), 'expected outcome PASSED with 2 yes / 1 no, got: ' + finalizeText);
     assert(finalizeText.includes('2 yes') && finalizeText.includes('1 no') && finalizeText.includes('3 total votes'), 'unexpected finalize counts: ' + finalizeText);
@@ -130,7 +130,7 @@ function assert(cond, message) {
     const rawBox = page.locator('#finalizeResult details.raw');
     await rawBox.locator('summary').click();
     await rawBox.locator('button').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
     const verifyText = await page.locator('#verifyResult').textContent();
     console.log('PASS:', verifyText);
 

@@ -96,7 +96,7 @@ async function waitForCount(world, expected) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => !document.getElementById('placeLabel').textContent.includes('Loading'), { timeout: 10000 });
+    await frame.waitForFunction(() => !document.getElementById('placeLabel').textContent.includes('Loading'), null, { timeout: 10000 });
 
     console.log('STEP 1: entering the default world (plaza, 2D) records exactly one visit');
     await waitForCount('plaza', 1);
@@ -107,13 +107,13 @@ async function waitForCount(world, expected) {
 
     console.log('STEP 2: travelling to the lobby (3D) records one visit for it');
     await frame.evaluate(() => enterWorld('lobby'));
-    await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 15000 });
+    await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 15000 });
     await waitForCount('lobby', 1);
     console.log('PASS: lobby (3D) -> 1');
 
     console.log('STEP 3: travelling to market (2D) records one visit — 2D worlds are counted too');
     await frame.evaluate(() => enterWorld('market'));
-    await frame.waitForFunction(() => currentWorld && currentWorld.id === 'market' && !window.__atlasActive3D, { timeout: 15000 });
+    await frame.waitForFunction(() => currentWorld && currentWorld.id === 'market' && !window.__atlasActive3D, null, { timeout: 15000 });
     await waitForCount('market', 1);
     console.log('PASS: market (2D) -> 1; today =', JSON.stringify(todaysCounts()));
 
@@ -130,7 +130,7 @@ async function waitForCount(world, expected) {
     console.log('STEP 5: an erroring /atlas/visit does not stop the visitor entering a world');
     await context.route('**/atlas/visit', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"boom"}' }));
     await frame.evaluate(() => enterWorld('arena'));
-    await frame.waitForFunction(() => currentWorld && currentWorld.id === 'arena' && !document.getElementById('placeLabel').textContent.includes('Loading'), { timeout: 15000 });
+    await frame.waitForFunction(() => currentWorld && currentWorld.id === 'arena' && !document.getElementById('placeLabel').textContent.includes('Loading'), null, { timeout: 15000 });
     assert((todaysCounts().arena || 0) === 0, 'the intercepted ping never reached the server, so arena must still be 0');
     console.log('PASS: arena entered normally while the ping endpoint was failing');
 

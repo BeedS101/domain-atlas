@@ -155,12 +155,12 @@ async function login(admin) {
       sessionStorage.setItem('atlasAdminSession', JSON.stringify({ token: sessionToken, expiresAt: sessionExpiresAt }));
     }, [token, expiresAt]);
     await page.goto(NODE_BASE + '/atlas-admin/index.html', { waitUntil: 'load' });
-    await page.waitForFunction(() => document.getElementById('classPatchClass') && getComputedStyle(document.getElementById('hidden-while-logged-out')).display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('classPatchClass') && getComputedStyle(document.getElementById('hidden-while-logged-out')).display !== 'none', null, { timeout: 10000 });
     // Both refreshes the page kicks off on login (class list, active
     // patches) are fire-and-forget — wait for their real effects rather
     // than racing ahead of them.
-    await page.waitForFunction(() => document.querySelectorAll('#classPatchClassOptions option').length > 0, { timeout: 5000 });
-    await page.waitForFunction(() => document.getElementById('classPatchCurrent').textContent.includes('atlas.trophy.chess') && document.getElementById('classPatchCurrent').textContent.includes('atlas.badge'), { timeout: 5000 });
+    await page.waitForFunction(() => document.querySelectorAll('#classPatchClassOptions option').length > 0, null, { timeout: 5000 });
+    await page.waitForFunction(() => document.getElementById('classPatchCurrent').textContent.includes('atlas.trophy.chess') && document.getElementById('classPatchCurrent').textContent.includes('atlas.badge'), null, { timeout: 5000 });
 
     console.log('STEP 1: a class with an existing patch pre-fills the ORIGINAL catalog properties merged with the patched fact, and its own default tradeScope');
     await page.locator('#classPatchClass').fill('atlas.trophy.chess');
@@ -183,10 +183,10 @@ async function login(admin) {
 
     console.log('STEP 3: a class with per-instance randomized stats shows the caveat note; switching away hides it again');
     await page.locator('#classPatchClass').fill('atlas.wearable.ring');
-    await page.waitForFunction(() => getComputedStyle(document.getElementById('classPatchRandomNote')).display !== 'none', { timeout: 3000 });
+    await page.waitForFunction(() => getComputedStyle(document.getElementById('classPatchRandomNote')).display !== 'none', null, { timeout: 3000 });
     console.log('PASS: the randomized-class caveat shows for the Signet Ring');
     await page.locator('#classPatchClass').fill('atlas.trophy.chess');
-    await page.waitForFunction(() => getComputedStyle(document.getElementById('classPatchRandomNote')).display === 'none', { timeout: 3000 });
+    await page.waitForFunction(() => getComputedStyle(document.getElementById('classPatchRandomNote')).display === 'none', null, { timeout: 3000 });
     console.log('PASS: the caveat hides again once a non-randomized class is picked');
 
     console.log('STEP 4: a class with a property already deleted via its active patch shows the deletion as a literal null, not omitted');

@@ -79,7 +79,7 @@ async function enterPlaza(page) {
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
   frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   return frame;
 }
 
@@ -100,10 +100,10 @@ async function enterPlaza(page) {
     await frame.locator('#newPasswordInput').fill(PASSWORD);
     await frame.locator('#newPasswordConfirmInput').fill(PASSWORD);
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click(); // close the panel, back to the scene
     console.log('PASS: identity ready');
 
@@ -113,12 +113,12 @@ async function enterPlaza(page) {
     if (!desk) throw new Error('Expected the Subscription Card desk interactable in the plaza');
     await frame.page().mouse.move(5, 5);
     await frame.locator('#scene').click({ position: { x: desk.sx, y: desk.sy } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Subscription Card.', { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Subscription Card.', null, { timeout: 10000 });
     console.log('PASS: desk credential minted');
 
     console.log('STEP 2: lock the wallet, then reload the page entirely — a genuinely fresh visit, still locked');
     await frame.locator('#quickLockWalletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('quickLockWalletBtn').style.display === 'none', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('quickLockWalletBtn').style.display === 'none', null, { timeout: 5000 });
     frame = await enterPlaza(page); // full page.goto() + re-enter — a real fresh enterWorld(), not just a portal hop
     console.log('PASS: back in the Plaza on a fresh page load, wallet still locked (identityRequired: false lets this through with no prompt)');
 
@@ -128,17 +128,17 @@ async function enterPlaza(page) {
     if (!desk) throw new Error('Expected the desk interactable to still be present after reload');
     await frame.page().mouse.move(5, 5);
     await frame.locator('#scene').hover({ position: { x: desk.sx, y: desk.sy } });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, null, { timeout: 3000 });
     console.log('PASS: confirmed starting condition — previewer offers the desk while locked, as expected');
 
     console.log('STEP 4 (the actual fix): unlock via the wallet panel WITHOUT leaving the Plaza — the desk should immediately stop previewing, no world re-entry needed');
     await frame.page().mouse.move(5, 5);
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, { timeout: 5000 }).catch(() => {});
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, null, { timeout: 5000 }).catch(() => {});
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#unlockPasswordInput').fill(PASSWORD);
     await frame.locator('#unlockBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click(); // close the panel, back to the scene, still standing in the Plaza the whole time
 
     await frame.page().mouse.move(5, 5);

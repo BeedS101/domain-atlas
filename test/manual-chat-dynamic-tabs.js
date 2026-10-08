@@ -103,10 +103,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#walletBtn').click();
 }
 
@@ -193,11 +193,11 @@ async function waitForSendable(frame, expectDisabled, timeoutMs = 8000) {
 }
 async function setDefaultTabPreference(frame, value) {
   await frame.locator('#chatSettingsBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('chatSettingsPopover').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('chatSettingsPopover').hidden, null, { timeout: 5000 });
   await frame.locator('#chatDefaultTabInput').selectOption(value);
   await frame.page().waitForTimeout(150);
   await frame.locator('#chatSettingsBtn').click();
-  await frame.waitForFunction(() => document.getElementById('chatSettingsPopover').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('chatSettingsPopover').hidden, null, { timeout: 5000 });
 }
 
 (async () => {
@@ -271,7 +271,7 @@ async function setDefaultTabPreference(frame, value) {
     console.log('STEP 4: walk Plaza -> Arena — "(current)" suffix moves from Plaza to Arena, and Arena\'s own tab becomes sendable in turn');
     const toArena = await waitForPortal(a.frame, (p) => p.to === 'arena', 'the Arena portal from Plaza');
     await a.frame.locator('#scene').click({ position: { x: toArena.sx, y: toArena.sy } });
-    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     await waitForActiveChatTab(a.frame, 'world:arena');
     labels = await chatTabLabels(a.frame);
     if (labels[1] !== 'Example Plaza') throw new Error('Expected "Example Plaza" to lose its "(current)" suffix at Arena, got: ' + JSON.stringify(labels));
@@ -287,25 +287,25 @@ async function setDefaultTabPreference(frame, value) {
     console.log('STEP 5: defaultTabPreference — "domain" selects Domain over Plaza\'s own tab on a fresh entry; "world" selects Plaza\'s own tab over Domain');
     const arenaBackToPlaza = await waitForPortal(a.frame, (p) => p.to === 'plaza', 'the Plaza portal from Arena');
     await a.frame.locator('#scene').click({ position: { x: arenaBackToPlaza.sx, y: arenaBackToPlaza.sy } });
-    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     await setDefaultTabPreference(a.frame, 'domain');
     const toArena2 = await waitForPortal(a.frame, (p) => p.to === 'arena', 'the Arena portal from Plaza (2nd time)');
     await a.frame.locator('#scene').click({ position: { x: toArena2.sx, y: toArena2.sy } });
-    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     const arenaBackToPlaza2 = await waitForPortal(a.frame, (p) => p.to === 'plaza', 'the Plaza portal from Arena (2nd time)');
     await a.frame.locator('#scene').click({ position: { x: arenaBackToPlaza2.sx, y: arenaBackToPlaza2.sy } });
-    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await waitForActiveChatTab(a.frame, 'domain');
     console.log('PASS: "domain" preference selects Domain on fresh entry, even though Plaza has its own tab too');
 
     await setDefaultTabPreference(a.frame, 'world');
     const toArena3 = await waitForPortal(a.frame, (p) => p.to === 'arena', 'the Arena portal from Plaza (3rd time)');
     await a.frame.locator('#scene').click({ position: { x: toArena3.sx, y: toArena3.sy } });
-    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     const arenaBackToPlaza3 = await waitForPortal(a.frame, (p) => p.to === 'plaza', 'the Plaza portal from Arena (3rd time)');
     await a.frame.locator('#scene').click({ position: { x: arenaBackToPlaza3.sx, y: arenaBackToPlaza3.sy } });
-    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await waitForActiveChatTab(a.frame, 'world:plaza');
     console.log('PASS: "world" preference selects the current-world tab on fresh entry, even though Domain is available too');
 

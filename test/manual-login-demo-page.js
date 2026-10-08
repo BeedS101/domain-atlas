@@ -71,7 +71,7 @@ function assert(cond, message) {
 
     console.log('STEP 1: "Set up my demo account" issues a real login credential and reveals it');
     await page.locator('#enrollBtn').click();
-    await page.waitForFunction(() => document.getElementById('credentialDetails').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('credentialDetails').style.display !== 'none', null, { timeout: 10000 });
     const rawCredential = JSON.parse(await page.locator('#credentialRaw').textContent());
     assert(rawCredential.asset.class === 'atlas.demo.login.badge', 'expected the raw panel to show a genuine login badge, got: ' + JSON.stringify(rawCredential));
     assert(typeof rawCredential.id === 'string' && rawCredential.id.length > 0, 'expected a real credential id, got: ' + JSON.stringify(rawCredential));
@@ -89,7 +89,7 @@ function assert(cond, message) {
     console.log('STEP 3: the right password proceeds automatically to a successful second factor');
     await page.locator('#passwordInput').fill('atlas123');
     await page.locator('#passwordForm button[type="submit"]').click();
-    await page.waitForFunction(() => (document.getElementById('factorResult').textContent || '').startsWith('✓ Welcome'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('factorResult').textContent || '').startsWith('✓ Welcome'), null, { timeout: 10000 });
     const successText = await page.locator('#factorResult').textContent();
     assert(successText.includes('Demo Login Credential'), 'expected the success message to name the real credential, got: ' + successText);
     assert((await page.locator('#factorResult').getAttribute('class')).includes('ok'), 'expected the ok result styling on a genuine second-factor success');
@@ -102,10 +102,10 @@ function assert(cond, message) {
 
     console.log('STEP 5: clicking "Revoke my credential" (no admin panel involved) fails the very next second-factor attempt, with no password re-ask');
     await page.locator('#revokeBtn').click();
-    await page.waitForFunction(() => (document.getElementById('revokeStatus').textContent || '').startsWith('Revoked'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('revokeStatus').textContent || '').startsWith('Revoked'), null, { timeout: 10000 });
     assert(!(await page.locator('#usernameInput').isVisible()) || (await page.locator('#usernameInput').isDisabled()), 'expected the password fields to stay as they were, not reappear for re-entry');
     await page.locator('#retryFactorBtn').click();
-    await page.waitForFunction(() => (document.getElementById('factorResult').textContent || '').startsWith('✗ Second factor failed'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('factorResult').textContent || '').startsWith('✗ Second factor failed'), null, { timeout: 10000 });
     const failText = await page.locator('#factorResult').textContent();
     assert(failText.includes('revoked'), 'expected the real server rejection reason to mention revocation, got: ' + failText);
     assert((await page.locator('#factorResult').getAttribute('class')).includes('err'), 'expected the err result styling once revoked');
@@ -113,16 +113,16 @@ function assert(cond, message) {
 
     console.log('STEP 6: "Start over" resets the page, and a second full run-through succeeds');
     await page.locator('#resetBtn').click();
-    await page.waitForFunction(() => document.getElementById('passwordPanel').style.display === 'none', { timeout: 5000 });
+    await page.waitForFunction(() => document.getElementById('passwordPanel').style.display === 'none', null, { timeout: 5000 });
     assert(!(await page.locator('#enrollBtn').isDisabled()), 'expected "Set up my demo account" to be clickable again after Start over');
     await page.locator('#enrollBtn').click();
-    await page.waitForFunction(() => document.getElementById('credentialDetails').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('credentialDetails').style.display !== 'none', null, { timeout: 10000 });
     const secondCredential = JSON.parse(await page.locator('#credentialRaw').textContent());
     assert(secondCredential.id !== rawCredential.id, 'expected Start over to enroll a genuinely fresh credential, not reuse the revoked one');
     await page.locator('#usernameInput').fill('demo-user-2');
     await page.locator('#passwordInput').fill('atlas123');
     await page.locator('#passwordForm button[type="submit"]').click();
-    await page.waitForFunction(() => (document.getElementById('factorResult').textContent || '').startsWith('✓ Welcome'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('factorResult').textContent || '').startsWith('✓ Welcome'), null, { timeout: 10000 });
     console.log('PASS: a second run-through after Start over succeeds end to end with a fresh credential —', secondCredential.id);
 
     console.log('\nALL LOGIN DEMO PAGE CHECKS PASSED');

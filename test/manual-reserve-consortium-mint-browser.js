@@ -137,7 +137,7 @@ async function loginAsAdminInBrowser(page, token) {
     await demoPage.locator('#siblingDomainInput').fill(B_DOMAIN);
     await demoPage.locator('#consortiumAmountInput').fill('20000');
     await demoPage.locator('#requestConsortiumMintBtn').click();
-    await demoPage.waitForFunction(() => document.getElementById('consortiumApprovePanel').style.display !== 'none', { timeout: 10000 });
+    await demoPage.waitForFunction(() => document.getElementById('consortiumApprovePanel').style.display !== 'none', null, { timeout: 10000 });
     const requestId = await demoPage.locator('#consortiumRequestIdDisplay').inputValue();
     assert(requestId.startsWith('urn:atlas:reserve-mint-consortium:'), 'expected a real request id, got: ' + requestId);
     const progressAfterCreate = await demoPage.locator('#consortiumProgressText').textContent();
@@ -148,23 +148,23 @@ async function loginAsAdminInBrowser(page, token) {
     const bAdminPage = await browser.newPage();
     await loginAsAdminInBrowser(bAdminPage, bToken);
     await bAdminPage.goto(B_BASE + '/atlas-admin/', { waitUntil: 'load' });
-    await bAdminPage.waitForFunction(() => document.getElementById('hidden-while-logged-out').style.display !== 'none', { timeout: 10000 });
+    await bAdminPage.waitForFunction(() => document.getElementById('hidden-while-logged-out').style.display !== 'none', null, { timeout: 10000 });
     await bAdminPage.locator('#consortiumRequestingDomain').fill(A_DOMAIN);
     await bAdminPage.locator('#consortiumRequestId').fill(requestId);
     await bAdminPage.locator('#consortiumFetchBtn').click();
-    await bAdminPage.waitForFunction(() => (document.getElementById('consortiumPreview').textContent || '').includes('Mint'), { timeout: 10000 });
+    await bAdminPage.waitForFunction(() => (document.getElementById('consortiumPreview').textContent || '').includes('Mint'), null, { timeout: 10000 });
     const previewText = await bAdminPage.locator('#consortiumPreview').textContent();
     assert(previewText.includes('20000'), 'expected the preview to show the real pending amount (20000), got: ' + previewText);
     await bAdminPage.evaluate(() => { document.getElementById('consortiumResult').textContent = ''; });
     await bAdminPage.locator('#consortiumCoSignBtn').click();
-    await bAdminPage.waitForFunction(() => (document.getElementById('consortiumResult').textContent || '').length > 0, { timeout: 10000 });
+    await bAdminPage.waitForFunction(() => (document.getElementById('consortiumResult').textContent || '').length > 0, null, { timeout: 10000 });
     const bCoSignResult = await bAdminPage.locator('#consortiumResult').textContent();
     assert(/relayed|executed/.test(bCoSignResult), 'expected B\'s co-sign to report success, got: ' + bCoSignResult);
     console.log('PASS: B co-signed via its own admin panel —', bCoSignResult);
 
     console.log('STEP 3: back on A\'s reserve-bank-demo.html, refreshing shows B\'s signature and what\'s still waited on');
     await demoPage.locator('#refreshConsortiumBtn').click();
-    await demoPage.waitForFunction(() => (document.getElementById('consortiumApproveStatus').textContent || '').includes('Waiting'), { timeout: 10000 });
+    await demoPage.waitForFunction(() => (document.getElementById('consortiumApproveStatus').textContent || '').includes('Waiting'), null, { timeout: 10000 });
     const waitingText = await demoPage.locator('#consortiumApproveStatus').textContent();
     assert(waitingText.includes(A_DOMAIN), 'expected the status to say it\'s still waiting on A, got: ' + waitingText);
     const progressAfterB = await demoPage.locator('#consortiumProgressText').textContent();
@@ -175,18 +175,18 @@ async function loginAsAdminInBrowser(page, token) {
     const aAdminPage = await browser.newPage();
     await loginAsAdminInBrowser(aAdminPage, aToken);
     await aAdminPage.goto(A_BASE + '/atlas-admin/', { waitUntil: 'load' });
-    await aAdminPage.waitForFunction(() => document.getElementById('hidden-while-logged-out').style.display !== 'none', { timeout: 10000 });
+    await aAdminPage.waitForFunction(() => document.getElementById('hidden-while-logged-out').style.display !== 'none', null, { timeout: 10000 });
     await aAdminPage.locator('#consortiumRequestingDomain').fill(A_DOMAIN);
     await aAdminPage.locator('#consortiumRequestId').fill(requestId);
     await aAdminPage.locator('#consortiumCoSignBtn').click();
-    await aAdminPage.waitForFunction(() => (document.getElementById('consortiumResult').textContent || '').length > 0, { timeout: 10000 });
+    await aAdminPage.waitForFunction(() => (document.getElementById('consortiumResult').textContent || '').length > 0, null, { timeout: 10000 });
     const aCoSignResult = await aAdminPage.locator('#consortiumResult').textContent();
     assert(/executed/.test(aCoSignResult), 'expected A\'s co-sign to report the mint executed, got: ' + aCoSignResult);
     console.log('PASS: A co-signed, threshold reached —', aCoSignResult);
 
     console.log('STEP 5: back on A\'s reserve-bank-demo.html, refreshing shows Executed with a real minted credential');
     await demoPage.locator('#refreshConsortiumBtn').click();
-    await demoPage.waitForFunction(() => (document.getElementById('consortiumApproveStatus').textContent || '').includes('minted'), { timeout: 10000 });
+    await demoPage.waitForFunction(() => (document.getElementById('consortiumApproveStatus').textContent || '').includes('minted'), null, { timeout: 10000 });
     const executedText = await demoPage.locator('#consortiumApproveStatus').textContent();
     assert(executedText.includes('20000'), 'expected the executed message to show the real minted quantity, got: ' + executedText);
     const rawCredentialText = await demoPage.locator('#consortiumApproveStatus details.raw pre').textContent();

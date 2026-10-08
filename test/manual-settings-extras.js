@@ -45,11 +45,11 @@ async function projectPortals(frame) {
 // collapsed by default.
 async function openIdentityMethodCategory(frame) {
   await frame.locator('#settingsTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
   const category = frame.locator('.settings-category[data-category="identity-method"]');
   if (!(await category.evaluate((el) => el.classList.contains('open')))) {
     await category.locator('.settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity-method"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity-method"]').classList.contains('open'), null, { timeout: 5000 });
   }
 }
 
@@ -73,31 +73,31 @@ async function openIdentityMethodCategory(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
-    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), null, { timeout: 5000 });
 
     console.log('STEP 1: Enter in the confirm-password field submits identity creation — no click on Create identity');
     const ORIGINAL_PASSWORD = 'enter-key-test-password-1';
     await frame.locator('#newPasswordInput').fill(ORIGINAL_PASSWORD);
     await frame.locator('#newPasswordConfirmInput').fill(ORIGINAL_PASSWORD);
     await frame.locator('#newPasswordConfirmInput').press('Enter');
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     console.log('PASS: Enter submitted the create-identity form, seed phrase revealed');
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     console.log('STEP 2: locking, then Enter in the unlock password field logs back in — no click on Unlock');
     await openIdentityMethodCategory(frame);
     await frame.locator('#lockWalletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#unlockPasswordInput').fill(ORIGINAL_PASSWORD);
     await frame.locator('#unlockPasswordInput').press('Enter');
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
     console.log('PASS: Enter logged in from the unlock screen, no button click needed');
 
     console.log('STEP 3: changing password — wrong current password is rejected, nothing changes');
@@ -107,7 +107,7 @@ async function openIdentityMethodCategory(frame) {
     await frame.locator('#changePasswordNewInput').fill(NEW_PASSWORD);
     await frame.locator('#changePasswordConfirmInput').fill(NEW_PASSWORD);
     await frame.locator('#changePasswordBtn').click();
-    await frame.waitForFunction(() => document.getElementById('changePasswordStatus').textContent === 'Change failed: Incorrect current password.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('changePasswordStatus').textContent === 'Change failed: Incorrect current password.', null, { timeout: 5000 });
     console.log('PASS: wrong current password rejected with a distinct message');
 
     console.log('STEP 4: changing password for real — Enter in the confirm field submits it, same as the other forms');
@@ -115,23 +115,23 @@ async function openIdentityMethodCategory(frame) {
     await frame.locator('#changePasswordNewInput').fill(NEW_PASSWORD);
     await frame.locator('#changePasswordConfirmInput').fill(NEW_PASSWORD);
     await frame.locator('#changePasswordConfirmInput').press('Enter');
-    await frame.waitForFunction(() => document.getElementById('changePasswordStatus').textContent === 'Password changed.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('changePasswordStatus').textContent === 'Password changed.', null, { timeout: 5000 });
     console.log('PASS: password changed');
 
     console.log('STEP 5: the OLD password no longer unlocks; the NEW one does');
     await frame.locator('#lockWalletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#unlockPasswordInput').fill(ORIGINAL_PASSWORD);
     await frame.locator('#unlockBtn').click();
-    await frame.waitForFunction(() => document.getElementById('unlockScreenStatus').textContent === 'Incorrect password.', { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreenStatus').textContent === 'Incorrect password.', null, { timeout: 10000 });
     console.log('PASS: old password rejected after the change');
     const identityBeforeUnlock = await frame.locator('#unlockScreen').getAttribute('class');
     if (!identityBeforeUnlock.includes('active')) throw new Error('Should still be on the unlock screen after the old password fails');
     await frame.locator('#unlockPasswordInput').fill(NEW_PASSWORD);
     await frame.locator('#unlockBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
     const identityLabel = await frame.locator('#walletIdentity').textContent();
     if (!identityLabel.startsWith('Identity:')) throw new Error('Expected the SAME identity back, got: ' + identityLabel);
     console.log('PASS: new password unlocks the SAME identity (same keypair, only its at-rest encryption changed) ->', identityLabel);
@@ -167,7 +167,7 @@ async function openIdentityMethodCategory(frame) {
     const portals = await projectPortals(frame);
     const toNeighbor = portals.find((p) => p.kind === 'domain');
     await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
     console.log('PASS: crossed to Neighbor Workshop on localhost:8002');
 
     // Recent worlds lives directly on the main wallet screen now (moved out
@@ -175,10 +175,10 @@ async function openIdentityMethodCategory(frame) {
     if (!(await frame.locator('#walletPanel').evaluate((el) => el.classList.contains('open')))) {
       await frame.locator('#walletBtn').click();
     }
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('.settings-category[data-category="recent-worlds"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="recent-worlds"]').classList.contains('open'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#recentWorldsList .info-card').length >= 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="recent-worlds"]').classList.contains('open'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#recentWorldsList .info-card').length >= 2, null, { timeout: 5000 });
     const recentText = await frame.locator('#recentWorldsList').textContent();
     if (!recentText.includes('Neighbor Workshop') || !recentText.includes('Example Plaza')) {
       throw new Error('Expected both visited worlds listed, got: ' + recentText.replace(/\s+/g, ' ').trim());
@@ -188,8 +188,8 @@ async function openIdentityMethodCategory(frame) {
 
     console.log('STEP 8: clicking "Go" on Example Plaza travels back there and closes the wallet panel');
     await frame.locator('#recentWorldsList button[data-action="travel"]').first().click();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     console.log('PASS: traveled back to Example Plaza, wallet panel closed automatically');
 
     console.log('\nALL SETTINGS-EXTRAS CHECKS PASSED');

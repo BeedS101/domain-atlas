@@ -106,35 +106,35 @@ async function projectPortals(frame) {
     await btn.click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     console.log('PASS: viewer rendered Plaza world');
     await page.screenshot({ path: shot('wallet-01-plaza.png') });
 
     console.log('STEP 2: setting up a password-protected identity through onboarding');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#chooseNewBtn').click();
-    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), null, { timeout: 5000 });
     const TEST_PASSWORD = 'correct-horse-battery-staple-1';
     await frame.locator('#newPasswordInput').fill(TEST_PASSWORD);
     await frame.locator('#newPasswordConfirmInput').fill(TEST_PASSWORD);
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     const seedPhrase = (await frame.locator('#seedPhraseText').textContent()).trim();
     if (seedPhrase.split(/\s+/).length !== 16) throw new Error('Expected a 16-word seed phrase, got: ' + seedPhrase);
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const identityLabel = await frame.locator('#walletIdentity').textContent();
     console.log('PASS: identity created, seed phrase captured, main wallet screen active ->', identityLabel);
 
     console.log('STEP 3: requesting an item from this world\'s real issuer');
     const requestBtn = frame.locator('#requestItemBtn');
-    await frame.waitForFunction(() => !document.getElementById('requestItemBtn').disabled, { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('requestItemBtn').disabled, null, { timeout: 5000 });
     await requestBtn.click();
     await frame.waitForFunction(
-      () => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0,
+      () => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null,
       { timeout: 15000 }
     );
     const walletText = await frame.locator('#selfCollectiblesList').textContent();
@@ -157,7 +157,7 @@ async function projectPortals(frame) {
     if (!identityCategoryOpen) await frame.locator('.settings-category[data-category="identity"] .settings-category-toggle').click();
     await frame.locator('#presentBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('presentBtn').textContent.includes('verified'),
+      () => document.getElementById('presentBtn').textContent.includes('verified'), null,
       { timeout: 15000 }
     );
     console.log('PASS: presentation signature verified client-side, no relying-party server involved');
@@ -166,13 +166,13 @@ async function projectPortals(frame) {
     let portals = await projectPortals(frame);
     const toNeighbor = portals.find((p) => p.kind === 'domain');
     await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
     console.log('PASS: now on localhost:8002 · Neighbor Workshop, wallet state carried over unchanged');
 
     console.log('STEP 6: re-verifying the wallet from here — same item, issuer never contacted by this domain');
     await frame.locator('#reverifyBtn').click();
-    await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === true, { timeout: 5000 }).catch(() => {});
-    await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === false, { timeout: 15000 });
+    await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === true, null, { timeout: 5000 }).catch(() => {});
+    await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === false, null, { timeout: 15000 });
     const walletTextAfterCross = await frame.locator('#selfCollectiblesList').textContent();
     if (!walletTextAfterCross.includes('✓')) throw new Error('Item should still verify as valid from a different domain');
     // properties live inside `asset`, covered by the same signature as
@@ -185,10 +185,10 @@ async function projectPortals(frame) {
 
     console.log('STEP 7: exporting the wallet (atlas-wallet-export/1.0) — lives under Settings now');
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     // Settings categories are collapsed by default — open "Wallet backup" before using its export button.
     await frame.locator('.settings-category[data-category="wallet-backup"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="wallet-backup"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="wallet-backup"]').classList.contains('open'), null, { timeout: 5000 });
     const [download] = await Promise.all([
       page.waitForEvent('download', { timeout: 10000 }),
       frame.locator('#exportBtn').click()
@@ -200,7 +200,7 @@ async function projectPortals(frame) {
     if (!exported.credentials || exported.credentials.length !== 1) throw new Error('Expected exactly one exported credential');
     console.log('PASS: exported wallet has the right shape ->', exported.format, '·', exported.credentials.length, 'credential(s)');
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     console.log('STEP 8: revoking the item at the issuer, then re-verifying — should now fail');
     const issuedId = exported.credentials[0].id;
@@ -216,8 +216,8 @@ async function projectPortals(frame) {
     if (!revokeHttpRes.ok) throw new Error('Revoke call failed: ' + await revokeHttpRes.text());
 
     await frame.locator('#reverifyBtn').click();
-    await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === true, { timeout: 5000 }).catch(() => {});
-    await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === false, { timeout: 15000 });
+    await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === true, null, { timeout: 5000 }).catch(() => {});
+    await frame.waitForFunction(() => document.getElementById('reverifyBtn').disabled === false, null, { timeout: 15000 });
     const walletTextAfterRevoke = await frame.locator('#selfCollectiblesList').textContent();
     if (!walletTextAfterRevoke.includes('✗')) throw new Error('Revoked item should now show as invalid');
     if (!walletTextAfterRevoke.toLowerCase().includes('revoked')) throw new Error('Reason should mention revocation');

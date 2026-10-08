@@ -119,7 +119,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -130,10 +130,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click();
   return publicKey;
@@ -149,13 +149,13 @@ async function claimPostOfficeMembership(frame, label) {
   const toNeighbor = portals.find((p) => p.kind === 'domain');
   if (!toNeighbor) throw new Error('Expected a domain portal out of the Plaza for ' + label);
   await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), null, { timeout: 10000 });
 
   const [postOfficeStall] = (await projectInteractables(frame)).filter((m) => m.class === 'atlas.postoffice.membership');
   if (!postOfficeStall) throw new Error('Expected a Post Office interactable (atlas.postoffice.membership) in the workshop scene');
   await frame.locator('#scene').click({ position: { x: postOfficeStall.sx, y: postOfficeStall.sy } });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), null, { timeout: 10000 });
   const membershipStatus = await frame.locator('#status').textContent();
   if (!membershipStatus.includes('Claim Global Mail Membership')) throw new Error('Expected ' + label + ' to collect the Global Mail Membership: ' + membershipStatus);
   console.log('PASS: ' + label + ' claimed a Global Mail Membership Card at Domain B ->', membershipStatus);
@@ -165,7 +165,7 @@ async function claimPostOfficeMembership(frame, label) {
   portals = await projectPortals(frame);
   const backToDomainA = portals.find((p) => p.kind === 'domain');
   await frame.locator('#scene').click({ position: { x: backToDomainA.sx, y: backToDomainA.sy } });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), null, { timeout: 10000 });
   return postOfficeStall;
 }
 
@@ -198,18 +198,18 @@ async function claimPostOfficeMembership(frame, label) {
     let portals = await projectPortals(b.frame);
     const toNeighborAgain = portals.find((p) => p.kind === 'domain');
     await b.frame.locator('#scene').click({ position: { x: toNeighborAgain.sx, y: toNeighborAgain.sy } });
-    await b.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
+    await b.frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
     // Reuse the same projected coordinates claimPostOfficeMembership already
     // computed rather than re-querying scene.interactables here — that
     // avoids a race where this world's interactables haven't finished
     // loading yet right after the portal transition.
     await b.frame.locator('#scene').click({ position: { x: bStall.sx, y: bStall.sy } });
-    await b.frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Already collected'), { timeout: 10000 });
+    await b.frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Already collected'), null, { timeout: 10000 });
     console.log('PASS: no duplicate membership issued on a second click');
     portals = await projectPortals(b.frame);
     const backToPlazaFromB = portals.find((p) => p.kind === 'domain');
     await b.frame.locator('#scene').click({ position: { x: backToPlazaFromB.sx, y: backToPlazaFromB.sy } });
-    await b.frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), { timeout: 10000 });
+    await b.frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), null, { timeout: 10000 });
 
     console.log('STEP 2 (task #94): Visitor A ALSO has to join Domain B before A can send through it — symmetric membership');
     await claimPostOfficeMembership(a.frame, 'Visitor A');
@@ -217,13 +217,13 @@ async function claimPostOfficeMembership(frame, label) {
     console.log('STEP 3: the "Send mail" dropdown only offers Post Offices this wallet has actually joined');
     await a.frame.locator('#walletBtn').click();
     await a.frame.locator('#socialTabBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     // showSocialSubtab() flips the active class synchronously, before the
     // click handler's own async refreshes (mail display, subscribe button,
     // public key display + send-via options) have resolved — wait for the
     // actual values rather than racing the screen-active class.
-    await a.frame.waitForFunction(() => document.getElementById('myPublicKeyDisplay').value.length > 0, { timeout: 5000 });
-    await a.frame.waitForFunction(() => document.getElementById('postOfficeToDomainInput').options.length > 1, { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('myPublicKeyDisplay').value.length > 0, null, { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('postOfficeToDomainInput').options.length > 1, null, { timeout: 5000 });
 
     const myAddressValue = await a.frame.locator('#myPublicKeyDisplay').inputValue();
     if (myAddressValue !== pkA) throw new Error('Expected "Your address" to show A\'s own public key, got: ' + myAddressValue);
@@ -254,16 +254,16 @@ async function claimPostOfficeMembership(frame, label) {
     await a.frame.locator('#postOfficeSubjectInput').fill(XSS_SUBJECT);
     await a.frame.locator('#postOfficeBodyInput').fill(XSS_BODY);
     await a.frame.locator('#postOfficeSendBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', null, { timeout: 10000 });
     console.log('PASS: send reported success');
 
     console.log('STEP 5: Visitor B\'s ordinary mail check picks the message up automatically');
     await b.frame.locator('#walletBtn').click();
     await b.frame.locator('#socialTabBtn').click();
-    await b.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await b.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await b.frame.locator('#checkMailNowBtn').click();
     // 2 messages: the welcome mail auto-sent on claiming membership + this test's message.
-    await b.frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, { timeout: 10000 });
+    await b.frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, null, { timeout: 10000 });
     const mailCard = b.frame.locator('#mailList .mail-card', { hasText: 'Hi ' });
     const cardText = await mailCard.textContent();
     if (!cardText.includes('Hi <b>Bob</b>')) throw new Error('Expected the literal, un-rendered subject text in the card: ' + cardText);
@@ -290,7 +290,7 @@ async function claimPostOfficeMembership(frame, label) {
     await a.frame.locator('#postOfficeBodyInput').fill('Nobody registered this key at Domain B.');
     await a.frame.locator('#postOfficeSendBtn').click();
     await a.frame.waitForFunction(
-      () => document.getElementById('postOfficeSendStatus').textContent.startsWith('Send failed'),
+      () => document.getElementById('postOfficeSendStatus').textContent.startsWith('Send failed'), null,
       { timeout: 10000 }
     );
     const failStatus = await a.frame.locator('#postOfficeSendStatus').textContent();

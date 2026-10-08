@@ -138,16 +138,16 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
     frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('previewer-2d-test-pw');
     await frame.locator('#newPasswordConfirmInput').fill('previewer-2d-test-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: identity ready, wallet still empty');
 
     const { interactables } = await projectMarkers(frame);
@@ -163,7 +163,7 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
 
     console.log('STEP 2: hovering the Bronze Compass stall BEFORE collecting one opens the Previewer');
     await frame.locator('#scene').hover({ position: { x: compass.sx, y: compass.sy } });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, null, { timeout: 3000 });
     const preview = await readPreviewer(frame);
     if (!preview.name.includes('Bronze Compass')) throw new Error('Expected "Bronze Compass" in the preview, got: ' + preview.name);
     if (!preview.meta.includes('atlas.wearable') || !preview.meta.includes('localhost:8001')) throw new Error('Expected class + issuer domain in the preview meta, got: ' + preview.meta);
@@ -189,7 +189,7 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     console.log('STEP 5: clicking the previewed item INSIDE THE PREVIEWER (not the stall itself) collects it — a real issue() mint');
     await frame.page().mouse.move(5, 5);
     await frame.locator('#scene').hover({ position: { x: compass.sx, y: compass.sy } });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, null, { timeout: 3000 });
     const statusBeforeCollect = await frame.locator('#status').textContent();
     await frame.locator('#previewerBody').click();
     const statusAfterCollect = await waitForStatusPrefix(frame, 'Collected', statusBeforeCollect);
@@ -218,19 +218,19 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
 
     console.log('SETUP for STEP 7: mint a Chess Champion Trophy directly (AtlasWallet.mintAsset, same pattern manual-drop-pickup.js uses) — the Bronze Compass collected above is tradeScope: \'bound\' now and its card offers no Drop control at all');
     await frame.evaluate(() => AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.trophy.chess').then(() => refreshInventoryDisplay()));
-    await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Chess Champion Trophy'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Chess Champion Trophy'), null, { timeout: 5000 });
 
     console.log('STEP 7: dropping the trophy, then hovering its OWN dropped marker shows the real owned credential — no preview note this time');
     await frame.page().mouse.move(5, 5);
     await clickCardMenuAction(frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), null, { timeout: 5000 });
     await frame.locator('#scene').click({ position: { x: 90, y: 90 } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), null, { timeout: 5000 });
 
     const { itemMarkers } = await projectMarkers(frame);
     if (itemMarkers.length !== 1) throw new Error('Expected exactly one dropped-item marker, got ' + itemMarkers.length);
     await frame.locator('#scene').hover({ position: { x: itemMarkers[0].sx, y: itemMarkers[0].sy } });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, null, { timeout: 3000 });
     const droppedPreview = await readPreviewer(frame);
     if (!droppedPreview.name.includes('Chess Champion Trophy')) throw new Error('Expected "Chess Champion Trophy" for the dropped item\'s own marker, got: ' + droppedPreview.name);
     if (droppedPreview.hasNote) throw new Error('Expected NO preview note for an owned, dropped item — this is a real credential, not a class-level preview');
@@ -252,7 +252,7 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
 
     console.log('SETUP for STEP 8b: mint 20 iron (fungible) — same fixture/pattern manual-drop-pickup.js\'s STEP 3 uses');
     await frame.evaluate(() => AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20).then(() => refreshInventoryDisplay()));
-    await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Iron'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Iron'), null, { timeout: 5000 });
 
     console.log('STEP 8b: dropping only PART of the iron stack (5 of 20) and hovering its marker shows the quantity in the Previewer\'s name');
     await frame.page().mouse.move(5, 5);
@@ -266,27 +266,27 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     await ironCard.locator('.card-menu-items.show').waitFor({ state: 'visible', timeout: 3000 });
     await ironCard.locator('.drop-quantity-input').fill('5');
     await ironCard.locator('button[data-action="drop"][data-fungible="1"]').click();
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), null, { timeout: 5000 });
     await frame.locator('#scene').click({ position: { x: 60, y: 120 } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), null, { timeout: 5000 });
 
     const { itemMarkers: ironMarkers } = await projectMarkers(frame);
     if (ironMarkers.length !== 1) throw new Error('Expected exactly one dropped iron marker, got ' + ironMarkers.length);
     await frame.locator('#scene').hover({ position: { x: ironMarkers[0].sx, y: ironMarkers[0].sy } });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, null, { timeout: 3000 });
     const ironPreview = await readPreviewer(frame);
     if (!ironPreview.name.includes('Iron') || !ironPreview.name.includes('×5 g')) throw new Error('Expected the Previewer name to read like "Iron (Fe) ×5 g" (the split-off quantity, not the original 20), got: ' + ironPreview.name);
     console.log('PASS: Previewer shows the dropped quantity right in the name ->', ironPreview.name);
 
     console.log('STEP 9: hovering an actual WALLET CARD still opens the Asset Viewer, exactly as before this task — "don\'t touch the Asset Viewer" means it still works normally, not that it\'s disabled');
     await frame.page().mouse.move(5, 5);
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 10000 });
     // Two collectibles are held by this point (the Compass from steps 2-6,
     // the Trophy picked back up in step 8) — target the Compass explicitly
     // rather than .first(), which would otherwise depend on render order.
     const cardBox = await frame.locator('#selfCollectiblesList .wallet-item').filter({ hasText: 'Bronze Compass' }).boundingBox();
     await frame.page().mouse.move(cardBox.x + cardBox.width / 2, cardBox.y + cardBox.height / 2);
-    await frame.waitForFunction(() => document.getElementById('assetViewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('assetViewerWidget').hidden === false, null, { timeout: 3000 });
     const cardHoverContent = await frame.evaluate(() => ({
       name: document.querySelector('#assetViewerBody .name') ? document.querySelector('#assetViewerBody .name').textContent : null
     }));

@@ -92,7 +92,7 @@ function assert(cond, message) {
 
     console.log('STEP 1: clicking "Get my two demo credentials" issues and renders both cards');
     await page.locator('#issueBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 2, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 2, null, { timeout: 10000 });
     const couponCard = page.locator('#youCards .card', { hasText: '10% Off Coupon' });
     const badgeCard = page.locator('#youCards .card', { hasText: 'Plaza Visitor Badge' });
     assert(await couponCard.locator('.badge.giftable').count() === 1, 'expected the coupon to be tagged Giftable');
@@ -103,7 +103,7 @@ function assert(cond, message) {
     const couponRawBefore = await couponCard.locator('details.raw pre').textContent();
     const couponIdBefore = JSON.parse(couponRawBefore).id;
     await couponCard.locator('.sendBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#friendCards .card').length === 1, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#friendCards .card').length === 1, null, { timeout: 10000 });
     assert((await couponCard.locator('.result.ok').textContent()).includes('Sent'), 'expected a plain success message on the sender\'s own card');
     const friendCard = page.locator('#friendCards .card', { hasText: '10% Off Coupon' });
     assert(await friendCard.count() === 1, 'expected the coupon to show up in the friend panel');
@@ -117,7 +117,7 @@ function assert(cond, message) {
     await page.waitForFunction(() => {
       const cards = [...document.querySelectorAll('#youCards .card')].filter((c) => c.textContent.includes('Plaza Visitor Badge'));
       return cards[0] && cards[0].querySelector('.result.err');
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const badgeErrorText = await badgeCard.locator('.result.err').textContent();
     assert(badgeErrorText.includes('bound to its owner and cannot be sent'), 'expected the exact server rejection reason to be shown, got: ' + badgeErrorText);
     assert(await page.locator('#friendCards .card', { hasText: 'Plaza Visitor Badge' }).count() === 0, 'expected nothing to land in the friend panel for a rejected transfer');
@@ -128,7 +128,7 @@ function assert(cond, message) {
     await badgeCard.locator('details.raw summary').click(); // expand the <details> to reveal the button inside it
     await badgeCard.locator('.fillVerifyBtn').click();
     const verifyResult = page.locator('#verifyResult');
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
     assert((await verifyResult.getAttribute('class')).includes('ok'), 'expected the ok result styling on a genuinely valid credential');
     console.log('PASS: independently verified as valid —', await verifyResult.textContent());
 
@@ -137,7 +137,7 @@ function assert(cond, message) {
     tampered.owner = { ...tampered.owner, publicKey: tampered.owner.publicKey.slice(0, -4) + 'xxxx' };
     await page.locator('#verifyInput').fill(JSON.stringify(tampered, null, 2));
     await page.locator('#verifyBtn').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✗ Not valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✗ Not valid'), null, { timeout: 10000 });
     assert((await verifyResult.getAttribute('class')).includes('err'), 'expected the err result styling once the owner field is tampered with');
     assert((await verifyResult.textContent()).includes("signature doesn't match"), 'expected the specific signature-mismatch reason, got: ' + (await verifyResult.textContent()));
     console.log('PASS: a tampered credential is correctly rejected —', await verifyResult.textContent());
@@ -148,10 +148,10 @@ function assert(cond, message) {
     await page.waitForFunction(() => {
       const cards = [...document.querySelectorAll('#youCards .card')].filter((c) => c.textContent.includes('Plaza Visitor Badge'));
       return cards[0] && cards[0].querySelector('.result.ok');
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     assert((await badgeCard.locator('.result.ok').textContent()).includes('Redeemed'), 'expected a plain success message once the bound badge is redeemed');
     assert(await badgeCard.locator('.sendBtn').count() === 0 && await badgeCard.locator('.redeemBtn').count() === 0, 'expected both action buttons gone once the badge is redeemed');
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✗ Not valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✗ Not valid'), null, { timeout: 10000 });
     const redeemVerifyText = await verifyResult.textContent();
     assert(redeemVerifyText.includes('revoked by the issuer'), 'expected the just-redeemed badge to independently verify as revoked, got: ' + redeemVerifyText);
     assert(JSON.parse(await page.locator('#verifyInput').inputValue()).id === badgeRawId, 'expected the auto-filled verify textarea to hold the actual redeemed badge, not a stale one');
@@ -159,13 +159,13 @@ function assert(cond, message) {
 
     console.log('STEP 8: "Start over" resets the page without a reload, and it works normally afterward');
     await page.locator('#resetBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 0 && document.getElementById('resetBtn').style.display === 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 0 && document.getElementById('resetBtn').style.display === 'none', null, { timeout: 10000 });
     assert(!(await page.locator('#youPanel').isVisible()), 'expected the wallet panel to hide again after a reset');
     assert(!(await page.locator('#friendPanel').isVisible()), 'expected the friend panel to hide again after a reset');
     assert((await page.locator('#friendCards').textContent()).includes('Nothing sent yet'), 'expected the friend panel to show its empty placeholder again');
     assert(await page.locator('#issueBtn').isEnabled(), 'expected "Get my two demo credentials" to be clickable again');
     await page.locator('#issueBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 2, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#youCards .card').length === 2, null, { timeout: 10000 });
     console.log('PASS: the page resets in place and a second run-through works normally');
 
     console.log('\nALL BUSINESS DEMO PAGE CHECKS PASSED');

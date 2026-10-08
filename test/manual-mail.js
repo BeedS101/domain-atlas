@@ -88,16 +88,16 @@ function postJson(port, urlPath, body) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('mail-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('mail-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     // requestItemBtn requests whichever class the current world's
     // manifest lists first in policy.acceptedItemClasses — the Plaza's is
@@ -130,14 +130,14 @@ function postJson(port, urlPath, body) {
 
     console.log('STEP 2: opening the Mail tab checks automatically — no need to click Check now first, verifies the signature, and shows it unread (alongside the auto-sent welcome message from subscribing — see /atlas/asset/issue)');
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     // 2, not 1: requesting atlas.membership in SETUP now also triggers a
     // server-side auto-welcome message (issue.php / server.js's
     // /atlas/asset/issue), so opening the tab picks up both that and STEP
     // 1's message via the tab's own automatic check (no #checkMailNowBtn
     // click needed here at all). Sorted newest-first, so this test's own
     // message (sent after SETUP's welcome message) is first().
-    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, null, { timeout: 10000 });
     const cardText = await frame.locator('#mailList .mail-card').first().textContent();
     if (!cardText.includes('Welcome to the Plaza')) throw new Error('Expected the message subject to render: ' + cardText);
     if (!cardText.includes('new exhibit in the Lobby')) throw new Error('Expected the message body to render: ' + cardText);
@@ -159,8 +159,8 @@ function postJson(port, urlPath, body) {
 
     console.log('STEP 4: clicking the unread card marks it read — badge drops to 1 (the auto-welcome message is still unread)');
     await frame.locator('#mailList .mail-card').first().click();
-    await frame.waitForFunction(() => !document.querySelector('#mailList .mail-card').classList.contains('unread'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('mailBadge').textContent === '1', { timeout: 5000 });
+    await frame.waitForFunction(() => !document.querySelector('#mailList .mail-card').classList.contains('unread'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailBadge').textContent === '1', null, { timeout: 5000 });
     console.log('PASS: message marked read, badge shows 1 remaining');
 
     console.log('STEP 5: checking again (including a re-visit of the Mail sub-tab, which now also auto-checks) does not duplicate either message');
@@ -177,15 +177,15 @@ function postJson(port, urlPath, body) {
     console.log('STEP 6: check-frequency setting persists');
     // Check frequency now lives under Mail's "Mail Settings" inner sub-tab.
     await frame.locator('#mailSettingsSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSettingsSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSettingsSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#mailIntervalInput').fill('5');
     await frame.locator('#saveMailIntervalBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailIntervalStatus').textContent === 'Saved.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailIntervalStatus').textContent === 'Saved.', null, { timeout: 5000 });
     // Re-open the tab (simulating navigating away and back) and confirm
     // the saved value is what pre-fills the input.
     await frame.locator('#walletTabBtn').click();
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailIntervalInput').value === '5', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailIntervalInput').value === '5', null, { timeout: 5000 });
     console.log('PASS: check-frequency interval saved and reloaded correctly');
 
     console.log('\nALL MAIL CHECKS PASSED');

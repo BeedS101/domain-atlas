@@ -171,15 +171,15 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     console.log('STEP 3: creating a real wallet identity (side panel, standalone mode)');
     const walletPage = await context.newPage();
     await walletPage.goto('chrome-extension://' + extensionId + '/viewer.html', { waitUntil: 'load' });
-    await walletPage.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 10000 });
+    await walletPage.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 10000 });
     await walletPage.locator('#chooseNewBtn').click();
     await walletPage.locator('#newPasswordInput').fill('bridge-offer-test-pw');
     await walletPage.locator('#newPasswordConfirmInput').fill('bridge-offer-test-pw');
     await walletPage.locator('#confirmCreateBtn').click();
-    await walletPage.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await walletPage.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await walletPage.locator('#seedConfirmCheck').check();
     await walletPage.locator('#seedConfirmBtn').click();
-    await walletPage.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await walletPage.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const realPublicKey = await walletPage.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       return identity ? identity.publicKey : null;
@@ -364,7 +364,7 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     await walletPage.waitForFunction(() => {
       const modal = document.getElementById('bridgeOfferPreviewModal');
       return modal && modal.classList.contains('active');
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const previewBodyText = await walletPage.locator('#bridgeOfferPreviewBody').innerText();
     if (!previewBodyText.includes(previewOfferCredential.asset.name)) throw new Error('Expected the preview modal to show the real asset name, got: ' + previewBodyText);
     if (!previewBodyText.includes(WHITELISTED_CLASS)) throw new Error('Expected the preview modal to show the real asset class, got: ' + previewBodyText);
@@ -375,7 +375,7 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     await walletPage.waitForFunction(() => {
       const modal = document.getElementById('bridgeOfferPreviewModal');
       return modal && !modal.classList.contains('active');
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const walletAfterPreviewClaim = await walletPage.evaluate((owner) => AtlasWallet.getWallet(owner), realPublicKey);
     if (!walletAfterPreviewClaim.some((e) => e.credential.id === previewOfferCredential.id)) throw new Error('Expected the in-modal Claim to actually move the credential into the wallet');
     const pendingAfterPreviewClaim = await walletPage.evaluate((owner) => AtlasWallet.getBridgeOffers(owner), realPublicKey);
@@ -404,13 +404,13 @@ async function mintCredential(page, assetClass, ownerPublicKey, quantity) {
     await walletPage.waitForFunction(() => {
       const modal = document.getElementById('bridgeOfferPreviewModal');
       return modal && modal.classList.contains('active');
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     walletPage.once('dialog', (d) => d.accept()); // the modal's own Dismiss button runs the same confirm() prompt the card-level one does
     await walletPage.locator('#bridgeOfferPreviewDismissBtn').click();
     await walletPage.waitForFunction(() => {
       const modal = document.getElementById('bridgeOfferPreviewModal');
       return modal && !modal.classList.contains('active');
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const pendingAfterPreviewDismiss = await walletPage.evaluate((owner) => AtlasWallet.getBridgeOffers(owner), realPublicKey);
     if (pendingAfterPreviewDismiss.some((e) => e.id === dismissPreviewOfferId)) throw new Error('Expected the preview-dismissed offer to be removed from getBridgeOffers() entirely');
     const walletAfterPreviewDismiss = await walletPage.evaluate((owner) => AtlasWallet.getWallet(owner), realPublicKey);

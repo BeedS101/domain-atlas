@@ -35,42 +35,42 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('search-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('search-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     // Identity now defaults to a collapsed category on the main wallet
     // screen (see viewer.html) — expand it before its buttons are clickable.
     await frame.locator('[data-category="identity"] .settings-category-toggle').click();
     await frame.locator('#createCounterpartyBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('counterpartyIdentity').textContent.includes('No counterparty yet'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('counterpartyIdentity').textContent.includes('No counterparty yet'), null, { timeout: 5000 });
 
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 15000 });
 
     // Task #211 removed the dev-only mine buttons — mint the exact same
     // way they used to (AtlasWallet.mintAsset + the same
     // refreshInventoryDisplay() the button handlers called) directly.
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, null, { timeout: 10000 });
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('counterparty', 'localhost:8001', 'atlas.element.gold', 10); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.querySelectorAll('#counterpartyCollectiblesList .wallet-item').length > 0, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#counterpartyCollectiblesList .wallet-item').length > 0, null, { timeout: 10000 });
     console.log('PASS: setup complete — item + iron balance (self), gold balance (counterparty), all under Collectibles');
 
     console.log('STEP 1: the old footer Settings button is gone (see #54) — Settings is reached via the top tab bar instead, and still opens Settings');
     const oldBtnCount = await frame.locator('#openSettingsBtn').count();
     if (oldBtnCount !== 0) throw new Error('Expected #openSettingsBtn to be gone entirely, found ' + oldBtnCount);
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: old footer button gone, Settings tab still works');
 
     console.log('STEP 2: searching Collectibles for a substring of the item\'s class shows it and hides the unrelated iron balance in the SAME list');
@@ -80,7 +80,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const itemCard = cards.find((c) => c.textContent.includes('Bronze Compass'));
       const ironCard = cards.find((c) => c.textContent.includes('Iron (Fe)'));
       return itemCard && !itemCard.hidden && ironCard && ironCard.hidden;
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: matching search term keeps the item visible and hides the non-matching iron balance in the same list');
 
     console.log('STEP 2b: searching by an asset.properties value (not just name/class) also matches — properties are folded into the search index');
@@ -89,21 +89,21 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
       const itemCard = cards.find((c) => c.textContent.includes('Bronze Compass'));
       return itemCard && !itemCard.hidden;
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: searching "victorian" (a com.example.era property value) finds the item');
 
     await frame.locator('#collectiblesSearchInput').fill('zzz-nomatch');
     await frame.waitForFunction(() => {
       const cards = document.querySelectorAll('#selfCollectiblesList .wallet-item');
       return cards.length > 0 && Array.from(cards).every((c) => c.hidden) && !!document.querySelector('#selfCollectiblesList .filter-empty-note');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: non-matching search term hides everything and shows a "No matches" note');
 
     await frame.locator('#collectiblesSearchInput').fill('');
     await frame.waitForFunction(() => {
       const cards = document.querySelectorAll('#selfCollectiblesList .wallet-item');
       return cards.length > 0 && Array.from(cards).every((c) => !c.hidden) && !document.querySelector('#selfCollectiblesList .filter-empty-note');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: clearing the search restores everything and drops the "No matches" note');
 
     console.log('STEP 3: the Collectibles search filters BOTH the self and counterparty lists by the same query');
@@ -115,7 +115,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const cpCards = document.querySelectorAll('#counterpartyCollectiblesList .wallet-item');
       return ironCard && !ironCard.hidden && compassCard && compassCard.hidden
         && cpCards.length > 0 && Array.from(cpCards).every((c) => c.hidden);
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: "iron" keeps the self iron balance visible, hides the self item, and hides the counterparty gold balance');
 
     await frame.locator('#collectiblesSearchInput').fill('gold');
@@ -124,7 +124,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const cpCards = document.querySelectorAll('#counterpartyCollectiblesList .wallet-item');
       return selfCards.length > 0 && Array.from(selfCards).every((c) => c.hidden)
         && cpCards.length > 0 && Array.from(cpCards).every((c) => !c.hidden);
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: "gold" flips it — everything in self hidden, counterparty gold visible');
 
     await frame.locator('#collectiblesSearchInput').fill('');
@@ -132,12 +132,12 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const selfCards = document.querySelectorAll('#selfCollectiblesList .wallet-item');
       const cpCards = document.querySelectorAll('#counterpartyCollectiblesList .wallet-item');
       return Array.from(selfCards).every((c) => !c.hidden) && Array.from(cpCards).every((c) => !c.hidden);
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: clearing the search restores every card in both lists');
 
     console.log('STEP 4: the search text survives a list refresh (minting more iron re-renders the list; the filter re-applies)');
     await frame.locator('#collectiblesSearchInput').fill('gold');
-    await frame.waitForFunction(() => Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item')).every((c) => c.hidden), { timeout: 5000 });
+    await frame.waitForFunction(() => Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item')).every((c) => c.hidden), null, { timeout: 5000 });
     // Task #211 removed the dev-only mine buttons — mint the same way its
     // handler used to (AtlasWallet.mintAsset then refreshInventoryDisplay()),
     // which is exactly the "list re-renders" trigger this step is testing.
@@ -150,7 +150,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     // STEP 4 left the search set to "gold", which hides the self cards this
     // step needs to click on — clear it back to an unfiltered view.
     await frame.locator('#collectiblesSearchInput').fill('');
-    await frame.waitForFunction(() => Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item')).every((c) => !c.hidden), { timeout: 5000 });
+    await frame.waitForFunction(() => Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item')).every((c) => !c.hidden), null, { timeout: 5000 });
     const itemCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Bronze Compass' });
     const itemPropsLink = itemCard.locator('.properties-link');
     const itemPropsDetail = itemCard.locator('.properties-detail');
@@ -172,14 +172,14 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
         && detail.textContent.includes('com.example.condition: well-worn')
         && detail.textContent.includes('tradeScope: bound')
         && detail.textContent.includes('fungible: false');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: clicking the item\'s Properties link reveals its custom properties plus the merged protocol-level fields');
     await itemPropsLink.click();
     await frame.waitForFunction(() => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
       const card = cards.find((c) => c.textContent.includes('Bronze Compass'));
       return card && card.querySelector('.properties-detail').hidden === true;
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: clicking it again collapses the detail panel');
 
     const resourceCard = frame.locator('#selfCollectiblesList .wallet-item', { hasText: 'Iron (Fe)' });
@@ -192,7 +192,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const card = cards.find((c) => c.textContent.includes('Iron (Fe)'));
       const detail = card && card.querySelector('.properties-detail');
       return detail && !detail.hidden && detail.textContent.includes('atlas.purity: 99.9%');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: iron balance carries its class-level atlas.purity property and the same toggle link works on fungible cards, in the same list as items');
 
     console.log('STEP 5b: searching by a fungible balance\'s property value also works, same as it already does for items — same search box, same list');
@@ -201,7 +201,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
       const ironCard = cards.find((c) => c.textContent.includes('Iron (Fe)'));
       return ironCard && !ironCard.hidden;
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     await frame.locator('#collectiblesSearchInput').fill('');
     console.log('PASS: searching "99.9%" (the iron balance\'s atlas.purity value) finds it');
 

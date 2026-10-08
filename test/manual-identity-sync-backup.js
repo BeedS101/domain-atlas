@@ -67,20 +67,20 @@ function assert(cond, message) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, null, { timeout: 10000 });
 
     const PASSWORD_A = 'identity-sync-test-password-a1';
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#chooseNewBtn').click();
-    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#newPasswordInput').fill(PASSWORD_A);
     await frame.locator('#newPasswordConfirmInput').fill(PASSWORD_A);
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     const step1 = await frame.evaluate(async () => {
       await AtlasWallet.addFriend('friend-public-key-xyz789', 'Identity Sync Friend');
@@ -133,9 +133,9 @@ function assert(cond, message) {
       await chrome.storage.session.clear();
     });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: fresh "device" state confirmed — routed back to onboarding');
 
     console.log('STEP 6: the onboarding screen itself offers the synced-identity restore box');
@@ -155,7 +155,7 @@ function assert(cond, message) {
     await frame.waitForFunction(() => {
       const text = document.getElementById('onboardingSyncedIdentityStatus').textContent;
       return text.length > 0 && text !== 'Decrypting…';
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     const wrongRestoreStatus = await frame.evaluate(() => document.getElementById('onboardingSyncedIdentityStatus').textContent);
     assert(wrongRestoreStatus === 'Incorrect password.', 'expected "Incorrect password." on the onboarding box, got: ' + wrongRestoreStatus);
     assert(await frame.evaluate(() => document.getElementById('onboardingChoiceScreen').classList.contains('active')), 'a failed restore should leave the onboarding screen active');
@@ -164,7 +164,7 @@ function assert(cond, message) {
     console.log('STEP 8: restoring through the real onboarding UI with the CORRECT password recovers identity A only — no wallet/friend data');
     await frame.locator('#onboardingSyncedIdentityPasswordInput').fill(PASSWORD_A);
     await frame.locator('#onboardingRestoreSyncedIdentityBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const restore = await frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       const friends = await AtlasWallet.getFriends();

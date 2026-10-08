@@ -82,12 +82,12 @@ async function enterLobby(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
   const portals = await projectPortals(frame);
   const toLobby = portals.find((p) => p.to === 'lobby');
   await frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
   await page.waitForTimeout(300);
   console.log('SETUP: ' + label + ' entered the Lobby');
   return { page, frame };

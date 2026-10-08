@@ -115,7 +115,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     console.log('STEP 2: viewer.html with no manifest query param (exactly what the side panel shows) boots into standalone mode');
     const page = await context.newPage();
     await page.goto('chrome-extension://' + extensionId + '/viewer.html', { waitUntil: 'load' });
-    await page.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 10000 });
     const placeLabelText = await page.locator('#placeLabel').innerText();
     if (!placeLabelText.includes('Wallet')) throw new Error('Expected placeLabel to say something Wallet-related in standalone mode, got: ' + placeLabelText);
     console.log('PASS: wallet panel open immediately, placeLabel reflects standalone mode, not stuck on "Loading space…"');
@@ -132,10 +132,10 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     await page.locator('#newPasswordInput').fill('toolbar-wallet-test-pw');
     await page.locator('#newPasswordConfirmInput').fill('toolbar-wallet-test-pw');
     await page.locator('#confirmCreateBtn').click();
-    await page.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await page.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await page.locator('#seedConfirmCheck').check();
     await page.locator('#seedConfirmBtn').click();
-    await page.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await page.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await page.evaluate(async (domain) => {
       await AtlasWallet.mintAsset('self', domain, 'atlas.element.iron', 20);
       await refreshInventoryDisplay();
@@ -168,7 +168,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-toolbar-wallet-
     await worldPage.locator('#domain-atlas-enter-btn').click();
     const worldFrameHandle = await worldPage.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const worldFrame = await worldFrameHandle.contentFrame();
-    await worldFrame.waitForFunction(() => !document.getElementById('placeLabel').textContent.includes('Loading'), { timeout: 10000 });
+    await worldFrame.waitForFunction(() => !document.getElementById('placeLabel').textContent.includes('Loading'), null, { timeout: 10000 });
     const worldTabId = await background.evaluate(async (domain) => {
       const tabs = await chrome.tabs.query({ url: 'http://' + domain + '/*' });
       return tabs[0] && tabs[0].id;

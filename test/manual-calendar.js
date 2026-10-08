@@ -247,7 +247,7 @@ async function deleteAllCalendarEvents(page, frame) {
     await frame.locator('#calendarEventsList button[data-action="delete-calendar-event"]').first().click();
     await page.waitForTimeout(200);
   }
-  await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 0, { timeout: 5000 });
+  await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 0, null, { timeout: 5000 });
 }
 
 (async () => {
@@ -266,19 +266,19 @@ async function deleteAllCalendarEvents(page, frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('calendar-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('calendar-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#socialTabBtn').click();
     await frame.locator('#calendarSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const emptyText = await frame.locator('#calendarEventsList').textContent();
     if (!emptyText.includes('No events yet')) throw new Error('Expected an empty-state note before any event exists, got: ' + emptyText);
     console.log('PASS: Calendar sub-tab opens with no events yet');
@@ -287,11 +287,11 @@ async function deleteAllCalendarEvents(page, frame) {
 
     console.log('STEP 1: add three events OUT OF chronological order — the list should still render soonest-first');
     await addEvent(frame, 'Third (latest)', new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000), 'Added first, happens last');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, null, { timeout: 5000 });
     await addEvent(frame, 'First (soonest)', new Date(now.getTime() + 1 * 24 * 60 * 60 * 1000), 'Added second, happens first');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, null, { timeout: 5000 });
     await addEvent(frame, 'Second (middle)', new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000), 'Added third, happens second');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 3, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 3, null, { timeout: 5000 });
     const titles = await eventTitlesInOrder(frame);
     if (JSON.stringify(titles) !== JSON.stringify(['First (soonest)', 'Second (middle)', 'Third (latest)'])) {
       throw new Error('Expected events sorted soonest-first regardless of add order, got: ' + JSON.stringify(titles));
@@ -300,13 +300,13 @@ async function deleteAllCalendarEvents(page, frame) {
 
     console.log('STEP 2: edit the middle event — push its date out past the third event, confirm it re-sorts to last');
     await frame.locator('#calendarEventsList .calendar-event', { hasText: 'Second (middle)' }).locator('button[data-action="edit-calendar-event"]').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', null, { timeout: 5000 });
     const titleValueWhileEditing = await frame.locator('#calendarEventTitleInput').inputValue();
     if (titleValueWhileEditing !== 'Second (middle)') throw new Error('Expected the edit form to pre-fill the existing title, got: ' + titleValueWhileEditing);
     await frame.locator('#calendarEventTitleInput').fill('Second, now last');
     await frame.locator('#calendarEventDateTimeInput').fill(toLocalInputValue(new Date(now.getTime() + 4 * 24 * 60 * 60 * 1000)));
     await frame.locator('#calendarSaveEventBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', null, { timeout: 5000 });
     const titlesAfterEdit = await eventTitlesInOrder(frame);
     if (JSON.stringify(titlesAfterEdit) !== JSON.stringify(['First (soonest)', 'Third (latest)', 'Second, now last'])) {
       throw new Error('Expected the edited event to re-sort to the end, got: ' + JSON.stringify(titlesAfterEdit));
@@ -316,7 +316,7 @@ async function deleteAllCalendarEvents(page, frame) {
     console.log('STEP 3: delete "Third (latest)" — exactly one event disappears, the other two remain');
     page.once('dialog', (d) => d.accept());
     await frame.locator('#calendarEventsList .calendar-event', { hasText: 'Third (latest)' }).locator('button[data-action="delete-calendar-event"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, null, { timeout: 5000 });
     const titlesAfterDelete = await eventTitlesInOrder(frame);
     if (JSON.stringify(titlesAfterDelete) !== JSON.stringify(['First (soonest)', 'Second, now last'])) {
       throw new Error('Expected exactly the two remaining events after delete, got: ' + JSON.stringify(titlesAfterDelete));
@@ -331,10 +331,10 @@ async function deleteAllCalendarEvents(page, frame) {
       await frame.locator('#calendarEventsList button[data-action="delete-calendar-event"]').first().click();
       await page.waitForTimeout(200);
     }
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 0, null, { timeout: 5000 });
 
     await addEvent(frame, 'Overdue meeting', new Date(now.getTime() - 60 * 60 * 1000), 'This already happened');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, null, { timeout: 5000 });
     const overdueIsMarked = await frame.evaluate(() => document.querySelector('#calendarEventsList .calendar-event').classList.contains('overdue'));
     if (!overdueIsMarked) throw new Error('Expected a past-dated event to carry the .overdue class');
     const overdueCardText = await frame.locator('#calendarEventsList .calendar-event').first().textContent();
@@ -342,11 +342,11 @@ async function deleteAllCalendarEvents(page, frame) {
     console.log('PASS: a past-dated event renders visually distinct (.overdue) with an explicit "overdue" label');
 
     await addEvent(frame, 'Due soon (in 2h)', new Date(now.getTime() + 2 * 60 * 60 * 1000), '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, null, { timeout: 5000 });
     await addEvent(frame, 'Far future (in 3 days)', new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000), '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 3, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 3, null, { timeout: 5000 });
 
-    await frame.waitForFunction(() => document.getElementById('calendarBadge').textContent === '2', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarBadge').textContent === '2', null, { timeout: 5000 });
     const calendarBadgeShown = await frame.evaluate(() => document.getElementById('calendarBadge').classList.contains('show'));
     if (!calendarBadgeShown) throw new Error('Expected the Calendar sub-tab badge to be visible with 2 due/overdue events');
     console.log('PASS: Calendar sub-tab badge shows 2 (overdue + due-within-24h), excluding the far-future event');
@@ -358,7 +358,7 @@ async function deleteAllCalendarEvents(page, frame) {
     console.log('STEP 4b: deleting the overdue event drops the badge to 1');
     page.once('dialog', (d) => d.accept());
     await frame.locator('#calendarEventsList .calendar-event', { hasText: 'Overdue meeting' }).locator('button[data-action="delete-calendar-event"]').click();
-    await frame.waitForFunction(() => document.getElementById('calendarBadge').textContent === '1', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarBadge').textContent === '1', null, { timeout: 5000 });
     console.log('PASS: badge count drops immediately after deleting the overdue event');
 
     console.log('STEP 5: "Add to calendar" from a mail card — real subscribe + /atlas/mail/send flow, same as manual-mail.js');
@@ -389,7 +389,7 @@ async function deleteAllCalendarEvents(page, frame) {
     await mailCard.locator('button[data-action="toggle-mail-menu"]').click();
     await mailCard.locator('button[data-action="add-mail-to-calendar"]').click();
 
-    await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: "Add to calendar" jumped straight to the Calendar sub-tab');
 
     // The sub-tab going active happens synchronously (showSocialSubtab),
@@ -429,13 +429,13 @@ async function deleteAllCalendarEvents(page, frame) {
       await frame.locator('#calendarEventsList button[data-action="delete-calendar-event"]').first().click();
       await page.waitForTimeout(200);
     }
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 0, null, { timeout: 5000 });
     // Leaving and reopening the sub-tab is the documented way the widget
     // snaps back to today (resetCalendarGridToToday) — matters here because
     // STEP 9 below will have stepped it away to other months.
     await frame.locator('#mailSubtabBtn').click();
     await frame.locator('#calendarSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), null, { timeout: 5000 });
 
     const realNow = new Date();
     const realTodayKey = toLocalDateKey(realNow);
@@ -467,7 +467,7 @@ async function deleteAllCalendarEvents(page, frame) {
     const blankDay = markerDay > 15 ? markerDay - 5 : markerDay + 5; // still inside the month, deliberately bare
     const blankKey = toLocalDateKey(new Date(realNow.getFullYear(), realNow.getMonth(), blankDay));
     await addEvent(frame, 'Marker test event', markerDate, '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, null, { timeout: 5000 });
     grid = await gridInfo(frame);
     const markerCell = grid.cells.find((c) => c.date === markerKey && !c.otherMonth);
     const blankCell = grid.cells.find((c) => c.date === blankKey && !c.otherMonth);
@@ -542,10 +542,10 @@ async function deleteAllCalendarEvents(page, frame) {
     // or touches events, and we're back on the real current month.
     const earlyDate = new Date(realNow.getFullYear(), realNow.getMonth(), markerDay, 3, 15); // before CALENDAR_DAY_VIEW_START_HOUR (6am)
     await addEvent(frame, 'Very early call', earlyDate, '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, null, { timeout: 5000 });
 
     await frame.locator('#calendarMonthGrid .calendar-grid-day[data-date="' + markerKey + '"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 2, null, { timeout: 5000 });
     let dayInfo = await dayViewerInfo(frame);
     if (dayInfo.hidden) throw new Error('Expected the day viewer to be visible after clicking a day');
     const expectedHeader = markerDate.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -577,28 +577,28 @@ async function deleteAllCalendarEvents(page, frame) {
 
     console.log('STEP 12: clicking an event inside the day viewer opens the SAME edit flow as the main list\'s "Edit" button, and Save/Cancel from there behave the same as they do from the main list');
     await frame.locator('#calendarMonthGrid .calendar-grid-day[data-date="' + markerKey + '"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 2, null, { timeout: 5000 });
     await frame.locator('#calendarDayViewer .calendar-day-event', { hasText: 'Marker test event' }).click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', null, { timeout: 5000 });
     const editTitleValue = await frame.locator('#calendarEventTitleInput').inputValue();
     if (editTitleValue !== 'Marker test event') throw new Error('Expected clicking the day-viewer chip to pre-fill the same title the main list\'s Edit button would, got: ' + editTitleValue);
     console.log('PASS: clicking the day-viewer chip opened the add/edit form in edit mode, pre-filled exactly like the main list\'s Edit button');
 
     console.log('STEP 12b: Cancel edit (reached via the day-viewer chip) behaves the same as it does from the main list, and clears/hides the day viewer (calendarSelectedDate back to null)');
     await frame.locator('#calendarCancelEditBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', null, { timeout: 5000 });
     dayInfo = await dayViewerInfo(frame);
     if (!dayInfo.hidden) throw new Error('Expected Cancel edit to hide the day viewer (resetCalendarForm clears calendarSelectedDate), stayed visible: ' + JSON.stringify(dayInfo));
     console.log('PASS: Cancel edit reset the form AND hid the day viewer, same as resetCalendarForm already does for the month grid\'s .selected highlight');
 
     console.log('STEP 12c: re-open via the day-viewer chip, this time actually Save changes — the rename lands in the main list, and the day viewer clears afterward same as a save from the main list already does');
     await frame.locator('#calendarMonthGrid .calendar-grid-day[data-date="' + markerKey + '"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 2, null, { timeout: 5000 });
     await frame.locator('#calendarDayViewer .calendar-day-event', { hasText: 'Marker test event' }).click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', null, { timeout: 5000 });
     await frame.locator('#calendarEventTitleInput').fill('Marker test event, renamed via day view');
     await frame.locator('#calendarSaveEventBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', null, { timeout: 5000 });
     const renamedTitles = await eventTitlesInOrder(frame);
     if (!renamedTitles.includes('Marker test event, renamed via day view')) throw new Error('Expected the rename made via the day-viewer edit flow to land in the main list, got: ' + JSON.stringify(renamedTitles));
     dayInfo = await dayViewerInfo(frame);
@@ -607,10 +607,10 @@ async function deleteAllCalendarEvents(page, frame) {
 
     console.log('STEP 13: the day viewer clears on a fresh sub-tab open, same as the month grid snapping back to today');
     await frame.locator('#calendarMonthGrid .calendar-grid-day[data-date="' + markerKey + '"]').click();
-    await frame.waitForFunction(() => !document.getElementById('calendarDayViewer').hidden, { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('calendarDayViewer').hidden, null, { timeout: 5000 });
     await frame.locator('#mailSubtabBtn').click();
     await frame.locator('#calendarSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSubscreen').classList.contains('active'), null, { timeout: 5000 });
     dayInfo = await dayViewerInfo(frame);
     if (!dayInfo.hidden) throw new Error('Expected a freshly (re)opened Calendar sub-tab to show no day view (nothing selected yet), stayed visible: ' + JSON.stringify(dayInfo));
     const noSelectionCells = (await gridInfo(frame)).cells.filter((c) => c.selected);
@@ -622,7 +622,7 @@ async function deleteAllCalendarEvents(page, frame) {
     const rangedStart = new Date(realNow.getFullYear(), realNow.getMonth(), realNow.getDate() + 1, 14, 0);
     const rangedEnd = new Date(realNow.getFullYear(), realNow.getMonth(), realNow.getDate() + 1, 15, 30);
     await addEventWithEnd(frame, 'Ranged meeting', rangedStart, rangedEnd, '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, null, { timeout: 5000 });
     let rangedInfo = await eventCardInfo(frame, 'Ranged meeting');
     if (!rangedInfo) throw new Error('Expected the ranged event to appear in the list');
     if (!rangedInfo.when.includes('–')) throw new Error('Expected a "start – end" range (en dash) on the list card, got: ' + rangedInfo.when);
@@ -635,7 +635,7 @@ async function deleteAllCalendarEvents(page, frame) {
     console.log('STEP 15: an event with only a start time still behaves exactly as before (backward compatibility)');
     const plainStart = new Date(realNow.getFullYear(), realNow.getMonth(), realNow.getDate() + 1, 10, 0);
     await addEventWithEnd(frame, 'Plain instant event', plainStart, null, '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, null, { timeout: 5000 });
     const plainInfo = await eventCardInfo(frame, 'Plain instant event');
     if (!plainInfo) throw new Error('Expected the end-less event to appear in the list');
     if (plainInfo.when.includes('–')) throw new Error('Expected NO range dash for an event with no end time, got: ' + plainInfo.when);
@@ -647,22 +647,22 @@ async function deleteAllCalendarEvents(page, frame) {
     // The end field itself must also round-trip to blank on edit — an
     // end-less event opened for editing shouldn't suddenly grow one.
     await frame.locator('#calendarEventsList .calendar-event', { hasText: 'Plain instant event' }).locator('button[data-action="edit-calendar-event"]').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', null, { timeout: 5000 });
     const endFieldOnEdit = await frame.locator('#calendarEventEndDateTimeInput').inputValue();
     if (endFieldOnEdit !== '') throw new Error('Expected the end field to stay blank when editing an event that never had one, got: ' + endFieldOnEdit);
     await frame.locator('#calendarCancelEditBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', null, { timeout: 5000 });
     console.log('PASS: an end-less event renders and edits identically to pre-feature behavior -> "' + plainInfo.when + '"');
 
     console.log('STEP 15b: editing the ranged event pre-fills BOTH fields, and the end field round-trips through Cancel edit without altering the event');
     await frame.locator('#calendarEventsList .calendar-event', { hasText: 'Ranged meeting' }).locator('button[data-action="edit-calendar-event"]').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Save changes', null, { timeout: 5000 });
     const startFieldOnEdit = await frame.locator('#calendarEventDateTimeInput').inputValue();
     const endFieldOnRangedEdit = await frame.locator('#calendarEventEndDateTimeInput').inputValue();
     if (startFieldOnEdit !== toLocalInputValue(rangedStart)) throw new Error('Expected the start field pre-filled with the existing start, got: ' + startFieldOnEdit);
     if (endFieldOnRangedEdit !== toLocalInputValue(rangedEnd)) throw new Error('Expected the end field pre-filled with the existing end, got: ' + endFieldOnRangedEdit);
     await frame.locator('#calendarCancelEditBtn').click();
-    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarSaveEventBtn').textContent === 'Add event', null, { timeout: 5000 });
     console.log('PASS: both start and end fields pre-fill correctly on edit -> ' + startFieldOnEdit + ' / ' + endFieldOnRangedEdit);
 
     console.log('STEP 16: end-before-start is rejected inline, with a clear message, and no event is saved');
@@ -695,20 +695,20 @@ async function deleteAllCalendarEvents(page, frame) {
     // A: ongoing right now (started 2h ago, ends in 2h) — NOT overdue (it
     //    hasn't finished), but IS due soon (its end is within 24h).
     await addEventWithEnd(frame, 'Ongoing now', new Date(now.getTime() - 2 * 60 * 60 * 1000), new Date(now.getTime() + 2 * 60 * 60 * 1000), '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, null, { timeout: 5000 });
     // B: fully in the past (started 3h ago, ended 1h ago) — overdue.
     await addEventWithEnd(frame, 'Finished 1h ago', new Date(now.getTime() - 3 * 60 * 60 * 1000), new Date(now.getTime() - 60 * 60 * 1000), '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 2, null, { timeout: 5000 });
     // C: plain instant, starts in 2h, no end — due soon (unchanged
     //    end-less behavior, a regression check).
     await addEventWithEnd(frame, 'Starts soon, no end', new Date(now.getTime() + 2 * 60 * 60 * 1000), null, '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 3, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 3, null, { timeout: 5000 });
     // D: the key differentiator — starts in 2h (which WOULD count as "due
     //    soon" under the old start-only logic) but doesn't end until 30h
     //    from now, past the 24h due-soon window. With overdue/due-soon now
     //    keyed off the end time when one exists, this should NOT count.
     await addEventWithEnd(frame, 'Long event, ends late', new Date(now.getTime() + 2 * 60 * 60 * 1000), new Date(now.getTime() + 30 * 60 * 60 * 1000), '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 4, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 4, null, { timeout: 5000 });
 
     const ongoingInfo = await eventCardInfo(frame, 'Ongoing now');
     const finishedInfo = await eventCardInfo(frame, 'Finished 1h ago');
@@ -720,7 +720,7 @@ async function deleteAllCalendarEvents(page, frame) {
     if (longEventInfo.overdue) throw new Error('Expected a not-yet-started long event to NOT be overdue');
     console.log('PASS: overdue correctly reflects the END time when present (ongoing = not overdue, finished = overdue)');
 
-    await frame.waitForFunction(() => document.getElementById('calendarBadge').textContent === '3', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('calendarBadge').textContent === '3', null, { timeout: 5000 });
     console.log('PASS: due-soon badge shows 3 (ongoing + finished + starts-soon-no-end), correctly EXCLUDING the long event whose end is 30h out even though it starts in 2h');
 
     console.log('STEP 18: a multi-day event\'s month-grid dot appears on EVERY day it spans, not just its start day');
@@ -733,7 +733,7 @@ async function deleteAllCalendarEvents(page, frame) {
     const spanStart = new Date(realNow.getFullYear(), realNow.getMonth(), spanStartDay, 9, 0);
     const spanEnd = new Date(realNow.getFullYear(), realNow.getMonth(), spanEndDay, 10, 0);
     await addEventWithEnd(frame, 'Multi-day trip', spanStart, spanEnd, '');
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarEventsList .calendar-event').length === 1, null, { timeout: 5000 });
     grid = await gridInfo(frame);
     const spanKeys = [spanStartDay, spanStartDay + 1, spanEndDay].map((d) => toLocalDateKey(new Date(realNow.getFullYear(), realNow.getMonth(), d)));
     const beforeKey = toLocalDateKey(new Date(realNow.getFullYear(), realNow.getMonth(), spanStartDay - 1));
@@ -754,7 +754,7 @@ async function deleteAllCalendarEvents(page, frame) {
     const endDayKey = spanKeys[2];
 
     await frame.locator('#calendarMonthGrid .calendar-grid-day[data-date="' + startDayKey + '"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 1, null, { timeout: 5000 });
     let spanDayInfo = await dayViewerInfo(frame);
     let chip = spanDayInfo.chips[0];
     if (chip.zone !== 'hour' || chip.hourLabel !== '9 AM') throw new Error('Expected the start day to place the trip at its 9 AM start hour, got: ' + JSON.stringify(chip));
@@ -763,7 +763,7 @@ async function deleteAllCalendarEvents(page, frame) {
     console.log('PASS: start day (' + startDayKey + ') shows -> "' + chip.text + '" at the 9 AM row');
 
     await frame.locator('#calendarMonthGrid .calendar-grid-day[data-date="' + throughDayKey + '"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 1, null, { timeout: 5000 });
     spanDayInfo = await dayViewerInfo(frame);
     chip = spanDayInfo.chips[0];
     if (chip.zone !== 'all-day') throw new Error('Expected the middle (through) day to place the trip in the "All day" bucket, not an hour row, got: ' + JSON.stringify(chip));
@@ -771,7 +771,7 @@ async function deleteAllCalendarEvents(page, frame) {
     console.log('PASS: the day strictly between start/end (' + throughDayKey + ') shows -> "' + chip.text + '" in the "All day" bucket, not tied to any one hour');
 
     await frame.locator('#calendarMonthGrid .calendar-grid-day[data-date="' + endDayKey + '"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#calendarDayViewer .calendar-day-event').length === 1, null, { timeout: 5000 });
     spanDayInfo = await dayViewerInfo(frame);
     chip = spanDayInfo.chips[0];
     if (chip.zone !== 'hour' || chip.hourLabel !== '10 AM') throw new Error('Expected the end day to place the trip at its 10 AM end hour, got: ' + JSON.stringify(chip));

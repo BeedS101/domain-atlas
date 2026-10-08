@@ -61,7 +61,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     console.log('STEP 0: content.js Enter-Space tooltip shows chat + accepts drops (no trading — plaza is not a trading-station)');
     await page.locator('#domain-atlas-enter-btn').hover();
-    await page.waitForFunction(() => document.getElementById('domain-atlas-info-tooltip').style.display === 'block', { timeout: 5000 });
+    await page.waitForFunction(() => document.getElementById('domain-atlas-info-tooltip').style.display === 'block', null, { timeout: 5000 });
     const enterTooltipText = await page.locator('#domain-atlas-info-tooltip').innerText();
     if (!enterTooltipText.includes('chat')) throw new Error('Expected "chat" in the Enter-Space tooltip (manifest.chat is true), got: ' + enterTooltipText);
     if (!enterTooltipText.includes('accepts drops: atlas.wearable, atlas.badge, atlas.wearable.ring')) throw new Error('Expected plaza\'s full accepted-classes list in the Enter-Space tooltip, got: ' + enterTooltipText);
@@ -71,24 +71,24 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('world-compat-test-pw');
     await frame.locator('#newPasswordConfirmInput').fill('world-compat-test-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 15000 });
     // Task #211 removed the dev-only "Mine 20 iron (self)" Settings button
     // — mints the same way its handler used to (AtlasWallet.mintAsset then
     // the same refreshInventoryDisplay() call).
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item, #selfCollectiblesList .resource-group-header').length >= 2, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item, #selfCollectiblesList .resource-group-header').length >= 2, null, { timeout: 15000 });
     console.log('PASS: wallet holds both a Bronze Compass and mined iron');
 
     console.log('STEP 1: dataset.compatible is correct on both cards before any filtering');
@@ -109,7 +109,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const compass = cards.find((c) => c.querySelector('.name').textContent.includes('Bronze Compass'));
       const iron = cards.find((c) => c.querySelector('.name').textContent.includes('Iron'));
       return compass && !compass.hidden && iron && iron.hidden;
-    }, { timeout: 3000 });
+    }, null, { timeout: 3000 });
     console.log('PASS: incompatible iron hidden, compatible compass still shown');
 
     console.log('STEP 3: combining the checkbox with a search that matches only the (now-hidden) iron shows "no compatible" empty state');
@@ -118,7 +118,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       const note = document.querySelector('#selfCollectiblesList .filter-empty-note');
       const compass = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item')).find((c) => c.querySelector('.name').textContent.includes('Bronze Compass'));
       return !!note && compass && compass.hidden;
-    }, { timeout: 3000 });
+    }, null, { timeout: 3000 });
     console.log('PASS: search + compatibility filter combine correctly (AND, not OR)');
     await frame.locator('#collectiblesSearchInput').fill('');
 
@@ -127,7 +127,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.waitForFunction(() => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
       return cards.every((c) => !c.hidden);
-    }, { timeout: 3000 });
+    }, null, { timeout: 3000 });
     console.log('PASS: unchecking restores the full list');
 
     console.log('STEP 5: portal tooltip on a same-domain world portal (Museum) shows chat but NOT accepts-drops (itemDropsAllowed is false there)');
@@ -142,7 +142,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       check();
     }));
     await frame.locator('#scene').hover({ position: { x: museumHb.sx, y: museumHb.sy } });
-    await frame.waitForFunction(() => document.getElementById('portalHoverTooltip').style.display === 'block', { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('portalHoverTooltip').style.display === 'block', null, { timeout: 3000 });
     const museumTooltip = await frame.locator('#portalHoverTooltip').innerText();
     if (!museumTooltip.includes('chat')) throw new Error('Expected "chat" in the Museum portal tooltip (domain-wide manifest.chat), got: ' + museumTooltip);
     if (museumTooltip.includes('accepts drops')) throw new Error('Museum has itemDropsAllowed:false — should not show accepts drops, got: ' + museumTooltip);
@@ -159,7 +159,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     }));
     await frame.locator('#scene').hover({ position: { x: 0, y: 0 } }); // move off first so the marker-equality re-hover check re-fires
     await frame.locator('#scene').hover({ position: { x: marketHb.sx, y: marketHb.sy } });
-    await frame.waitForFunction(() => document.getElementById('portalHoverTooltip').innerText.includes('trading'), { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('portalHoverTooltip').innerText.includes('trading'), null, { timeout: 3000 });
     console.log('PASS: Trading Post portal tooltip shows "trading"');
 
     console.log('STEP 7: cross-domain portal tooltip (Neighbor Workshop) resolves the fetched manifest\'s own chat flag + accepted classes');
@@ -176,7 +176,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.waitForFunction(() => {
       const text = document.getElementById('portalHoverTooltip').innerText;
       return text.includes('chat') && text.includes('accepts drops: atlas.wearable, atlas.badge');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: cross-domain portal tooltip correctly resolved localhost:8002\'s own manifest.chat + acceptedItemClasses');
 
     console.log('\nALL CHECKS PASSED — #151 compatibility checkbox + chat/trading/accepted-classes tooltip surfacing all working live.');

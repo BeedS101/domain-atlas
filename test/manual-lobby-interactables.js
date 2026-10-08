@@ -78,19 +78,19 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
     frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('lobby-interactables-password');
     await frame.locator('#newPasswordConfirmInput').fill('lobby-interactables-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     const lobbyHb = await frame.evaluate(() => new Promise((resolve) => {
       const check = () => {
@@ -103,8 +103,8 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
       check();
     }));
     await frame.locator('#scene').click({ position: { x: lobbyHb.sx, y: lobbyHb.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
-    await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 10000 });
     await frame.evaluate(() => window.__atlasActive3D.ready);
     console.log('PASS: entered the 3D lobby with a fresh wallet');
 
@@ -117,7 +117,7 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
 
     console.log('STEP 2: walking (teleporting, for a deterministic test) up to crate 1 shows the prompt');
     await teleport(frame, CRATE_1.x, CRATE_1.z);
-    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', null, { timeout: 5000 });
     const hintText = await frame.locator('#scene3dInteractHint').textContent();
     if (hintText !== 'E — Open the crate') throw new Error('Expected the on-screen hint to read "E — Open the crate", got: ' + JSON.stringify(hintText));
     const hintActive = await frame.evaluate(() => document.getElementById('scene3dInteractHint').classList.contains('active'));
@@ -138,8 +138,8 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
     console.log('PASS: crate 1 minted a genuine ' + CRATE_1.name + ' credential into the wallet');
 
     console.log('STEP 4: the crate is now fully out of reach — task #227 filters already-owned oncePerUser markers out of gltf-mini.js\'s own proximity check entirely (both the E-target and the Previewer\'s nearby list — see isMarkerAlreadyOwned in viewer.js/enterWorld() and getNearbyInteractMarkers() in gltf-mini.js), a deliberate change from the old "press E again, get an \'Already collected\' rejection message" behavior: it\'s what makes "press E multiple times to collect a multi-item list one at a time" (see manual-previewer-3d.js) work at all — an owned item has to drop out of E-targeting so the NEXT nearest one becomes the target, with no extra bookkeeping. The practical result: no on-screen "E — Open the crate" hint at all for an already-opened crate, and pressing E while standing right on top of it is a complete no-op (still standing at crate 1\'s own position from step 2/3 above, no need to move).');
-    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === null, { timeout: 5000 });
-    await frame.waitForFunction(() => !document.getElementById('scene3dInteractHint').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === null, null, { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('scene3dInteractHint').classList.contains('active'), null, { timeout: 5000 });
     const statusBeforeReopen = await frame.locator('#status').textContent();
     await pressE(frame);
     await page.waitForTimeout(500); // give a wrongly-still-reachable crate time to produce a (now unwanted) status change
@@ -151,13 +151,13 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
 
     console.log('STEP 5: walking away from crate 1 hides the prompt again');
     await teleport(frame, FAR_AWAY.x, FAR_AWAY.z);
-    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === null, { timeout: 5000 });
-    await frame.waitForFunction(() => !document.getElementById('scene3dInteractHint').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === null, null, { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('scene3dInteractHint').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: prompt/hint both clear once out of range');
 
     console.log('STEP 6: crate 2 is a fully independent interactable — different class, own oncePerUser state');
     await teleport(frame, CRATE_2.x, CRATE_2.z);
-    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', null, { timeout: 5000 });
     // Both crates share the exact same label ("Open the crate"), so their
     // "Collected ..." status text is byte-identical — and since task #227's
     // step 4 above no longer produces its own distinct "Already collected"
@@ -173,7 +173,7 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
         });
       });
     }, CRATE_2.class, { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 5000 });
     const wallet = await frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       return AtlasWallet.getWallet(identity.publicKey);

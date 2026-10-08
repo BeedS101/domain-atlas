@@ -78,7 +78,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-wallet-resilien
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     console.log('SETUP: overlay opened at Example Plaza');
 
     console.log('STEP 1: create an identity and request an item; it should appear in Collectibles');
@@ -87,14 +87,14 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-wallet-resilien
     await frame.locator('#newPasswordInput').fill('resilience-test-pw');
     await frame.locator('#newPasswordConfirmInput').fill('resilience-test-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     await frame.locator('#requestItemBtn').click();
     await frame.waitForFunction(
-      () => document.querySelector('#selfCollectiblesList')?.textContent.includes('Bronze Compass'),
+      () => document.querySelector('#selfCollectiblesList')?.textContent.includes('Bronze Compass'), null,
       { timeout: 5000 }
     );
     console.log('PASS: Bronze Compass shows up in Collectibles normally');

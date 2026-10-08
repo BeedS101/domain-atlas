@@ -47,57 +47,57 @@ async function clickCardMenuAction(actionLocator) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('asset-management-test-pw');
     await frame.locator('#newPasswordConfirmInput').fill('asset-management-test-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 15000 });
     console.log('PASS: identity + one item ready');
 
     console.log('STEP 1: settings screen holds the identity switch, lock, and backup controls, reachable from the main wallet screen');
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     const hasSwitchBtn = await frame.locator('#switchIdentityModeBtn').count();
     const hasLockBtn = await frame.locator('#lockWalletBtn').count();
     const hasExportBtn = await frame.locator('#exportIdentityBtn').count();
     if (!hasSwitchBtn || !hasLockBtn || !hasExportBtn) throw new Error('Settings screen is missing expected controls');
     console.log('PASS: identity switch, lock, and backup all live under Settings');
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: back from Settings returns to the main wallet screen');
 
     console.log('STEP 2: hiding the item — no confirm dialog (reversible), disappears from the main view but shows up in Settings');
     await clickCardMenuAction(frame.locator('#selfCollectiblesList button[data-action="hide"]'));
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, null, { timeout: 5000 });
     console.log('PASS: item removed from the main wallet view after hiding');
 
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     // Settings categories are collapsed by default — open "Hidden assets" before checking its contents.
     await frame.locator('.settings-category[data-category="hidden-assets"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="hidden-assets"]').classList.contains('open'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="hidden-assets"]').classList.contains('open'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 1, null, { timeout: 5000 });
     console.log('PASS: hidden item is listed under Settings -> Hidden assets');
 
     await frame.locator('#hiddenAssetsList button[data-action="unhide"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 0, null, { timeout: 5000 });
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, null, { timeout: 5000 });
     const unhiddenVerdict = await frame.locator('#selfCollectiblesList .wallet-item .verdict').textContent();
     if (!unhiddenVerdict.includes('✓')) throw new Error('Unhidden item did not still verify: ' + unhiddenVerdict);
     console.log('PASS: unhiding brought the item back to the main view, still verifying fine');
 
     console.log('STEP 2b: hiding it again, so STEP 3 starts from the same empty-list baseline as before');
     await clickCardMenuAction(frame.locator('#selfCollectiblesList button[data-action="hide"]'));
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, null, { timeout: 5000 });
 
     console.log('STEP 3: minting iron twice — should auto-consolidate into ONE balance, no manual click needed');
     // Task #211 removed the dev-only "Mine 20 iron (self)" Settings button
@@ -106,9 +106,9 @@ async function clickCardMenuAction(actionLocator) {
     // the same refreshInventoryDisplay() call, awaited here in the test
     // instead of inferred from a button's disabled state.
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 1, null, { timeout: 15000 });
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, null, { timeout: 15000 });
     const mergedName = await frame.locator('#selfCollectiblesList .wallet-item .name').textContent();
     if (!mergedName.includes('Iron (Fe) ×40 g')) throw new Error('Expected a single 40-iron balance after auto-consolidating, got: ' + mergedName);
     const mergedMeta = await frame.locator('#selfCollectiblesList .wallet-item .meta').textContent();
@@ -124,16 +124,16 @@ async function clickCardMenuAction(actionLocator) {
     await frame.waitForFunction(() => {
       const name = document.querySelector('#selfCollectiblesList .wallet-item .name');
       return document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1 && name && name.textContent.includes('Iron (Fe) ×60 g');
-    }, { timeout: 15000 });
+    }, null, { timeout: 15000 });
     console.log('PASS: a third mint merged straight into the running total -> Iron (Fe) ×60 g');
 
     console.log('STEP 5: hiding the merged resource balance too — no confirm dialog (reversible), disappears from the main view but shows up in Settings, same as items in STEP 2');
     await clickCardMenuAction(frame.locator('#selfCollectiblesList button[data-action="hide"]'));
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, null, { timeout: 5000 });
     console.log('PASS: resource balance removed from the main wallet view after hiding');
 
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     // "Hidden assets" is a single unified accordion now — items and fungible
     // balances both land here (was two separate accordions pre-unification),
     // and it was already opened once in STEP 2, so its open/closed state
@@ -143,12 +143,12 @@ async function clickCardMenuAction(actionLocator) {
     if (!hiddenAssetsAlreadyOpen) {
       await frame.locator('.settings-category[data-category="hidden-assets"] .settings-category-toggle').click();
     }
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="hidden-assets"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="hidden-assets"]').classList.contains('open'), null, { timeout: 5000 });
     // Two entries here, not one: the Bronze Compass has stayed hidden ever
     // since STEP 2b re-hid it (it's never unhidden again after that), and
     // now the Iron (Fe) balance joins it — proving the unified list really
     // does hold both a non-fungible item and a fungible balance together.
-    await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 2, null, { timeout: 5000 });
     const hiddenListText = await frame.locator('#hiddenAssetsList').textContent();
     if (!hiddenListText.includes('Bronze Compass') || !hiddenListText.includes('Iron (Fe)')) {
       throw new Error('Expected both the hidden item and the hidden resource balance listed together: ' + hiddenListText);
@@ -157,13 +157,13 @@ async function clickCardMenuAction(actionLocator) {
 
     // Unhide only the Iron (Fe) card — the Bronze Compass card must stay put.
     await frame.locator('#hiddenAssetsList .info-card', { hasText: 'Iron (Fe)' }).locator('button[data-action="unhide"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#hiddenAssetsList .info-card').length === 1, null, { timeout: 5000 });
     const stillHiddenText = await frame.locator('#hiddenAssetsList').textContent();
     if (!stillHiddenText.includes('Bronze Compass')) throw new Error('Bronze Compass should still be hidden: ' + stillHiddenText);
     if (stillHiddenText.includes('Iron (Fe)')) throw new Error('Iron (Fe) should no longer be in the hidden list: ' + stillHiddenText);
     await frame.locator('#backFromSettingsBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, null, { timeout: 5000 });
     const stillOnlyResource = await frame.locator('#selfCollectiblesList').textContent();
     if (stillOnlyResource.includes('Bronze Compass')) throw new Error('Bronze Compass should stay hidden from the main view: ' + stillOnlyResource);
     const unhiddenResourceVerdict = await frame.locator('#selfCollectiblesList .wallet-item .verdict').textContent();

@@ -75,19 +75,19 @@ async function createIdentityAndEnterLobby(context, password, label) {
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
   frame.on('pageerror', (err) => console.log(label + ' FRAMEERROR:', String(err)));
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
   await frame.locator('#walletBtn').click();
   await frame.locator('#chooseNewBtn').click();
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
   await enterLobbyFromPlaza(frame);
   console.log('SETUP: ' + label + ' created an identity and entered the lobby');
@@ -106,8 +106,8 @@ async function enterLobbyFromPlaza(frame) {
     check();
   }));
   await frame.locator('#scene').click({ position: { x: lobbyHb.sx, y: lobbyHb.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
-  await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
+  await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 10000 });
   await frame.evaluate(() => window.__atlasActive3D.ready);
 }
 
@@ -118,7 +118,7 @@ async function enterLobbyFromPlaza(frame) {
 // wouldn't be.
 async function openCrate(frame, crate) {
   await teleport(frame, crate.x, crate.z);
-  await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', { timeout: 5000 });
+  await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', null, { timeout: 5000 });
   await pressE(frame);
   await frame.waitForTimeout(1000);
   await frame.waitForFunction(async (cls) => {
@@ -140,7 +140,7 @@ async function openCrate(frame, crate) {
 // runs inside one retried poll instead of a plain Playwright click chain.
 async function toggleFromWallet(frame, assetName, action, expectSubstring) {
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
   await frame.waitForFunction(({ name, action }) => {
     const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
     const c = cards.find((x) => x.textContent.includes(name));
@@ -160,7 +160,7 @@ async function toggleFromWallet(frame, assetName, action, expectSubstring) {
     return c && c.textContent.includes(substr);
   }, { name: assetName, substr: expectSubstring }, { timeout: 5000 });
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 }
 
 // Holds W for durationMs and returns the flat XZ distance covered — used
@@ -289,7 +289,7 @@ async function measureJumpPeak(page, frame) {
     console.log('STEP 8: a second visitor sees the first visitor\'s shoe visual scale, not just color, on the remote character');
     contextB = await chromium.launchPersistentContext(dirB, { headless: false, executablePath: '/opt/pw-browsers/chromium', args: LAUNCH_ARGS });
     const { frame: frameB } = await createIdentityAndEnterLobby(contextB, 'avatar-shoe-buffs-password-b', 'B');
-    await frameB.waitForFunction(() => window.__atlasActive3D.getRemotePlayerCount() >= 1, { timeout: 8000 });
+    await frameB.waitForFunction(() => window.__atlasActive3D.getRemotePlayerCount() >= 1, null, { timeout: 8000 });
     const idOfA = await frameB.evaluate(() => window.__atlasActive3D.getRemotePlayerIds()[0]);
     await frameB.waitForFunction(({ id, scale }) => {
       const rp = window.__atlasActive3D.getRemotePlayerRenderState(id);

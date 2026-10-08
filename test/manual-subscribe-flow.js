@@ -91,25 +91,25 @@ function postJson(port, urlPath, body) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('subscribe-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('subscribe-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: identity ready, no membership card');
 
     console.log('STEP 1: Mail tab shows a visible Subscribe section naming the current domain');
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.waitForFunction(() => {
       const section = document.getElementById('subscribeSection');
       return section && !section.hidden;
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     const subscribeLabel = await frame.locator('#subscribeBtn').textContent();
     if (!subscribeLabel.includes('localhost:8001')) throw new Error('Expected the Subscribe button to name the current domain: ' + subscribeLabel);
     console.log('PASS: Subscribe section visible ->', subscribeLabel);
@@ -119,7 +119,7 @@ function postJson(port, urlPath, body) {
     await frame.waitForFunction(() => {
       const section = document.getElementById('subscribeSection');
       return section && section.hidden;
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const membershipCount = await frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       const wallet = await AtlasWallet.getWallet(identity.publicKey);
@@ -131,7 +131,7 @@ function postJson(port, urlPath, body) {
     console.log('STEP 3: leaving and re-opening the Mail tab keeps the section hidden (state persists, not just a one-time UI flip)');
     await frame.locator('#walletTabBtn').click();
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const stillHidden = await frame.locator('#subscribeSection').isHidden();
     if (!stillHidden) throw new Error('Expected Subscribe section to stay hidden across tab navigation');
     console.log('PASS: Subscribe section stays hidden');
@@ -144,7 +144,7 @@ function postJson(port, urlPath, body) {
 
     console.log('STEP 4: /atlas/asset/issue auto-sends a welcome message on subscribe — Check now picks it up with no admin action needed');
     await frame.locator('#checkMailNowBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 1, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 1, null, { timeout: 10000 });
     const welcomeText = await frame.locator('#mailList .mail-card').first().textContent();
     if (!welcomeText.includes('Welcome to localhost:8001')) throw new Error('Expected an auto-sent welcome message: ' + welcomeText);
     console.log('PASS: welcome message arrived automatically ->', welcomeText.split('\n')[0]);
@@ -161,7 +161,7 @@ function postJson(port, urlPath, body) {
     const sent = await postJson(8001, '/atlas/mail/send', { payload: sendPayload, proof: sendProof });
     if (!sent.id) throw new Error('Expected /atlas/mail/send to return a signed message, got: ' + JSON.stringify(sent));
     await frame.locator('#checkMailNowBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, null, { timeout: 10000 });
     const listText = await frame.locator('#mailList').textContent();
     if (!listText.includes('Thanks for subscribing')) throw new Error('Expected the second message to render: ' + listText);
     console.log('PASS: both the welcome message and the follow-up message are present');

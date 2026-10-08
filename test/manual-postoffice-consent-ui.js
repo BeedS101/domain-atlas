@@ -52,7 +52,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     console.log('SETUP: create a real wallet identity');
     await frame.locator('#walletBtn').click();
@@ -60,10 +60,10 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.locator('#newPasswordInput').fill('consent-ui-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('consent-ui-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
     console.log('PASS: identity created');
 
@@ -92,35 +92,35 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     const portals = await projectPortals();
     const toNeighbor = portals.find((p) => p.kind === 'domain');
     await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), null, { timeout: 10000 });
 
     await frame.locator('#walletBtn').click();
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
-    await frame.waitForFunction(() => !document.getElementById('postOfficeJoinSection').hidden, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('postOfficeJoinSection').hidden, null, { timeout: 5000 });
     await frame.locator('#postOfficeJoinBtn').click();
-    await frame.waitForFunction(() => document.getElementById('postOfficeJoinSection').hidden, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeJoinSection').hidden, null, { timeout: 10000 });
     console.log('PASS: joined Domain B\'s Post Office');
 
     console.log('STEP 2: the "Who can mail you" domain picker offers Domain B too, not just "Send mail"');
     // "Who can mail you" / blocked senders now live under Mail's own
     // "Mail Settings" inner sub-tab, not the top-level Mail screen itself.
     await frame.locator('#mailSettingsSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSettingsSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSettingsSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.waitForFunction(() => {
       const opts = [...document.getElementById('postOfficeSettingsDomainInput').options].map((o) => o.value).filter(Boolean);
       return opts.includes('localhost:8002');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     await frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
-    await frame.waitForFunction(() => document.getElementById('postOfficeBlockedList').textContent.includes('No one blocked here'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeBlockedList').textContent.includes('No one blocked here'), null, { timeout: 5000 });
     console.log('PASS: Domain B selectable in the settings picker, starts with nobody blocked');
 
     console.log('STEP 3: block a (made-up) public key through the panel');
     const fakeKey = 'BFAKE-not-a-real-key-just-testing-the-ui-round-trip-0000000000';
     await frame.locator('#postOfficeBlockPublicKeyInput').fill(fakeKey);
     await frame.locator('#postOfficeBlockBtn').click();
-    await frame.waitForFunction(() => document.getElementById('postOfficeBlockStatus').textContent === 'Blocked.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeBlockStatus').textContent === 'Blocked.', null, { timeout: 5000 });
     const listHtml = await frame.locator('#postOfficeBlockedList').innerHTML();
     if (!listHtml.includes(fakeKey.slice(0, 24))) throw new Error('Expected the blocked list to show the newly-blocked key, got: ' + listHtml);
     if (!listHtml.includes('Unblock')) throw new Error('Expected an Unblock control on the blocked entry, got: ' + listHtml);
@@ -128,28 +128,28 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     console.log('STEP 4: unblock it again via the inline Unblock button');
     await frame.locator('#postOfficeBlockedList button[data-action="unblock"]').click();
-    await frame.waitForFunction(() => document.getElementById('postOfficeBlockedList').textContent.includes('No one blocked here'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeBlockedList').textContent.includes('No one blocked here'), null, { timeout: 5000 });
     console.log('PASS: unblocking clears it back to "No one blocked here"');
 
     console.log('STEP 5: save "Friends only" with zero local friends — reports 0 synced, round-trips through a real save+reload');
     await frame.locator('#postOfficeMailModeInput').selectOption('friendsOnly');
     await frame.locator('#postOfficeSaveMailModeBtn').click();
-    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeStatus').textContent.includes('0 friends synced'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeStatus').textContent.includes('0 friends synced'), null, { timeout: 5000 });
     console.log('PASS: friends-only saved with 0 friends (this wallet has none locally)');
 
     console.log('STEP 6: switching domain away and back reloads settings from the server, confirming friendsOnly actually persisted');
     await frame.locator('#postOfficeSettingsDomainInput').selectOption('');
     await frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
-    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeInput').value === 'friendsOnly', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeInput').value === 'friendsOnly', null, { timeout: 5000 });
     console.log('PASS: reloaded settings show friendsOnly — this came from the server, not local memory');
 
     console.log('STEP 7: switch back to open and confirm it reloads that way too');
     await frame.locator('#postOfficeMailModeInput').selectOption('open');
     await frame.locator('#postOfficeSaveMailModeBtn').click();
-    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeStatus').textContent.includes('open to anyone'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeStatus').textContent.includes('open to anyone'), null, { timeout: 5000 });
     await frame.locator('#postOfficeSettingsDomainInput').selectOption('');
     await frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
-    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeInput').value === 'open', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeMailModeInput').value === 'open', null, { timeout: 5000 });
     console.log('PASS: back to open, confirmed via reload');
 
     console.log('\nALL POST OFFICE CONSENT/BLOCK UI CHECKS PASSED');

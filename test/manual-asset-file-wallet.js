@@ -61,7 +61,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay');
   return { page, frame };
 }
@@ -72,10 +72,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click(); // closes the panel
   await frame.locator('#walletBtn').click(); // reopen it: the inventory lives inside
@@ -96,7 +96,7 @@ async function openCardMenu(card) {
 }
 
 async function waitForDialog(frame) {
-  await frame.waitForFunction(() => document.getElementById('bridgeOfferPreviewModal').classList.contains('active'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('bridgeOfferPreviewModal').classList.contains('active'), null, { timeout: 10000 });
   // The verification and status checks run before the dialog opens, so its
   // text is complete by now.
   return frame.locator('#bridgeOfferPreviewBox').innerText();
@@ -108,7 +108,7 @@ async function primaryVisible(frame) {
 
 async function closeDialog(frame) {
   await frame.locator('#bridgeOfferPreviewDismissBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('bridgeOfferPreviewModal').classList.contains('active'), { timeout: 3000 });
+  await frame.waitForFunction(() => !document.getElementById('bridgeOfferPreviewModal').classList.contains('active'), null, { timeout: 3000 });
 }
 
 async function importFile(frame, file) {
@@ -165,7 +165,7 @@ async function holdingsOf(frame) {
     await mint(alice.frame, RING);
     await mint(alice.frame, 'atlas.element.iron', 5);
     await mint(alice.frame, 'atlas.badge', 1);
-    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 3, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length >= 3, null, { timeout: 15000 });
     const saveButtons = await alice.frame.$$eval('#selfCollectiblesList .wallet-item', (cards) => cards.map((c) => ({ text: c.querySelector('.name').textContent, has: !!c.querySelector('button[data-action="save-file"]') })));
     assert(saveButtons.find((c) => /Signet Ring/.test(c.text) && c.has), 'the ring should offer Save to a file: ' + JSON.stringify(saveButtons));
     assert(saveButtons.filter((c) => !/Signet Ring/.test(c.text)).every((c) => !c.has), 'the balance and the bound badge must not: ' + JSON.stringify(saveButtons));
@@ -184,7 +184,7 @@ async function holdingsOf(frame) {
     assert(/\.atlas-asset\.json$/.test(download.suggestedFilename()), 'unexpected file name ' + download.suggestedFilename());
     const file1 = JSON.parse(fs.readFileSync(file1Path, 'utf8'));
     assert(file1.owner.publicKey !== aliceKey && file1.asset.class === RING && file1.issuer.domain === DOMAIN, 'the file should be a ring credential owned by a different key');
-    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2 && !document.getElementById('pendingExportsSection').hidden, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2 && !document.getElementById('pendingExportsSection').hidden, null, { timeout: 15000 });
     assert((await holdingsOf(alice.frame)).every((h) => h.cls !== RING), 'the ring should have left Alice\'s wallet');
     const pendingText = await alice.frame.locator('#pendingExportsList').innerText();
     assert(/Signet Ring/.test(pendingText), 'the pending list should show the ring: ' + pendingText);
@@ -198,7 +198,7 @@ async function holdingsOf(frame) {
     assert((await bob.frame.locator('#bridgeOfferPreviewClaimBtn').innerText()) === 'Claim into my wallet', 'unexpected primary button');
     assert((await holdingsOf(bob.frame)).length === 0, 'previewing must not change the wallet');
     await bob.frame.locator('#bridgeOfferPreviewClaimBtn').click();
-    await bob.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, { timeout: 15000 });
+    await bob.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, null, { timeout: 15000 });
     const bobHolds = await holdingsOf(bob.frame);
     assert(bobHolds.length === 1 && bobHolds[0].cls === RING && bobHolds[0].owner === bobKey, 'Bob should now own the ring: ' + JSON.stringify(bobHolds));
     console.log('PASS: preview first, then the ring is Bob\'s');
@@ -209,7 +209,7 @@ async function holdingsOf(frame) {
     assert(/already claimed this file/.test(againText) && !(await primaryVisible(bob.frame)), 'Bob should be told he already claimed it, with nothing to click: ' + againText);
     await closeDialog(bob.frame);
     await alice.frame.locator('#pendingExportsList button[data-action="pe-check"]').click();
-    await alice.frame.waitForFunction(() => document.getElementById('pendingExportsSection').hidden === true, { timeout: 10000 });
+    await alice.frame.waitForFunction(() => document.getElementById('pendingExportsSection').hidden === true, null, { timeout: 10000 });
     assert(/claimed/.test(await alice.frame.locator('#importAssetFileStatus').innerText()), 'Alice should be told it was claimed');
     await importFile(alice.frame, file1Path);
     const aliceTooLate = await waitForDialog(alice.frame);
@@ -247,13 +247,13 @@ async function holdingsOf(frame) {
     const [download2] = await Promise.all([alice.page.waitForEvent('download'), alice.frame.locator('#bridgeOfferPreviewClaimBtn').click()]);
     const file2Path = path.join(TMP, 'file2.atlas-asset.json');
     await download2.saveAs(file2Path);
-    await alice.frame.waitForFunction(() => !document.getElementById('pendingExportsSection').hidden, { timeout: 15000 });
+    await alice.frame.waitForFunction(() => !document.getElementById('pendingExportsSection').hidden, null, { timeout: 15000 });
     const [download3] = await Promise.all([alice.page.waitForEvent('download'), alice.frame.locator('#pendingExportsList button[data-action="pe-save"]').click()]);
     const file2Again = path.join(TMP, 'file2-again.atlas-asset.json');
     await download3.saveAs(file2Again);
     assert(fs.readFileSync(file2Path, 'utf8') === fs.readFileSync(file2Again, 'utf8'), 'saving again should give the same file');
     await alice.frame.locator('#pendingExportsList button[data-action="pe-claim-back"]').click();
-    await alice.frame.waitForFunction(() => document.getElementById('pendingExportsSection').hidden === true, { timeout: 10000 });
+    await alice.frame.waitForFunction(() => document.getElementById('pendingExportsSection').hidden === true, null, { timeout: 10000 });
     const aliceBack = await holdingsOf(alice.frame);
     assert(aliceBack.some((h) => h.cls === RING && h.owner === aliceKey), 'the ring should be back with Alice');
     await importFile(bob.frame, file2Path);

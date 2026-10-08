@@ -34,32 +34,32 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('wallet-import-test-pw');
     await frame.locator('#newPasswordConfirmInput').fill('wallet-import-test-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 15000 });
     // Task #211 removed the dev-only "Mine 20 iron (self)" Settings
     // button — mints the exact same way it used to (AtlasWallet.mintAsset
     // directly, then the same refreshInventoryDisplay() the button's own
     // handler called), just from the test instead of a button click.
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, null, { timeout: 15000 });
     console.log('PASS: identity + 1 item + 1 resource balance ready');
 
     console.log('STEP 1: exporting the wallet — Export/Import wallet now live under Settings');
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     // Settings categories are collapsed by default — open "Wallet backup" before using its export button.
     await frame.locator('.settings-category[data-category="wallet-backup"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="wallet-backup"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="wallet-backup"]').classList.contains('open'), null, { timeout: 5000 });
     const [download] = await Promise.all([
       page.waitForEvent('download', { timeout: 10000 }),
       frame.locator('#exportBtn').click()
@@ -74,13 +74,13 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     });
     await frame.locator('#walletBtn').click();
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, null, { timeout: 5000 });
     console.log('PASS: wallet appears empty (cache cleared, identity untouched)');
 
     console.log('STEP 3: importing the exported file back — should restore both, independently re-verified');
     await frame.locator('#importWalletFileInput').setInputFiles(exportPath);
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, null, { timeout: 10000 });
     const importStatus1 = await frame.locator('#importWalletStatus').textContent();
     if (!importStatus1.includes('2 asset(s) added')) {
       throw new Error('Unexpected import status: ' + importStatus1);
@@ -91,7 +91,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     console.log('STEP 4: importing the SAME file again — should be a no-op (duplicates skipped)');
     await frame.locator('#importWalletFileInput').setInputFiles(exportPath);
-    await frame.waitForFunction(() => document.getElementById('importWalletStatus').textContent.includes('already in this wallet'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('importWalletStatus').textContent.includes('already in this wallet'), null, { timeout: 5000 });
     const importStatus2 = await frame.locator('#importWalletStatus').textContent();
     const itemCountAfterReimport = await frame.locator('#selfCollectiblesList .wallet-item').count();
     if (itemCountAfterReimport !== 2) throw new Error('Re-importing duplicated an asset instead of skipping it, count=' + itemCountAfterReimport);
@@ -105,7 +105,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     const foreignPath = path.resolve(__dirname, 'atlas-wallet-export-foreign.json');
     fs.writeFileSync(foreignPath, JSON.stringify(foreignExport));
     await frame.locator('#importWalletFileInput').setInputFiles(foreignPath);
-    await frame.waitForFunction(() => document.getElementById('importWalletStatus').textContent.includes('different identity'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('importWalletStatus').textContent.includes('different identity'), null, { timeout: 5000 });
     const itemCountAfterForeign = await frame.locator('#selfCollectiblesList .wallet-item').count();
     if (itemCountAfterForeign !== 2) throw new Error('A foreign-owned credential was imported as this wallet\'s own, count=' + itemCountAfterForeign);
     console.log('PASS: foreign-owned credentials were skipped, not absorbed into this wallet ->', (await frame.locator('#importWalletStatus').textContent()).trim());

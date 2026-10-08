@@ -41,21 +41,21 @@ function shot(name) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: no identity on this device yet, routed straight to the new/import choice');
 
     console.log('STEP 2: password-mismatch validation on the create screen');
     await frame.locator('#chooseNewBtn').click();
-    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), null, { timeout: 5000 });
     const PASSWORD = 'correct-horse-battery-staple-1';
     await frame.locator('#newPasswordInput').fill(PASSWORD);
     await frame.locator('#newPasswordConfirmInput').fill('a-different-password-entirely');
     await frame.locator('#confirmCreateBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('createScreenStatus').textContent === 'Passwords do not match.',
+      () => document.getElementById('createScreenStatus').textContent === 'Passwords do not match.', null,
       { timeout: 5000 }
     );
     if (await frame.locator('#createScreen').getAttribute('class').then((c) => !c.includes('active'))) {
@@ -66,34 +66,34 @@ function shot(name) {
     console.log('STEP 3: creating the identity for real and capturing the one-time 16-word seed phrase');
     await frame.locator('#newPasswordConfirmInput').fill(PASSWORD);
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     const seedPhrase = (await frame.locator('#seedPhraseText').textContent()).trim();
     if (seedPhrase.split(/\s+/).length !== 16) throw new Error('Expected a 16-word seed phrase, got: ' + seedPhrase);
     await page.screenshot({ path: shot('idb-01-seed-revealed.png') });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const originalIdentityLabel = await frame.locator('#walletIdentity').textContent();
     if (!originalIdentityLabel.startsWith('Identity:')) throw new Error('Identity was not created: ' + originalIdentityLabel);
     console.log('PASS: identity created, 16-word seed phrase captured ->', originalIdentityLabel);
 
     console.log('STEP 4: locking the wallet, then reopening — should route to the unlock screen, not onboarding');
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     // Settings categories are collapsed by default — open "Identity method" before using its lock button.
     await frame.locator('.settings-category[data-category="identity-method"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity-method"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity-method"]').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#lockWalletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: identity exists on this device but is locked -> unlock screen (not onboarding)');
 
     console.log('STEP 5: unlocking with a WRONG password — must fail generically, must not unlock');
     await frame.locator('#unlockPasswordInput').fill('definitely-the-wrong-password');
     await frame.locator('#unlockBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('unlockScreenStatus').textContent === 'Incorrect password.',
+      () => document.getElementById('unlockScreenStatus').textContent === 'Incorrect password.', null,
       { timeout: 10000 }
     );
     if (await frame.locator('#unlockScreen').getAttribute('class').then((c) => !c.includes('active'))) {
@@ -104,22 +104,22 @@ function shot(name) {
     console.log('STEP 6: unlocking with the CORRECT password');
     await frame.locator('#unlockPasswordInput').fill(PASSWORD);
     await frame.locator('#unlockBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
     const unlockedLabel = await frame.locator('#walletIdentity').textContent();
     if (unlockedLabel !== originalIdentityLabel) throw new Error('Unlocked identity does not match the original: ' + unlockedLabel + ' vs ' + originalIdentityLabel);
     console.log('PASS: unlocked with the correct password, same identity ->', unlockedLabel);
 
     console.log('STEP 7: export with the correct password but a malformed (too-short) seed phrase — distinct validation message');
     await frame.locator('#settingsTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     // Settings categories are collapsed by default — open "Identity backup" before using its export fields.
     await frame.locator('.settings-category[data-category="identity-backup"] .settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity-backup"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity-backup"]').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#exportPasswordInput').fill(PASSWORD);
     await frame.locator('#exportSeedInput').fill('only two words');
     await frame.locator('#exportIdentityBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('exportStatus').textContent === 'Export failed: Enter the full seed phrase you were shown when you created this identity.',
+      () => document.getElementById('exportStatus').textContent === 'Export failed: Enter the full seed phrase you were shown when you created this identity.', null,
       { timeout: 10000 }
     );
     console.log('PASS: malformed seed phrase rejected with its own distinct message (not the generic import one)');
@@ -152,22 +152,22 @@ function shot(name) {
       await chrome.storage.session.remove('atlasUnlockedIdentity');
     });
     await frame.locator('#walletBtn').click(); // close
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click(); // reopen -> re-route
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: with local storage cleared, this "device" is routed to onboarding again, not unlock');
     await page.screenshot({ path: shot('idb-02-fresh-device.png') });
 
     console.log('STEP 10: import with a WRONG password (correct seed phrase) — must fail generically, must not restore anything');
     await frame.locator('#chooseImportBtn').click();
-    await frame.waitForFunction(() => document.getElementById('importScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('importScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#onboardImportFileInput').setInputFiles(exportPath);
-    await frame.waitForFunction(() => document.getElementById('importScreenStatus').textContent.includes('loaded'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('importScreenStatus').textContent.includes('loaded'), null, { timeout: 5000 });
     await frame.locator('#onboardImportPasswordInput').fill('definitely-the-wrong-password');
     await frame.locator('#onboardImportSeedInput').fill(seedPhrase);
     await frame.locator('#confirmImportBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('importScreenStatus').textContent === 'Incorrect password or seed phrase.',
+      () => document.getElementById('importScreenStatus').textContent === 'Incorrect password or seed phrase.', null,
       { timeout: 10000 }
     );
     if (await frame.locator('#importScreen').getAttribute('class').then((c) => !c.includes('active'))) {
@@ -180,7 +180,7 @@ function shot(name) {
     await frame.locator('#onboardImportSeedInput').fill('wrong seed phrase entirely not the real one at all here whatsoever nope');
     await frame.locator('#confirmImportBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('importScreenStatus').textContent === 'Incorrect password or seed phrase.',
+      () => document.getElementById('importScreenStatus').textContent === 'Incorrect password or seed phrase.', null,
       { timeout: 10000 }
     );
     if (await frame.locator('#importScreen').getAttribute('class').then((c) => !c.includes('active'))) {
@@ -193,7 +193,7 @@ function shot(name) {
     await frame.locator('#onboardImportPasswordInput').fill(PASSWORD);
     await frame.locator('#onboardImportSeedInput').fill(seedPhrase);
     await frame.locator('#confirmImportBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
     const restoredLabel = await frame.locator('#walletIdentity').textContent();
     if (restoredLabel !== originalIdentityLabel) throw new Error('Restored public key does not match the original: ' + restoredLabel + ' vs ' + originalIdentityLabel);
     console.log('PASS: identity restored on this "device" — public key matches the original exactly ->', restoredLabel);
@@ -207,7 +207,7 @@ function shot(name) {
     if (!identityCategoryOpen) await frame.locator('.settings-category[data-category="identity"] .settings-category-toggle').click();
     await frame.locator('#presentBtn').click();
     await frame.waitForFunction(
-      () => document.getElementById('presentBtn').textContent.includes('verified'),
+      () => document.getElementById('presentBtn').textContent.includes('verified'), null,
       { timeout: 10000 }
     );
     console.log('PASS: restored identity produced a signature that verified against its own public key');

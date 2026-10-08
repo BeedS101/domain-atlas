@@ -78,7 +78,7 @@ function readPreviewer(frame) {
 
 async function subscribeSectionHidden(frame) {
   await frame.locator('#socialTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
   return frame.locator('#subscribeSection').isHidden();
 }
 
@@ -88,10 +88,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 }
 
 async function enterPlaza(page) {
@@ -100,7 +100,7 @@ async function enterPlaza(page) {
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
   frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   return frame;
 }
 
@@ -127,7 +127,7 @@ async function enterPlaza(page) {
 
       console.log('STEP A1: before subscribing, hovering the desk previews the domain-templated card name, and the wallet\'s own Subscribe section is visible');
       await frame.locator('#scene').hover({ position: { x: desk.sx, y: desk.sy } });
-      await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
+      await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, null, { timeout: 3000 });
       const preview = await readPreviewer(frame);
       if (preview.name !== DOMAIN + ' Subscription Card') throw new Error('Expected "' + DOMAIN + ' Subscription Card", got: ' + preview.name);
       if (!preview.hasNote) throw new Error('Expected a "Not collected yet" note before subscribing');
@@ -138,7 +138,7 @@ async function enterPlaza(page) {
       console.log('STEP A2: clicking the desk mints a real atlas.membership credential');
       await frame.page().mouse.move(5, 5);
       await frame.locator('#scene').click({ position: { x: desk.sx, y: desk.sy } });
-      await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Subscription Card.', { timeout: 10000 });
+      await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Subscription Card.', null, { timeout: 10000 });
       const statusAfter = await frame.locator('#status').textContent();
       const membership = await frame.evaluate(async (domain) => {
         const identity = await AtlasWallet.getIdentity();
@@ -194,21 +194,21 @@ async function enterPlaza(page) {
 
       console.log('STEP B1: subscribing via the WALLET panel\'s own Subscribe button (Mail tab), not the desk');
       await frame.locator('#socialTabBtn').click();
-      await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+      await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
       await frame.waitForFunction(() => {
         const section = document.getElementById('subscribeSection');
         return section && !section.hidden;
-      }, { timeout: 5000 });
+      }, null, { timeout: 5000 });
       await frame.locator('#subscribeBtn').click();
       await frame.waitForFunction(() => {
         const section = document.getElementById('subscribeSection');
         return section && section.hidden;
-      }, { timeout: 10000 });
+      }, null, { timeout: 10000 });
       console.log('PASS: subscribed via the wallet button, its own section hid itself as usual');
 
       console.log('STEP B2: back in the plaza, hovering the desk now previews NOTHING — the Previewer ignores this already-owned oncePerUser class, with no world re-entry needed');
       await frame.locator('#walletTabBtn').click();
-      await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 }).catch(() => {});
+      await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 }).catch(() => {});
       const interactables = await projectInteractables(frame);
       const desk = interactables.find((m) => m.class === 'atlas.membership');
       if (!desk) throw new Error('Expected the desk interactable to still be present in the scene');

@@ -35,20 +35,20 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('inbox-default-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('inbox-default-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     console.log('STEP 1: first-ever click on Social lands on Mail -> Inbox');
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const inboxActiveOnFirstVisit = await frame.evaluate(() => ({
       subscreen: document.getElementById('mailBoxInboxSubscreen').classList.contains('active'),
       tabBtn: document.getElementById('mailBoxInboxSubtabBtn').classList.contains('active-subtab')
@@ -70,9 +70,9 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     // stray reference just never got updated; unrelated to today's change,
     // fixed in passing, same as manual-mail.js's own identical fix.
     await frame.locator('#contactsSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('contactsSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('contactsSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#mailSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const stillCompose = await frame.evaluate(() => ({
       compose: document.getElementById('mailBoxComposeSubscreen').classList.contains('active'),
       inbox: document.getElementById('mailBoxInboxSubscreen').classList.contains('active')

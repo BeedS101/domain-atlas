@@ -93,7 +93,7 @@ function readProgress(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     console.log('STEP 1: no world loaded yet — the progress overlay is not showing');
     const before = await readProgress(frame);
@@ -114,7 +114,7 @@ function readProgress(frame) {
       await new Promise((r) => setTimeout(r, 40));
     }
     await clickPromise;
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
 
     if (samples.length === 0) throw new Error('Never observed the progress overlay active while the Lobby was loading — expected several samples');
     const totals = new Set(samples.map((s) => s.total));

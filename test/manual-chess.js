@@ -48,10 +48,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#walletBtn').click(); // close the wallet back down
 }
 
@@ -108,7 +108,7 @@ async function winByBackRankMate(frame) {
   await injectPosition(frame, { a1: 'wq', e1: 'wk', f7: 'bp', g7: 'bp', h7: 'bp', h8: 'bk' }, { turn: 'w', playerColor: 'w' });
   await clickSquare(frame, 'a1');
   await clickSquare(frame, 'a8');
-  await frame.waitForFunction(() => chessGame.status === 'checkmate', { timeout: 2000 });
+  await frame.waitForFunction(() => chessGame.status === 'checkmate', null, { timeout: 2000 });
 }
 
 // Injects a fully-formed game state directly (bypassing AtlasChess.createGame
@@ -153,14 +153,14 @@ async function injectPosition(frame, boardMap, opts) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     console.log('STEP 1: the "Play Chess" table is a real interactable in the Plaza, and clicking it opens the modal with no identity prompt at all');
     const interactables = await projectInteractables(frame);
     const chessStall = interactables.find((m) => m.action === 'open-chess');
     if (!chessStall) throw new Error('Expected an "open-chess" interactable in the Plaza scene');
     await frame.locator('#scene').click({ position: { x: chessStall.sx, y: chessStall.sy } });
-    await frame.waitForFunction(() => document.getElementById('chessModal').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('chessModal').classList.contains('active'), null, { timeout: 5000 });
     const walletOpenedInstead = await frame.evaluate(() => document.getElementById('walletPanel').classList.contains('open'));
     if (walletOpenedInstead) throw new Error('Expected chess to skip the identity gate entirely — it never touches the wallet');
     const startSquareCount = await frame.locator('.chess-square').count();
@@ -173,8 +173,8 @@ async function injectPosition(frame, boardMap, opts) {
     const e4IsLegal = await frame.locator('.chess-square[data-square="' + sq('e4') + '"].legal-move').count();
     if (!e4IsLegal) throw new Error('Expected e4 to be highlighted as a legal destination for the e2 pawn');
     await clickSquare(frame, 'e4');
-    await frame.waitForFunction(() => chessGame.board[28] === 'wp' && chessGame.board[12] === null, { timeout: 2000 }); // e4=28, e2=12
-    await frame.waitForFunction(() => chessGame.turn === 'w' && !chessBotThinking, { timeout: 5000 });
+    await frame.waitForFunction(() => chessGame.board[28] === 'wp' && chessGame.board[12] === null, null, { timeout: 2000 }); // e4=28, e2=12
+    await frame.waitForFunction(() => chessGame.turn === 'w' && !chessBotThinking, null, { timeout: 5000 });
     const movesSoFar = await frame.evaluate(() => chessGame.lastMove);
     if (!movesSoFar) throw new Error("Expected the bot's own reply to have landed as lastMove");
     console.log('PASS: e2-e4 applied, turn returned to White after the bot replied on its own ->', JSON.stringify(movesSoFar));
@@ -198,7 +198,7 @@ async function injectPosition(frame, boardMap, opts) {
     console.log('STEP 5: playing as Black lets the bot (White) move first, automatically');
     await frame.locator('#chessPlayerColorInput').selectOption('b');
     await frame.locator('#chessNewGameBtn').click();
-    await frame.waitForFunction(() => chessGame.turn === 'b' && !chessBotThinking, { timeout: 5000 });
+    await frame.waitForFunction(() => chessGame.turn === 'b' && !chessBotThinking, null, { timeout: 5000 });
     const whiteMovedFirst = await frame.evaluate(() => chessGame.lastMove && chessGame.lastMove.from !== null);
     if (!whiteMovedFirst) throw new Error("Expected White (the bot) to have already made an opening move");
     console.log('PASS: bot opened as White with no action needed from the Black-playing visitor ->', await frame.evaluate(() => JSON.stringify(chessGame.lastMove)));
@@ -211,7 +211,7 @@ async function injectPosition(frame, boardMap, opts) {
     const a8IsLegal = await frame.locator('.chess-square[data-square="' + sq('a8') + '"].legal-move').count();
     if (!a8IsLegal) throw new Error('Expected Qa8# to be offered as a legal move from a1');
     await clickSquare(frame, 'a8');
-    await frame.waitForFunction(() => chessGame.status === 'checkmate', { timeout: 2000 });
+    await frame.waitForFunction(() => chessGame.status === 'checkmate', null, { timeout: 2000 });
     const mateStatusText = await frame.locator('#chessStatus').textContent();
     if (!mateStatusText.includes('Checkmate') || !mateStatusText.includes('White wins') || !mateStatusText.includes('You won')) throw new Error('Expected a "Checkmate — White wins. You won!" style message, got: ' + mateStatusText);
     console.log('PASS: back-rank mate correctly detected and reported ->', mateStatusText);
@@ -220,13 +220,13 @@ async function injectPosition(frame, boardMap, opts) {
     await injectPosition(frame, { a7: 'wp', e1: 'wk', e8: 'bk' }, { turn: 'w', playerColor: 'w' });
     await clickSquare(frame, 'a7');
     await clickSquare(frame, 'a8');
-    await frame.waitForFunction(() => document.getElementById('chessPromotionPicker').classList.contains('active'), { timeout: 2000 });
+    await frame.waitForFunction(() => document.getElementById('chessPromotionPicker').classList.contains('active'), null, { timeout: 2000 });
     // a7 = index 48, a8 = index 56 — plain literals here (not this file's
     // own Node-side sq() helper, which doesn't exist inside the page).
     const midState = await frame.evaluate(() => ({ a7: chessGame.board[48], a8: chessGame.board[56] }));
     if (midState.a7 !== 'wp' || midState.a8) throw new Error('Expected the move to stay pending (pawn still on a7, nothing yet on a8) until a promotion choice is made, got: ' + JSON.stringify(midState));
     await frame.locator('#chessPromotionPicker button[data-promo="n"]').click();
-    await frame.waitForFunction(() => !document.getElementById('chessPromotionPicker').classList.contains('active'), { timeout: 2000 });
+    await frame.waitForFunction(() => !document.getElementById('chessPromotionPicker').classList.contains('active'), null, { timeout: 2000 });
     const promotedPiece = await frame.evaluate(() => chessGame.board[56]); // a8
     if (promotedPiece !== 'wn') throw new Error('Expected the a7 pawn to have promoted to a white knight on a8, got: ' + promotedPiece);
     console.log('PASS: promotion picker appeared, held the move pending, and applied the chosen piece (knight) once resolved');
@@ -234,11 +234,11 @@ async function injectPosition(frame, boardMap, opts) {
     console.log('STEP 8: Close hides the modal without ending the game; reopening the stall resumes the exact same position');
     const positionBeforeClose = await frame.evaluate(() => chessGame.board.slice());
     await frame.locator('#chessCloseBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('chessModal').classList.contains('active'), { timeout: 2000 });
+    await frame.waitForFunction(() => !document.getElementById('chessModal').classList.contains('active'), null, { timeout: 2000 });
     const freshInteractables = await projectInteractables(frame);
     const chessStallAgain = freshInteractables.find((m) => m.action === 'open-chess');
     await frame.locator('#scene').click({ position: { x: chessStallAgain.sx, y: chessStallAgain.sy } });
-    await frame.waitForFunction(() => document.getElementById('chessModal').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('chessModal').classList.contains('active'), null, { timeout: 5000 });
     const positionAfterReopen = await frame.evaluate(() => chessGame.board.slice());
     if (JSON.stringify(positionBeforeClose) !== JSON.stringify(positionAfterReopen)) throw new Error('Expected closing and reopening the modal to preserve the in-progress game');
     console.log('PASS: Close only hid the modal — the game (knight-on-a8 position from STEP 7) was exactly as left');
@@ -246,7 +246,7 @@ async function injectPosition(frame, boardMap, opts) {
     console.log('STEP 9: winning with no identity yet shows a friendly note instead of a raw mint error (chess still needs no identity to play)');
     await frame.locator('#chessDifficultyInput').selectOption('easy');
     await winByBackRankMate(frame);
-    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('Create a wallet identity'), { timeout: 3000 });
+    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('Create a wallet identity'), null, { timeout: 3000 });
     console.log('PASS: no-identity win degraded gracefully ->', await frame.locator('#chessStatus').textContent());
 
     console.log('STEP 10: winning on Easy with a real identity mints exactly 5 gold, no trophy');
@@ -254,15 +254,15 @@ async function injectPosition(frame, boardMap, opts) {
     // and intercepts clicks, so #walletBtn needs it closed first — reopened
     // via the stall right after, same as STEP 8 already does.
     await frame.locator('#chessCloseBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('chessModal').classList.contains('active'), { timeout: 2000 });
+    await frame.waitForFunction(() => !document.getElementById('chessModal').classList.contains('active'), null, { timeout: 2000 });
     await createIdentity(frame, 'chess-reward-test-password');
     const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
     const reopenInteractables = await projectInteractables(frame);
     const reopenChessStall = reopenInteractables.find((m) => m.action === 'open-chess');
     await frame.locator('#scene').click({ position: { x: reopenChessStall.sx, y: reopenChessStall.sy } });
-    await frame.waitForFunction(() => document.getElementById('chessModal').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('chessModal').classList.contains('active'), null, { timeout: 5000 });
     await winByBackRankMate(frame);
-    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), null, { timeout: 5000 });
     const easyStatusText = await frame.locator('#chessStatus').textContent();
     if (!easyStatusText.includes('You earned 5 gold') || easyStatusText.includes('trophy')) throw new Error('Expected "You earned 5 gold!" with no trophy mention, got: ' + easyStatusText);
     const goldAfterEasy = await goldBalance(frame, publicKey);
@@ -274,7 +274,7 @@ async function injectPosition(frame, boardMap, opts) {
     console.log('STEP 11: winning on Hard mints 20 gold AND a trophy');
     await frame.locator('#chessDifficultyInput').selectOption('hard');
     await winByBackRankMate(frame);
-    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), null, { timeout: 5000 });
     const hardStatusText = await frame.locator('#chessStatus').textContent();
     if (!hardStatusText.includes('You earned 20 gold') || !hardStatusText.includes('trophy')) throw new Error('Expected "You earned 20 gold + a trophy!", got: ' + hardStatusText);
     const goldAfterHard = await goldBalance(frame, publicKey);
@@ -285,7 +285,7 @@ async function injectPosition(frame, boardMap, opts) {
 
     console.log('STEP 12: winning on Hard again mints more gold but never a second trophy');
     await winByBackRankMate(frame);
-    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), null, { timeout: 5000 });
     const secondHardStatusText = await frame.locator('#chessStatus').textContent();
     if (secondHardStatusText.includes('trophy')) throw new Error('Expected no trophy mention on a second Hard win (already held), got: ' + secondHardStatusText);
     const goldAfterSecondHard = await goldBalance(frame, publicKey);

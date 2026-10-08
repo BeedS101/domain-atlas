@@ -149,19 +149,19 @@ async function fetchDrops() {
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
     frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('item-drop-3d-visible-password');
     await frame.locator('#newPasswordConfirmInput').fill('item-drop-3d-visible-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     const lobbyHb = await frame.evaluate(() => new Promise((resolve) => {
       const check = () => {
@@ -174,20 +174,20 @@ async function fetchDrops() {
       check();
     }));
     await frame.locator('#scene').click({ position: { x: lobbyHb.sx, y: lobbyHb.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
-    await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 10000 });
     await frame.evaluate(() => window.__atlasActive3D.ready);
     console.log('PASS: entered the 3D lobby with a fresh wallet — itemDropsAllowed just flipped true for this world (task: 3D item-drop visibility) so there\'s actually a Drop button to click here now');
 
     console.log('STEP 1: mint a Chess Champion Trophy (atlas.trophy.chess — now has its own dedicated model, assets/trophy.glb), teleport to a known spot, and drop it via the real wallet UI Drop button');
     await frame.evaluate(() => AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.trophy.chess').then(() => refreshInventoryDisplay()));
-    await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Chess Champion Trophy'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('#selfCollectiblesList')?.textContent.includes('Chess Champion Trophy'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click(); // reopen the wallet panel — it closed itself after account creation earlier
-    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await teleport(frame, TROPHY_SPOT.x, TROPHY_SPOT.z);
     const trophyCard = frame.locator('#selfCollectiblesList .wallet-item').filter({ hasText: 'Chess Champion Trophy' });
     await clickCardMenuAction(trophyCard.locator('button[data-action="drop"]'));
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Dropped. Anyone standing here can see it and pick it up.', { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Dropped. Anyone standing here can see it and pick it up.', null, { timeout: 10000 });
     console.log('PASS: dropped via the real beginDropPlacement()/finalizeDrop() path, not a mock');
 
     console.log('STEP 2: the drop landed near where the visitor actually was — not hardcoded at world origin [0,0,0], the old 3D placeholder position');
@@ -200,7 +200,7 @@ async function fetchDrops() {
     console.log('PASS: dropped at ' + JSON.stringify(trophyDrop.position) + ', near the visitor\'s own position, not at world origin');
 
     console.log('STEP 3: gltf-mini.js actually tracks the drop and renders its REAL model (trophy.glb loaded successfully), not the amber glow fallback');
-    await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 1, null, { timeout: 5000 });
     await frame.waitForFunction((dropId) => window.__atlasActive3D.getItemDropRenderKind(dropId) === 'model', trophyDrop.dropId, { timeout: 5000 });
     console.log('PASS: the trophy\'s own model loaded and is what\'s actually rendered at its drop position');
 
@@ -211,22 +211,22 @@ async function fetchDrops() {
 
     console.log('STEP 4: walking up to the trophy\'s own drop position shows the "E — <item name>" prompt');
     await teleport(frame, trophyDrop.position[0], trophyDrop.position[2]);
-    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Chess Champion Trophy', { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Chess Champion Trophy', null, { timeout: 5000 });
     const hintText = await frame.locator('#scene3dInteractHint').textContent();
     if (hintText !== 'E — Chess Champion Trophy') throw new Error('Expected the on-screen hint to read "E — Chess Champion Trophy", got: ' + JSON.stringify(hintText));
     console.log('PASS: E-range prompt names the actual dropped item ->', hintText);
 
     console.log('STEP 5: pressing E picks it up through the SAME pickUpDroppedItem() the 2D renderer and Previewer already use — a real claim, not handleInteractable()\'s mint/issue path');
     await pressE(frame);
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Picked it up.', { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Picked it up.', null, { timeout: 10000 });
     const hasTrophyBack = await frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       const wallet = await AtlasWallet.getWallet(identity.publicKey);
       return wallet.some((e) => e.credential.asset.class === 'atlas.trophy.chess');
     });
     if (!hasTrophyBack) throw new Error('Expected the picked-up trophy back in the wallet as a freshly-minted credential');
-    await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 0, { timeout: 5000 });
-    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === null, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 0, null, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === null, null, { timeout: 5000 });
     console.log('PASS: claimed, back in the wallet, and the model/prompt both disappeared from the 3D scene');
 
     console.log('STEP 6: a class whose model genuinely fails to load (atlas.element.silver -> assets/badge.glb, a pre-existing, still-missing file — left alone on purpose, not fixed by this task) falls back to the amber glow marker instead of rendering nothing');
@@ -237,7 +237,7 @@ async function fetchDrops() {
       await refreshSceneItemMarkers(); // force a sync instead of waiting out WORLD_DROPS_POLL_MS
       return result.dropId;
     }, [SILVER_SPOT.x, 0, SILVER_SPOT.z]);
-    await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 1, null, { timeout: 5000 });
     await frame.waitForFunction(
       (dropId) => window.__atlasActive3D.getItemDropRenderKind(dropId) === 'marker',
       silverDropId,
@@ -254,7 +254,7 @@ async function fetchDrops() {
     // is 3 of it, same "×<formatMass(quantity)>" convention the 2D
     // renderer's own marker hover and the Previewer already show; the
     // E-press prompt used to leave the quantity out entirely.
-    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Silver (Ag) ×3 g', { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Silver (Ag) ×3 g', null, { timeout: 5000 });
     // Status text alone ("Picked it up.") isn't a safe wait here — STEP 5
     // already left that exact same string on screen, so a text-equality
     // check would resolve immediately without proving E actually fired
@@ -263,7 +263,7 @@ async function fetchDrops() {
     // renderer's own drop count instead — a real signal that this
     // specific claim went through.
     await pressE(frame);
-    await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 0, { timeout: 10000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getItemDropCount() === 0, null, { timeout: 10000 });
     const hasSilverBack = await frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       const wallet = await AtlasWallet.getWallet(identity.publicKey);

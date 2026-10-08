@@ -88,7 +88,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -102,10 +102,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click(); // close the panel — identity stays unlocked for the rest of the session
   return publicKey;
@@ -115,7 +115,7 @@ async function enterLobby(frame, page, label) {
   const portals = await projectPortals(frame);
   const toLobby = portals.find((p) => p.to === 'lobby');
   await frame.locator('#scene').click({ position: { x: toLobby.sx, y: toLobby.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
   await page.waitForTimeout(300);
   console.log('SETUP: ' + label + ' entered the Lobby');
 }
@@ -130,22 +130,22 @@ async function joinDomainBPostOffice(frame, label) {
   const portals = await projectPortals(frame);
   const toNeighbor = portals.find((p) => p.kind === 'domain');
   await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), null, { timeout: 10000 });
 
   await frame.locator('#walletBtn').click();
   await frame.locator('#socialTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
-  await frame.waitForFunction(() => !document.getElementById('postOfficeJoinSection').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('postOfficeJoinSection').hidden, null, { timeout: 5000 });
   await frame.locator('#postOfficeJoinBtn').click();
-  await frame.waitForFunction(() => document.getElementById('postOfficeJoinSection').hidden, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('postOfficeJoinSection').hidden, null, { timeout: 10000 });
   console.log('PASS: ' + label + ' joined Domain B\'s Post Office');
   await frame.locator('#walletBtn').click(); // close the wallet panel before navigating
 
   const backPortals = await projectPortals(frame);
   const backToPlaza = backPortals.find((p) => p.kind === 'domain');
   await frame.locator('#scene').click({ position: { x: backToPlaza.sx, y: backToPlaza.sy } });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), null, { timeout: 10000 });
 }
 
 // Registers a Post Office handle at Domain B (must already be a member —
@@ -155,19 +155,19 @@ async function registerDomainBHandle(frame, handle) {
   const alreadyOpen = await frame.evaluate(() => document.getElementById('walletPanel').classList.contains('open'));
   if (!alreadyOpen) await frame.locator('#walletBtn').click();
   await frame.locator('#socialTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
   // socialTabBtn's click handler kicks off several async refreshes
   // (checkMailOnTabOpen, refreshMyPublicKeyDisplay -> the Post Office
   // domain dropdowns, etc.) — wait for one of them to land before touching
   // Mail Settings, same as manual-postoffice-handle-ui.js's openMailScreen.
-  await frame.waitForFunction(() => document.getElementById('myPublicKeyDisplay').value.length > 0, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('myPublicKeyDisplay').value.length > 0, null, { timeout: 5000 });
   await frame.locator('#mailSettingsSubtabBtn').click();
-  await frame.waitForFunction(() => [...document.getElementById('postOfficeSettingsDomainInput').options].some((o) => o.value === 'localhost:8002'), { timeout: 5000 });
+  await frame.waitForFunction(() => [...document.getElementById('postOfficeSettingsDomainInput').options].some((o) => o.value === 'localhost:8002'), null, { timeout: 5000 });
   await frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
-  await frame.waitForFunction(() => document.getElementById('postOfficeYourHandleDisplay').textContent.includes('No handle set'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('postOfficeYourHandleDisplay').textContent.includes('No handle set'), null, { timeout: 5000 });
   await frame.locator('#postOfficeHandleInput').fill(handle);
   await frame.locator('#postOfficeSaveHandleBtn').click();
-  await frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), null, { timeout: 5000 });
   console.log('PASS: registered handle "' + handle + '#localhost:8002"');
   await frame.locator('#walletBtn').click();
 }
@@ -176,7 +176,7 @@ async function openContactsTab(frame) {
   await frame.locator('#walletBtn').click();
   await frame.locator('#socialTabBtn').click();
   await frame.locator('#contactsSubtabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('contactsSubscreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('contactsSubscreen').classList.contains('active'), null, { timeout: 5000 });
 }
 
 async function waitFor(frame, fn, description, timeoutMs = 8000) {
@@ -222,7 +222,7 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     console.log('STEP 1: each visitor sees the OTHER (not themselves) in Add Contact\'s "People here now" with an Add-friend action');
     await openContactsTab(a.frame);
     await a.frame.locator('#addContactSubtabBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('addContactSubscreen').classList.contains('active'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('addContactSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const bIdSeenByA = await waitFor(a.frame, () => {
       const btn = document.querySelector('#friendsHereList button[data-action="add-friend"]');
       return btn ? btn.dataset.id : null;
@@ -261,21 +261,21 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
 
     console.log('STEP 5: the three Contacts inner sub-tabs each render the right content');
     await a.frame.locator('#contactsListSubtabBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('contactsListSubscreen').classList.contains('active'), { timeout: 5000 });
-    await a.frame.waitForFunction(() => document.querySelectorAll('#contactsList .info-card').length === 1, { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('contactsListSubscreen').classList.contains('active'), null, { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.querySelectorAll('#contactsList .info-card').length === 1, null, { timeout: 5000 });
     const firstContactText = await a.frame.locator('#contactsList .info-card').first().textContent();
     if (!firstContactText.includes(pkB.slice(0, 16))) throw new Error('Expected the saved contact (B) to render with B\'s public key, got: ' + firstContactText);
     console.log('PASS: Contacts inner tab shows the saved contact');
     await a.frame.locator('#addContactSubtabBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('addContactSubscreen').classList.contains('active'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('addContactSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const addContactText = await a.frame.locator('#addContactSubscreen').textContent();
     if (!addContactText.includes('People here now') || !addContactText.includes('Friend requests') || !addContactText.includes('Add by address')) {
       throw new Error('Expected Add Contact to render People here now, Friend requests, AND the manual add-by-address form, got: ' + addContactText);
     }
     console.log('PASS: Add Contact inner tab shows all three of its sections');
     await a.frame.locator('#contactGroupsSubtabBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('contactGroupsSubscreen').classList.contains('active'), { timeout: 5000 });
-    await a.frame.waitForFunction(() => document.getElementById('contactGroupsList').textContent.includes('No groups yet'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('contactGroupsSubscreen').classList.contains('active'), null, { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('contactGroupsList').textContent.includes('No groups yet'), null, { timeout: 5000 });
     console.log('PASS: Groups inner tab renders its empty state');
 
     console.log('STEP 6: adding a contact manually by RAW PUBLIC KEY — no live presence connection to the other side needed');
@@ -289,7 +289,7 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     await a.frame.locator('#manualAddToggleRawKeyBtn').click();
     await a.frame.locator('#manualAddPublicKeyInput').fill(strangerKey);
     await a.frame.locator('#manualAddContactBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('manualAddContactStatus').textContent === 'Added.', { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('manualAddContactStatus').textContent === 'Added.', null, { timeout: 5000 });
     let currentFriends = await a.frame.evaluate(() => AtlasWallet.getFriends());
     if (!currentFriends.some((f) => f.publicKey === strangerKey && f.name === 'Dana (raw key)')) {
       throw new Error('Expected the raw-key contact to be saved, got: ' + JSON.stringify(currentFriends));
@@ -304,7 +304,7 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     await a.frame.waitForFunction(() => {
       const t = document.getElementById('manualAddContactStatus').textContent;
       return t && t !== '' && t !== 'Looking up…';
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     const unjoinedStatus = await a.frame.locator('#manualAddContactStatus').textContent();
     if (!unjoinedStatus.toLowerCase().includes("haven't joined")) throw new Error('Expected a clear "haven\'t joined that Post Office" error, got: ' + unjoinedStatus);
     console.log('PASS:', unjoinedStatus);
@@ -313,7 +313,7 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     await a.frame.locator('#manualAddNameInput').fill('Charlie');
     await a.frame.locator('#manualAddHandleInput').fill('charlie#localhost:8002');
     await a.frame.locator('#manualAddContactBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('manualAddContactStatus').textContent === 'Added.', { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('manualAddContactStatus').textContent === 'Added.', null, { timeout: 10000 });
     currentFriends = await a.frame.evaluate(() => AtlasWallet.getFriends());
     if (!currentFriends.some((f) => f.publicKey === pkC && f.name === 'Charlie')) {
       throw new Error('Expected Charlie (Visitor C, resolved by handle) to be saved as a contact, got: ' + JSON.stringify(currentFriends));
@@ -322,7 +322,7 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
 
     console.log('STEP 8: a contact\'s notes field saves on blur and persists');
     await a.frame.locator('#contactsListSubtabBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('contactsListSubscreen').classList.contains('active'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('contactsListSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const danaCard = a.frame.locator('#contactsList .info-card', { hasText: 'Dana (raw key)' });
     await danaCard.locator('.contact-notes-input').fill('met via a manual raw-key add, testing notes');
     await danaCard.locator('.contact-notes-input').blur();
@@ -342,7 +342,7 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     }, 'search to narrow the list down to only Dana (matched via her notes)');
     console.log('PASS: search matched on notes text and hid the non-matching cards');
     await a.frame.locator('#contactsSearchInput').fill('');
-    await a.frame.waitForFunction(() => [...document.querySelectorAll('#contactsList .info-card')].every((c) => !c.hidden), { timeout: 5000 });
+    await a.frame.waitForFunction(() => [...document.querySelectorAll('#contactsList .info-card')].every((c) => !c.hidden), null, { timeout: 5000 });
 
     console.log('STEP 10: removing a contact requires two deliberate clicks');
     const danaRemoveBtn = danaCard.locator('button[data-action="remove-contact-ask"]');
@@ -364,21 +364,21 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
 
     console.log('STEP 11: Groups — create one, add a contact to it, then delete it');
     await a.frame.locator('#contactGroupsSubtabBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('contactGroupsSubscreen').classList.contains('active'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('contactGroupsSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await a.frame.locator('#newGroupNameInput').fill('Post Office Friends');
     await a.frame.locator('#createGroupBtn').click();
-    await a.frame.waitForFunction(() => document.querySelectorAll('#contactGroupsList .info-card').length === 1, { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.querySelectorAll('#contactGroupsList .info-card').length === 1, null, { timeout: 5000 });
     console.log('PASS: group created');
     const groupCard = a.frame.locator('#contactGroupsList .info-card').first();
     const charlieCheckbox = groupCard.locator('label', { hasText: 'Charlie' }).locator('input[type="checkbox"]');
     await charlieCheckbox.check();
-    await a.frame.waitForFunction(() => document.querySelector('#contactGroupsList .info-card .meta').textContent.includes('1 member'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.querySelector('#contactGroupsList .info-card .meta').textContent.includes('1 member'), null, { timeout: 5000 });
     const groupsAfterAdd = await a.frame.evaluate(() => AtlasWallet.getContactGroups());
     if (!groupsAfterAdd[0].memberPublicKeys.includes(pkC)) throw new Error('Expected Charlie (C\'s public key) to be a member of the new group, got: ' + JSON.stringify(groupsAfterAdd));
     console.log('PASS: checking a contact\'s box adds them to the group, member count updates');
     a.page.once('dialog', (d) => d.accept());
     await groupCard.locator('button[data-action="delete-group"]').click();
-    await a.frame.waitForFunction(() => document.getElementById('contactGroupsList').textContent.includes('No groups yet'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('contactGroupsList').textContent.includes('No groups yet'), null, { timeout: 5000 });
     const groupsAfterDelete = await a.frame.evaluate(() => AtlasWallet.getContactGroups());
     if (groupsAfterDelete.length !== 0) throw new Error('Expected the group to be gone after confirming delete, got: ' + JSON.stringify(groupsAfterDelete));
     const friendsAfterGroupDelete = await a.frame.evaluate(() => AtlasWallet.getFriends());

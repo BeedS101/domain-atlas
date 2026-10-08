@@ -85,7 +85,7 @@ function isoDateDaysAgo(days) {
     await page.goto(NODE_BASE + '/warranty-demo.html', { waitUntil: 'load' });
 
     console.log('STEP 1: the page generates and displays a public key on load');
-    await page.waitForFunction(() => (document.getElementById('yourPublicKey').textContent || '').length > 0, { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('yourPublicKey').textContent || '').length > 0, null, { timeout: 10000 });
     const yourPublicKey = await page.locator('#yourPublicKey').textContent();
     assert(yourPublicKey.length > 20, 'expected a real-looking public key, got: ' + yourPublicKey);
     console.log('PASS: page identity generated —', yourPublicKey.slice(0, 24) + '…');
@@ -93,7 +93,7 @@ function isoDateDaysAgo(days) {
     console.log('STEP 2: filling in a serial number and minting renders the card with that serial and "not started yet" — no admin panel involved');
     await page.locator('#serialInput').fill('SN-0001');
     await page.locator('#mintBtn').click();
-    await page.waitForFunction(() => document.getElementById('cardPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('cardPanel').style.display !== 'none', null, { timeout: 10000 });
     const cardTextAfterMint = await page.locator('#certificateCard').textContent();
     assert(cardTextAfterMint.includes('SN-0001'), 'expected the serial number to show on the card, got: ' + cardTextAfterMint);
     assert(cardTextAfterMint.includes('Not started yet'), 'expected a "not started" warranty status before any sale is stamped, got: ' + cardTextAfterMint);
@@ -105,7 +105,7 @@ function isoDateDaysAgo(days) {
     await page.locator('#warrantyMonthsInput').fill('24');
     await page.locator('#retailerInput').fill('Example Retailer');
     await page.locator('#stampBtn').click();
-    await page.waitForFunction(() => (document.getElementById('certificateCard').textContent || '').includes('Active until'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('certificateCard').textContent || '').includes('Active until'), null, { timeout: 10000 });
     const activeCardText = await page.locator('#certificateCard').textContent();
     assert(activeCardText.includes('Example Retailer'), 'expected the retailer name to show on the card, got: ' + activeCardText);
     assert(activeCardText.includes('SN-0001'), 'expected the same serial number to survive the stamp');
@@ -115,12 +115,12 @@ function isoDateDaysAgo(days) {
     await page.locator('#saleDateInput').fill(isoDateDaysAgo(800));
     await page.locator('#warrantyMonthsInput').fill('12');
     await page.locator('#stampBtn').click();
-    await page.waitForFunction(() => (document.getElementById('certificateCard').textContent || '').includes('Expired'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('certificateCard').textContent || '').includes('Expired'), null, { timeout: 10000 });
     console.log('PASS: an already-lapsed sale window shows Expired, computed instantly with no real waiting');
 
     console.log('STEP 5: "Transfer to a new owner" performs a genuine transfer, keeping the serial and warranty status');
     await page.locator('#transferBtn').click();
-    await page.waitForFunction(() => (document.getElementById('transferResult').textContent || '').startsWith('Transferred'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('transferResult').textContent || '').startsWith('Transferred'), null, { timeout: 10000 });
     const afterTransferText = await page.locator('#certificateCard').textContent();
     assert(afterTransferText.includes('SN-0001'), 'expected the serial number to survive the transfer, got: ' + afterTransferText);
     assert(afterTransferText.includes('Expired'), 'expected the warranty status to survive the transfer unchanged, got: ' + afterTransferText);
@@ -130,12 +130,12 @@ function isoDateDaysAgo(days) {
     console.log('STEP 6: "Try verifying this one independently" reports the transferred certificate valid');
     await page.locator('#certificateCard details.raw summary').click();
     await page.locator('#certificateCard .fillVerifyBtn').click();
-    await page.waitForFunction(() => (document.getElementById('verifyResult').textContent || '').startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('verifyResult').textContent || '').startsWith('✓ Valid'), null, { timeout: 10000 });
     console.log('PASS: independently verified as valid —', await page.locator('#verifyResult').textContent());
 
     console.log('STEP 7: "View full history" walks the supersedes chain back through both stamps and the original mint');
     await page.locator('#historyBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#historyResult .card').length > 0, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#historyResult .card').length > 0, null, { timeout: 10000 });
     const historyCards = await page.locator('#historyResult .card').allTextContents();
     assert(historyCards.length === 3, 'expected 3 archived links (original mint + both stamps), got ' + historyCards.length);
     assert(historyCards.every((c) => c.includes('SN-0001')), 'expected every archived link to still carry the original serial number');

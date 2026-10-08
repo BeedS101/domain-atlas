@@ -19,11 +19,11 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 // category re-opened first.
 async function openIdentityMethodCategory(frame) {
   await frame.locator('#settingsTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
   const category = frame.locator('.settings-category[data-category="identity-method"]');
   if (!(await category.evaluate((el) => el.classList.contains('open')))) {
     await category.locator('.settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity-method"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('.settings-category[data-category="identity-method"]').classList.contains('open'), null, { timeout: 5000 });
   }
 }
 
@@ -36,7 +36,7 @@ async function openIdentityCategory(frame) {
   const category = frame.locator('#mainWalletScreen .settings-category[data-category="identity"]');
   if (!(await category.evaluate((el) => el.classList.contains('open')))) {
     await category.locator('.settings-category-toggle').click();
-    await frame.waitForFunction(() => document.querySelector('#mainWalletScreen .settings-category[data-category="identity"]').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelector('#mainWalletScreen .settings-category[data-category="identity"]').classList.contains('open'), null, { timeout: 5000 });
   }
 }
 
@@ -60,16 +60,16 @@ async function openIdentityCategory(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('alias-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('alias-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const rawIdentityLabel = await frame.locator('#walletIdentity').textContent();
     if (!rawIdentityLabel.startsWith('Identity:')) throw new Error('Expected the raw-key display before any alias is set, got: ' + rawIdentityLabel);
     console.log('PASS: identity created, shown as the raw key before any alias exists ->', rawIdentityLabel);
@@ -78,7 +78,7 @@ async function openIdentityCategory(frame) {
     console.log('STEP 1: an obviously profane alias is rejected, nothing changes');
     await frame.locator('#aliasInput').fill('fuckface');
     await frame.locator('#setAliasBtn').click();
-    await frame.waitForFunction(() => document.getElementById('aliasStatus').textContent === "That alias isn't allowed here — try something else.", { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('aliasStatus').textContent === "That alias isn't allowed here — try something else.", null, { timeout: 5000 });
     const stillRaw = await frame.locator('#walletIdentity').textContent();
     if (!stillRaw.startsWith('Identity:')) throw new Error('Display should be unaffected by a rejected alias, got: ' + stillRaw);
     console.log('PASS: profane alias rejected, display unchanged');
@@ -86,13 +86,13 @@ async function openIdentityCategory(frame) {
     console.log('STEP 2: a leetspeak-obscured variant is ALSO caught (normalization before matching)');
     await frame.locator('#aliasInput').fill('5h1t-head');
     await frame.locator('#setAliasBtn').click();
-    await frame.waitForFunction(() => document.getElementById('aliasStatus').textContent === "That alias isn't allowed here — try something else.", { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('aliasStatus').textContent === "That alias isn't allowed here — try something else.", null, { timeout: 5000 });
     console.log('PASS: leetspeak dodge ("5h1t-head" -> normalizes to contain "shit") caught too');
 
     console.log('STEP 3: an innocent nickname is accepted — Enter submits it, same as clicking Save');
     await frame.locator('#aliasInput').fill('Nomad');
     await frame.locator('#aliasInput').press('Enter');
-    await frame.waitForFunction(() => document.getElementById('aliasStatus').textContent === 'Saved.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('aliasStatus').textContent === 'Saved.', null, { timeout: 5000 });
     const aliasedLabel = await frame.locator('#walletIdentity').textContent();
     if (!aliasedLabel.startsWith('Nomad ·')) throw new Error('Expected the display to lead with the alias, got: ' + aliasedLabel);
     console.log('PASS: alias accepted and now shown in place of "Identity:" ->', aliasedLabel);
@@ -100,12 +100,12 @@ async function openIdentityCategory(frame) {
     console.log('STEP 4: locking and unlocking again — the alias is still there (persisted, not session-only)');
     await openIdentityMethodCategory(frame);
     await frame.locator('#lockWalletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#unlockPasswordInput').fill('alias-test-password');
     await frame.locator('#unlockBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
     const aliasAfterUnlock = await frame.locator('#walletIdentity').textContent();
     if (!aliasAfterUnlock.startsWith('Nomad ·')) throw new Error('Alias should survive a lock/unlock cycle, got: ' + aliasAfterUnlock);
     const aliasInputAfterUnlock = await frame.locator('#aliasInput').inputValue();
@@ -120,16 +120,16 @@ async function openIdentityCategory(frame) {
       options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true }
     });
     await frame.locator('#switchIdentityModeBtn').click();
-    await frame.waitForFunction(() => document.getElementById('webauthnCreateScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('webauthnCreateScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#confirmWebAuthnCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 10000 });
     // mainWalletScreen going active happens synchronously; the async
     // refreshIdentityDisplay() that actually repaints #walletIdentity for
     // the NEW identity can still be in flight right after — waiting only
     // on the screen's active class risks reading the previous identity's
     // (aliased) label. Wait for the real value instead, same pattern used
     // in manual-webauthn-identity-mode.js for the identical race.
-    await frame.waitForFunction(() => document.getElementById('walletIdentity').textContent.startsWith('Identity:'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletIdentity').textContent.startsWith('Identity:'), null, { timeout: 5000 });
     const passkeyLabel = await frame.locator('#walletIdentity').textContent();
     if (!passkeyLabel.startsWith('Identity:')) throw new Error('The new passkey identity should show its raw key, no alias yet: ' + passkeyLabel);
     const passkeyAliasInput = await frame.locator('#aliasInput').inputValue();
@@ -139,13 +139,13 @@ async function openIdentityCategory(frame) {
     console.log('STEP 6: switching back to the password identity brings its "Nomad" alias right back');
     await openIdentityMethodCategory(frame);
     await frame.locator('#switchIdentityModeBtn').click();
-    await frame.waitForFunction(() => document.getElementById('walletIdentity').textContent.startsWith('Nomad ·'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletIdentity').textContent.startsWith('Nomad ·'), null, { timeout: 5000 });
     console.log('PASS: switched back, "Nomad" reappeared automatically — the alias followed the key, not a global slot');
 
     console.log('STEP 7: clearing the alias (blank field + Save) reverts the display to the raw key');
     await frame.locator('#aliasInput').fill('');
     await frame.locator('#setAliasBtn').click();
-    await frame.waitForFunction(() => document.getElementById('aliasStatus').textContent === 'Nickname cleared.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('aliasStatus').textContent === 'Nickname cleared.', null, { timeout: 5000 });
     const clearedLabel = await frame.locator('#walletIdentity').textContent();
     if (!clearedLabel.startsWith('Identity:')) throw new Error('Expected the raw-key display back after clearing, got: ' + clearedLabel);
     console.log('PASS: cleared alias reverts the display to the raw key ->', clearedLabel);

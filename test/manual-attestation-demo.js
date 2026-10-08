@@ -84,14 +84,14 @@ function assert(cond, message) {
 
     console.log('STEP 1: clicking "Get my demo filing" issues a real filing');
     await page.locator('#issueBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#filingCardSlot .card').length === 1, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#filingCardSlot .card').length === 1, null, { timeout: 10000 });
     const filingRaw = JSON.parse(await page.locator('#filingCardSlot .card details.raw pre').textContent());
     assert(filingRaw.issuer === NODE_DOMAIN, 'expected the filing to be issued by ' + NODE_DOMAIN + ', got: ' + filingRaw.issuer);
     console.log('PASS: filing issued by', filingRaw.issuer, 'id', filingRaw.id);
 
     console.log('STEP 2: "Mark \'Reviewed\'" calls this same domain\'s own reviewer key and renders a real attestation signed by it');
     await page.locator('.claimBtn[data-claim="reviewed"]').click();
-    await page.waitForFunction(() => document.querySelectorAll('#attestationCards .card').length === 1, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#attestationCards .card').length === 1, null, { timeout: 10000 });
     const attestationCard = page.locator('#attestationCards .card').first();
     const attestationRaw = JSON.parse(await attestationCard.locator('details.raw pre').textContent());
     assert(attestationRaw.issuer === NODE_DOMAIN, 'expected the attestation to say issuer domain ' + NODE_DOMAIN + ', got: ' + attestationRaw.issuer);
@@ -104,7 +104,7 @@ function assert(cond, message) {
     await attestationCard.locator('details.raw summary').click(); // expand the <details> to reveal the button inside it
     await attestationCard.locator('.fillVerifyBtn').click();
     const verifyResult = page.locator('#verifyResult');
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
     assert((await verifyResult.textContent()).includes('reviewer key'), 'expected the verify result to mention the reviewer key specifically, got: ' + (await verifyResult.textContent()));
     console.log('PASS:', await verifyResult.textContent());
 
@@ -113,7 +113,7 @@ function assert(cond, message) {
     tampered.claim = 'Something the reviewer never actually signed';
     await page.locator('#verifyInput').fill(JSON.stringify(tampered, null, 2));
     await page.locator('#verifyBtn').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✗ Not valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✗ Not valid'), null, { timeout: 10000 });
     assert((await verifyResult.textContent()).includes("doesn't match"), 'expected a signature-mismatch reason, got: ' + (await verifyResult.textContent()));
     console.log('PASS: a tampered attestation is correctly rejected —', await verifyResult.textContent());
 
@@ -123,7 +123,7 @@ function assert(cond, message) {
     // stale text instantly, before revoke's own re-verify has even run —
     // wait for the specific revoked-by-reviewer-key text instead.
     await attestationCard.locator('.revokeAttBtn').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.includes('revoked by') && document.getElementById('verifyResult').textContent.includes('reviewer key'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.includes('revoked by') && document.getElementById('verifyResult').textContent.includes('reviewer key'), null, { timeout: 10000 });
     const revokeVerifyText = await verifyResult.textContent();
     assert(revokeVerifyText.includes('revoked by') && revokeVerifyText.includes('reviewer key'), 'expected the just-revoked attestation to independently verify as revoked by the reviewer key, got: ' + revokeVerifyText);
     assert(await attestationCard.locator('.badge.revoked').count() === 1, 'expected the attestation card to show a Revoked badge');
@@ -132,7 +132,7 @@ function assert(cond, message) {
     console.log('STEP 6: the underlying filing itself still verifies fine — the two are genuinely independent');
     await page.locator('#filingCardSlot .card details.raw summary').click(); // expand the <details> to reveal the button inside it
     await page.locator('#filingCardSlot .card .fillVerifyBtn').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
     assert(!(await verifyResult.textContent()).includes('reviewer key'), 'expected the filing to verify against its own key, not the reviewer key, got: ' + (await verifyResult.textContent()));
     console.log('PASS: the filing is untouched by the attestation above it being revoked —', await verifyResult.textContent());
 

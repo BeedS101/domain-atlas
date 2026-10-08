@@ -89,16 +89,16 @@ function postJson(port, urlPath, body) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('mail-mgmt-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('mail-mgmt-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     const membership = await frame.evaluate(async () => {
       return await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.membership');
@@ -111,16 +111,16 @@ function postJson(port, urlPath, body) {
     await postJson(8001, '/atlas/mail/send', { payload: sendPayload, proof: sendProof });
 
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#checkMailNowBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, null, { timeout: 10000 });
     console.log('PASS: two messages present (auto-welcome + the manual one), both unread');
 
     console.log('STEP 1: "Mark all read" clears the badge without opening either message');
     const badgeBefore = await frame.locator('#mailBadge').textContent();
     if (badgeBefore !== '2') throw new Error('Expected badge to show 2 before marking all read, got: ' + badgeBefore);
     await frame.locator('#markAllMailReadBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('mailBadge').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('mailBadge').classList.contains('show'), null, { timeout: 5000 });
     const stillTwoCards = await frame.locator('#mailList .mail-card').count();
     if (stillTwoCards !== 2) throw new Error('Mark all read should not remove any messages, got: ' + stillTwoCards);
     const anyUnread = await frame.locator('#mailList .mail-card.unread').count();
@@ -131,7 +131,7 @@ function postJson(port, urlPath, body) {
     const deletedSubject = await frame.locator('#mailList .mail-card').first().locator('.mail-subject').textContent();
     page.once('dialog', (d) => d.accept());
     await frame.locator('#mailList .mail-card').first().locator('button[data-action="delete"]').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 1, null, { timeout: 5000 });
     const remainingText = await frame.locator('#mailList').textContent();
     if (remainingText.includes(deletedSubject)) throw new Error('Deleted message subject should no longer render: ' + deletedSubject);
     console.log('PASS: exactly one message deleted ->', deletedSubject);
@@ -146,7 +146,7 @@ function postJson(port, urlPath, body) {
     console.log('STEP 4: "Clear all" asks for confirmation, then removes everything');
     page.once('dialog', (d) => d.accept());
     await frame.locator('#clearAllMailBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailList').textContent.includes('No mail yet'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailList').textContent.includes('No mail yet'), null, { timeout: 5000 });
     console.log('PASS: all messages cleared');
 
     console.log('STEP 5: checking mail again does NOT bring anything back after Clear all either');

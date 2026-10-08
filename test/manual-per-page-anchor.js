@@ -88,7 +88,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-per-page-anchor
 
     await page.locator('#domain-atlas-enter-btn').hover();
     await page.waitForFunction(
-      () => document.getElementById('domain-atlas-info-tooltip')?.innerHTML.includes('Compass Stall'),
+      () => document.getElementById('domain-atlas-info-tooltip')?.innerHTML.includes('Compass Stall'), null,
       { timeout: 5000 }
     );
     console.log('PASS: hover tooltip resolves "Links to: Compass Stall"');
@@ -97,7 +97,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-per-page-anchor
     let frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     let frame = await frameHandle.contentFrame();
     await frame.waitForFunction(
-      () => document.getElementById('placeLabel').innerHTML.includes('Example Plaza') && document.getElementById('placeLabel').innerHTML.includes('Compass Stall'),
+      () => document.getElementById('placeLabel').innerHTML.includes('Example Plaza') && document.getElementById('placeLabel').innerHTML.includes('Compass Stall'), null,
       { timeout: 10000 }
     );
     const activeAnchor1 = await frame.evaluate(() => window.__atlasScene && window.__atlasScene.activeAnchor);
@@ -114,7 +114,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-per-page-anchor
 
     await page.locator('#domain-atlas-enter-btn').hover();
     await page.waitForFunction(
-      () => document.getElementById('domain-atlas-info-tooltip')?.innerHTML.includes('Reading Nook'),
+      () => document.getElementById('domain-atlas-info-tooltip')?.innerHTML.includes('Reading Nook'), null,
       { timeout: 5000 }
     );
     console.log('PASS: Enter button marker and hover tooltip both resolve for the Lobby\'s Reading Nook anchor');
@@ -123,7 +123,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-per-page-anchor
     frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     frame = await frameHandle.contentFrame();
     await frame.waitForFunction(
-      () => document.getElementById('placeLabel').innerHTML.includes('Reading Nook') && !!window.__atlasActive3D,
+      () => document.getElementById('placeLabel').innerHTML.includes('Reading Nook') && !!window.__atlasActive3D, null,
       { timeout: 15000 }
     );
     const camPos = await frame.evaluate(() => window.__atlasActive3D && window.__atlasActive3D.camera && window.__atlasActive3D.camera.pos);
@@ -142,7 +142,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-per-page-anchor
     await page.locator('#domain-atlas-enter-btn').click();
     frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     const placeLabelHtml3 = await frame.evaluate(() => document.getElementById('placeLabel').innerHTML);
     if (placeLabelHtml3.includes('anchorLabel')) throw new Error('Expected no anchor marker on an ordinary, non-anchored entry, got placeLabel: ' + placeLabelHtml3);
     const activeAnchor3 = await frame.evaluate(() => window.__atlasScene && window.__atlasScene.activeAnchor);
@@ -156,14 +156,14 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-per-page-anchor
     // identity, same as plaza/lobby above, so it isolates the §3.5 behavior
     // this step actually means to check.
     await frame.evaluate(() => loadManifest(currentManifestUrl, 'museum', null));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Museum'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Museum'), null, { timeout: 10000 });
     const placeLabelHtml4 = await frame.evaluate(() => document.getElementById('placeLabel').innerHTML);
     if (placeLabelHtml4.includes('anchorLabel')) throw new Error('Expected no anchor marker for a world-only fragment, got placeLabel: ' + placeLabelHtml4);
     console.log('PASS: world-only fragment enters Example Museum cleanly, no anchor marker');
 
     console.log('STEP 5: a dead/mismatched anchor id falls back gracefully to ordinary entry, no crash');
     await frame.evaluate(() => loadManifest(currentManifestUrl, 'plaza', 'no-such-anchor'));
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     const placeLabelHtml5 = await frame.evaluate(() => document.getElementById('placeLabel').innerHTML);
     if (placeLabelHtml5.includes('anchorLabel')) throw new Error('Expected a dead anchor id to leave no anchor marker, got placeLabel: ' + placeLabelHtml5);
     const activeAnchor5 = await frame.evaluate(() => window.__atlasScene && window.__atlasScene.activeAnchor);

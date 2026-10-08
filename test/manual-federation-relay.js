@@ -81,7 +81,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -92,10 +92,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click();
   return publicKey;
@@ -149,8 +149,8 @@ async function createIdentity(frame, password) {
     await bob.frame.evaluate(() => AtlasWallet.checkAllMail());
     await bob.frame.locator('#walletBtn').click();
     await bob.frame.locator('#socialTabBtn').click();
-    await bob.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
-    await bob.frame.waitForFunction(() => document.getElementById('mailList').textContent.includes('Cross-domain hello'), { timeout: 10000 });
+    await bob.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
+    await bob.frame.waitForFunction(() => document.getElementById('mailList').textContent.includes('Cross-domain hello'), null, { timeout: 10000 });
     const mailListText = await bob.frame.locator('#mailList').textContent();
     if (!mailListText.includes('alice#' + DOMAIN_A)) {
       throw new Error('REGRESSION: expected the Mail tab to show "alice#' + DOMAIN_A + '", got: ' + mailListText);

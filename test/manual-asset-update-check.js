@@ -158,18 +158,18 @@ async function clickPortalTo(frame, targetWorld) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('item-update-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('item-update-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 15000 });
     const held1 = await frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       const wallet = await AtlasWallet.getWallet(identity.publicKey);
@@ -198,7 +198,7 @@ async function clickPortalTo(frame, targetWorld) {
 
     console.log('STEP 2: "Check now" (task #45 mail check-in, extended) picks up the reissue and adopts it');
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#checkMailNowBtn').click();
     await frame.waitForFunction((oldId) => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
@@ -217,7 +217,7 @@ async function clickPortalTo(frame, targetWorld) {
 
     console.log('STEP 3: the reissued item verifies as a normal, independently-checkable credential (not just trusted because it arrived over mail-check)');
     await frame.locator('#walletTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const verdictText = await frame.locator('#selfCollectiblesList .wallet-item .verdict').textContent();
     if (!verdictText.includes('✓')) throw new Error('Adopted item did not verify: ' + verdictText);
     console.log('PASS: adopted item independently re-verifies valid ->', verdictText.trim());
@@ -228,7 +228,7 @@ async function clickPortalTo(frame, targetWorld) {
     // mark-seen call itself) — poll rather than reading the badge the
     // instant the screen swap is observed, same reasoning as this file's
     // other background-driven waitForFunction checks.
-    await frame.waitForFunction(() => !document.getElementById('assetUpdatesBadge').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('assetUpdatesBadge').classList.contains('show'), null, { timeout: 5000 });
     console.log('PASS: item-update badge cleared on open, same unobtrusive pattern as mail\'s own badge');
 
     console.log('STEP 5: a SECOND reissue, picked up WITHOUT clicking Check now — just by walking Plaza -> Museum -> Plaza (same domain)');
@@ -244,9 +244,9 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('PASS: issuer signed a second replacement ->', reissue2.newCredential.id);
 
     await clickPortalTo(frame, 'museum');
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Museum'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Museum'), null, { timeout: 10000 });
     await clickPortalTo(frame, 'plaza');
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     // enterWorld's domain-scoped check is fired and not awaited (see
     // checkItemUpdatesForDomain in viewer.js) — give it a moment to land,

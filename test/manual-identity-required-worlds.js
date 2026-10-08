@@ -91,7 +91,7 @@ async function projectInteractables(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     console.log('SETUP: fresh profile, no identity created yet, landed in Example Plaza (identityRequired: false) with no prompt');
     const walletOpen = await frame.evaluate(() => document.getElementById('walletPanel').classList.contains('open'));
     if (walletOpen) throw new Error('Expected no wallet prompt entering a world that does not require identity');
@@ -114,15 +114,15 @@ async function projectInteractables(frame) {
     const toArena = portals.find((p) => p.to === 'arena');
     if (!toArena) throw new Error('Expected a portal to Arena from the Plaza');
     await frame.locator('#scene').click({ position: { x: toArena.sx, y: toArena.sy } });
-    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     const stillPlazaAfterClick = await frame.locator('#placeLabel').textContent();
     if (!stillPlazaAfterClick.includes('Example Plaza')) throw new Error('Expected to still be in the Plaza while the wallet is being sorted out, got: ' + stillPlazaAfterClick);
     console.log('PASS: navigation paused, wallet opened straight to onboarding, still standing in the Plaza');
 
     console.log('STEP 3: closing the wallet WITHOUT creating an identity leaves the visitor exactly where they were — no half-entered state');
     await frame.locator('#walletBtn').click(); // toggles closed
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     const stillPlazaAfterCancel = await frame.locator('#placeLabel').textContent();
     if (!stillPlazaAfterCancel.includes('Example Plaza')) throw new Error('Expected to still be in the Plaza after cancelling, got: ' + stillPlazaAfterCancel);
     console.log('PASS: cancelled cleanly, still in the Plaza, nothing half-configured');
@@ -131,22 +131,22 @@ async function projectInteractables(frame) {
     portals = await projectPortals(frame);
     const toArenaAgain = portals.find((p) => p.to === 'arena');
     await frame.locator('#scene').click({ position: { x: toArenaAgain.sx, y: toArenaAgain.sy } });
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('identity-required-test-pw');
     await frame.locator('#newPasswordConfirmInput').fill('identity-required-test-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Arena'), null, { timeout: 10000 });
     const walletClosedAfterResume = await frame.evaluate(() => !document.getElementById('walletPanel').classList.contains('open'));
     if (!walletClosedAfterResume) throw new Error('Expected the wallet panel to close itself once entry actually resumed');
     console.log('PASS: identity created -> auto-resumed straight into Arena, wallet closed itself, no second click on the portal');
 
     console.log('STEP 5: locking the wallet WHILE STANDING in Arena does NOT evict the visitor (entry-time-only enforcement, resolved design)');
     await frame.locator('#quickLockWalletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('quickLockWalletBtn').style.display === 'none', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('quickLockWalletBtn').style.display === 'none', null, { timeout: 5000 });
     const stillArenaAfterLock = await frame.locator('#placeLabel').textContent();
     if (!stillArenaAfterLock.includes('Example Arena')) throw new Error('Expected locking mid-visit to leave the visitor standing in Arena, got: ' + stillArenaAfterLock);
     console.log('PASS: still in Arena after locking — no eviction, matching the resolved design');
@@ -155,7 +155,7 @@ async function projectInteractables(frame) {
     portals = await projectPortals(frame);
     const backToPlaza = portals.find((p) => p.to === 'plaza');
     await frame.locator('#scene').click({ position: { x: backToPlaza.sx, y: backToPlaza.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     const walletStillClosed = await frame.evaluate(() => !document.getElementById('walletPanel').classList.contains('open'));
     if (!walletStillClosed) throw new Error('Expected no wallet prompt entering a non-gated world even while locked');
     console.log('PASS: entered the Plaza instantly while locked — an ungated destination never triggers the gate at all');
@@ -169,33 +169,33 @@ async function projectInteractables(frame) {
     // shows. Plaza's own scene.json declares exactly 5 portalMarkers, so
     // waiting for that exact count is a cheap, specific way to know the
     // NEW scene has actually landed before trusting its portal data.
-    await frame.waitForFunction(() => window.__atlasScene && window.__atlasScene.portalMarkers.length === 5, { timeout: 10000 });
+    await frame.waitForFunction(() => window.__atlasScene && window.__atlasScene.portalMarkers.length === 5, null, { timeout: 10000 });
     portals = await projectPortals(frame);
     const toMarket = portals.find((p) => p.to === 'market');
     if (!toMarket) throw new Error('Expected a portal to Market from the Plaza');
     await frame.locator('#scene').click({ position: { x: toMarket.sx, y: toMarket.sy } });
-    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), null, { timeout: 5000 });
     const stillPlazaBeforeUnlock = await frame.locator('#placeLabel').textContent();
     if (!stillPlazaBeforeUnlock.includes('Example Plaza')) throw new Error('Expected to still be in the Plaza while unlocking, got: ' + stillPlazaBeforeUnlock);
     await frame.locator('#unlockPasswordInput').fill('identity-required-test-pw');
     await frame.locator('#unlockBtn').click();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Market') || document.getElementById('placeLabel').textContent.includes('Example Trading Post'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Market') || document.getElementById('placeLabel').textContent.includes('Example Trading Post'), null, { timeout: 10000 });
     console.log('PASS: unlocked -> auto-resumed straight into Market, no second click on the portal');
 
     console.log('STEP 8: an IN-WORLD action that needs identity (the "Mine Iron" stall) opens the wallet and waits when locked, then completes automatically once unlocked — scoped to this identity-required world only');
     await frame.locator('#quickLockWalletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('quickLockWalletBtn').style.display === 'none', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('quickLockWalletBtn').style.display === 'none', null, { timeout: 5000 });
     const stillMarketAfterLock = await frame.locator('#placeLabel').textContent();
     if (!(stillMarketAfterLock.includes('Example Market') || stillMarketAfterLock.includes('Example Trading Post'))) throw new Error('Expected locking mid-visit in Market to leave the visitor standing there too, got: ' + stillMarketAfterLock);
     const interactables = await projectInteractables(frame);
     const ironStall = interactables.find((m) => m.label === 'Mine Iron');
     if (!ironStall) throw new Error('Expected a "Mine Iron" interactable in the Market scene');
     await frame.locator('#scene').click({ position: { x: ironStall.sx, y: ironStall.sy } });
-    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('unlockScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: clicking the stall while locked opened the wallet to Unlock, instead of just failing the mint with an error');
     await frame.locator('#unlockPasswordInput').fill('identity-required-test-pw');
     await frame.locator('#unlockBtn').click();
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Collected') && document.getElementById('status').textContent.includes('iron'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Collected') && document.getElementById('status').textContent.includes('iron'), null, { timeout: 10000 });
     const walletClosedAfterActionResume = await frame.evaluate(() => !document.getElementById('walletPanel').classList.contains('open'));
     if (!walletClosedAfterActionResume) throw new Error('Expected the wallet panel to close itself once the in-world action actually resumed');
     console.log('PASS: unlocking auto-completed the mint with no second click on the stall, and the wallet closed itself ->', await frame.locator('#status').textContent());

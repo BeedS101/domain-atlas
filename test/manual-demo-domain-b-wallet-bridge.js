@@ -109,12 +109,12 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-b-profile-
     console.log('STEP 2: wallet-bridge-demo.html — "Check my wallet" correctly reports no active identity before one exists');
     const demoPage = await context.newPage();
     await demoPage.goto('http://' + DOMAIN + '/wallet-bridge-demo.html', { waitUntil: 'load' });
-    await demoPage.waitForFunction(() => !document.getElementById('checkBtn').disabled, { timeout: 10000 }); // extension-detection poll finishing
+    await demoPage.waitForFunction(() => !document.getElementById('checkBtn').disabled, null, { timeout: 10000 }); // extension-detection poll finishing
     await demoPage.locator('#checkBtn').click();
     await demoPage.waitForFunction(() => {
       const el = document.getElementById('checkStatus');
       return el && el.textContent.includes('No wallet identity is active');
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const signBtnDisabledBefore = await demoPage.locator('#signBtn').isDisabled();
     const offerBtnDisabledBefore = await demoPage.locator('#offerBtn').isDisabled();
     if (!signBtnDisabledBefore || !offerBtnDisabledBefore) throw new Error('Expected Step 2/3 buttons to stay disabled with no active identity');
@@ -123,15 +123,15 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-b-profile-
     console.log('STEP 3: creating a real wallet identity (side panel, standalone mode)');
     const walletPage = await context.newPage();
     await walletPage.goto('chrome-extension://' + extensionId + '/viewer.html', { waitUntil: 'load' });
-    await walletPage.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), { timeout: 10000 });
+    await walletPage.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 10000 });
     await walletPage.locator('#chooseNewBtn').click();
     await walletPage.locator('#newPasswordInput').fill('demo-b-bridge-test-pw');
     await walletPage.locator('#newPasswordConfirmInput').fill('demo-b-bridge-test-pw');
     await walletPage.locator('#confirmCreateBtn').click();
-    await walletPage.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await walletPage.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await walletPage.locator('#seedConfirmCheck').check();
     await walletPage.locator('#seedConfirmBtn').click();
-    await walletPage.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await walletPage.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const realPublicKey = await walletPage.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       return identity ? identity.publicKey : null;
@@ -156,8 +156,8 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-demo-b-profile-
     await demoPage.waitForFunction(() => {
       const el = document.getElementById('checkStatus');
       return el && el.textContent.includes('Active identity');
-    }, { timeout: 10000 });
-    await demoPage.waitForFunction(() => !document.getElementById('signBtn').disabled && !document.getElementById('offerBtn').disabled, { timeout: 5000 });
+    }, null, { timeout: 10000 });
+    await demoPage.waitForFunction(() => !document.getElementById('signBtn').disabled && !document.getElementById('offerBtn').disabled, null, { timeout: 5000 });
     console.log('PASS: the page picked up the real identity and enabled Step 2/3');
 
     console.log('STEP 5: "Ask for a signature" shows the real prompt naming "demo-login", and reports a real signed envelope once approved');

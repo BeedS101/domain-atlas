@@ -68,14 +68,14 @@ function assert(cond, message) {
 
     console.log('STEP 1: "Set up the demo bank" generates three officer cards');
     await page.locator('#setupBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#officerCards .officer').length === 3, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#officerCards .officer').length === 3, null, { timeout: 10000 });
     console.log('PASS: three officer cards rendered');
 
     console.log('STEP 2: requesting a transfer creates a real pending record, 0-of-2 progress shown');
     await page.locator('#amountInput').fill('750');
     await page.locator('#memoInput').fill('Payroll batch');
     await page.locator('#requestBtn').click();
-    await page.waitForFunction(() => document.getElementById('approvePanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('approvePanel').style.display !== 'none', null, { timeout: 10000 });
     const progressAfterRequest = await page.locator('#progressText').textContent();
     assert(progressAfterRequest.includes('0 of 2'), 'expected "0 of 2" progress right after requesting, got: ' + progressAfterRequest);
     const rawAfterRequest = JSON.parse(await page.locator('#rawPre').textContent());
@@ -85,7 +85,7 @@ function assert(cond, message) {
 
     console.log('STEP 3: approving as Officer A signs it — still pending, 1 more needed');
     await page.locator('#approveButtons button').nth(0).click();
-    await page.waitForFunction(() => document.getElementById('officerState-0').textContent.includes('Signed'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('officerState-0').textContent.includes('Signed'), null, { timeout: 10000 });
     const progressAfterA = await page.locator('#progressText').textContent();
     assert(progressAfterA.includes('1 of 2'), 'expected "1 of 2" progress after Officer A signs, got: ' + progressAfterA);
     const rawAfterA = JSON.parse(await page.locator('#rawPre').textContent());
@@ -97,7 +97,7 @@ function assert(cond, message) {
     await page.waitForFunction(() => {
       const el = document.getElementById('approveStatus');
       return el.textContent.includes('Rejected');
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const tamperText = await page.locator('#approveStatus').textContent();
     assert(tamperText.includes('does not check out') || tamperText.includes('Rejected'), 'expected a rejection message, got: ' + tamperText);
     assert(!(await page.locator('#officerState-2').textContent()).includes('Signed'), 'expected the tampered signature to NOT count as Officer C actually signing');
@@ -107,7 +107,7 @@ function assert(cond, message) {
 
     console.log('STEP 5: approving as Officer B reaches the 2-of-3 threshold and executes');
     await page.locator('#approveButtons button').nth(1).click();
-    await page.waitForFunction(() => document.getElementById('approveStatus').textContent.includes('executed'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('approveStatus').textContent.includes('executed'), null, { timeout: 10000 });
     const executedText = await page.locator('#approveStatus').textContent();
     const rawExecuted = JSON.parse(await page.locator('#rawPre').textContent());
     assert(rawExecuted.status === 'executed', 'expected the request to be executed after 2 real signatures, got: ' + rawExecuted.status);

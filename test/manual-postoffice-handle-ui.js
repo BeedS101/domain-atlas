@@ -68,7 +68,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -79,10 +79,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click();
   return publicKey;
@@ -96,15 +96,15 @@ async function joinDomainBPostOffice(frame, label) {
   const portals = await projectPortals(frame);
   const toNeighbor = portals.find((p) => p.kind === 'domain');
   await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), null, { timeout: 10000 });
 
   await frame.locator('#walletBtn').click();
   await frame.locator('#socialTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
-  await frame.waitForFunction(() => !document.getElementById('postOfficeJoinSection').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('postOfficeJoinSection').hidden, null, { timeout: 5000 });
   await frame.locator('#postOfficeJoinBtn').click();
-  await frame.waitForFunction(() => document.getElementById('postOfficeJoinSection').hidden, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('postOfficeJoinSection').hidden, null, { timeout: 10000 });
   console.log('PASS: ' + label + ' joined Domain B\'s Post Office');
   await frame.locator('#walletBtn').click(); // close the wallet panel before navigating, same as createIdentity leaves it
 
@@ -112,7 +112,7 @@ async function joinDomainBPostOffice(frame, label) {
   const backPortals = await projectPortals(frame);
   const backToPlaza = backPortals.find((p) => p.kind === 'domain');
   await frame.locator('#scene').click({ position: { x: backToPlaza.sx, y: backToPlaza.sy } });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), null, { timeout: 10000 });
 }
 
 // Idempotent — walletBtn TOGGLES the panel (see viewer.js), so blindly
@@ -123,8 +123,8 @@ async function openMailScreen(frame) {
   const alreadyOpen = await frame.evaluate(() => document.getElementById('walletPanel').classList.contains('open'));
   if (!alreadyOpen) await frame.locator('#walletBtn').click();
   await frame.locator('#socialTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
-  await frame.waitForFunction(() => document.getElementById('myPublicKeyDisplay').value.length > 0, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('myPublicKeyDisplay').value.length > 0, null, { timeout: 5000 });
 }
 
 // Mail now has its own inner "Mail" / "Mail Settings" sub-tab bar — "Your
@@ -180,10 +180,10 @@ async function openMailBoxComposeSubtab(frame) {
     await openMailScreen(b.frame);
     await openMailSettingsSubtab(b.frame);
     await b.frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
-    await b.frame.waitForFunction(() => document.getElementById('postOfficeYourHandleDisplay').textContent.includes('No handle set'), { timeout: 5000 });
+    await b.frame.waitForFunction(() => document.getElementById('postOfficeYourHandleDisplay').textContent.includes('No handle set'), null, { timeout: 5000 });
     await b.frame.locator('#postOfficeHandleInput').fill('bob');
     await b.frame.locator('#postOfficeSaveHandleBtn').click();
-    await b.frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), { timeout: 5000 });
+    await b.frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), null, { timeout: 5000 });
     const handleDisplay = await b.frame.locator('#postOfficeYourHandleDisplay').textContent();
     if (!handleDisplay.includes('bob#localhost:8002')) throw new Error('Expected the handle display to read "bob#localhost:8002", got: ' + handleDisplay);
     console.log('PASS: B is now', handleDisplay);
@@ -195,7 +195,7 @@ async function openMailBoxComposeSubtab(frame) {
     await a.frame.waitForFunction(() => {
       const opts = [...document.getElementById('postOfficeToDomainInput').options].map((o) => o.value).filter(Boolean);
       return opts.includes('localhost:8002');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     await a.frame.locator('#postOfficeToDomainInput').selectOption('localhost:8002');
     const rawKeyHiddenByDefault = await a.frame.evaluate(() => document.getElementById('postOfficeToPublicKeyInput').hidden);
     if (!rawKeyHiddenByDefault) throw new Error('Expected the raw-key field to be hidden by default (handle-first)');
@@ -203,7 +203,7 @@ async function openMailBoxComposeSubtab(frame) {
     await a.frame.locator('#postOfficeSubjectInput').fill('Hello via handle');
     await a.frame.locator('#postOfficeBodyInput').fill('sent using just "bob", no public key typed');
     await a.frame.locator('#postOfficeSendBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', null, { timeout: 10000 });
     console.log('PASS: sent by bare handle');
 
     console.log('STEP 3: B\'s mail card shows it, falling back to A\'s raw key (A has no handle registered yet)');
@@ -211,7 +211,7 @@ async function openMailBoxComposeSubtab(frame) {
     await openMailInboxSubtab(b.frame);
     await openMailBoxInboxSubtab(b.frame);
     await b.frame.locator('#checkMailNowBtn').click();
-    await b.frame.waitForFunction(() => [...document.querySelectorAll('#mailList .mail-card')].some((el) => el.textContent.includes('Hello via handle')), { timeout: 10000 });
+    await b.frame.waitForFunction(() => [...document.querySelectorAll('#mailList .mail-card')].some((el) => el.textContent.includes('Hello via handle')), null, { timeout: 10000 });
     const card1 = b.frame.locator('#mailList .mail-card', { hasText: 'Hello via handle' });
     const card1Text = await card1.textContent();
     if (!card1Text.includes(pkA.slice(0, 20))) throw new Error('Expected the fallback raw-key fragment for A (no handle yet), got: ' + card1Text);
@@ -223,7 +223,7 @@ async function openMailBoxComposeSubtab(frame) {
     await a.frame.locator('#postOfficeSettingsDomainInput').selectOption('localhost:8002');
     await a.frame.locator('#postOfficeHandleInput').fill('alice');
     await a.frame.locator('#postOfficeSaveHandleBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('postOfficeHandleStatus').textContent.startsWith('Saved'), null, { timeout: 5000 });
     await openMailInboxSubtab(a.frame);
     await openMailBoxComposeSubtab(a.frame);
     await a.frame.locator('#postOfficeToDomainInput').selectOption(''); // clear the dropdown to prove the full address alone drives it
@@ -231,14 +231,14 @@ async function openMailBoxComposeSubtab(frame) {
     await a.frame.locator('#postOfficeSubjectInput').fill('Hello via full address');
     await a.frame.locator('#postOfficeBodyInput').fill('sent using "bob#localhost:8002" in one field');
     await a.frame.locator('#postOfficeSendBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', null, { timeout: 10000 });
     const dropdownAfterParse = await a.frame.locator('#postOfficeToDomainInput').inputValue();
     if (dropdownAfterParse !== 'localhost:8002') throw new Error('Expected parsing the full address to auto-select the domain dropdown, got: ' + dropdownAfterParse);
     console.log('PASS: a full "handle#domain" address alone resolved the domain and sent successfully');
 
     console.log('STEP 5: B\'s second mail card shows "From alice#localhost:8002"');
     await b.frame.locator('#checkMailNowBtn').click();
-    await b.frame.waitForFunction(() => [...document.querySelectorAll('#mailList .mail-card')].some((el) => el.textContent.includes('Hello via full address')), { timeout: 10000 });
+    await b.frame.waitForFunction(() => [...document.querySelectorAll('#mailList .mail-card')].some((el) => el.textContent.includes('Hello via full address')), null, { timeout: 10000 });
     const card2 = b.frame.locator('#mailList .mail-card', { hasText: 'Hello via full address' });
     const card2Text = await card2.textContent();
     if (!card2Text.includes('alice#localhost:8002')) throw new Error('Expected "From alice#localhost:8002", got: ' + card2Text);
@@ -254,7 +254,7 @@ async function openMailBoxComposeSubtab(frame) {
     await a.frame.locator('#postOfficeSubjectInput').fill('Hello via raw key');
     await a.frame.locator('#postOfficeBodyInput').fill('the fallback path still works');
     await a.frame.locator('#postOfficeSendBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', null, { timeout: 10000 });
     console.log('PASS: raw-key fallback path still sends successfully');
 
     console.log('STEP 7: sending to an unregistered handle fails with a clear status, no crash');
@@ -266,7 +266,7 @@ async function openMailBoxComposeSubtab(frame) {
     await a.frame.waitForFunction(() => {
       const t = document.getElementById('postOfficeSendStatus').textContent;
       return t && t !== '' && t !== 'Looking up…';
-    }, { timeout: 10000 });
+    }, null, { timeout: 10000 });
     const failStatus = await a.frame.locator('#postOfficeSendStatus').textContent();
     if (failStatus === 'Sent.') throw new Error('Expected sending to an unregistered handle to fail, but it reported success');
     console.log('PASS: clear failure status ->', failStatus);

@@ -77,7 +77,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -88,10 +88,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click();
   return publicKey;
@@ -102,19 +102,19 @@ async function claimPostOfficeMembership(frame, label) {
   const toNeighbor = portals.find((p) => p.kind === 'domain');
   if (!toNeighbor) throw new Error('Expected a domain portal out of the Plaza for ' + label);
   await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), null, { timeout: 10000 });
 
   const [postOfficeStall] = (await projectInteractables(frame)).filter((m) => m.class === 'atlas.postoffice.membership');
   if (!postOfficeStall) throw new Error('Expected a Post Office interactable in the workshop scene');
   await frame.locator('#scene').click({ position: { x: postOfficeStall.sx, y: postOfficeStall.sy } });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), null, { timeout: 10000 });
   console.log('PASS: ' + label + ' claimed a Global Mail Membership Card at Domain B');
 
   portals = await projectPortals(frame);
   const backToDomainA = portals.find((p) => p.kind === 'domain');
   await frame.locator('#scene').click({ position: { x: backToDomainA.sx, y: backToDomainA.sy } });
-  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8001'), null, { timeout: 10000 });
 }
 
 (async () => {
@@ -142,8 +142,8 @@ async function claimPostOfficeMembership(frame, label) {
     console.log('STEP 2: Visitor A sends B a raw-public-key message (no handle registered) through the Post Office');
     await a.frame.locator('#walletBtn').click();
     await a.frame.locator('#socialTabBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
-    await a.frame.waitForFunction(() => document.getElementById('postOfficeToDomainInput').options.length > 1, { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
+    await a.frame.waitForFunction(() => document.getElementById('postOfficeToDomainInput').options.length > 1, null, { timeout: 5000 });
     const composeAlreadyActive = await a.frame.locator('#mailBoxComposeSubscreen').evaluate((el) => el.classList.contains('active'));
     if (!composeAlreadyActive) await a.frame.locator('#mailBoxComposeSubtabBtn').click();
     await a.frame.locator('#postOfficeToggleRawKeyBtn').click();
@@ -152,16 +152,16 @@ async function claimPostOfficeMembership(frame, label) {
     await a.frame.locator('#postOfficeSubjectInput').fill('Hey there');
     await a.frame.locator('#postOfficeBodyInput').fill('Just saying hi.');
     await a.frame.locator('#postOfficeSendBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('postOfficeSendStatus').textContent === 'Sent.', null, { timeout: 10000 });
     console.log('PASS: message sent');
 
     console.log('STEP 3: Visitor B checks mail and finds the message, NOT yet a saved contact');
     await b.frame.locator('#walletBtn').click();
     await b.frame.locator('#socialTabBtn').click();
-    await b.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await b.frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await b.frame.locator('#checkMailNowBtn').click();
     // 2 messages: the welcome mail auto-sent on claiming membership + this test's message.
-    await b.frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, { timeout: 10000 });
+    await b.frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, null, { timeout: 10000 });
     const mailCard = b.frame.locator('#mailList .mail-card', { hasText: 'Hey there' });
     const cardTextBefore = await mailCard.textContent();
     if (cardTextBefore.includes('(friend)')) throw new Error('Sender should not already read as a friend before Add Contact is used: ' + cardTextBefore);
@@ -179,7 +179,7 @@ async function claimPostOfficeMembership(frame, label) {
 
     console.log('STEP 5: clicking Add Contact saves the sender with the fallback name, shows visible feedback, and the button disappears from this same card');
     await addContactBtn.click();
-    await b.frame.waitForFunction(() => document.getElementById('status').textContent === 'Added Friend to Contacts.', { timeout: 5000 });
+    await b.frame.waitForFunction(() => document.getElementById('status').textContent === 'Added Friend to Contacts.', null, { timeout: 5000 });
     console.log('PASS: status line confirmed the add ->', await b.frame.locator('#status').textContent());
     // The card re-renders on refreshMailDisplay() — re-locate rather than
     // reuse stale handles, then confirm this exact sender's Add Contact
@@ -200,11 +200,11 @@ async function claimPostOfficeMembership(frame, label) {
     // Contacts -> its default-active "Contacts" inner sub-tab (contactsList
     // itself), same nesting the file's own comments describe above.
     await b.frame.locator('#contactsSubtabBtn').click();
-    await b.frame.waitForFunction(() => document.getElementById('contactsSubscreen').classList.contains('active'), { timeout: 5000 });
+    await b.frame.waitForFunction(() => document.getElementById('contactsSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await b.frame.waitForFunction(() => {
       const list = document.getElementById('contactsList');
       return list && list.querySelector('.info-card');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     const contactCardText = await b.frame.locator('#contactsList .info-card').first().textContent();
     if (!contactCardText.includes('Friend')) throw new Error('Expected the new contact to be named "Friend" (no handle was registered), got: ' + contactCardText);
     if (!contactCardText.includes(pkA.slice(0, 16))) throw new Error('Expected the new contact\'s key fragment to match Visitor A\'s public key: ' + contactCardText);

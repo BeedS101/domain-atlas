@@ -102,19 +102,19 @@ async function setupFreshLobbySession(context, page) {
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
   frame.on('pageerror', (err) => console.log('FRAMEERROR:', String(err)));
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
   await frame.locator('#walletBtn').click();
   await frame.locator('#chooseNewBtn').click();
   await frame.locator('#newPasswordInput').fill('previewer-3d-test-pw');
   await frame.locator('#newPasswordConfirmInput').fill('previewer-3d-test-pw');
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#walletBtn').click();
-  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
   const lobbyHb = await frame.evaluate(() => new Promise((resolve) => {
     const check = () => {
@@ -127,8 +127,8 @@ async function setupFreshLobbySession(context, page) {
     check();
   }));
   await frame.locator('#scene').click({ position: { x: lobbyHb.sx, y: lobbyHb.sy } });
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
-  await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
+  await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 10000 });
   await frame.evaluate(() => window.__atlasActive3D.ready);
   return frame;
 }
@@ -158,8 +158,8 @@ async function runScenarioA() {
 
     console.log('STEP A2: walking up to crate 1 alone shows a single-item Previewer (crate 2 is too far away)');
     await teleport(frame, CRATE_1.x, CRATE_1.z);
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 1, { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, { timeout: 3000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 1, null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === false, null, { timeout: 3000 });
     const singlePreview = await readPreviewer(frame);
     if (singlePreview.listItemNames.length !== 0) throw new Error('Expected a single-item detail view (no list rows) with only one crate in range, got: ' + JSON.stringify(singlePreview.listItemNames));
     if (!singlePreview.name.includes(pinName)) throw new Error('Expected "' + pinName + '" in the single-item preview, got: ' + singlePreview.name);
@@ -169,8 +169,8 @@ async function runScenarioA() {
 
     console.log('STEP A3: walking to the midpoint between both crates shows a MULTI-item list — Bruno\'s "close to 2 or more items" case');
     await teleport(frame, MIDPOINT.x, MIDPOINT.z);
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 2, { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#previewerBody .previewer-list-item').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 2, null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#previewerBody .previewer-list-item').length === 2, null, { timeout: 5000 });
     const listPreview = await readPreviewer(frame);
     const expectedNames = [pinName, charmName].sort();
     const actualNames = listPreview.listItemNames.slice().sort();
@@ -189,8 +189,8 @@ async function runScenarioA() {
     console.log('PASS: clicking the list row minted a genuine ' + pinName + ' credential ->', statusAfterClick);
 
     console.log('STEP A5: the list narrows itself down to the single remaining item automatically, still at the same spot');
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 1, { timeout: 5000 });
-    await frame.waitForFunction(() => document.querySelectorAll('#previewerBody .previewer-list-item').length === 0, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 1, null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#previewerBody .previewer-list-item').length === 0, null, { timeout: 5000 });
     const narrowedPreview = await readPreviewer(frame);
     if (!narrowedPreview.name.includes(charmName)) throw new Error('Expected the remaining single-item preview to be "' + charmName + '", got: ' + narrowedPreview.name);
     console.log('PASS: Previewer automatically narrowed to the one remaining uncollected item ->', narrowedPreview.name);
@@ -209,9 +209,9 @@ async function runScenarioA() {
         });
       });
     }, CRATE_2.class, { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', { timeout: 5000 });
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 0, { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 0, null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, null, { timeout: 5000 });
     const finalWallet = await getWalletClasses(frame);
     if (!finalWallet.includes(CRATE_1.class) || !finalWallet.includes(CRATE_2.class)) throw new Error('Expected BOTH crate classes in the wallet, got: ' + finalWallet.join(', '));
     console.log('PASS: both classes now owned, the Previewer ignores the midpoint entirely — nothing left to preview');
@@ -237,7 +237,7 @@ async function runScenarioB() {
 
     console.log('STEP B1: walking to the midpoint between both crates shows both in range');
     await teleport(frame, MIDPOINT.x, MIDPOINT.z);
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 2, null, { timeout: 5000 });
     console.log('PASS: both crates in E-range at once, exactly as scenario A found');
 
     console.log('STEP B2: pressing E collects the nearest available item — "press e multiple times to collect them one at a time"');
@@ -251,7 +251,7 @@ async function runScenarioB() {
     console.log('PASS: first E press collected ' + firstClass + ' -> ' + statusAfterFirst);
 
     console.log('STEP B3: the just-collected one drops out of range immediately — only the OTHER item is left nearby');
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 1, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 1, null, { timeout: 5000 });
     const remainingMarker = await frame.evaluate(() => window.__atlasActive3D.getNearbyInteractMarkers()[0].class);
     const expectedRemaining = firstClass === CRATE_1.class ? CRATE_2.class : CRATE_1.class;
     if (remainingMarker !== expectedRemaining) throw new Error('Expected the remaining nearby marker to be ' + expectedRemaining + ', got: ' + remainingMarker);
@@ -271,7 +271,7 @@ async function runScenarioB() {
         });
       });
     }, expectedRemaining, { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 5000 });
     const walletAfterSecond = await getWalletClasses(frame);
     if (!walletAfterSecond.includes(CRATE_1.class) || !walletAfterSecond.includes(CRATE_2.class)) {
       throw new Error('Expected BOTH crate classes in the wallet after two E presses, got: ' + walletAfterSecond.join(', '));
@@ -280,8 +280,8 @@ async function runScenarioB() {
     console.log('PASS: second E press collected the other item; both classes owned, no duplicates ->', walletAfterSecond.join(', '));
 
     console.log('STEP B5: nothing left to preview at the midpoint now');
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 0, { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 0, null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, null, { timeout: 5000 });
     console.log('PASS: Previewer closed, both oncePerUser classes now owned and ignored');
 
     console.log('\nSCENARIO B (press E multiple times, one at a time) PASSED');

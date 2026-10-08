@@ -73,7 +73,7 @@ function assert(cond, message) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, null, { timeout: 10000 });
 
     console.log('STEP 2: right-clicking the 2D scene canvas is suppressed');
     const canvasNotDefaulted = await dispatchContextMenu(frame.locator('#scene'));
@@ -82,7 +82,7 @@ function assert(cond, message) {
 
     console.log('STEP 3: right-clicking inside the wallet panel (once open) is suppressed');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     const panelNotDefaulted = await dispatchContextMenu(frame.locator('#walletPanel'));
     assert(panelNotDefaulted === false, 'expected the wallet panel\'s contextmenu event to have been prevented, dispatchEvent returned ' + panelNotDefaulted);
     console.log('PASS: the wallet panel suppresses the browser\'s own right-click menu');

@@ -86,7 +86,7 @@ function assert(cond, message) {
 
     console.log('STEP 1: clicking "Get my demo voucher" issues and renders the voucher, tagged Giftable');
     await page.locator('#issueBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#voucherCard .card').length === 1, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#voucherCard .card').length === 1, null, { timeout: 10000 });
     const voucherCard = page.locator('#voucherCard .card');
     assert((await voucherCard.locator('h3').textContent()) === 'Workshop Visitor Voucher', 'expected the voucher\'s real name to render');
     assert(await voucherCard.locator('.badge').textContent() === 'Giftable', 'expected the voucher tagged Giftable');
@@ -95,14 +95,14 @@ function assert(cond, message) {
 
     console.log('STEP 2: clicking "Send the voucher" with no address entered is caught client-side, no network call');
     await page.locator('#sendBtn').click();
-    await page.waitForFunction(() => (document.getElementById('sendResult').textContent || '').includes('Enter a valid email address'), { timeout: 10000 });
+    await page.waitForFunction(() => (document.getElementById('sendResult').textContent || '').includes('Enter a valid email address'), null, { timeout: 10000 });
     assert(await page.locator('#sendBtn').isEnabled(), 'expected the button to stay enabled after a client-side-only rejection');
     console.log('PASS: empty address caught before anything else happens');
 
     console.log('STEP 3: sending to a well-formed address shows the mockup result, never touching the real endpoint');
     await page.locator('#emailInput').fill('friend@example.com');
     await page.locator('#sendBtn').click();
-    await page.waitForFunction(() => document.querySelector('#sendResult .result.ok') !== null, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelector('#sendResult .result.ok') !== null, null, { timeout: 10000 });
     const okText = await page.locator('#sendResult .result.ok').textContent();
     assert(okText.includes('friend@example.com'), 'expected the mockup message to name the address typed in, got: ' + okText);
     assert(/no real email was sent/i.test(okText), 'expected the mockup to say plainly that nothing was actually sent, got: ' + okText);
@@ -116,11 +116,11 @@ function assert(cond, message) {
 
     console.log('STEP 4: "Start over" resets the page without a reload, and a second run-through works normally');
     await page.locator('#resetBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#voucherCard .card').length === 0 && document.getElementById('resetBtn').style.display === 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#voucherCard .card').length === 0 && document.getElementById('resetBtn').style.display === 'none', null, { timeout: 10000 });
     assert(!(await page.locator('#sendPanel').isVisible()), 'expected Step 2 to hide again after a reset');
     assert(await page.locator('#issueBtn').isEnabled(), 'expected "Get my demo voucher" to be clickable again');
     await page.locator('#issueBtn').click();
-    await page.waitForFunction(() => document.querySelectorAll('#voucherCard .card').length === 1, { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('#voucherCard .card').length === 1, null, { timeout: 10000 });
     assert(transferRequests.length === 0, 'expected the real endpoint to still never have been called after a reset and re-run');
     console.log('PASS: the page resets in place and a second run-through works normally');
 

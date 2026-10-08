@@ -37,7 +37,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     console.log('SETUP: create a wallet identity (needed for chat to be sendable), then walk into the 3D Lobby');
     await frame.locator('#walletBtn').click();
@@ -45,10 +45,10 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.locator('#newPasswordInput').fill('movement-focus-guard-pw');
     await frame.locator('#newPasswordConfirmInput').fill('movement-focus-guard-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click(); // close the panel so the scene/canvas is reachable
 
     const lobbyHb = await frame.evaluate(() => new Promise((resolve) => {
@@ -62,8 +62,8 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       check();
     }));
     await frame.locator('#scene').click({ position: { x: lobbyHb.sx, y: lobbyHb.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), { timeout: 10000 });
-    await frame.waitForFunction(() => !!window.__atlasActive3D, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => !!window.__atlasActive3D, null, { timeout: 10000 });
     console.log('PASS: in the 3D Lobby, window.__atlasActive3D live');
 
     async function readPos() {
@@ -85,7 +85,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     console.log('STEP 1: focusing the CHAT text input and typing (including a Space) neither moves the character nor eats the space character');
     await frame.locator('#chatTextInput').click();
-    await frame.waitForFunction(() => document.activeElement && document.activeElement.id === 'chatTextInput', { timeout: 2000 });
+    await frame.waitForFunction(() => document.activeElement && document.activeElement.id === 'chatTextInput', null, { timeout: 2000 });
     const posBeforeChatTyping = await readPos();
     await page.keyboard.type('hi there'); // real keydown/keyup events, including Space and the movement-key letters in "there" (KeyT/KeyH/KeyE/KeyR/KeyE — none are WASD, so type something with a 'w' too)
     await page.keyboard.type(' walk');
@@ -97,14 +97,14 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 
     console.log('STEP 2: same guard applies to a COMPLETELY DIFFERENT text field (the Identity settings category\'s alias input), proving this isn\'t hardcoded to chat specifically');
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const identityCategory = frame.locator('#mainWalletScreen .settings-category[data-category="identity"]');
     if (!(await identityCategory.evaluate((el) => el.classList.contains('open')))) {
       await identityCategory.locator('.settings-category-toggle').click();
-      await frame.waitForFunction(() => document.querySelector('#mainWalletScreen .settings-category[data-category="identity"]').classList.contains('open'), { timeout: 5000 });
+      await frame.waitForFunction(() => document.querySelector('#mainWalletScreen .settings-category[data-category="identity"]').classList.contains('open'), null, { timeout: 5000 });
     }
     await frame.locator('#aliasInput').click();
-    await frame.waitForFunction(() => document.activeElement && document.activeElement.id === 'aliasInput', { timeout: 2000 });
+    await frame.waitForFunction(() => document.activeElement && document.activeElement.id === 'aliasInput', null, { timeout: 2000 });
     const posBeforeAliasTyping = await readPos();
     await page.keyboard.type('Way Walker'); // deliberately full of W/A/S/D letters and a space
     const aliasValue = await frame.locator('#aliasInput').inputValue();
@@ -121,7 +121,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.waitForTimeout(150);
     const posMidHold = await readPos();
     await frame.locator('#chatTextInput').click(); // focus change while W is still physically "held" from Playwright's perspective
-    await frame.waitForFunction(() => document.activeElement && document.activeElement.id === 'chatTextInput', { timeout: 2000 });
+    await frame.waitForFunction(() => document.activeElement && document.activeElement.id === 'chatTextInput', null, { timeout: 2000 });
     const posRightAfterFocus = await readPos();
     await page.waitForTimeout(250); // if the key were still stuck "on", the character would keep sliding during this window
     const posWellAfterFocus = await readPos();

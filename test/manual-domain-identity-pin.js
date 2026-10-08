@@ -290,7 +290,7 @@ async function waitSettle(ms = 1500) { await new Promise((r) => setTimeout(r, ms
     await page.waitForFunction(() => {
       const el = document.getElementById('domain-atlas-info-tooltip');
       return el && getComputedStyle(el).display !== 'none' && el.innerHTML.toLowerCase().includes('identity key changed');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: undocumented key change discloses plainly — label prefix, color change, and a tooltip line — with the button still fully clickable, never a blocking modal');
 
     console.log('STEP 8: a manifest whose pin fails its own signature check is never disclosed');

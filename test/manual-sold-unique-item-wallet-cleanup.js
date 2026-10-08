@@ -45,7 +45,7 @@ async function openOverlay(context, label) {
   await page.locator('#domain-atlas-enter-btn').click();
   const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
   const frame = await frameHandle.contentFrame();
-  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+  await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
   console.log('SETUP: ' + label + ' opened the overlay at Example Plaza');
   return { page, frame };
 }
@@ -56,10 +56,10 @@ async function createIdentity(frame, password) {
   await frame.locator('#newPasswordInput').fill(password);
   await frame.locator('#newPasswordConfirmInput').fill(password);
   await frame.locator('#confirmCreateBtn').click();
-  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
   await frame.locator('#seedConfirmCheck').check();
   await frame.locator('#seedConfirmBtn').click();
-  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
   const publicKey = await frame.evaluate(() => AtlasWallet.getIdentity().then((i) => i.publicKey));
   await frame.locator('#walletBtn').click(); // close the panel — later steps re-open it via the same toggle
   return publicKey;
@@ -69,7 +69,7 @@ async function openTradingSubtab(frame, subtabBtnId, subscreenId) {
   const panelOpen = await frame.evaluate(() => document.getElementById('walletPanel').classList.contains('open'));
   if (!panelOpen) await frame.locator('#walletBtn').click();
   await frame.locator('#tradeTabBtn').click();
-  await frame.waitForFunction(() => document.getElementById('tradeScreen').classList.contains('active'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('tradeScreen').classList.contains('active'), null, { timeout: 5000 });
   await frame.locator('#' + subtabBtnId).click();
   await frame.waitForFunction((id) => document.getElementById(id).classList.contains('active'), subscreenId, { timeout: 5000 });
 }
@@ -96,10 +96,10 @@ async function pickSearchable(frame, selectId, value) {
 async function joinTradingStationIfNeeded(frame) {
   const alreadyJoined = await frame.evaluate(() => document.getElementById('tradingStationJoinSection').hidden);
   if (alreadyJoined) return;
-  await frame.waitForFunction(() => !document.getElementById('tradingStationJoinSection').hidden, { timeout: 5000 });
+  await frame.waitForFunction(() => !document.getElementById('tradingStationJoinSection').hidden, null, { timeout: 5000 });
   await frame.locator('#tradingStationJoinBtn').click();
-  await frame.waitForFunction(() => document.getElementById('tradingStationJoinSection').hidden, { timeout: 10000 });
-  await frame.waitForFunction(() => Array.from(document.getElementById('remoteTradeStationDomainSelect').options).some((o) => o.value === 'localhost:8001'), { timeout: 5000 });
+  await frame.waitForFunction(() => document.getElementById('tradingStationJoinSection').hidden, null, { timeout: 10000 });
+  await frame.waitForFunction(() => Array.from(document.getElementById('remoteTradeStationDomainSelect').options).some((o) => o.value === 'localhost:8001'), null, { timeout: 5000 });
 }
 
 (async () => {
@@ -122,7 +122,7 @@ async function joinTradingStationIfNeeded(frame) {
 
     console.log('STEP 1: A mints a Signet Ring (non-fungible, local tradeScope); B mints gold');
     await a.frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.wearable.ring'); await refreshInventoryDisplay(); });
-    await a.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes("Merchant's Signet Ring"), { timeout: 15000 });
+    await a.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes("Merchant's Signet Ring"), null, { timeout: 15000 });
     const ringId = await a.frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       const wallet = await AtlasWallet.getWallet(identity.publicKey);
@@ -133,20 +133,20 @@ async function joinTradingStationIfNeeded(frame) {
     console.log('PASS: A holds the ring ->', ringId);
 
     await b.frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.gold', 10); await refreshInventoryDisplay(); });
-    await b.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Gold (Au) ×10 g'), { timeout: 15000 });
+    await b.frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Gold (Au) ×10 g'), null, { timeout: 15000 });
     console.log('PASS: B holds 10 gold');
 
     console.log('STEP 2: A sells the ring for 3 gold (same-domain Trading Station — tradeScope: local)');
     await openTradingSubtab(a.frame, 'tradingSellSubtabBtn', 'tradingSellSubscreen');
     await joinTradingStationIfNeeded(a.frame);
-    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellOfferClassSelect').options).some((o) => o.value === 'atlas.wearable.ring'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellOfferClassSelect').options).some((o) => o.value === 'atlas.wearable.ring'), null, { timeout: 10000 });
     await pickSearchable(a.frame, 'tradingSellOfferClassSelect', 'atlas.wearable.ring');
-    await a.frame.waitForFunction(() => document.getElementById('tradingSellOfferQtyInput').disabled === true, { timeout: 5000 });
-    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellWantClassSelect').options).some((o) => o.value === 'atlas.element.gold'), { timeout: 10000 });
+    await a.frame.waitForFunction(() => document.getElementById('tradingSellOfferQtyInput').disabled === true, null, { timeout: 5000 });
+    await a.frame.waitForFunction(() => Array.from(document.getElementById('tradingSellWantClassSelect').options).some((o) => o.value === 'atlas.element.gold'), null, { timeout: 10000 });
     await pickSearchable(a.frame, 'tradingSellWantClassSelect', 'atlas.element.gold');
     await a.frame.locator('#tradingSellWantQtyInput').fill('3');
     await a.frame.locator('#tradingSellSubmitBtn').click();
-    await a.frame.waitForFunction(() => document.getElementById('tradingSellStatus').textContent.startsWith('✓ Posted'), { timeout: 15000 });
+    await a.frame.waitForFunction(() => document.getElementById('tradingSellStatus').textContent.startsWith('✓ Posted'), null, { timeout: 15000 });
     console.log('PASS: A\'s listing is posted ->', await a.frame.locator('#tradingSellStatus').textContent());
 
     console.log('STEP 3: B claims it — the ring is now genuinely B\'s, A\'s balance is spent server-side');
@@ -156,7 +156,7 @@ async function joinTradingStationIfNeeded(frame) {
     const buyRow = b.frame.locator('#tradingBuyList .wallet-item', { hasText: 'atlas.wearable.ring' });
     await buyRow.waitFor({ timeout: 15000 });
     await buyRow.locator('.trading-claim-btn').click();
-    await b.frame.waitForFunction(() => document.getElementById('tradingBuyStatus').textContent.startsWith('✓ Traded'), { timeout: 15000 });
+    await b.frame.waitForFunction(() => document.getElementById('tradingBuyStatus').textContent.startsWith('✓ Traded'), null, { timeout: 15000 });
     console.log('PASS: B claimed the ring ->', await b.frame.locator('#tradingBuyStatus').textContent());
 
     console.log('STEP 4: before A ever checks mail, the server-side state is already the exact shape this bug needs — a bare revoked/superseded update, no assetUpdates record');
@@ -184,7 +184,7 @@ async function joinTradingStationIfNeeded(frame) {
     // it, so just wait on the thing processAssetUpdates() actually does
     // synchronously within the same mail-check round trip: the ring
     // itself disappearing from the collectibles list.
-    await a.frame.waitForFunction(() => !document.getElementById('selfCollectiblesList').textContent.includes("Merchant's Signet Ring"), { timeout: 15000 });
+    await a.frame.waitForFunction(() => !document.getElementById('selfCollectiblesList').textContent.includes("Merchant's Signet Ring"), null, { timeout: 15000 });
 
     const walletAfter = await a.frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();

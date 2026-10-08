@@ -104,16 +104,16 @@ function postJson(port, urlPath, body) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('mail-gift-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('mail-gift-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     const membership = await frame.evaluate(async () => {
       return await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.membership');
@@ -148,7 +148,7 @@ function postJson(port, urlPath, body) {
     await frame.locator('#socialTabBtn').click();
     await frame.locator('#checkMailNowBtn').click();
     // 2 messages: this test's gift message + the auto-sent welcome message from subscribing.
-    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, { timeout: 10000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#mailList .mail-card').length === 2, null, { timeout: 10000 });
     const giftCard = frame.locator('#mailList .mail-card', { hasText: 'A little gift' });
     const giftCardText = await giftCard.textContent();
     if (!giftCardText.includes('Gift: Plaza Visitor Badge')) throw new Error('Expected the gift card to name the gift: ' + giftCardText);
@@ -164,12 +164,12 @@ function postJson(port, urlPath, body) {
 
     console.log('STEP 3: clicking Claim adds the credential to the wallet and the card flips to a static "(claimed)" indicator');
     await giftCard.locator('button[data-action="claim-gift"]').click();
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Claimed Plaza Visitor Badge'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('Claimed Plaza Visitor Badge'), null, { timeout: 5000 });
     await frame.waitForFunction(() => {
       const cards = Array.from(document.querySelectorAll('#mailList .mail-card'));
       const card = cards.find((c) => c.textContent.includes('A little gift'));
       return card && card.textContent.includes('(claimed)') && !card.querySelector('button[data-action="claim-gift"]');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     const walletAfterClaim = await frame.evaluate(async (pk) => {
       const wallet = await AtlasWallet.getWallet(pk);
       return wallet.filter((e) => e.credential.asset.class === 'atlas.badge').length;

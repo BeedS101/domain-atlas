@@ -63,20 +63,20 @@ function assert(cond, message) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.length > 0, null, { timeout: 10000 });
 
     const PASSWORD_1 = 'activity-log-test-password-1';
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('onboardingChoiceScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#chooseNewBtn').click();
-    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('createScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#newPasswordInput').fill(PASSWORD_1);
     await frame.locator('#newPasswordConfirmInput').fill(PASSWORD_1);
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
     const afterCreate = await frame.evaluate(async () => AtlasWallet.getActivityLog());
     assert(afterCreate.length === 1, 'expected exactly one entry right after creating an identity, got ' + afterCreate.length);
@@ -169,13 +169,13 @@ function assert(cond, message) {
       await refreshInventoryDisplay();
     }, NODE_DOMAIN);
     await frame.locator('#walletTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     const activityCategoryToggle = frame.locator('.settings-category[data-category="activity-log"] .settings-category-toggle');
     await activityCategoryToggle.click();
     await frame.waitForFunction(() => {
       const list = document.getElementById('activityLogList');
       return list && list.querySelector('.info-card');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     const uiRowText = await frame.evaluate(() => document.querySelector('#activityLogList .info-card .name').textContent);
     assert(uiRowText.indexOf('Minted 1 atlas.element.iron') === 0, 'expected the UI to render the freshly-minted entry, got: ' + uiRowText);
     console.log('PASS: UI renders the current activity log —', uiRowText);

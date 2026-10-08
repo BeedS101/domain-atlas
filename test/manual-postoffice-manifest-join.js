@@ -67,7 +67,7 @@ async function projectPortals(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
     console.log('SETUP: create a real wallet identity');
     await frame.locator('#walletBtn').click();
@@ -75,17 +75,17 @@ async function projectPortals(frame) {
     await frame.locator('#newPasswordInput').fill('manifest-join-test-password');
     await frame.locator('#newPasswordConfirmInput').fill('manifest-join-test-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click();
     console.log('PASS: identity created');
 
     console.log('STEP 1: at Domain A (no postOffice field), the Join section never shows');
     await frame.locator('#walletBtn').click();
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const joinHiddenAtA = await frame.evaluate(() => document.getElementById('postOfficeJoinSection').hidden);
     if (!joinHiddenAtA) throw new Error('Expected the Join section to be hidden at Domain A, which does not advertise postOffice');
     console.log('PASS: no Join section at a domain that hasn\'t opted in');
@@ -95,27 +95,27 @@ async function projectPortals(frame) {
     const portals = await projectPortals(frame);
     const toNeighbor = portals.find((p) => p.kind === 'domain');
     await frame.locator('#scene').click({ position: { x: toNeighbor.sx, y: toNeighbor.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Neighbor Workshop'), null, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.includes('8002'), null, { timeout: 10000 });
 
     await frame.locator('#walletBtn').click();
     await frame.locator('#socialTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), { timeout: 5000 });
-    await frame.waitForFunction(() => !document.getElementById('postOfficeJoinSection').hidden, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mailSubscreen').classList.contains('active'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('postOfficeJoinSection').hidden, null, { timeout: 5000 });
     const joinBtnText = await frame.locator('#postOfficeJoinBtn').textContent();
     if (!joinBtnText.includes('localhost:8002')) throw new Error('Expected the Join button to name Domain B, got: ' + joinBtnText);
     console.log('PASS: Join section visible at Domain B ->', joinBtnText);
 
     console.log('STEP 3: clicking Join mints membership directly, with no in-world stall involved');
     await frame.locator('#postOfficeJoinBtn').click();
-    await frame.waitForFunction(() => document.getElementById('postOfficeJoinSection').hidden, { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('postOfficeJoinSection').hidden, null, { timeout: 10000 });
     console.log('PASS: Join section hides itself immediately after joining — already a member now, same convention Subscribe uses');
 
     console.log('STEP 4: the new membership shows up in the "Send mail" dropdown right away, no separate action needed');
     await frame.waitForFunction(() => {
       const opts = [...document.getElementById('postOfficeToDomainInput').options].map((o) => o.value).filter(Boolean);
       return opts.includes('localhost:8002');
-    }, { timeout: 5000 });
+    }, null, { timeout: 5000 });
     console.log('PASS: localhost:8002 appears in the send-via dropdown immediately after a manifest-driven join');
 
     console.log('\nALL POST OFFICE MANIFEST-ADVERTISEMENT CHECKS PASSED');

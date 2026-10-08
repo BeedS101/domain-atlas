@@ -68,7 +68,7 @@ function assert(cond, message) {
 
     console.log('STEP 1: Act 1 — buy a policy for BA249, 500-unit payout');
     await page.locator('#buyBtn').click();
-    await page.waitForFunction(() => document.getElementById('reportPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('reportPanel').style.display !== 'none', null, { timeout: 10000 });
     const buyText = await page.locator('#buyResult').textContent();
     assert(buyText.includes('BA249') && buyText.includes('500') && buyText.includes('120'), 'unexpected buy result: ' + buyText);
     assert(await page.locator('#buyResult details.raw').count() === 1, 'expected a raw-policy box on the buy result');
@@ -77,14 +77,14 @@ function assert(cond, message) {
     console.log('STEP 2: Act 2 — the oracle reports a 45-minute delay');
     await page.locator('#delayInput').fill('45');
     await page.locator('#reportBtn').click();
-    await page.waitForFunction(() => document.getElementById('claimPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('claimPanel').style.display !== 'none', null, { timeout: 10000 });
     const reportText = await page.locator('#reportResult').textContent();
     assert(reportText.includes('BA249') && reportText.includes('45'), 'unexpected report result: ' + reportText);
     console.log('PASS:', reportText);
 
     console.log('STEP 3: Act 3 — requesting a payout against the sub-threshold report is rejected');
     await page.locator('#claimBtn').click();
-    await page.waitForFunction(() => document.getElementById('claimResult').textContent.includes('Not paid out'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('claimResult').textContent.includes('Not paid out'), null, { timeout: 10000 });
     const rejectedClaimText = await page.locator('#claimResult').textContent();
     assert(rejectedClaimText.includes('does not meet'), 'unexpected sub-threshold rejection: ' + rejectedClaimText);
     assert(await page.locator('#breakPanel').isHidden(), 'break panel should stay hidden until a payout actually succeeds');
@@ -93,9 +93,9 @@ function assert(cond, message) {
     console.log('STEP 4: report a 150-minute delay for the same flight, then request the payout again — it succeeds');
     await page.locator('#delayInput').fill('150');
     await page.locator('#reportBtn').click();
-    await page.waitForFunction(() => document.getElementById('reportResult').textContent.includes('150'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('reportResult').textContent.includes('150'), null, { timeout: 10000 });
     await page.locator('#claimBtn').click();
-    await page.waitForFunction(() => document.getElementById('breakPanel').style.display !== 'none', { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('breakPanel').style.display !== 'none', null, { timeout: 10000 });
     const claimText = await page.locator('#claimResult').textContent();
     assert(claimText.includes('Paid out 500 units'), 'unexpected successful claim result: ' + claimText);
     assert(await page.locator('#claimResult details.raw').count() === 1, 'expected a raw-payout box on the successful claim result');
@@ -103,13 +103,13 @@ function assert(cond, message) {
 
     console.log('STEP 5: Act 4 — try to break it');
     await page.locator('#doubleClaimBtn').click();
-    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('Rejected'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('Rejected'), null, { timeout: 10000 });
     let breakText = await page.locator('#breakResult').textContent();
     assert(!breakText.includes('Unexpected'), 'double claim should have been rejected, got: ' + breakText);
     assert(breakText.includes('already been paid out'), 'unexpected double-claim rejection text: ' + breakText);
 
     await page.locator('#wrongFlightBtn').click();
-    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('different flight'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('breakResult').textContent.includes('different flight'), null, { timeout: 10000 });
     breakText = await page.locator('#breakResult').textContent();
     assert(!breakText.includes('Unexpected'), 'mismatched-flight claim should have been rejected, got: ' + breakText);
     console.log('PASS: both double-claim and mismatched-flight attempts were correctly rejected');
@@ -118,7 +118,7 @@ function assert(cond, message) {
     const rawBox = page.locator('#claimResult details.raw');
     await rawBox.locator('summary').click();
     await rawBox.locator('button').click();
-    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), { timeout: 10000 });
+    await page.waitForFunction(() => document.getElementById('verifyResult').textContent.startsWith('✓ Valid'), null, { timeout: 10000 });
     const verifyText = await page.locator('#verifyResult').textContent();
     console.log('PASS:', verifyText);
 

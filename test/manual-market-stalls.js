@@ -74,18 +74,18 @@ async function projectInteractables(frame) {
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     const frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('market-stall-password');
     await frame.locator('#newPasswordConfirmInput').fill('market-stall-password');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#walletBtn').click(); // close panel so canvas clicks land on the scene
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     const plazaHb = await frame.evaluate(() => new Promise((resolve) => {
       const check = () => {
@@ -98,24 +98,24 @@ async function projectInteractables(frame) {
       check();
     }));
     await frame.locator('#scene').click({ position: { x: plazaHb.sx, y: plazaHb.sy } });
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), null, { timeout: 10000 });
     console.log('PASS: reached the Trading Post');
 
     console.log('STEP 1: clicking the iron stall mints 20 iron for self, no counterparty needed');
     const [ironStall, goldStall, silverStall, membershipDesk] = await projectInteractables(frame);
     if (!ironStall || ironStall.class !== 'atlas.element.iron') throw new Error('Expected the first interactable to be the iron stall, got: ' + JSON.stringify(ironStall));
     await frame.locator('#scene').click({ position: { x: ironStall.sx, y: ironStall.sy } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Collected'), null, { timeout: 10000 });
     const statusAfterIron = await frame.locator('#status').textContent();
     if (!statusAfterIron.includes('atlas.element.iron')) throw new Error('Expected the status line to mention iron: ' + statusAfterIron);
     // Confirm it actually landed in the wallet, not just a status message.
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 5000 });
     const ironCardText = await frame.locator('#selfCollectiblesList .wallet-item').first().textContent();
     if (!ironCardText.includes('atlas.element.iron')) throw new Error('Expected iron in the self resource list: ' + ironCardText);
     console.log('PASS: clicking the iron stall actually minted iron into the wallet ->', statusAfterIron);
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     console.log('STEP 2: clicking the gold stall mints 10 gold for self — v1.15 fixed this stall, which used to require a counterparty');
     if (!goldStall || goldStall.class !== 'atlas.element.gold') throw new Error('Expected the second interactable to be the gold stall, got: ' + JSON.stringify(goldStall));
@@ -132,10 +132,10 @@ async function projectInteractables(frame) {
     const statusAfterGold = await frame.locator('#status').textContent();
     if (!statusAfterGold.includes('atlas.element.gold')) throw new Error('Expected the status line to mention gold: ' + statusAfterGold);
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, null, { timeout: 5000 });
     console.log('PASS: gold stall minted gold for self, with no counterparty in play at all ->', statusAfterGold);
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     console.log('STEP 3: clicking the new silver stall mints 15 silver for self');
     if (!silverStall || silverStall.class !== 'atlas.element.silver') throw new Error('Expected the third interactable to be the silver stall, got: ' + JSON.stringify(silverStall));
@@ -148,10 +148,10 @@ async function projectInteractables(frame) {
     const statusAfterSilver = await frame.locator('#status').textContent();
     if (!statusAfterSilver.includes('atlas.element.silver')) throw new Error('Expected the status line to mention silver: ' + statusAfterSilver);
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 3, { timeout: 5000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 3, null, { timeout: 5000 });
     console.log('PASS: silver stall minted silver for self ->', statusAfterSilver);
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), { timeout: 5000 });
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
     console.log('STEP 4: clicking the "Join Trading Station" desk on the Trading Post sign issues a real membership credential');
     if (!membershipDesk || membershipDesk.class !== 'atlas.tradingstation.membership') throw new Error('Expected the fourth interactable to be the membership desk, got: ' + JSON.stringify(membershipDesk));
@@ -177,7 +177,7 @@ async function projectInteractables(frame) {
 
     console.log('STEP 5: clicking the desk again is a no-op (once-per-user dedupe), same as every other "issue" stall');
     await frame.locator('#scene').click({ position: { x: membershipDesk.sx, y: membershipDesk.sy } });
-    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Already collected'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Already collected'), null, { timeout: 10000 });
     console.log('PASS: second click was rejected client-side ->', await frame.locator('#status').textContent());
 
     console.log('STEP 6: the wallet panel\'s own "Join Trading Station" button recognizes the desk-issued membership and does not offer a redundant second join');
@@ -187,12 +187,12 @@ async function projectInteractables(frame) {
     // where a real join actually gets used, to post a listing) stands in
     // for what used to be the one and only Remote sub-tab here.
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#tradeTabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('tradeScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('tradeScreen').classList.contains('active'), null, { timeout: 5000 });
     await frame.locator('#tradingSellSubtabBtn').click();
-    await frame.waitForFunction(() => document.getElementById('tradingSellSubscreen').classList.contains('active'), { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('tradingStationJoinSection').hidden, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('tradingSellSubscreen').classList.contains('active'), null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('tradingStationJoinSection').hidden, null, { timeout: 5000 });
     console.log('PASS: Join Trading Station section stayed hidden for self — the two join paths agree with each other');
 
     console.log('\nALL MARKET STALL CHECKS PASSED');

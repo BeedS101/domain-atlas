@@ -39,16 +39,16 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     let frame = await frameHandle.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
     await frame.locator('#chooseNewBtn').click();
     await frame.locator('#newPasswordInput').fill('inventory-filter-persist-pw');
     await frame.locator('#newPasswordConfirmInput').fill('inventory-filter-persist-pw');
     await frame.locator('#confirmCreateBtn').click();
-    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('seedRevealBox').classList.contains('show'), null, { timeout: 5000 });
     await frame.locator('#seedConfirmCheck').check();
     await frame.locator('#seedConfirmBtn').click();
-    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
     console.log('PASS: identity created, wallet open');
 
     console.log('STEP 1: before touching either checkbox, the persisted setting defaults both to false');
@@ -72,7 +72,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle2 = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     frame = await frameHandle2.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     // No AtlasWallet.unlockIdentity() call here — a fresh-local-identity
     // reload is exactly the "resets on login" symptom reported (a panel
     // reopening, re-rendering the Inventory screen from scratch), and
@@ -80,7 +80,7 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     // Wallet screen (see viewer.html), reachable the same way
     // manual-world-compatibility.js reaches it — no separate tab click.
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('collectiblesCompatOnlyCheckbox') !== null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('collectiblesCompatOnlyCheckbox') !== null, null, { timeout: 5000 });
     await frame.page().waitForTimeout(300); // let AtlasWallet.getInventoryFilterSettings().then(...) run at startup
     const checkboxStateAfterReload = await frame.evaluate(() => ({
       collectibles: document.getElementById('collectiblesCompatOnlyCheckbox').checked,
@@ -103,9 +103,9 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.locator('#domain-atlas-enter-btn').click();
     const frameHandle3 = await page.waitForSelector('#domain-atlas-overlay', { timeout: 10000 });
     frame = await frameHandle3.contentFrame();
-    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), { timeout: 10000 });
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     await frame.locator('#walletBtn').click();
-    await frame.waitForFunction(() => document.getElementById('collectiblesCompatOnlyCheckbox') !== null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('collectiblesCompatOnlyCheckbox') !== null, null, { timeout: 5000 });
     await frame.page().waitForTimeout(300);
     const checkboxStateAfterSecondReload = await frame.evaluate(() => ({
       collectibles: document.getElementById('collectiblesCompatOnlyCheckbox').checked,
@@ -123,9 +123,9 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     // uses for the same reason.
     await frame.locator('#collectiblesSubtabBtn').click();
     await frame.locator('#requestItemBtn').click();
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length > 0, null, { timeout: 15000 });
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item, #selfCollectiblesList .resource-group-header').length >= 2, { timeout: 15000 });
+    await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item, #selfCollectiblesList .resource-group-header').length >= 2, null, { timeout: 15000 });
     const cardState = await frame.evaluate(() => {
       const cards = Array.from(document.querySelectorAll('#selfCollectiblesList .wallet-item'));
       const compass = cards.find((c) => c.querySelector('.name').textContent.includes('Bronze Compass'));
