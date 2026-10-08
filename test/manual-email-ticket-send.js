@@ -36,6 +36,14 @@
 //   5. Delivery-check-before-revoke: the mail server rejecting RCPT TO
 //      leaves the sender's original credential completely untouched
 //      (still valid, not revoked) — nothing stranded by a failed send.
+//   6. Only a registered domain admin may use transfer-to-email: a holder
+//      who is not an admin is refused and nothing is revoked or sent.
+//   7. POST /atlas/admin/send-ticket-to-email (admin-gated): mints a
+//      ticket straight to an address, delivers a valid attachment with the
+//      requested starting facts, and never puts the admin's key on it.
+//   8. That route refuses a non-admin, a fungible class, a bound class, a
+//      bad address and an unconfigured domain, and a rejected delivery
+//      undoes the mint.
 //
 // Not part of the permanent suite, same reasoning as every other
 // manual-*.js script.
@@ -91,6 +99,9 @@ async function mailCheckStatus(base, id) {
   const res = await postJson(base, '/atlas/mail/check', { credentialIds: [id] });
   if (res.status !== 200) throw new Error('mail check failed: ' + JSON.stringify(res.body));
   return res.body.updates.find((u) => u.id === id) || null;
+}
+async function adminSend(base, admin, payload) {
+  return postJson(base, '/atlas/admin/send-ticket-to-email', { payload, proof: await signWithSelf(admin.kp, admin.publicKey, payload) });
 }
 async function transferToEmail(base, credential, ownerKp, ownerPublicKey, recipientEmail) {
   const intentPayload = { credentialId: credential.id, recipientEmail, action: 'transfer-to-email' };
@@ -246,6 +257,10 @@ function startIssuer({ port, domain, stateDir, docrootDir, smtpEnv }) {
 
   try {
     const owner = await genIdentity();
+    const admin = await genIdentity();
+    const roster = JSON.stringify({ keys: [owner, admin].map((i) => ({ publicKey: i.publicKey, addedAt: new Date().toISOString() })) });
+    fs.writeFileSync(path.join(stateDir, 'atlas-admin-keys-store.json'), roster);
+    fs.writeFileSync(path.join(stateDirUnconfigured, 'atlas-admin-keys-store.json'), roster);
 
     console.log('STEP 1: an eligible credential sends cleanly — 200, original revoked, real SMTP envelope + valid attachment received');
     const ticket = await issueAsset(BASE, owner.publicKey, 'atlas.demo.attestation.filing');
@@ -302,6 +317,54 @@ function startIssuer({ port, domain, stateDir, docrootDir, smtpEnv }) {
     const statusAfterRejectedSend = await mailCheckStatus(BASE, ticketForRejectedSend.id);
     assert(statusAfterRejectedSend === null, 'expected the original credential to be completely untouched after a rejected delivery, got: ' + JSON.stringify(statusAfterRejectedSend));
     console.log('PASS: rejected delivery left the sender\'s credential untouched ->', rejectedSendRes.body.error);
+
+    console.log('STEP 6: a holder who is not a domain admin cannot use transfer-to-email');
+    const stranger = await genIdentity();
+    const strangerTicket = await issueAsset(BASE, stranger.publicKey, 'atlas.demo.attestation.filing');
+    const sessionsBefore6 = sessions.length;
+    const strangerRes = await transferToEmail(BASE, strangerTicket, stranger.kp, stranger.publicKey, 'victim@example.com');
+    assert(strangerRes.status === 403, 'expected a non-admin to be refused with 403, got ' + strangerRes.status + ': ' + JSON.stringify(strangerRes.body));
+    assert(sessions.length === sessionsBefore6, 'no mail may be sent for a non-admin');
+    assert((await mailCheckStatus(BASE, strangerTicket.id)) === null, 'the non-admin\'s credential must be untouched');
+    console.log('PASS: refused, nothing sent, credential untouched ->', strangerRes.body.error);
+
+    console.log('STEP 7: the admin send route mints a ticket straight to an address');
+    const sessionsBefore7 = sessions.length;
+    const sent = await adminSend(BASE, admin, { assetClass: 'atlas.demo.attestation.filing', recipientEmail: 'guest@example.com', properties: { 'com.example.seat': 'A-12' } });
+    assert(sent.status === 200 && sent.body.status === 'email-sent' && sent.body.ticketId, 'expected the admin send to succeed, got ' + sent.status + ': ' + JSON.stringify(sent.body));
+    assert(sessions.length === sessionsBefore7 + 1, 'expected one SMTP session');
+    const sess7 = sessions[sessions.length - 1];
+    assert(sess7.rcptTo[0] === '<guest@example.com>', 'expected RCPT TO guest@example.com, got ' + sess7.rcptTo[0]);
+    const ticket7 = JSON.parse(parseMimeAttachment(sess7.data, null));
+    assert(ticket7.id === sent.body.ticketId && ticket7.asset.class === 'atlas.demo.attestation.filing', 'the attachment should be the ticket the route reported');
+    assert(ticket7.asset.properties && ticket7.asset.properties['com.example.seat'] === 'A-12', 'the starting fact should be on the ticket, got ' + JSON.stringify(ticket7.asset.properties));
+    assert(ticket7.owner.publicKey !== admin.publicKey && ticket7.owner.publicKey !== owner.publicKey, 'the ticket must not be owned by the admin\'s key');
+    assert(await verifyCredentialSignature(ticket7), 'the ticket should verify against the domain key');
+    assert((await mailCheckStatus(BASE, ticket7.id)) === null, 'the ticket should be live');
+    console.log('PASS: ticket delivered with its starting fact, owned by a discarded key ->', ticket7.id);
+
+    console.log('STEP 8: the admin send route refuses what it should');
+    const ok = { assetClass: 'atlas.demo.attestation.filing', recipientEmail: 'guest@example.com' };
+    const sessionsBefore8 = sessions.length;
+    const notAdmin = await adminSend(BASE, stranger, ok);
+    assert(notAdmin.status === 401, 'a non-admin signer should get 401, got ' + notAdmin.status);
+    const fungible = await adminSend(BASE, admin, { ...ok, assetClass: 'atlas.element.gold' });
+    assert(fungible.status === 400 && /unique|fungible/.test(fungible.body.error), 'a fungible class should be refused, got ' + JSON.stringify(fungible.body));
+    const bound = await adminSend(BASE, admin, { ...ok, assetClass: 'atlas.demo.museum.ticket' });
+    assert(bound.status === 400 && /bound/.test(bound.body.error), 'a bound class should be refused, got ' + JSON.stringify(bound.body));
+    const badAddress = await adminSend(BASE, admin, { ...ok, recipientEmail: 'nope' });
+    assert(badAddress.status === 400, 'a bad address should be refused, got ' + badAddress.status);
+    const unknownClass = await adminSend(BASE, admin, { ...ok, assetClass: 'atlas.no.such.class' });
+    assert(unknownClass.status === 400, 'an unknown class should be refused, got ' + unknownClass.status);
+    const unconfigured = await adminSend(BASE_UNCONFIGURED, admin, ok);
+    assert(unconfigured.status === 400 && /not configured/.test(unconfigured.body.error), 'an unconfigured domain should refuse, got ' + JSON.stringify(unconfigured.body));
+    assert(sessions.length === sessionsBefore8, 'none of those may send mail');
+    const revokedBefore = (JSON.parse(fs.readFileSync(path.join(docrootDir, '.well-known', 'atlas-revocations.json'), 'utf8')).revoked || []).length;
+    const rejected = await adminSend(BASE, admin, { ...ok, recipientEmail: REJECT_RECIPIENT });
+    assert(rejected.status === 502, 'a rejected delivery should be a 502, got ' + rejected.status + ': ' + JSON.stringify(rejected.body));
+    const revokedAfter = JSON.parse(fs.readFileSync(path.join(docrootDir, '.well-known', 'atlas-revocations.json'), 'utf8')).revoked || [];
+    assert(revokedAfter.length === revokedBefore + 1 && revokedAfter[revokedAfter.length - 1].reason === 'issuer-request', 'the undelivered mint should be revoked as issuer-request');
+    console.log('PASS: non-admin, fungible, bad address, unknown class and unconfigured domain refused; a rejected delivery undid the mint');
 
     console.log('\nALL EMAIL-TICKET SEND CHECKS PASSED');
   } catch (err) {

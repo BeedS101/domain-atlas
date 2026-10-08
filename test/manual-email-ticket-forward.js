@@ -379,7 +379,7 @@ function startIssuer({ port, domain, stateDir, docrootDir, extraEnv }) {
   console.log('PASS: issuer-server up on port ' + PORT);
 
   try {
-    const owner = await genIdentity();
+    const owner = admin; // only an admin may send a ticket to an email address;
 
     console.log('STEP 1: a clean single-CC forward transfers the ticket over real SMTP, forwarded-from credential revoked');
     const ticket1 = await issueAsset(BASE, owner.publicKey, 'atlas.demo.attestation.filing');

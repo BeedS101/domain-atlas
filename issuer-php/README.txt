@@ -74,6 +74,7 @@ What's in this folder
     admin/class-patch.php    - POST /atlas/admin/class-patch   (admin-gated: set/clear a properties+tradeScope patch for a whole non-fungible class — see "Class-wide patches" below)
     admin/class-patches.php  - POST /atlas/admin/class-patches  (admin-gated: list every class patch currently active — see "Class-wide patches" below)
     admin/asset-classes.php  - POST /atlas/admin/asset-classes  (admin-gated: every non-fungible class, bound or not, for the class-patch form's dropdown — see "Class-wide patches" below)
+    admin/send-ticket-to-email.php - POST /atlas/admin/send-ticket-to-email (admin-gated: mint a ticket and email it to an address; needs outbound email configured — see SPEC.md section 13.1)
     .htaccess                - makes the URLs above work without a .php
                                 extension, matching what the extension calls
   lib/

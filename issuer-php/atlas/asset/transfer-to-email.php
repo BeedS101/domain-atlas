@@ -53,6 +53,9 @@ if (!$config['smtpHost'] || !$config['fromAddress']) {
 $envelopeOk = verify_envelope($payload, $intent['proof']);
 if (!$envelopeOk) send_json(400, ['error' => 'intent signature does not check out']);
 $senderPub = $intent['proof']['publicKey'];
+// The domain sends this mail from its own mailbox, so only a registered
+// domain admin may ask for it.
+if (!is_admin_key($senderPub)) send_json(403, ['error' => 'only a domain admin can send a ticket to an email address']);
 
 $problem = check_presented_giftable_asset($kp['publicKeyB64url'], $credential, $senderPub, $credential['asset']['class'] ?? null);
 if ($problem) send_json(400, ['error' => $problem]);
@@ -64,23 +67,7 @@ $minted = transfer_unique_asset($kp['privateKey'], $kp['publicKeyB64url'], $disc
 register_bearer($minted['id'], $credential['asset']['class'] ?? null);
 
 try {
-  atlas_smtp_send_mail([
-    'host' => $config['smtpHost'],
-    'port' => $config['smtpPort'],
-    'secure' => $config['smtpSecure'],
-    'user' => $config['smtpUser'],
-    'pass' => $config['smtpPass'],
-    'from' => $config['fromAddress'],
-    'to' => $recipientEmail,
-    'subject' => $minted['asset']['name'] ?? 'Your ticket',
-    'textBody' => 'You have been sent "' . ($minted['asset']['name'] ?? $minted['asset']['class']) . '" from ' . atlas_domain() .
-      ".\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC'd, is how you pass it on.",
-    'attachments' => [[
-      'filename' => 'ticket-' . substr($minted['id'], strrpos($minted['id'], ':') + 1) . '.json',
-      'contentType' => 'application/json',
-      'content' => json_encode($minted, JSON_UNESCAPED_SLASHES),
-    ]],
-  ]);
+  atlas_mail_ticket_to($minted, $recipientEmail);
 } catch (Exception $e) {
   // Delivery check before finalizing: the sender's original credential
   // above was never touched, so a send the mail server never actually

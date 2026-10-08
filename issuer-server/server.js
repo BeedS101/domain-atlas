@@ -1982,6 +1982,28 @@ async function generateDiscardedOwnerPublicKey() {
   return b64url(rawPublic);
 }
 
+// Sends a freshly minted ticket to an address as a MIME attachment (SPEC.md
+// §13.2). Throws when the mail server does not accept it.
+function mailTicketTo(minted, recipientEmail) {
+  return sendMail({
+    host: EMAIL_TICKETS_CONFIG.smtpHost,
+    port: EMAIL_TICKETS_CONFIG.smtpPort,
+    secure: EMAIL_TICKETS_CONFIG.smtpSecure,
+    user: EMAIL_TICKETS_CONFIG.smtpUser,
+    pass: EMAIL_TICKETS_CONFIG.smtpPass,
+    from: EMAIL_TICKETS_CONFIG.fromAddress,
+    to: recipientEmail,
+    subject: (minted.asset && minted.asset.name) || 'Your ticket',
+    textBody: 'You have been sent "' + ((minted.asset && minted.asset.name) || minted.asset.class) + '" from ' + DOMAIN +
+      '.\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC\'d, is how you pass it on.',
+    attachments: [{
+      filename: 'ticket-' + minted.id.split(':').pop() + '.json',
+      contentType: 'application/json',
+      content: JSON.stringify(minted)
+    }]
+  });
+}
+
 // SPEC.md §13.3's bounce bookkeeping (EMAIL_TICKET_SENDS_FILE's own
 // comment above explains the shape and why it exists). Same missing-file-
 // means-empty convention every other store in this file already uses.
@@ -6519,6 +6541,9 @@ async function main() {
         const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
         if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
         const senderPub = intent.proof.publicKey;
+        // The domain sends this mail from its own mailbox, so only a
+        // registered domain admin may ask for it.
+        if (!isAdminKey(senderPub)) return sendJson(res, 403, { error: 'only a domain admin can send a ticket to an email address' });
 
         const problem = await checkPresentedGiftableAsset(credential, senderPub, credential.asset && credential.asset.class);
         if (problem) return sendJson(res, 400, { error: problem });
@@ -6530,23 +6555,7 @@ async function main() {
         registerBearer(minted.id, credential.asset && credential.asset.class);
 
         try {
-          await sendMail({
-            host: EMAIL_TICKETS_CONFIG.smtpHost,
-            port: EMAIL_TICKETS_CONFIG.smtpPort,
-            secure: EMAIL_TICKETS_CONFIG.smtpSecure,
-            user: EMAIL_TICKETS_CONFIG.smtpUser,
-            pass: EMAIL_TICKETS_CONFIG.smtpPass,
-            from: EMAIL_TICKETS_CONFIG.fromAddress,
-            to: recipientEmail,
-            subject: (minted.asset && minted.asset.name) || 'Your ticket',
-            textBody: 'You have been sent "' + ((minted.asset && minted.asset.name) || minted.asset.class) + '" from ' + DOMAIN +
-              '.\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC\'d, is how you pass it on.',
-            attachments: [{
-              filename: 'ticket-' + minted.id.split(':').pop() + '.json',
-              contentType: 'application/json',
-              content: JSON.stringify(minted)
-            }]
-          });
+          await mailTicketTo(minted, recipientEmail);
         } catch (err) {
           // Delivery check before finalizing (SPEC.md §13.3's own
           // discipline for the forward-to-transfer step, applied
@@ -6573,6 +6582,50 @@ async function main() {
         archiveIfAudited(credential, 'email-transferred');
         console.log('Emailed', credential.asset.class, credential.id, '-> delivered to', recipientEmail);
         return sendJson(res, 200, { status: 'email-transferred', to: recipientEmail });
+      }
+
+      // POST /atlas/admin/send-ticket-to-email — admin-gated. For an
+      // operator (or a company's own backend acting as one) that issues
+      // tickets: mints a fresh instance of a ticket class straight to an
+      // email address, with no wallet-held credential to start from. The
+      // result is the same bearer ticket transfer-to-email produces
+      // (SPEC.md §13.1): owned by a discarded key, listed in the bearer
+      // registry, delivered as an attachment. Delivery is checked before
+      // the mint is kept: a send the mail server does not accept undoes
+      // the mint. Only a non-fungible, non-bound class is eligible, as for
+      // any email ticket.
+      if (req.method === 'POST' && req.url === '/atlas/admin/send-ticket-to-email') {
+        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const auth = await requireAdminAuth(payload, proof, token);
+        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { assetClass, recipientEmail, properties } = payload || {};
+        if (typeof recipientEmail !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+          return sendJson(res, 400, { error: 'recipientEmail does not look like an email address' });
+        }
+        const catalogEntry = ASSET_CATALOG[assetClass];
+        if (!catalogEntry) return sendJson(res, 400, { error: 'Unknown assetClass.' });
+        if (catalogEntry.fungible) return sendJson(res, 400, { error: 'only a unique (non-fungible) item can be sent as an email ticket' });
+        if (catalogEntry.tradeScope === 'bound') return sendJson(res, 400, { error: 'a bound item cannot be sent as an email ticket' });
+        if (properties !== undefined && (typeof properties !== 'object' || properties === null || Array.isArray(properties))) {
+          return sendJson(res, 400, { error: "properties, when given, must be a patch object onto the class's own base properties" });
+        }
+        if (!EMAIL_TICKETS_CONFIG.smtpHost || !EMAIL_TICKETS_CONFIG.fromAddress) {
+          return sendJson(res, 400, { error: 'this domain has not configured email-delivered tickets (SPEC.md §13)' });
+        }
+
+        const discardedOwnerKey = await generateDiscardedOwnerPublicKey();
+        const minted = await mintAssetByClass(discardedOwnerKey, assetClass, 1, null, properties);
+        registerBearer(minted.id, assetClass);
+        try {
+          await mailTicketTo(minted, recipientEmail);
+        } catch (err) {
+          takeBearer(minted.id);
+          revoke(minted.id, 'issuer-request');
+          console.error('Admin email-ticket send to', recipientEmail, 'failed, mint undone:', err.message);
+          return sendJson(res, 502, { error: 'could not deliver to ' + recipientEmail + ': ' + err.message });
+        }
+        console.log('Admin-sent', assetClass, minted.id, '-> delivered to', recipientEmail, 'by admin', auth.publicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, { status: 'email-sent', to: recipientEmail, ticketId: minted.id, assetClass });
       }
 
       // SPEC.md §13.5 — export a held asset as a claimable file. The owner

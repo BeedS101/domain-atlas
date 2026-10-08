@@ -364,7 +364,7 @@ function startPhp(port, bundleDir) {
   console.log('PASS: issuer-php bundle up on port ' + PHP_PORT);
 
   try {
-    const owner = await genIdentity();
+    const owner = admin; // only an admin may send a ticket to an email address;
 
     console.log('STEP 1: a clean single-CC forward transfers the ticket over real SMTP, forwarded-from credential revoked');
     const ticket1 = await issueAsset(PHP_BASE, owner.publicKey, 'atlas.demo.attestation.filing');

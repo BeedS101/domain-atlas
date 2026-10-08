@@ -137,3 +137,26 @@ function atlas_smtp_send_mail($opts) {
   fclose($socket);
   return ['accepted' => true];
 }
+
+// Sends a freshly minted ticket to an address as a MIME attachment
+// (SPEC.md §13.2). Throws when the mail server does not accept it.
+function atlas_mail_ticket_to($minted, $recipientEmail) {
+  $config = atlas_email_tickets_config();
+  atlas_smtp_send_mail([
+    'host' => $config['smtpHost'],
+    'port' => $config['smtpPort'],
+    'secure' => $config['smtpSecure'],
+    'user' => $config['smtpUser'],
+    'pass' => $config['smtpPass'],
+    'from' => $config['fromAddress'],
+    'to' => $recipientEmail,
+    'subject' => $minted['asset']['name'] ?? 'Your ticket',
+    'textBody' => 'You have been sent "' . ($minted['asset']['name'] ?? $minted['asset']['class']) . '" from ' . atlas_domain() .
+      ".\n\nThe attached file is your ticket. Keep it safe — forwarding this email, with the new holder CC'd, is how you pass it on.",
+    'attachments' => [[
+      'filename' => 'ticket-' . substr($minted['id'], strrpos($minted['id'], ':') + 1) . '.json',
+      'contentType' => 'application/json',
+      'content' => json_encode($minted, JSON_UNESCAPED_SLASHES),
+    ]],
+  ]);
+}

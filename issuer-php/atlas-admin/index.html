@@ -329,6 +329,25 @@
       </section>
 
       <section class="panel">
+        <h2>Send a ticket by email</h2>
+        <p class="hint">Mints a ticket of the chosen class and emails it to an address as an attachment (POST /atlas/admin/send-ticket-to-email, SPEC.md §13.1). The recipient needs no wallet: whoever holds the attachment holds the ticket, and forwarding the email with the new holder CC'd passes it on. Meant for testing here, and as the same call a company's own backend makes when it issues tickets. Only a unique (non-fungible) class that is not bound to its owner can be sent. The domain must have outbound email configured, or this says so. Properties merge onto the class's catalog defaults, as in Mint above. If the mail server does not accept the message the ticket is cancelled, so nothing is left outstanding.</p>
+        <div class="row">
+          <div>
+            <label for="emailTicketClass">Ticket class</label>
+            <input type="text" id="emailTicketClass" placeholder="atlas.demo.email.ticket">
+          </div>
+          <div>
+            <label for="emailTicketTo">Send to</label>
+            <input type="text" id="emailTicketTo" placeholder="guest@example.com">
+          </div>
+        </div>
+        <label for="emailTicketProperties">Properties patch (optional JSON)</label>
+        <textarea id="emailTicketProperties" placeholder='{"com.example.seat": "A-12"}'></textarea>
+        <button class="submit" id="emailTicketBtn" type="button">Send ticket</button>
+        <div class="result" id="emailTicketResult"></div>
+      </section>
+
+      <section class="panel">
         <h2>Calendar</h2>
         <p class="hint">Publishes to this domain's (or one world's) calendar (POST /atlas/calendar).</p>
         <div class="row">
@@ -1059,6 +1078,32 @@
           message += ' But "' + credentialId + '" doesn\'t look like a credential id (expected something like urn:atlas:asset:...) — if that was a public key or a handle, nobody actually holds this as a credential id, so nothing will really arrive.';
         }
         showResult(result, res.ok && looksLikeCredentialId, message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- send a ticket by email ----------
+    document.getElementById('emailTicketBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('emailTicketBtn');
+      const result = document.getElementById('emailTicketResult');
+      const assetClass = document.getElementById('emailTicketClass').value.trim();
+      const recipientEmail = document.getElementById('emailTicketTo').value.trim();
+      if (!assetClass) return showResult(result, false, 'Ticket class is required.');
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) return showResult(result, false, 'Enter a valid email address to send to.');
+      let properties;
+      const propertiesRaw = document.getElementById('emailTicketProperties').value.trim();
+      if (propertiesRaw) {
+        try {
+          properties = JSON.parse(propertiesRaw);
+        } catch (err) {
+          return showResult(result, false, 'Properties patch does not parse: ' + err.message);
+        }
+      }
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/admin/send-ticket-to-email', { payload: { assetClass, recipientEmail, properties }, token: session.token });
+        showResult(result, res.ok, res.ok ? 'Sent ' + res.body.assetClass + ' to ' + res.body.to + ' (ticket ' + res.body.ticketId + ').' : (res.body.error || 'Send failed.'));
       } finally {
         btn.disabled = false;
       }
