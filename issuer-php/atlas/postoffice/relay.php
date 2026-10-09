@@ -116,7 +116,7 @@ if (!empty($relayAttestation['relayingDomainHandle'])) {
 }
 $outPayload = [
   'id' => 'urn:atlas:mail:' . atlas_uuid(),
-  'credentialId' => $membership['credentialId'],
+  'credentialId' => postoffice_delivery_credential_id($to['publicKey'], $membership['credentialId']),
   'subject' => $payload['subject'],
   'body' => $payload['body'],
   'from' => $from,

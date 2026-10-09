@@ -3048,6 +3048,15 @@ function appendPostOfficeMember(entry) {
 // supports revoking one without silently cutting the owner off mail
 // entirely, which nothing here does yet, but the check is written to be
 // correct either way at no extra cost.
+// The credential id mail for an owner is addressed to: the newest live card.
+// Consent settings (block list, mode) stay on the owner's first live entry;
+// only the addressing follows the newest card. A wallet that deleted its card
+// and joined again presents only the new card when it fetches mail, so mail
+// addressed to the old one could never be collected.
+function postOfficeDeliveryCredentialId(doc, ownerPublicKey, fallback) {
+  const live = doc.members.filter((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
+  return live.length ? live[live.length - 1].credentialId : fallback;
+}
 function isValidPostOfficeMember(ownerPublicKey) {
   const doc = readPostOfficeMembers();
   return doc.members.some((m) => m.ownerPublicKey === ownerPublicKey && !isRevoked(m.credentialId) && !isSuspended(m.credentialId));
@@ -8151,7 +8160,7 @@ async function main() {
         // resolve, just delivered proactively instead of on request.
         const outPayload = {
           id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
-          credentialId: membership.credentialId,
+          credentialId: postOfficeDeliveryCredentialId(doc, payload.to.publicKey, membership.credentialId),
           subject: payload.subject,
           body: payload.body,
           from: senderMembership.handle ? { publicKey: proof.publicKey, handle: senderMembership.handle } : { publicKey: proof.publicKey },
@@ -8275,7 +8284,7 @@ async function main() {
         if (relayAttestation.relayingDomainHandle) from.handle = relayAttestation.relayingDomainHandle;
         const outPayload = {
           id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
-          credentialId: membership.credentialId,
+          credentialId: postOfficeDeliveryCredentialId(doc, payload.to.publicKey, membership.credentialId),
           subject: payload.subject,
           body: payload.body,
           from,

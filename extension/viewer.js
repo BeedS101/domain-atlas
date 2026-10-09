@@ -449,6 +449,28 @@ duplicateJoinKeepBtn && duplicateJoinKeepBtn.addEventListener('click', () => {
 // currently announcing as — a save for the local "counterparty" stand-in
 // (PvP-loss, split's "send to") should never count as activity for a
 // wholly different identity's own presence session.
+// The Post Office pickers (send via, mail settings, friend requests) list the
+// membership cards this wallet holds, so they follow the wallet: a card
+// deleted or received elsewhere changes them without a reload.
+let postOfficePickerDomains = null;
+let postOfficePickerTimer = null;
+AtlasWallet.onWalletChanged((ownerPublicKey) => {
+  clearTimeout(postOfficePickerTimer);
+  postOfficePickerTimer = setTimeout(async () => {
+    try {
+      const identity = await AtlasWallet.getIdentity();
+      if (!identity || identity.publicKey !== ownerPublicKey) return;
+      const domains = (await AtlasWallet.getPostOfficeMemberships(identity.publicKey)).map((m) => m.domain).sort().join('|');
+      if (domains === postOfficePickerDomains) return;
+      postOfficePickerDomains = domains;
+      await refreshMyPublicKeyDisplay();
+      await refreshFriendRequestViaOptions(identity);
+    } catch (err) {
+      // locked or no identity: nothing to refresh
+    }
+  }, 250);
+});
+
 AtlasWallet.onWalletChanged((ownerPublicKey) => {
   if (presenceIsConnected() && presenceOwnPublicKey && ownerPublicKey === presenceOwnPublicKey) {
     sendPresenceActivityPing();
@@ -6207,7 +6229,17 @@ hiddenAssetsListEl && hiddenAssetsListEl.addEventListener('click', async (e) => 
     // Delete only lives here, in the already-hidden view — a deliberate
     // second step after hiding, not something reachable straight from the
     // main Inventory list. Still irreversible, so still worth a confirm.
-    if (!confirm('This permanently removes it — if this was your only copy, it\'s gone for good.')) return;
+    let warning = '';
+    const held = (await AtlasWallet.getWallet(owner.publicKey)).find((e) => e.credential.id === btn.dataset.id);
+    if (held && held.credential.asset && held.credential.asset.class === 'atlas.postoffice.membership') {
+      // The membership card is how this wallet fetches its mail from that
+      // Post Office, so without it nothing addressed to it can arrive.
+      const domain = held.credential.issuer && held.credential.issuer.domain;
+      const waiting = (await AtlasWallet.getOutgoingFriendRequests(owner.publicKey)).filter((r) => r.viaDomain === domain).length;
+      warning = '\n\nThis is your Post Office card for ' + domain + '. Without it this wallet cannot receive mail from ' + domain + ' (including answers to friend requests)' +
+        (waiting ? ', and ' + waiting + ' friend request(s) sent through it are still waiting for an answer' : '') + '.';
+    }
+    if (!confirm('This permanently removes it — if this was your only copy, it\'s gone for good.' + warning)) return;
     await AtlasWallet.deleteAsset(owner.publicKey, btn.dataset.id);
     await refreshHiddenAssetsDisplay();
     return;
@@ -9881,6 +9913,7 @@ function renderSentRequestCard(req, container) {
     '<div class="name">' + escapeHtml(req.name) + '</div>' +
     '<div class="meta">' + escapeHtml(address) + ' · waiting for an answer</div>' +
     '<div class="item-actions">' +
+    '<button type="button" data-action="resend-sent-request" data-key="' + escapeHtml(req.publicKey) + '" class="link-btn">Send again</button>' +
     '<button type="button" data-action="cancel-sent-request" data-key="' + escapeHtml(req.publicKey) + '" class="link-btn">Cancel</button>' +
     '</div>';
   container.appendChild(el);
@@ -9890,9 +9923,11 @@ function renderSentRequestCard(req, container) {
 // keeping the current choice (or the last one used for sending mail).
 async function refreshFriendRequestViaOptions(identity) {
   if (!friendReqViaSelect) return;
+  const memberships = identity ? await AtlasWallet.getPostOfficeMemberships(identity.publicKey) : [];
+  // Read the current choice and rebuild after the await: two overlapping
+  // refreshes must not interleave a clear with another call's fill.
   const previous = friendReqViaSelect.value;
   friendReqViaSelect.innerHTML = '';
-  const memberships = identity ? await AtlasWallet.getPostOfficeMemberships(identity.publicKey) : [];
   const domains = Array.from(new Set(memberships.map((m) => m.domain)));
   if (domains.length === 0) {
     const opt = document.createElement('option');
@@ -10087,6 +10122,22 @@ socialScreen && socialScreen.addEventListener('click', async (e) => {
   if (action === 'cancel-sent-request') {
     await AtlasWallet.cancelOutgoingFriendRequest(btn.dataset.key);
     await refreshFriendsDisplay();
+    return;
+  }
+
+  // Sends the request again. Someone who already accepted answers it with a
+  // fresh acceptance, so this recovers an answer that never arrived.
+  if (action === 'resend-sent-request') {
+    btn.disabled = true;
+    try {
+      const result = await AtlasWallet.resendFriendRequest(btn.dataset.key);
+      btn.textContent = result.warning ? 'Sent — see note' : 'Sent';
+      if (result.warning && friendReqStatusEl) friendReqStatusEl.textContent = result.warning;
+      await AtlasWallet.checkAllMail();
+    } catch (err) {
+      btn.textContent = 'Could not send';
+      if (friendReqStatusEl) friendReqStatusEl.textContent = err.message;
+    }
     return;
   }
 
@@ -10285,9 +10336,9 @@ friendReqSendBtn && friendReqSendBtn.addEventListener('click', async () => {
   friendReqStatusEl.textContent = 'Sending…';
   try {
     const result = await AtlasWallet.sendFriendRequest({ viaDomain, handle, recipientDomain, name: name || handle, note: friendReqNoteInput.value });
-    friendReqStatusEl.textContent = result.accepted
+    friendReqStatusEl.textContent = (result.accepted
       ? 'They had already asked to be your friend — added to your contacts.'
-      : 'Request sent to ' + raw + '. They\'ll appear in your contacts once they accept.';
+      : 'Request sent to ' + raw + '. They\'ll appear in your contacts once they accept.') + (result.warning ? ' ' + result.warning : '');
     friendReqNameInput.value = '';
     friendReqHandleInput.value = '';
     friendReqNoteInput.value = '';

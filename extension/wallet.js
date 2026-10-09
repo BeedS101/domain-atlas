@@ -6620,7 +6620,46 @@ const AtlasWallet = (() => {
       s.outgoing = s.outgoing.filter((r) => r.publicKey !== key);
       s.outgoing.push({ publicKey: key, name: displayName, handle: handle || null, recipientDomain: homeDomain, viaDomain, note: cleanFriendNote(note), sentAt: new Date().toISOString() });
     });
-    return { accepted: false, publicKey: key };
+    return { accepted: false, publicKey: key, warning: await friendReplyBlockedWarning(viaDomain) };
+  }
+
+  // The answer to a request comes back as mail to this wallet's own
+  // membership at `viaDomain`, so a "friends only" mode there refuses it: the
+  // person asked is not a contact until the answer is read. Returns text to
+  // show the sender, or null.
+  async function friendReplyBlockedWarning(viaDomain) {
+    try {
+      const settings = await getPostOfficeSettings(viaDomain);
+      if (settings && settings.mailMode === 'friendsOnly') {
+        return 'Your mail settings at ' + viaDomain + ' only accept mail from contacts, so their answer cannot reach you. Switch to "open" there until they reply.';
+      }
+    } catch (err) {
+      // settings unreadable: nothing to warn about
+    }
+    return null;
+  }
+
+  // Sends the same request again, from the record kept in `outgoing`. A
+  // recipient who has already accepted (or who has the request waiting)
+  // handles it exactly like a first request: someone who is already a contact
+  // answers with a fresh acceptance, which is how a lost answer is recovered.
+  async function resendFriendRequest(publicKey) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Set up or unlock an identity first.');
+    const state = await getFriendRequestState(identity.publicKey);
+    const pending = state.outgoing.find((r) => r.publicKey === publicKey);
+    if (!pending) throw new Error('No pending request to that person.');
+    const memberships = await getPostOfficeMemberships(identity.publicKey);
+    if (!memberships.some((m) => m.domain === pending.viaDomain)) {
+      throw new Error('You no longer hold a membership at ' + pending.viaDomain + ', so an answer could not reach you. Join it again first.');
+    }
+    const body = JSON.stringify({ v: 1, type: 'request', note: cleanFriendNote(pending.note) });
+    await postOfficeSendRaw(pending.viaDomain, { publicKey, domain: pending.recipientDomain }, FRIEND_SUBJECT_MARKER, body);
+    await updateFriendRequestState(identity.publicKey, (s) => {
+      const r = s.outgoing.find((x) => x.publicKey === publicKey);
+      if (r) r.sentAt = new Date().toISOString();
+    });
+    return { publicKey, warning: await friendReplyBlockedWarning(pending.viaDomain) };
   }
 
   async function cancelOutgoingFriendRequest(publicKey) {
@@ -6662,7 +6701,7 @@ const AtlasWallet = (() => {
   }
 
   // Delivers queued 'accepted' notices. A rejection from the other side (4xx
-  // other than 429) is final and drops the notice; a network error, 5xx or
+  // other than 429 and other than "not accepting mail") is final and drops the notice; a network error, 5xx or
   // 429 keeps it for the next attempt, up to FRIEND_NOTICE_MAX_AGE_MS.
   async function flushFriendNotices() {
     const identity = await getIdentity();
@@ -6679,7 +6718,11 @@ const AtlasWallet = (() => {
         done.add(notice.publicKey);
         delivered++;
       } catch (err) {
-        if (err && err.status && err.status >= 400 && err.status < 500 && err.status !== 429) done.add(notice.publicKey);
+        // A refusal for "not accepting mail" is the other person's mail
+        // setting and can be switched off later, so it is retried like a
+        // network error until the notice expires.
+        const refusedForNow = /not accepting mail/.test((err && err.message) || '');
+        if (err && err.status && err.status >= 400 && err.status < 500 && err.status !== 429 && !refusedForNow) done.add(notice.publicKey);
       }
     }
     if (done.size) {
@@ -7170,7 +7213,7 @@ const AtlasWallet = (() => {
     getPendingExports, checkPendingExport, reclaimPendingExport, forgetPendingExport,
     exportFullBackup, importFullBackup,
     // Friend requests by handle, delivered through the Post Office (federated).
-    sendFriendRequest, getIncomingFriendRequests, getOutgoingFriendRequests,
+    sendFriendRequest, resendFriendRequest, getIncomingFriendRequests, getOutgoingFriendRequests,
     acceptFriendRequest, declineFriendRequest, cancelOutgoingFriendRequest, flushFriendNotices,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
     writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,

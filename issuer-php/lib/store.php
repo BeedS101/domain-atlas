@@ -3475,6 +3475,20 @@ function find_postoffice_membership($ownerPublicKey) {
   return null;
 }
 
+// The credential id mail for an owner is addressed to: the newest live card.
+// Consent settings (block list, mode) stay on the owner's first live entry;
+// only the addressing follows the newest card. A wallet that deleted its card
+// and joined again presents only the new card when it fetches mail, so mail
+// addressed to the old one could never be collected.
+function postoffice_delivery_credential_id($ownerPublicKey, $fallback) {
+  $doc = read_postoffice_members();
+  $id = $fallback;
+  foreach ($doc['members'] as $m) {
+    if (isset($m['ownerPublicKey']) && $m['ownerPublicKey'] === $ownerPublicKey && !is_revoked($m['credentialId']) && !is_suspended($m['credentialId'])) $id = $m['credentialId'];
+  }
+  return $id;
+}
+
 // atlas/clawback.php's roster fix-up: re-points an EXISTING roster entry
 // (found by its OLD credentialId, regardless of that id's own revoked
 // state — it's about to be revoked by the caller, if it isn't already) at
