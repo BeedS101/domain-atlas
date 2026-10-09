@@ -331,6 +331,7 @@ function showPresenceTransientHint(text, durationMs = 6000) {
 function presenceDeniedHint(reason) {
   if (reason === 'room-full') return 'This world is full — you can look around, but other visitors will not see you.';
   if (reason === 'server-busy') return 'The presence server is busy — you will not appear to other visitors.';
+  if (reason === 'invalid') return 'The presence server refused this world.';
   return 'The presence server refused the connection.';
 }
 
@@ -715,12 +716,14 @@ let chatSendStatusTimer = null;
 // recognize it's stale and back out instead of resurrecting chat for a
 // world already left behind.
 let chatPollToken = null;
+let chatJoined = false; // true once the server accepted this attempt's join (WS chat-history, or a poll join response)
+let chatJoinFailure = null; // why the last join was refused, shown instead of the generic "Not connected" text
 let chatPollId = null; // server-assigned id, set once join resolves and this attempt is still current
 let chatPollTimer = null;
 let chatPollHttpBase = null; // the base this poll session's id belongs to — needed by disconnectChat()'s leave beacon
 
 function chatIsConnected() {
-  return !!(chatSocket && chatSocket.readyState === WebSocket.OPEN) || !!chatPollId;
+  return !!(chatSocket && chatSocket.readyState === WebSocket.OPEN && !chatJoinFailure) || !!chatPollId;
 }
 
 // Preserves "was scrolled near the bottom" across a full innerHTML
@@ -1020,6 +1023,8 @@ function chatErrorText(reason) {
   if (reason === 'room-full') return 'Chat is full for this domain.';
   if (reason === 'server-busy') return 'The chat server is busy.';
   if (reason === 'not-joined') return 'Not connected — try again in a moment.';
+  if (reason === 'invalid') return 'The chat server refused this world.';
+  if (typeof reason === 'string' && reason.indexOf('http-') === 0) return 'The chat server returned an error (' + reason.slice(5) + ').';
   return 'Message not sent.';
 }
 
@@ -1088,6 +1093,8 @@ function disconnectChat() {
   chatDomain = null;
   chatWorldId = null;
   chatCanSend = false;
+  chatJoined = false;
+  chatJoinFailure = null;
   chatOwnSenderId = null;
   chatMessages = [];
   renderChatMessages();
@@ -1107,10 +1114,13 @@ function pollChat(domain, worldId, displayName, canSend, base, historyOnJoin) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ domain, world: worldId, name: displayName })
   })
-    .then((r) => r.json().then((body) => ({ ok: r.ok, body })).catch(() => ({ ok: false, body: {} })))
-    .then(({ ok, body: welcome }) => {
+    .then((r) => r.json().then((body) => ({ ok: r.ok, status: r.status, body })).catch(() => ({ ok: false, status: r.status, body: {} })))
+    .then(({ ok, status, body: welcome }) => {
       if (!ok || !welcome || typeof welcome.id !== 'string') {
-        if (chatPollToken === token) showChatSendStatus(chatErrorText(welcome && welcome.reason));
+        if (chatPollToken === token) {
+          chatJoinFailure = (welcome && welcome.reason) || ('http-' + status);
+          showChatSendStatus(chatErrorText(chatJoinFailure));
+        }
         return;
       }
       if (chatPollToken !== token || chatDomain !== domain || chatWorldId !== worldId) {
@@ -1120,6 +1130,8 @@ function pollChat(domain, worldId, displayName, canSend, base, historyOnJoin) {
         return;
       }
       chatPollId = welcome.id;
+      chatJoined = true;
+      chatJoinFailure = null;
       chatPollHttpBase = base;
       chatOwnSenderId = welcome.senderId || null;
       chatCanSend = canSend;
@@ -1164,6 +1176,8 @@ function connectChat(domain, worldId, base) {
   chatDomain = domain;
   chatWorldId = worldId;
   chatMessages = [];
+  chatJoined = false;
+  chatJoinFailure = null;
   if (chatSessionDomain !== domain) {
     chatSessionDomain = domain;
     chatSessionMuted = new Map();
@@ -1228,6 +1242,8 @@ function connectChat(domain, worldId, base) {
       try { msg = JSON.parse(ev.data); } catch (err) { return; }
       if (!msg || typeof msg.type !== 'string') return;
       if (msg.type === 'chat-history') {
+        chatJoined = true;
+        chatJoinFailure = null;
         chatOwnSenderId = msg.senderId || null;
         // historyOnJoin off (purely local — see wallet.js's comment):
         // discard the batch the server just sent instead of asking it to
@@ -1240,6 +1256,7 @@ function connectChat(domain, worldId, base) {
         if (chatMessages.length > CHAT_MESSAGES_CAP) chatMessages.shift();
         renderChatMessages();
       } else if (msg.type === 'chat-error') {
+        if (!chatJoined) chatJoinFailure = msg.reason || 'not-joined';
         showChatSendStatus(chatErrorText(msg.reason));
       }
     });
@@ -1323,7 +1340,7 @@ chatTextInput && chatTextInput.addEventListener('keydown', (e) => {
     showChatSendStatus('Switch here or to Domain to send a message');
     return;
   }
-  if (!chatIsConnected()) { showChatSendStatus('Not connected — try again in a moment.'); return; }
+  if (!chatIsConnected()) { showChatSendStatus(chatErrorText(chatJoinFailure || 'not-joined')); return; }
   if (AtlasWallet.chatMessageContainsBlockedWord(text)) { showChatSendStatus(chatErrorText('blocked')); return; }
 
   if (chatSocket && chatSocket.readyState === WebSocket.OPEN) {

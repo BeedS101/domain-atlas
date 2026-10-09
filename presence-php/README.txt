@@ -217,7 +217,8 @@ server-busy:
   MAX_BODY_BYTES (8192; larger bodies get 413)  CHAT_MIN_INTERVAL_MS (400)
   CHAT_HISTORY_LIMIT (50)  CHAT_HISTORY_TTL_MS (86400000)
   POLL_TIMEOUT_MS (15000)
-domain and world ids must match [A-Za-z0-9._:-]{1,120}. The limits are
+domain and world ids must be 1-120 characters of valid UTF-8 with no control
+characters (spaces, slashes and non-ASCII are fine; they are only room keys). The limits are
 checked per request against the stored state, so they bound the store's
 size but are not a defence against a flood of requests; put rate limiting
 in front of the host if that matters to you.

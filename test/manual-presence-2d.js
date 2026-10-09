@@ -202,7 +202,7 @@ async function runBackend(kind) {
       try { sessionStorage.setItem('atlasAdminSession', JSON.stringify({ token: t, expiresAt: Date.now() + 3600000 })); } catch (err) {}
     }, login.body.token);
     await adminPage.goto(BASE + '/atlas-admin/', { waitUntil: 'load' });
-    await adminPage.waitForFunction(() => /Example Arena \(1\)/.test(document.getElementById('onlineWorlds').textContent), null, { timeout: 15000 });
+    await adminPage.waitForFunction(() => /Example Arena \(1\)/.test(document.getElementById('onlineWorlds').textContent) && document.getElementById('onlineTotal').textContent.trim() === '1', null, { timeout: 15000 });
     assert((await adminPage.textContent('#onlineTotal')).trim() === '1', 'expected a total of 1 online, got ' + (await adminPage.textContent('#onlineTotal')));
     console.log('PASS: Online now shows Example Arena (1), total 1');
     await adminPage.close();

@@ -214,7 +214,7 @@ function noKeyIn(label, value) {
     await post('/presence/poll/join', { domain: 'r4.example', world: 'x', name: 'r4' });
     const tooMany = await post('/presence/poll/join', { domain: 'r5.example', world: 'x', name: 'r5' });
     check(tooMany.status === 503 && tooMany.body.reason === 'server-busy', 'a new room beyond MAX_ROOMS is refused with server-busy');
-    for (const bad of [{ domain: 'bad domain', world: 'x' }, { domain: 'a/b', world: 'x' }, { domain: 'x'.repeat(121), world: 'x' }, { domain: '', world: 'x' }, { domain: 'ok.example', world: '' }, { domain: 'ok.example', world: '<script>' }]) {
+    for (const bad of [{ domain: 'bad\ndomain', world: 'x' }, { domain: 'x'.repeat(121), world: 'x' }, { domain: '', world: 'x' }, { domain: 'ok.example', world: '' }, { domain: 'ok.example', world: 'a\u0000b' }]) {
       const r = await post('/presence/poll/join', bad);
       check(r.status === 400, 'invalid domain/world ' + JSON.stringify(bad).slice(0, 48) + ' is refused (400)');
     }

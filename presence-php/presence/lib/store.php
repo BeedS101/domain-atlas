@@ -74,13 +74,17 @@ function presence_new_token() {
 }
 
 // Domain and world strings come from a manifest and name a room; they are
-// not validated against anything real, so this only keeps the key space to
-// plain host:port / slug shapes. Returns the string, or null.
+// not validated against anything real. World ids are free-form in the
+// manifest, so only length, encoding and control characters are restricted —
+// the value is only ever used as an array key. Returns the string, or null.
 function presence_clean_id($raw) {
   if (!is_string($raw)) return null;
-  $len = strlen($raw);
+  $s = trim($raw);
+  $len = strlen($s);
   if ($len < 1 || $len > PRESENCE_MAX_ID_LEN) return null;
-  return preg_match('/^[A-Za-z0-9._:-]+$/', $raw) === 1 ? $raw : null;
+  if (preg_match('//u', $s) !== 1) return null;
+  if (preg_match('/[\x00-\x1f\x7f]|\x{2028}|\x{2029}/u', $s) === 1) return null;
+  return $s;
 }
 
 // A display name is free text announced by the client: strip control

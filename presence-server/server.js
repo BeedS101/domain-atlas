@@ -202,12 +202,14 @@ const MAX_CHAT_MEMBERS_PER_DOMAIN = envNumber('MAX_CHAT_MEMBERS_PER_DOMAIN', 200
 const MAX_BODY_BYTES = envNumber('MAX_BODY_BYTES', 8 * 1024);
 
 // Domain and world strings come from a manifest and name a room; they are
-// not validated against anything real, so this only keeps the key space to
-// plain host:port / slug shapes.
-const ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
+// not validated against anything real. World ids are free-form in the
+// manifest, so only length, type and control characters are restricted —
+// the value is only ever used as a map key.
+const ID_FORBIDDEN = /[\u0000-\u001f\u007f\u2028\u2029]/;
 function cleanId(raw) {
-  const s = String(raw || '');
-  return s.length >= 1 && s.length <= MAX_ID_LEN && ID_PATTERN.test(s) ? s : null;
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim();
+  return s.length >= 1 && s.length <= MAX_ID_LEN && !ID_FORBIDDEN.test(s) ? s : null;
 }
 
 // A display name is free text announced by the client: strip control
