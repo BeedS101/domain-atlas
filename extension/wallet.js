@@ -5949,6 +5949,7 @@ const AtlasWallet = (() => {
   // (chat view) and "delete chat" (main view) both call this directly;
   // the only difference is what the UI does afterward (stay vs. go back).
   async function deleteChatThread(ownerPublicKey, counterpartyPublicKey) {
+    let gone = [];
     await withMessageLock(async () => {
       const entries = await getChatMessages(ownerPublicKey);
       const toDelete = entries.filter((e) => e.counterpartyPublicKey === counterpartyPublicKey);
@@ -5956,7 +5957,10 @@ const AtlasWallet = (() => {
       const remaining = entries.filter((e) => e.counterpartyPublicKey !== counterpartyPublicKey);
       await addDeletedChatIds(ownerPublicKey, toDelete.map((e) => e.id));
       await saveChatMessages(ownerPublicKey, remaining);
+      // Messages this wallet sent are not on any server; only incoming ones are.
+      gone = toDelete.filter((e) => e.direction === 'in').map((e) => ({ id: e.id, domain: e.domain }));
     });
+    await forgetOnServers(ownerPublicKey, gone);
   }
 
   // Chats' own "last domain used" memory — separate storage key from Mail
@@ -6292,21 +6296,81 @@ const AtlasWallet = (() => {
     await chrome.storage.local.set({ atlasDeletedMailIds: all });
   }
 
+  // Asks `domain` to forget messages that were deleted from this wallet, so
+  // the only copy left is the one the person chose to keep. The request is
+  // signed with the identity's key, and carries this wallet's credentials
+  // from that domain so it can tell which mailboxes the person owns. Never
+  // throws: a domain that is unreachable, or too old to have the endpoint,
+  // simply keeps the messages, and the next mail check asks again for any
+  // that it still returns.
+  //
+  // Local identities only. A WebAuthn identity signs with a passkey prompt,
+  // which a background request must not raise.
+  async function deleteMessagesOnServer(identity, domain, messageIds, assets) {
+    try {
+      if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return 0;
+      const ids = Array.from(new Set(messageIds));
+      if (!ids.length) return 0;
+      const held = assets || await getWallet(identity.publicKey);
+      const credentials = held.filter((e) => e.credential.issuer && e.credential.issuer.domain === domain).map((e) => e.credential).slice(0, 200);
+      if (!credentials.length) return 0;
+      let deleted = 0;
+      for (let i = 0; i < ids.length; i += 500) {
+        const payload = { messageIds: ids.slice(i, i + 500) };
+        const proof = await signWithSelf(payload);
+        const res = await fetch(baseUrl(domain) + '/atlas/mail/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ credentials, payload, proof })
+        });
+        if (!res.ok) break;
+        deleted += ((await res.json().catch(() => null)) || {}).deleted || 0;
+      }
+      return deleted;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  // Groups message ids by the domain that holds them and asks each domain to
+  // drop them. Runs in the background; the local delete has already happened.
+  function forgetOnServers(ownerPublicKey, items) {
+    const byDomain = new Map();
+    for (const item of items) {
+      if (!item.domain) continue;
+      if (!byDomain.has(item.domain)) byDomain.set(item.domain, []);
+      byDomain.get(item.domain).push(item.id);
+    }
+    if (!byDomain.size) return Promise.resolve();
+    return (async () => {
+      const identity = await getIdentity();
+      if (!identity || identity.publicKey !== ownerPublicKey) return;
+      const assets = await getWallet(identity.publicKey);
+      for (const [domain, ids] of byDomain) await deleteMessagesOnServer(identity, domain, ids, assets);
+    })().catch(() => {});
+  }
+
   async function deleteMailMessage(ownerPublicKey, messageId) {
+    let gone = [];
     await withMessageLock(async () => {
       const entries = await getMail(ownerPublicKey);
+      gone = entries.filter((e) => e.message.id === messageId).map((e) => ({ id: e.message.id, domain: e.message.domain }));
       const remaining = entries.filter((e) => e.message.id !== messageId);
       await addDeletedMailIds(ownerPublicKey, [messageId]);
       await saveMail(ownerPublicKey, remaining);
     });
+    await forgetOnServers(ownerPublicKey, gone);
   }
 
   async function clearAllMail(ownerPublicKey) {
+    let gone = [];
     await withMessageLock(async () => {
       const entries = await getMail(ownerPublicKey);
+      gone = entries.map((e) => ({ id: e.message.id, domain: e.message.domain }));
       await addDeletedMailIds(ownerPublicKey, entries.map((e) => e.message.id));
       await saveMail(ownerPublicKey, []);
     });
+    await forgetOnServers(ownerPublicKey, gone);
   }
 
   // SPEC.md §3.8.2 — pending wallet-bridge asset offers. A SEPARATE
@@ -7116,8 +7180,14 @@ const AtlasWallet = (() => {
           })
         });
         const { messages, updates } = await res.json();
+        // Messages the person deleted that this domain still holds (deleted
+        // while offline, or before domains could be asked to forget them).
+        const staleOnServer = [];
         for (const message of (messages || [])) {
-          if (knownIds.has(message.id)) continue;
+          if (knownIds.has(message.id)) {
+            if (deletedIds.has(message.id) || deletedChatIds.has(message.id)) staleOnServer.push(message.id);
+            continue;
+          }
           const ok = await verifyMailMessage(domain, message);
           if (!ok) continue; // never surface anything that doesn't check out
           knownIds.add(message.id);
@@ -7185,6 +7255,7 @@ const AtlasWallet = (() => {
         }
         await processAssetUpdates(identity.publicKey, domain, updates);
         await reconcileSubmittedTrades(identity.publicKey, domain, updates);
+        if (staleOnServer.length) await deleteMessagesOnServer(identity, domain, staleOnServer, assets);
       } catch (err) {
         // unreachable domain — move on, don't let it block the others
       }

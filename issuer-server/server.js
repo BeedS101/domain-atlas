@@ -171,6 +171,9 @@ const FILE_CLAIMS_FILE = path.join(STATE_DIR, 'atlas-file-claims-store.json');
 // able to crowd out real mail while it's actively happening. Other
 // recipients' mailboxes are never touched by one mailbox hitting its cap.
 const MAILBOX_CAP = parseInt(process.env.ATLAS_MAILBOX_CAP || '200', 10);
+// Bounds on one /atlas/mail/delete request.
+const MAIL_DELETE_MAX_IDS = 500;
+const MAIL_DELETE_MAX_CREDENTIALS = 200;
 // Email-delivered bearer credentials (SPEC.md §13) — outbound SMTP config
 // for the mailbox named by this domain's own manifest.emailTickets.
 // intakeAddress (§13.1). Deliberately read fresh from the environment
@@ -2813,6 +2816,20 @@ function appendMail(message) {
     doc.messages = doc.messages.filter((m) => !dropIds.has(m.id));
   }
   fs.writeFileSync(MAIL_FILE, JSON.stringify(doc, null, 2));
+}
+
+// Removes the given messages from the mailboxes of the given credential ids.
+// A message only goes if both match, so naming an id that lives in someone
+// else's mailbox deletes nothing. Returns how many were removed.
+function deleteMailMessages(messageIds, credentialIds) {
+  const wantedIds = new Set(messageIds);
+  const mailboxes = new Set(credentialIds);
+  const doc = readMail();
+  const before = doc.messages.length;
+  doc.messages = doc.messages.filter((m) => !(wantedIds.has(m.id) && mailboxes.has(m.credentialId)));
+  const removed = before - doc.messages.length;
+  if (removed > 0) fs.writeFileSync(MAIL_FILE, JSON.stringify(doc, null, 2));
+  return removed;
 }
 
 // Registered mail-encryption public keys — see /atlas/mail/register-key
@@ -7954,6 +7971,32 @@ async function main() {
         }
 
         return sendJson(res, 200, { messages, updates });
+      }
+
+      // /atlas/mail/delete: the holder asks this domain to forget messages
+      // they have deleted from their wallet. The caller presents the
+      // credentials whose mailboxes the messages may sit in, and a signed
+      // list of message ids. A credential counts only if this domain signed
+      // it and its owner is the signer, so one holder can never remove
+      // another's mail. Unknown ids and ids in other mailboxes are skipped
+      // without error, which keeps a repeated request harmless.
+      if (req.method === 'POST' && req.url === '/atlas/mail/delete') {
+        const { credentials, payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!Array.isArray(credentials) || !payload || !proof) return sendJson(res, 400, { error: 'credentials, payload, and proof are required' });
+        if (!Array.isArray(payload.messageIds) || payload.messageIds.length === 0) return sendJson(res, 400, { error: 'payload.messageIds must be a non-empty array' });
+        if (payload.messageIds.length > MAIL_DELETE_MAX_IDS || credentials.length > MAIL_DELETE_MAX_CREDENTIALS) {
+          return sendJson(res, 400, { error: 'too many messages or credentials in one request' });
+        }
+        if (!payload.messageIds.every((id) => typeof id === 'string')) return sendJson(res, 400, { error: 'payload.messageIds must be strings' });
+        if (!(await verifyEnvelope(payload, proof))) return sendJson(res, 400, { error: 'proof signature does not check out' });
+        const mailboxes = [];
+        for (const credential of credentials) {
+          if (!credential || typeof credential.id !== 'string' || !credential.owner || credential.owner.publicKey !== proof.publicKey) continue;
+          if (!(await verifyOwnCredentialSignature(credential, assetPayloadOf(credential)))) continue;
+          mailboxes.push(credential.id);
+        }
+        const deleted = mailboxes.length ? deleteMailMessages(payload.messageIds, mailboxes) : 0;
+        return sendJson(res, 200, { ok: true, deleted });
       }
 
       // --- Calendar (SPEC.md §12) ---

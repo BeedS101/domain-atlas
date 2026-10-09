@@ -622,6 +622,16 @@ endpoints" below) sends against a `credentialId`; the wallet picks new
 mail up through its existing periodic `/atlas/mail/check` loop alongside
 asset-reissue notices (§5.1.1 above).
 
+**Deleting mail deletes it from the domain too (SPEC.md §11.6).** Mail,
+chat messages and friend notices a domain holds for you stay on its server
+until you say otherwise. Deleting a mail, clearing the inbox or deleting a
+chat thread in the wallet also asks the domain to forget those messages
+(`/atlas/mail/delete`, signed by your key, accepted only for mailboxes your
+credentials own). If the domain could not be reached, every later mail check
+asks again for any deleted message it still returns, so deletions made
+before this existed are cleaned up the same way. Wallets that sign with a
+passkey are skipped, since a background request must not raise a prompt.
+
 A mail message can carry a **gift** — a fresh credential attached at send
 time, addressed to a specific visitor. A gift never joins the wallet
 automatically the way a reissue replacement does: the mail card shows a

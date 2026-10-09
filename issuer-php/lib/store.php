@@ -2406,6 +2406,35 @@ function append_mail($message) {
   fclose($fh);
 }
 
+// Removes the given messages from the mailboxes of the given credential ids.
+// A message only goes if both match, so naming an id that lives in someone
+// else's mailbox deletes nothing. Returns how many were removed.
+function delete_mail_messages($messageIds, $credentialIds) {
+  $wantedIds = array_flip($messageIds);
+  $mailboxes = array_flip($credentialIds);
+  $file = atlas_mail_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return 0;
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['messages' => []];
+  $before = count($doc['messages']);
+  $doc['messages'] = array_values(array_filter($doc['messages'], function ($m) use ($wantedIds, $mailboxes) {
+    return !(isset($wantedIds[$m['id'] ?? null]) && isset($mailboxes[$m['credentialId'] ?? null]));
+  }));
+  $removed = $before - count($doc['messages']);
+  if ($removed > 0) {
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $removed;
+}
+
 // ---------- asset updates (same flock-guarded shape as mail above) ----------
 
 function read_asset_updates() {
