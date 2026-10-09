@@ -7050,7 +7050,7 @@ function renderMailCard(entry, container, friendNameByKey) {
   // vetted for the analogous chat-menu version in task #148, so there's no
   // "unsolicited request" concern here to design around.
   const addContactHtml = (!entry.message.from || friendName) ? '' :
-    '<button type="button" data-action="add-contact-from-mail" data-key="' + escapeHtml(entry.message.from.publicKey) + '" data-handle="' + escapeHtml(entry.message.from.handle || '') + '">Add Contact</button>';
+    '<button type="button" data-action="add-contact-from-mail" data-key="' + escapeHtml(entry.message.from.publicKey) + '" data-handle="' + escapeHtml(entry.message.from.handle || '') + '" data-handle-domain="' + escapeHtml(entry.message.from.homeDomain || entry.message.domain || '') + '">Add Contact</button>';
   const blockSenderHtml = !entry.message.from ? '' :
     '<button type="button" data-action="block-sender" data-domain="' + escapeHtml(entry.message.domain) + '" data-key="' + escapeHtml(entry.message.from.publicKey) + '" class="danger-btn">Block sender</button>';
   // An unclaimed gift is the only copy of that credential anywhere —
@@ -7977,7 +7977,7 @@ mailListEl && mailListEl.addEventListener('click', async (e) => {
     const handle = addContactBtn.dataset.handle;
     const name = handle || 'Friend';
     try {
-      await AtlasWallet.addFriend(key, name);
+      await AtlasWallet.addFriend(key, name, handle ? { handle, domain: addContactBtn.dataset.handleDomain } : null);
       if (socialFriendsTabActive()) await refreshFriendsDisplay();
       await refreshMailDisplay();
       statusEl.textContent = 'Added ' + name + ' to Contacts.';
@@ -9961,9 +9961,11 @@ const REMOVE_CONTACT_CONFIRM_GRACE_MS = 400;
 function renderFriendCard(f, container) {
   const el = document.createElement('div');
   el.className = 'info-card';
-  el.dataset.search = (f.name + ' ' + (f.notes || '')).toLowerCase();
+  const address = f.handle && f.handleDomain ? f.handle + '#' + f.handleDomain : '';
+  el.dataset.search = (f.name + ' ' + address + ' ' + (f.notes || '')).toLowerCase();
   el.innerHTML =
     '<div class="name">' + escapeHtml(f.name) + '</div>' +
+    (address ? '<div class="meta contact-address" title="Mail address">' + escapeHtml(address) + '</div>' : '') +
     '<div class="meta">' + short(f.publicKey, 20) + '</div>' +
     '<textarea class="contact-notes-input" data-key="' + f.publicKey + '" placeholder="Notes (just for you)…" rows="2" style="margin-top:6px;width:100%;box-sizing:border-box;font-family:inherit;font-size:12px;">' + escapeHtml(f.notes || '') + '</textarea>' +
     '<div class="item-actions">' +
@@ -10418,7 +10420,7 @@ manualAddContactBtn && manualAddContactBtn.addEventListener('click', async () =>
   manualAddContactStatusEl.textContent = 'Looking up…';
   try {
     const resolved = await AtlasWallet.resolvePostOfficeHandle(domain, handle);
-    await AtlasWallet.addFriend(resolved.publicKey, name);
+    await AtlasWallet.addFriend(resolved.publicKey, name, { handle: resolved.handle || handle, domain });
     manualAddContactStatusEl.textContent = 'Added.';
     manualAddNameInput.value = '';
     manualAddHandleInput.value = '';

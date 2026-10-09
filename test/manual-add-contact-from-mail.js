@@ -193,7 +193,10 @@ async function claimPostOfficeMembership(frame, label) {
     await menuItemsAfter.waitFor({ state: 'visible', timeout: 2000 });
     if ((await menuItemsAfter.locator('button[data-action="add-contact-from-mail"]').count()) !== 0) throw new Error('Add Contact button should have disappeared once the sender is already a saved contact');
     if ((await menuItemsAfter.locator('button[data-action="block-sender"]').count()) !== 1) throw new Error('Block sender should still be present after adding the contact');
-    console.log('PASS: Add Contact button is gone post-save, Block sender unaffected');
+    // A sender with no handle gives no address to keep; none is invented.
+    const savedSender = await b.frame.evaluate(() => AtlasWallet.getFriends());
+    if (savedSender.length !== 1 || savedSender[0].handle || savedSender[0].handleDomain) throw new Error('A sender without a handle should be saved without an address: ' + JSON.stringify(savedSender));
+    console.log('PASS: Add Contact button is gone post-save, Block sender unaffected, and no address was invented');
 
     console.log('STEP 6: the Contacts tab now lists the sender');
     // Social's own sub-tab bar (already on this screen from Steps 3-5) ->

@@ -69,8 +69,15 @@ async function openAddContact(frame) {
   await frame.waitForFunction(() => document.getElementById('addContactSubscreen').classList.contains('active'), null, { timeout: 5000 });
 }
 
+// The wallet panel is already open when this is used.
+async function openContacts(frame) {
+  await frame.locator('#contactsSubtabBtn').click();
+  await frame.locator('#contactsListSubtabBtn').click();
+  await frame.waitForFunction(() => document.querySelectorAll('#contactsList .info-card').length > 0, null, { timeout: 5000 });
+}
+
 async function friendsOf(frame) {
-  return frame.evaluate(() => AtlasWallet.getFriends().then((f) => f.map((x) => ({ publicKey: x.publicKey, name: x.name }))));
+  return frame.evaluate(() => AtlasWallet.getFriends().then((f) => f.map((x) => ({ publicKey: x.publicKey, name: x.name, handle: x.handle, handleDomain: x.handleDomain }))));
 }
 
 async function state(frame) {
@@ -144,11 +151,23 @@ function assert(cond, message) {
     await bob.frame.waitForFunction(() => document.getElementById('federatedFriendRequestsList').children.length === 0, null, { timeout: 10000 });
     const bobFriends = await friendsOf(bob.frame);
     assert(bobFriends.length === 1 && bobFriends[0].publicKey === pkAlice, 'Expected Alice in Bob\'s contacts, got: ' + JSON.stringify(bobFriends));
-    await alice.frame.evaluate(() => AtlasWallet.checkAllMail());
-    const aliceFriends = await friendsOf(alice.frame);
+    // Bob's acceptance is posted in the background after the click, so Alice
+    // may need more than one check to see it.
+    let aliceFriends = [];
+    for (let i = 0; i < 20 && aliceFriends.length === 0; i++) {
+      await alice.frame.evaluate(() => AtlasWallet.checkAllMail());
+      aliceFriends = await friendsOf(alice.frame);
+      if (aliceFriends.length === 0) await new Promise((r) => setTimeout(r, 250));
+    }
     assert(aliceFriends.length === 1 && aliceFriends[0].publicKey === pkBob && aliceFriends[0].name === 'Bobby', 'Expected Bobby in Alice\'s contacts, got: ' + JSON.stringify(aliceFriends));
     assert((await state(alice.frame)).outgoing.length === 0, 'Alice\'s sent request should be cleared once accepted');
     console.log('PASS: both have each other as contacts; Alice\'s pending list is empty');
+    assert(aliceFriends[0].handle === handleBob && aliceFriends[0].handleDomain === DOMAIN_B, 'Alice should keep Bob\'s address, got: ' + JSON.stringify(aliceFriends[0]));
+    assert(bobFriends[0].handle === handleAlice && bobFriends[0].handleDomain === DOMAIN_A, 'Bob should keep Alice\'s address, got: ' + JSON.stringify(bobFriends[0]));
+    await openContacts(alice.frame);
+    const aliceCards = await alice.frame.locator('#contactsList .contact-address').allTextContents();
+    assert(aliceCards.length === 1 && aliceCards[0] === handleBob + '#' + DOMAIN_B, 'Contact card should show the address, got: ' + JSON.stringify(aliceCards));
+    console.log('PASS: both contacts carry the other\'s address, and the contact card shows it');
 
     // Back to a clean slate for the next scenarios.
     await alice.frame.evaluate((k) => AtlasWallet.removeFriend(k), pkBob);
@@ -176,6 +195,7 @@ function assert(cond, message) {
     const bobF5 = await friendsOf(bob.frame);
     assert(aliceF5.length === 1 && aliceF5[0].publicKey === pkBob && aliceF5[0].name === 'Bobby', 'Alice should have Bobby, got: ' + JSON.stringify(aliceF5));
     assert(bobF5.length === 1 && bobF5[0].publicKey === pkAlice && bobF5[0].name === 'Ally', 'Bob should have Ally, got: ' + JSON.stringify(bobF5));
+    assert(aliceF5[0].handle === handleBob && bobF5[0].handle === handleAlice, 'Crossing requests should record both addresses, got: ' + JSON.stringify([aliceF5[0], bobF5[0]]));
     assert((await state(alice.frame)).outgoing.length === 0 && (await state(bob.frame)).outgoing.length === 0, 'No request should be left pending');
     console.log('PASS: crossing requests made them contacts automatically');
     await alice.frame.evaluate((k) => AtlasWallet.removeFriend(k), pkBob);

@@ -318,7 +318,11 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     if (!currentFriends.some((f) => f.publicKey === pkC && f.name === 'Charlie')) {
       throw new Error('Expected Charlie (Visitor C, resolved by handle) to be saved as a contact, got: ' + JSON.stringify(currentFriends));
     }
-    console.log('PASS: handle-based manual add resolved to the right public key and saved');
+    const charlieEntry = currentFriends.find((f) => f.publicKey === pkC);
+    if (charlieEntry.handle !== 'charlie' || charlieEntry.handleDomain !== 'localhost:8002') {
+      throw new Error('Expected Charlie\'s contact to keep his address, got: ' + JSON.stringify(charlieEntry));
+    }
+    console.log('PASS: handle-based manual add resolved to the right public key and saved, with its address');
 
     console.log('STEP 8: a contact\'s notes field saves on blur and persists');
     await a.frame.locator('#contactsListSubtabBtn').click();

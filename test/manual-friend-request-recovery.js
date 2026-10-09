@@ -60,7 +60,7 @@ async function openAddContact(frame) {
 }
 
 async function friendsOf(frame) {
-  return frame.evaluate(() => AtlasWallet.getFriends().then((f) => f.map((x) => ({ publicKey: x.publicKey, name: x.name }))));
+  return frame.evaluate(() => AtlasWallet.getFriends().then((f) => f.map((x) => ({ publicKey: x.publicKey, name: x.name, handle: x.handle, handleDomain: x.handleDomain }))));
 }
 
 async function state(frame) {
@@ -121,7 +121,8 @@ async function untilTrue(fn, what, ms = 10000) {
     let aliceFriends = await friendsOf(alice.frame);
     assert(aliceFriends.length === 1 && aliceFriends[0].publicKey === pkBob, 'Expected Bobby in Alice\'s contacts, got: ' + JSON.stringify(aliceFriends));
     assert((await state(alice.frame)).outgoing.length === 0, 'The sent request should be cleared');
-    console.log('PASS: request found by a differently-cased handle; contact added after Accept');
+    assert(aliceFriends[0].handle === handleBob && aliceFriends[0].handleDomain === DOMAIN_A, 'The contact should keep the handle as the Post Office spells it (' + handleBob + '), got: ' + JSON.stringify(aliceFriends[0]));
+    console.log('PASS: request found by a differently-cased handle; contact added after Accept, keeping the handle as registered');
     await reset();
 
     console.log('STEP 2: friends-only mail settings: warned, acceptance kept queued, delivered once mail is open');

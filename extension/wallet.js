@@ -2292,7 +2292,18 @@ const AtlasWallet = (() => {
     await chrome.storage.local.set({ atlasFriends: all });
   }
 
-  async function addFriend(publicKey, name) {
+  // A contact may carry the Post Office address it is reachable at, stored
+  // as `handle` plus `handleDomain` (shown as handle#domain). It is optional
+  // and only ever filled in from a source that knows it: a resolved handle,
+  // or the `from` of relayed mail.
+  function cleanMailAddress(address) {
+    if (!address || typeof address.handle !== 'string' || typeof address.domain !== 'string') return null;
+    const handle = address.handle.trim().slice(0, 64);
+    const domain = address.domain.trim().slice(0, 253);
+    return handle && domain ? { handle, domain } : null;
+  }
+
+  async function addFriend(publicKey, name, address) {
     if (!publicKey) throw new Error('No public key to add as a friend.');
     const trimmedName = (name || '').trim().slice(0, MAX_ALIAS_LENGTH) || 'Friend';
     if (aliasContainsBlockedWord(trimmedName)) throw new Error('That name isn\'t allowed here — try something else.');
@@ -2301,16 +2312,37 @@ const AtlasWallet = (() => {
     if (identity.publicKey === publicKey) throw new Error('That\'s your own identity, not someone else\'s.');
     const friends = await getFriends();
     const existing = friends.find((f) => f.publicKey === publicKey);
+    const mailAddress = cleanMailAddress(address);
     if (existing) {
       // Re-adding (e.g. a later live request from the same person) just
       // refreshes the saved name rather than creating a duplicate entry —
       // any notes already jotted down (see updateFriendNotes below) are
       // left untouched.
       existing.name = trimmedName;
+      if (mailAddress) { existing.handle = mailAddress.handle; existing.handleDomain = mailAddress.domain; }
     } else {
-      friends.push({ publicKey, name: trimmedName, notes: '', addedAt: new Date().toISOString() });
+      const entry = { publicKey, name: trimmedName, notes: '', addedAt: new Date().toISOString() };
+      if (mailAddress) { entry.handle = mailAddress.handle; entry.handleDomain = mailAddress.domain; }
+      friends.push(entry);
     }
     await saveFriends(identity.publicKey, friends);
+  }
+
+  // Records a contact's address without touching anything else about them.
+  // Does nothing for someone who is not a contact or for an unusable address.
+  async function setFriendMailAddress(publicKey, address) {
+    const mailAddress = cleanMailAddress(address);
+    if (!mailAddress) return false;
+    const identity = await getIdentity();
+    if (!identity) return false;
+    const friends = await getFriends();
+    const entry = friends.find((f) => f.publicKey === publicKey);
+    if (!entry) return false;
+    if (entry.handle === mailAddress.handle && entry.handleDomain === mailAddress.domain) return false;
+    entry.handle = mailAddress.handle;
+    entry.handleDomain = mailAddress.domain;
+    await saveFriends(identity.publicKey, friends);
+    return true;
   }
 
   // Contacts -> Contacts sub-tab's free-text notes field (task #67
@@ -6596,16 +6628,23 @@ const AtlasWallet = (() => {
     }
     let key = publicKey;
     const homeDomain = recipientDomain || viaDomain;
+    // The handle as the recipient's Post Office spells it, not as typed.
+    let canonicalHandle = handle || null;
     if (!key) {
       if (!handle) throw new Error('Enter their handle.');
       const resolved = await resolvePostOfficeHandle(homeDomain, handle);
       key = resolved.publicKey;
+      if (resolved.handle) canonicalHandle = resolved.handle;
     }
     if (key === identity.publicKey) throw new Error('That is your own address.');
     const friends = await getFriends();
-    if (friends.some((f) => f.publicKey === key)) throw new Error('They are already in your contacts.');
+    const alreadyContact = friends.find((f) => f.publicKey === key);
+    if (alreadyContact) {
+      const learned = canonicalHandle && await setFriendMailAddress(key, { handle: canonicalHandle, domain: homeDomain });
+      throw new Error('They are already in your contacts.' + (learned ? ' Their address was saved on the contact card.' : ''));
+    }
 
-    const displayName = (name || '').trim().slice(0, MAX_ALIAS_LENGTH) || handle || 'Friend';
+    const displayName = (name || '').trim().slice(0, MAX_ALIAS_LENGTH) || canonicalHandle || 'Friend';
 
     // They already asked us: answering with our own request is an acceptance.
     const state = await getFriendRequestState(identity.publicKey);
@@ -6618,7 +6657,7 @@ const AtlasWallet = (() => {
     await postOfficeSendRaw(viaDomain, { publicKey: key, domain: homeDomain }, FRIEND_SUBJECT_MARKER, body);
     await updateFriendRequestState(identity.publicKey, (s) => {
       s.outgoing = s.outgoing.filter((r) => r.publicKey !== key);
-      s.outgoing.push({ publicKey: key, name: displayName, handle: handle || null, recipientDomain: homeDomain, viaDomain, note: cleanFriendNote(note), sentAt: new Date().toISOString() });
+      s.outgoing.push({ publicKey: key, name: displayName, handle: canonicalHandle, recipientDomain: homeDomain, viaDomain, note: cleanFriendNote(note), sentAt: new Date().toISOString() });
     });
     return { accepted: false, publicKey: key, warning: await friendReplyBlockedWarning(viaDomain) };
   }
@@ -6679,7 +6718,7 @@ const AtlasWallet = (() => {
     });
     if (!request) throw new Error('No pending request from that person.');
     const label = (name || '').trim() || friendDisplayName(request) || 'Friend';
-    await addFriend(publicKey, label);
+    await addFriend(publicKey, label, request.handle ? { handle: request.handle, domain: request.homeDomain } : null);
     await updateFriendRequestState(identity.publicKey, (s) => {
       s.incoming = s.incoming.filter((r) => r.publicKey !== publicKey);
       queueFriendNotice(s, request.publicKey, request.homeDomain, request.via);
@@ -6751,7 +6790,7 @@ const AtlasWallet = (() => {
         if (parsed.type === 'accepted') {
           if (!pending) continue; // never asked: ignore
           s.outgoing = s.outgoing.filter((r) => r.publicKey !== item.publicKey);
-          toAdd.push({ publicKey: item.publicKey, name: pending.name });
+          toAdd.push({ publicKey: item.publicKey, name: pending.name, address: friendAddressOf(item, pending) });
           friendKeys.add(item.publicKey);
           continue;
         }
@@ -6763,7 +6802,7 @@ const AtlasWallet = (() => {
         }
         if (pending) {
           s.outgoing = s.outgoing.filter((r) => r.publicKey !== item.publicKey);
-          toAdd.push({ publicKey: item.publicKey, name: pending.name });
+          toAdd.push({ publicKey: item.publicKey, name: pending.name, address: friendAddressOf(item, pending) });
           friendKeys.add(item.publicKey);
           queueFriendNotice(s, item.publicKey, item.homeDomain, item.via);
           continue;
@@ -6774,7 +6813,15 @@ const AtlasWallet = (() => {
       if (s.incoming.length > FRIEND_INCOMING_CAP) s.incoming = s.incoming.slice(-FRIEND_INCOMING_CAP);
       s.seen = Array.from(seen).slice(-FRIEND_SEEN_CAP);
     });
-    for (const entry of toAdd) await addFriend(entry.publicKey, entry.name);
+    for (const entry of toAdd) await addFriend(entry.publicKey, entry.name, entry.address);
+  }
+
+  // The address to keep for a person who answered: what their own Post
+  // Office reported on the message, else what the request was sent to.
+  function friendAddressOf(item, pending) {
+    if (item.handle) return { handle: item.handle, domain: item.homeDomain };
+    if (pending && pending.handle) return { handle: pending.handle, domain: pending.recipientDomain };
+    return null;
   }
 
   // ---------- asset update notices (SPEC.md §5.1.1) ----------
@@ -7213,7 +7260,7 @@ const AtlasWallet = (() => {
     getPendingExports, checkPendingExport, reclaimPendingExport, forgetPendingExport,
     exportFullBackup, importFullBackup,
     // Friend requests by handle, delivered through the Post Office (federated).
-    sendFriendRequest, resendFriendRequest, getIncomingFriendRequests, getOutgoingFriendRequests,
+    setFriendMailAddress, sendFriendRequest, resendFriendRequest, getIncomingFriendRequests, getOutgoingFriendRequests,
     acceptFriendRequest, declineFriendRequest, cancelOutgoingFriendRequest, flushFriendNotices,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
     writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,
