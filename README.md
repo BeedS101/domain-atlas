@@ -632,6 +632,18 @@ asks again for any deleted message it still returns, so deletions made
 before this existed are cleaned up the same way. Wallets that sign with a
 passkey are skipped, since a background request must not raise a prompt.
 
+**Friend notices and cards clean up after themselves.** Once a friend
+request has been answered or declined, and once its acceptance has been
+picked up, the notice is removed from the domain; one still waiting for an
+answer stays. Deleting a Post Office membership card gives the membership
+up too (`/atlas/postoffice/leave`, SPEC.md §11.7): the card is revoked, the
+mail address it reserved is freed for anyone to take, and its mailbox is
+emptied. This cannot be undone. If the domain cannot be reached the wallet
+asks whether to delete the card anyway. With friends-only mail on, the
+domain's list of allowed senders follows your contacts (and anyone you have
+asked to be a contact) automatically, on every change and on every mail
+check, so there is no need to switch the mode off and on to refresh it.
+
 A mail message can carry a **gift** — a fresh credential attached at send
 time, addressed to a specific visitor. A gift never joins the wallet
 automatically the way a reissue replacement does: the mail card shows a

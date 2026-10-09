@@ -2832,6 +2832,16 @@ function deleteMailMessages(messageIds, credentialIds) {
   return removed;
 }
 
+// Removes every message held for one mailbox. Returns how many were removed.
+function deleteMailbox(credentialId) {
+  const doc = readMail();
+  const before = doc.messages.length;
+  doc.messages = doc.messages.filter((m) => m.credentialId !== credentialId);
+  const removed = before - doc.messages.length;
+  if (removed > 0) fs.writeFileSync(MAIL_FILE, JSON.stringify(doc, null, 2));
+  return removed;
+}
+
 // Registered mail-encryption public keys — see /atlas/mail/register-key
 // for how a key gets here and MAIL_ENCRYPTION_KEYS_FILE's own comment for
 // why this lives outside .well-known. A flat object keyed by credentialId
@@ -7996,6 +8006,32 @@ async function main() {
           mailboxes.push(credential.id);
         }
         const deleted = mailboxes.length ? deleteMailMessages(payload.messageIds, mailboxes) : 0;
+        return sendJson(res, 200, { ok: true, deleted });
+      }
+
+      // /atlas/postoffice/leave: a member gives up one membership. The
+      // credential is revoked (which stops mail in both directions and
+      // releases the handle, see findHandleHolder), the handle and consent
+      // lists are cleared, and the mailbox is emptied. Signed by the
+      // membership's own owner, so nobody can end another person's. Repeating
+      // it is harmless.
+      if (req.method === 'POST' && req.url === '/atlas/postoffice/leave') {
+        const { payload, proof } = JSON.parse((await readBody(req)) || '{}');
+        if (!payload || !proof) return sendJson(res, 400, { error: 'payload and proof are required' });
+        if (typeof payload.credentialId !== 'string' || !payload.credentialId) return sendJson(res, 400, { error: 'payload.credentialId is required' });
+        if (!(await verifyEnvelope(payload, proof))) return sendJson(res, 400, { error: 'signature does not check out' });
+        const doc = readPostOfficeMembers();
+        const member = doc.members.find((m) => m.credentialId === payload.credentialId && m.ownerPublicKey === proof.publicKey);
+        if (!member) return sendJson(res, 400, { error: 'you do not hold that membership at this domain' });
+        delete member.handle;
+        member.blockedSenders = [];
+        member.friends = [];
+        member.mailMode = 'open';
+        member.leftAt = member.leftAt || new Date().toISOString();
+        fs.writeFileSync(POSTOFFICE_MEMBERS_FILE, JSON.stringify(doc, null, 2));
+        if (!isRevoked(member.credentialId)) revoke(member.credentialId, 'left');
+        const deleted = deleteMailbox(member.credentialId);
+        console.log('Post Office membership left:', member.credentialId, '(' + deleted + ' messages removed)');
         return sendJson(res, 200, { ok: true, deleted });
       }
 

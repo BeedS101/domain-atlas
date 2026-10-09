@@ -1232,9 +1232,18 @@ const AtlasWallet = (() => {
   // to. This is for decluttering (a duplicate, a revoked asset you're done
   // tracking) — the credential itself, wherever else a copy of it exists,
   // is unaffected. Also drops it from the loadout, in case it was loaded.
-  async function deleteAsset(ownerPublicKey, credentialId) {
+  // Deleting a Post Office membership card first gives the membership up at
+  // its domain (leavePostOffice), so the handle is released and the mailbox
+  // emptied instead of both being stranded. If the domain cannot be reached
+  // this throws with code 'leave-unreachable' and deletes nothing, so the
+  // caller can offer to delete anyway (opts.keepOnServer).
+  async function deleteAsset(ownerPublicKey, credentialId, opts = {}) {
     const before = await getWallet(ownerPublicKey);
     const deleted = before.find((e) => e.credential.id === credentialId);
+    if (deleted && !opts.keepOnServer && deleted.credential.asset && deleted.credential.asset.class === 'atlas.postoffice.membership') {
+      const holder = await getIdentity();
+      if (holder && holder.publicKey === ownerPublicKey) await leavePostOffice(deleted.credential.issuer.domain, credentialId);
+    }
     const wallet = before.filter((e) => e.credential.id !== credentialId);
     await saveWallet(ownerPublicKey, wallet);
     await unloadItem(credentialId);
@@ -2290,6 +2299,7 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     all[ownerPublicKey] = await encryptAtRest(identity, 'friends', friends);
     await chrome.storage.local.set({ atlasFriends: all });
+    scheduleFriendsSync();
   }
 
   // A contact may carry the Post Office address it is reachable at, stored
@@ -6157,16 +6167,14 @@ const AtlasWallet = (() => {
 
   // Switches this wallet's mail mode at `domain` between "open" (accept
   // from any fellow member, the long-standing default) and "friendsOnly".
-  // Turning friendsOnly ON submits the CURRENT contents of this wallet's
-  // local Friends list (getFriends() — otherwise entirely client-side, see
-  // that function's own comment) to `domain` as an explicit one-time
-  // snapshot; it is not kept in sync automatically afterward — call this
-  // again later to update it, same as any other "sync" action elsewhere in
-  // this file. Turning it back to "open" clears that snapshot server-side.
+  // Turning friendsOnly ON gives `domain` the list of keys it may accept mail
+  // from (friendsAllowlist). That list is kept current afterwards by
+  // syncFriendsToPostOffices. Turning it back to "open" clears it server-side.
   async function setPostOfficeMailMode(domain, mode) {
     if (!domain) throw new Error('domain is required.');
     if (mode !== 'open' && mode !== 'friendsOnly') throw new Error('mode must be "open" or "friendsOnly".');
-    const friends = mode === 'friendsOnly' ? (await getFriends()).map((f) => f.publicKey) : undefined;
+    const identity = await getIdentity();
+    const friends = mode === 'friendsOnly' && identity ? (await friendsAllowlist(identity.publicKey)).slice(0, FRIENDS_SYNC_MAX_KEYS) : undefined;
     const payload = mode === 'friendsOnly' ? { mode, friends } : { mode };
     const proof = await signWithSelf(payload);
     const res = await fetch(baseUrl(domain) + '/atlas/postoffice/mailmode', {
@@ -6175,7 +6183,97 @@ const AtlasWallet = (() => {
       body: JSON.stringify({ payload, proof })
     });
     if (!res.ok) throw new Error('Setting mail mode failed: ' + (await res.text()));
+    if (identity) await recordFriendsSynced(identity.publicKey, domain, await allowlistDigest(await friendsAllowlist(identity.publicKey)));
     return await res.json();
+  }
+
+  // ---------- keeping each Post Office's contact list current ----------
+  //
+  // A Post Office in friends-only mode accepts mail only from the keys this
+  // wallet gave it. That list is the contacts plus everyone a friend request
+  // is still waiting on, since their answer has to be allowed through before
+  // they become a contact. It is pushed again whenever it changes (contacts
+  // or sent requests saved) and checked on every mail check, so a new
+  // contact can write straight away instead of being refused until the mode is
+  // toggled by hand.
+  //
+  // Local identities only: signing with a passkey prompts the person, which
+  // a background push must not do.
+  const FRIENDS_SYNC_MAX_KEYS = 500; // the Post Office's own cap on the list
+  const FRIENDS_SYNC_DEBOUNCE_MS = 500;
+  const FRIENDS_SYNC_RETRY_MS = 10 * 60 * 1000; // a domain that failed is left alone this long, unless asked about by name
+  let friendsSyncTimer = null;
+  let friendsSyncChain = Promise.resolve();
+  const friendsSyncFailedAt = new Map();
+
+  async function friendsAllowlist(ownerPublicKey) {
+    const keys = new Set((await getFriends()).map((f) => f.publicKey));
+    (await getFriendRequestState(ownerPublicKey)).outgoing.forEach((r) => keys.add(r.publicKey));
+    return Array.from(keys).sort();
+  }
+
+  async function allowlistDigest(keys) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keys.join(',')));
+    return b64urlEncode(digest);
+  }
+
+  async function recordFriendsSynced(ownerPublicKey, domain, digest) {
+    const { atlasFriendsSynced } = await chrome.storage.local.get('atlasFriendsSynced');
+    const all = atlasFriendsSynced || {};
+    all[ownerPublicKey] = { ...(all[ownerPublicKey] || {}), [domain]: digest };
+    await chrome.storage.local.set({ atlasFriendsSynced: all });
+  }
+
+  async function syncFriendsOnce(opts) {
+    const identity = await getIdentity();
+    if (!identity || identity.mode !== 'local' || !identity.privateKeyJwk) return {};
+    const keys = (await friendsAllowlist(identity.publicKey)).slice(0, FRIENDS_SYNC_MAX_KEYS);
+    const digest = await allowlistDigest(keys);
+    const { atlasFriendsSynced } = await chrome.storage.local.get('atlasFriendsSynced');
+    const known = (atlasFriendsSynced || {})[identity.publicKey] || {};
+    const domains = Array.from(new Set((await getPostOfficeMemberships(identity.publicKey)).map((m) => m.domain)))
+      .filter((d) => !opts.onlyDomain || d === opts.onlyDomain);
+    const result = {};
+    for (const domain of domains) {
+      if (known[domain] === digest) { result[domain] = 'unchanged'; continue; }
+      if (!opts.onlyDomain && Date.now() - (friendsSyncFailedAt.get(domain) || 0) < FRIENDS_SYNC_RETRY_MS) { result[domain] = 'failed'; continue; }
+      try {
+        const settings = await getPostOfficeSettings(domain);
+        if (settings && settings.mailMode === 'friendsOnly') {
+          const payload = { mode: 'friendsOnly', friends: keys };
+          const proof = await signWithSelf(payload);
+          const res = await fetch(baseUrl(domain) + '/atlas/postoffice/mailmode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ payload, proof })
+          });
+          if (!res.ok) throw new Error('mail mode update refused');
+          result[domain] = 'synced';
+        } else {
+          result[domain] = 'open';
+        }
+        await recordFriendsSynced(identity.publicKey, domain, digest);
+        friendsSyncFailedAt.delete(domain);
+      } catch (err) {
+        result[domain] = 'failed';
+        friendsSyncFailedAt.set(domain, Date.now());
+      }
+    }
+    return result;
+  }
+
+  // Pushes the current list to every Post Office that needs it. Runs one at a
+  // time. Resolves to {domain: 'unchanged' | 'open' | 'synced' | 'failed'};
+  // empty when this identity cannot sign silently.
+  function syncFriendsToPostOffices(opts) {
+    const run = friendsSyncChain.then(() => syncFriendsOnce(opts || {}));
+    friendsSyncChain = run.catch(() => {});
+    return run;
+  }
+
+  function scheduleFriendsSync() {
+    clearTimeout(friendsSyncTimer);
+    friendsSyncTimer = setTimeout(() => { syncFriendsToPostOffices().catch(() => {}); }, FRIENDS_SYNC_DEBOUNCE_MS);
   }
 
   async function blockPostOfficeSender(domain, blockedPublicKey) {
@@ -6213,6 +6311,33 @@ const AtlasWallet = (() => {
   // above, so it only ever returns the caller's own entry. Used to
   // populate the Mail settings panel without the wallet having to keep its
   // own separate copy of what it last told each domain.
+  // Gives up the membership `credentialId` at `domain`: the domain revokes
+  // the card, releases its handle and empties its mailbox. A domain that does
+  // not know the endpoint or the membership has nothing to release, which
+  // counts as done. Only an unreachable domain is an error.
+  async function leavePostOffice(domain, credentialId) {
+    if (!domain) throw new Error('domain is required.');
+    const payload = { credentialId };
+    const proof = await signWithSelf(payload);
+    let res;
+    try {
+      res = await fetch(baseUrl(domain) + '/atlas/postoffice/leave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payload, proof })
+      });
+    } catch (err) {
+      res = null;
+    }
+    if (!res || res.status >= 500) {
+      const err = new Error('Could not reach ' + domain + ' to release your address and mailbox there.');
+      err.code = 'leave-unreachable';
+      throw err;
+    }
+    if (!res.ok) return { left: false };
+    return { left: true, ...((await res.json().catch(() => null)) || {}) };
+  }
+
   async function getPostOfficeSettings(domain) {
     if (!domain) throw new Error('domain is required.');
     // A non-empty payload, deliberately — an empty object round-trips
@@ -6635,6 +6760,7 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     all[ownerPublicKey] = await encryptAtRest(identity, 'friendRequests', normalizeFriendRequestState(state));
     await chrome.storage.local.set({ atlasFriendRequests: all });
+    scheduleFriendsSync();
   }
 
   // Read-modify-write of the state under the same lock that guards mail and
@@ -6727,10 +6853,14 @@ const AtlasWallet = (() => {
   }
 
   // The answer to a request comes back as mail to this wallet's own
-  // membership at `viaDomain`, so a "friends only" mode there refuses it: the
-  // person asked is not a contact until the answer is read. Returns text to
-  // show the sender, or null.
+  // membership at `viaDomain`, so a "friends only" mode there refuses it
+  // unless the person asked is on the list. Returns text to show the sender
+  // when the list could not be brought up to date, or null.
   async function friendReplyBlockedWarning(viaDomain) {
+    // Their answer is let through once the list at viaDomain includes them
+    // (friendsAllowlist); only a list that could not be updated is a problem.
+    const synced = await syncFriendsToPostOffices({ onlyDomain: viaDomain }).catch(() => ({}));
+    if (synced[viaDomain] && synced[viaDomain] !== 'failed') return null;
     try {
       const settings = await getPostOfficeSettings(viaDomain);
       if (settings && settings.mailMode === 'friendsOnly') {
@@ -6788,6 +6918,7 @@ const AtlasWallet = (() => {
       queueFriendNotice(s, request.publicKey, request.homeDomain, request.via);
     });
     try { await flushFriendNotices(); } catch (err) { /* stays queued, retried on the next mail check */ }
+    await forgetOnServers(identity.publicKey, [{ id: request.messageId, domain: request.via }]);
     return { publicKey };
   }
 
@@ -6795,7 +6926,12 @@ const AtlasWallet = (() => {
   async function declineFriendRequest(publicKey) {
     const identity = await getIdentity();
     if (!identity) return;
-    await updateFriendRequestState(identity.publicKey, (s) => { s.incoming = s.incoming.filter((r) => r.publicKey !== publicKey); });
+    let declined = [];
+    await updateFriendRequestState(identity.publicKey, (s) => {
+      declined = s.incoming.filter((r) => r.publicKey === publicKey);
+      s.incoming = s.incoming.filter((r) => r.publicKey !== publicKey);
+    });
+    await forgetOnServers(identity.publicKey, declined.map((r) => ({ id: r.messageId, domain: r.via })));
   }
 
   function queueFriendNotice(state, publicKey, toDomain, viaDomain) {
@@ -6841,12 +6977,18 @@ const AtlasWallet = (() => {
     const friends = await getFriends();
     const friendKeys = new Set(friends.map((f) => f.publicKey));
     const toAdd = [];
+    // Domain copies that are no longer needed once the state below is saved:
+    // everything handled in this pass except a request now waiting for an
+    // answer (that copy goes when the person answers it).
+    const handled = [];
+    const dropped = [];
     await updateFriendRequestState(identity.publicKey, (s) => {
       const seen = new Set(s.seen);
       items.sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
       for (const item of items) {
         if (seen.has(item.id)) continue;
         seen.add(item.id);
+        handled.push(item);
         if (!item.publicKey || item.publicKey === identity.publicKey) continue;
         const parsed = parseFriendBody(item.body);
         if (!parsed) continue;
@@ -6871,13 +7013,22 @@ const AtlasWallet = (() => {
           queueFriendNotice(s, item.publicKey, item.homeDomain, item.via);
           continue;
         }
+        s.incoming.filter((r) => r.publicKey === item.publicKey).forEach((r) => dropped.push({ id: r.messageId, domain: r.via }));
         s.incoming = s.incoming.filter((r) => r.publicKey !== item.publicKey);
         s.incoming.push({ publicKey: item.publicKey, handle: item.handle || null, homeDomain: item.homeDomain, via: item.via, note: parsed.note, receivedAt: new Date().toISOString(), messageId: item.id });
       }
-      if (s.incoming.length > FRIEND_INCOMING_CAP) s.incoming = s.incoming.slice(-FRIEND_INCOMING_CAP);
+      if (s.incoming.length > FRIEND_INCOMING_CAP) {
+        s.incoming.slice(0, s.incoming.length - FRIEND_INCOMING_CAP).forEach((r) => dropped.push({ id: r.messageId, domain: r.via }));
+        s.incoming = s.incoming.slice(-FRIEND_INCOMING_CAP);
+      }
       s.seen = Array.from(seen).slice(-FRIEND_SEEN_CAP);
     });
     for (const entry of toAdd) await addFriend(entry.publicKey, entry.name, entry.address);
+    const stillWaiting = new Set((await getFriendRequestState(identity.publicKey)).incoming.map((r) => r.messageId));
+    await forgetOnServers(identity.publicKey, [
+      ...handled.filter((item) => !stillWaiting.has(item.id)).map((item) => ({ id: item.id, domain: item.via })),
+      ...dropped
+    ]);
   }
 
   // The address to keep for a person who answered: what their own Post
@@ -7132,6 +7283,8 @@ const AtlasWallet = (() => {
     // to atlasFriendRequests), so the ids already processed are folded in
     // from that store.
     const friendState = await getFriendRequestState(identity.publicKey);
+    const friendHandledIds = new Set(friendState.seen);
+    const friendWaitingIds = new Set(friendState.incoming.map((r) => r.messageId));
     const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds, ...existingChat.map((e) => e.id), ...deletedChatIds, ...friendState.seen]);
     // New arrivals are collected here and merged into the stored lists at
     // the end, under the lock, against a fresh read; `existing` and
@@ -7185,7 +7338,10 @@ const AtlasWallet = (() => {
         const staleOnServer = [];
         for (const message of (messages || [])) {
           if (knownIds.has(message.id)) {
-            if (deletedIds.has(message.id) || deletedChatIds.has(message.id)) staleOnServer.push(message.id);
+            // Friend notices already handled count as deleted too; a request
+            // still waiting for an answer is kept until it gets one.
+            const handledFriendNotice = friendHandledIds.has(message.id) && !friendWaitingIds.has(message.id);
+            if (deletedIds.has(message.id) || deletedChatIds.has(message.id) || handledFriendNotice) staleOnServer.push(message.id);
             continue;
           }
           const ok = await verifyMailMessage(domain, message);
@@ -7299,6 +7455,7 @@ const AtlasWallet = (() => {
     // flushFriendNotices does network I/O.
     await processFriendMessages(identity, incomingFriend);
     try { await flushFriendNotices(); } catch (err) { /* retried on the next check */ }
+    try { await syncFriendsToPostOffices(); } catch (err) { /* retried on the next check */ }
     const settings = await getMailSettings();
     settings.lastCheckedAt = new Date().toISOString();
     await chrome.storage.local.set({ atlasMailSettings: settings });
@@ -7331,7 +7488,7 @@ const AtlasWallet = (() => {
     getPendingExports, checkPendingExport, reclaimPendingExport, forgetPendingExport,
     exportFullBackup, importFullBackup,
     // Friend requests by handle, delivered through the Post Office (federated).
-    setFriendMailAddress, sendFriendRequest, resendFriendRequest, getIncomingFriendRequests, getOutgoingFriendRequests,
+    setFriendMailAddress, leavePostOffice, syncFriendsToPostOffices, sendFriendRequest, resendFriendRequest, getIncomingFriendRequests, getOutgoingFriendRequests,
     acceptFriendRequest, declineFriendRequest, cancelOutgoingFriendRequest, flushFriendNotices,
     getAutoBackupSettings, setUpAutoBackup, turnOffAutoBackup, reconnectAutoBackupPermission,
     writeAutoBackupNow, restoreFromAutoBackupFile, buildAutoBackupBlob, isAutoBackupWriterWindowOpen,

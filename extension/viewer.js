@@ -6233,14 +6233,26 @@ hiddenAssetsListEl && hiddenAssetsListEl.addEventListener('click', async (e) => 
     const held = (await AtlasWallet.getWallet(owner.publicKey)).find((e) => e.credential.id === btn.dataset.id);
     if (held && held.credential.asset && held.credential.asset.class === 'atlas.postoffice.membership') {
       // The membership card is how this wallet fetches its mail from that
-      // Post Office, so without it nothing addressed to it can arrive.
+      // Post Office. Deleting it also gives the membership up there.
       const domain = held.credential.issuer && held.credential.issuer.domain;
       const waiting = (await AtlasWallet.getOutgoingFriendRequests(owner.publicKey)).filter((r) => r.viaDomain === domain).length;
-      warning = '\n\nThis is your Post Office card for ' + domain + '. Without it this wallet cannot receive mail from ' + domain + ' (including answers to friend requests)' +
+      warning = '\n\nThis is your Post Office card for ' + domain + '. Deleting it also gives your membership up there: your address is released and the mail waiting for you at ' + domain + ' is deleted. ' +
+        'Without it this wallet cannot receive mail from ' + domain + ' (including answers to friend requests)' +
         (waiting ? ', and ' + waiting + ' friend request(s) sent through it are still waiting for an answer' : '') + '.';
     }
     if (!confirm('This permanently removes it — if this was your only copy, it\'s gone for good.' + warning)) return;
-    await AtlasWallet.deleteAsset(owner.publicKey, btn.dataset.id);
+    try {
+      await AtlasWallet.deleteAsset(owner.publicKey, btn.dataset.id);
+    } catch (err) {
+      if (err && err.code === 'leave-unreachable') {
+        // Deleting anyway leaves the address reserved and the mailbox in place.
+        if (!confirm(err.message + ' Delete the card anyway? Your address there stays reserved and the waiting mail is not removed.')) return;
+        await AtlasWallet.deleteAsset(owner.publicKey, btn.dataset.id, { keepOnServer: true });
+      } else {
+        statusEl.textContent = 'Delete failed: ' + err.message;
+        return;
+      }
+    }
     await refreshHiddenAssetsDisplay();
     return;
   }

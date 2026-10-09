@@ -2435,6 +2435,31 @@ function delete_mail_messages($messageIds, $credentialIds) {
   return $removed;
 }
 
+// Removes every message held for one mailbox. Returns how many were removed.
+function delete_mailbox($credentialId) {
+  $file = atlas_mail_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return 0;
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['messages' => []];
+  $before = count($doc['messages']);
+  $doc['messages'] = array_values(array_filter($doc['messages'], function ($m) use ($credentialId) {
+    return ($m['credentialId'] ?? null) !== $credentialId;
+  }));
+  $removed = $before - count($doc['messages']);
+  if ($removed > 0) {
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $removed;
+}
+
 // ---------- asset updates (same flock-guarded shape as mail above) ----------
 
 function read_asset_updates() {
@@ -3955,6 +3980,42 @@ function update_postoffice_member($ownerPublicKey, callable $mutate) {
   }
   unset($member);
 
+  if ($found !== null) {
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $found;
+}
+
+// Ends one membership for its owner: clears the handle and consent lists on
+// the roster entry. Returns the entry, or null if that credential is not
+// listed under that owner. Revoking the credential and emptying its mailbox
+// are separate steps for the caller (atlas_revoke, delete_mailbox).
+function leave_postoffice_membership($credentialId, $ownerPublicKey) {
+  $file = atlas_postoffice_members_file();
+  $fh = fopen($file, 'c+');
+  if ($fh === false) return null;
+  flock($fh, LOCK_EX);
+  $data = stream_get_contents($fh);
+  $doc = json_decode($data, true);
+  if (!is_array($doc)) $doc = ['members' => []];
+  $found = null;
+  foreach ($doc['members'] as &$member) {
+    if (($member['credentialId'] ?? null) === $credentialId && ($member['ownerPublicKey'] ?? null) === $ownerPublicKey) {
+      unset($member['handle']);
+      $member['blockedSenders'] = [];
+      $member['friends'] = [];
+      $member['mailMode'] = 'open';
+      if (empty($member['leftAt'])) $member['leftAt'] = gmdate('Y-m-d\TH:i:s\Z');
+      $found = $member;
+      break;
+    }
+  }
+  unset($member);
   if ($found !== null) {
     ftruncate($fh, 0);
     rewind($fh);

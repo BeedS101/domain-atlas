@@ -60,6 +60,7 @@ What's in this folder
     mail/check.php           - POST /atlas/mail/check        (wallet's periodic mail check)
     mail/delete.php          - POST /atlas/mail/delete       (wallet asks to forget mail it deleted)
     postoffice/send.php      - POST /atlas/postoffice/send   (user-to-user mail — see "Post Office" below)
+    postoffice/leave.php     - POST /atlas/postoffice/leave  (member gives up a membership: frees the handle, empties the mailbox)
     postoffice/mailmode.php  - POST /atlas/postoffice/mailmode  (self-service: open vs. friends-only — see "Post Office" below)
     postoffice/block.php     - POST /atlas/postoffice/block     (self-service: block a sender)
     postoffice/unblock.php   - POST /atlas/postoffice/unblock   (self-service: undo a block)

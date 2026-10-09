@@ -125,20 +125,18 @@ async function untilTrue(fn, what, ms = 10000) {
     console.log('PASS: request found by a differently-cased handle; contact added after Accept, keeping the handle as registered');
     await reset();
 
-    console.log('STEP 2: friends-only mail settings: warned, acceptance kept queued, delivered once mail is open');
+    console.log('STEP 2: friends-only mail settings: the person asked is let through, so their answer arrives');
     await alice.frame.evaluate((d) => AtlasWallet.setPostOfficeMailMode(d, 'friendsOnly'), DOMAIN_A);
-    const warned = await sendRequest();
-    assert(warned.warning && warned.warning.includes('only accept mail from contacts'), 'Expected a warning about friends-only mail, got: ' + JSON.stringify(warned));
+    const sentUnderFriendsOnly = await sendRequest();
+    assert(!sentUnderFriendsOnly.warning, 'No warning expected once the list at the Post Office includes the person asked, got: ' + sentUnderFriendsOnly.warning);
     await bob.frame.evaluate(() => AtlasWallet.checkAllMail());
     await bob.frame.evaluate((k) => AtlasWallet.acceptFriendRequest(k), pkAlice);
     await alice.frame.evaluate(() => AtlasWallet.checkAllMail());
-    assert((await friendsOf(alice.frame)).length === 0 && (await state(alice.frame)).outgoing.length === 1, 'The acceptance cannot arrive while Alice only takes mail from contacts');
-    await alice.frame.evaluate((d) => AtlasWallet.setPostOfficeMailMode(d, 'open'), DOMAIN_A);
-    await bob.frame.evaluate(() => AtlasWallet.checkAllMail());
-    await alice.frame.evaluate(() => AtlasWallet.checkAllMail());
     aliceFriends = await friendsOf(alice.frame);
-    assert(aliceFriends.length === 1 && aliceFriends[0].publicKey === pkBob, 'Expected the retried acceptance to add Bobby, got: ' + JSON.stringify(aliceFriends));
-    console.log('PASS: the refused acceptance was kept and delivered after Alice switched to open mail');
+    assert(aliceFriends.length === 1 && aliceFriends[0].publicKey === pkBob, 'Expected the acceptance to add Bobby although Alice only takes mail from contacts, got: ' + JSON.stringify(aliceFriends));
+    assert((await state(alice.frame)).outgoing.length === 0, 'The sent request should be cleared');
+    console.log('PASS: friends-only mode did not block the answer to a request Alice sent');
+    await alice.frame.evaluate((d) => AtlasWallet.setPostOfficeMailMode(d, 'open'), DOMAIN_A);
     await reset();
 
     console.log('STEP 3: Alice deletes her card, joins again, and sends the request again');
