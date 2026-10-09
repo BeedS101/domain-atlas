@@ -141,12 +141,10 @@ const SUSPENSIONS_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-suspensi
 const REVIEWER_KEY_FILE = path.join(STATE_DIR, 'reviewer-private-key.jwk.json');
 const REVIEWER_PUBLIC_KEY_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-reviewer-key.json');
 // Deliberately NOT under .well-known (which is served as plain static
-// files, world-readable to anyone who knows the URL) — mail is looked up
-// through the /atlas/mail/check endpoint instead, which at least requires
-// already knowing the credential IDs being asked about, same as any other
-// server-side state that isn't meant to be a public crawlable file. Lives
-// next to the private key file for the same "server-process-only state"
-// reason, not in the public docroot.
+// files, world-readable to anyone who knows the URL) — mail is read through
+// the signed /atlas/mail/check endpoint (SPEC.md §11.8) instead. Lives next
+// to the private key file for the same "server-process-only state" reason,
+// not in the public docroot.
 const MAIL_FILE = path.join(STATE_DIR, 'atlas-mail-store.json');
 // Credentials this domain minted as claimable files (SPEC.md §13.5): the
 // ids a claim-from-file may consume. Server-process-only state next to the
@@ -174,6 +172,17 @@ const MAILBOX_CAP = parseInt(process.env.ATLAS_MAILBOX_CAP || '200', 10);
 // Bounds on one /atlas/mail/delete request.
 const MAIL_DELETE_MAX_IDS = 500;
 const MAIL_DELETE_MAX_CREDENTIALS = 200;
+// Authenticated mail reads (SPEC.md §11.8). A request is accepted only when
+// its issuedAt is within MAIL_REQUEST_WINDOW_MS of this server's clock, and
+// its nonce is remembered for twice that, so a captured request cannot be
+// replayed once the window has closed or inside it. A delegation (a key the
+// identity authorised for reads) lives at most MAIL_SESSION_MAX_MS.
+const MAIL_REQUEST_WINDOW_MS = 2 * 60 * 1000;
+const MAIL_NONCE_RETAIN_MS = 2 * MAIL_REQUEST_WINDOW_MS + 30 * 1000;
+const MAIL_NONCE_CAP = 20000;
+const MAIL_SESSION_MAX_MS = 15 * 60 * 1000;
+const MAIL_CHECK_MAX_CREDENTIALS = 200;
+const MAIL_NONCE_FILE = path.join(STATE_DIR, 'atlas-mail-nonces-store.json');
 // Email-delivered bearer credentials (SPEC.md §13) — outbound SMTP config
 // for the mailbox named by this domain's own manifest.emailTickets.
 // intakeAddress (§13.1). Deliberately read fresh from the environment
@@ -277,10 +286,8 @@ const VISITS_RETENTION_DAYS = 90;
 // open the file directly (this is a demo running as a plain process; a real
 // deployment would read it from wherever it actually runs) if they want to
 // message everyone by hand later. A public "list subscribers" API would leak
-// every subscriber's public key to anyone who requests it, unlike
-// /atlas/mail/send or /atlas/mail/check which at least require already
-// knowing a credential id — worth real operator authentication before ever
-// exposing this over HTTP.
+// every subscriber's public key to anyone who requests it — worth real
+// operator authentication before ever exposing this over HTTP.
 const SUBSCRIBERS_FILE = path.join(STATE_DIR, 'atlas-subscribers-store.json');
 // Post Office (task #75/#87): a roster of who holds a currently-valid
 // Global Mail membership from THIS domain — one entry per
@@ -2840,6 +2847,98 @@ function deleteMailbox(credentialId) {
   const removed = before - doc.messages.length;
   if (removed > 0) fs.writeFileSync(MAIL_FILE, JSON.stringify(doc, null, 2));
   return removed;
+}
+
+// ---------- Authenticated mail reads (SPEC.md §11.8) ----------
+
+// Spent request nonces, as [sha256(signerKey|nonce), expiresAtMs] pairs. The
+// check and the write happen in one synchronous step, so two concurrent
+// requests carrying the same nonce cannot both pass.
+function consumeMailNonce(signerKey, nonce, nowMs) {
+  let doc = { nonces: [] };
+  try { if (fs.existsSync(MAIL_NONCE_FILE)) doc = JSON.parse(fs.readFileSync(MAIL_NONCE_FILE, 'utf8')); } catch (e) { doc = { nonces: [] }; }
+  const live = (Array.isArray(doc.nonces) ? doc.nonces : []).filter((n) => Array.isArray(n) && n[1] > nowMs);
+  const key = require('crypto').createHash('sha256').update(signerKey + '|' + nonce).digest('base64url');
+  if (live.some((n) => n[0] === key)) return 'replayed';
+  if (live.length >= MAIL_NONCE_CAP) return 'full';
+  live.push([key, nowMs + MAIL_NONCE_RETAIN_MS]);
+  fs.writeFileSync(MAIL_NONCE_FILE, JSON.stringify({ nonces: live }));
+  return 'ok';
+}
+
+// verifyEnvelope() plus what a read grant needs from a passkey assertion:
+// it must be a "get" assertion and the user must have been present.
+async function verifyMailEnvelope(payload, envelope) {
+  try {
+    if (!envelope || typeof envelope !== 'object') return false;
+    if (envelope.signerRole === 'webauthn') {
+      const clientData = JSON.parse(Buffer.from(fromB64url(envelope.clientDataJSON)).toString('utf8'));
+      if (clientData.type !== 'webauthn.get') return false;
+      const authData = fromB64url(envelope.authenticatorData);
+      if (authData.length < 37 || (authData[32] & 0x01) === 0) return false;
+    } else if (envelope.signerRole !== 'raw-ecdsa') {
+      return false;
+    }
+    return await verifyEnvelope(payload, envelope);
+  } catch (e) {
+    return false;
+  }
+}
+
+function mailAuthError(status, code, message, extra) {
+  return { error: { status, body: { error: message, code, ...(extra || {}) } } };
+}
+
+// Authenticates one signed mail request and returns {identityKey} (the public
+// key whose mailboxes may be read) or {error: {status, body}}.
+//
+//   body.payload  {action, domain, issuedAt, nonce, ...}   signed by body.proof
+//   body.delegation (optional) {payload: {action:'mail-session', purpose:'mail-read',
+//                   domain, sessionPublicKey, issuedAt, expiresAt}, proof}
+//                   signed by the identity; then body.proof must be a raw-ecdsa
+//                   signature by sessionPublicKey. Without it body.proof is
+//                   the identity's own signature.
+//
+// Nothing here trusts a public key just because it appears in the request:
+// the identity is whichever key actually verified, and the caller then has to
+// show credentials owned by it. The nonce is spent only after every
+// signature has checked out, so unauthenticated traffic cannot fill the store.
+async function authenticateMailRequest(body, action) {
+  const payload = body && body.payload, proof = body && body.proof, delegation = body && body.delegation;
+  if (!payload || typeof payload !== 'object' || !proof || typeof proof !== 'object') {
+    return mailAuthError(401, 'auth-required', 'this endpoint now requires a signed request (SPEC.md §11.8)');
+  }
+  const nowMs = Date.now();
+  if (payload.action !== action) return mailAuthError(400, 'bad-request', 'payload.action must be ' + action);
+  if (payload.domain !== DOMAIN) return mailAuthError(400, 'wrong-domain', 'payload.domain does not name this domain');
+  if (typeof payload.nonce !== 'string' || payload.nonce.length < 16 || payload.nonce.length > 128) return mailAuthError(400, 'bad-request', 'payload.nonce must be a string of 16 to 128 characters');
+  const issuedMs = Date.parse(payload.issuedAt);
+  if (!Number.isFinite(issuedMs)) return mailAuthError(400, 'bad-request', 'payload.issuedAt must be an ISO timestamp');
+  if (Math.abs(nowMs - issuedMs) > MAIL_REQUEST_WINDOW_MS) {
+    return mailAuthError(401, 'stale-request', 'request is outside the allowed time window', { serverTime: new Date(nowMs).toISOString() });
+  }
+
+  let identityKey = proof.publicKey;
+  if (delegation !== undefined && delegation !== null) {
+    const d = delegation.payload;
+    if (!d || typeof d !== 'object' || !delegation.proof) return mailAuthError(401, 'bad-delegation', 'delegation is malformed');
+    if (d.action !== 'mail-session' || d.purpose !== 'mail-read' || d.domain !== DOMAIN) return mailAuthError(401, 'bad-delegation', 'delegation is not a mail read grant for this domain');
+    if (typeof d.sessionPublicKey !== 'string' || proof.signerRole !== 'raw-ecdsa' || proof.publicKey !== d.sessionPublicKey) return mailAuthError(401, 'bad-delegation', 'request was not signed by the delegated key');
+    const dIssued = Date.parse(d.issuedAt), dExpires = Date.parse(d.expiresAt);
+    if (!Number.isFinite(dIssued) || !Number.isFinite(dExpires) || dExpires - dIssued > MAIL_SESSION_MAX_MS || dExpires <= dIssued) return mailAuthError(401, 'bad-delegation', 'delegation lifetime is invalid');
+    if (dIssued - nowMs > MAIL_REQUEST_WINDOW_MS) return mailAuthError(401, 'stale-request', 'delegation is outside the allowed time window', { serverTime: new Date(nowMs).toISOString() });
+    if (nowMs > dExpires) return mailAuthError(401, 'session-expired', 'mail session has expired');
+    if (issuedMs > dExpires || issuedMs < dIssued - MAIL_REQUEST_WINDOW_MS) return mailAuthError(401, 'bad-delegation', 'request time falls outside the delegation');
+    if (!(await verifyMailEnvelope(d, delegation.proof))) return mailAuthError(401, 'bad-signature', 'delegation signature does not check out');
+    identityKey = delegation.proof.publicKey;
+  }
+  if (typeof identityKey !== 'string' || !identityKey) return mailAuthError(401, 'bad-signature', 'signature does not check out');
+  if (!(await verifyMailEnvelope(payload, proof))) return mailAuthError(401, 'bad-signature', 'signature does not check out');
+
+  const spent = consumeMailNonce(proof.publicKey, payload.nonce, nowMs);
+  if (spent === 'replayed') return mailAuthError(401, 'replayed-request', 'this request has already been used');
+  if (spent === 'full') return mailAuthError(503, 'busy', 'too many recent requests; try again shortly');
+  return { identityKey };
 }
 
 // Registered mail-encryption public keys — see /atlas/mail/register-key
@@ -7907,77 +8006,78 @@ async function main() {
         return sendJson(res, 200, message);
       }
 
-      // /atlas/mail/check is what the wallet's periodic check loop calls —
-      // give it every credential id you hold that this domain issued, get
-      // back whatever's been sent for any of them. The wallet re-verifies
-      // each message's signature itself against this domain's published
-      // key (the exact same .well-known/atlas-key.json check it already
-      // does for credentials) before trusting or displaying anything —
-      // this endpoint doesn't need to do anything special to be trustworthy
-      // beyond signing what it hands back, same as every other endpoint here.
+      // /atlas/mail/check is what the wallet's periodic check loop calls: it
+      // asks for whatever was sent to, or happened to, the credentials the
+      // caller owns. The request is signed (SPEC.md §11.8, see
+      // authenticateMailRequest). The wallet re-verifies each message's
+      // signature against this domain's published key before trusting it.
       //
-      // `updates` (SPEC.md §5.1.1, additive to the existing mail response
-      // — this endpoint's existing mail check-in cycle is reused as the
-      // transport rather than standing up a second polling mechanism)
-      // rides the same request: for each requested id that isn't simply
-      // still active, one entry naming what happened to it. A superseded
-      // asset's entry carries the full replacement credential so the
-      // wallet can verify and adopt it without a second round trip — the
-      // wallet must still run that verification itself before trusting
-      // any of it, this endpoint being "the truth" no more than any other
-      // network response is. Ids that are still perfectly valid get no
-      // entry at all, same lean-response reasoning as `messages` above
-      // only ever containing what's actually new.
+      // `updates` (SPEC.md §5.1.1) rides the same request: for each
+      // authorised id that is not simply still active, one entry naming what
+      // happened to it. A superseded asset's entry carries the full
+      // replacement credential so the wallet can verify and adopt it without
+      // a second round trip. Ids that are still valid get no entry.
       //
-      // `credentials` (optional, additive — a caller that only sends
-      // `credentialIds` gets exactly the old behavior): the wallet's own
-      // current copy of whichever of those ids it still wants to ask
-      // about. Lets this same request also catch a class-wide patch (POST
-      // /atlas/admin/class-patch) that's moved past what a specific
-      // credential says, without this domain ever keeping a registry of
-      // who holds what — see applyClassPatchIfStale()'s own comment. Only
-      // consulted for an id that isn't already revoked or superseded;
-      // never trusted for anything until its own signature checks out.
+      // `credentials` are the caller's copies of the credentials behind the
+      // requested ids. They authorise nothing by themselves (each must carry
+      // this domain's signature and name the authenticated identity as
+      // owner) and are the only input the class patch (POST
+      // /atlas/admin/class-patch) ever acts on, see applyClassPatchIfStale().
       if (req.method === 'POST' && req.url === '/atlas/mail/check') {
-        const { credentialIds, credentials } = JSON.parse((await readBody(req)) || '{}');
-        if (!Array.isArray(credentialIds) || credentialIds.length === 0) {
-          return sendJson(res, 400, { error: 'credentialIds must be a non-empty array' });
+        // Authenticated read (SPEC.md §11.8). Knowing a credential id, or
+        // holding a copy of the credential, proves nothing: ids and
+        // credentials are shared freely. The caller signs the request and
+        // each mailbox is released only for a credential this domain signed
+        // whose owner is the authenticated identity. Everything else is
+        // dropped silently, so a mixed request returns the caller's own
+        // mailboxes and nothing reveals whether an unauthorised id exists.
+        let body;
+        try { body = JSON.parse((await readBody(req)) || '{}'); } catch (e) { return sendJson(res, 400, { error: 'invalid JSON body' }); }
+        const auth = await authenticateMailRequest(body, 'mail-check');
+        if (auth.error) return sendJson(res, auth.error.status, auth.error.body);
+        const requested = body.payload.credentialIds;
+        const credentials = body.credentials;
+        if (!Array.isArray(requested) || requested.length === 0 || requested.length > MAIL_CHECK_MAX_CREDENTIALS || !requested.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 512)) {
+          return sendJson(res, 400, { error: 'payload.credentialIds must be 1 to ' + MAIL_CHECK_MAX_CREDENTIALS + ' strings' });
         }
-        const wanted = new Set(credentialIds);
-        const messages = readMail().messages.filter((m) => wanted.has(m.credentialId));
-
-        const presentedById = new Map();
-        (Array.isArray(credentials) ? credentials : []).forEach((c) => { if (c && c.id) presentedById.set(c.id, c); });
+        if (!Array.isArray(credentials) || credentials.length > MAIL_CHECK_MAX_CREDENTIALS) {
+          return sendJson(res, 400, { error: 'credentials must be an array of at most ' + MAIL_CHECK_MAX_CREDENTIALS });
+        }
+        const requestedSet = new Set(requested);
+        // Revoked and superseded credentials still authorise their own
+        // mailbox: ownership does not lapse, and settlement notices and
+        // replacements are filed under exactly those ids.
+        const authorised = new Map();
+        for (const c of credentials) {
+          if (!c || typeof c.id !== 'string' || !requestedSet.has(c.id) || authorised.has(c.id)) continue;
+          if (!c.owner || c.owner.publicKey !== auth.identityKey) continue;
+          try { if (!(await verifyOwnCredentialSignature(c, assetPayloadOf(c)))) continue; } catch (e) { continue; }
+          authorised.set(c.id, c);
+        }
+        const messages = readMail().messages.filter((m) => authorised.has(m.credentialId));
 
         const assetUpdates = readAssetUpdates().updates;
         const revokedBefore = readRevocations().revoked;
         const updates = [];
-        for (const id of wanted) {
+        for (const [id, presented] of authorised) {
           const supersession = assetUpdates.find((u) => u.id === id);
           if (supersession) { updates.push(supersession); continue; }
           const revocation = revokedBefore.find((r) => r.id === id);
           if (revocation) { updates.push({ id, status: 'revoked', reason: revocation.reason }); continue; }
           // A suspended id gets its own status rather than being silently
-          // indistinguishable from "still fine" — same channel this
-          // endpoint already uses to report a revocation, just a lighter,
-          // reversible one. `expiresAt` lets a wallet show "until <date>"
-          // when the admin gave it a deadline, or nothing when it's
-          // indefinite (SUSPENSIONS_FILE's own comment above).
+          // indistinguishable from "still fine". `expiresAt` lets a wallet
+          // show "until <date>" when the admin gave one.
           const suspension = findSuspension(id);
           if (suspension) { updates.push({ id, status: 'suspended', reason: suspension.reason, expiresAt: suspension.expiresAt }); continue; }
-          // findSuspension() above resolves any expired suspension as a
-          // side effect, including revoking an expired 'finalize' entry
-          // (SPEC.md §13.4) — which `revokedBefore` was read too early to
-          // catch if it happened for this exact id. Re-checking fresh here,
-          // only for ids that reach this point, reports that revocation in
-          // this same response rather than one call late.
+          // findSuspension() resolves an expired suspension as a side
+          // effect, including revoking an expired 'finalize' entry (SPEC.md
+          // §13.4); re-reading here reports that in this same response.
           const justRevoked = readRevocations().revoked.find((r) => r.id === id);
           if (justRevoked) { updates.push({ id, status: 'revoked', reason: justRevoked.reason }); continue; }
-          const presented = presentedById.get(id);
-          if (presented) {
-            const applied = await applyClassPatchIfStale(presented);
-            if (applied) updates.push(applied);
-          }
+          // The class patch (re-minting a stale credential) only ever runs
+          // for a credential the caller has just proved they own.
+          const applied = await applyClassPatchIfStale(presented);
+          if (applied) updates.push(applied);
         }
 
         return sendJson(res, 200, { messages, updates });

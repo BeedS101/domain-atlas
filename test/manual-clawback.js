@@ -103,8 +103,10 @@ async function transfer(credential, ownerKp, ownerPublicKey, recipientPublicKey)
 async function split(credential, sendAmount, toPublicKey) {
   return postJson('/atlas/asset/split', { credential, sendAmount, toPublicKey });
 }
-async function mailCheck(ids) {
-  const res = await postJson('/atlas/mail/check', { credentialIds: ids });
+async function mailCheck(who, credentials) {
+  const payload = { action: 'mail-check', domain: new URL(BASE).host, credentialIds: credentials.map((c) => c.id), issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signWithSelf(who.kp, who.publicKey, payload);
+  const res = await postJson('/atlas/mail/check', { credentials, payload, proof });
   if (res.status !== 200) throw new Error('mail check failed: ' + JSON.stringify(res.body));
   return res.body;
 }
@@ -168,7 +170,7 @@ async function adminDirectory(admin) {
     console.log('PASS: clawed-back credential successfully spent onward via split');
 
     console.log('STEP 2: mail/check reports the OLD (thief-held) id as revoked, reason "clawback" — not "superseded", since the replacement went to someone else');
-    const status = await mailCheck([stolen.id]);
+    const status = await mailCheck(thief, [stolen]);
     const update = status.updates.find((u) => u.id === stolen.id);
     assert(update && update.status === 'revoked', 'expected the old id to be reported revoked, got: ' + JSON.stringify(update));
     assert(update.reason === 'clawback', 'expected the revocation reason to be "clawback", got: ' + JSON.stringify(update));
@@ -202,7 +204,7 @@ async function adminDirectory(admin) {
     const deliveredClawback = await adminCall('/atlas/clawback', admin, { credential: memberStolen, toPublicKey: member.publicKey });
     assert(deliveredClawback.status === 200, 'expected the clawback to succeed, got: ' + JSON.stringify(deliveredClawback.body));
     assert(deliveredClawback.body.delivered === true, 'expected delivered:true — the recipient holds a live Post Office membership, got: ' + JSON.stringify(deliveredClawback.body));
-    const memberMail = await mailCheck([memberCred.id]);
+    const memberMail = await mailCheck(member, [memberCred]);
     const gift = memberMail.messages.find((m) => m.attachedAsset && m.attachedAsset.id === deliveredClawback.body.newCredential.id);
     assert(gift, 'expected the member\'s own mail check to show the clawed-back credential attached as a gift, got: ' + JSON.stringify(memberMail.messages));
     assert(/returned to you/.test(gift.subject || ''), 'expected a "returned to you" subject line, got: ' + JSON.stringify(gift));

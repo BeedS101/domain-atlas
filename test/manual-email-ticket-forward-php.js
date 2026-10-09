@@ -92,10 +92,19 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
   if (res.status !== 200) throw new Error('Failed to issue ' + assetClass + ': ' + JSON.stringify(res.body));
   return res.body;
 }
-async function mailCheckStatus(base, id) {
-  const res = await postJson(base, '/atlas/mail/check', { credentialIds: [id] });
+async function mailCheckStatus(base, who, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signWithSelf(who.kp, who.publicKey, payload);
+  const res = await postJson(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
   if (res.status !== 200) throw new Error('mail check failed: ' + JSON.stringify(res.body));
-  return res.body.updates.find((u) => u.id === id) || null;
+  return res.body.updates.find((u) => u.id === credential.id) || null;
+}
+// A credential nobody holds a key for (an emailed bearer one) is read from
+// the public revocation list, which is all a stranger may learn.
+async function publicStatus(base, id) {
+  const doc = await (await fetch(base + '/.well-known/atlas-revocations.json')).json();
+  const entry = (doc.revoked || []).find((r) => r.id === id);
+  return entry ? { id, status: 'revoked', reason: entry.reason } : null;
 }
 async function transferToEmail(base, credential, ownerKp, ownerPublicKey, recipientEmail) {
   const intentPayload = { credentialId: credential.id, recipientEmail, action: 'transfer-to-email' };
@@ -378,7 +387,7 @@ function startPhp(port, bundleDir) {
     assert(poll1.status === 200, 'expected poll-now to succeed, got ' + poll1.status + ': ' + JSON.stringify(poll1.body));
     assert(poll1.body.summary.transferred === 1, 'expected exactly one transfer, got: ' + JSON.stringify(poll1.body.summary));
 
-    const credential1Status = await mailCheckStatus(PHP_BASE, credential1.id);
+    const credential1Status = await publicStatus(PHP_BASE, credential1.id);
     assert(credential1Status && credential1Status.status === 'revoked' && credential1Status.reason === 'email-transferred', 'expected the forwarded-from credential revoked with reason "email-transferred", got: ' + JSON.stringify(credential1Status));
 
     assert(sessions.length === 2, 'expected a second SMTP session for the forward delivery, got ' + sessions.length);
@@ -399,7 +408,7 @@ function startPhp(port, bundleDir) {
     mailbox.push({ raw: buildForwardMessage('holder3@example.com', ['holder4@example.com', 'holder5@example.com'], credential3), seen: false });
     const poll2 = await pollNow(PHP_BASE, admin);
     assert(poll2.body.summary.denied === 1, 'expected exactly one denial for a multi-CC forward, got: ' + JSON.stringify(poll2.body.summary));
-    const credential3Status = await mailCheckStatus(PHP_BASE, credential3.id);
+    const credential3Status = await publicStatus(PHP_BASE, credential3.id);
     assert(credential3Status === null, 'expected the multi-CC forward to leave the credential untouched, got: ' + JSON.stringify(credential3Status));
     assert(sessions.length === 4, 'expected one more SMTP session for the denial reply, got ' + sessions.length);
     const denialSession1 = sessions[3];
@@ -415,7 +424,7 @@ function startPhp(port, bundleDir) {
     const denialSession2 = sessions[4];
     assert(denialSession2.rcptTo[0] === '<holder1@example.com>', 'expected the denial reply to go back to the forwarder, got: ' + denialSession2.rcptTo[0]);
     assert(!denialSession2.data.includes('holder2@example.com'), 'expected the denial reply to never name the real current holder');
-    const credential1StatusAfterReplay = await mailCheckStatus(PHP_BASE, credential1.id);
+    const credential1StatusAfterReplay = await publicStatus(PHP_BASE, credential1.id);
     assert(credential1StatusAfterReplay && credential1StatusAfterReplay.reason === 'email-transferred', 'expected the already-transferred credential\'s status to stay exactly as it was, got: ' + JSON.stringify(credential1StatusAfterReplay));
     console.log('PASS: stale forward denied without revealing the real current holder');
 
@@ -429,7 +438,7 @@ function startPhp(port, bundleDir) {
     const poll4 = await pollNow(PHP_BASE, admin);
     assert(poll4.body.summary.ignored === 1, 'expected exactly one ignored message for a no-CC forward, got: ' + JSON.stringify(poll4.body.summary));
     assert(sessions.length === sessionsBeforePoll4, 'expected a no-CC forward to send nothing at all, got ' + (sessions.length - sessionsBeforePoll4) + ' new SMTP session(s)');
-    const credential4Status = await mailCheckStatus(PHP_BASE, credential4.id);
+    const credential4Status = await publicStatus(PHP_BASE, credential4.id);
     assert(credential4Status === null, 'expected a no-CC forward to leave the credential untouched, got: ' + JSON.stringify(credential4Status));
     console.log('PASS: no-CC forward was a true no-op — nothing sent, nothing revoked');
 
@@ -441,7 +450,7 @@ function startPhp(port, bundleDir) {
     mailbox.push({ raw: buildForwardMessage('holder8@example.com', [REJECT_RECIPIENT], credential5), seen: false });
     const poll5 = await pollNow(PHP_BASE, admin);
     assert(poll5.body.summary.failed === 1, 'expected exactly one failure for a forward the mail server rejects, got: ' + JSON.stringify(poll5.body.summary));
-    const credential5Status = await mailCheckStatus(PHP_BASE, credential5.id);
+    const credential5Status = await publicStatus(PHP_BASE, credential5.id);
     assert(credential5Status === null, 'expected the forwarded-from credential to be completely untouched after a rejected delivery, got: ' + JSON.stringify(credential5Status));
     console.log('PASS: rejected forward delivery left the forwarded-from credential untouched');
 
@@ -462,7 +471,7 @@ function startPhp(port, bundleDir) {
     const poll6b = await pollNow(PHP_BASE, admin);
     assert(poll6b.body.summary.bounced === 1, 'expected exactly one bounce reversal, got: ' + JSON.stringify(poll6b.body.summary));
 
-    const minted6Status = await mailCheckStatus(PHP_BASE, minted6.id);
+    const minted6Status = await publicStatus(PHP_BASE, minted6.id);
     assert(minted6Status && minted6Status.status === 'revoked' && minted6Status.reason === 'bounced', 'expected the bounced credential revoked with reason "bounced", got: ' + JSON.stringify(minted6Status));
 
     assert(sessions.length === sessionsBeforeBounce6 + 1, 'expected exactly one new SMTP session for the bounce reissue, got ' + (sessions.length - sessionsBeforeBounce6));
@@ -499,7 +508,7 @@ function startPhp(port, bundleDir) {
     mailbox.push({ raw: buildForwardMessage('holder12@example.com', ['holder13@example.com'], minted8), seen: false });
     const poll8b = await pollNow(PHP_BASE, admin);
     assert(poll8b.body.summary.transferred === 1, 'expected the second forward to also transfer cleanly, got: ' + JSON.stringify(poll8b.body.summary));
-    const minted8StatusBeforeBounce = await mailCheckStatus(PHP_BASE, minted8.id);
+    const minted8StatusBeforeBounce = await publicStatus(PHP_BASE, minted8.id);
     assert(minted8StatusBeforeBounce && minted8StatusBeforeBounce.reason === 'email-transferred', 'expected minted8 revoked as "email-transferred" by the second forward, got: ' + JSON.stringify(minted8StatusBeforeBounce));
 
     const sessionsBeforePoll8c = sessions.length;
@@ -507,7 +516,7 @@ function startPhp(port, bundleDir) {
     const poll8c = await pollNow(PHP_BASE, admin);
     assert(poll8c.body.summary.ignored === 1, 'expected a bounce for an already-resolved ticket to be ignored, got: ' + JSON.stringify(poll8c.body.summary));
     assert(sessions.length === sessionsBeforePoll8c, 'expected a moot bounce to send nothing at all, got ' + (sessions.length - sessionsBeforePoll8c) + ' new SMTP session(s)');
-    const minted8StatusAfterBounce = await mailCheckStatus(PHP_BASE, minted8.id);
+    const minted8StatusAfterBounce = await publicStatus(PHP_BASE, minted8.id);
     assert(minted8StatusAfterBounce && minted8StatusAfterBounce.reason === 'email-transferred', 'expected the already-resolved ticket\'s status to stay exactly as it was, got: ' + JSON.stringify(minted8StatusAfterBounce));
     console.log('PASS: bounce for an already-resolved ticket left its recorded status untouched');
 
@@ -518,7 +527,7 @@ function startPhp(port, bundleDir) {
     const poll9 = await pollNow(PHP_BASE, admin);
     assert(poll9.body.summary.ignored === 1 && !poll9.body.summary.transferred, 'expected the ordinary credential to be ignored, got: ' + JSON.stringify(poll9.body.summary));
     assert(sessions.length === sessionsBeforePoll9, 'expected nothing to be sent for an ordinary credential, got ' + (sessions.length - sessionsBeforePoll9) + ' new SMTP session(s)');
-    const ordinaryStatus = await mailCheckStatus(PHP_BASE, ordinary.id);
+    const ordinaryStatus = await mailCheckStatus(PHP_BASE, owner, ordinary);
     assert(ordinaryStatus === null, 'expected the ordinary credential to be untouched, got: ' + JSON.stringify(ordinaryStatus));
     console.log('PASS: ordinary credential ignored, nothing sent, nothing revoked');
 

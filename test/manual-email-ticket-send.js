@@ -95,10 +95,19 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
   if (res.status !== 200) throw new Error('Failed to issue ' + assetClass + ': ' + JSON.stringify(res.body));
   return res.body;
 }
-async function mailCheckStatus(base, id) {
-  const res = await postJson(base, '/atlas/mail/check', { credentialIds: [id] });
+async function mailCheckStatus(base, who, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signWithSelf(who.kp, who.publicKey, payload);
+  const res = await postJson(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
   if (res.status !== 200) throw new Error('mail check failed: ' + JSON.stringify(res.body));
-  return res.body.updates.find((u) => u.id === id) || null;
+  return res.body.updates.find((u) => u.id === credential.id) || null;
+}
+// A credential nobody holds a key for (an emailed bearer one) is read from
+// the public revocation list, which is all a stranger may learn.
+async function publicStatus(base, id) {
+  const doc = await (await fetch(base + '/.well-known/atlas-revocations.json')).json();
+  const entry = (doc.revoked || []).find((r) => r.id === id);
+  return entry ? { id, status: 'revoked', reason: entry.reason } : null;
 }
 async function adminSend(base, admin, payload) {
   return postJson(base, '/atlas/admin/send-ticket-to-email', { payload, proof: await signWithSelf(admin.kp, admin.publicKey, payload) });
@@ -268,7 +277,7 @@ function startIssuer({ port, domain, stateDir, docrootDir, smtpEnv }) {
     assert(sendRes.status === 200, 'expected the send to succeed, got ' + sendRes.status + ': ' + JSON.stringify(sendRes.body));
     assert(sendRes.body.status === 'email-transferred', 'expected status "email-transferred", got: ' + JSON.stringify(sendRes.body));
 
-    const originalStatus = await mailCheckStatus(BASE, ticket.id);
+    const originalStatus = await mailCheckStatus(BASE, owner, ticket);
     assert(originalStatus && originalStatus.status === 'revoked' && originalStatus.reason === 'email-transferred', 'expected the original credential revoked with reason "email-transferred", got: ' + JSON.stringify(originalStatus));
     console.log('PASS: original wallet credential revoked ->', JSON.stringify(originalStatus));
 
@@ -299,7 +308,7 @@ function startIssuer({ port, domain, stateDir, docrootDir, smtpEnv }) {
     const anotherTicket = await issueAsset(BASE, owner.publicKey, 'atlas.demo.attestation.filing');
     const badEmailRes = await transferToEmail(BASE, anotherTicket, owner.kp, owner.publicKey, 'not-an-email-address');
     assert(badEmailRes.status === 400, 'expected a malformed address to be rejected, got ' + badEmailRes.status);
-    const statusAfterBadEmail = await mailCheckStatus(BASE, anotherTicket.id);
+    const statusAfterBadEmail = await mailCheckStatus(BASE, owner, anotherTicket);
     assert(statusAfterBadEmail === null, 'expected the credential to be untouched after a rejected malformed address, got: ' + JSON.stringify(statusAfterBadEmail));
     console.log('PASS: malformed address rejected, nothing sent, credential untouched ->', badEmailRes.body.error);
 
@@ -314,7 +323,7 @@ function startIssuer({ port, domain, stateDir, docrootDir, smtpEnv }) {
     const ticketForRejectedSend = await issueAsset(BASE, owner.publicKey, 'atlas.demo.attestation.filing');
     const rejectedSendRes = await transferToEmail(BASE, ticketForRejectedSend, owner.kp, owner.publicKey, REJECT_RECIPIENT);
     assert(rejectedSendRes.status === 502, 'expected a 502 when the mail server rejects delivery, got ' + rejectedSendRes.status + ': ' + JSON.stringify(rejectedSendRes.body));
-    const statusAfterRejectedSend = await mailCheckStatus(BASE, ticketForRejectedSend.id);
+    const statusAfterRejectedSend = await mailCheckStatus(BASE, owner, ticketForRejectedSend);
     assert(statusAfterRejectedSend === null, 'expected the original credential to be completely untouched after a rejected delivery, got: ' + JSON.stringify(statusAfterRejectedSend));
     console.log('PASS: rejected delivery left the sender\'s credential untouched ->', rejectedSendRes.body.error);
 
@@ -325,7 +334,7 @@ function startIssuer({ port, domain, stateDir, docrootDir, smtpEnv }) {
     const strangerRes = await transferToEmail(BASE, strangerTicket, stranger.kp, stranger.publicKey, 'victim@example.com');
     assert(strangerRes.status === 403, 'expected a non-admin to be refused with 403, got ' + strangerRes.status + ': ' + JSON.stringify(strangerRes.body));
     assert(sessions.length === sessionsBefore6, 'no mail may be sent for a non-admin');
-    assert((await mailCheckStatus(BASE, strangerTicket.id)) === null, 'the non-admin\'s credential must be untouched');
+    assert((await mailCheckStatus(BASE, stranger, strangerTicket)) === null, 'the non-admin\'s credential must be untouched');
     console.log('PASS: refused, nothing sent, credential untouched ->', strangerRes.body.error);
 
     console.log('STEP 7: the admin send route mints a ticket straight to an address');
@@ -340,7 +349,7 @@ function startIssuer({ port, domain, stateDir, docrootDir, smtpEnv }) {
     assert(ticket7.asset.properties && ticket7.asset.properties['com.example.seat'] === 'A-12', 'the starting fact should be on the ticket, got ' + JSON.stringify(ticket7.asset.properties));
     assert(ticket7.owner.publicKey !== admin.publicKey && ticket7.owner.publicKey !== owner.publicKey, 'the ticket must not be owned by the admin\'s key');
     assert(await verifyCredentialSignature(ticket7), 'the ticket should verify against the domain key');
-    assert((await mailCheckStatus(BASE, ticket7.id)) === null, 'the ticket should be live');
+    assert((await publicStatus(BASE, ticket7.id)) === null, 'the ticket should be live');
     console.log('PASS: ticket delivered with its starting fact, owned by a discarded key ->', ticket7.id);
 
     console.log('STEP 8: the admin send route refuses what it should');

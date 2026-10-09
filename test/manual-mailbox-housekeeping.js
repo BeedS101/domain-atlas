@@ -55,13 +55,21 @@ function assert(cond, message) {
   if (!cond) throw new Error(message);
 }
 
-async function messages(cardId) {
-  const res = await fetch(BASE + '/atlas/mail/check', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentialIds: [cardId] })
-  });
-  return (await res.json()).messages;
+// The mailbox as its owner reads it: the page signs a mail check with the
+// wallet's key (SPEC.md §11.8), so a copy of the card is all the test keeps.
+const knownCards = new Map();
+async function messages(owner, cardId) {
+  const credential = knownCards.get(cardId);
+  const body = await owner.frame.evaluate((async ({ base, credential }) => {
+        const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(18)))).replace(/[+\/=]/g, 'x') };
+        const proof = await AtlasWallet.signWithSelf(payload);
+        const res = await fetch(base + '/atlas/mail/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentials: [credential], payload, proof }) });
+        return res.json();
+      }), { base: BASE, credential });
+  if (!body.messages) throw new Error('mail check refused: ' + JSON.stringify(body));
+  return body.messages;
 }
-const friendNotices = async (cardId) => (await messages(cardId)).filter((m) => m.subject === FRIEND_MARKER).length;
+const friendNotices = async (owner, cardId) => (await messages(owner, cardId)).filter((m) => m.subject === FRIEND_MARKER).length;
 
 async function waitUntil(fn, description, timeoutMs = 10000) {
   const start = Date.now();
@@ -92,7 +100,11 @@ const unblock = (frame) => frame.evaluate(() => { window.fetch = window.__realFe
     const handleBob = 'hkB' + suffix;
     await alice.frame.evaluate((a) => AtlasWallet.setPostOfficeHandle(a.d, a.h), { d: DOMAIN, h: handleAlice });
     await bob.frame.evaluate((a) => AtlasWallet.setPostOfficeHandle(a.d, a.h), { d: DOMAIN, h: handleBob });
-    const cardOf = (frame, pk) => frame.evaluate((k) => AtlasWallet.getPostOfficeMemberships(k).then((m) => m[m.length - 1].credentialId), pk);
+    const cardOf = async (frame, pk) => {
+      const id = await frame.evaluate((k) => AtlasWallet.getPostOfficeMemberships(k).then((m) => m[m.length - 1].credentialId), pk);
+      knownCards.set(id, await frame.evaluate((a) => AtlasWallet.getWallet(a.k).then((all) => all.find((e) => e.credential.id === a.id).credential), { k: pk, id }));
+      return id;
+    };
     let aliceCard = await cardOf(alice.frame, pkAlice);
     const bobCard = await cardOf(bob.frame, pkBob);
     const request = () => alice.frame.evaluate((a) => AtlasWallet.sendFriendRequest({ viaDomain: a.d, handle: a.h, recipientDomain: a.d, name: 'Bobby' }), { d: DOMAIN, h: handleBob });
@@ -103,21 +115,21 @@ const unblock = (frame) => frame.evaluate(() => { window.fetch = window.__realFe
 
     console.log('STEP 1: handled friend notices leave the domain');
     await request();
-    assert((await friendNotices(bobCard)) === 1, 'The request should be on the domain');
+    assert((await friendNotices(bob, bobCard)) === 1, 'The request should be on the domain');
     await bob.frame.evaluate(() => AtlasWallet.checkAllMail());
-    assert((await friendNotices(bobCard)) === 1, 'A request nobody has answered yet must stay');
+    assert((await friendNotices(bob, bobCard)) === 1, 'A request nobody has answered yet must stay');
     await bob.frame.evaluate((k) => AtlasWallet.acceptFriendRequest(k), pkAlice);
-    await waitUntil(async () => (await friendNotices(bobCard)) === 0, 'the answered request to leave the domain');
-    assert((await friendNotices(aliceCard)) === 1, 'The acceptance should be waiting for Alice');
+    await waitUntil(async () => (await friendNotices(bob, bobCard)) === 0, 'the answered request to leave the domain');
+    assert((await friendNotices(alice, aliceCard)) === 1, 'The acceptance should be waiting for Alice');
     await alice.frame.evaluate(() => AtlasWallet.checkAllMail());
-    await waitUntil(async () => (await friendNotices(aliceCard)) === 0, 'the picked-up acceptance to leave the domain');
+    await waitUntil(async () => (await friendNotices(alice, aliceCard)) === 0, 'the picked-up acceptance to leave the domain');
     console.log('PASS: the unanswered request stayed, then both notices left the domain once handled');
 
     await clearContacts();
     await request();
     await bob.frame.evaluate(() => AtlasWallet.checkAllMail());
     await bob.frame.evaluate((k) => AtlasWallet.declineFriendRequest(k), pkAlice);
-    await waitUntil(async () => (await friendNotices(bobCard)) === 0, 'the declined request to leave the domain');
+    await waitUntil(async () => (await friendNotices(bob, bobCard)) === 0, 'the declined request to leave the domain');
     console.log('PASS: a declined request left the domain');
 
     await alice.frame.evaluate((k) => AtlasWallet.cancelOutgoingFriendRequest(k), pkBob);
@@ -126,10 +138,10 @@ const unblock = (frame) => frame.evaluate(() => { window.fetch = window.__realFe
     await blockDeletes(bob.frame);
     await bob.frame.evaluate((k) => AtlasWallet.acceptFriendRequest(k), pkAlice);
     await new Promise((r) => setTimeout(r, 800));
-    assert((await friendNotices(bobCard)) === 1, 'With removal failing the request stays on the domain');
+    assert((await friendNotices(bob, bobCard)) === 1, 'With removal failing the request stays on the domain');
     await unblock(bob.frame);
     await bob.frame.evaluate(() => AtlasWallet.checkAllMail());
-    await waitUntil(async () => (await friendNotices(bobCard)) === 0, 'the next check to remove it');
+    await waitUntil(async () => (await friendNotices(bob, bobCard)) === 0, 'the next check to remove it');
     console.log('PASS: a removal that failed was completed by the next mail check');
     await alice.frame.evaluate(() => AtlasWallet.checkAllMail());
     await clearContacts();
@@ -148,11 +160,11 @@ const unblock = (frame) => frame.evaluate(() => { window.fetch = window.__realFe
 
     console.log('STEP 3: deleting a membership card gives the membership up');
     await bob.frame.evaluate((a) => AtlasWallet.sendUserMail(a.d, a.k, 'left behind', 'body'), { d: DOMAIN, k: pkAlice });
-    assert((await messages(aliceCard)).length > 0, 'There should be mail waiting for Alice');
+    assert((await messages(alice, aliceCard)).length > 0, 'There should be mail waiting for Alice');
     const resolves = async (h) => (await fetch(BASE + '/atlas/postoffice/resolve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ handle: h }) })).ok;
     assert(await resolves(handleAlice), 'Alice\'s handle should resolve before she leaves');
     await alice.frame.evaluate((a) => AtlasWallet.deleteAsset(a.pk, a.id), { pk: pkAlice, id: aliceCard });
-    assert((await messages(aliceCard)).length === 0, 'Her mailbox should be empty');
+    assert((await messages(alice, aliceCard)).length === 0, 'Her mailbox should be empty');
     assert(!(await resolves(handleAlice)), 'Her handle should no longer resolve');
     const toGone = await bob.frame.evaluate((a) => AtlasWallet.sendUserMail(a.d, a.k, 'nobody home', 'body').then(() => 'sent', (e) => e.message), { d: DOMAIN, k: pkAlice });
     assert(toGone !== 'sent', 'Mail to a card that was given up must be refused');

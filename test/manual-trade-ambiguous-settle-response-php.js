@@ -92,6 +92,13 @@ function injectFirstResponseLostThenRecovers(bundleDir) {
   fs.writeFileSync(filePath, src);
 }
 
+// Signed mail check (SPEC.md §11.8): the credential's owner asks for its mailbox.
+async function mailCheckAs(base, identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signPayload(identity, payload);
+  return post(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
+}
+
 (async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-ambiguous-settle-php-'));
   const bundleA = path.join(tmpRoot, 'domain-a');
@@ -133,18 +140,18 @@ function injectFirstResponseLostThenRecovers(bundleDir) {
     console.log('PASS: claim settled normally ->', JSON.stringify({ status: claim.body.status, received: claim.body.received.asset.class + ' x' + claim.body.received.quantity }));
 
     console.log('STEP 3: Alice\'s mailed payment (the gold) is clean and claimable — NOT revoked by a wrongful refund');
-    const aliceMailCheck = await post(BASE_A, '/atlas/mail/check', { credentialIds: [aliceIron.id] });
+    const aliceMailCheck = await mailCheckAs(BASE_A, alice, aliceIron);
     const aliceMailMessage = aliceMailCheck.body.messages.find((m) => m.credentialId === aliceIron.id);
     if (!aliceMailMessage || !aliceMailMessage.attachedAsset) throw new Error('Expected Alice to have a mail message at Domain A with her gold attached, got: ' + JSON.stringify(aliceMailCheck.body.messages));
     const mailedGold = aliceMailMessage.attachedAsset;
     if (mailedGold.asset.class !== 'atlas.element.gold' || mailedGold.quantity !== 5) throw new Error('Expected the mailed gift to be 5 gold, got: ' + JSON.stringify(mailedGold));
-    const mailedGoldCheck = await post(BASE_B, '/atlas/mail/check', { credentialIds: [mailedGold.id] });
+    const mailedGoldCheck = await mailCheckAs(BASE_B, alice, mailedGold);
     const mailedGoldUpdate = mailedGoldCheck.body.updates.find((u) => u.id === mailedGold.id);
     if (mailedGoldUpdate) throw new Error('Expected Alice\'s mailed gold gift to be CLEAN (no revocation), got: ' + JSON.stringify(mailedGoldUpdate));
     console.log('PASS: the gift Alice is owed (' + mailedGold.id + ') is unrevoked and genuinely claimable — the bug this test guards against is gone');
 
     console.log('STEP 4: Bob was NOT double-granted — his gold was spent exactly once, no refund exists for it');
-    const bobGoldCheck = await post(BASE_B, '/atlas/mail/check', { credentialIds: [bobGold.id] });
+    const bobGoldCheck = await mailCheckAs(BASE_B, bob, bobGold);
     const bobGoldUpdate = bobGoldCheck.body.updates.find((u) => u.id === bobGold.id);
     if (!bobGoldUpdate || bobGoldUpdate.status !== 'revoked') throw new Error('Expected Bob\'s offered gold to be genuinely spent (revoked), got: ' + JSON.stringify(bobGoldUpdate));
     console.log('PASS: Bob\'s gold was spent exactly once for exactly one iron credential — no double grant');

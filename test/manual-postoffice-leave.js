@@ -43,23 +43,23 @@ function check(name, ok, detail) {
 
     const signed = async (who, route, payload) => H.postJson(BASE, route, { payload, proof: await H.signWithSelf(who, payload) });
     const send = (from, to, subject) => signed(from, '/atlas/postoffice/send', { to: { publicKey: to.publicKey }, subject, body: 'b' });
-    const mailbox = async (card) => (await H.postJson(BASE, '/atlas/mail/check', { credentialIds: [card.id] })).body.messages.filter((m) => /^m\d$/.test(m.subject)).length;
+    const mailbox = async (who, card) => ((await H.mailCheck(BASE, who, card)).body.messages || []).filter((m) => /^m\d$/.test(m.subject)).length;
     const resolve = (handle) => H.postJson(BASE, '/atlas/postoffice/resolve', { handle });
 
     let r = await signed(alice, '/atlas/postoffice/handle', { handle: 'Alice' + KIND });
     check('setup: alice claims a handle', r.status === 200, JSON.stringify(r));
     await send(bob, alice, 'm1');
     await send(bob, alice, 'm2');
-    check('setup: alice has two messages', (await mailbox(aliceCard)) === 2, String(await mailbox(aliceCard)));
+    check('setup: alice has two messages', (await mailbox(alice, aliceCard)) === 2, String(await mailbox(alice, aliceCard)));
     check('setup: her handle resolves', (await resolve('Alice' + KIND)).status === 200, 'does not resolve');
 
     r = await signed(bob, '/atlas/postoffice/leave', { credentialId: aliceCard.id });
     check('another member cannot end her membership', r.status === 400, JSON.stringify(r));
-    check('...and nothing changed', (await mailbox(aliceCard)) === 2 && (await resolve('Alice' + KIND)).status === 200, 'state changed');
+    check('...and nothing changed', (await mailbox(alice, aliceCard)) === 2 && (await resolve('Alice' + KIND)).status === 200, 'state changed');
 
     r = await signed(alice, '/atlas/postoffice/leave', { credentialId: aliceCard.id });
     check('the owner leaves', r.status === 200 && r.body.deleted >= 2, JSON.stringify(r));
-    check('her mailbox is empty', (await mailbox(aliceCard)) === 0, String(await mailbox(aliceCard)));
+    check('her mailbox is empty', (await mailbox(alice, aliceCard)) === 0, String(await mailbox(alice, aliceCard)));
     check('her handle no longer resolves', (await resolve('Alice' + KIND)).status !== 200, 'still resolves');
     r = await signed(carol, '/atlas/postoffice/handle', { handle: 'Alice' + KIND });
     check('someone else can now claim the released handle', r.status === 200, JSON.stringify(r));
@@ -67,7 +67,7 @@ function check(name, ok, detail) {
     check('mail to her is refused', r.status >= 400, JSON.stringify(r));
     r = await send(alice, bob, 'm4');
     check('mail from her is refused', r.status >= 400, JSON.stringify(r));
-    check('bob\'s mailbox was untouched', (await mailbox(bobCard)) === 0 && r.status >= 400, 'unexpected');
+    check('bob\'s mailbox was untouched', (await mailbox(bob, bobCard)) === 0 && r.status >= 400, 'unexpected');
 
     r = await signed(alice, '/atlas/postoffice/leave', { credentialId: aliceCard.id });
     check('repeating it is harmless', r.status === 200, JSON.stringify(r));
@@ -80,7 +80,7 @@ function check(name, ok, detail) {
     await send(carol, bob, 'm5');
     r = await signed(bob, '/atlas/postoffice/leave', { credentialId: bobCard.id });
     check('a member with two cards leaves the older one', r.status === 200, JSON.stringify(r));
-    const m = (await H.postJson(BASE, '/atlas/mail/check', { credentialIds: [second.id] })).body.messages.filter((x) => x.subject === 'm5').length;
+    const m = ((await H.mailCheck(BASE, bob, second)).body.messages || []).filter((x) => x.subject === 'm5').length;
     check('mail for the newer card survives', m === 1, String(m));
     r = await send(carol, bob, 'm6');
     check('and mail to her still goes through', r.status === 200, JSON.stringify(r));

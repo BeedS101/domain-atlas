@@ -22,8 +22,8 @@ function check(name, ok, detail) {
   console.log((ok ? 'PASS: ' : 'FAIL: ') + name + (ok ? '' : ' => ' + detail));
 }
 
-async function mailFor(credentialId) {
-  const res = await H.postJson(BASE, '/atlas/mail/check', { credentialIds: [credentialId] });
+async function mailFor(owner, card) {
+  const res = await H.mailCheck(BASE, owner, card);
   // Issuing a card also files a welcome message under it; only the test message counts.
   return (res.body.messages || []).filter((m) => m.subject === 'hello');
 }
@@ -48,8 +48,8 @@ async function mailFor(credentialId) {
     const res = await H.postJson(BASE, '/atlas/postoffice/send', { payload, proof: await H.signWithSelf(sender, payload) });
     check('send accepted', res.status === 200, JSON.stringify(res.body));
 
-    const underNew = await mailFor(newCard.id);
-    const underOld = await mailFor(oldCard.id);
+    const underNew = await mailFor(owner, newCard);
+    const underOld = await mailFor(owner, oldCard);
     check('mail is filed under the newest card', underNew.length === 1, 'newest card has ' + underNew.length);
     check('nothing is filed under the older card', underOld.length === 0, 'older card has ' + underOld.length);
   } finally {

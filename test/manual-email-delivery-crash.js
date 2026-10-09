@@ -93,7 +93,7 @@ function openDeliveries(location) {
 }
 
 async function judge(location, original, smtp) {
-  const originalStatus = original ? await H.mailCheckStatus(BASE, original.id) : null;
+  const originalStatus = original ? await H.mailCheckStatus(BASE, location.admin, original) : null;
   const originalUsable = !!original && (!originalStatus || (originalStatus.status !== 'revoked' && originalStatus.status !== 'suspended'));
   const delivered = [];
   for (const m of smtp.messages) {

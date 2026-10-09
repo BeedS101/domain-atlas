@@ -64,7 +64,8 @@ const NODE_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-props-delete
 const NODE_DOCROOT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-props-delete-docroot-'));
 const PHP_BUNDLE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-props-delete-php-'));
 
-const OWNER = 'test-owner-public-key-properties-patch-delete-demo';
+let OWNER = null; // the owner identity's public key, set once main() starts
+let ownerIdentity = null;
 
 function postJson(base, urlPath, body) {
   return fetch(base + urlPath, {
@@ -108,10 +109,13 @@ async function setClassPatchAsAdmin(base, admin, payload) {
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(base, '/atlas/admin/class-patch', { payload, proof });
 }
-// Exactly the shape extension/wallet.js's checkAllMail() sends: both the
-// bare id AND this wallet's own current copy of the credential.
-function checkMail(base, credential) {
-  return postJson(base, '/atlas/mail/check', { credentialIds: [credential.id], credentials: [credential] });
+// Exactly the shape extension/wallet.js's checkAllMail() sends: a signed
+// request by the credential's owner plus the owner's copy of the credential.
+async function checkMail(base, credential, as) {
+  const who = as || ownerIdentity;
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signWithSelf(who.kp, who.publicKey, payload);
+  return postJson(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
 }
 
 (async () => {
@@ -146,6 +150,8 @@ function checkMail(base, credential) {
 
   console.log('SETUP: seeding one admin identity into both isolated instances\' own admin rosters');
   const admin = await genIdentity();
+  ownerIdentity = await genIdentity();
+  OWNER = ownerIdentity.publicKey;
   fs.writeFileSync(path.join(NODE_STATE_DIR, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
   fs.writeFileSync(path.join(PHP_BUNDLE_DIR, 'lib', 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
   console.log('PASS: admin identity seeded into both rosters');

@@ -132,6 +132,13 @@ function setTrustedPeers(bundleDir, peers) {
   fs.writeFileSync(path.resolve(bundleDir, 'lib', 'atlas-trusted-trade-peers-store.json'), JSON.stringify({ peers }));
 }
 
+// Signed mail check (SPEC.md §11.8): the credential's owner asks for its mailbox.
+async function mailCheckAs(base, identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signPayload(identity, payload);
+  return post(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
+}
+
 (async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-cross-trade-php-'));
   const bundleA = path.join(tmpRoot, 'domain-a');
@@ -197,7 +204,7 @@ function setTrustedPeers(bundleDir, peers) {
     console.log('PASS: claim settled — Bob got 10 iron (relayed from Domain A, lock+settle) and kept a 5-gold remainder (settled locally by Domain B)');
 
     console.log('STEP 4: Alice (absent poster) gets her due via Domain A\'s own /atlas/mail/check — her remainder via asset-update, her gold via a mail-delivered attachment relayed in from Domain B');
-    const aliceMailCheck = await post(BASE_A, '/atlas/mail/check', { credentialIds: [aliceIron.id] });
+    const aliceMailCheck = await mailCheckAs(BASE_A, alice, aliceIron);
     // offerA.quantity (10) === aliceIron.quantity (10), so this trade
     // leaves no remainder at all — fulfillTradeSideSettlement() only
     // appends an asset-update when there's a remainder to hand forward,

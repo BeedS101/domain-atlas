@@ -96,6 +96,13 @@ function startNodeServer(bundleDir, port, domain, stateDir, docrootDir) {
   });
 }
 
+// Signed mail check (SPEC.md §11.8): the credential's owner asks for its mailbox.
+async function mailCheckAs(base, identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signPayload(identity, payload);
+  return post(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
+}
+
 (async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-cross-trade-node-'));
   const bundleA = path.join(tmpRoot, 'domain-a');
@@ -158,7 +165,7 @@ function startNodeServer(bundleDir, port, domain, stateDir, docrootDir) {
     console.log('PASS: claim settled — Bob got 10 iron (relayed, lock+settle) and kept a 5-gold remainder (local)');
 
     console.log('STEP 4: Alice (absent poster) gets her gold via Domain A\'s own mail/check, relayed in as mailDeliverAttachedAsset');
-    const aliceMailCheck = await post(BASE_A, '/atlas/mail/check', { credentialIds: [aliceIron.id] });
+    const aliceMailCheck = await mailCheckAs(BASE_A, alice, aliceIron);
     const ironUpdate = aliceMailCheck.body.updates.find((u) => u.id === aliceIron.id);
     if (!ironUpdate || ironUpdate.status !== 'revoked' || ironUpdate.newCredential) {
       throw new Error('Expected a plain revocation with no remainder for Alice\'s fully-spent iron, got: ' + JSON.stringify(ironUpdate));

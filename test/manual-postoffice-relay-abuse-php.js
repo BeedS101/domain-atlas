@@ -110,10 +110,12 @@ async function sendMail(base, identity, to, subject, body) {
     body: JSON.stringify({ payload, proof })
   });
 }
-async function checkMail(base, credentialId) {
+async function checkMail(base, identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signWithSelf(identity.kp, identity.publicKey, payload);
   const res = await fetch(base + '/atlas/mail/check', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ credentialIds: [credentialId] })
+    body: JSON.stringify({ credentials: [credential], payload, proof })
   });
   if (!res.ok) throw new Error('mail check failed: ' + await res.text());
   return (await res.json()).messages;
@@ -169,7 +171,7 @@ async function checkMail(base, credentialId) {
       const res = await sendMail(BASE_B, dave, { publicKey: eve.publicKey }, 'cap ' + i, 'local flood message ' + i);
       assert(res.ok, 'expected local send #' + i + ' to succeed (no relaying domain is involved, so no rate limit applies), got ' + res.status + ': ' + await res.text());
     }
-    const eveMail = await checkMail(BASE_B, eveCred.id);
+    const eveMail = await checkMail(BASE_B, eve, eveCred);
     assert(eveMail.length === 200, 'expected exactly 200 messages in Eve\'s capped mailbox, got ' + eveMail.length);
     const subjects = eveMail.map((m) => m.subject);
     assert(!subjects.includes('cap 0') && !subjects.includes('cap 4'), 'expected the oldest 5 messages (cap 0..cap 4) to have been pruned, got subjects starting: ' + subjects.slice(0, 3));
@@ -177,7 +179,7 @@ async function checkMail(base, credentialId) {
     console.log('PASS: Eve\'s mailbox holds exactly 200 messages, oldest 5 pruned, newest 200 kept');
 
     console.log('STEP 5: Bob\'s own mail (from the relayed steps above) is completely untouched by Eve\'s mailbox being capped');
-    const bobMail = await checkMail(BASE_B, bobCred.id);
+    const bobMail = await checkMail(BASE_B, bob, bobCred);
     // 1 auto-sent welcome message (claiming a Post Office membership queues
     // one, see atlas/asset/issue.php) + 30 from Alice + 1 from Carol.
     assert(bobMail.length === 32, 'expected Bob to still have all 32 messages (1 welcome + 30 from Alice + 1 from Carol), got ' + bobMail.length);

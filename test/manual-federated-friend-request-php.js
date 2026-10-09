@@ -132,6 +132,13 @@ async function verifyMailSignature(base, message) {
   return subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, Buffer.from(message.signature, 'base64url'), new TextEncoder().encode(canonicalize(payload)));
 }
 
+// Signed mail check (SPEC.md §11.8): the credential's owner asks for its mailbox.
+async function mailCheckAs(base, identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signPayload(identity, payload);
+  return post(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
+}
+
 (async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-friendreq-php-'));
   const bundleA = path.join(tmpRoot, 'domain-a');
@@ -167,7 +174,7 @@ async function verifyMailSignature(base, message) {
     console.log('PASS: stored with the exact marker subject and body, attributed to alice#' + DOMAIN_A);
 
     console.log('STEP 2: Bob\'s mail check returns it, and the signature verifies');
-    const check = await post(BASE_B, '/atlas/mail/check', { credentialIds: [bobMembership.id] });
+    const check = await mailCheckAs(BASE_B, bob, bobMembership);
     const delivered = (check.body.messages || []).find((m) => m.id === sent.body.id);
     if (!delivered) throw new Error('Mail check did not return the request: ' + JSON.stringify(check.body));
     if (delivered.subject !== MARKER) throw new Error('Subject changed in transit: ' + JSON.stringify(delivered.subject));
@@ -177,7 +184,7 @@ async function verifyMailSignature(base, message) {
     console.log('STEP 3: Bob\'s acceptance travels back the other way');
     const accepted = await sendMail(BASE_B, bob, alice.publicKey, DOMAIN_A, MARKER, JSON.stringify({ v: 1, type: 'accepted' }));
     if (accepted.status !== 200) throw new Error('Expected the acceptance to be relayed, got: ' + JSON.stringify(accepted));
-    const aliceCheck = await post(BASE_A, '/atlas/mail/check', { credentialIds: [aliceMembership.id] });
+    const aliceCheck = await mailCheckAs(BASE_A, alice, aliceMembership);
     const back = (aliceCheck.body.messages || []).find((m) => m.id === accepted.body.id);
     if (!back || back.from.homeDomain !== DOMAIN_B || back.from.publicKey !== bob.publicKey) throw new Error('Alice did not get Bob\'s acceptance: ' + JSON.stringify(aliceCheck.body));
     if (!(await verifyMailSignature(BASE_A, back))) throw new Error('Signature on the acceptance does not verify');

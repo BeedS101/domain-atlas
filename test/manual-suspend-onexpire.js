@@ -60,10 +60,10 @@ async function issueAsset(ownerPublicKey, assetClass) {
   if (res.status !== 200) throw new Error('Failed to issue ' + assetClass + ': ' + JSON.stringify(res.body));
   return res.body;
 }
-async function mailCheckStatus(id) {
-  const res = await postJson('/atlas/mail/check', { credentialIds: [id] });
-  if (res.status !== 200) throw new Error('mail check failed: ' + JSON.stringify(res.body));
-  return res.body.updates.find((u) => u.id === id) || null;
+const H = require('./lib/delivery-harness');
+let statusOwner = null; // the identity that owns the credentials below
+async function mailCheckStatus(credential) {
+  return H.mailCheckStatus(BASE, statusOwner, credential);
 }
 // Test-only backdoor added to the patched copy below — calls suspend()
 // directly with all 4 arguments, bypassing admin auth, since nothing
@@ -116,10 +116,9 @@ function buildPatchedCopy() {
 
   try {
     console.log('SETUP: minting four throwaway credentials, one per check below');
-    // ownerPublicKey doesn't need to be a real signing identity for this
-    // test — nothing here signs with it, only mail/check and the test
-    // backdoor touch these ids, neither of which verifies ownership.
-    const fakeOwnerKey = 'b64url-placeholder-owner-key-not-used-for-signing';
+    // The owner signs the mail check that reads each credential's status.
+    statusOwner = await H.genIdentity();
+    const fakeOwnerKey = statusOwner.publicKey;
     const credFinalizeExpired = await issueAsset(fakeOwnerKey, 'atlas.demo.attestation.filing');
     const credLiftExpired = await issueAsset(fakeOwnerKey, 'atlas.demo.attestation.filing');
     const credDefaultExpired = await issueAsset(fakeOwnerKey, 'atlas.demo.attestation.filing');
@@ -130,7 +129,7 @@ function buildPatchedCopy() {
 
     console.log('STEP 1: a \'finalize\' suspension with a past expiresAt reads back as genuinely revoked, reason \'redeemed\'');
     await testSuspend(credFinalizeExpired.id, 'event-ended', past, 'finalize');
-    const status1 = await mailCheckStatus(credFinalizeExpired.id);
+    const status1 = await mailCheckStatus(credFinalizeExpired);
     assert(status1 !== null, 'expected mail/check to report something for the finalize-expired id, got null');
     assert(status1.status === 'revoked', 'expected status "revoked", got: ' + JSON.stringify(status1));
     assert(status1.reason === 'redeemed', 'expected reason "redeemed", got: ' + JSON.stringify(status1));
@@ -138,19 +137,19 @@ function buildPatchedCopy() {
 
     console.log('STEP 2: a \'lift\' suspension with the same past expiresAt reads back as neither suspended nor revoked');
     await testSuspend(credLiftExpired.id, 'temporary-hold', past, 'lift');
-    const status2 = await mailCheckStatus(credLiftExpired.id);
+    const status2 = await mailCheckStatus(credLiftExpired);
     assert(status2 === null, 'expected an expired lift-suspension to be invisible to mail/check, got: ' + JSON.stringify(status2));
     console.log('PASS: lift-on-expiry left the credential alone, same as today\'s only behavior');
 
     console.log('STEP 3: omitting onExpire entirely (the 3-argument shape every existing call site uses) behaves identically to explicit \'lift\'');
     await testSuspend(credDefaultExpired.id, 'temporary-hold', past, undefined);
-    const status3 = await mailCheckStatus(credDefaultExpired.id);
+    const status3 = await mailCheckStatus(credDefaultExpired);
     assert(status3 === null, 'expected the default (unspecified onExpire) to behave like lift, got: ' + JSON.stringify(status3));
     console.log('PASS: default onExpire matches explicit \'lift\' — zero behavior change for existing callers');
 
     console.log('STEP 4: a \'finalize\' suspension that has NOT yet expired is still only suspended, not revoked');
     await testSuspend(credFinalizeNotYetExpired.id, 'event-in-progress', future, 'finalize');
-    const status4 = await mailCheckStatus(credFinalizeNotYetExpired.id);
+    const status4 = await mailCheckStatus(credFinalizeNotYetExpired);
     assert(status4 !== null && status4.status === 'suspended', 'expected status "suspended" while still within the window, got: ' + JSON.stringify(status4));
     assert(status4.reason === 'event-in-progress', 'expected the suspension reason to come through, got: ' + JSON.stringify(status4));
     console.log('PASS: finalize does not fire early ->', JSON.stringify(status4));

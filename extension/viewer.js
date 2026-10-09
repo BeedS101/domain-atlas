@@ -8104,7 +8104,7 @@ clearAllMailBtn && clearAllMailBtn.addEventListener('click', async () => {
 // silently not-checking is the right response to.
 async function checkMailOnTabOpen() {
   try {
-    await AtlasWallet.checkAllMail();
+    await AtlasWallet.checkAllMail({ interactive: true });
   } catch (err) {
     // nothing to show for this — see comment above
   }
@@ -11338,7 +11338,9 @@ checkMailNowBtn && checkMailNowBtn.addEventListener('click', async () => {
   checkMailNowBtn.disabled = true;
   checkMailNowBtn.textContent = 'Checking…';
   try {
-    await AtlasWallet.checkAllMail();
+    // A passkey identity opens its mail session here (one prompt per
+    // domain); background checks only use a session that is already open.
+    await AtlasWallet.checkAllMail({ interactive: true });
   } catch (err) {
     // checkAllMail already swallows per-domain failures; this would only
     // be something more fundamental (no identity, storage error, etc).

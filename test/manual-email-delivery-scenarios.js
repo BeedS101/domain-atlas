@@ -51,8 +51,10 @@ async function teardown() {
   current = null;
 }
 
-async function statusOf(id) {
-  const st = await H.mailCheckStatus(BASE, id);
+// A credential object is read as its owner (signed); a bare id, which is an
+// emailed bearer credential nobody holds a key for, from the public list.
+async function statusOf(target) {
+  const st = typeof target === 'object' ? await H.mailCheckStatus(BASE, current.owner, target) : await H.publicStatus(BASE, target);
   return st ? st.status + (st.reason ? '/' + st.reason : '') : 'valid';
 }
 function distinctIds(smtp) {
@@ -75,7 +77,7 @@ scenario('a delivery the mail server accepts: original revoked, exactly one clai
   const original = await H.issueAsset(BASE, owner.publicKey, ASSET_CLASS);
   const res = await H.transferToEmail(BASE, original, owner, GOOD);
   H.assert(res.status === 200 && res.body.status === 'email-transferred', 'expected 200 email-transferred, got ' + JSON.stringify(res));
-  H.assert((await statusOf(original.id)) === 'revoked/email-transferred', 'original should be revoked as email-transferred, got ' + await statusOf(original.id));
+  H.assert((await statusOf(original)) === 'revoked/email-transferred', 'original should be revoked as email-transferred, got ' + await statusOf(original));
   H.assert(smtp.messages.length === 1, 'expected one message, got ' + smtp.messages.length);
   const claimable = await claimableIds(smtp);
   H.assert(claimable.length === 1, 'expected one claimable credential, got ' + claimable.length);
@@ -88,7 +90,7 @@ scenario('a recipient the server rejects: sender untouched, nothing claimable, a
   const original = await H.issueAsset(BASE, owner.publicKey, ASSET_CLASS);
   const res = await H.transferToEmail(BASE, original, owner, 'bad@example.com');
   H.assert(res.status === 502, 'expected 502, got ' + JSON.stringify(res));
-  H.assert((await statusOf(original.id)) === 'valid', 'original should be valid again (no lingering hold), got ' + await statusOf(original.id));
+  H.assert((await statusOf(original)) === 'valid', 'original should be valid again (no lingering hold), got ' + await statusOf(original));
   H.assert(smtp.messages.length === 0, 'no message should have been delivered');
   const ok = await H.transferToEmail(BASE, original, owner, GOOD);
   H.assert(ok.status === 200, 'the same asset should still be sendable to a good address, got ' + JSON.stringify(ok));
@@ -103,7 +105,7 @@ scenario('an uncertain delivery (message taken, connection dropped): retried, sa
   H.assert(smtp.messages.length === 2, 'expected the message to be sent twice, got ' + smtp.messages.length);
   H.assert(distinctIds(smtp).size === 1, 'both messages must carry the identical credential, got ' + distinctIds(smtp).size + ' distinct');
   H.assert((await claimableIds(smtp)).length === 1, 'exactly one claimable credential');
-  H.assert((await statusOf(original.id)) === 'revoked/email-transferred', 'original should be revoked');
+  H.assert((await statusOf(original)) === 'revoked/email-transferred', 'original should be revoked');
 });
 
 scenario('delivery never confirmed (every attempt dropped): rolled back, any copy that arrived is dead', async () => {
@@ -111,7 +113,7 @@ scenario('delivery never confirmed (every attempt dropped): rolled back, any cop
   const original = await H.issueAsset(BASE, owner.publicKey, ASSET_CLASS);
   const res = await H.transferToEmail(BASE, original, owner, GOOD);
   H.assert(res.status === 502, 'expected 502 after the attempts ran out, got ' + JSON.stringify(res));
-  H.assert((await statusOf(original.id)) === 'valid', 'sender must keep a usable original, got ' + await statusOf(original.id));
+  H.assert((await statusOf(original)) === 'valid', 'sender must keep a usable original, got ' + await statusOf(original));
   H.assert((await claimableIds(smtp)).length === 0, 'a copy that may have arrived must not be claimable');
   for (const id of distinctIds(smtp)) {
     H.assert((await statusOf(id)) === 'revoked/issuer-request', 'an unconfirmed copy must be revoked, got ' + await statusOf(id));
@@ -131,7 +133,7 @@ scenario('a temporary failure that does not clear: rolled back, sender untouched
   const original = await H.issueAsset(BASE, owner.publicKey, ASSET_CLASS);
   const res = await H.transferToEmail(BASE, original, owner, GOOD);
   H.assert(res.status === 502, 'expected 502, got ' + JSON.stringify(res));
-  H.assert((await statusOf(original.id)) === 'valid' && smtp.messages.length === 0, 'sender untouched, nothing delivered');
+  H.assert((await statusOf(original)) === 'valid' && smtp.messages.length === 0, 'sender untouched, nothing delivered');
 });
 
 scenario('the same request twice: the second gets the first answer and sends nothing; another address is refused', async () => {
@@ -153,7 +155,7 @@ scenario('two simultaneous identical requests: one delivery, one claimable crede
   H.assert([a, b].some((r) => r.status === 200), 'at least one request must succeed, got ' + JSON.stringify([a, b]));
   H.assert(distinctIds(smtp).size === 1, 'exactly one distinct credential delivered, got ' + distinctIds(smtp).size);
   H.assert((await claimableIds(smtp)).length === 1, 'exactly one claimable credential');
-  H.assert((await statusOf(original.id)) === 'revoked/email-transferred', 'original revoked');
+  H.assert((await statusOf(original)) === 'revoked/email-transferred', 'original revoked');
 });
 
 scenario('two claimants race for the delivered credential: exactly one wins', async () => {

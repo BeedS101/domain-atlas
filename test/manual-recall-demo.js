@@ -73,8 +73,10 @@ async function transferWidget(identity, credential, recipientPublicKey) {
 async function issueRecall(reason) {
   return postJson('/atlas/demo/recall/issue', { assetClass: WIDGET_CLASS, reason });
 }
-async function checkIn(credential) {
-  return postJson('/atlas/mail/check', { credentialIds: [credential.id], credentials: [credential] });
+async function checkIn(who, credential) {
+  const payload = { action: 'mail-check', domain: new URL(BASE).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signWithSelf(who, payload);
+  return postJson('/atlas/mail/check', { credentials: [credential], payload, proof });
 }
 async function verifyAssetCredentialIndependently(credential) {
   const keyDoc = await fetch(BASE + '/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json());
@@ -154,14 +156,14 @@ async function verifyAssetCredentialIndependently(credential) {
     console.log('STEP 5: a tampered copy of the still-stale Customer credential is silently ignored at check-in');
     const tampered = JSON.parse(JSON.stringify(widget));
     tampered.asset.properties = Object.assign({}, tampered.asset.properties, { 'com.example.batch': 'tampered-batch-99' });
-    const tamperCheckin = await checkIn(tampered);
+    const tamperCheckin = await checkIn(customer, tampered);
     assert(tamperCheckin.status === 200, 'check-in call itself should not fail: ' + JSON.stringify(tamperCheckin.body));
     const tamperUpdate = (tamperCheckin.body.updates || []).find((u) => u.id === widget.id);
     assert(!tamperUpdate, 'a tampered credential should never get an update applied, got: ' + JSON.stringify(tamperUpdate));
     console.log('PASS: tampered check-in produced no update — the bad signature was caught, nothing trusted');
 
     console.log('STEP 6: the genuine, untouched credential picks up the recall on check-in');
-    const realCheckin = await checkIn(widget);
+    const realCheckin = await checkIn(customer, widget);
     assert(realCheckin.status === 200, 'real check-in failed: ' + JSON.stringify(realCheckin.body));
     const realUpdate = (realCheckin.body.updates || []).find((u) => u.id === widget.id);
     assert(realUpdate && realUpdate.newCredential, 'expected a real update for the genuine credential, got: ' + JSON.stringify(realCheckin.body));

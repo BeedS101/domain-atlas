@@ -622,6 +622,27 @@ endpoints" below) sends against a `credentialId`; the wallet picks new
 mail up through its existing periodic `/atlas/mail/check` loop alongside
 asset-reissue notices (§5.1.1 above).
 
+**Mail checks are authenticated (SPEC.md §11.8).** Credential ids are not
+secrets, so `/atlas/mail/check` no longer answers for an id alone. The wallet
+sends the credentials it holds together with a signed request (domain,
+credential ids, issue time, one-time nonce), and the domain returns mail,
+attached assets and status updates only for credentials whose owner key
+matches the signer and whose issuer signature verifies. Ids the caller does
+not own are dropped silently, revoked or superseded credentials still
+authorise their original owner, and the class-wide reissue check runs only
+for authorised credentials. Requests older than two minutes, for another
+domain, or repeating a nonce are refused (`stale-request`, `wrong-domain`,
+`replayed-request`); the wallet learns the domain's clock offset from a
+`stale-request` answer and retries once. A passkey wallet signs one short
+delegation (at most 15 minutes, the wallet uses 14, read-only, bound to
+that domain) that a throwaway key then uses for the mail checks, so it
+prompts at most once per domain per session and only for an explicit
+action (opening the Mail tab, "Check now"); the background poll uses a live
+session and otherwise skips the domain without a prompt. A wallet from
+before this change gets `401 auth-required` and no mail until it is updated.
+Email-delivered (bearer) credentials have no owner key, so their status
+comes from the domain's published revocation list.
+
 **Deleting mail deletes it from the domain too (SPEC.md §11.6).** Mail,
 chat messages and friend notices a domain holds for you stay on its server
 until you say otherwise. Deleting a mail, clearing the inbox or deleting a
@@ -2002,8 +2023,7 @@ simplifications are worth naming plainly rather than leaving implicit:
   `/atlas/asset/consolidate` (§5.4/§5.4.1), the `/atlas/trade/*` family —
   submit, listings, claim, cancel, catalog (§7), `/atlas/convert` (§7's
   currency conversion), `/atlas/world/drop`, `/atlas/world/drops`, and the
-  claim/relay-claim pair (§5.5), `/atlas/calendar`'s `GET` side (§12),
-  `/atlas/mail/check` (§11.1), and the
+  claim/relay-claim pair (§5.5), `/atlas/calendar`'s `GET` side (§12), and the
   `/atlas/postoffice/*` family (§8 above, SPEC.md §11.3, including
   `/relay` for §11.4 federation) — have no auth by design (beyond Post
   Office's own self-signed-envelope checks on its self-service endpoints),

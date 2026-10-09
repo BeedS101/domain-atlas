@@ -277,8 +277,14 @@
     const proof = await signWithSelf(senderIdentity, payload);
     return postJson(domain, '/atlas/postoffice/send', { payload, proof });
   }
-  async function checkMail(domain, credentialId) {
-    return postJson(domain, '/atlas/mail/check', { credentialIds: [credentialId] });
+  // A mail check is signed by the credential's owner (SPEC.md §11.8).
+  async function checkMail(domain, identity, credential) {
+    const payload = {
+      action: 'mail-check', domain, credentialIds: [credential.id],
+      issuedAt: new Date().toISOString(), nonce: b64urlEncode(crypto.getRandomValues(new Uint8Array(18)))
+    };
+    const proof = await signWithSelf(identity, payload);
+    return postJson(domain, '/atlas/mail/check', { credentials: [credential], payload, proof });
   }
   async function blockSender(domain, identity, blockedPublicKey) {
     const payload = { blockedPublicKey };
@@ -433,7 +439,7 @@
     const resultEl = document.getElementById('checkResult');
     btn.disabled = true;
     const domB = domainB();
-    const res = await checkMail(domB, bobMembership.id);
+    const res = await checkMail(domB, bob, bobMembership);
     if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
     const message = (res.body.messages || [])[res.body.messages.length - 1];
     if (!message) { resultEl.innerHTML = '<div class="result err">No message found waiting for Bob at ' + domB + '.</div>'; btn.disabled = false; return; }

@@ -111,6 +111,13 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
   return res.body;
 }
 
+// Signed mail check (SPEC.md §11.8): the credential's owner asks for its mailbox.
+async function mailCheckAs(base, identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signPayload(identity, payload);
+  return post(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
+}
+
 (async () => {
   console.log('SETUP: starting an isolated issuer-server instance on port ' + NODE_PORT);
   const nodeProc = spawn('node', ['issuer-server/server.js'], {
@@ -177,7 +184,7 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
     }
     console.log('PASS: claimant received the exact same ring instance (rarity=' + originalRarity + ', serial=' + originalSerial + ', enchantments=' + JSON.stringify(originalEnchantments) + ') — nothing re-rolled');
 
-    const posterMailCheck = await post(NODE_BASE, '/atlas/mail/check', { credentialIds: [posterRing.id] });
+    const posterMailCheck = await mailCheckAs(NODE_BASE, poster, posterRing);
     const goldGiftMail = posterMailCheck.body.messages.find((m) => m.subject.startsWith('Listing claimed at'));
     if (!goldGiftMail || goldGiftMail.attachedAsset.asset.class !== 'atlas.element.gold' || goldGiftMail.attachedAsset.quantity !== 3) {
       throw new Error('Expected poster to receive 3 gold via the usual mail-gift path, got: ' + JSON.stringify(posterMailCheck.body.messages));
@@ -198,7 +205,7 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
     if (claim2.status !== 200 || claim2.body.status !== 'settled') throw new Error('Expected the gold-for-ring claim to settle, got: ' + JSON.stringify(claim2.body));
     if (claim2.body.received.asset.class !== 'atlas.element.gold' || claim2.body.received.quantity !== 4) throw new Error('Expected claimant to receive exactly 4 gold, got: ' + JSON.stringify(claim2.body.received));
 
-    const posterMailCheck2 = await post(NODE_BASE, '/atlas/mail/check', { credentialIds: [posterGold2.id] });
+    const posterMailCheck2 = await mailCheckAs(NODE_BASE, poster, posterGold2);
     const ringGiftMail = posterMailCheck2.body.messages.find((m) => m.subject.startsWith('Listing claimed at'));
     if (!ringGiftMail || ringGiftMail.attachedAsset.asset.class !== 'atlas.wearable.ring') throw new Error('Expected poster to receive the ring via mail gift, got: ' + JSON.stringify(posterMailCheck2.body.messages));
     if (JSON.stringify(ringGiftMail.attachedAsset.asset.properties['com.example.enchantments']) !== JSON.stringify(claimantOriginalEnchantments)) {

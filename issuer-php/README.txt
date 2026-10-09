@@ -57,7 +57,7 @@ What's in this folder
     trade/cancel.php         - POST /atlas/trade/cancel      (withdraw your own open listing — see "Trading Station" below)
     revoke.php              - POST /atlas/revoke            (revoke by id)
     mail/send.php            - POST /atlas/mail/send         (send mail about a held credential — demo/admin use)
-    mail/check.php           - POST /atlas/mail/check        (wallet's periodic mail check)
+    mail/check.php           - POST /atlas/mail/check        (wallet's mail check — signed, owner-authenticated, see "Mail checks are authenticated")
     mail/delete.php          - POST /atlas/mail/delete       (wallet asks to forget mail it deleted)
     postoffice/send.php      - POST /atlas/postoffice/send   (user-to-user mail — see "Post Office" below)
     postoffice/leave.php     - POST /atlas/postoffice/leave  (member gives up a membership: frees the handle, empties the mailbox)
@@ -127,6 +127,33 @@ inline.
 
 Membership cards and the mail system
 ---------------------------------------
+Mail checks are authenticated
+-----------------------------
+/atlas/mail/check no longer answers for a credential id alone, because ids
+are not secrets (they sit inside every shareable credential). The wallet
+posts {credentials, payload, proof, delegation?}: payload is
+{action:"mail-check", domain, credentialIds, issuedAt, nonce}, signed by the
+key that owns the credentials (or by a short-lived session key that key
+delegated to, for passkey wallets). This bundle returns mail and status
+updates only for credentials whose owner key equals the signer and whose
+signature from this domain verifies; everything else is dropped without
+telling the caller. It also refuses requests whose `domain` is not this
+host (the HTTP Host header — if a proxy rewrites it, set it back), requests
+more than 2 minutes off this server's clock, and repeated nonces.
+A wallet from before this change gets 401 auth-required and no mail until
+its extension is updated; revocation checks that read
+/.well-known/atlas-revocations.json are unaffected.
+
+Seen nonces are kept for about 4.5 minutes in lib/atlas-mail-nonces-store.json
+(created on demand, capped at 20000 entries, protected by lib/.htaccess like
+the other stores). Nothing is logged about message contents.
+
+When upgrading a live site, upload these three files together:
+  atlas/mail/check.php
+  lib/bootstrap.php
+  lib/store.php
+and publish the matching extension release at the same time.
+
 This bundle also issues an "atlas.membership" asset (non-fungible) — the
 same "subscribe to this domain" credential the Node demo uses. A visitor
 requests one through the extension's normal asset-request flow (already
@@ -198,8 +225,8 @@ things happen automatically, no action needed from you:
 The subscriber roster is private, same reasoning as the mail store — it's
 in lib/, not web-reachable, and there's deliberately no API endpoint that
 lists it (a public "who's subscribed" endpoint would leak every
-subscriber's public key to anyone who asks, unlike /atlas/mail/send or
-/atlas/mail/check which at least require already knowing a credential id).
+subscriber's public key to anyone who asks, unlike /atlas/mail/send
+(admin-gated) and /atlas/mail/check (signed by the credentials' owner).
 To actually use the roster today — e.g. to message everyone at once —
 open lib/atlas-subscribers-store.json directly via cPanel File Manager or
 SSH and loop the credential ids into tools/admin-mail-send.js --print-only
@@ -851,9 +878,8 @@ the active patch, and auto-reissues it on the spot exactly the way a
 manual /atlas/asset/reissue call would: revoking the old id and minting a
 signed replacement with the patch applied, which the wallet then adopts
 through its ordinary "supersede" path. This is why /atlas/mail/check's
-request body grew an optional `credentials` field alongside the existing
-`credentialIds` array: it's the wallet briefly re-presenting its own
-evidence for the ids it's asking about, not a new registry — this bundle
+request body carries a `credentials` field next to the ids it asks about:
+it's the wallet briefly re-presenting its own evidence for those ids, not a new registry — this bundle
 still stores nothing about who holds what between requests, and never
 mints anything for a presented credential that doesn't cryptographically
 verify against this domain's own key first. A caller that only sends

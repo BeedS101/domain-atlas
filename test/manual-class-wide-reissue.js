@@ -76,7 +76,8 @@ const NODE_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-class-patch-
 const NODE_DOCROOT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-class-patch-docroot-'));
 const PHP_BUNDLE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-class-patch-php-'));
 
-const OWNER = 'test-owner-public-key-class-wide-reissue-demo';
+let OWNER = null; // the owner identity's public key, set once main() starts
+let ownerIdentity = null;
 
 function postJson(base, urlPath, body) {
   return fetch(base + urlPath, {
@@ -130,10 +131,13 @@ async function login(base, admin) {
   if (res.status !== 200) throw new Error('login failed at ' + base + ': ' + JSON.stringify(res));
   return res.body.token;
 }
-// Exactly the shape extension/wallet.js's checkAllMail() now sends: both
-// the bare ids AND this wallet's own current copy of each credential.
-function checkMail(base, credential) {
-  return postJson(base, '/atlas/mail/check', { credentialIds: [credential.id], credentials: [credential] });
+// Exactly the shape extension/wallet.js's checkAllMail() sends: a signed
+// request by the credential's owner plus the owner's copy of the credential.
+async function checkMail(base, credential, as) {
+  const who = as || ownerIdentity;
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signWithSelf(who.kp, who.publicKey, payload);
+  return postJson(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
 }
 
 (async () => {
@@ -168,6 +172,8 @@ function checkMail(base, credential) {
 
   console.log('SETUP: seeding one admin identity into both isolated instances\' own admin rosters');
   const admin = await genIdentity();
+  ownerIdentity = await genIdentity();
+  OWNER = ownerIdentity.publicKey;
   fs.writeFileSync(path.join(NODE_STATE_DIR, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
   fs.writeFileSync(path.join(PHP_BUNDLE_DIR, 'lib', 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
   console.log('PASS: admin identity seeded into both rosters');
@@ -192,11 +198,14 @@ function checkMail(base, credential) {
     assert(recheckRes.status === 200 && recheckRes.body.updates.length === 0, 'expected no further update once the credential already matches the patch, got: ' + JSON.stringify(recheckRes.body.updates));
     console.log('PASS: applying a class patch is idempotent, not a repeat-forever loop');
 
-    console.log('STEP 3: Node — a caller that only sends credentialIds (the old wire shape) never gets an auto-applied patch');
+    console.log('STEP 3: Node — nobody but the owner can trigger a patch: no signature, or someone else\'s, applies nothing');
     const anotherTrophy = await issueAsset(NODE_BASE, OWNER, 'atlas.trophy.chess', 1);
-    const idsOnlyRes = await postJson(NODE_BASE, '/atlas/mail/check', { credentialIds: [anotherTrophy.id] });
-    assert(idsOnlyRes.status === 200 && idsOnlyRes.body.updates.length === 0, 'expected no update when the caller never presented the credential itself, got: ' + JSON.stringify(idsOnlyRes.body.updates));
-    console.log('PASS: the new behavior is purely additive — a bare-ids caller sees exactly the old behavior');
+    const idsOnlyRes = await postJson(NODE_BASE, '/atlas/mail/check', { credentialIds: [anotherTrophy.id], credentials: [anotherTrophy] });
+    assert(idsOnlyRes.status === 401 && idsOnlyRes.body.code === 'auth-required' && !idsOnlyRes.body.updates, 'expected an unsigned request to be refused, got: ' + JSON.stringify(idsOnlyRes));
+    const stranger = await genIdentity();
+    const strangerRes = await checkMail(NODE_BASE, anotherTrophy, stranger);
+    assert(strangerRes.status === 200 && strangerRes.body.updates.length === 0, 'expected a non-owner presenting the credential to trigger nothing, got: ' + JSON.stringify(strangerRes));
+    console.log('PASS: an unsigned request, and a signed one from a non-owner, never run the patch');
 
     console.log('STEP 4: Node — a credential that does not check out against this domain\'s own signature is never acted on');
     const tampered = { ...anotherTrophy, asset: { ...anotherTrophy.asset, properties: { ...anotherTrophy.asset.properties, 'com.example.awardedFor': 'not what was actually signed' } } };
@@ -245,6 +254,10 @@ function checkMail(base, credential) {
     const phpTrophy = await issueAsset(PHP_BASE, OWNER, 'atlas.trophy.chess', 1);
     const phpPatchRes = await setClassPatchAsAdmin(PHP_BASE, admin, { assetClass: 'atlas.trophy.chess', properties: { 'com.example.awardedFor': 'Season 2 Champion' } });
     assert(phpPatchRes.status === 200, 'expected setting the PHP class patch to succeed, got: ' + JSON.stringify(phpPatchRes));
+    const phpStranger = await checkMail(PHP_BASE, phpTrophy, await genIdentity());
+    assert(phpStranger.status === 200 && phpStranger.body.updates.length === 0, 'expected a non-owner to trigger nothing on PHP either, got: ' + JSON.stringify(phpStranger));
+    const phpUnsigned = await postJson(PHP_BASE, '/atlas/mail/check', { credentialIds: [phpTrophy.id], credentials: [phpTrophy] });
+    assert(phpUnsigned.status === 401 && phpUnsigned.body.code === 'auth-required', 'expected an unsigned PHP request to be refused, got: ' + JSON.stringify(phpUnsigned));
     const phpCheckRes = await checkMail(PHP_BASE, phpTrophy);
     assert(phpCheckRes.status === 200 && phpCheckRes.body.updates.length === 1, 'expected exactly one PHP update, got: ' + JSON.stringify(phpCheckRes.body));
     const phpUpdate = phpCheckRes.body.updates[0];

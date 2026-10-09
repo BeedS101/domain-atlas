@@ -207,6 +207,93 @@ function verify_envelope($payload, $envelope) {
   return false;
 }
 
+// ---------- Authenticated mail reads (SPEC.md §11.8) ----------
+// Mirrors issuer-server/server.js's authenticateMailRequest().
+
+const ATLAS_MAIL_REQUEST_WINDOW_MS = 120000;
+const ATLAS_MAIL_NONCE_RETAIN_MS = 270000;
+const ATLAS_MAIL_SESSION_MAX_MS = 900000;
+const ATLAS_MAIL_CHECK_MAX_CREDENTIALS = 200;
+
+function mail_auth_error($status, $code, $message, $extra = []) {
+  send_json($status, array_merge(['error' => $message, 'code' => $code], $extra));
+}
+
+function parse_iso_ms($value) {
+  if (!is_string($value)) return null;
+  try {
+    $d = new DateTime($value);
+    return (int) round(((float) $d->format('U.u')) * 1000);
+  } catch (Exception $e) {
+    return null;
+  }
+}
+
+// verify_envelope() plus what a read grant needs from a passkey assertion:
+// it must be a "get" assertion and the user must have been present.
+function verify_mail_envelope($payload, $envelope) {
+  if (!is_array($envelope) || !isset($envelope['signerRole'])) return false;
+  if ($envelope['signerRole'] === 'webauthn') {
+    try {
+      $clientData = json_decode(b64url_decode($envelope['clientDataJSON']), true);
+      if (!is_array($clientData) || ($clientData['type'] ?? null) !== 'webauthn.get') return false;
+      $authData = b64url_decode($envelope['authenticatorData']);
+      if (strlen($authData) < 37 || (ord($authData[32]) & 0x01) === 0) return false;
+    } catch (Exception $e) {
+      return false;
+    }
+  } elseif ($envelope['signerRole'] !== 'raw-ecdsa') {
+    return false;
+  }
+  return verify_envelope($payload, $envelope);
+}
+
+// Authenticates one signed mail request and returns the identity public key
+// whose mailboxes may be read. Ends the request with an error response
+// otherwise. The nonce is spent only after every signature has checked out.
+function authenticate_mail_request($body, $action) {
+  $payload = $body['payload'] ?? null;
+  $proof = $body['proof'] ?? null;
+  $delegation = $body['delegation'] ?? null;
+  if (!is_array($payload) || !is_array($proof)) {
+    mail_auth_error(401, 'auth-required', 'this endpoint now requires a signed request (SPEC.md §11.8)');
+  }
+  $nowMs = (int) round(microtime(true) * 1000);
+  if (($payload['action'] ?? null) !== $action) mail_auth_error(400, 'bad-request', 'payload.action must be ' . $action);
+  if (($payload['domain'] ?? null) !== atlas_domain()) mail_auth_error(400, 'wrong-domain', 'payload.domain does not name this domain');
+  $nonce = $payload['nonce'] ?? null;
+  if (!is_string($nonce) || strlen($nonce) < 16 || strlen($nonce) > 128) mail_auth_error(400, 'bad-request', 'payload.nonce must be a string of 16 to 128 characters');
+  $issuedMs = parse_iso_ms($payload['issuedAt'] ?? null);
+  if ($issuedMs === null) mail_auth_error(400, 'bad-request', 'payload.issuedAt must be an ISO timestamp');
+  if (abs($nowMs - $issuedMs) > ATLAS_MAIL_REQUEST_WINDOW_MS) {
+    mail_auth_error(401, 'stale-request', 'request is outside the allowed time window', ['serverTime' => gmdate('Y-m-d\TH:i:s', intdiv($nowMs, 1000)) . sprintf('.%03dZ', $nowMs % 1000)]);
+  }
+
+  $identityKey = $proof['publicKey'] ?? null;
+  if ($delegation !== null) {
+    $d = is_array($delegation) ? ($delegation['payload'] ?? null) : null;
+    if (!is_array($d) || !is_array($delegation['proof'] ?? null)) mail_auth_error(401, 'bad-delegation', 'delegation is malformed');
+    if (($d['action'] ?? null) !== 'mail-session' || ($d['purpose'] ?? null) !== 'mail-read' || ($d['domain'] ?? null) !== atlas_domain()) mail_auth_error(401, 'bad-delegation', 'delegation is not a mail read grant for this domain');
+    $sessionKey = $d['sessionPublicKey'] ?? null;
+    if (!is_string($sessionKey) || ($proof['signerRole'] ?? null) !== 'raw-ecdsa' || ($proof['publicKey'] ?? null) !== $sessionKey) mail_auth_error(401, 'bad-delegation', 'request was not signed by the delegated key');
+    $dIssued = parse_iso_ms($d['issuedAt'] ?? null);
+    $dExpires = parse_iso_ms($d['expiresAt'] ?? null);
+    if ($dIssued === null || $dExpires === null || $dExpires - $dIssued > ATLAS_MAIL_SESSION_MAX_MS || $dExpires <= $dIssued) mail_auth_error(401, 'bad-delegation', 'delegation lifetime is invalid');
+    if ($dIssued - $nowMs > ATLAS_MAIL_REQUEST_WINDOW_MS) mail_auth_error(401, 'stale-request', 'delegation is outside the allowed time window', ['serverTime' => gmdate('Y-m-d\TH:i:s', intdiv($nowMs, 1000)) . sprintf('.%03dZ', $nowMs % 1000)]);
+    if ($nowMs > $dExpires) mail_auth_error(401, 'session-expired', 'mail session has expired');
+    if ($issuedMs > $dExpires || $issuedMs < $dIssued - ATLAS_MAIL_REQUEST_WINDOW_MS) mail_auth_error(401, 'bad-delegation', 'request time falls outside the delegation');
+    if (!verify_mail_envelope($d, $delegation['proof'])) mail_auth_error(401, 'bad-signature', 'delegation signature does not check out');
+    $identityKey = $delegation['proof']['publicKey'] ?? null;
+  }
+  if (!is_string($identityKey) || $identityKey === '') mail_auth_error(401, 'bad-signature', 'signature does not check out');
+  if (!verify_mail_envelope($payload, $proof)) mail_auth_error(401, 'bad-signature', 'signature does not check out');
+
+  $spent = consume_mail_nonce($proof['publicKey'], $nonce, $nowMs, ATLAS_MAIL_NONCE_RETAIN_MS);
+  if ($spent === 'replayed') mail_auth_error(401, 'replayed-request', 'this request has already been used');
+  if ($spent === 'full') mail_auth_error(503, 'busy', 'too many recent requests; try again shortly');
+  return $identityKey;
+}
+
 // Verifies an asset credential this issuer itself signed — used before
 // trusting a balance presented back to us for a reissue, split,
 // consolidate, or trade.

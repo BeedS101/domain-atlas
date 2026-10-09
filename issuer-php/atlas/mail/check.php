@@ -1,14 +1,23 @@
 <?php
 // POST /atlas/mail/check — mirrors issuer-server/server.js's same route.
 //
-// This is what the wallet's periodic check loop calls — give it every
-// credential id you hold that this domain issued, get back whatever's
-// been sent for any of them. The wallet re-verifies each message's
-// signature itself against this domain's published key (the exact same
-// .well-known/atlas-key.json check it already does for credentials)
-// before trusting or displaying anything — this endpoint doesn't need to
-// do anything special to be trustworthy beyond signing what it hands
-// back, same as every other endpoint in this bundle.
+// The wallet's periodic check: it asks for whatever was sent to, or happened
+// to, the credentials the caller owns. The request is signed (SPEC.md §11.8,
+// see authenticate_mail_request()). The wallet re-verifies each message's
+// signature against this domain's published key before trusting it.
+//
+// Each requested mailbox is released only for a credential this domain
+// signed whose owner is the authenticated identity; every other id is
+// dropped silently, so a mixed request returns the caller's own mailboxes
+// and nothing reveals whether an unauthorised id exists. Revoked and
+// superseded credentials still authorise their own mailbox: ownership does
+// not lapse, and settlement notices and replacements are filed under them.
+//
+// `updates` (SPEC.md §5.1.1) rides the same request: for each authorised id
+// that is not simply still active, one entry naming what happened to it. A
+// superseded asset's entry carries the full replacement credential. The
+// class patch (re-minting a stale credential) only ever runs for a
+// credential the caller has just proved they own.
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
@@ -20,50 +29,40 @@ try {
   send_json(400, ['error' => 'invalid JSON body']);
 }
 
-$credentialIds = $body['credentialIds'] ?? null;
-if (!is_array($credentialIds) || count($credentialIds) === 0) {
-  send_json(400, ['error' => 'credentialIds must be a non-empty array']);
-}
+$identityKey = authenticate_mail_request($body, 'mail-check');
 
-$wanted = array_flip($credentialIds);
-$messages = array_values(array_filter(read_mail()['messages'], function ($m) use ($wanted) {
-  return isset($wanted[$m['credentialId']]);
-}));
-
-// `updates` (SPEC.md §5.1.1, additive to the messages above — this
-// endpoint's existing mail check-in cycle is reused as the transport for
-// asset-update notices rather than standing up a second polling mechanism)
-// rides the same request: for each requested id that isn't simply still
-// active, one entry naming what happened to it. A superseded asset's entry
-// carries the full replacement credential so the wallet can verify and
-// adopt it without a second round trip — the wallet must still run that
-// verification itself before trusting any of it, this endpoint being "the
-// truth" no more than any other network response is. Ids that are still
-// perfectly valid get no entry at all, same lean-response reasoning
-// $messages above already follows. Mirrors issuer-server/server.js's
-// /atlas/mail/check extension exactly.
-//
-// `credentials` (optional, additive — a caller that only sends
-// `credentialIds` gets exactly the old behavior): the wallet's own current
-// copy of whichever of those ids it still wants to ask about. Lets this
-// same request also catch a class-wide patch (POST /atlas/admin/
-// class-patch.php) that's moved past what a specific credential says,
-// without this bundle ever keeping a registry of who holds what — see
-// apply_class_patch_if_stale()'s own comment. Only consulted for an id
-// that isn't already revoked or superseded; never trusted for anything
-// until its own signature checks out.
-$presentedCredentials = $body['credentials'] ?? null;
-$presentedById = [];
-if (is_array($presentedCredentials)) {
-  foreach ($presentedCredentials as $c) {
-    if (is_array($c) && isset($c['id'])) $presentedById[$c['id']] = $c;
+$requested = $body['payload']['credentialIds'] ?? null;
+$credentials = $body['credentials'] ?? null;
+$validIds = is_array($requested) && count($requested) > 0 && count($requested) <= ATLAS_MAIL_CHECK_MAX_CREDENTIALS;
+if ($validIds) {
+  foreach ($requested as $id) {
+    if (!is_string($id) || $id === '' || strlen($id) > 512) { $validIds = false; break; }
   }
 }
+if (!$validIds) {
+  send_json(400, ['error' => 'payload.credentialIds must be 1 to ' . ATLAS_MAIL_CHECK_MAX_CREDENTIALS . ' strings']);
+}
+if (!is_array($credentials) || count($credentials) > ATLAS_MAIL_CHECK_MAX_CREDENTIALS) {
+  send_json(400, ['error' => 'credentials must be an array of at most ' . ATLAS_MAIL_CHECK_MAX_CREDENTIALS]);
+}
+
+$requestedSet = array_flip($requested);
+$authorised = [];
+foreach ($credentials as $c) {
+  if (!is_array($c) || !isset($c['id']) || !is_string($c['id']) || !isset($requestedSet[$c['id']]) || isset($authorised[$c['id']])) continue;
+  if (!isset($c['owner']['publicKey']) || $c['owner']['publicKey'] !== $identityKey) continue;
+  if (!verify_own_credential_signature($kp['publicKeyB64url'], $c, asset_payload_of($c))) continue;
+  $authorised[$c['id']] = $c;
+}
+
+$messages = array_values(array_filter(read_mail()['messages'], function ($m) use ($authorised) {
+  return isset($authorised[$m['credentialId']]);
+}));
 
 $assetUpdates = read_asset_updates()['updates'];
 $revokedBefore = read_revocations()['revoked'];
 $updates = [];
-foreach (array_keys($wanted) as $id) {
+foreach ($authorised as $id => $presented) {
   $supersession = null;
   foreach ($assetUpdates as $u) { if ($u['id'] === $id) { $supersession = $u; break; } }
   if ($supersession) { $updates[] = $supersession; continue; }
@@ -71,25 +70,17 @@ foreach (array_keys($wanted) as $id) {
   foreach ($revokedBefore as $r) { if ($r['id'] === $id) { $revocation = $r; break; } }
   if ($revocation) { $updates[] = ['id' => $id, 'status' => 'revoked', 'reason' => $revocation['reason']]; continue; }
   // A suspended id gets its own status rather than being silently
-  // indistinguishable from "still fine" — same channel this endpoint
-  // already uses to report a revocation, just a lighter, reversible one.
-  // Mirrors issuer-server/server.js's /atlas/mail/check extension.
+  // indistinguishable from "still fine".
   $suspension = find_suspension($id);
   if ($suspension) { $updates[] = ['id' => $id, 'status' => 'suspended', 'reason' => $suspension['reason'], 'expiresAt' => $suspension['expiresAt'] ?? null]; continue; }
-  // find_suspension() above resolves any expired suspension as a side
-  // effect, including revoking an expired 'finalize' entry (SPEC.md §13.4)
-  // — which $revokedBefore was read too early to catch if it happened for
-  // this exact id. Re-checking fresh here, only for ids that reach this
-  // point, reports that revocation in this same response rather than one
-  // call late. Mirrors issuer-server/server.js's /atlas/mail/check
-  // extension.
+  // find_suspension() resolves any expired suspension as a side effect,
+  // including revoking an expired 'finalize' entry (SPEC.md §13.4); reading
+  // revocations again reports that in this same response.
   $justRevoked = null;
   foreach (read_revocations()['revoked'] as $r) { if ($r['id'] === $id) { $justRevoked = $r; break; } }
   if ($justRevoked) { $updates[] = ['id' => $id, 'status' => 'revoked', 'reason' => $justRevoked['reason']]; continue; }
-  if (isset($presentedById[$id])) {
-    $applied = apply_class_patch_if_stale($kp['privateKey'], $kp['publicKeyB64url'], $presentedById[$id]);
-    if ($applied) $updates[] = $applied;
-  }
+  $applied = apply_class_patch_if_stale($kp['privateKey'], $kp['publicKeyB64url'], $presented);
+  if ($applied) $updates[] = $applied;
 }
 
 send_json(200, ['messages' => $messages, 'updates' => $updates]);

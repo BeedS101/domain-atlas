@@ -92,8 +92,10 @@ async function sendMail(base, senderIdentity, toPublicKey, toDomain, subject, bo
   const proof = await signPayload(senderIdentity, payload);
   return post(base, '/atlas/postoffice/send', { payload, proof });
 }
-async function checkMail(base, credentialId) {
-  return post(base, '/atlas/mail/check', { credentialIds: [credentialId] });
+async function checkMail(base, identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signPayload(identity, payload);
+  return post(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
 }
 async function blockSender(base, identity, blockedPublicKey) {
   const payload = { blockedPublicKey };
@@ -173,7 +175,7 @@ function startNodeServer(port, domain, docroot, stateDir) {
     console.log('PASS: Domain A relayed the message to Domain B without Alice ever joining Domain B');
 
     console.log('STEP 3: Bob checks his own mail DIRECTLY at Domain B, never routed through Domain A');
-    const checkRes = await checkMail(BASE_B, bobMembership.id);
+    const checkRes = await checkMail(BASE_B, bob, bobMembership);
     assert(checkRes.ok, 'mail check failed: ' + JSON.stringify(checkRes.body));
     const message = (checkRes.body.messages || []).find((m) => m.id === sendRes.body.id);
     assert(message, 'expected to find the relayed message in Bob\'s own mail check at Domain B');

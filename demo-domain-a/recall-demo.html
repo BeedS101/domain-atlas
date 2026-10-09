@@ -251,8 +251,14 @@
   async function issueRecall(reason) {
     return postJson('/atlas/demo/recall/issue', { assetClass: WIDGET_CLASS, reason });
   }
-  async function checkIn(credential) {
-    return postJson('/atlas/mail/check', { credentialIds: [credential.id], credentials: [credential] });
+  // A check-in is signed by the credential's owner (SPEC.md §11.8).
+  async function checkIn(identity, credential) {
+    const payload = {
+      action: 'mail-check', domain: location.host, credentialIds: [credential.id],
+      issuedAt: new Date().toISOString(), nonce: b64urlEncode(crypto.getRandomValues(new Uint8Array(18)))
+    };
+    const proof = await signWithSelf(identity, payload);
+    return postJson('/atlas/mail/check', { credentials: [credential], payload, proof });
   }
 
   // Only ever needs to check the one credential shape this whole demo
@@ -388,7 +394,7 @@
     const resultEl = document.getElementById('checkinResult');
     const tampered = JSON.parse(JSON.stringify(widget));
     tampered.asset.properties = Object.assign({}, tampered.asset.properties, { 'com.example.batch': 'tampered-batch-99' });
-    const res = await checkIn(tampered);
+    const res = await checkIn(customer, tampered);
     const accepted = (res.body.updates || []).some((u) => u.id === widget.id);
     resultEl.innerHTML = '<div class="result ' + (accepted ? 'err' : 'warn') + '">' +
       (accepted ? 'Unexpected — a tampered credential got an update applied.' :
@@ -397,7 +403,7 @@
 
   document.getElementById('realCheckinBtn').addEventListener('click', async () => {
     const resultEl = document.getElementById('checkinResult');
-    const res = await checkIn(widget);
+    const res = await checkIn(customer, widget);
     const update = (res.body.updates || []).find((u) => u.id === widget.id);
     if (!update || !update.newCredential) {
       resultEl.innerHTML += '<div class="result err">No update came back for this check-in — unexpected.</div>';

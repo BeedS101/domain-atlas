@@ -7221,6 +7221,119 @@ const AtlasWallet = (() => {
     }
   }
 
+  // ---------- authenticated mail reads (SPEC.md §11.8) ----------
+  //
+  // A domain releases a mailbox only to a signed request from the credential's
+  // owner. A local identity signs each request itself, silently. A passkey
+  // cannot sign without a prompt, so it signs one short-lived delegation per
+  // domain (15 minutes at most) authorising a throwaway key held in
+  // chrome.storage.session; polls are then signed by that key and need no
+  // prompt. The delegation is bound to the domain and to reading mail, and a
+  // copy of it is useless without the throwaway private key.
+  const MAIL_SESSION_LIFETIME_MS = 14 * 60 * 1000;
+  const MAIL_CHECK_CHUNK = 100;
+  const mailClockOffsets = new Map(); // domain -> serverTime - localTime, learned from a stale-request answer
+
+  function mailNow(domain) {
+    return Date.now() + (mailClockOffsets.get(domain) || 0);
+  }
+
+  async function signMailPayload(identity, payload) {
+    if (!identity.privateKeyJwk) return signWithWebAuthnIdentity(payload);
+    const privateKey = await crypto.subtle.importKey('jwk', identity.privateKeyJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, new TextEncoder().encode(canonicalize(payload)));
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+
+  async function getMailSessions() {
+    try {
+      const { atlasMailSessions } = await chrome.storage.session.get('atlasMailSessions');
+      return atlasMailSessions || {};
+    } catch (e) {
+      return {};
+    }
+  }
+  async function putMailSession(key, session) {
+    try {
+      const all = await getMailSessions();
+      if (session) all[key] = session; else delete all[key];
+      await chrome.storage.session.set({ atlasMailSessions: all });
+    } catch (e) {
+      // Without session storage a passkey wallet only reads on request.
+    }
+  }
+
+  // Returns a usable delegated signer for (identity, domain), prompting for a
+  // passkey assertion only when `interactive` is set and none is live.
+  async function getMailSession(identity, domain, interactive) {
+    const key = domain + '|' + identity.publicKey;
+    const sessions = await getMailSessions();
+    const live = sessions[key];
+    if (live && live.expiresAtMs - 60 * 1000 > mailNow(domain)) return live;
+    if (!interactive) return null;
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const sessionPublicKey = b64urlEncode(await crypto.subtle.exportKey('raw', pair.publicKey));
+    const issuedMs = mailNow(domain);
+    const delegationPayload = {
+      action: 'mail-session',
+      purpose: 'mail-read',
+      domain,
+      sessionPublicKey,
+      issuedAt: new Date(issuedMs).toISOString(),
+      expiresAt: new Date(issuedMs + MAIL_SESSION_LIFETIME_MS).toISOString()
+    };
+    const delegationProof = await signWithWebAuthnIdentity(delegationPayload);
+    const session = {
+      privateKeyJwk: await crypto.subtle.exportKey('jwk', pair.privateKey),
+      publicKey: sessionPublicKey,
+      delegation: { payload: delegationPayload, proof: delegationProof },
+      expiresAtMs: issuedMs + MAIL_SESSION_LIFETIME_MS
+    };
+    await putMailSession(key, session);
+    return session;
+  }
+
+  // One signed request to a domain's /atlas/mail/check for these credentials.
+  // Returns {messages, updates}, or null when the domain could not or would
+  // not answer (unreachable, too old to verify, passkey session not open).
+  async function signedMailCheck(identity, domain, credentials, opts, retried) {
+    const webauthn = !identity.privateKeyJwk;
+    const session = webauthn ? await getMailSession(identity, domain, !!opts.interactive) : null;
+    if (webauthn && !session) return null;
+    const payload = {
+      action: 'mail-check',
+      domain,
+      credentialIds: credentials.map((c) => c.id),
+      issuedAt: new Date(mailNow(domain)).toISOString(),
+      nonce: b64urlEncode(crypto.getRandomValues(new Uint8Array(18)).buffer)
+    };
+    const signer = webauthn ? { privateKeyJwk: session.privateKeyJwk, publicKey: session.publicKey } : identity;
+    const proof = await signMailPayload(signer, payload);
+    const res = await fetch(baseUrl(domain) + '/atlas/mail/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        // credentialIds is repeated outside the signed payload only so a
+        // domain that predates signed reads still answers.
+        credentialIds: payload.credentialIds,
+        credentials,
+        payload,
+        proof,
+        ...(webauthn ? { delegation: session.delegation } : {})
+      })
+    });
+    if (res.ok) return res.json();
+    const err = await res.json().catch(() => null);
+    const code = err && err.code;
+    if (!retried && code === 'stale-request' && err.serverTime && Number.isFinite(Date.parse(err.serverTime))) {
+      mailClockOffsets.set(domain, Date.parse(err.serverTime) - Date.now());
+      if (webauthn) await putMailSession(domain + '|' + identity.publicKey, null);
+      return signedMailCheck(identity, domain, credentials, opts, true);
+    }
+    if (webauthn && (code === 'session-expired' || code === 'bad-delegation')) await putMailSession(domain + '|' + identity.publicKey, null);
+    return null;
+  }
+
   // The actual periodic check: gathers every domain the current self
   // identity holds a credential from, asks each domain's
   // /atlas/mail/check for anything tied to those specific credential ids,
@@ -7324,15 +7437,20 @@ const AtlasWallet = (() => {
         // whatever comes back still goes through processAssetUpdates'
         // own full re-verification below, exactly like any other
         // supersession notice.
-        const res = await fetch(base + '/atlas/mail/check', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            credentialIds: Array.from(idSet),
-            credentials: assets.filter((e) => idSet.has(e.credential.id)).map((e) => e.credential)
-          })
-        });
-        const { messages, updates } = await res.json();
+        // Signed per chunk (SPEC.md §11.8). A domain that cannot be read this
+        // round (unreachable, passkey session not open) is skipped.
+        const domainCredentials = assets.filter((e) => idSet.has(e.credential.id)).map((e) => e.credential);
+        const messages = [];
+        const updates = [];
+        let answered = false;
+        for (let i = 0; i < domainCredentials.length; i += MAIL_CHECK_CHUNK) {
+          const result = await signedMailCheck(identity, domain, domainCredentials.slice(i, i + MAIL_CHECK_CHUNK), opts, false);
+          if (!result) continue;
+          answered = true;
+          messages.push(...(result.messages || []));
+          updates.push(...(result.updates || []));
+        }
+        if (!answered) continue;
         // Messages the person deleted that this domain still holds (deleted
         // while offline, or before domains could be asked to forget them).
         const staleOnServer = [];

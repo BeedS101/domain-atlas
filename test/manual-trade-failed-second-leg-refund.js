@@ -109,6 +109,13 @@ function injectUnconditionalSettleFailure(bundleDir) {
   fs.writeFileSync(serverPath, src);
 }
 
+// Signed mail check (SPEC.md §11.8): the credential's owner asks for its mailbox.
+async function mailCheckAs(base, identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signPayload(identity, payload);
+  return post(base, '/atlas/mail/check', { credentials: [credential], payload, proof });
+}
+
 (async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-failed-second-leg-'));
   const bundleA = path.join(tmpRoot, 'domain-a');
@@ -162,13 +169,13 @@ function injectUnconditionalSettleFailure(bundleDir) {
     console.log('PASS: claim failed as expected, carrying a valid 5-gold refund for Bob ->', claim.body.error);
 
     console.log('STEP 3: the refund credential itself is NOT revoked (Bob can actually hold it)');
-    const refundCheck = await post(BASE_B, '/atlas/mail/check', { credentialIds: [claim.body.refund.id] });
+    const refundCheck = await mailCheckAs(BASE_B, bob, claim.body.refund);
     const refundUpdate = refundCheck.body.updates.find((u) => u.id === claim.body.refund.id);
     if (refundUpdate) throw new Error('Expected no revocation/supersession update for the fresh refund credential, got: ' + JSON.stringify(refundUpdate));
     console.log('PASS: refund credential is clean — no revocation recorded against it');
 
     console.log('STEP 4: Bob\'s ORIGINAL balance is genuinely revoked (the first leg really did spend it) -- but he was compensated, so this is expected, not a loss');
-    const originalCheck = await post(BASE_B, '/atlas/mail/check', { credentialIds: [bobGold.id] });
+    const originalCheck = await mailCheckAs(BASE_B, bob, bobGold);
     const originalUpdate = originalCheck.body.updates.find((u) => u.id === bobGold.id);
     if (!originalUpdate || originalUpdate.status !== 'revoked') throw new Error('Expected the original spent balance to be revoked, got: ' + JSON.stringify(originalUpdate));
     console.log('PASS: original balance correctly shows revoked, exactly matching the refund that replaces it');

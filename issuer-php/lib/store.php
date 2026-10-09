@@ -168,9 +168,8 @@ function atlas_reviewer_public_key_file() {
 
 // Deliberately NOT under .well-known (which is served as plain static
 // files, world-readable to anyone who knows the URL, same as
-// atlas-revocations.json above needs to be) — mail is looked up through
-// atlas/mail/check.php instead, which at least requires already knowing
-// the credential ids being asked about. Lives in lib/ next to the private
+// atlas-revocations.json above needs to be) — mail is read through the
+// signed atlas/mail/check.php (SPEC.md §11.8) instead. Lives in lib/ next to the private
 // key file for the same "not meant to be a public crawlable file" reason,
 // protected by this folder's .htaccess deny. Mirrors issuer-server/
 // server.js's MAIL_FILE (which similarly sits next to the Node server's
@@ -345,10 +344,9 @@ function atlas_class_patches_file() {
 // who to auto-welcome, and so you can open this file directly (cPanel File
 // Manager or SSH) if you want to message everyone by hand later. A public
 // "list subscribers" API would leak every subscriber's public key to
-// anyone who requests it, unlike mail/send.php or mail/check.php which at
-// least require already knowing a credential id first — this would need
-// real operator authentication (which nothing in this bundle has yet)
-// before it's ever safe to expose over HTTP.
+// anyone who requests it — this would need real operator authentication
+// (which nothing in this bundle has yet) before it's ever safe to expose
+// over HTTP.
 function atlas_subscribers_file() {
   return __DIR__ . '/atlas-subscribers-store.json';
 }
@@ -551,6 +549,40 @@ function consume_login_nonce($nonce) {
   flock($fh, LOCK_UN);
   fclose($fh);
   return $found;
+}
+
+// Spent request nonces for authenticated mail reads (SPEC.md §11.8), as
+// [sha256(signerKey|nonce), expiresAtMs] pairs. Check and write happen under
+// one exclusive lock, so concurrent requests carrying the same nonce cannot
+// both pass. Mirrors issuer-server/server.js's consumeMailNonce().
+const ATLAS_MAIL_NONCE_CAP = 20000;
+function atlas_mail_nonces_file() {
+  return __DIR__ . '/atlas-mail-nonces-store.json';
+}
+function consume_mail_nonce($signerKey, $nonce, $nowMs, $retainMs) {
+  $fh = fopen(atlas_mail_nonces_file(), 'c+');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  $live = [];
+  if (is_array($doc) && isset($doc['nonces']) && is_array($doc['nonces'])) {
+    foreach ($doc['nonces'] as $n) {
+      if (is_array($n) && count($n) === 2 && $n[1] > $nowMs) $live[] = $n;
+    }
+  }
+  $key = rtrim(strtr(base64_encode(hash('sha256', $signerKey . '|' . $nonce, true)), '+/', '-_'), '=');
+  $result = 'ok';
+  foreach ($live as $n) { if ($n[0] === $key) { $result = 'replayed'; break; } }
+  if ($result === 'ok' && count($live) >= ATLAS_MAIL_NONCE_CAP) $result = 'full';
+  if ($result === 'ok') {
+    $live[] = [$key, $nowMs + $retainMs];
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode(['nonces' => $live]));
+    fflush($fh);
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $result;
 }
 
 function create_admin_session($publicKey) {

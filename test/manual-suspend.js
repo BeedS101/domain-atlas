@@ -90,10 +90,12 @@ async function transfer(credential, ownerKp, ownerPublicKey, recipientPublicKey)
   const intentProof = await signWithSelf(ownerKp, ownerPublicKey, intentPayload);
   return postJson('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload: intentPayload, proof: intentProof } });
 }
-async function mailCheckStatus(id) {
-  const res = await postJson('/atlas/mail/check', { credentialIds: [id] });
+async function mailCheckStatus(who, credential) {
+  const payload = { action: 'mail-check', domain: new URL(BASE).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signWithSelf(who.kp, who.publicKey, payload);
+  const res = await postJson('/atlas/mail/check', { credentials: [credential], payload, proof });
   if (res.status !== 200) throw new Error('mail check failed: ' + JSON.stringify(res.body));
-  return res.body.updates.find((u) => u.id === id) || null;
+  return res.body.updates.find((u) => u.id === credential.id) || null;
 }
 
 (async () => {
@@ -127,7 +129,7 @@ async function mailCheckStatus(id) {
     console.log('PASS: transfer rejected while suspended ->', blockedTransfer.body.error);
 
     console.log('STEP 2: /atlas/mail/check reports a suspended status for the id, with the reason and expiresAt: null');
-    const status1 = await mailCheckStatus(credential.id);
+    const status1 = await mailCheckStatus(owner, credential);
     assert(status1 && status1.status === 'suspended', 'expected mail/check to report status "suspended", got: ' + JSON.stringify(status1));
     assert(status1.reason === 'fraud-investigation', 'expected the suspension reason to come through, got: ' + JSON.stringify(status1));
     assert(status1.expiresAt === null, 'expected expiresAt to be null for an indefinite suspension, got: ' + JSON.stringify(status1));
@@ -152,7 +154,7 @@ async function mailCheckStatus(id) {
     assert(expiredSuspend.status === 200, 'expected the suspend call itself to succeed even with a past expiresAt, got: ' + JSON.stringify(expiredSuspend.body));
     const transferAfterExpiredSuspend = await transfer(credential, recipient.kp, recipient.publicKey, owner.publicKey);
     assert(transferAfterExpiredSuspend.status === 200, 'expected the transfer to succeed — the suspension already expired, got ' + transferAfterExpiredSuspend.status + ': ' + JSON.stringify(transferAfterExpiredSuspend.body));
-    const status2 = await mailCheckStatus(transferAfterExpiredSuspend.body.credential.supersedes);
+    const status2 = await mailCheckStatus(recipient, credential);
     assert(status2 === null || status2.status !== 'suspended', 'expected an already-expired suspension to be invisible to mail/check, got: ' + JSON.stringify(status2));
     console.log('PASS: an already-expired suspension blocks nothing and reports nothing, with no explicit unsuspend call');
 

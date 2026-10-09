@@ -45,8 +45,8 @@ function check(name, ok, detail) {
       if (r.status !== 200) throw new Error('send failed: ' + JSON.stringify(r.body));
       return r.body.id;
     };
-    const mailbox = async (card) => {
-      const r = await H.postJson(BASE, '/atlas/mail/check', { credentialIds: [card.id] });
+    const mailbox = async (who, card) => {
+      const r = await H.mailCheck(BASE, who, card);
       return r.body.messages.filter((m) => /^(m\d|x\d)$/.test(m.subject)).map((m) => m.subject).sort();
     };
     const del = async (who, credentials, ids) => {
@@ -58,11 +58,11 @@ function check(name, ok, detail) {
     const m2 = await send(alice, 'm2');
     const m3 = await send(alice, 'm3');
     const x1 = await send(mallory, 'x1');
-    check('setup: alice has three messages', (await mailbox(aliceCard)).join() === 'm1,m2,m3', (await mailbox(aliceCard)).join());
+    check('setup: alice has three messages', (await mailbox(alice, aliceCard)).join() === 'm1,m2,m3', (await mailbox(alice, aliceCard)).join());
 
     let r = await del(alice, [aliceCard], [m1, m2]);
     check('holder deletes two of her messages', r.status === 200 && r.body.deleted === 2, JSON.stringify(r));
-    check('only the named messages are gone', (await mailbox(aliceCard)).join() === 'm3', (await mailbox(aliceCard)).join());
+    check('only the named messages are gone', (await mailbox(alice, aliceCard)).join() === 'm3', (await mailbox(alice, aliceCard)).join());
 
     r = await del(mallory, [malloryCard], [m3]);
     check('another holder naming her message deletes nothing', r.status === 200 && r.body.deleted === 0, JSON.stringify(r));
@@ -72,8 +72,8 @@ function check(name, ok, detail) {
     forged.owner.publicKey = mallory.publicKey;
     r = await del(mallory, [forged], [m3]);
     check('a credential with a changed owner deletes nothing', r.status === 200 && r.body.deleted === 0, JSON.stringify(r));
-    check('her message is untouched by all of that', (await mailbox(aliceCard)).join() === 'm3', (await mailbox(aliceCard)).join());
-    check('mallory\'s own mailbox is untouched', (await mailbox(malloryCard)).join() === 'x1', (await mailbox(malloryCard)).join());
+    check('her message is untouched by all of that', (await mailbox(alice, aliceCard)).join() === 'm3', (await mailbox(alice, aliceCard)).join());
+    check('mallory\'s own mailbox is untouched', (await mailbox(mallory, malloryCard)).join() === 'x1', (await mailbox(mallory, malloryCard)).join());
 
     r = await del(alice, [aliceCard], [m1, m2]);
     check('repeating a delete is harmless', r.status === 200 && r.body.deleted === 0, JSON.stringify(r));
@@ -86,10 +86,10 @@ function check(name, ok, detail) {
     check('an empty id list is refused', r.status === 400, JSON.stringify(r));
     r = await H.postJson(BASE, '/atlas/mail/delete', {});
     check('an empty request is refused', r.status === 400, JSON.stringify(r));
-    check('alice\'s last message survived the refused requests', (await mailbox(aliceCard)).join() === 'm3', (await mailbox(aliceCard)).join());
+    check('alice\'s last message survived the refused requests', (await mailbox(alice, aliceCard)).join() === 'm3', (await mailbox(alice, aliceCard)).join());
 
     r = await del(alice, [aliceCard], [m3]);
-    check('the last message can be deleted', r.status === 200 && r.body.deleted === 1 && (await mailbox(aliceCard)).length === 0, JSON.stringify(r));
+    check('the last message can be deleted', r.status === 200 && r.body.deleted === 1 && (await mailbox(alice, aliceCard)).length === 0, JSON.stringify(r));
     void x1;
   } finally {
     await H.stopIssuer(issuer);

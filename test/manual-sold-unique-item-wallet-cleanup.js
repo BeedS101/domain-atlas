@@ -161,9 +161,14 @@ async function joinTradingStationIfNeeded(frame) {
 
     console.log('STEP 4: before A ever checks mail, the server-side state is already the exact shape this bug needs — a bare revoked/superseded update, no assetUpdates record');
     const rawUpdate = await a.frame.evaluate(async (id) => {
-      const res = await fetch('http://localhost:8001/atlas/mail/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentialIds: [id] }) });
+      const identity = await AtlasWallet.getIdentity();
+      const credential = (await AtlasWallet.getWallet(identity.publicKey)).find((e) => e.credential.id === id).credential;
+      const base = 'http://localhost:8001';
+      const payload = { action: 'mail-check', domain: new URL(base).host, credentialIds: [id], issuedAt: new Date().toISOString(), nonce: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(18)))).replace(/[+\/=]/g, 'x') };
+      const proof = await AtlasWallet.signWithSelf(payload);
+      const res = await fetch(base + '/atlas/mail/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentials: [credential], payload, proof }) });
       const body = await res.json();
-      return body.updates.find((u) => u.id === id) || null;
+      return (body.updates || []).find((u) => u.id === id) || null;
     }, ringId);
     if (!rawUpdate || rawUpdate.status !== 'revoked' || rawUpdate.reason !== 'superseded' || rawUpdate.newCredential) {
       throw new Error('Expected a bare {status: revoked, reason: superseded} update with no newCredential, got: ' + JSON.stringify(rawUpdate));

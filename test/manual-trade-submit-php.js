@@ -152,6 +152,13 @@ async function issueAsset(ownerPublicKey, assetClass, quantity) {
   return res.body;
 }
 
+// Signed mail check (SPEC.md §11.8): the credential's owner asks for its mailbox.
+async function mailCheckAs(identity, credential) {
+  const payload = { action: 'mail-check', domain: new URL(BASE).host, credentialIds: [credential.id], issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };
+  const proof = await signPayload(identity, payload);
+  return post('/atlas/mail/check', { credentials: [credential], payload, proof });
+}
+
 (async () => {
   console.log('SETUP: starting PHP\'s built-in dev server against issuer-php/test-router.php');
   cleanGeneratedFiles();
@@ -184,7 +191,7 @@ async function issueAsset(ownerPublicKey, assetClass, quantity) {
     if (!roster.members.some((m) => m.credentialId === posterMembership.id && m.ownerPublicKey === poster.publicKey)) {
       throw new Error('Expected poster to be logged to the Trading Station roster, got: ' + JSON.stringify(roster));
     }
-    const mailCheck = await post('/atlas/mail/check', { credentialIds: [posterMembership.id] });
+    const mailCheck = await mailCheckAs(poster, posterMembership);
     if (!mailCheck.body.messages.some((m) => m.subject === 'Trading Station membership active')) {
       throw new Error('Expected a welcome mail message, got: ' + JSON.stringify(mailCheck.body.messages));
     }
@@ -240,7 +247,7 @@ async function issueAsset(ownerPublicKey, assetClass, quantity) {
     console.log('PASS: the claimed listing no longer appears in GET /atlas/trade/listings');
 
     console.log('STEP 8: poster (not live for the claiming call) gets the rest via the ordinary mail-check path — iron remainder via asset-update, gold via a claimable mail gift');
-    const posterMailCheck = await post('/atlas/mail/check', { credentialIds: [posterIron.id] });
+    const posterMailCheck = await mailCheckAs(poster, posterIron);
     const ironUpdate = posterMailCheck.body.updates.find((u) => u.id === posterIron.id);
     if (!ironUpdate || ironUpdate.status !== 'superseded' || ironUpdate.newCredential.asset.class !== 'atlas.element.iron' || ironUpdate.newCredential.quantity !== 10) {
       throw new Error('Expected poster\'s old iron balance to show a superseded update to a 10-iron remainder, got: ' + JSON.stringify(posterMailCheck.body.updates));

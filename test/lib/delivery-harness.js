@@ -14,6 +14,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const crypto = webcrypto;
 const { subtle } = webcrypto;
 const { buildMimeMessage } = require('../../issuer-server/lib-smtp');
 
@@ -60,10 +61,53 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
   if (res.status !== 200) throw new Error('Failed to issue ' + assetClass + ': ' + JSON.stringify(res.body));
   return res.body;
 }
-async function mailCheckStatus(base, id) {
-  const res = await postJson(base, '/atlas/mail/check', { credentialIds: [id] });
+// A signed /atlas/mail/check request (SPEC.md §11.8) made by `owner` for the
+// mailboxes of `credentials`. `o` overrides parts of the request so tests can
+// build bad ones: domain, issuedAt, nonce, credentialIds, signer (another
+// identity signs instead), delegation, payloadExtra, noProof.
+async function mailCheck(base, owner, credentials, o) {
+  o = o || {};
+  const list = Array.isArray(credentials) ? credentials : [credentials];
+  const payload = {
+    action: 'mail-check',
+    domain: o.domain || new URL(base).host,
+    credentialIds: o.credentialIds || list.map((c) => c.id),
+    issuedAt: o.issuedAt || new Date().toISOString(),
+    nonce: o.nonce || b64url(crypto.getRandomValues(new Uint8Array(18))),
+    ...(o.payloadExtra || {})
+  };
+  const body = { credentials: list, payload, ...(o.delegation ? { delegation: o.delegation } : {}) };
+  if (!o.noProof) body.proof = await signWithSelf(o.signer || owner, payload);
+  return postJson(base, '/atlas/mail/check', body);
+}
+// Delegation (a throwaway key authorised by `owner` for reads) plus the
+// session identity that signs requests under it.
+async function mailDelegation(base, owner, o) {
+  o = o || {};
+  const session = await genIdentity();
+  const issued = o.issuedAt ? new Date(o.issuedAt) : new Date();
+  const payload = {
+    action: 'mail-session',
+    purpose: o.purpose || 'mail-read',
+    domain: o.domain || new URL(base).host,
+    sessionPublicKey: o.sessionPublicKey || session.publicKey,
+    issuedAt: issued.toISOString(),
+    expiresAt: new Date(issued.getTime() + (o.lifetimeMs || 10 * 60 * 1000)).toISOString()
+  };
+  return { session, delegation: { payload, proof: await signWithSelf(o.signer || owner, payload) } };
+}
+// What a stranger may learn about a credential nobody holds a key for (an
+// emailed bearer one): the public revocation list, in the shape a mail
+// check reports a revocation.
+async function publicStatus(base, id) {
+  const doc = await (await fetch(base + '/.well-known/atlas-revocations.json')).json();
+  const entry = (doc.revoked || []).find((r) => r.id === id);
+  return entry ? { id, status: 'revoked', reason: entry.reason } : null;
+}
+async function mailCheckStatus(base, owner, credential) {
+  const res = await mailCheck(base, owner, credential);
   if (res.status !== 200) throw new Error('mail check failed: ' + JSON.stringify(res.body));
-  return res.body.updates.find((u) => u.id === id) || null;
+  return res.body.updates.find((u) => u.id === credential.id) || null;
 }
 async function transferToEmail(base, credential, owner, recipientEmail, extra) {
   const intentPayload = { credentialId: credential.id, recipientEmail, action: 'transfer-to-email', ...(extra || {}) };
@@ -350,7 +394,7 @@ async function waitFor(fn, description, timeoutMs = 8000) {
 }
 
 module.exports = {
-  assert, b64url, canonicalize, genIdentity, signWithSelf, postJson, getJson, issueAsset, mailCheckStatus,
+  assert, b64url, canonicalize, genIdentity, signWithSelf, postJson, getJson, issueAsset, mailCheck, mailDelegation, mailCheckStatus, publicStatus,
   transferToEmail, walletTransfer, claimFromFile, fileStatus, adminSend, adminPollNow, startFakeSmtp, startFakeImap, buildForwardMessage, imapEnvFor, attachmentOf, smtpEnvFor, startNodeIssuer,
   startPhpIssuer, stopIssuer, tmpDir, writeAdminRoster, preparePhpBundle, readState, waitFor, ROOT
 };
