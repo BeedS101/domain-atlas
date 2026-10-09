@@ -8423,6 +8423,8 @@ async function refreshPostOfficeSendOptions(identity) {
     const lastUsed = await AtlasWallet.getLastPostOfficeSendDomain(identity.publicKey);
     if (lastUsed && seen.has(lastUsed)) postOfficeToDomainInput.value = lastUsed;
   }
+  // A wallet with a single Post Office has nothing to choose between.
+  if (!postOfficeToDomainInput.value && seen.size === 1) postOfficeToDomainInput.value = [...seen][0];
 }
 
 // Friend quick-pick: lets Compose fill the recipient's public key from a
@@ -8452,6 +8454,10 @@ async function refreshComposeFriendPicker() {
     const opt = document.createElement('option');
     opt.value = f.publicKey;
     opt.textContent = f.name;
+    if (f.handle && f.handleDomain) {
+      opt.dataset.handle = f.handle;
+      opt.dataset.handleDomain = f.handleDomain;
+    }
     composeFriendPickerInput.appendChild(opt);
   }
   if (seen.has(previousValue)) composeFriendPickerInput.value = previousValue;
@@ -8755,14 +8761,29 @@ postOfficeToggleRawKeyBtn && postOfficeToggleRawKeyBtn.addEventListener('click',
   if (composeFriendPickerInput) composeFriendPickerInput.value = '';
 });
 
-// Friend quick-pick (see refreshComposeFriendPicker above): a friend is only
-// ever addressed by public key, never a handle, so picking one always drops
-// Compose into the raw-key path (switching directly rather than going
+// Friend quick-pick (see refreshComposeFriendPicker above): a friend whose
+// mail address is known fills the handle field with the full handle#domain
+// (the default way to address someone). A friend without one drops Compose
+// into the raw-key path instead. Both switch the modes directly rather than
 // through postOfficeToggleRawKeyBtn's own click handler, which would just
-// clear the selection this handler is reacting to) and fills the key in.
+// clear the selection this handler is reacting to.
 composeFriendPickerInput && composeFriendPickerInput.addEventListener('change', () => {
   const publicKey = composeFriendPickerInput.value;
   if (!publicKey) return;
+  const picked = composeFriendPickerInput.selectedOptions[0];
+  const handle = picked && picked.dataset.handle;
+  const handleDomain = picked && picked.dataset.handleDomain;
+  if (handle && handleDomain) {
+    postOfficeToHandleInput.hidden = false;
+    postOfficeToPublicKeyInput.hidden = true;
+    postOfficeToPublicKeyInput.value = '';
+    postOfficeToggleRawKeyBtn.textContent = 'Paste a raw public key instead';
+    postOfficeToHandleInput.value = handle + '#' + handleDomain;
+    // Send through their own Post Office when this wallet belongs to it;
+    // otherwise the current choice stays and the mail is relayed.
+    if ([...postOfficeToDomainInput.options].some((o) => o.value === handleDomain)) postOfficeToDomainInput.value = handleDomain;
+    return;
+  }
   if (postOfficeToPublicKeyInput.hidden) {
     postOfficeToPublicKeyInput.hidden = false;
     postOfficeToHandleInput.hidden = true;
@@ -8818,25 +8839,18 @@ async function openComposeReply({ domain, key, handle, subject }) {
   if (postOfficeSendStatusEl) postOfficeSendStatusEl.textContent = '';
 }
 
-// Post Office (task #75/#87/#94, SPEC.md §11.3): composes and sends a
-// message to another identity's public key through a Post Office this
-// wallet already belongs to — see AtlasWallet.sendUserMail's own comment
-// for the wire mechanics. Membership is symmetric: the recipient has to
-// hold a card at that SAME domain too, or the domain rejects the send —
-// this wallet only offers domains it's actually joined in the dropdown
-// above, so the common failure here is the recipient not being a member
-// yet, not this wallet.
+// Post Office (SPEC.md §11.3): composes and sends a message to another
+// identity through a Post Office this wallet belongs to; see
+// AtlasWallet.sendUserMail for the wire mechanics. The recipient has to hold
+// a card at the Post Office the mail is delivered from.
 //
-// Task #94 (handle addressing): when the handle field is the active one
-// (the default), the recipient input can be either a bare handle — resolved
-// against whichever Post Office is picked in the dropdown — or a full
-// "handle#domain" address, which overrides the dropdown to that domain
-// instead (as long as this wallet has actually joined it; if not, that's
-// reported directly rather than attempting a resolve that would only fail
-// at the membership check anyway). Either way it resolves to a public key
-// via AtlasWallet.resolvePostOfficeHandle BEFORE sending, so the actual
-// send call underneath is identical to the raw-key path — Post Office
-// addressing is purely a lookup layered in front of it.
+// Addressing is handle-first. The recipient field takes a bare handle,
+// resolved at the Post Office picked in the dropdown, or a full
+// "handle#domain". For a full address at a Post Office this wallet has
+// joined, that domain becomes the one sent through. For any other domain the
+// handle is resolved there and the mail is relayed to it through the Post
+// Office picked in the dropdown (SPEC.md §11.4). The raw-key mode skips the
+// lookup. Either way the send call underneath is the same.
 postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
   const subject = (postOfficeSubjectInput.value || '').trim();
   const body = (postOfficeBodyInput.value || '').trim();
@@ -8849,6 +8863,9 @@ postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
   // below, where a handle was actually resolved; the raw-key path leaves
   // it undefined and the Sent card falls back to showing the raw key.
   let toHandleForRecord;
+  // Set when the handle lives at a Post Office this wallet has not joined:
+  // the mail is then relayed through the selected one to that domain.
+  let relayToDomain = '';
 
   if (usingRawKey) {
     toPublicKey = (postOfficeToPublicKeyInput.value || '').trim();
@@ -8868,12 +8885,16 @@ postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
       handle = rawHandleInput.slice(0, hashIndex).trim();
       const parsedDomain = rawHandleInput.slice(hashIndex + 1).trim();
       const knownDomains = [...postOfficeToDomainInput.options].map((o) => o.value).filter(Boolean);
-      if (!knownDomains.includes(parsedDomain)) {
-        postOfficeSendStatusEl.textContent = 'You haven\'t joined ' + parsedDomain + '\'s Post Office yet — join it first (Post Office section above).';
+      if (!parsedDomain) {
+        postOfficeSendStatusEl.textContent = 'Add the domain after the # (handle#domain), or leave the # out.';
         return;
       }
-      toDomain = parsedDomain;
-      postOfficeToDomainInput.value = parsedDomain;
+      if (knownDomains.includes(parsedDomain)) {
+        toDomain = parsedDomain;
+        postOfficeToDomainInput.value = parsedDomain;
+      } else {
+        relayToDomain = parsedDomain;
+      }
     }
     if (!toDomain) {
       postOfficeSendStatusEl.textContent = 'Choose a Post Office to send through first.';
@@ -8887,9 +8908,9 @@ postOfficeSendBtn && postOfficeSendBtn.addEventListener('click', async () => {
     postOfficeSendBtn.textContent = 'Looking up…';
     postOfficeSendStatusEl.textContent = '';
     try {
-      const resolved = await AtlasWallet.resolvePostOfficeHandle(toDomain, handle);
-      toPublicKey = resolved.publicKey;
-      toHandleForRecord = handle;
+      const resolved = await AtlasWallet.resolvePostOfficeHandle(relayToDomain || toDomain, handle);
+      toPublicKey = relayToDomain ? { publicKey: resolved.publicKey, domain: relayToDomain } : resolved.publicKey;
+      toHandleForRecord = resolved.handle || handle;
     } catch (err) {
       postOfficeSendStatusEl.textContent = err.message;
       postOfficeSendBtn.disabled = false;
