@@ -118,7 +118,7 @@
     <div id="hidden-while-logged-out">
       <section class="panel" id="onlinePanel">
         <h2>Online now</h2>
-        <p class="hint">Live presence across every world this domain declares (GET /presence/status, one call per world) — the underlying data isn't itself gated, any visitor's own client already sees a nearby roster; this just aggregates all of it into one operator view. Refreshes automatically every 5 seconds while this page is open.</p>
+        <p class="hint">Visitor counts across every world this domain declares (GET /presence/status, one call per world). Counts only: the presence server holds no identity for visitors, so nobody is listed by name. Refreshes automatically every 5 seconds while this page is open.</p>
         <div class="online-header">
           <div class="online-total">Total online: <strong id="onlineTotal">—</strong></div>
           <button type="button" id="onlineRefreshBtn">Refresh now</button>
@@ -448,32 +448,15 @@
         worldsEl.innerHTML = '';
         for (const world of worlds) {
           const res = await fetch(presenceBase + '/presence/status?domain=' + encodeURIComponent(manifest.domain) + '&world=' + encodeURIComponent(world.id));
-          const body = res.ok ? await res.json() : { count: 0, roster: [] };
-          total += body.count || 0;
+          const body = res.ok ? await res.json() : { count: 0 };
+          const count = Number.isFinite(body.count) ? body.count : 0;
+          total += count;
 
           const section = document.createElement('div');
           section.className = 'world-roster';
           const heading = document.createElement('h3');
-          heading.textContent = world.name + ' (' + (body.count || 0) + ')';
+          heading.textContent = world.name + ' (' + count + ')';
           section.appendChild(heading);
-          const list = document.createElement('ul');
-          if (!body.roster || body.roster.length === 0) {
-            const li = document.createElement('li');
-            li.className = 'empty';
-            li.textContent = 'No one here right now.';
-            list.appendChild(li);
-          } else {
-            body.roster.forEach((visitor) => {
-              const li = document.createElement('li');
-              const nameSpan = document.createElement('span');
-              nameSpan.className = 'visitor-name';
-              nameSpan.textContent = visitor.name || 'Visitor';
-              li.appendChild(nameSpan);
-              li.appendChild(document.createTextNode(visitor.publicKey ? ' — ' + visitor.publicKey.slice(0, 16) + '…' : ' — anonymous'));
-              list.appendChild(li);
-            });
-          }
-          section.appendChild(list);
           worldsEl.appendChild(section);
         }
         totalEl.textContent = String(total);

@@ -10,11 +10,11 @@
 //     must still be kept alive by the sync tick alone.
 //
 // Checks, per backend:
-//   1. Entering plaza (2D) puts exactly one anonymous visitor in plaza's
-//      presence room.
-//   2. Another visitor joining that room shows up in the wallet's own
-//      roster (the data behind the Friends screen's "here now" list) even
-//      though a 2D world draws no avatars.
+//   1. Entering plaza (2D) asks before using the third-party presence
+//      server and, once allowed, puts exactly one anonymous visitor in
+//      plaza's presence room.
+//   2. The visitor is announced as a plain "Visitor" with no key, and
+//      another visitor joining sees exactly that in the room's roster.
 //   3. Travelling plaza -> lobby (3D) -> market (2D) moves the visitor
 //      between rooms: each world's count follows them, never two at once.
 //   4. (PHP only) Sitting in a 2D world past the poll staleness timeout
@@ -149,18 +149,21 @@ async function runBackend(kind) {
     const frame = await frameHandle.contentFrame();
     await frame.waitForFunction(() => !document.getElementById('placeLabel').textContent.includes('Loading'), null, { timeout: 10000 });
 
-    console.log('STEP 1 ' + tag + 'entering plaza (2D) puts one anonymous visitor in its presence room');
+    console.log('STEP 1 ' + tag + 'entering plaza (2D) asks about the third-party presence server, then joins');
     assert(!(await frame.evaluate(() => !!window.__atlasActive3D)), 'plaza must be a 2D world for this check to mean what it says');
+    await frame.waitForSelector('#presenceApprovalModal.active', { timeout: 10000 });
+    await sleep(1500);
+    assert((await status(presenceBase, 'plaza')).count === 0, 'nobody may join before the visitor approves the endpoint');
+    await frame.locator('#presenceApprovalAllowBtn').click();
     const plaza = await waitForCount(presenceBase, 'plaza', 1, 'after entering plaza');
-    assert(plaza.roster[0].name === 'Visitor' && !plaza.roster[0].publicKey, 'expected an anonymous "Visitor", got ' + JSON.stringify(plaza.roster));
-    console.log('PASS: plaza ->', JSON.stringify(plaza.roster));
+    console.log('PASS: approved, plaza ->', JSON.stringify(plaza));
 
-    console.log('STEP 2 ' + tag + 'another visitor appears in the wallet\'s roster although a 2D world draws no avatars');
-    const observer = await postJson(presenceBase, '/presence/poll/join', { domain: DOMAIN, world: 'plaza', name: 'Observer', publicKey: 'observer-key' });
+    console.log('STEP 2 ' + tag + 'the visitor is announced as a keyless "Visitor"');
+    const observer = await postJson(presenceBase, '/presence/poll/join', { domain: DOMAIN, world: 'plaza', name: 'Observer' });
     assert(observer.status === 200 && observer.body.id, 'observer could not join: ' + JSON.stringify(observer));
-    await frame.waitForFunction(() => presenceRosterMeta.size === 1 && [...presenceRosterMeta.values()][0].name === 'Observer', null, { timeout: 10000 });
+    assert(observer.body.roster.length === 1 && observer.body.roster[0].name === 'Visitor' && !('publicKey' in observer.body.roster[0]), 'expected one anonymous Visitor, got ' + JSON.stringify(observer.body.roster));
     assert(await frame.evaluate(() => presenceIsConnected()), 'expected the wallet to report presence connected in a 2D world');
-    console.log('PASS: roster holds Observer, presence connected');
+    console.log('PASS: roster holds a keyless Visitor, presence connected');
     await postJson(presenceBase, '/presence/poll/leave', { id: observer.body.id });
 
     console.log('STEP 3 ' + tag + 'plaza -> lobby (3D) -> market (2D): the visitor is in exactly one room at a time');
@@ -189,7 +192,7 @@ async function runBackend(kind) {
     await waitForCount(presenceBase, 'market', 0, 'market after leaving it');
     console.log('PASS: arena 1, market 0');
 
-    console.log('STEP 6 ' + tag + 'the admin panel\'s Online now lists the visitor under their 2D world');
+    console.log('STEP 6 ' + tag + 'the admin panel\'s Online now counts the visitor under their 2D world');
     const nonce = (await (await fetch(BASE + '/atlas/admin/session/nonce')).json()).nonce;
     const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, new TextEncoder().encode(canonicalize({ nonce }))));
     const login = await postJson(BASE, '/atlas/admin/session/start', { payload: { nonce }, proof: { signerRole: 'raw-ecdsa', publicKey: adminKey, signature: b64url(sig) } });

@@ -15,14 +15,7 @@ const scene3dInteractHint = document.getElementById('scene3dInteractHint'); // t
 const hintEl = document.getElementById('hint');
 const portalTooltipEl = document.getElementById('portalHoverTooltip');
 
-// Task #137 — duplicate-identity join guard UI (see the presence section
-// further below for the actual logic these are driven by).
-const presenceJoinWaitingHintEl = document.getElementById('presenceJoinWaitingHint');
 const presenceTransientHintEl = document.getElementById('presenceTransientHint');
-const duplicateJoinModalEl = document.getElementById('duplicateJoinModal');
-const duplicateJoinCountdownEl = document.getElementById('duplicateJoinCountdown');
-const duplicateJoinLeaveBtn = document.getElementById('duplicateJoinLeaveBtn');
-const duplicateJoinKeepBtn = document.getElementById('duplicateJoinKeepBtn');
 
 // SPEC.md §3.6.1 — mandatory disclosure shown before ever entering a
 // key-anchored world (a portal.kind === 'key' target). See
@@ -170,26 +163,21 @@ let active3D = null;
 // ever calls; gltf-mini.js's rendering/interpolation has no idea which
 // transport is in use, and doesn't need to.
 //
-// The presence endpoint is now a per-domain, manifest-declared thing —
-// enterWorld() passes manifest.presence through to connectPresence() as
-// `presenceBase`. This is NOT part of SPEC.md; it's a plain, optional,
-// implementation-only convenience field the same way `presence-server`
-// itself isn't part of the formal protocol. A manifest with no `presence`
-// field (every existing local demo domain) falls back to
-// PRESENCE_DEFAULT_BASE below, so nothing about local dev changes.
+// The presence endpoint is a per-domain, manifest-declared thing: the
+// optional `presence` field of the manifest (implementation-only, not part
+// of SPEC.md). Whether the client may use it is decided by
+// approvedPresenceBase() below. A manifest with no `presence` field falls
+// back to PRESENCE_DEFAULT_BASE, but only for manifests served from a
+// loopback host (local development).
 //
 // Given a base like "https://example.com" or "http://localhost:8004",
 // presenceWsUrlFor() derives the WebSocket URL by swapping the scheme
-// (http->ws, https->wss) and appending /presence; the HTTP polling base
-// is the base as given, with /presence/poll/* appended per call. A domain
-// whose presence lives entirely on plain PHP/Apache (see presence-php/,
-// task #68) simply has no working WebSocket route at that derived
-// wss://.../presence URL — the connection attempt fails fast, and the
-// existing WS-then-poll fallback logic (unchanged, added for task #68)
-// picks up the SAME base for polling automatically. No separate
-// "transport capability" flag needed in the manifest: a domain either
-// answers the WS upgrade or it doesn't, and the client already handles
-// both outcomes.
+// (http->ws, https->wss) and appending /presence; the HTTP polling base is
+// the base as given, with /presence/poll/* appended per call. A domain whose
+// presence lives entirely on plain PHP/Apache (see presence-php/) has no
+// working WebSocket route at that URL: the connection attempt fails fast and
+// the WS-then-poll fallback uses the same base for polling. No transport
+// flag is needed in the manifest.
 const PRESENCE_DEFAULT_BASE = 'http://localhost:8004';
 function presenceWsUrlFor(base) {
   return base.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/presence';
@@ -198,156 +186,137 @@ const PRESENCE_MOVE_INTERVAL_MS = 150; // WebSocket: how often a move is sent
 const PRESENCE_POLL_INTERVAL_MS = 2000; // polling fallback: one sync (move + roster fetch) per tick — server's staleness timeout is generous enough to tolerate a couple of missed ticks
 const PRESENCE_WS_CONNECT_TIMEOUT_MS = 2500; // how long to let a WebSocket attempt hang before giving up on it and trying polling instead
 
+// ---------- presence endpoint approval ----------
+// A manifest's `presence` field names the server that will see this
+// visitor's display name, avatar pose and IP address. An endpoint on the
+// manifest's own origin is allowed by default; any other origin needs an
+// explicit approval from the visitor. The decision is stored against the
+// pair (manifest origin, endpoint origin), so a later manifest edit that
+// points at a different server asks again instead of reusing an approval.
+// A manifest with no `presence` field gets the built-in local development
+// server only when the manifest itself is served from a loopback host.
+const PRESENCE_APPROVALS_KEY = 'atlasPresenceEndpointApprovals';
+const presenceApprovalModalEl = document.getElementById('presenceApprovalModal');
+const presenceApprovalDetailsEl = document.getElementById('presenceApprovalDetails');
+const presenceApprovalAllowBtn = document.getElementById('presenceApprovalAllowBtn');
+const presenceApprovalDenyBtn = document.getElementById('presenceApprovalDenyBtn');
+
+function isLoopbackOrigin(origin) {
+  try {
+    const host = new URL(origin).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.localhost');
+  } catch (err) {
+    return false;
+  }
+}
+
+// -> {base, origin, builtin} or null when the manifest offers no usable endpoint.
+function parsePresenceEndpoint(manifestOrigin, raw) {
+  if (raw === undefined || raw === null || raw === '') {
+    if (!isLoopbackOrigin(manifestOrigin)) return null;
+    return { base: PRESENCE_DEFAULT_BASE, origin: new URL(PRESENCE_DEFAULT_BASE).origin, builtin: true };
+  }
+  if (typeof raw !== 'string') return null;
+  let u;
+  try { u = new URL(raw); } catch (err) { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  if (u.username || u.password) return null;
+  return { base: u.origin + u.pathname.replace(/\/+$/, ''), origin: u.origin, builtin: false };
+}
+
+function presenceApprovalKey(manifestOrigin, endpointOrigin) {
+  return manifestOrigin + ' -> ' + endpointOrigin;
+}
+
+async function readPresenceApprovals() {
+  try {
+    const stored = await chrome.storage.local.get(PRESENCE_APPROVALS_KEY);
+    const all = stored && stored[PRESENCE_APPROVALS_KEY];
+    return (all && typeof all === 'object' && !Array.isArray(all)) ? all : {};
+  } catch (err) {
+    return {};
+  }
+}
+
+async function writePresenceApproval(manifestOrigin, endpointOrigin, decision) {
+  const all = await readPresenceApprovals();
+  all[presenceApprovalKey(manifestOrigin, endpointOrigin)] = { manifestOrigin, endpointOrigin, decision, decidedAt: new Date().toISOString() };
+  await chrome.storage.local.set({ [PRESENCE_APPROVALS_KEY]: all });
+}
+
+let presenceApprovalQueue = Promise.resolve();
+const presenceApprovalPrompts = new Map();
+
+// One prompt at a time; presence, chat and a second world asking about the
+// same pair share a single prompt. Fails closed when the dialog is missing.
+function askPresenceApproval(manifestOrigin, endpointOrigin) {
+  const key = presenceApprovalKey(manifestOrigin, endpointOrigin);
+  if (presenceApprovalPrompts.has(key)) return presenceApprovalPrompts.get(key);
+  const decision = presenceApprovalQueue.then(() => new Promise((resolve) => {
+    if (!presenceApprovalModalEl || !presenceApprovalAllowBtn || !presenceApprovalDenyBtn) { resolve(false); return; }
+    presenceApprovalDetailsEl.textContent = manifestOrigin + ' asks to use the presence server at ' + endpointOrigin;
+    presenceApprovalModalEl.classList.add('active');
+    const finish = (allow) => {
+      presenceApprovalAllowBtn.onclick = null;
+      presenceApprovalDenyBtn.onclick = null;
+      presenceApprovalModalEl.classList.remove('active');
+      resolve(allow);
+    };
+    presenceApprovalAllowBtn.onclick = () => finish(true);
+    presenceApprovalDenyBtn.onclick = () => finish(false);
+  })).then(async (allow) => {
+    try { await writePresenceApproval(manifestOrigin, endpointOrigin, allow ? 'allow' : 'deny'); } catch (err) {}
+    presenceApprovalPrompts.delete(key);
+    return allow;
+  });
+  presenceApprovalPrompts.set(key, decision);
+  presenceApprovalQueue = decision.catch(() => {});
+  return decision;
+}
+
+// The base URL presence/chat/status may talk to for this manifest, or null.
+// `prompt: false` never opens the dialog (Favorites, background lookups).
+async function approvedPresenceBase(manifestOrigin, rawPresence, { prompt } = {}) {
+  if (!manifestOrigin) return null;
+  const endpoint = parsePresenceEndpoint(manifestOrigin, rawPresence);
+  if (!endpoint) return null;
+  if (endpoint.builtin || endpoint.origin === manifestOrigin) return endpoint.base;
+  const record = (await readPresenceApprovals())[presenceApprovalKey(manifestOrigin, endpoint.origin)];
+  if (record && record.decision === 'allow') return endpoint.base;
+  if (record && record.decision === 'deny') return null;
+  if (!prompt) return null;
+  return (await askPresenceApproval(manifestOrigin, endpoint.origin)) ? endpoint.base : null;
+}
+
+// ---------- presence connection state ----------
+// A member is a display name, a pose and a look. Two random identifiers
+// exist per connection: the public id (broadcast, used to track avatars)
+// and a private poll token (never broadcast, the credential for polling
+// sync/leave). Neither is tied to the wallet, and neither proves who the
+// visitor is. Reconnecting produces a new id and a new avatar; two tabs are
+// two avatars.
 let presenceSocket = null;
 let presenceMoveTimer = null;
-// A polling attempt has no server-assigned id to compare identity against
-// until its join fetch actually resolves — unlike the WebSocket path,
-// where `socket` itself is that identity from the very first line of
-// connectPresence(). presencePollToken plays the same role for polling:
-// set synchronously the moment pollPresence() is called, so a join
-// response that comes back after a NEWER attempt has already taken over
-// (a fast enterWorld() -> enterWorld() -> enterWorld(), or a WS attempt
-// that succeeded in the meantime) can recognize it's stale and back out,
-// instead of resurrecting presence for a world already left behind.
+// A polling attempt has no server-assigned token until its join fetch
+// resolves, so presencePollToken is set synchronously when pollPresence()
+// starts; a join response arriving after a newer attempt took over sees the
+// mismatch and backs out instead of resurrecting presence for a world
+// already left.
 let presencePollToken = null;
-let presencePollId = null; // server-assigned id, set once join resolves and this attempt is still current
+let presencePollId = null; // private poll token, set once the join resolves and this attempt is still current
 let presencePollTimer = null;
-let presencePollHttpBase = null; // the base this poll session's id belongs to — needed by disconnectPresence()'s leave beacon
-// Task #139 — the currently-attached visibilitychange listener for
-// whichever poll attempt is live right now, so disconnectPresence() can
-// remove it explicitly instead of leaking a new one on every reconnect
-// (world switch, or the auto-rejoin pollPresence() itself now performs —
-// see its own comment). Exactly one of these is ever attached at a time.
+let presencePollHttpBase = null; // base the poll token belongs to, needed by disconnectPresence()'s leave beacon
+// The currently attached visibilitychange listener of the live poll attempt,
+// removed explicitly on every reconnect so listeners never accumulate.
 let presencePollVisibilityHandler = null;
-
-// This visitor's own identity as announced to the current presence room
-// (Friends, #67) — null/null for an anonymous visitor with no unlocked
-// wallet, same as what actually gets sent in the join message. Needed by
-// the "Add friend" action so it can announce who's asking, without having
-// to re-look-up the wallet identity at click time (the identity might get
-// locked between joining a room and clicking Add friend on someone in it —
-// this keeps the signal consistent with whatever was actually announced).
-let presenceOwnPublicKey = null;
-let presenceOwnName = null;
-
-// Task #137 — duplicate-identity join guard, client-side state.
-//
-// presenceJoinPendingChallengeId: set when THIS connection's own join
-// came back "pending" (requestJoin() on the server found this identity
-// already active elsewhere in the room) — drives the waiting-hint pill
-// and, for the polling transport only, the join-status poll loop below
-// (a WS connection instead gets the eventual 'welcome'/'join-denied'
-// pushed straight down the same socket it's already holding open, so it
-// needs no separate poll of its own).
-let presenceJoinPendingChallengeId = null;
-let presenceJoinStatusPollTimer = null;
-
-// duplicateJoinActiveChallengeId: set when THIS connection is the
-// EXISTING half of a challenge someone else just triggered — i.e. the
-// Leave-now/Keep-this-session-active modal is currently open and these
-// are which challenge its buttons should answer.
-let duplicateJoinActiveChallengeId = null;
-let duplicateJoinCountdownTimer = null;
 let presenceTransientHintTimer = null;
-
-// Live roster metadata (Friends, #67): id -> {name, publicKey}, separate
-// from gltf-mini.js's remotePlayers (render-only — position/yaw for
-// interpolation, no name or publicKey at all). Used by the Friends screen
-// to show "who's here right now" with an Add-friend action, and to
-// recognize an incoming signal's `from` id as someone actually present.
-let presenceRosterMeta = new Map();
-function notePresenceRosterMeta(id, name, publicKey) {
-  presenceRosterMeta.set(id, { name: name || 'Visitor', publicKey: publicKey || null });
-}
-function clearPresenceRosterMeta() { presenceRosterMeta = new Map(); }
-
-// Friend-request state (Friends, #67), scoped to the CURRENT presence
-// connection — same "live through presence" design as the rest of this
-// feature: a request only makes sense while both parties are simultaneously
-// in the room, so none of this survives disconnectPresence() (see there).
-// presencePendingIncoming: requests aimed at THIS visitor, waiting on an
-// Accept/Decline click, {from, publicKey, name, receivedAt}[].
-// presencePendingSentRequests: ids THIS visitor has already sent a
-// friend-request to, so the "Add friend" button can show "Request sent"
-// instead of letting a second request pile up.
-let presencePendingIncoming = [];
-let presencePendingSentRequests = new Set();
 
 function presenceIsConnected() {
   return !!(presenceSocket && presenceSocket.readyState === WebSocket.OPEN) || !!presencePollId;
 }
 
-// True once a domain+world's presence backend has relayed a signal back at
-// this visitor — routed to the Friends screen's "Friend requests" /
-// "Add friend" state, and to the top Social tab's badge count. See
-// ALLOWED_SIGNAL_KINDS in presence-server.js/store.php for the closed
-// vocabulary this handles; anything else is simply not sent by either
-// backend, so there's nothing else to branch on here.
-//
-// Task #137's two kinds ('duplicate-join-request'/'duplicate-join-lost')
-// are a server-initiated notice about THIS connection's own membership,
-// not a relay from another member — they carry no `from` at all, so
-// they're checked before the friend-request family's `from`-requiring
-// guard below, not folded into the same branch chain.
-function handleIncomingSignal(msg) {
-  if (!msg) return;
-  if (msg.kind === 'duplicate-join-request') {
-    openDuplicateJoinModal(msg.challengeId, msg.countdownMs);
-    return;
-  }
-  if (msg.kind === 'duplicate-join-lost') {
-    closeDuplicateJoinModal();
-    // Task #137 — this session just lost the identity race: the server
-    // already evicted its presence membership (see resolveChallenge()'s
-    // own 'yield' branch), so tearing this connection down locally too
-    // is just catching up to what already happened server-side, whether
-    // this arrived because of this session's own "Leave now" click or
-    // because the countdown lapsed unanswered.
-    disconnectPresence();
-    showPresenceTransientHint('You left this world — another session using your identity connected.');
-    return;
-  }
-  if (typeof msg.from !== 'string') return;
-  if (msg.kind === 'friend-request') {
-    if (presencePendingIncoming.some((r) => r.from === msg.from)) return; // already have one from them, don't duplicate
-    presencePendingIncoming.push({ from: msg.from, publicKey: msg.publicKey || null, name: msg.name || 'Visitor', receivedAt: Date.now() });
-  } else if (msg.kind === 'friend-request-accepted') {
-    presencePendingSentRequests.delete(msg.from);
-    if (msg.publicKey) {
-      // Save using the identity THEY just confirmed in this reply, not
-      // whatever roster snapshot was on screen when the request was sent —
-      // that snapshot could in principle be stale by the time they answer.
-      AtlasWallet.addFriend(msg.publicKey, msg.name || 'Friend').then(() => { if (socialFriendsTabActive()) refreshFriendsDisplay(); }).catch(() => {});
-    }
-  } else if (msg.kind === 'friend-request-declined') {
-    presencePendingSentRequests.delete(msg.from);
-  }
-  updateSocialBadge();
-  if (socialFriendsTabActive()) refreshFriendsDisplay();
-}
-
-// Sends a friend-request-family signal to another member of the CURRENT
-// room, over whichever transport is actually connected right now — a
-// live WS send if one's open, otherwise the polling relay route. No-op if
-// neither transport is connected (nothing to relay through).
-function sendSignal(toId, kind, publicKey, name) {
-  if (presenceSocket && presenceSocket.readyState === WebSocket.OPEN) {
-    presenceSocket.send(JSON.stringify({ type: 'signal', to: toId, kind, publicKey, name }));
-    return;
-  }
-  if (presencePollId && presencePollHttpBase) {
-    fetch(presencePollHttpBase + '/presence/poll/signal', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: presencePollId, to: toId, kind, publicKey, name })
-    }).catch(() => {});
-  }
-}
-
-// Task #137 — a one-off "shows itself, clears itself a few seconds
-// later" pill notice, reused both for a duplicate-join eviction notice
-// and for the silent-404-on-poll-sync fix (see pollPresence() further
-// below). Calling it again while one is already showing just replaces
-// the message and restarts the timer rather than stacking or racing.
+// A one-off pill notice that clears itself; calling it again replaces the
+// message and restarts the timer.
 function showPresenceTransientHint(text, durationMs = 6000) {
   if (!presenceTransientHintEl) return;
   if (presenceTransientHintTimer) clearTimeout(presenceTransientHintTimer);
@@ -359,96 +328,12 @@ function showPresenceTransientHint(text, durationMs = 6000) {
   }, durationMs);
 }
 
-function showPresenceJoinWaitingHint() {
-  if (presenceJoinWaitingHintEl) presenceJoinWaitingHintEl.classList.add('active');
-}
-function hidePresenceJoinWaitingHint() {
-  if (presenceJoinWaitingHintEl) presenceJoinWaitingHintEl.classList.remove('active');
-}
-
-// Sends this connection's own activity ping — see noteActivity()'s own
-// comment in presence-server.js/store.php for what this is for. Wired
-// to AtlasWallet.onWalletChanged further below; a no-op if presence
-// isn't even connected right now (nothing to ping).
-function sendPresenceActivityPing() {
-  if (presenceSocket && presenceSocket.readyState === WebSocket.OPEN) {
-    presenceSocket.send(JSON.stringify({ type: 'activity' }));
-    return;
-  }
-  if (presencePollId && presencePollHttpBase) {
-    fetch(presencePollHttpBase + '/presence/poll/activity', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: presencePollId })
-    }).catch(() => {});
-  }
+function presenceDeniedHint(reason) {
+  if (reason === 'room-full') return 'This world is full — you can look around, but other visitors will not see you.';
+  if (reason === 'server-busy') return 'The presence server is busy — you will not appear to other visitors.';
+  return 'The presence server refused the connection.';
 }
 
-// This connection's own explicit answer (Leave now / Keep this session
-// active) to a duplicate-join-request notice it's the EXISTING half of.
-function sendDuplicateJoinResponse(challengeId, decision) {
-  if (presenceSocket && presenceSocket.readyState === WebSocket.OPEN) {
-    presenceSocket.send(JSON.stringify({ type: 'duplicate-join-response', challengeId, decision }));
-    return;
-  }
-  if (presencePollId && presencePollHttpBase) {
-    fetch(presencePollHttpBase + '/presence/poll/duplicate-response', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: presencePollId, challengeId, decision })
-    }).catch(() => {});
-  }
-}
-
-function closeDuplicateJoinModal() {
-  duplicateJoinActiveChallengeId = null;
-  if (duplicateJoinCountdownTimer) { clearInterval(duplicateJoinCountdownTimer); duplicateJoinCountdownTimer = null; }
-  if (duplicateJoinModalEl) duplicateJoinModalEl.classList.remove('active');
-}
-
-// Opens the modal and starts its visible countdown — purely cosmetic,
-// the SERVER'S OWN timer is what actually decides the default outcome;
-// this one just ticks a number down so the visitor can see roughly how
-// long they have, and stops cleanly at 0 rather than going negative if
-// the server's own resolution message is a beat late to arrive.
-function openDuplicateJoinModal(challengeId, countdownMs) {
-  duplicateJoinActiveChallengeId = challengeId;
-  const endsAt = Date.now() + (countdownMs || 60000);
-  const tick = () => {
-    const secondsLeft = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
-    if (duplicateJoinCountdownEl) duplicateJoinCountdownEl.textContent = String(secondsLeft);
-    if (secondsLeft <= 0 && duplicateJoinCountdownTimer) { clearInterval(duplicateJoinCountdownTimer); duplicateJoinCountdownTimer = null; }
-  };
-  if (duplicateJoinCountdownTimer) clearInterval(duplicateJoinCountdownTimer);
-  tick();
-  duplicateJoinCountdownTimer = setInterval(tick, 1000);
-  if (duplicateJoinModalEl) duplicateJoinModalEl.classList.add('active');
-}
-
-duplicateJoinLeaveBtn && duplicateJoinLeaveBtn.addEventListener('click', () => {
-  if (!duplicateJoinActiveChallengeId) return;
-  sendDuplicateJoinResponse(duplicateJoinActiveChallengeId, 'yield');
-  closeDuplicateJoinModal();
-  // The server's own 'duplicate-join-lost' push (sent to this exact
-  // connection right before it evicts it) is what actually tears this
-  // session's presence down — see handleIncomingSignal()'s own branch —
-  // so nothing more needs to happen here than closing the dialog.
-});
-
-duplicateJoinKeepBtn && duplicateJoinKeepBtn.addEventListener('click', () => {
-  if (!duplicateJoinActiveChallengeId) return;
-  sendDuplicateJoinResponse(duplicateJoinActiveChallengeId, 'keep');
-  closeDuplicateJoinModal();
-});
-
-// Task #137 — wallet activity (minting, trading, splitting, PvP-loss,
-// mail-gift claims, etc.) has no presence connection of its own to ping
-// through; wallet.js has no idea presence even exists. This is the one
-// subscription point that bridges the two: AtlasWallet.onWalletChanged()
-// fires for every saveWallet() call regardless of which action triggered
-// it (see that function's own comment in wallet.js for why one hook
-// there covers effectively everything), and this only actually pings the
-// presence server when the change was for the SAME identity presence is
-// currently announcing as — a save for the local "counterparty" stand-in
-// (PvP-loss, split's "send to") should never count as activity for a
-// wholly different identity's own presence session.
 // The Post Office pickers (send via, mail settings, friend requests) list the
 // membership cards this wallet holds, so they follow the wallet: a card
 // deleted or received elsewhere changes them without a reload.
@@ -471,27 +356,18 @@ AtlasWallet.onWalletChanged((ownerPublicKey) => {
   }, 250);
 });
 
-AtlasWallet.onWalletChanged((ownerPublicKey) => {
-  if (presenceIsConnected() && presenceOwnPublicKey && ownerPublicKey === presenceOwnPublicKey) {
-    sendPresenceActivityPing();
-  }
-});
-
-// Read-only "who's in this world right now" for a domain+world the caller
-// ISN'T necessarily present in (Favorites, #61) — a favorited domain the
-// visitor hasn't opened this session. Never throws; an unreachable or
-// misconfigured presence backend just reads as "nobody's status
-// available," same "presence is a pure enhancement, never an error"
-// posture connectPresence/pollPresence already have.
-async function fetchPresenceStatus(domain, worldId, presenceBase) {
-  const base = presenceBase || PRESENCE_DEFAULT_BASE;
+// Visitor count for a domain+world the caller is not in (Favorites). A count
+// only: it names nobody. `base` must already be an approved endpoint (see
+// approvedPresenceBase); an unreachable server reads as null (unknown).
+async function fetchPresenceStatus(domain, worldId, base) {
+  if (!base) return null;
   try {
     const res = await fetch(base + '/presence/status?domain=' + encodeURIComponent(domain) + '&world=' + encodeURIComponent(worldId));
-    if (!res.ok) return { count: 0, roster: [] };
+    if (!res.ok) return null;
     const body = await res.json();
-    return { count: body.count || 0, roster: body.roster || [] };
+    return Number.isFinite(body.count) ? body.count : null;
   } catch (err) {
-    return { count: 0, roster: [] };
+    return null;
   }
 }
 
@@ -608,232 +484,123 @@ function disconnectPresence() {
     const base = presencePollHttpBase;
     presencePollId = null;
     presencePollHttpBase = null;
-    presencePollKnownIds = new Set();
-    // Best-effort — a closed tab won't reach this, that's what the
-    // server's staleness sweep (task #68) is for. A clean world switch or
-    // overlay close reaches it fine, so it's worth sending when possible.
+    // Best-effort: a closed tab never reaches this and is removed by the
+    // server's staleness sweep instead.
     fetch(base + '/presence/poll/leave', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
     }).catch(() => {});
   }
+  presencePollKnownIds = new Set();
   window.__atlasPresenceOwnId = null;
-  // Friend-request state is scoped to this one presence connection (#67,
-  // see presencePendingIncoming's own comment) — leaving the room means
-  // any not-yet-answered request can't be replied to anymore anyway (the
-  // relay only works within the sender's current room), so there's nothing
-  // useful left to keep around.
-  presenceOwnPublicKey = null;
-  presenceOwnName = null;
-  clearPresenceRosterMeta();
-  presencePendingIncoming = [];
-  presencePendingSentRequests = new Set();
-  // Task #137 — a pending join of THIS visitor's own, or a challenge THIS
-  // visitor was the existing half of, is equally moot the moment presence
-  // disconnects for any reason (a fast world switch, an explicit leave,
-  // or the eviction handled in handleIncomingSignal's own
-  // 'duplicate-join-lost' branch, which calls this function too).
-  presenceJoinPendingChallengeId = null;
-  if (presenceJoinStatusPollTimer) { clearInterval(presenceJoinStatusPollTimer); presenceJoinStatusPollTimer = null; }
-  hidePresenceJoinWaitingHint();
-  closeDuplicateJoinModal();
-  if (socialFriendsTabActive()) refreshFriendsDisplay();
-  updateSocialBadge();
 }
 
-function pollPresence(domain, worldId, displayName, httpBase, publicKey) {
-  const base = httpBase || PRESENCE_DEFAULT_BASE;
-  const token = {}; // this attempt's own identity — see the presencePollToken comment above
+function pollPresence(domain, worldId, displayName, base) {
+  const token = {}; // this attempt's own identity, see the presencePollToken comment above
   presencePollToken = token;
-  presenceOwnPublicKey = publicKey || null;
-  presenceOwnName = displayName;
 
-  // Finalizes this attempt once it actually has a real room membership —
-  // called either immediately below (the common case) or later, once a
-  // task #137 duplicate-join challenge this attempt was waiting on
-  // resolves in its favor (see the 'pending' branch further down).
-  function finishJoin(id, roster) {
-    // Superseded by a later enterWorld() call (or a WS attempt that
-    // succeeded in the meantime) before this join actually resolved —
-    // leave the room we just joined rather than let a visitor "linger"
-    // server-side in a world they've already left, and don't touch any
-    // state a newer attempt now owns.
-    if (presencePollToken !== token) {
-      fetch(base + '/presence/poll/leave', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
-      }).catch(() => {});
-      return;
-    }
-    presencePollId = id;
+  function leaveBeacon(id) {
+    fetch(base + '/presence/poll/leave', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
+    }).catch(() => {});
+  }
+
+  // joined: the join response {id (private poll token), publicId, roster}.
+  function finishJoin(joined) {
+    // Superseded before this join resolved: leave the room just joined
+    // rather than linger in a world the visitor already left.
+    if (presencePollToken !== token) { leaveBeacon(joined.id); return; }
+    presencePollId = joined.id;
     presencePollHttpBase = base;
-    window.__atlasPresenceOwnId = id;
-    (roster || []).forEach((m) => notePresenceRosterMeta(m.id, m.name, m.publicKey));
-    reconcilePollRoster(roster);
-    if (socialFriendsTabActive()) refreshFriendsDisplay();
+    window.__atlasPresenceOwnId = joined.publicId;
+    reconcilePollRoster(joined.roster);
 
-    // One heartbeat + move + roster-fetch tick. Named (not just the
-    // interval's own inline callback) so a task #139 visibilitychange
-    // wake-up, below, can also trigger one immediately rather than only
-    // on the regular PRESENCE_POLL_INTERVAL_MS cadence.
+    // One move + roster-fetch tick. Named so a visibilitychange wake-up can
+    // trigger one immediately instead of waiting out the interval.
     function syncTick() {
-      if (presencePollToken !== token) return; // disconnectPresence() already clears this timer too — just a defensive guard
+      if (presencePollToken !== token) return;
       const pose = currentLocalPose() || {};
       fetch(base + '/presence/poll/sync', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign({ id }, pose))
+        body: JSON.stringify(Object.assign({ id: joined.id }, pose))
       })
         .then((r) => r.json().then((body) => ({ status: r.status, body })).catch(() => ({ status: r.status, body: {} })))
         .then(({ status, body }) => {
           if (status === 404) {
-            // This poll session no longer exists server-side. Two very
-            // different reasons, told apart by `body.reason` (task #139):
-            //   'duplicate-join-lost' — evicted after losing a task #137
-            //     duplicate-join challenge elsewhere, with no separate push
-            //     notice the way the WS side's 'duplicate-join-lost' signal
-            //     gives. Auto-rejoining here would just immediately
-            //     re-trigger a fresh challenge against whichever session
-            //     actually won, fighting it forever — so this case is
-            //     surfaced and left for the visitor to re-enter manually,
-            //     same as before.
-            //   anything else (the common case: plain staleness — most
-            //     often this very tab having been backgrounded long enough
-            //     for the browser to throttle this interval well past the
-            //     server's staleness timeout) — nothing else is contesting
-            //     this identity, so it's safe to silently self-heal:
-            //     rejoin fresh with the same identity and carry on. This
-            //     used to render an empty roster forever with no recovery
-            //     at all; now it recovers within one tick.
+            // The server no longer knows this token: swept as stale (most
+            // often a backgrounded tab whose timer was throttled past the
+            // staleness timeout). Rejoin with a fresh id; the old avatar is
+            // already gone server-side and the position resets.
             if (presencePollToken === token) {
               disconnectPresence();
-              if (body.reason === 'duplicate-join-lost') {
-                showPresenceTransientHint('Your presence in this world was lost — re-enter to reconnect.');
-              } else {
-                showPresenceTransientHint('Reconnected after a pause — your position was reset.');
-                pollPresence(domain, worldId, displayName, base, publicKey);
-              }
+              showPresenceTransientHint('Reconnected after a pause — your position was reset.');
+              pollPresence(domain, worldId, displayName, base);
             }
-            return Promise.reject(new Error('presence id expired'));
+            return Promise.reject(new Error('presence token expired'));
           }
           return body;
         })
         .then((res) => {
           if (presencePollToken !== token) return;
-          (res.roster || []).forEach((m) => notePresenceRosterMeta(m.id, m.name, m.publicKey));
-          presencePollKnownIds.forEach((pid) => { if (!(res.roster || []).some((m) => m.id === pid)) presenceRosterMeta.delete(pid); });
           reconcilePollRoster(res.roster);
-          if (socialFriendsTabActive()) refreshFriendsDisplay();
-          (res.signals || []).forEach((sig) => handleIncomingSignal(sig)); // friend requests etc (#67) — see poll/sync.php and its Node twin
         })
-        .catch(() => {}); // a dropped tick (network hiccup, or the 404 handling above) just tries again next interval — no need to escalate
+        .catch(() => {}); // a dropped tick just tries again next interval
     }
 
     presencePollTimer = setInterval(syncTick, PRESENCE_POLL_INTERVAL_MS);
-    // Task #139 — a backgrounded tab's setInterval can be throttled by the
-    // browser to well beyond the server's staleness timeout, so the
-    // roster can go stale long before the next tick would naturally fire.
-    // Sync immediately the moment this tab becomes visible again instead
-    // of waiting out however much of the throttled interval is left —
-    // shrinks the "stale and about to be swept" window as much as
-    // possible, on top of the self-heal above that recovers from it
-    // cleanly even if it does happen.
+    // A backgrounded tab's interval can be throttled past the server's
+    // staleness timeout; sync as soon as the tab is visible again.
     presencePollVisibilityHandler = () => { if (presencePollToken === token && document.visibilityState === 'visible') syncTick(); };
     document.addEventListener('visibilitychange', presencePollVisibilityHandler);
   }
 
   fetch(base + '/presence/poll/join', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ domain, world: worldId, name: displayName, publicKey })
+    body: JSON.stringify({ domain, world: worldId, name: displayName })
   })
-    .then((r) => r.json())
-    .then((welcome) => {
-      if (presencePollToken !== token) {
-        fetch(base + '/presence/poll/leave', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: welcome.id })
-        }).catch(() => {});
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })).catch(() => ({ ok: false, body: {} })))
+    .then(({ ok, body }) => {
+      if (!ok || !body || typeof body.id !== 'string') {
+        if (presencePollToken === token) showPresenceTransientHint(presenceDeniedHint(body && body.reason));
         return;
       }
-      if (welcome.status !== 'pending') {
-        finishJoin(welcome.id, welcome.roster);
-        return;
-      }
-
-      // Task #137 — this identity is already active elsewhere in the
-      // room; the join is held pending until that other session responds
-      // or its countdown lapses. Polling has no push channel of its own,
-      // so this attempt has to ask /presence/poll/join-status instead of
-      // just waiting on a message the way the WS side does.
-      presenceJoinPendingChallengeId = welcome.challengeId;
-      showPresenceJoinWaitingHint();
-      presenceJoinStatusPollTimer = setInterval(() => {
-        if (presencePollToken !== token) { clearInterval(presenceJoinStatusPollTimer); presenceJoinStatusPollTimer = null; return; }
-        fetch(base + '/presence/poll/join-status', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ challengeId: welcome.challengeId })
-        })
-          .then((r) => (r.ok ? r.json() : { status: 'denied' })) // a 404 here (challenge already swept away) is functionally the same as an explicit denial — nothing left to join
-          .then((status) => {
-            if (presencePollToken !== token) return;
-            if (status.status === 'pending') return; // still waiting — nothing to do yet
-            clearInterval(presenceJoinStatusPollTimer);
-            presenceJoinStatusPollTimer = null;
-            presenceJoinPendingChallengeId = null;
-            hidePresenceJoinWaitingHint();
-            if (status.status === 'joined') {
-              finishJoin(status.id, status.roster);
-            } else {
-              showPresenceTransientHint('The other session chose to stay — join declined.');
-            }
-          })
-          .catch(() => {}); // a dropped tick just tries again next interval
-      }, PRESENCE_POLL_INTERVAL_MS);
+      finishJoin(body);
     })
     .catch(() => {}); // presence, including its fallback, stays a pure enhancement — never surfaced as an error
 }
 
-function connectPresence(domain, worldId, displayName, presenceBase, publicKey) {
-  const base = presenceBase || PRESENCE_DEFAULT_BASE;
+// `base` must already be an approved endpoint (see approvedPresenceBase).
+function connectPresence(domain, worldId, displayName, base) {
   let socket;
   try {
     socket = new WebSocket(presenceWsUrlFor(base));
   } catch (err) {
-    pollPresence(domain, worldId, displayName, base, publicKey); // WebSocket unsupported/blocked outright — go straight to polling
+    pollPresence(domain, worldId, displayName, base); // WebSocket unsupported/blocked outright — go straight to polling
     return;
   }
 
-  // If the WebSocket attempt hasn't opened OR failed within this window
-  // (a presence server that exists but never completes the handshake,
-  // rather than one that's cleanly unreachable and errors fast), stop
-  // waiting on it and fall back to polling anyway — a visitor shouldn't
-  // go without any presence at all just because one transport hung.
-  //
-  // Guarded by `presenceSocket === socket`, not just `settled`: if
-  // disconnectPresence() already ran (a fast world switch, say), it will
-  // have set presenceSocket to null (or a newer socket) and closed this
-  // one itself — this timer firing afterward must NOT then call
-  // pollPresence() for a world already left behind, since that stale call
-  // could otherwise clobber a legitimately newer session's token.
+  // If the WebSocket neither opens nor fails within this window (a server
+  // that never completes the handshake, rather than one that errors fast),
+  // fall back to polling. Guarded by `presenceSocket === socket`: if
+  // disconnectPresence() already ran (a fast world switch) this must not
+  // start polling for a world already left.
   let settled = false;
   const fallbackTimer = setTimeout(() => {
     if (settled) return;
     settled = true;
-    if (presenceSocket !== socket) return; // superseded — nothing to fall back FOR
+    if (presenceSocket !== socket) return;
     presenceSocket = null;
     try { socket.close(); } catch (err) {}
-    pollPresence(domain, worldId, displayName, base, publicKey);
+    pollPresence(domain, worldId, displayName, base);
   }, PRESENCE_WS_CONNECT_TIMEOUT_MS);
 
   presenceSocket = socket;
-  presenceOwnPublicKey = publicKey || null;
-  presenceOwnName = displayName;
 
   socket.addEventListener('open', () => {
-    // Superseded by a later enterWorld() call (disconnectPresence(), then
-    // a new connectPresence()) before this particular connection actually
-    // finished opening — let it die quietly rather than join a room for a
-    // world the visitor has already left.
+    // Superseded before it finished opening: let it die quietly.
     if (presenceSocket !== socket) { try { socket.close(); } catch (err) {} return; }
     settled = true;
     clearTimeout(fallbackTimer);
-    socket.send(JSON.stringify({ type: 'join', domain, world: worldId, name: displayName, publicKey }));
+    socket.send(JSON.stringify({ type: 'join', domain, world: worldId, name: displayName }));
     presenceMoveTimer = setInterval(() => {
       const pose = currentLocalPose();
       if (!pose || socket.readyState !== WebSocket.OPEN) return;
@@ -842,46 +609,22 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
   });
 
   socket.addEventListener('message', (ev) => {
-    if (presenceSocket !== socket) return; // stale connection, or the world already changed out from under it
+    if (presenceSocket !== socket) return; // stale connection, or the world already changed
     let msg;
     try { msg = JSON.parse(ev.data); } catch (err) { return; }
     if (!msg || typeof msg.type !== 'string') return;
     if (msg.type === 'welcome') {
-      // Task #137 — a 'welcome' here can arrive either immediately (the
-      // common case) or later, pushed down this SAME still-open socket
-      // once a pending duplicate-join challenge this connection was
-      // waiting on resolves in its favor — clearing the pending state is
-      // a harmless no-op in the immediate case.
-      presenceJoinPendingChallengeId = null;
-      hidePresenceJoinWaitingHint();
       window.__atlasPresenceOwnId = msg.id; // test-observability, same convention as window.__atlasActive3D/__atlasScene
-      (msg.roster || []).forEach((m) => { if (active3D) active3D.upsertRemotePlayer(m.id, m); notePresenceRosterMeta(m.id, m.name, m.publicKey); });
-      if (socialFriendsTabActive()) refreshFriendsDisplay();
-    } else if (msg.type === 'join-pending') {
-      // Task #137 — this identity is already active elsewhere in the
-      // room; held pending until that other session responds or its
-      // countdown lapses. The eventual outcome arrives as a further
-      // 'welcome' (see above) or 'join-denied' (below) pushed down this
-      // same socket — no separate status polling needed on this
-      // transport, unlike the polling fallback's own equivalent.
-      presenceJoinPendingChallengeId = msg.challengeId;
-      showPresenceJoinWaitingHint();
+      (msg.roster || []).forEach((m) => { if (active3D) active3D.upsertRemotePlayer(m.id, m); });
     } else if (msg.type === 'join-denied') {
-      presenceJoinPendingChallengeId = null;
-      hidePresenceJoinWaitingHint();
-      showPresenceTransientHint('The other session chose to stay — join declined.');
+      showPresenceTransientHint(presenceDeniedHint(msg.reason));
+      disconnectPresence();
     } else if (msg.type === 'joined') {
       if (active3D) active3D.upsertRemotePlayer(msg.id, msg);
-      notePresenceRosterMeta(msg.id, msg.name, msg.publicKey);
-      if (socialFriendsTabActive()) refreshFriendsDisplay();
     } else if (msg.type === 'moved') {
-      if (active3D) active3D.upsertRemotePlayer(msg.id, msg); // no name/publicKey on a move broadcast — roster meta from join/welcome stands
+      if (active3D) active3D.upsertRemotePlayer(msg.id, msg);
     } else if (msg.type === 'left') {
       if (active3D) active3D.removeRemotePlayer(msg.id);
-      presenceRosterMeta.delete(msg.id);
-      if (socialFriendsTabActive()) refreshFriendsDisplay();
-    } else if (msg.type === 'signal') {
-      handleIncomingSignal(msg); // friend requests etc (#67) — see relaySignal() in presence-server.js
     }
   });
 
@@ -891,25 +634,19 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
       presenceSocket = null;
       if (presenceMoveTimer) { clearInterval(presenceMoveTimer); presenceMoveTimer = null; }
     }
-    // A close that arrives before the WebSocket ever opened (handshake
-    // rejected, connection refused) is exactly the "try polling instead"
-    // case — but only if this attempt was still the live one (wasCurrent)
-    // AND nothing has settled it yet. Without the wasCurrent check, a
-    // disconnectPresence() that closed this same socket on its way out
-    // (a fast world switch) would land here with settled still false and
-    // wrongly kick off polling for the world already left behind.
+    // A close before the socket ever opened (handshake rejected, connection
+    // refused) means "try polling instead" — but only for the live attempt,
+    // so a disconnectPresence() close during a fast world switch does not
+    // start polling for the world just left.
     if (!settled) {
       settled = true;
       clearTimeout(fallbackTimer);
-      if (wasCurrent) pollPresence(domain, worldId, displayName, base, publicKey);
+      if (wasCurrent) pollPresence(domain, worldId, displayName, base);
     }
   });
 
-  // presence-server unreachable/down, or the connection dropped mid-world.
-  // The 'close' listener above (which always fires after 'error' for a
-  // WebSocket) does the actual fallback decision and cleanup — this just
-  // has to exist so the failed connection doesn't surface as an unhandled
-  // error, per the top-of-section comment.
+  // The 'close' listener does the fallback decision; this only keeps a
+  // failed connection from surfacing as an unhandled error.
   socket.addEventListener('error', () => {});
 }
 
@@ -917,32 +654,25 @@ function connectPresence(domain, worldId, displayName, presenceBase, publicKey) 
 // A read-by-anyone, send-when-unlocked text chat, riding the SAME
 // presence-server process (see server.js's own "chat" section) but as a
 // fully INDEPENDENT WebSocket connection from presence's — presence can be
-// down or declined (a pending duplicate-identity join, say) while chat
+// down or refused (room full, say) while chat
 // still works, and each reconnects on its own schedule. Two tabs, one live stream: the server scopes its room+history by
 // DOMAIN alone and tags every message with `world`, so "This World" vs
 // "Domain" is purely a client-side filter over the same chatMessages
 // array — see renderChatMessages().
 //
-// Same WS-then-poll fallback shape as presence (#68): connectChat() tries
-// a WebSocket first, and falls back to HTTP polling (pollChat(), the
-// chat-join/-sync/-send/-leave routes) the moment that attempt fails or
-// hangs past CHAT_WS_CONNECT_TIMEOUT_MS — a plain cPanel/PHP host that
-// can't run a persistent WebSocket process (see presence-php/README.txt,
-// and presence-php/presence/poll/chat-*.php for the deployable PHP side of
-// this) simply never completes the WS handshake, and this falls back the
-// same way presence already does. sendSignal() above is the template for
-// "one call site, branch on which transport is actually live" — the
-// Enter-key send handler below does the same thing for chat-send.
+// Same WS-then-poll fallback shape as presence: connectChat() tries a
+// WebSocket first and falls back to HTTP polling (pollChat(), the
+// chat-join/-sync/-send/-leave routes) once that attempt fails or hangs
+// past CHAT_WS_CONNECT_TIMEOUT_MS. A plain cPanel/PHP host that cannot run
+// a persistent WebSocket process (see presence-php/README.txt) never
+// completes the handshake and falls back the same way presence does.
 //
-// Read access needs no identity at all (matches #63's "entering a world
-// never requires a wallet" principle) — connectChat()/pollChat() join
-// with publicKey: null for an anonymous visitor, and history/broadcasts
-// go to every member of the room regardless. Sending is gated purely on
-// chatOwnPublicKey being set (see refreshChatSendability()); the server
-// enforces the same gate authoritatively (reason: 'login-required') on
-// BOTH transports, since the client-side gate alone is just UX, never
-// trusted as the real check.
-const CHAT_DEFAULT_BASE = PRESENCE_DEFAULT_BASE; // same server, same base resolution as presence (manifest.presence, falling back to localhost:8004)
+// Chat carries no wallet identity. A sender is a display name plus a random
+// per-join `senderId` the server assigns; neither is authenticated, so a
+// name can be copied by anyone and a senderId only distinguishes
+// connections. Reading needs no wallet. Sending is gated in the client on
+// an unlocked wallet purely as a UX choice (chatCanSend); the server does
+// not and cannot enforce it, and only rate-limits and filters messages.
 const CHAT_MESSAGES_CAP = 200; // client-side cap across both tabs — the server's own chatHistory buffer (CHAT_HISTORY_LIMIT) is what a late joiner actually receives
 const CHAT_WS_CONNECT_TIMEOUT_MS = 2500; // matches PRESENCE_WS_CONNECT_TIMEOUT_MS — how long to let a WS attempt hang before giving up and trying polling instead
 const CHAT_POLL_INTERVAL_MS = 2000; // matches PRESENCE_POLL_INTERVAL_MS — one "what's new since my cursor?" sync per tick
@@ -961,7 +691,8 @@ let chatSocket = null;
 let chatMessages = []; // flat list, each tagged with `world` — see renderChatMessages() for how the active tab filters this same array
 let chatDomain = null;
 let chatWorldId = null;
-let chatOwnPublicKey = null; // this chat connection's own announced identity — independent of presenceOwnPublicKey, since chat can be live without presence (the presence server being unreachable, say)
+let chatCanSend = false; // client-side send gate (an unlocked wallet); not enforced by the server
+let chatOwnSenderId = null; // the server-assigned random id of this chat connection
 // chatTabs/chatActiveTab (dynamic tab list, replacing the old fixed
 // This-World/Domain pair — see computeChatTabs()/refreshChatAvailability()
 // below): chatTabs is the ordered list of {id, label} entries currently
@@ -974,7 +705,7 @@ let chatTabs = [];
 let chatActiveTab = null;
 let chatSendStatusTimer = null;
 
-// Polling-fallback state (#68's chat counterpart) — parallels
+// Polling-fallback state — parallels
 // presencePollToken/presencePollId/presencePollTimer/presencePollHttpBase
 // above exactly, including the "token" trick: a join fetch has no
 // server-assigned id to compare identity against until it resolves, so
@@ -996,7 +727,7 @@ function chatIsConnected() {
 // replace, so an already-open chat keeps auto-scrolling to new messages
 // while someone who's scrolled up to read history isn't yanked back down.
 //
-// Each sender name carries data-key/data-name/data-sentat (#115/#116) —
+// Each sender name carries data-sender/data-name/data-sentat —
 // everything the hover tooltip and right-click context menu below need,
 // read straight back off the element the event fired on rather than
 // re-looking the message up in chatMessages by index.
@@ -1008,15 +739,13 @@ function renderChatList(container, msgs, emptyText) {
     return;
   }
   container.innerHTML = msgs.map((m) =>
-    '<div class="chat-line"><span class="chat-name" data-key="' + escapeHtml(m.publicKey || '') + '" data-name="' + escapeHtml(m.name || 'Visitor') + '" data-sentat="' + escapeHtml(m.sentAt || '') + '">' + escapeHtml(m.name || 'Visitor') + ':</span> ' + escapeHtml(m.text) + '</div>'
+    '<div class="chat-line"><span class="chat-name" data-sender="' + escapeHtml(m.senderId || '') + '" data-name="' + escapeHtml(m.name || 'Visitor') + '" data-sentat="' + escapeHtml(m.sentAt || '') + '">' + escapeHtml(m.name || 'Visitor') + ':</span> ' + escapeHtml(m.text) + '</div>'
   ).join('');
   if (wasNearBottom) container.scrollTop = container.scrollHeight;
 }
 
-// chatMutedKeys/chatBlockedKeys (#116) filter muted/blocked senders out of
-// whichever tab is active before it ever reaches renderChatList — see
-// refreshChatModerationCache() below for how this stays in sync with
-// AtlasWallet's own lists.
+// chatSessionMuted/chatSessionBlocked filter muted/blocked senders out of
+// whichever tab is active before it reaches renderChatList.
 //
 // Single shared container now (was two, #chatMessagesWorld/#chatMessagesDomain,
 // one per fixed tab, both always rendered and one just hidden via CSS) —
@@ -1025,7 +754,7 @@ function renderChatList(container, msgs, emptyText) {
 // split as before, just picked by chatActiveTab instead of by which of two
 // containers a given render call happened to target.
 function renderChatMessages() {
-  const visible = chatMessages.filter((m) => !chatMutedKeys.has(m.publicKey) && !chatBlockedKeys.has(m.publicKey));
+  const visible = chatMessages.filter((m) => !chatSessionMuted.has(m.senderId) && !chatSessionBlocked.has(m.senderId));
   if (chatActiveTab === 'domain') {
     renderChatList(chatMessagesEl, visible, 'No messages in this domain yet.');
   } else {
@@ -1097,47 +826,35 @@ function showChatTab(tabId) {
   refreshChatSendability(); // which tab is active is now part of whether sending is currently allowed — see refreshChatSendability()'s own comment
 }
 
-// ---------- chat moderation: mute/block local cache (#116) ----------
-// renderChatMessages() needs a synchronous yes/no per message (it's called
-// from a WebSocket 'message' handler, among other non-async call sites), so
-// the two AtlasWallet-backed lists are mirrored here as plain Sets, kept
-// current by refreshChatModerationCache() — called once at load and again
-// after every mute/unmute/block/unblock action anywhere in this file.
-let chatMutedKeys = new Set();
-let chatBlockedKeys = new Set();
-async function refreshChatModerationCache() {
-  const [muted, blocked] = await Promise.all([AtlasWallet.getMutedChatUsers(), AtlasWallet.getBlockedChatUsers()]);
-  chatMutedKeys = new Set(muted.map((m) => m.publicKey));
-  chatBlockedKeys = new Set(blocked.map((b) => b.publicKey));
-}
-refreshChatModerationCache();
+// ---------- chat moderation: session mute/block ----------
+// A chat sender has no persistent identity, so a mute or block can only
+// target the sender's random per-join senderId: it holds while that
+// connection lasts and says nothing about the person once they reconnect
+// (they get a new senderId) or change their display name. Entries live in
+// memory and are dropped when the visitor moves to another domain.
+//
+// Mute and block records saved by earlier versions are keyed by a wallet
+// public key that chat no longer carries. They are kept untouched (listed
+// in Settings -> Chat Admin, removable one by one) but cannot match
+// anything now.
+const CHAT_SESSION_MODERATION_CAP = 200;
+let chatSessionMuted = new Map(); // senderId -> display name
+let chatSessionBlocked = new Map();
+let chatSessionDomain = null;
 
-// ---------- chat username hover tooltip (#115) ----------
-// Same floating-singleton-div approach as renderPortalTooltip/
-// #portalHoverTooltip above: one element, moved and filled in per-hover
-// rather than one per message. "Online" is checked against
-// presenceRosterMeta, the SAME live roster the Friends screen already uses
-// for "people here now" — not a new presence mechanism. That roster only
-// covers the world the viewer is in right now, so a sender who has since
-// left (or is in another world) won't show up in it; the tooltip words this
-// as "not currently shown as present" rather than a flat "offline" it can't
-// actually prove.
-function isChatSenderOnline(publicKey) {
-  if (!publicKey) return false;
-  if (publicKey === chatOwnPublicKey || publicKey === presenceOwnPublicKey) return true; // this viewer's own identity is obviously online right now
-  for (const meta of presenceRosterMeta.values()) {
-    if (meta.publicKey === publicKey) return true;
-  }
-  return false;
+function addChatSessionEntry(map, senderId, name) {
+  if (!senderId) return;
+  if (map.size >= CHAT_SESSION_MODERATION_CAP && !map.has(senderId)) map.delete(map.keys().next().value);
+  map.set(senderId, name || 'Visitor');
 }
 
-function renderChatUserTooltip(name, sentAt, online) {
+function renderChatUserTooltip(name, sentAt) {
   if (!chatUserTooltipEl) return;
   const when = sentAt ? new Date(sentAt).toLocaleString() : 'unknown time';
   chatUserTooltipEl.innerHTML =
     '<div style="font-weight:600;margin-bottom:2px;">' + escapeHtml(name) + '</div>' +
     '<div>Sent ' + escapeHtml(when) + '</div>' +
-    '<div>' + (online ? '🟢 Online now' : '⚪ Not currently shown as present') + '</div>';
+    '<div>Display names are not verified.</div>';
 }
 
 function hideChatUserTooltip() {
@@ -1154,7 +871,7 @@ chatPanelEl && chatPanelEl.addEventListener('mouseover', (e) => {
   const nameEl = e.target.closest('.chat-name');
   if (!nameEl) return;
   const rect = nameEl.getBoundingClientRect();
-  renderChatUserTooltip(nameEl.dataset.name, nameEl.dataset.sentat, isChatSenderOnline(nameEl.dataset.key || null));
+  renderChatUserTooltip(nameEl.dataset.name, nameEl.dataset.sentat);
   chatUserTooltipEl.style.left = rect.left + 'px';
   chatUserTooltipEl.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
   chatUserTooltipEl.style.display = 'block';
@@ -1169,14 +886,14 @@ chatPanelEl && chatPanelEl.addEventListener('mouseout', (e) => {
   hideChatUserTooltip();
 });
 
-// ---------- chat username right-click menu (#116): private message / mute / block ----------
+// ---------- chat username right-click menu: mute / block (this session) ----------
 // Visual/interaction pattern reused from mail's/asset cards' own "⋯" menus
 // (renderMailCard's blockHtml, .card-menu-items in viewer.html) — dark
 // card, thin border, full-width stacked buttons — via #chatUserContextMenu's
 // own CSS, just a standalone singleton positioned at the click point
 // (there's no one fixed toggle button to anchor a right-click menu under)
 // instead of `position:absolute` under a per-card toggle.
-let chatContextMenuTarget = null; // {key, name} for whichever name this menu is currently open for
+let chatContextMenuTarget = null; // {senderId, name} for whichever name this menu is currently open for
 
 function closeChatUserContextMenu() {
   if (chatUserContextMenuEl) chatUserContextMenuEl.classList.remove('show');
@@ -1187,7 +904,7 @@ chatPanelEl && chatPanelEl.addEventListener('contextmenu', (e) => {
   const nameEl = e.target.closest('.chat-name');
   if (!nameEl || !chatUserContextMenuEl) return;
   e.preventDefault();
-  chatContextMenuTarget = { key: nameEl.dataset.key || null, name: nameEl.dataset.name || 'Visitor' };
+  chatContextMenuTarget = { senderId: nameEl.dataset.sender || null, name: nameEl.dataset.name || 'Visitor' };
   hideChatUserTooltip(); // don't leave the hover tooltip floating over an open menu
   // Clamped so a name near the right/bottom edge of the viewport doesn't
   // open a menu that spills off-screen — same rough idea as any other
@@ -1207,43 +924,20 @@ document.addEventListener('click', (e) => {
   closeChatUserContextMenu();
 });
 
-// Private message: no live/real-time private-chat feature exists yet (a
-// separate, not-in-scope backlog item) — instead this jumps straight to
-// Mail's Compose tab, pre-addressed to this chat user's public key, reusing
-// openComposeReply() exactly as Quick Reply on a mail card already does
-// (including its own friend-picker resolution — a public key that happens
-// to match a saved friend shows that friend's name instead of the raw key,
-// with no separate recipient-resolution logic written for chat at all).
-async function openChatPrivateMessage(key, name) {
-  if (!key) { showChatSendStatus('This visitor has no identity to message.'); return; }
-  walletPanel.classList.add('open');
-  if (!(await AtlasWallet.isUnlocked())) {
-    await routeWalletScreen();
-    showChatSendStatus('Unlock your wallet, then try Private message again.');
-    return;
-  }
-  await openComposeReply({ domain: chatDomain || (currentManifest && currentManifest.domain), key, handle: null, subject: '' });
-}
-
-chatUserContextMenuEl && chatUserContextMenuEl.addEventListener('click', async (e) => {
+chatUserContextMenuEl && chatUserContextMenuEl.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-action]');
   if (!btn || !chatContextMenuTarget) return;
-  const { key, name } = chatContextMenuTarget;
+  const { senderId, name } = chatContextMenuTarget;
   closeChatUserContextMenu();
-
-  if (btn.dataset.action === 'chat-pm') {
-    await openChatPrivateMessage(key, name);
-  } else if (btn.dataset.action === 'chat-mute') {
-    if (!key) { showChatSendStatus('This visitor has no identity to mute.'); return; }
-    await AtlasWallet.muteChatUser(key, name);
-    await refreshChatModerationCache();
-    renderChatMessages();
+  if (btn.dataset.action === 'chat-mute') {
+    addChatSessionEntry(chatSessionMuted, senderId, name);
   } else if (btn.dataset.action === 'chat-block') {
-    if (!key) { showChatSendStatus('This visitor has no identity to block.'); return; }
-    await AtlasWallet.blockChatUser(key, name);
-    await refreshChatModerationCache();
-    renderChatMessages();
+    addChatSessionEntry(chatSessionBlocked, senderId, name);
+  } else {
+    return;
   }
+  renderChatMessages();
+  refreshChatAdminDisplay();
 });
 
 // ---------- chat capability opt-in (#111/#112) ----------
@@ -1322,6 +1016,10 @@ function chatErrorText(reason) {
   if (reason === 'login-required') return 'Unlock your wallet to send chat messages.';
   if (reason === 'blocked') return 'Message blocked — please rephrase.';
   if (reason === 'empty') return 'Type a message first.';
+  if (reason === 'rate-limited') return 'Slow down — wait a moment before sending again.';
+  if (reason === 'room-full') return 'Chat is full for this domain.';
+  if (reason === 'server-busy') return 'The chat server is busy.';
+  if (reason === 'not-joined') return 'Not connected — try again in a moment.';
   return 'Message not sent.';
 }
 
@@ -1332,8 +1030,8 @@ function showChatSendStatus(text) {
   if (text) chatSendStatusTimer = setTimeout(() => { chatSendStatusEl.textContent = ''; }, 4000);
 }
 
-// Send eligibility depends on two independent things now: whether an
-// identity is currently announced to this connection (as before — not the
+// Send eligibility depends on two independent things: whether the wallet
+// is unlocked (a client-side gate only, see the chat section header; as before — not the
 // socket's live open/closed state, checked separately at send time in the
 // Enter-key handler, so a momentary reconnect shouldn't visibly flicker
 // the input disabled/enabled on every world switch), AND whether the
@@ -1350,9 +1048,9 @@ function showChatSendStatus(text) {
 function refreshChatSendability() {
   if (!chatTextInput) return;
   const onSendableTab = chatActiveTab === 'domain' || chatActiveTab === chatTabForWorld(chatWorldId);
-  const canSend = !!chatOwnPublicKey && onSendableTab;
+  const canSend = chatCanSend && onSendableTab;
   chatTextInput.disabled = !canSend;
-  if (!chatOwnPublicKey) {
+  if (!chatCanSend) {
     chatTextInput.placeholder = 'Sign in to chat…';
   } else if (!onSendableTab) {
     chatTextInput.placeholder = 'Switch here or to Domain to send a message';
@@ -1360,7 +1058,7 @@ function refreshChatSendability() {
     chatTextInput.placeholder = 'Message this domain…';
   }
   if (chatLoginNoteEl) {
-    chatLoginNoteEl.textContent = !chatOwnPublicKey
+    chatLoginNoteEl.textContent = !chatCanSend
       ? 'Unlock your wallet to send messages. Anyone can still read chat.'
       : (!onSendableTab ? 'You can read every tab, but only send from Domain or your current world.' : '');
   }
@@ -1389,7 +1087,8 @@ function disconnectChat() {
   }
   chatDomain = null;
   chatWorldId = null;
-  chatOwnPublicKey = null;
+  chatCanSend = false;
+  chatOwnSenderId = null;
   chatMessages = [];
   renderChatMessages();
   refreshChatSendability();
@@ -1400,17 +1099,20 @@ function disconnectChat() {
 // guard (chatPollToken) and immediately leaving a room this attempt just
 // joined if a newer attempt has already taken over by the time the join
 // fetch actually comes back.
-function pollChat(domain, worldId, displayName, publicKey, httpBase, historyOnJoin) {
-  const base = httpBase || CHAT_DEFAULT_BASE;
+function pollChat(domain, worldId, displayName, canSend, base, historyOnJoin) {
   const token = {};
   chatPollToken = token;
 
   fetch(base + '/presence/poll/chat-join', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ domain, world: worldId, name: displayName, publicKey })
+    body: JSON.stringify({ domain, world: worldId, name: displayName })
   })
-    .then((r) => r.json())
-    .then((welcome) => {
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })).catch(() => ({ ok: false, body: {} })))
+    .then(({ ok, body: welcome }) => {
+      if (!ok || !welcome || typeof welcome.id !== 'string') {
+        if (chatPollToken === token) showChatSendStatus(chatErrorText(welcome && welcome.reason));
+        return;
+      }
       if (chatPollToken !== token || chatDomain !== domain || chatWorldId !== worldId) {
         fetch(base + '/presence/poll/chat-leave', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: welcome.id })
@@ -1419,7 +1121,8 @@ function pollChat(domain, worldId, displayName, publicKey, httpBase, historyOnJo
       }
       chatPollId = welcome.id;
       chatPollHttpBase = base;
-      chatOwnPublicKey = publicKey;
+      chatOwnSenderId = welcome.senderId || null;
+      chatCanSend = canSend;
       refreshChatSendability();
       // historyOnJoin off (purely local — see wallet.js's comment):
       // discard the join response's history batch instead of asking the
@@ -1434,9 +1137,16 @@ function pollChat(domain, worldId, displayName, publicKey, httpBase, historyOnJo
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: welcome.id })
         })
-          .then((r) => r.json())
-          .then((res) => {
+          .then((r) => r.json().then((body) => ({ status: r.status, body })).catch(() => ({ status: r.status, body: {} })))
+          .then(({ status, body: res }) => {
             if (chatPollToken !== token) return;
+            if (status === 404) {
+              // The server swept this chat session as stale (backgrounded
+              // tab, say). Rejoin with a fresh sender id.
+              disconnectChat();
+              connectChat(domain, worldId, base);
+              return;
+            }
             const delta = res.messages || [];
             if (!delta.length) return;
             chatMessages = chatMessages.concat(delta);
@@ -1449,17 +1159,22 @@ function pollChat(domain, worldId, displayName, publicKey, httpBase, historyOnJo
     .catch(() => {}); // chat is a pure enhancement, including its fallback — never surfaced as an error
 }
 
-function connectChat(domain, worldId, presenceBase) {
+// `base` must already be an approved endpoint (see approvedPresenceBase).
+function connectChat(domain, worldId, base) {
   chatDomain = domain;
   chatWorldId = worldId;
   chatMessages = [];
+  if (chatSessionDomain !== domain) {
+    chatSessionDomain = domain;
+    chatSessionMuted = new Map();
+    chatSessionBlocked = new Map();
+  }
   renderChatMessages();
 
-  const base = presenceBase || CHAT_DEFAULT_BASE;
   AtlasWallet.getIdentity().then(async (identity) => {
     const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
-    const displayName = alias || (identity ? short(identity.publicKey, 10) : 'Visitor');
-    const publicKey = identity ? identity.publicKey : null;
+    const displayName = alias || 'Visitor';
+    const canSend = !!identity;
     // historyOnJoin (purely local — see wallet.js's own comment on this
     // setting): read once per connectChat() attempt, used below to decide
     // whether the history batch this join is about to receive gets shown
@@ -1476,7 +1191,7 @@ function connectChat(domain, worldId, presenceBase) {
     try {
       socket = new WebSocket(presenceWsUrlFor(base));
     } catch (err) {
-      pollChat(domain, worldId, displayName, publicKey, base, historyOnJoin); // WebSocket unsupported/blocked outright — go straight to polling
+      pollChat(domain, worldId, displayName, canSend, base, historyOnJoin); // WebSocket unsupported/blocked outright — go straight to polling
       return;
     }
     if (chatDomain !== domain || chatWorldId !== worldId) { try { socket.close(); } catch (err) {} return; }
@@ -1493,18 +1208,18 @@ function connectChat(domain, worldId, presenceBase) {
       if (chatSocket !== socket) return; // superseded — nothing to fall back FOR
       chatSocket = null;
       try { socket.close(); } catch (err) {}
-      pollChat(domain, worldId, displayName, publicKey, base, historyOnJoin);
+      pollChat(domain, worldId, displayName, canSend, base, historyOnJoin);
     }, CHAT_WS_CONNECT_TIMEOUT_MS);
 
     chatSocket = socket;
-    chatOwnPublicKey = publicKey;
+    chatCanSend = canSend;
     refreshChatSendability();
 
     socket.addEventListener('open', () => {
       if (chatSocket !== socket) { try { socket.close(); } catch (err) {} return; }
       settled = true;
       clearTimeout(fallbackTimer);
-      socket.send(JSON.stringify({ type: 'chat-join', domain, world: worldId, name: displayName, publicKey }));
+      socket.send(JSON.stringify({ type: 'chat-join', domain, world: worldId, name: displayName }));
     });
 
     socket.addEventListener('message', (ev) => {
@@ -1513,6 +1228,7 @@ function connectChat(domain, worldId, presenceBase) {
       try { msg = JSON.parse(ev.data); } catch (err) { return; }
       if (!msg || typeof msg.type !== 'string') return;
       if (msg.type === 'chat-history') {
+        chatOwnSenderId = msg.senderId || null;
         // historyOnJoin off (purely local — see wallet.js's comment):
         // discard the batch the server just sent instead of asking it to
         // withhold anything — the list simply starts empty and only grows
@@ -1541,7 +1257,7 @@ function connectChat(domain, worldId, presenceBase) {
       if (!settled) {
         settled = true;
         clearTimeout(fallbackTimer);
-        if (wasCurrent) pollChat(domain, worldId, displayName, publicKey, base, historyOnJoin);
+        if (wasCurrent) pollChat(domain, worldId, displayName, canSend, base, historyOnJoin);
       }
     });
 
@@ -1562,11 +1278,6 @@ function connectChat(domain, worldId, presenceBase) {
 // left to reconnect to.
 function refreshChatIdentity() {
   if (!chatDomain || !chatWorldId) { refreshChatSendability(); return; }
-  // Defensive gate (#111) — chatDomain/chatWorldId are only ever set by a
-  // connectChat() call that already passed this same check in enterWorld(),
-  // so this should never actually trip in practice, but a call site that
-  // reconnects chat has to honor the opt-in gate too, not just the two that
-  // establish the connection in the first place.
   if (!chatEnabledForWorld(currentManifest, currentWorld)) {
     disconnectChat();
     refreshChatAvailability(currentManifest, currentWorld);
@@ -1574,14 +1285,24 @@ function refreshChatIdentity() {
   }
   const domain = chatDomain;
   const worldId = chatWorldId;
-  const presenceBase = (currentManifest && currentManifest.domain === domain) ? currentManifest.presence : null;
+  const rawPresence = (currentManifest && currentManifest.domain === domain) ? currentManifest.presence : undefined;
+  const origin = currentOrigin;
+  const world = currentWorld;
   disconnectChat();
-  connectChat(domain, worldId, presenceBase);
+  connectChatApproved(domain, worldId, origin, rawPresence, world);
+}
+
+// Resolves the manifest's presence endpoint (asking the visitor when it is
+// a third-party server) and then connects chat; does nothing when the
+// endpoint is not approved or the visitor already moved on.
+async function connectChatApproved(domain, worldId, manifestOrigin, rawPresence, world) {
+  const base = await approvedPresenceBase(manifestOrigin, rawPresence, { prompt: true });
+  if (!base || currentWorld !== world) return;
+  connectChat(domain, worldId, base);
 }
 
 // Sends over whichever transport is actually live right now, same
-// WS-first-else-poll-relay branch sendSignal() above uses for presence's
-// friend requests. The poll path posts straight to chat-send and handles
+// WS-first-else-poll branch. The poll path posts straight to chat-send and handles
 // the response inline (no separate "on next sync" round trip needed for
 // the sender's own message) rather than waiting for it to come back
 // through a later chat-sync poll — that would mean seeing your own
@@ -1592,7 +1313,7 @@ chatTextInput && chatTextInput.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   const text = chatTextInput.value.trim();
   if (!text) return;
-  if (!chatOwnPublicKey) { showChatSendStatus(chatErrorText('login-required')); return; }
+  if (!chatCanSend) { showChatSendStatus(chatErrorText('login-required')); return; }
   // Defensive — the input is already .disabled while browsing a
   // non-sendable tab (see refreshChatSendability()), so Enter shouldn't
   // normally even reach here in that state, but a tab switch racing this
@@ -1833,7 +1554,6 @@ const postOfficeBlockPublicKeyInput = document.getElementById('postOfficeBlockPu
 const postOfficeBlockBtn = document.getElementById('postOfficeBlockBtn');
 const postOfficeBlockStatusEl = document.getElementById('postOfficeBlockStatus');
 
-const friendsHereListEl = document.getElementById('friendsHereList');
 const friendRequestsListEl = document.getElementById('friendRequestsList');
 const contactsListEl = document.getElementById('contactsList');
 const contactsSearchInput = document.getElementById('contactsSearchInput');
@@ -2503,22 +2223,28 @@ function show3DCanvas(active) {
   scene3dInteractHint.classList.remove('active');
 }
 
-// Joins this domain+world's presence room — for 2D and 3D worlds alike. A
-// visitor is announced under their wallet alias, else a short public-key
-// fragment, else "Visitor"; the public key is optional, so an anonymous
-// visitor can still be seen (and counted) but can't be friend-requested.
-// Presence rooms are keyed by manifest.domain, which a key-anchored world
-// (SPEC.md §3.6) doesn't have, so those skip presence and chat entirely.
-// Skipped when the visitor has already moved on to another world while the
-// identity lookup was in flight.
-async function joinPresenceForWorld(manifest, world) {
+// Joins this domain+world's presence room (2D and 3D worlds alike) and, when
+// the world opted in, its chat. A visitor is announced under their wallet
+// alias, else "Visitor"; no key or key fragment is sent, so the room sees a
+// display name, a pose and a look only. Rooms are keyed by manifest.domain,
+// which a key-anchored world (SPEC.md §3.6) does not have, so those skip
+// presence and chat entirely.
+//
+// The presence endpoint is resolved first: same-origin is allowed, any other
+// origin needs the visitor's approval (see approvedPresenceBase). This runs
+// in the background and never blocks entering the world. Skipped if the
+// visitor already moved on to another world while any lookup was in flight.
+async function joinPresenceAndChat(manifest, world) {
   if (!manifest.domain) return;
+  const manifestOrigin = currentOrigin;
   try {
+    const base = await approvedPresenceBase(manifestOrigin, manifest.presence, { prompt: true });
+    if (!base || currentWorld !== world) return;
     const identity = await AtlasWallet.getIdentity();
     const alias = identity ? await AtlasWallet.getAlias(identity.publicKey) : null;
-    const name = alias || (identity ? short(identity.publicKey, 10) : 'Visitor');
     if (currentWorld !== world) return;
-    connectPresence(manifest.domain, world.id, name, manifest.presence, identity ? identity.publicKey : null);
+    connectPresence(manifest.domain, world.id, alias || 'Visitor', base);
+    if (chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, base);
   } catch (err) {
     // Presence is an enhancement layered on entering a world; never fail the entry over it.
   }
@@ -2547,8 +2273,8 @@ async function enterWorld(worldId, anchorId) {
   // string each time (no static badge markup — innerHTML below would just
   // clobber it on every world entry anyway).
   placeLabel.innerHTML = manifest.domain
-    ? world.name + ' <span class="domain">' + manifest.domain + ' · ' + world.id + '</span>'
-    : world.name + ' <span class="domain">' + manifestLabelOf(manifest) + ' · ' + world.id + '</span><span class="keyAnchorBadge">⚠ no domain — key only</span>';
+    ? escapeHtml(world.name) + ' <span class="domain">' + escapeHtml(manifest.domain) + ' · ' + escapeHtml(world.id) + '</span>'
+    : escapeHtml(world.name) + ' <span class="domain">' + escapeHtml(manifestLabelOf(manifest)) + ' · ' + escapeHtml(world.id) + '</span><span class="keyAnchorBadge">⚠ no domain — key only</span>';
   // document.title here is a no-op for anything actually visible — this
   // document is an extension-origin IFRAME, cross-origin from the host page,
   // and an iframe doesn't own the top-level browser tab title no matter what
@@ -2646,7 +2372,7 @@ async function enterWorld(worldId, anchorId) {
         ? (sceneData.anchors.find((a) => a.id === anchorId) || null)
         : null;
       if (anchor) {
-        placeLabel.innerHTML += ' <span class="anchorLabel">📍 ' + (anchor.label || anchor.id) + '</span>';
+        placeLabel.innerHTML += ' <span class="anchorLabel">📍 ' + escapeHtml(anchor.label || anchor.id) + '</span>';
       }
 
       // Task #227 — onInteractPrompt below fires every single animation
@@ -2796,9 +2522,8 @@ async function enterWorld(worldId, anchorId) {
       history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
 
       // Presence and chat both join here for a 3D world; a 2D world does
-      // the same in its own branch below (chat always, presence too).
-      await joinPresenceForWorld(manifest, world);
-      if (manifest.domain && chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence);
+      // the same in its own branch below.
+      joinPresenceAndChat(manifest, world);
     } catch (err) {
       hideSceneLoadProgress(); // a failed load shouldn't leave a stuck progress bar over the error message
       statusEl.textContent = 'Could not load world: ' + err.message;
@@ -2822,7 +2547,7 @@ async function enterWorld(worldId, anchorId) {
       ? (scene.anchors.find((a) => a.id === anchorId) || null)
       : null;
     if (anchor) {
-      placeLabel.innerHTML += ' <span class="anchorLabel">📍 ' + (anchor.label || anchor.id) + '</span>';
+      placeLabel.innerHTML += ' <span class="anchorLabel">📍 ' + escapeHtml(anchor.label || anchor.id) + '</span>';
     }
 
     window.__atlasScene = {
@@ -2845,12 +2570,11 @@ async function enterWorld(worldId, anchorId) {
 
     statusEl.textContent = 'In sync with ' + manifestLabelOf(manifest) + ' · ' + world.id;
     history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
-    // A 2D world joins the same presence room a 3D one does, so the
-    // Friends screen and the admin "Online now" view see its visitors; it
-    // just has no avatars to draw (see connectPresence()). Chat is gated
-    // on the world/domain opting in, as in the 3D branch.
-    await joinPresenceForWorld(manifest, world);
-    if (manifest.domain && chatEnabledForWorld(manifest, world)) connectChat(manifest.domain, world.id, manifest.presence);
+    // A 2D world joins the same presence room a 3D one does, so it is
+    // counted by the admin "Online now" view;
+    // it just has no avatars to draw. Chat is gated on the world/domain
+    // opting in, as in the 3D branch.
+    joinPresenceAndChat(manifest, world);
   } catch (err) {
     statusEl.textContent = 'Could not load world: ' + err.message;
     window.__atlasScene = { floor: { size: [10, 10], color: '#2a1a1a' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
@@ -4644,11 +4368,12 @@ function droppedItemDisplayName(asset, credential) {
 }
 
 function renderPreviewerItemDetail(name, cls, domain, thumbnail, properties, note) {
-  let html = '<div class="name">' + name + '</div>' + '<div class="meta">' + cls + ' · issued by ' + domain + '</div>';
-  if (note) html += '<div class="previewer-note">' + note + '</div>';
-  if (thumbnail) html += '<img class="previewer-thumbnail" src="' + thumbnail + '" alt="">';
+  // Every argument originates from a remote scene or issuer, so each is escaped.
+  let html = '<div class="name">' + escapeHtml(name) + '</div>' + '<div class="meta">' + escapeHtml(cls) + ' · issued by ' + escapeHtml(domain) + '</div>';
+  if (note) html += '<div class="previewer-note">' + escapeHtml(note) + '</div>';
+  if (thumbnail) html += '<img class="previewer-thumbnail" src="' + escapeHtml(thumbnail) + '" alt="">';
   if (properties && typeof properties === 'object' && Object.keys(properties).length) {
-    html += '<div class="previewer-properties">' + Object.entries(properties).map(([k, v]) => '<div>' + k + ': ' + formatPropertyValue(v) + '</div>').join('') + '</div>';
+    html += '<div class="previewer-properties">' + Object.entries(properties).map(([k, v]) => '<div>' + escapeHtml(k) + ': ' + escapeHtml(formatPropertyValue(v)) + '</div>').join('') + '</div>';
   }
   return html;
 }
@@ -4681,9 +4406,9 @@ function renderPreviewerContent(items) {
     } else {
       const info = getOrFetchPreviewerClassInfo(item.domain, item.marker.class, token);
       if (info === undefined) {
-        previewerBodyEl.innerHTML = '<div class="meta">Loading ' + item.marker.class + '…</div>';
+        previewerBodyEl.innerHTML = '<div class="meta">Loading ' + escapeHtml(item.marker.class) + '…</div>';
       } else if (info === null) {
-        previewerBodyEl.innerHTML = '<div class="meta">' + item.marker.class + ' (unknown class)</div>';
+        previewerBodyEl.innerHTML = '<div class="meta">' + escapeHtml(item.marker.class) + ' (unknown class)</div>';
       } else {
         // A "purchase" marker (the museum ticket stall's own worked example)
         // gets a price/expiry note instead of the generic "Not collected
@@ -4716,15 +4441,15 @@ function renderPreviewerContent(items) {
     if (item.kind === 'dropped') {
       const asset = item.entry.credential.asset;
       return '<div class="previewer-list-item" data-index="' + i + '">' +
-        (asset.thumbnail ? '<img class="previewer-list-item-thumb" src="' + asset.thumbnail + '" alt="">' : '<span class="previewer-list-item-thumb"></span>') +
-        '<span class="previewer-list-item-name">' + droppedItemDisplayName(asset, item.entry.credential) + '</span></div>';
+        (asset.thumbnail ? '<img class="previewer-list-item-thumb" src="' + escapeHtml(asset.thumbnail) + '" alt="">' : '<span class="previewer-list-item-thumb"></span>') +
+        '<span class="previewer-list-item-name">' + escapeHtml(droppedItemDisplayName(asset, item.entry.credential)) + '</span></div>';
     }
     const info = getOrFetchPreviewerClassInfo(item.domain, item.marker.class, token);
     const name = (info && info.name) || item.marker.label || item.marker.class;
     const thumb = info && info.thumbnail;
     return '<div class="previewer-list-item" data-index="' + i + '">' +
-      (thumb ? '<img class="previewer-list-item-thumb" src="' + thumb + '" alt="">' : '<span class="previewer-list-item-thumb"></span>') +
-      '<span class="previewer-list-item-name">' + name + '</span></div>';
+      (thumb ? '<img class="previewer-list-item-thumb" src="' + escapeHtml(thumb) + '" alt="">' : '<span class="previewer-list-item-thumb"></span>') +
+      '<span class="previewer-list-item-name">' + escapeHtml(name) + '</span></div>';
   });
   previewerBodyEl.innerHTML = rows.join('') + '<div class="previewer-collect-hint">Click one, or press E, to collect the nearest</div>';
 }
@@ -6270,9 +5995,21 @@ function renderChatModerationCard(entry, container, action) {
   el.className = 'info-card';
   el.innerHTML =
     '<div class="name">' + escapeHtml(entry.name || 'Visitor') + '</div>' +
-    '<div class="meta mono">' + escapeHtml(entry.publicKey.slice(0, 24)) + '…</div>' +
+    '<div class="meta">Saved by an earlier version against a wallet identity. Chat no longer carries one, so this entry no longer matches anyone; remove it when you like.</div>' +
     '<div class="item-actions">' +
-    '<button type="button" data-action="' + action + '" data-key="' + escapeHtml(entry.publicKey) + '" class="danger-btn">' + (action === 'unmute-chat-user' ? 'Unmute' : 'Unblock') + '</button>' +
+    '<button type="button" data-action="' + action + '" data-key="' + escapeHtml(entry.publicKey) + '" class="danger-btn">Remove</button>' +
+    '</div>';
+  container.appendChild(el);
+}
+
+function renderChatSessionCard(senderId, name, container, action) {
+  const el = document.createElement('div');
+  el.className = 'info-card';
+  el.innerHTML =
+    '<div class="name">' + escapeHtml(name || 'Visitor') + '</div>' +
+    '<div class="meta">This session only — applies to this connection, not to the person.</div>' +
+    '<div class="item-actions">' +
+    '<button type="button" data-action="' + action + '" data-sender="' + escapeHtml(senderId) + '" class="danger-btn">' + (action === 'unmute-chat-session' ? 'Unmute' : 'Unblock') + '</button>' +
     '</div>';
   container.appendChild(el);
 }
@@ -6281,32 +6018,65 @@ async function refreshChatAdminDisplay() {
   if (chatMutedUsersListEl) {
     const muted = await AtlasWallet.getMutedChatUsers();
     chatMutedUsersListEl.innerHTML = '';
-    if (muted.length === 0) {
-      chatMutedUsersListEl.innerHTML = '<div class="empty-note">No muted users.</div>';
-    } else {
-      muted.forEach((entry) => renderChatModerationCard(entry, chatMutedUsersListEl, 'unmute-chat-user'));
-    }
+    chatSessionMuted.forEach((name, id) => renderChatSessionCard(id, name, chatMutedUsersListEl, 'unmute-chat-session'));
+    muted.forEach((entry) => renderChatModerationCard(entry, chatMutedUsersListEl, 'unmute-chat-user'));
+    if (muted.length === 0 && chatSessionMuted.size === 0) chatMutedUsersListEl.innerHTML = '<div class="empty-note">No muted users.</div>';
   }
   if (chatBlockedUsersListEl) {
     const blocked = await AtlasWallet.getBlockedChatUsers();
     chatBlockedUsersListEl.innerHTML = '';
-    if (blocked.length === 0) {
-      chatBlockedUsersListEl.innerHTML = '<div class="empty-note">No blocked users.</div>';
-    } else {
-      blocked.forEach((entry) => renderChatModerationCard(entry, chatBlockedUsersListEl, 'unblock-chat-user'));
-    }
+    chatSessionBlocked.forEach((name, id) => renderChatSessionCard(id, name, chatBlockedUsersListEl, 'unblock-chat-session'));
+    blocked.forEach((entry) => renderChatModerationCard(entry, chatBlockedUsersListEl, 'unblock-chat-user'));
+    if (blocked.length === 0 && chatSessionBlocked.size === 0) chatBlockedUsersListEl.innerHTML = '<div class="empty-note">No blocked users.</div>';
   }
 }
 
-async function handleChatAdminListClick(e) {
-  const btn = e.target.closest('button[data-action="unmute-chat-user"], button[data-action="unblock-chat-user"]');
+// ---------- Settings -> Presence servers: recorded endpoint approvals ----------
+const presenceApprovalsListEl = document.getElementById('presenceApprovalsList');
+
+async function refreshPresenceApprovalsDisplay() {
+  if (!presenceApprovalsListEl) return;
+  const all = await readPresenceApprovals();
+  const records = Object.values(all).filter((r) => r && r.manifestOrigin && r.endpointOrigin);
+  presenceApprovalsListEl.innerHTML = '';
+  if (records.length === 0) {
+    presenceApprovalsListEl.innerHTML = '<div class="empty-note">No decisions recorded.</div>';
+    return;
+  }
+  records.forEach((r) => {
+    const el = document.createElement('div');
+    el.className = 'info-card';
+    el.innerHTML =
+      '<div class="name mono">' + escapeHtml(r.endpointOrigin) + '</div>' +
+      '<div class="meta">For worlds on ' + escapeHtml(r.manifestOrigin) + ' · ' + (r.decision === 'allow' ? 'allowed' : 'not allowed') + '</div>' +
+      '<div class="item-actions">' +
+      '<button type="button" data-action="forget-presence-approval" data-manifest="' + escapeHtml(r.manifestOrigin) + '" data-endpoint="' + escapeHtml(r.endpointOrigin) + '" class="danger-btn">Forget</button>' +
+      '</div>';
+    presenceApprovalsListEl.appendChild(el);
+  });
+}
+
+presenceApprovalsListEl && presenceApprovalsListEl.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action="forget-presence-approval"]');
   if (!btn) return;
-  if (btn.dataset.action === 'unmute-chat-user') {
+  const all = await readPresenceApprovals();
+  delete all[presenceApprovalKey(btn.dataset.manifest, btn.dataset.endpoint)];
+  await chrome.storage.local.set({ [PRESENCE_APPROVALS_KEY]: all });
+  await refreshPresenceApprovalsDisplay();
+});
+
+async function handleChatAdminListClick(e) {
+  const btn = e.target.closest('button[data-action="unmute-chat-user"], button[data-action="unblock-chat-user"], button[data-action="unmute-chat-session"], button[data-action="unblock-chat-session"]');
+  if (!btn) return;
+  if (btn.dataset.action === 'unmute-chat-session') {
+    chatSessionMuted.delete(btn.dataset.sender);
+  } else if (btn.dataset.action === 'unblock-chat-session') {
+    chatSessionBlocked.delete(btn.dataset.sender);
+  } else if (btn.dataset.action === 'unmute-chat-user') {
     await AtlasWallet.unmuteChatUser(btn.dataset.key);
   } else {
     await AtlasWallet.unblockChatUser(btn.dataset.key);
   }
-  await refreshChatModerationCache();
   renderChatMessages();
   await refreshChatAdminDisplay();
 }
@@ -6510,16 +6280,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
       await refreshMailDisplay();
       await refreshInventoryDisplay();
       await refreshMessagingDisplay();
-      // Whole-storage at-rest encryption pass: Muted/Blocked chat lists are
-      // now per-identity and encrypted (see CHAT_MODERATION_GUEST_SLOT in
-      // wallet.js), so refreshChatModerationCache()'s in-memory Sets are
-      // stuck on the shared anonymous "guest" bucket from before this
-      // login until explicitly refreshed here — same "fetch on login"
-      // treatment as mail/messaging just above, and needed for the same
-      // reason: this listener is the one place every local-mode
-      // unlock/create/import path already funnels through.
-      await refreshChatModerationCache();
-      renderChatMessages();
+      refreshChatAdminDisplay();
     }
   }
 });
@@ -6882,6 +6643,7 @@ async function openSettings() {
   await refreshTrustedBridgeDomainsDisplay();
   await refreshCacheDisplay();
   await refreshChatAdminDisplay();
+  await refreshPresenceApprovalsDisplay();
   await refreshAutoBackupDisplay();
   await refreshIdentitySyncDisplay();
   if (characterScaleInputEl) {
@@ -7900,9 +7662,9 @@ async function updateSocialBadge() {
   const unreadMail = entries.filter((e) => !e.read).length;
   const calendarEvents = await AtlasWallet.getCalendarEvents();
   const calendarDueSoon = countCalendarEventsDueSoon(calendarEvents);
-  // Live (same-world) requests plus the ones that arrived by handle.
+  // Requests that arrived by handle.
   const federatedIncoming = identity ? await AtlasWallet.getIncomingFriendRequests(identity.publicKey) : [];
-  const pendingRequestCount = presencePendingIncoming.length + federatedIncoming.length;
+  const pendingRequestCount = federatedIncoming.length;
   if (friendRequestsBadge) {
     friendRequestsBadge.textContent = String(pendingRequestCount);
     friendRequestsBadge.classList.toggle('show', pendingRequestCount > 0);
@@ -9852,25 +9614,17 @@ tradingListingsListEl && tradingListingsListEl.addEventListener('click', async (
   }
 });
 
-// ---------- contacts (Social -> Contacts tab, #67, restructured) ----------
+// ---------- contacts (Social -> Contacts tab) ----------
 //
-// Three ways in, one saved list:
-//  - Add Contact: who's actually standing in this world with you right now
-//    (from the live presence roster, see presenceRosterMeta), any friend
-//    requests aimed at you that are still live (presencePendingIncoming —
-//    only exists while both sides remain in the same room, see its own
-//    comment up near disconnectPresence), and a manual add-by-address form
-//    (below, near manualAddContactBtn) for when you already know someone's
-//    handle or public key. Adding a friend live, and answering a request,
-//    both go out as a signal over the CURRENT presence connection
-//    (sendSignal) — there's no other channel this can use, by design (see
-//    README.md's Friends section for why mail can't do this). The manual
-//    form is the one path that doesn't need that live connection at all.
-//  - Contacts: the actual saved list (AtlasWallet.getFriends(), persists
-//    across sessions/worlds — see wallet.js), now searchable and carrying
-//    a free-text notes field per entry.
-//  - Groups: local-only personal organization over that same saved list —
-//    see refreshContactGroupsDisplay further below.
+// Three tabs over one saved list:
+//  - Add Contact: friend requests by handle (delivered through a Post
+//    Office, see the federated request cards below) and a manual
+//    add-by-address form. Presence plays no part: entering a world never
+//    reveals a visitor's identity, and nobody can be friended from a room.
+//  - Contacts: the saved list (AtlasWallet.getFriends(), persists across
+//    sessions/worlds), searchable, with a free-text notes field per entry.
+//  - Groups: local-only organization over that same saved list — see
+//    refreshContactGroupsDisplay further below.
 //
 // The underlying data model is still "friends" throughout wallet.js
 // (getFriends/addFriend/removeFriend/updateFriendNotes, the atlasFriends
@@ -9882,41 +9636,6 @@ tradingListingsListEl && tradingListingsListEl.addEventListener('click', async (
 // with tab navigation — renaming the data model would ripple into all of
 // those for no user-visible benefit, where renaming just the tab/screen
 // ids and labels here is fully contained to this file.
-
-function renderPresentVisitorCard(id, meta, friendKeys, container) {
-  const el = document.createElement('div');
-  el.className = 'info-card';
-  const isFriend = !!(meta.publicKey && friendKeys.has(meta.publicKey));
-  const requested = presencePendingSentRequests.has(id);
-  let actionHtml;
-  if (!meta.publicKey) {
-    actionHtml = '<span class="empty-note">No identity — can\'t be friended</span>';
-  } else if (isFriend) {
-    actionHtml = '<span class="empty-note">Already a friend</span>';
-  } else if (requested) {
-    actionHtml = '<span class="empty-note">Request sent</span>';
-  } else {
-    actionHtml = '<button type="button" data-action="add-friend" data-id="' + id + '">Add friend</button>';
-  }
-  el.innerHTML =
-    '<div class="name">' + meta.name + '</div>' +
-    '<div class="meta">' + (meta.publicKey ? short(meta.publicKey, 20) : 'No wallet identity') + '</div>' +
-    '<div class="item-actions">' + actionHtml + '</div>';
-  container.appendChild(el);
-}
-
-function renderIncomingRequestCard(req, container) {
-  const el = document.createElement('div');
-  el.className = 'info-card';
-  el.innerHTML =
-    '<div class="name">' + escapeHtml(req.name) + '</div>' +
-    '<div class="meta">' + (req.publicKey ? short(req.publicKey, 20) : '') + '</div>' +
-    '<div class="item-actions">' +
-    '<button type="button" data-action="accept-request" data-from="' + req.from + '">Accept</button>' +
-    '<button type="button" data-action="decline-request" data-from="' + req.from + '" class="danger-btn">Decline</button>' +
-    '</div>';
-  container.appendChild(el);
-}
 
 // A friend request that arrived by handle (through a Post Office, possibly
 // from another domain). Everything shown comes from the signed relayed
@@ -10000,41 +9719,20 @@ function renderFriendCard(f, container) {
     '<div class="name">' + escapeHtml(f.name) + '</div>' +
     (address ? '<div class="meta contact-address" title="Mail address">' + escapeHtml(address) + '</div>' : '') +
     '<div class="meta">' + short(f.publicKey, 20) + '</div>' +
-    '<textarea class="contact-notes-input" data-key="' + f.publicKey + '" placeholder="Notes (just for you)…" rows="2" style="margin-top:6px;width:100%;box-sizing:border-box;font-family:inherit;font-size:12px;">' + escapeHtml(f.notes || '') + '</textarea>' +
+    '<textarea class="contact-notes-input" data-key="' + escapeHtml(f.publicKey) + '" placeholder="Notes (just for you)…" rows="2" style="margin-top:6px;width:100%;box-sizing:border-box;font-family:inherit;font-size:12px;">' + escapeHtml(f.notes || '') + '</textarea>' +
     '<div class="item-actions">' +
-    '<button type="button" data-action="remove-contact-ask" data-key="' + f.publicKey + '" class="link-btn">Remove</button>' +
+    '<button type="button" data-action="remove-contact-ask" data-key="' + escapeHtml(f.publicKey) + '" class="link-btn">Remove</button>' +
     '</div>' +
-    '<div class="remove-confirm-row empty-note" data-key="' + f.publicKey + '" hidden style="margin-top:6px;">' +
+    '<div class="remove-confirm-row empty-note" data-key="' + escapeHtml(f.publicKey) + '" hidden style="margin-top:6px;">' +
     'Remove this contact? ' +
-    '<button type="button" data-action="remove-contact-confirm" data-key="' + f.publicKey + '" class="danger-btn">Confirm</button> ' +
-    '<button type="button" data-action="remove-contact-cancel" data-key="' + f.publicKey + '" class="btn-secondary">Cancel</button>' +
+    '<button type="button" data-action="remove-contact-confirm" data-key="' + escapeHtml(f.publicKey) + '" class="danger-btn">Confirm</button> ' +
+    '<button type="button" data-action="remove-contact-cancel" data-key="' + escapeHtml(f.publicKey) + '" class="btn-secondary">Cancel</button>' +
     '</div>';
   container.appendChild(el);
 }
 
 async function refreshFriendsDisplay() {
   const friends = await AtlasWallet.getFriends();
-  const friendKeys = new Set(friends.map((f) => f.publicKey));
-
-  if (friendsHereListEl) {
-    friendsHereListEl.innerHTML = '';
-    if (!presenceIsConnected()) {
-      friendsHereListEl.innerHTML = '<div class="empty-note">Enter a world to see who\'s here right now.</div>';
-    } else if (presenceRosterMeta.size === 0) {
-      friendsHereListEl.innerHTML = '<div class="empty-note">Nobody else here right now.</div>';
-    } else {
-      presenceRosterMeta.forEach((meta, id) => renderPresentVisitorCard(id, meta, friendKeys, friendsHereListEl));
-    }
-  }
-
-  if (friendRequestsListEl) {
-    friendRequestsListEl.innerHTML = '';
-    if (presencePendingIncoming.length === 0) {
-      friendRequestsListEl.innerHTML = '<div class="empty-note">No pending requests.</div>';
-    } else {
-      presencePendingIncoming.forEach((req) => renderIncomingRequestCard(req, friendRequestsListEl));
-    }
-  }
 
   const requestIdentity = await AtlasWallet.getIdentity();
   const federatedIncoming = requestIdentity ? await AtlasWallet.getIncomingFriendRequests(requestIdentity.publicKey) : [];
@@ -10043,9 +9741,8 @@ async function refreshFriendsDisplay() {
     federatedFriendRequestsListEl.innerHTML = '';
     federatedIncoming.forEach((req) => renderFederatedRequestCard(req, federatedFriendRequestsListEl));
   }
-  if (friendRequestsListEl && federatedIncoming.length > 0 && presencePendingIncoming.length === 0) {
-    // The "No pending requests." line would contradict the cards below it.
-    friendRequestsListEl.innerHTML = '';
+  if (friendRequestsListEl) {
+    friendRequestsListEl.innerHTML = federatedIncoming.length > 0 ? '' : '<div class="empty-note">No pending requests.</div>';
   }
   if (sentFriendRequestsListEl) {
     sentFriendRequestsListEl.innerHTML = '';
@@ -10106,7 +9803,7 @@ contactsSearchInput && contactsSearchInput.addEventListener('input', () => {
   applyListFilter(contactsListEl, contactsSearchInput.value);
 });
 
-// One delegated listener covers Add Contact's two live lists AND the
+// One delegated listener covers Add Contact's request lists AND the
 // Contacts list's own per-card actions (notes textarea aside, handled
 // separately above) — same pattern as recentWorldsListEl's own click
 // handler.
@@ -10114,29 +9811,6 @@ socialScreen && socialScreen.addEventListener('click', async (e) => {
   const btn = e.target.closest('button');
   if (!btn) return;
   const action = btn.dataset.action;
-
-  if (action === 'add-friend') {
-    const id = btn.dataset.id;
-    const meta = presenceRosterMeta.get(id);
-    if (!meta || !meta.publicKey) return;
-    presencePendingSentRequests.add(id);
-    sendSignal(id, 'friend-request', presenceOwnPublicKey, presenceOwnName || 'Visitor');
-    await refreshFriendsDisplay();
-    return;
-  }
-
-  if (action === 'accept-request') {
-    const from = btn.dataset.from;
-    const req = presencePendingIncoming.find((r) => r.from === from);
-    if (!req) return;
-    presencePendingIncoming = presencePendingIncoming.filter((r) => r.from !== from);
-    if (req.publicKey) {
-      try { await AtlasWallet.addFriend(req.publicKey, req.name || 'Friend'); } catch (err) {}
-    }
-    sendSignal(from, 'friend-request-accepted', presenceOwnPublicKey, presenceOwnName || 'Visitor');
-    await refreshFriendsDisplay();
-    return;
-  }
 
   if (action === 'accept-federated-request') {
     try {
@@ -10173,14 +9847,6 @@ socialScreen && socialScreen.addEventListener('click', async (e) => {
       btn.textContent = 'Could not send';
       if (friendReqStatusEl) friendReqStatusEl.textContent = err.message;
     }
-    return;
-  }
-
-  if (action === 'decline-request') {
-    const from = btn.dataset.from;
-    presencePendingIncoming = presencePendingIncoming.filter((r) => r.from !== from);
-    sendSignal(from, 'friend-request-declined', presenceOwnPublicKey, presenceOwnName || 'Visitor');
-    await refreshFriendsDisplay();
     return;
   }
 
@@ -10288,7 +9954,7 @@ function renderContactGroupCard(group, friends, container) {
     membersHtml = friends.map((f) => {
       const checked = group.memberPublicKeys.includes(f.publicKey) ? ' checked' : '';
       return '<label style="display:block;margin-top:4px;font-size:12px;">' +
-        '<input type="checkbox" data-action="toggle-group-member" data-group="' + group.id + '" data-key="' + f.publicKey + '"' + checked + '> ' +
+        '<input type="checkbox" data-action="toggle-group-member" data-group="' + group.id + '" data-key="' + escapeHtml(f.publicKey) + '"' + checked + '> ' +
         escapeHtml(f.name) + '</label>';
     }).join('');
   }
@@ -10478,27 +10144,40 @@ manualAddContactBtn && manualAddContactBtn.addEventListener('click', async () =>
 // reasoning: the server only ever hands back who's actually there, never
 // anyone's friends list.
 
-function renderFavoriteCard(entry, status, friendByKey, index, total, container) {
+// `count` is the number of visitors in the favorited world, or null when it
+// cannot be shown (presence server unreachable, or its origin not approved).
+// Only a count is shown: nobody is identified, friends included. Every
+// manifest-supplied field is escaped.
+function renderFavoriteCard(entry, count, index, total, container) {
   const el = document.createElement('div');
   el.className = 'info-card';
   const isHere = !!(currentWorld && currentManifest && entry.domain === currentManifest.domain && entry.worldId === currentWorld.id);
-  const friendsHere = (status.roster || []).filter((m) => m.publicKey && friendByKey.has(m.publicKey));
-  const friendNames = friendsHere.map((m) => friendByKey.get(m.publicKey).name);
-  let statusLine = status.count > 0 ? status.count + ' here now' : 'Nobody here right now';
-  if (friendNames.length > 0) statusLine += ' · friends here: ' + friendNames.join(', ');
+  const statusLine = count === null ? 'Visitor count unavailable' : (count > 0 ? count + (count === 1 ? ' visitor' : ' visitors') + ' here now' : 'Nobody here right now');
+  const domainAttr = escapeHtml(entry.domain);
   el.innerHTML =
-    '<div class="name">' + entry.worldName + '</div>' +
-    '<div class="meta">' + entry.domain + (entry.worldId ? ' · ' + entry.worldId : '') + '</div>' +
-    '<div class="meta">' + statusLine + '</div>' +
+    '<div class="name">' + escapeHtml(entry.worldName) + '</div>' +
+    '<div class="meta">' + domainAttr + (entry.worldId ? ' · ' + escapeHtml(entry.worldId) : '') + '</div>' +
+    '<div class="meta">' + escapeHtml(statusLine) + '</div>' +
     '<div class="item-actions">' +
     (isHere
       ? '<span class="empty-note">You are here</span>'
-      : '<button type="button" data-action="travel-favorite" data-manifest="' + entry.manifestUrl + '" data-world="' + (entry.worldId || '') + '">Go</button>') +
-    (index > 0 ? '<button type="button" data-action="move-favorite-up" data-domain="' + entry.domain + '">Move up</button>' : '') +
-    (index < total - 1 ? '<button type="button" data-action="move-favorite-down" data-domain="' + entry.domain + '">Move down</button>' : '') +
-    '<button type="button" data-action="remove-favorite" data-domain="' + entry.domain + '" class="danger-btn">Remove</button>' +
+      : '<button type="button" data-action="travel-favorite" data-manifest="' + escapeHtml(entry.manifestUrl) + '" data-world="' + escapeHtml(entry.worldId || '') + '">Go</button>') +
+    (index > 0 ? '<button type="button" data-action="move-favorite-up" data-domain="' + domainAttr + '">Move up</button>' : '') +
+    (index < total - 1 ? '<button type="button" data-action="move-favorite-down" data-domain="' + domainAttr + '">Move down</button>' : '') +
+    '<button type="button" data-action="remove-favorite" data-domain="' + domainAttr + '" class="danger-btn">Remove</button>' +
     '</div>';
   container.appendChild(el);
+}
+
+// Counts are fetched only from endpoints already allowed for the favorite's
+// own manifest origin (same-origin, or previously approved); this never
+// opens an approval prompt.
+async function favoritePresenceCount(entry) {
+  if (!entry.worldId) return null;
+  let origin;
+  try { origin = new URL(entry.manifestUrl).origin; } catch (err) { return null; }
+  const base = await approvedPresenceBase(origin, entry.presenceBase || undefined, { prompt: false });
+  return fetchPresenceStatus(entry.domain, entry.worldId, base);
 }
 
 async function refreshFavoritesDisplay() {
@@ -10508,12 +10187,8 @@ async function refreshFavoritesDisplay() {
   if (favorites.length === 0) {
     favoritesListEl.innerHTML = '<div class="empty-note">No favorites yet — while you\'re in a world, use "Favorite this domain" above.</div>';
   } else {
-    const friends = await AtlasWallet.getFriends();
-    const friendByKey = new Map(friends.map((f) => [f.publicKey, f]));
-    const statuses = await Promise.all(favorites.map((entry) =>
-      entry.worldId ? fetchPresenceStatus(entry.domain, entry.worldId, entry.presenceBase) : Promise.resolve({ count: 0, roster: [] })
-    ));
-    favorites.forEach((entry, i) => renderFavoriteCard(entry, statuses[i], friendByKey, i, favorites.length, favoritesListEl));
+    const counts = await Promise.all(favorites.map((entry) => favoritePresenceCount(entry)));
+    favorites.forEach((entry, i) => renderFavoriteCard(entry, counts[i], i, favorites.length, favoritesListEl));
   }
   await refreshFavoriteCurrentDomainButton();
 }
@@ -11586,7 +11261,6 @@ autoBackupRestoreBtn.addEventListener('click', async () => {
     await AtlasWallet.checkAllMail();
     await refreshMailDisplay();
     await refreshMessagingDisplay();
-    await refreshChatModerationCache();
     renderChatMessages();
     refreshChatIdentity();
   } catch (err) {

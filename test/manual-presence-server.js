@@ -1,5 +1,5 @@
 // Manual check for presence-server/server.js's hand-rolled WebSocket
-// protocol (task #66) — run in isolation from the extension so the hardest
+// protocol — run in isolation from the extension so the hardest
 // new piece (a from-scratch RFC 6455 implementation, framing included) is
 // proven correct before anything in the browser depends on it.
 //
@@ -16,7 +16,7 @@
 //      the above — proves room isolation.
 //   5. Closing a connection makes the other client in its room receive
 //      'left' for that connection's id.
-//   6-9 (task #68): the HTTP polling fallback shares the exact same rooms
+//   6-9 the HTTP polling fallback shares the exact same rooms
 //      as the WebSocket path, not a parallel system —
 //        6. a polling client joining the SAME room a WS client is already
 //           in sees that WS client in its roster, AND the WS client gets a
@@ -28,7 +28,7 @@
 //           /sync roster (ws -> poll — polling has no push, so it pulls).
 //        9. an explicit /presence/poll/leave notifies the WS client with
 //           'left', same as a WS disconnect would.
-//   10. (task #68) a polling client that stops syncing entirely (no
+//   10. a polling client that stops syncing entirely (no
 //       explicit leave — e.g. the tab was just closed) is swept out by the
 //       server's staleness timer and the WS client still gets 'left' —
 //       proves cleanup doesn't depend on a well-behaved client. Uses env
@@ -158,27 +158,28 @@ function connect() {
     if (leftEvent.type !== 'left' || leftEvent.id !== idB) throw new Error('Expected A to receive "left" for B, got: ' + JSON.stringify(leftEvent));
     console.log('PASS: disconnect correctly broadcast as "left"');
 
-    console.log('STEP 6 (#68): a polling client joins the SAME room a WS client (A) is already in — mixed transport, both directions');
+    console.log('STEP 6: a polling client joins the SAME room a WS client (A) is already in — mixed transport, both directions');
     const joinD = await pollJoin('localhost:8001', 'lobby', 'Dave');
-    const idD = joinD.id;
+    const idD = joinD.id; // private poll token
+    const pubD = joinD.publicId; // the avatar id other members see
     if (!joinD.roster.some((m) => m.id === idA && m.name === 'Alice')) {
       throw new Error('Expected the polling client\'s join roster to include WS client A, got: ' + JSON.stringify(joinD.roster));
     }
     const joinedEventForD = await a.next();
-    if (joinedEventForD.type !== 'joined' || joinedEventForD.id !== idD || joinedEventForD.name !== 'Dave') {
+    if (joinedEventForD.type !== 'joined' || joinedEventForD.id !== pubD || joinedEventForD.name !== 'Dave') {
       throw new Error('Expected WS client A to get a real "joined" push for the polling client, got: ' + JSON.stringify(joinedEventForD));
     }
     console.log('PASS: the polling client sees WS client A in its roster, and A gets pushed a real "joined" event for it');
 
-    console.log('STEP 7 (#68): the polling client syncing a position push-notifies the WS client (poll -> ws)');
+    console.log('STEP 7: the polling client syncing a position push-notifies the WS client (poll -> ws)');
     await pollSync(idD, { x: 5, y: 0, z: 5, yaw: 1.2 });
     const movedFromD = await a.next();
-    if (movedFromD.type !== 'moved' || movedFromD.id !== idD || movedFromD.x !== 5 || movedFromD.z !== 5 || movedFromD.yaw !== 1.2) {
+    if (movedFromD.type !== 'moved' || movedFromD.id !== pubD || movedFromD.x !== 5 || movedFromD.z !== 5 || movedFromD.yaw !== 1.2) {
       throw new Error('Expected A to be pushed a "moved" event for the polling client\'s sync, got: ' + JSON.stringify(movedFromD));
     }
     console.log('PASS: a polling sync push-notifies WS members exactly like a WS move would');
 
-    console.log('STEP 8 (#68): the WS client moving is picked up by the polling client\'s next /sync roster (ws -> poll, the pull side)');
+    console.log('STEP 8: the WS client moving is picked up by the polling client\'s next /sync roster (ws -> poll, the pull side)');
     a.send({ type: 'move', x: -3, y: 0, z: -3, yaw: 2.0 });
     await new Promise((r) => setTimeout(r, 150)); // let the move land server-side before polling for it
     const syncAfterAMoved = await pollSync(idD);
@@ -188,15 +189,15 @@ function connect() {
     }
     console.log('PASS: a polling client\'s roster reflects a WS member\'s latest position');
 
-    console.log('STEP 9 (#68): an explicit poll leave notifies the WS client with "left", same as a WS disconnect would');
+    console.log('STEP 9: an explicit poll leave notifies the WS client with "left", same as a WS disconnect would');
     await pollLeave(idD);
     const leftEventForD = await a.next();
-    if (leftEventForD.type !== 'left' || leftEventForD.id !== idD) throw new Error('Expected A to receive "left" for the polling client, got: ' + JSON.stringify(leftEventForD));
+    if (leftEventForD.type !== 'left' || leftEventForD.id !== pubD) throw new Error('Expected A to receive "left" for the polling client, got: ' + JSON.stringify(leftEventForD));
     console.log('PASS: explicit poll leave broadcasts "left" correctly');
 
-    console.log('STEP 10 (#68): a polling client that just stops syncing (no explicit leave) is swept out by the staleness timer');
+    console.log('STEP 10: a polling client that just stops syncing (no explicit leave) is swept out by the staleness timer');
     const joinE = await pollJoin('localhost:8001', 'lobby', 'Erin');
-    const idE = joinE.id;
+    const idE = joinE.publicId;
     await a.next(); // consume E's "joined" push — not what this step is checking
     const leftEventForE = await a.next(6000); // POLL_TIMEOUT_MS(1500) + POLL_SWEEP_INTERVAL_MS(250), both shrunk via env for this test, plus margin
     if (leftEventForE.type !== 'left' || leftEventForE.id !== idE) throw new Error('Expected A to eventually receive "left" for the abandoned polling client, got: ' + JSON.stringify(leftEventForE));

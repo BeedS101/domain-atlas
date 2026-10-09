@@ -3,12 +3,12 @@ DOMAIN ATLAS — PHP presence + chat (polling fallback)
 
 What this is
 -------------
-A drop-in polling backend for multiplayer presence (task #66/#68) AND
-in-world chat (task #105-110) that runs on plain PHP + Apache — no
+A drop-in polling backend for multiplayer presence AND in-world chat that
+runs on plain PHP + Apache — no
 Node.js Selector needed, same reason issuer-php exists (see
 issuer-php/README.txt). It answers the same polling routes
-presence-server/server.js does — /presence/poll/join, /sync, /signal,
-/leave for presence; /presence/poll/chat-join, /chat-sync, /chat-send,
+presence-server/server.js does — /presence/poll/join, /sync, /leave for
+presence; /presence/poll/chat-join, /chat-sync, /chat-send,
 /chat-leave for chat — backed by JSON files instead of in-memory Maps, so
 other visitors in the same world show up as walking characters, and chat
 messages show up for everyone in the domain, exactly like the Node
@@ -40,16 +40,12 @@ What's in this folder
     poll/
       join.php       - POST /presence/poll/join    (a visitor enters a room)
       sync.php       - POST /presence/poll/sync     (heartbeat + move + roster fetch)
-      signal.php     - POST /presence/poll/signal   (friend-request relay, #67)
       leave.php      - POST /presence/poll/leave    (a visitor explicitly leaves)
-      join-status.php       - POST /presence/poll/join-status       (#137: poll a pending duplicate-join challenge)
-      duplicate-response.php - POST /presence/poll/duplicate-response (#137: existing member answers Leave/Keep)
-      activity.php           - POST /presence/poll/activity          (#137: explicit "still here" ping, e.g. wallet activity)
       chat-join.php  - POST /presence/poll/chat-join  (a visitor joins a domain's chat)
       chat-sync.php  - POST /presence/poll/chat-sync  (heartbeat + fetch new messages)
       chat-send.php  - POST /presence/poll/chat-send  (send one chat message)
       chat-leave.php - POST /presence/poll/chat-leave (a visitor explicitly leaves chat)
-    status.php       - GET /presence/status (who's in a world right now, #61)
+    status.php       - GET /presence/status (how many are in a world right now; a count only)
     lib/
       bootstrap.php, store.php  - shared code, not web routes — store.php
                                     holds BOTH the presence room logic and
@@ -58,7 +54,8 @@ What's in this folder
       .htaccess                  - blocks direct web access to this folder
                                     (this is where the two state JSON files
                                     live: atlas-presence-store.json and
-                                    atlas-chat-store.json)
+                                    atlas-chat-store.json; both are runtime
+                                    state and ignored by Git)
     .htaccess        - makes the URLs above work without a .php extension,
                         matching what the extension calls
 
@@ -98,10 +95,17 @@ visitors' extensions at them until your domain's manifest
 
 This is NOT part of SPEC.md — it's a plain, optional, implementation-only
 convenience field, the same way presence itself isn't a formal protocol
-claim yet. A manifest with no "presence" field (every local demo domain in
-this repo) just keeps using the Node dev default
-(ws://localhost:8004/presence) — nothing about local development changes
-because of this bundle existing.
+claim yet. A manifest with no "presence" field gets the Node dev default
+(localhost:8004) only when the manifest is itself served from a loopback
+host, so every local demo domain keeps working; a remote manifest with no
+field gets no presence or chat.
+
+Which origin the extension will talk to is the VISITOR'S decision: a
+presence server on the manifest's own origin (the example above) is used
+automatically, while one on any other origin is only used after the visitor
+approves that pair of sites in a prompt (recorded under Settings ->
+Presence servers). Point "presence" at your own domain unless you have a
+reason not to.
 
 With "presence" set to your own domain, extension/viewer.js derives:
   - a WebSocket URL: wss://example.com/presence — nothing answers this on
@@ -144,7 +148,7 @@ poll cycle — and you'd point "presence" in your manifest at that instead.
 
 In-world chat: what's different from presence
 --------------------------------------------------
-Chat (task #105-110) rides the SAME polling model as presence above — try
+Chat rides the SAME polling model as presence above — try
 WebSocket first (nothing answers it here), fall back to
 /presence/poll/chat-join, /chat-sync, /chat-send, /chat-leave — but the
 room shape is different in one way worth knowing: presence rooms are
@@ -157,18 +161,18 @@ exact same message stream, without this bundle needing to track two
 separate histories.
 
 Reading chat never requires a wallet identity — any visitor sees the
-backlog and live messages with no login. SENDING requires an unlocked
-wallet identity (this app's own rule, not a hosting constraint): a
-chat-join with no publicKey can read fine but any chat-send from that
-member is rejected server-side with reason "login-required", the same
-authoritative check the WebSocket/Node version enforces — never trust a
-client-side gate alone, since a modified client could always skip it.
-Every message is also profanity-filtered server-side (lib/store.php's
-chat_text_contains_blocked_word(), a plain substring match against a
-punctuation-normalized-to-spaces version of the text — see that
-function's own comment for why substring rather than whole-word-only)
-before it's ever added to the history or handed back to anyone else, same
-as the Node version's identical check.
+backlog and live messages with no login. Chat carries no identity at all:
+a message has a display name and a random per-join senderId this bundle
+assigns, and no public key. A display name is whatever the sender typed, so
+it proves nothing, and senderId only tells connections apart. The
+extension enables the chat input only while the wallet is unlocked, but
+that is a client-side choice; this bundle does not (and cannot) verify it,
+and instead rate-limits each connection (CHAT_MIN_INTERVAL_MS) and filters
+every message server-side (lib/store.php's chat_text_contains_blocked_word(),
+a plain substring match against a punctuation-normalized-to-spaces version
+of the text — see that function's own comment for why substring rather than
+whole-word-only) before it's ever added to the history or handed back to
+anyone else, same as the Node version's identical check.
 
 A poll-based chat member has no persistent connection to be pushed a new
 message on, so instead each member carries a `cursor` (the highest
@@ -181,54 +185,51 @@ every time.
 A note on room state and privacy
 ------------------------------------
 presence/lib/atlas-presence-store.json holds every current visitor's
-in-world position and display name, across every room, at all times.
-presence/lib/atlas-chat-store.json holds every domain's recent chat
-history (capped at CHAT_HISTORY_LIMIT messages, oldest dropped first —
-same rolling-buffer size as the Node version) plus current chat-poll
-member bookkeeping. Unlike issuer-php's atlas-mail-store.json (private
-correspondence) both of these are inherently ephemeral and low-stakes —
-display names default to a short public-key fragment or "Visitor" unless
-someone set a wallet alias, positions are meaningless outside the 3D
-scene they belong to, and chat messages are, well, a public chat room
-anyone in the domain can already read — but it's still real visitor data,
-so both files live in lib/ behind the same web-access deny-all .htaccess
-as everything else private in this bundle, not under .well-known. There's
-no admin/listing endpoint for either, same reasoning as issuer-php's
-subscriber roster.
+in-world position, look and display name, across every room, plus a random
+public id and a private poll token per member. No wallet public key or
+other persistent identifier is stored: a member is a name, a pose and a
+look, and both identifiers are random per join. presence/lib/
+atlas-chat-store.json holds every domain's recent chat history plus current
+chat-poll member bookkeeping. Both files are inherently ephemeral and
+low-stakes, but they are still real visitor data, so both live in lib/
+behind the same web-access deny-all .htaccess as everything else private in
+this bundle, not under .well-known, and both are ignored by Git. There is no
+admin/listing endpoint for either, and GET /presence/status returns only a
+count.
+
+Retention and cleanup:
+  - A presence member that stops syncing is removed after
+    POLL_TIMEOUT_MS (default 15000). Every locked write sweeps ALL rooms,
+    not only the one being touched, so rooms nobody visits again are still
+    cleaned up as soon as anyone anywhere makes a request.
+  - Chat history keeps at most CHAT_HISTORY_LIMIT messages (default 50)
+    and drops anything older than CHAT_HISTORY_TTL_MS (default 24 hours).
+    Chat domains with no members and no history are deleted.
+  - Store files written by older versions (which carried a wallet public
+    key, pending friend signals or duplicate-join bookkeeping) are scrubbed
+    of those fields the first time any request touches them.
+
+Limits (environment variables; the Node server reads the same names): each
+request is bounded and an over-limit join is refused with 503 room-full or
+server-busy:
+  MAX_ROOMS (500)  MAX_MEMBERS_PER_ROOM (100)  MAX_TOTAL_MEMBERS (2000)
+  MAX_CHAT_DOMAINS (500)  MAX_CHAT_MEMBERS_PER_DOMAIN (200)
+  MAX_BODY_BYTES (8192; larger bodies get 413)  CHAT_MIN_INTERVAL_MS (400)
+  CHAT_HISTORY_LIMIT (50)  CHAT_HISTORY_TTL_MS (86400000)
+  POLL_TIMEOUT_MS (15000)
+domain and world ids must match [A-Za-z0-9._:-]{1,120}. The limits are
+checked per request against the stored state, so they bound the store's
+size but are not a defence against a flood of requests; put rate limiting
+in front of the host if that matters to you.
 
 
-Duplicate-identity join guard (task #137)
-----------------------------------------
-Same rule as the Node version: if a visitor's wallet publicKey is already
-present in the room it's joining, the join isn't just let through as a
-second copy of the same identity. If that existing member has gone
-PRESENCE_ACTIVITY_IDLE_MS (env ACTIVITY_IDLE_MS, default 20 minutes) with
-no real movement, chat send, or explicit activity ping, it's presumed an
-abandoned tab and the new join silently takes its place. Otherwise the new
-join is held pending — /presence/poll/join returns
-{status:'pending', id, challengeId, countdownMs} instead of {id, roster} —
-while the existing member is notified (via the same pendingSignals
-mechanism friend requests already use, delivered on its own next
-/presence/poll/sync) and gets PRESENCE_DUPLICATE_JOIN_COUNTDOWN_MS (env
-DUPLICATE_JOIN_COUNTDOWN_MS, default 60 seconds) to explicitly answer
-Leave now or Keep this session active via /presence/poll/duplicate-response.
-No answer in time means the newcomer wins by default. The pending
-new joiner finds out how it settled by polling /presence/poll/join-status
-with the challengeId until it stops returning {status:'pending'}.
-
-One PHP-specific wrinkle: presence-server.js schedules the countdown's
-default outcome with a real timer so it fires even if nobody asks again.
-This bundle has no long-running process to run one, so instead every
-single request that touches presence/lib/atlas-presence-store.json — a
-join, a sync, a signal, an activity ping, from ANY visitor anywhere — also
-checks whether any pending challenge's countdown has run out and settles
-it right there (see presence_sweep_challenges() in lib/store.php). In
-practice that's frequent enough (every visitor syncs roughly every couple
-of seconds) that the timing stays close to the Node version's; the only
-real difference is a challenge could in principle sit unresolved a little
-longer if literally nothing touches the store in the meantime — the same
-"lazy instead of timer-based, fine at demo/small-site scale" tradeoff this
-bundle already makes for staleness sweeping.
+Reconnects and duplicate sessions
+----------------------------------
+There is no duplicate-session guard. Presence has no identity to compare, so
+a reconnect or a second tab simply joins as another visitor with a new
+random id; the old entry disappears when it stops syncing. A poll session
+whose token has been swept gets 404 from /presence/poll/sync and the
+extension rejoins with a fresh id.
 
 
 One real architectural difference from the Node version, worth knowing
@@ -246,3 +247,18 @@ issuer-php/README.txt gives for re-parsing the private key on every
 request. A busy site with hundreds of concurrent visitors in one room
 would eventually want a real datastore instead of one flat file; that's a
 very different scale of problem than what this bundle is for.
+
+
+Upgrading from an earlier version
+----------------------------------
+Upload the files in lib/ and poll/ over the old ones, then DELETE these
+files from the live host, which no longer exist and must not stay reachable:
+  presence/poll/signal.php
+  presence/poll/join-status.php
+  presence/poll/duplicate-response.php
+  presence/poll/activity.php
+Existing atlas-presence-store.json / atlas-chat-store.json files can stay;
+they are scrubbed in place. Upgrade the server before (or together with)
+the extension: an old server still lists wallet keys to new clients, and
+the new extension no longer sends a key, so old servers would reject chat
+sends that they require a key for.

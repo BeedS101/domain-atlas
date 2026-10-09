@@ -79,18 +79,6 @@
   }
   #scene3dInteractHint.active { display: block; }
 
-  /* Task #137 — a poll/WS join that came back "pending" because this
-     same identity is already active elsewhere in this room, waiting on
-     the OTHER session's Leave/Keep decision (or the countdown lapsing).
-     Same small pill look as #scene3dHint above, just a second instance
-     since the two are never shown at the same time anyway (this one only
-     matters before a world's presence room is actually joined). */
-  #presenceJoinWaitingHint {
-    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
-    font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
-    padding: 6px 12px; border-radius: 999px; border: 1px solid #2c3c44; display: none;
-  }
-  #presenceJoinWaitingHint.active { display: block; }
   #presenceTransientHint {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
@@ -98,20 +86,18 @@
   }
   #presenceTransientHint.active { display: block; }
 
-  /* Task #137 — the notice shown to the EXISTING session when a second
-     join under the same identity shows up elsewhere. Deliberately a
-     small centered panel, not a full-page dark overlay — this is an
-     FYI-with-a-decision, not a blocking security gate, and the visitor
-     should still be able to see (though not necessarily interact with)
-     the world behind it while deciding. */
-  #duplicateJoinModal { display: none; position: fixed; inset: 0; z-index: 20; align-items: center; justify-content: center; }
-  #duplicateJoinModal.active { display: flex; }
-  #duplicateJoinBox {
+  /* Asks before a world uses a presence server on another origin (see
+     approvedPresenceBase() in viewer.js). A small centered panel rather than
+     a full-page overlay: the world stays visible behind it. */
+  #presenceApprovalModal { display: none; position: fixed; inset: 0; z-index: 20; align-items: center; justify-content: center; pointer-events: none; }
+  #presenceApprovalModal.active { display: flex; }
+  #presenceApprovalBox {
+    pointer-events: auto;
     background: rgba(20,31,38,0.97); border: 1px solid #2c3c44; border-radius: 10px;
-    padding: 18px 20px; max-width: 340px; box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+    padding: 18px 20px; max-width: 360px; box-shadow: 0 6px 24px rgba(0,0,0,0.4);
   }
-  #duplicateJoinBox .subhead { margin-bottom: 8px; }
-  #duplicateJoinCountdownLine { font-size: 12px; color: #a9b8bf; margin-bottom: 12px; }
+  #presenceApprovalBox .subhead { margin-bottom: 8px; }
+  #presenceApprovalDetails { font-size: 12px; margin-bottom: 8px; word-break: break-all; }
   #hint {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
@@ -121,15 +107,15 @@
   /* Task #195 — in-world chess, a scene-local minigame (see chess.js's own
      header comment for why this deliberately touches no manifest field,
      credential, or SPEC.md section). A real dark backdrop rather than
-     duplicateJoinModal's "see the world behind it" look — this is a
+     presenceApprovalModal's "see the world behind it" look — this is a
      voluntary, attention-holding activity you walked up to and clicked
      on, not an FYI popping up over whatever you were already doing, so
      dimming the scene behind it is the right call here even though it
      wasn't for that one. z-index sits between #walletPanel (11) and
-     #duplicateJoinModal (20): the wallet can still be the thing you
+     #presenceApprovalModal (20): the wallet can still be the thing you
      summon over a modal if you want to check an item mid-game (rare, but
-     nothing prevents it), while a real duplicate-identity decision still
-     wins over a game. */
+     nothing prevents it), while an approval decision for a third-party
+     presence server still wins over a game. */
   #chessModal { display: none; position: fixed; inset: 0; z-index: 15; align-items: center; justify-content: center; background: rgba(8,13,16,0.72); }
   #chessModal.active { display: flex; }
   #chessBox {
@@ -187,7 +173,7 @@
      dismissible-banner tier. Modeled on #chessModal's full dark backdrop
      just below (this IS an attention-holding decision, not merely an
      FYI), but ranked ABOVE every other modal in this file — z-index 25,
-     above #duplicateJoinModal's 20 — because a trust decision about what
+     above #presenceApprovalModal's 20 — because a trust decision about what
      you're about to enter should never be able to hide behind, or get
      dismissed incidentally along with, something else already open. */
   #keyAnchorModal { display: none; position: fixed; inset: 0; z-index: 25; align-items: center; justify-content: center; background: rgba(8,13,16,0.82); }
@@ -819,7 +805,7 @@
      a live world (see its own comment), which would make it silently
      useless from the ordinary side panel. z-index 16: above #chessModal
      (15, an in-progress game shouldn't block reviewing an offer) and
-     below #duplicateJoinModal (20)/#keyAnchorModal (25) — neither of
+     below #presenceApprovalModal (20)/#keyAnchorModal (25) — neither of
      those should ever be able to hide behind a wallet-local decision
      like this one. */
   #bridgeOfferPreviewModal { display: none; position: fixed; inset: 0; z-index: 16; align-items: center; justify-content: center; background: rgba(8,13,16,0.72); }
@@ -952,7 +938,7 @@
      right/top default below) the instant it's ever been dragged — see
      AtlasWallet.get/setMessagingWindowSettings()'s `positioned` flag.
      z-index 14: above the Asset Viewer's popover (13) but below
-     #chessModal (15) and #duplicateJoinModal (20) — this window shouldn't
+     #chessModal (15) and #presenceApprovalModal (20) — this window shouldn't
      out-rank a modal that's actively demanding a decision. */
   #messagingWidget {
     position: fixed; z-index: 14;
@@ -1159,34 +1145,20 @@
   <div id="scene3dHint">WASD to walk · drag to look · scroll to zoom out · walk into a glowing ring to take that portal · F11 for fullscreen</div>
   <div id="scene3dInteractHint"></div>
 
-  <!-- Task #137 — shown to a NEW joiner while requestJoin() on the
-       presence server is holding their join as "pending" (this same
-       identity was recently active elsewhere in this room already).
-       Cleared the moment a real 'welcome' arrives (joined) or the
-       existing session explicitly declines ('join-denied'/'denied'). -->
-  <div id="presenceJoinWaitingHint">Waiting for the other session using your identity to respond…</div>
-
-  <!-- Same pill look, but for a one-off message that shows itself and
-       clears itself a few seconds later — this session's own presence
-       membership having just been evicted out from under it (task #137's
-       "duplicate-join-lost" notice) or a poll session finding its own
-       sync coming back 404/unknown (task #137's related fix to
-       pollPresence() no longer silently swallowing that). Distinct
-       element from presenceJoinWaitingHint above since that one's shown
-       for as long as a state lasts, not a fire-and-forget notice. -->
+  <!-- One-off pill notice that clears itself: a presence join refused
+       (room full / server busy) or a poll session that rejoined after a pause. -->
   <div id="presenceTransientHint"></div>
 
-  <!-- Task #137 — shown to the EXISTING session when a second join under
-       the same identity shows up elsewhere in this same room. See
-       handleIncomingSignal()'s 'duplicate-join-request' branch in
-       viewer.js for what populates and opens this. -->
-  <div id="duplicateJoinModal">
-    <div id="duplicateJoinBox">
-      <div class="subhead">Another session with your identity is trying to join this world.</div>
-      <div id="duplicateJoinCountdownLine">If you don't respond within <span id="duplicateJoinCountdown">60</span>s, they'll be let in automatically.</div>
+  <!-- Shown when a world's manifest names a presence server on another
+       origin. See approvedPresenceBase() in viewer.js. -->
+  <div id="presenceApprovalModal">
+    <div id="presenceApprovalBox">
+      <div class="subhead">This world wants to use a third-party presence server</div>
+      <div id="presenceApprovalDetails" class="mono"></div>
+      <div class="subhead">If you allow it, that server sees your display name, your position in the world, your IP address, and any chat you send. No wallet identity is sent. Your choice is remembered for this pair of sites, and you can change it in Settings.</div>
       <div class="btn-row">
-        <button id="duplicateJoinLeaveBtn" type="button" class="btn-secondary">Leave now</button>
-        <button id="duplicateJoinKeepBtn" type="button" class="btn-secondary">Keep this session active</button>
+        <button id="presenceApprovalAllowBtn" type="button" class="btn-secondary">Allow</button>
+        <button id="presenceApprovalDenyBtn" type="button" class="btn-secondary">Don't allow</button>
       </div>
     </div>
   </div>
@@ -1233,9 +1205,8 @@
        across every message row, same convention as #portalHoverTooltip. -->
   <div id="chatUserTooltip"></div>
   <div id="chatUserContextMenu">
-    <button type="button" data-action="chat-pm">Private message</button>
-    <button type="button" data-action="chat-mute">Mute user</button>
-    <button type="button" data-action="chat-block" class="danger-btn">Block user</button>
+    <button type="button" data-action="chat-mute">Mute (this session)</button>
+    <button type="button" data-action="chat-block" class="danger-btn">Block (this session)</button>
   </div>
 
   <!-- Asset Viewer hover panel (task #150) — opens near whichever wallet
@@ -1856,27 +1827,32 @@
         </div>
       </div>
 
-      <!-- Chat Admin (#116) — manages the two purely-local, per-viewer chat
-           moderation lists a right-click on a chat username can add to (see
-           viewer.js's openChatUserContextMenu()): muted users (silenced in
-           this viewer's own chat rendering only, no server involvement) and
-           blocked users (same local silencing effect). Blocked senders here
-           is its OWN list, deliberately NOT the same one as Mail Settings'
-           "Blocked senders" above — that one blocks a sender at one
-           specific Post Office domain membership, server-side; this one is
-           an instant, offline, cross-domain, per-public-key client-side
-           chat filter, a different mechanism entirely (see
-           AtlasWallet.blockChatUser's own comment for the full reasoning).
-           Nothing here touches or duplicates that other list's UI. -->
+      <!-- Chat Admin — session mute/block entries (keyed by the random per-join
+           chat sender id, see viewer.js's chatSessionMuted) and any entries
+           saved by earlier versions. Blocked users here is its OWN list,
+           deliberately NOT Mail Settings' "Blocked senders" above — that one
+           blocks a sender at one Post Office membership, server-side; this
+           one is an instant, offline, client-side chat filter. -->
       <div class="settings-category" data-category="chat-admin">
         <button type="button" class="settings-category-toggle"><span>Chat Admin</span><span class="chevron">▸</span></button>
         <div class="settings-category-body">
-          <div class="subhead">Muted and blocked chat users — local to this browser only. Right-click a name in chat to add someone here.</div>
+          <div class="subhead">Right-click a name in chat to mute or block it. Chat senders have no persistent identity, so these apply to that connection for this session only and are cleared when you leave the domain. Entries saved by earlier versions are kept below until you remove them, but can no longer match anyone.</div>
           <h3 style="margin-top:14px;">Muted users</h3>
           <div id="chatMutedUsersList" class="item-list" style="margin-top:8px;"></div>
           <h3>Blocked users</h3>
           <div class="empty-note">Separate from Mail Settings' "Blocked senders" above (that one is server-side, per Post Office membership) — this list only affects chat, purely on this device.</div>
           <div id="chatBlockedUsersList" class="item-list" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
+      <!-- Presence servers — the approvals recorded when a world asked to use a
+           presence server on another origin. Forgetting one makes the next
+           visit ask again. -->
+      <div class="settings-category" data-category="presence-servers">
+        <button type="button" class="settings-category-toggle"><span>Presence servers</span><span class="chevron">▸</span></button>
+        <div class="settings-category-body">
+          <div class="subhead">A world may name a presence server for multiplayer and chat. One on the world's own site is used automatically; one on another site is only used after you allow it here or in the prompt. Each decision applies to that pair of sites.</div>
+          <div id="presenceApprovalsList" class="item-list" style="margin-top:8px;"></div>
         </div>
       </div>
 
@@ -2568,22 +2544,12 @@
           <div id="contactsList" class="item-list" style="margin-top:10px;"></div>
         </div>
 
-        <!-- Sub-screen: Add Contact — everything that was here before this
-             restructuring (People here now / Friend requests, both driven
-             LIVE over the current presence connection — see
-             connectPresence/pollPresence's signal relay in viewer.js, and
-             relaySignal() in presence-server.js; there's no mail-based or
-             standalone way to friend-request someone, both people have to
-             be in the same room at the same moment), plus a new manual
-             add-by-address form for when you already know someone's
-             handle or public key without having to meet them in-world. -->
+        <!-- Sub-screen: Add Contact — friend requests by handle (delivered
+             through a Post Office) and manual add-by-address. Presence plays
+             no part: nobody is listed or friended from a shared world. -->
         <div id="addContactSubscreen" class="subscreen">
-          <h3>People here now</h3>
-          <div class="subhead">Other visitors currently in this same world. Only someone with an unlocked wallet identity can be added.</div>
-          <div id="friendsHereList" class="item-list"></div>
-
           <h3>Friend requests</h3>
-          <div class="subhead">Requests from people in this same world are live only — they can't be answered once either of you leaves. Requests sent to you by handle stay here until you answer them.</div>
+          <div class="subhead">Requests sent to you by handle stay here until you answer them.</div>
           <div id="friendRequestsList" class="item-list"></div>
           <div id="federatedFriendRequestsList" class="item-list"></div>
 

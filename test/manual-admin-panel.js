@@ -184,16 +184,19 @@ function postJson(port, urlPath, body) {
     }
     console.log('PASS: landed on the admin panel, logged in as', whoText.trim());
 
-    console.log('STEP 4: "Online now" reflects a real anonymous visitor who joined via the presence server\'s own poll endpoint');
+    console.log('STEP 4: "Online now" counts a real anonymous visitor who joined via the presence server\'s own poll endpoint');
     const joinRes = await postJson(PRESENCE_PORT, '/presence/poll/join', { domain: 'localhost:8001', world: 'plaza', name: 'Admin Panel Test Visitor' });
     if (!joinRes.id) throw new Error('Setup failed: could not join an anonymous visitor into the presence server, got: ' + JSON.stringify(joinRes));
     await page.evaluate(() => refreshOnlineNow());
     await page.waitForFunction(() => document.getElementById('onlineTotal').textContent === '1', null, { timeout: 10000 });
     const rosterText = await page.locator('#onlineWorlds').textContent();
-    if (!rosterText.includes('Admin Panel Test Visitor')) {
-      throw new Error('Expected the anonymous visitor\'s name in the rendered "Online now" roster, got: ' + rosterText);
+    if (!/\(1\)/.test(rosterText)) {
+      throw new Error('Expected the visitor counted in the rendered "Online now" view, got: ' + rosterText);
     }
-    console.log('PASS: "Online now" shows the real anonymous visitor from the presence server, no mocking involved');
+    if (rosterText.includes('Admin Panel Test Visitor')) {
+      throw new Error('"Online now" must show counts only, but it listed the visitor: ' + rosterText);
+    }
+    console.log('PASS: "Online now" counts the real anonymous visitor from the presence server and names nobody');
 
     console.log('STEP 5: the panel can actually revoke a real credential — POST /atlas/revoke with {payload, token}, no proof');
     const issued = await postJson(8001, '/atlas/asset/issue', { ownerPublicKey: 'admin-panel-test-owner', assetClass: 'atlas.trophy.chess' });

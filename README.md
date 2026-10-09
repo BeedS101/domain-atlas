@@ -341,8 +341,8 @@ Wallet/Settings panels once you've got items to work with:
   relays to the actual issuer behind the scenes. A domain/Post Office/
   Trading Station membership card can never be dropped (`tradeScope:
   "bound"`, enforced by the server, not just the UI).
-- **Nicknames for other identities.** From a presence roster or a mail
-  card, set a private alias for any public key you interact with — purely
+- **Nicknames for other identities.** From a mail card or a saved
+  contact, set a private alias for any public key you interact with — purely
   local, never sent anywhere, and profanity-filtered the same way
   `handle#domain` registration is (§8 below).
 - **Search filters** on the Collectibles and Documents lists (type to
@@ -515,7 +515,51 @@ a domain adds an optional top-level `"presence"` field to its
 `.well-known/spatial.json` (e.g. `"presence": "https://example.com"`) and
 `extension/viewer.js` derives both the WebSocket URL and the polling base
 from it. No manifest field at all (every local demo domain in this repo)
-falls back to the Node dev default, `localhost:8004`.
+falls back to the Node dev default, `localhost:8004`, but only when the
+manifest is itself served from a loopback host (`localhost`, `127.0.0.1`);
+a remote manifest with no `presence` field gets no multiplayer or chat.
+
+**Who may be a presence server (visitor approval).** The presence server
+sees a visitor's display name, avatar position, IP address and any chat they
+send, so the extension does not talk to just any endpoint a manifest names.
+An endpoint on the manifest's own origin is used automatically. An endpoint
+on any other origin triggers a prompt the first time ("This world wants to
+use a third-party presence server"), and nothing is sent to it until the
+visitor answers. The decision is stored per pair (manifest origin, endpoint
+origin) and can be reviewed or forgotten in **Settings → Presence servers**,
+so a later manifest edit that points at a different server asks again
+instead of inheriting the old answer. The same rule applies to chat,
+Favorites counts and the on-page participant count. Verified by
+`test/manual-presence-endpoint-approval.js`.
+
+**What presence knows.** A member is a display name (the wallet alias if
+you set one, otherwise "Visitor"), a pose and an avatar look. No wallet
+public key, key fragment or other persistent identifier is sent when you
+enter a world, and the roster, join/leave broadcasts, `/presence/status`
+(a bare `{count}`) and chat messages carry none. Each connection gets two
+random identifiers: a public id broadcast so others can track the avatar,
+and a private token used only for polling `sync`/`leave`; neither is
+derived from the wallet, neither survives a reconnect, and neither proves
+who the visitor is. Worlds that require an authenticated identity to enter
+(`policy.identityRequired`) are enforced separately by the wallet and
+issuer and do not use presence data.
+
+**Reconnects and duplicate sessions.** Presence cannot tell two sessions of
+the same person apart, so there is no duplicate-session guard: a reconnect
+(or a second tab) joins as a new visitor with a new avatar, and the old one
+disappears when its socket closes or its polling session times out. A
+polling client whose session was swept as stale rejoins automatically with
+a fresh id (its position resets).
+
+**Limits and retention.** Both servers cap rooms, members per room, total
+members, chat domains, chat members per domain, request body size (and, on
+Node, WebSocket frame size), and rate-limit chat per connection; full
+rooms answer `room-full` / `server-busy`. Chat history is bounded by count
+and by age (24 hours by default). Every limit is an environment variable
+with the same name on both servers (listed in `presence-php/README.txt`).
+The PHP store sweeps stale members and expired chat on every write and
+removes entries written by older versions that carried a public key. The
+PHP runtime store files are ignored by Git.
 
 That per-domain field is what makes `presence-php/` real rather than
 theoretical: a plain-PHP port of ONLY the polling routes (no WebSocket —
@@ -525,22 +569,6 @@ hosting the same way `issuer-php/` already is. Point a domain's `presence`
 field at a host running just this PHP bundle and the extension's own
 WS-then-poll fallback logic does the rest — there's no separate
 "polling-only" flag to set anywhere.
-
-**Duplicate-identity join guard and self-eviction fix (tasks #137, #139).**
-Two visitors sharing the same key pair — the counterparty identity from
-section 4, or the same wallet open in two tabs — used to both end up in
-the roster under conflicting entries. Joining now checks for an existing,
-still-active member with the same public key first: if one's found, the
-newcomer gets a short **challenge countdown** instead of an instant join,
-giving the original tab a chance to prove it's still there before either
-side is admitted, mirrored identically across the WebSocket server, the
-polling routes, and `presence-php`. A related bug (#139) meant a
-backgrounded or throttled browser tab could get silently swept from the
-roster by its own poll timer and then auto-rejoin mid-challenge, fighting
-whoever actually won it; polling clients now distinguish plain staleness
-(safe to silently self-heal from) from a lost duplicate-identity challenge
-(left alone on purpose) and also resync immediately on tab refocus rather
-than waiting out the next poll tick.
 
 ## 7. Try in-world chat
 
@@ -580,18 +608,27 @@ join instead starts empty, even though the server's own history buffer
 still has everything; live messages sent after you join show up either
 way; the toggle only ever affects that one join-time batch.
 
-**Usernames are interactive.** Hovering any sender's name shows a
-tooltip with a human-readable timestamp and online status; right-clicking
-one opens a small context menu — **Private message**, **Mute user**,
-**Block user** — the same visual language as Mail's block-sender menu.
-Muting or blocking is purely local and per-viewer (the muted/blocked
-person's own view is unaffected): their messages simply stop rendering for
-you, and both lists are reviewable and reversible from **Settings → Chat
-Admin → Muted users / Blocked users** (Unmute/Unblock). **Private message**
-jumps straight to Mail → Compose with the recipient field pre-filled with
-that sender's raw public key — chat has no handle system of its own, so
-this is the fastest way to actually reach someone you only know from a
-chat message.
+**Chat senders are not identities.** A message carries a display name and
+a random per-join sender id the server assigns; it carries no wallet key,
+so a chat name proves nothing and anyone can type any name. Reading chat
+needs no wallet. The input is enabled only while your wallet is unlocked, but
+that is a client-side choice, not something the server can verify; the
+server only rate-limits and filters messages. Sender ids differ per
+connection and are not a permanent handle.
+
+**Usernames are interactive.** Hovering a sender's name shows a
+tooltip with a human-readable timestamp and a note that display names are
+not verified; right-clicking one opens a small context menu with **Mute
+(this session)** and **Block (this session)**. Because a sender has no
+persistent identity, both act on that one connection's sender id: their
+messages stop rendering for you until you leave the domain or they
+reconnect (a reconnected sender gets a new id and is visible again). The
+session entries are listed under **Settings → Chat Admin** with Unmute /
+Unblock. Mute and block records saved by earlier versions were keyed by a
+public key chat no longer carries: they are kept (not deleted), shown in
+the same lists with a note that they no longer match anyone, and removed
+only if you remove them. There is deliberately no shortcut from chat to a
+private message; contact-based messaging (Mail, Contacts) is unchanged.
 
 Chat rides the exact same dual-transport design presence does: the
 WebSocket side lives in `presence-server/server.js` alongside presence
@@ -672,30 +709,17 @@ automatically the way a reissue replacement does: the mail card shows a
 adds it — receiving property from someone, even a domain, is deliberately
 never a silent step (SPEC.md §11.2).
 
-**Friends work live, through presence — not through mail.** Adding a
-friend needs both people simultaneously in the same `domain::world` room:
-open the Contacts tab's Add Contact sub-tab while standing in a world with
-someone else in it, and "People here now" lists them with an Add friend button (only if
-they've got an unlocked wallet identity announced — an anonymous visitor
-can't be friended, same "presence never requires an identity" principle
-world entry itself has always had). Clicking it sends a `friend-request`
-signal over whichever presence transport is actually connected right now
-(WebSocket or the polling fallback, transparently) to exactly that one
-other visitor. On their side it shows up under "Friend requests" with
-Accept/Decline; accepting saves the friend on both ends — the accepter
-immediately, and the original sender automatically once the
-`friend-request-accepted` reply signal reaches them back, no second click
-needed. This only works while both of you are still in the room: a
-request or its reply can't be relayed to someone who's already left, same
-as the roster itself only ever shows who's actually there.
+**Friendship is never discovered through presence.** Standing in the same
+world as someone reveals nothing about their identity and offers no way to
+add them: the old presence-based "People here now" list and friend-request
+signals were removed. Contacts come from federated friend requests by handle
+(below) or from the manual add-by-address form.
 
 **The Contacts sub-tab has three inner tabs of its own** — Contacts / Add
-Contact / Groups. Live presence isn't the only way in: Add Contact also
-takes a contact **manually**, either by pasting a raw public key or by
+Contact / Groups. Add Contact takes a contact **manually**, either by pasting a raw public key or by
 typing a `handle#domain` address (resolved through that domain's Post
 Office the same way Compose's recipient field resolves one — see handle
-addressing below), with no presence connection to the other person needed
-either way. Every saved contact gets a free-text **notes** field (saves on
+addressing below). Every saved contact gets a free-text **notes** field (saves on
 blur, persists in the wallet) and the Contacts list itself has a **search
 box** that filters live by name AND notes as you type. **Groups** is a
 separate, purely local, personal-organization layer on top of the same
@@ -720,36 +744,18 @@ block list and friends-only mode apply as for any mail. Verified by
 `test/manual-federated-friend-request.js` (Node, two issuers) and
 `test/manual-federated-friend-request-php.js` (two PHP bundles).
 
-The live in-room flow described above deliberately does NOT go through the existing mail system. Mail
-(`AtlasWallet.checkAllMail`) is domain-issuer-to-subscriber only —
-messages are addressed by `credentialId` and fetched per-domain from
-credentials the wallet already holds, and there's no way to even discover
-a stranger's `credentialId` to mail them (see `issuer-php/README.txt`'s
-note on why there's deliberately no public subscriber-listing endpoint).
-Friends needed a genuine peer-to-peer channel between two arbitrary
-visitors, so it rides a new, narrow **signal relay** built into presence
-itself instead: `presence-server/server.js`'s `relaySignal()` (WS message
-type `'signal'` / `POST /presence/poll/signal`) and `presence-php`'s
-`poll/signal.php` twin. The vocabulary is closed to exactly three kinds —
-`friend-request`, `friend-request-accepted`, `friend-request-declined` —
-the server relays them (pushed immediately to a WebSocket member, queued
-into `pendingSignals` and picked up on the next poll `sync` for a polling
-one) without ever inspecting or storing anything beyond that.
-
 **Favorites bookmark a domain+world**, independent of the auto-pruned
 Recent Worlds list on the main Wallet screen (Favorites are explicit
 add/remove only, and you control their order). "Favorite this domain"
 appears while you're actually standing in a world; the Favorites list
-itself shows every bookmark with a live "N here now" status line, pulled
-fresh from that domain's own presence backend every time the list renders
-(`GET /presence/status?domain=...&world=...` — reports who's in a room
-without creating a member the way joining would). If any of your saved
-friends are in that count, they're named right there too — "3 here now ·
-friends here: Nomad". That cross-referencing happens **entirely on your
-own device**: the status endpoint only ever returns who's actually
-present (id, name, publicKey), and your friends list is matched against
-it locally. No server, including presence-server itself, ever sees your
-friends list.
+itself shows every bookmark with a visitor count ("N visitors here now"),
+pulled from that domain's presence backend each time the list renders
+(`GET /presence/status?domain=...&world=...` returns only a count and
+creates no room member). It never says which of your contacts are there. A
+count is only fetched from a presence endpoint that is already allowed for
+that favorite's origin (same-origin, or approved earlier); otherwise it
+reads "Visitor count unavailable", and the list never opens an approval
+prompt.
 
 **Calendar is local-only** — manually-added personal reminders, nothing
 synced from anywhere and nothing any domain can see or write to (unlike
@@ -1990,9 +1996,7 @@ its closing note are explicit that in-world chat, presence, and anything
 else that only matters inside one domain aren't the protocol's business):
 real-time multiplayer presence and in-world chat, each with a genuine
 plain-PHP polling fallback for shared cPanel-style hosting that can't run
-a persistent WebSocket process, a duplicate-identity join guard that keeps
-two visitors sharing one key pair from corrupting each other's roster
-entry, and a fully playable in-world chess minigame (`extension/chess.js`,
+a persistent WebSocket process, presence and chat that carry no wallet identity, and a fully playable in-world chess minigame (`extension/chess.js`,
 task #195/#201) that mints a real credential — gold, plus a trophy on Hard
 difficulty — on checkmate. The Social tab's **Messaging window** (task
 #111) is closer to the protocol's own business without being part of it
@@ -2148,14 +2152,14 @@ simplifications are worth naming plainly rather than leaving implicit:
   uses; the base URL comes from the manifest's `presence` field, falling
   back to `http://localhost:8004` for local dev — the same default
   `extension/viewer.js` itself falls back to) and totals the counts,
-  rendering each world's roster (name, and a truncated public key or
-  "anonymous" for guests). No admin action or credential is involved in
+  showing each world's visitor count (the presence server holds no
+  identities, so nobody is listed by name). No admin action or credential is involved in
   reading it — it's a live aggregation across a genuinely separate service.
   Every world joins its presence room on entry, 2D (`procedural-v1`) as
   well as 3D, so this lists visitors in all scenes. A 2D visitor sends no
   position and draws no avatars — rendering of remote players stays
-  3D-only — but appears in the roster behind the Friends screen's "here
-  now" list and in `GET /presence/status`; on the polling transport the
+  3D-only — but is counted in
+  `GET /presence/status`; on the polling transport the
   regular sync tick doubles as the heartbeat that keeps a position-less
   member from being swept as stale. Tested in a real browser against both
   backends in `test/manual-presence-2d.js` (Node WebSocket, PHP polling).

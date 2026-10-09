@@ -2251,16 +2251,11 @@ const AtlasWallet = (() => {
   // contact). Keyed by publicKey, one entry per key (re-adding an existing
   // friend upserts their saved name rather than duplicating).
   //
-  // How someone actually gets added (task #67's own open question,
-  // resolved this build): extension/viewer.js's live presence "signal"
-  // relay — presence-server.js/presence-php's protocol, extended
-  // specifically for this (see their own header comments) — lets either
-  // side send a friend request while you're both actually standing in the
-  // same room right now; the other side accepts or declines on the spot,
-  // and both wallets call addFriend() locally at that moment. The presence
-  // server only ever relays the request/response between two live
-  // connections; it never sees or stores anyone's friends list — that stays
-  // entirely client-side, here.
+  // Contacts are added by a friend request sent by handle through a Post
+  // Office (see sendFriendRequest and the incoming/outgoing request helpers
+  // below) or by the manual add-by-address form. Presence never plays a
+  // part: a presence server sees no wallet identity and offers no way to
+  // meet or friend someone from a shared world.
   //
   // Encrypted + made per-identity (2026-09-14, second round): Friends
   // used to be "outside the wallet" entirely — one shared list, usable
@@ -2622,10 +2617,11 @@ const AtlasWallet = (() => {
   // manifest was current (see viewer.js's addCurrentDomainToFavorites) —
   // worldId lets teleporting land on a real world without needing
   // manifest.defaultWorld to still mean the same thing later, and
-  // presenceBase is what lets the live "how many people are here now"
-  // status (viewer.js's fetchPresenceStatus) query the right presence
-  // server for a domain that isn't the one currently active, without
-  // re-fetching that domain's manifest just to ask.
+  // presenceBase is what lets the "how many people are here now" count
+  // (viewer.js's fetchPresenceStatus) query the right presence server for
+  // a domain that isn't the one currently active, without re-fetching that
+  // domain's manifest just to ask. It is used only if the endpoint is
+  // allowed for the favorite's own manifest origin (approvedPresenceBase).
   //
   // Same "outside the wallet" scope as Recent worlds and Friends above.
 

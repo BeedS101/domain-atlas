@@ -1,52 +1,30 @@
-// Manual end-to-end check for chat username hover tooltips (#115) and the
-// right-click context menu / Chat Admin panel (#116).
+// Manual end-to-end check for chat username hover tooltips and the
+// right-click context menu / Chat Admin panel.
 //
-// Timestamp note: viewer.js's chat message shape already carried a
-// `sentAt` field identically on both presence-server (server.js's
-// sendChatMessage()) and presence-php (store.php's chat_send_message()) —
-// added together with `seq` in an earlier build. No backend change was
-// needed for the tooltip's timestamp; this test just confirms it's read
-// and displayed correctly.
-//
-// "Online" in the tooltip is checked against presenceRosterMeta, the SAME
-// live roster the Friends screen already uses for "people here now" — this
-// is presence's own roster (3D-world-only) so a 2D world like the Plaza
-// used here never populates it for OTHER visitors; the one case this test
-// can exercise live is a sender hovering their OWN name, which
-// isChatSenderOnline() special-cases as always online. The "another
-// visitor's public key is in the roster" branch is code-reviewed, not
-// exercised live here (see the session's own final report for why: it
-// needs a 3D (gltf-mini-v1) world with chat enabled, which no current demo
-// world has).
-//
-// Block/mute here is its own local list, deliberately NOT the same one as
-// mail's "Block sender" (that one's server-side, per-Post-Office-
-// membership — see AtlasWallet.blockChatUser's own comment for the full
-// reasoning) — so blocking B in chat here has no effect on B's mail
-// standing, and vice versa; this test only exercises the chat-local lists.
+// Chat senders carry no wallet identity: a message has a display name and a
+// random per-join senderId. Mute and block are therefore session-only and
+// keyed by that senderId; entries saved by earlier versions (keyed by a
+// public key chat no longer carries) are kept untouched and listed as
+// legacy entries that no longer match anyone.
 //
 // Requires the demo issuer-server and presence-server already running:
 //   cd /home/claude/domain-atlas && node issuer-server/server.js
 //   cd /home/claude/domain-atlas && node presence-server/server.js
 //
 // Checks:
-//   1. B creates an identity, sends a message. B hovers their OWN sender
-//      name — tooltip shows a human-readable timestamp and "Online now".
-//   2. B right-clicks their own name — the 3-item context menu (Private
-//      message / Mute user / Block user) appears (reusing the same visual
-//      language as mail's block-sender "⋯" menu).
-//   3. A (separate identity) joins, sees B's message. A right-clicks B's
-//      name and clicks "Mute user" — B's message disappears from A's chat
-//      view immediately (purely local to A; B's message is still visible
-//      to B). Settings -> Chat Admin -> Muted users lists B; Unmute
-//      restores the message.
-//   4. A right-clicks B's name again and clicks "Block user" — same
-//      disappearing effect via the separate block list. Chat Admin ->
-//      Blocked users lists B; Unblock restores the message.
-//   5. A right-clicks B's name and clicks "Private message" — wallet panel
-//      opens straight to Mail -> Compose with the recipient field
-//      pre-filled with B's raw public key (chat has no handles), reusing
-//      openComposeReply()/Quick Reply's exact pre-fill logic.
+//   1. B creates an identity, sends a message. Hovering B's own sender name
+//      shows a timestamp and says display names are not verified (no
+//      "Online now" claim, which would need an identity).
+//   2. Right-clicking a name offers exactly Mute (this session) and Block
+//      (this session) — no private-message shortcut.
+//   3. A (separate identity) mutes B via the menu: B's message disappears
+//      for A only. Settings -> Chat Admin lists the session entry; Unmute
+//      restores the message. Nothing is written to A's saved mute list.
+//   4. Same for Block.
+//   5. A mute record saved by an earlier version is preserved and listed
+//      with an explanation, and can be removed explicitly.
+//   6. After B reconnects (new senderId), a session mute of B's old
+//      connection no longer hides B: the new connection's message shows.
 //
 // The presence-server keeps recent chat history between runs, and these
 // checks count messages, so start it fresh for each run.
@@ -98,6 +76,7 @@ async function waitForCondition(frame, fn, description, timeoutMs = 12000) {
 async function sendChat(frame, text) {
   await frame.locator('#chatTextInput').fill(text);
   await frame.locator('#chatTextInput').press('Enter');
+  await frame.page().waitForTimeout(450); // the server rate-limits one sender to a message per CHAT_MIN_INTERVAL_MS
 }
 
 async function chatLines(frame) {
@@ -137,18 +116,19 @@ async function waitForListToInclude(frame, elementId, substring, timeoutMs = 800
     await b.frame.locator('#chatMessages .chat-name').first().hover();
     await b.frame.waitForFunction(() => getComputedStyle(document.getElementById('chatUserTooltip')).display !== 'none', null, { timeout: 5000 });
     const tooltipText = await b.frame.evaluate(() => document.getElementById('chatUserTooltip').textContent);
-    if (!/Online now/.test(tooltipText)) throw new Error('Expected B\'s own tooltip to show "Online now", got: ' + JSON.stringify(tooltipText));
+    if (/Online now/.test(tooltipText)) throw new Error('The tooltip must not claim a sender is online, got: ' + JSON.stringify(tooltipText));
+    if (!/not verified/.test(tooltipText)) throw new Error('Expected the tooltip to say display names are not verified, got: ' + JSON.stringify(tooltipText));
     if (!/\d/.test(tooltipText)) throw new Error('Expected the tooltip to include a rendered timestamp, got: ' + JSON.stringify(tooltipText));
-    console.log('PASS: hover tooltip on own name shows a timestamp and "Online now" — text: ' + JSON.stringify(tooltipText));
+    console.log('PASS: hover tooltip shows a timestamp and the not-verified note — text: ' + JSON.stringify(tooltipText));
 
-    console.log('STEP 2: B right-clicks own name — the 3-item context menu appears');
+    console.log('STEP 2: right-click offers session Mute / Block only');
     await b.frame.locator('#chatMessages .chat-name').first().click({ button: 'right' });
     await b.frame.waitForFunction(() => document.getElementById('chatUserContextMenu').classList.contains('show'), null, { timeout: 5000 });
     const menuLabels = await b.frame.evaluate(() => Array.from(document.querySelectorAll('#chatUserContextMenu button')).map((el) => el.textContent));
-    if (!menuLabels.includes('Private message') || !menuLabels.includes('Mute user') || !menuLabels.includes('Block user')) {
-      throw new Error('Expected all 3 menu items, got: ' + JSON.stringify(menuLabels));
+    if (menuLabels.length !== 2 || !menuLabels.includes('Mute (this session)') || !menuLabels.includes('Block (this session)')) {
+      throw new Error('Expected exactly the two session moderation items, got: ' + JSON.stringify(menuLabels));
     }
-    console.log('PASS: right-click context menu shows Private message / Mute user / Block user');
+    console.log('PASS: context menu shows Mute (this session) / Block (this session), no Private message');
     // Dismiss by clicking elsewhere before A joins.
     await b.page.mouse.click(10, 10);
     await b.frame.waitForFunction(() => !document.getElementById('chatUserContextMenu').classList.contains('show'), null, { timeout: 5000 });
@@ -168,51 +148,52 @@ async function waitForListToInclude(frame, elementId, substring, timeoutMs = 800
     if (bStillSeesOwnMessage.length !== 1) throw new Error('Expected B to still see its own message unaffected by A\'s local mute, got: ' + JSON.stringify(bStillSeesOwnMessage));
     console.log('PASS: mute is purely local to A — B still sees its own message');
 
-    console.log('STEP 3b: Chat Admin -> Muted users lists B; Unmute restores the message for A');
+    console.log('STEP 3b: Chat Admin lists the session mute; Unmute restores the message; nothing saved to the wallet');
     await a.frame.locator('#walletBtn').click();
     await a.frame.waitForFunction(() => document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
     await a.frame.locator('#settingsTabBtn').click();
     await a.frame.locator('.settings-category[data-category="chat-admin"] .settings-category-toggle').click();
     await a.frame.waitForFunction(() => document.querySelector('.settings-category[data-category="chat-admin"]').classList.contains('open'), null, { timeout: 5000 });
-    await waitForListToInclude(a.frame, 'chatMutedUsersList', bKey.slice(0, 24));
-    await a.frame.locator('#chatMutedUsersList button[data-action="unmute-chat-user"]').click();
+    await waitForListToInclude(a.frame, 'chatMutedUsersList', 'This session only');
+    const savedMuted = await a.frame.evaluate(() => AtlasWallet.getMutedChatUsers());
+    if (savedMuted.length !== 0) throw new Error('A session mute must not write a saved record, got: ' + JSON.stringify(savedMuted));
+    await a.frame.locator('#chatMutedUsersList button[data-action="unmute-chat-session"]').click();
     await a.frame.waitForFunction(() => document.getElementById('chatMutedUsersList').textContent.includes('No muted users'), null, { timeout: 5000 });
-    console.log('PASS: Chat Admin lists the muted user and Unmute clears it');
     await waitForCondition(a.frame, () => document.querySelectorAll('#chatMessages .chat-line').length === 1, 'A\'s view to show B\'s message again after unmuting');
-    console.log('PASS: unmuting restores the message in A\'s chat view');
+    console.log('PASS: session mute listed, nothing persisted, Unmute restores the message');
 
-    console.log('STEP 4: A blocks B via the context menu — same disappearing effect via the SEPARATE block list');
+    console.log('STEP 4: A blocks B via the context menu — the separate block list');
     await a.frame.locator('#chatMessages .chat-name').first().click({ button: 'right' });
     await a.frame.waitForFunction(() => document.getElementById('chatUserContextMenu').classList.contains('show'), null, { timeout: 5000 });
     await a.frame.locator('#chatUserContextMenu button[data-action="chat-block"]').click();
     await waitForCondition(a.frame, () => document.getElementById('chatMessages').textContent.includes('No messages'), 'A\'s view to hide B\'s message after blocking');
-    console.log('PASS: blocking B removes B\'s message from A\'s own chat view');
-
-    // The context menu's Block action only re-renders chat messages, not
-    // the (currently off-screen, since chat happened via the canvas, not
-    // this settings list) Chat Admin display — re-clicking Settings
-    // re-triggers openSettings()'s refreshChatAdminDisplay() the same way
-    // navigating to the tab normally would. The chat-admin accordion is
-    // still .open from step 3b (a static DOM element, untouched by any of
-    // this), so no need to re-toggle it.
     await a.frame.locator('#settingsTabBtn').click();
-    await waitForListToInclude(a.frame, 'chatBlockedUsersList', bKey.slice(0, 24));
-    await a.frame.locator('#chatBlockedUsersList button[data-action="unblock-chat-user"]').click();
+    await waitForListToInclude(a.frame, 'chatBlockedUsersList', 'This session only');
+    await a.frame.locator('#chatBlockedUsersList button[data-action="unblock-chat-session"]').click();
     await a.frame.waitForFunction(() => document.getElementById('chatBlockedUsersList').textContent.includes('No blocked users'), null, { timeout: 5000 });
-    console.log('PASS: Chat Admin lists the blocked user (a separate list from mail\'s own Blocked senders) and Unblock clears it');
     await waitForCondition(a.frame, () => document.querySelectorAll('#chatMessages .chat-line').length === 1, 'A\'s view to show B\'s message again after unblocking');
-    console.log('PASS: unblocking restores the message in A\'s chat view');
+    console.log('PASS: session block hides and Unblock restores the message');
 
-    console.log('STEP 5: A right-clicks B\'s name -> Private message — Compose opens pre-filled with B\'s public key');
+    console.log('STEP 5: a mute record saved by an earlier version is preserved, explained and removable');
+    await a.frame.evaluate((key) => AtlasWallet.muteChatUser(key, 'Legacy B'), bKey);
+    await a.frame.locator('#settingsTabBtn').click();
+    const legacyText = await waitForListToInclude(a.frame, 'chatMutedUsersList', 'Legacy B');
+    if (!/no longer matches anyone/.test(legacyText)) throw new Error('Expected the legacy entry to be explained, got: ' + legacyText);
+    await waitForCondition(a.frame, () => document.querySelectorAll('#chatMessages .chat-line').length === 1, 'the legacy mute must not hide anyone (chat carries no key)');
+    await a.frame.locator('#chatMutedUsersList button[data-action="unmute-chat-user"]').click();
+    await a.frame.waitForFunction(() => document.getElementById('chatMutedUsersList').textContent.includes('No muted users'), null, { timeout: 5000 });
+    console.log('PASS: legacy entry listed with a note, matches nobody, removable only on request');
+
+    console.log('STEP 6: after B reconnects (new senderId), A\'s session mute of the old connection no longer applies');
     await a.frame.locator('#chatMessages .chat-name').first().click({ button: 'right' });
-    await a.frame.waitForFunction(() => document.getElementById('chatUserContextMenu').classList.contains('show'), null, { timeout: 5000 });
-    await a.frame.locator('#chatUserContextMenu button[data-action="chat-pm"]').click();
-    await a.frame.waitForFunction(() => document.getElementById('mailBoxComposeSubscreen').classList.contains('active'), null, { timeout: 5000 });
-    const composeKey = await a.frame.evaluate(() => document.getElementById('postOfficeToPublicKeyInput').value);
-    const rawKeyModeVisible = await a.frame.evaluate(() => !document.getElementById('postOfficeToPublicKeyInput').hidden);
-    if (composeKey !== bKey) throw new Error('Expected Compose recipient pre-filled with B\'s public key ' + bKey + ', got: ' + JSON.stringify(composeKey));
-    if (!rawKeyModeVisible) throw new Error('Expected Compose to be in raw-public-key mode (chat has no handles) after Private message');
-    console.log('PASS: Private message opens wallet -> Mail -> Compose pre-addressed to B\'s public key');
+    await a.frame.locator('#chatUserContextMenu button[data-action="chat-mute"]').click();
+    await waitForCondition(a.frame, () => document.getElementById('chatMessages').textContent.includes('No messages'), 'A to mute B again');
+    await b.frame.evaluate(() => refreshChatIdentity());
+    await waitForCondition(b.frame, () => chatIsConnected(), 'B to reconnect chat');
+    await b.frame.waitForTimeout(600);
+    await sendChat(b.frame, 'hello again from B');
+    await waitForCondition(a.frame, () => document.getElementById('chatMessages').textContent.includes('hello again from B'), 'A to see the new connection\'s message');
+    console.log('PASS: the mute followed the old connection only; the reconnected sender is visible again');
 
     console.log('\nALL CHAT USERNAME HOVER/CONTEXT-MENU CHECKS PASSED');
   } catch (err) {

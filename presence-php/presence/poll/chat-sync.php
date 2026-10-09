@@ -1,12 +1,8 @@
 <?php
-// POST /presence/poll/chat-sync — mirrors presence-server/server.js's
-// identical route. No persistent connection to push a new message down
-// (this bundle is polling-only, see lib/store.php's own "in-world chat"
-// header comment), so a member asks instead: "what's new since the last
-// thing I saw?" Bumps this member's lastSeen (so it doesn't get swept as
-// stale — see chat_sweep_domain()) and returns only the history entries
-// newer than its stored cursor, advancing that cursor to match so the
-// same message never comes back on a later sync.
+// POST /presence/poll/chat-sync — body {id}. Polling counterpart of the Node
+// server's pushed 'chat-message': returns only the history entries newer than
+// this member's stored cursor and advances the cursor. Also keeps the member
+// from being swept as stale. 404 when the id is unknown or expired.
 require_once __DIR__ . '/../lib/bootstrap.php';
 handle_preflight();
 require_post();

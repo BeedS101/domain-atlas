@@ -1,16 +1,14 @@
-// Manual end-to-end check for Contacts (the restructured Friends tab,
-// #67 + the Contacts/Add Contact/Groups split), Favorites, the Social tab
-// (Mail moved in alongside them), and the quick Lock button (#61/#67) —
-// three SEPARATE browser contexts, each with its own real wallet
-// identity. A and B meet in the Lobby and exchange a REAL friend request
-// over the genuine presence-server WebSocket (not mocked), exactly the
-// way two visitors actually would; C never meets anyone in-world at all —
-// it exists purely to prove a contact can be added by address without
-// ever being in the same room. See manual-presence-signals.js for an
-// isolated protocol-level check of the underlying signal relay/status
-// endpoint, and manual-postoffice-handle-ui.js for the handle-addressing
-// UI this test's manual-add-by-handle path reuses; this test is the "does
-// the actual Contacts UI wire it all together correctly" counterpart.
+// Manual end-to-end check for Contacts (the Contacts/Add Contact/Groups
+// split), Favorites, the Social tab (Mail moved in alongside them), and the
+// quick Lock button — three SEPARATE browser contexts, each with its own
+// real wallet identity.
+//
+// Presence no longer plays any part in friendship: A and B stand in the
+// Lobby together and the test proves that nothing in the room lets either
+// of them discover or friend the other (federated Post Office friend
+// requests are covered by manual-federated-friend-request.js). Contacts are
+// added by raw public key or handle through the manual form, and Favorites
+// shows a visitor count without naming anyone.
 //
 // Requires presence-server/server.js on 8004, issuer-server on 8001, AND
 // domain B running as a real issuer-server instance on 8002 (see
@@ -18,22 +16,15 @@
 // any of them itself.
 //
 // Checks:
-//   1. Two visitors, each with a freshly created identity, meet in the
-//      Lobby — Add Contact's "People here now" list shows the OTHER
-//      visitor with an "Add friend" action (not themselves).
-//   2. Clicking "Add friend" sends a live friend-request signal; the
-//      button's own state flips to "Request sent" immediately.
-//   3. The recipient's Add Contact tab shows a live "Friend requests"
-//      entry for the sender — the Contacts sub-tab's own badge AND the
-//      Add Contact inner sub-tab's badge both reflect it, even before
-//      opening either tab, and it bubbles up to the outer Social badge.
-//   4. Clicking Accept saves the contact (AtlasWallet.getFriends()) on
-//      the recipient's side AND, once the accepted signal reaches the
-//      original sender, on their side too.
+//   1. Two visitors with identities meet in the Lobby — Add Contact has no
+//      "People here now" list and no add-friend action, and neither wallet
+//      has anything to friend.
+//   2. Nothing about either wallet identity reaches the presence server.
+//   3. A adds B by raw public key through the manual form; the Social badge
+//      is not driven by any live request.
 //   5. The Contacts sub-tab's three inner sub-tabs (Contacts / Add
 //      Contact / Groups) each render the right content once opened.
-//   6. Adding a contact manually by RAW PUBLIC KEY works, with no live
-//      presence connection to the other side needed at all.
+//   6. Adding a contact manually by RAW PUBLIC KEY works.
 //   7. Adding a contact manually by "handle#domain" address works
 //      (Visitor C registers a Post Office handle at Domain B without
 //      ever entering the Lobby) — including the "you haven't joined that
@@ -48,9 +39,8 @@
 //      removes it.
 //  11. Groups: a group can be created, a contact added to it via its
 //      membership checkbox, and the group deleted again.
-//  12. Favorites: favoriting the current domain, then checking the
-//      Favorites list shows a live "here now" count that includes the
-//      newly-added friend by name.
+//  12. Favorites: favoriting the current domain shows a visitor count and
+//      does not name which contacts are present.
 //  13. The quick Lock button in the top control bar is hidden while
 //      locked/no identity, appears once unlocked, and actually locks the
 //      wallet when clicked.
@@ -219,45 +209,44 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     await enterLobby(a.frame, a.page, 'Visitor A');
     await enterLobby(b.frame, b.page, 'Visitor B');
 
-    console.log('STEP 1: each visitor sees the OTHER (not themselves) in Add Contact\'s "People here now" with an Add-friend action');
+    console.log('STEP 1: in a shared room there is nothing to discover or friend — no People-here-now list, no add-friend action');
     await openContactsTab(a.frame);
     await a.frame.locator('#addContactSubtabBtn').click();
     await a.frame.waitForFunction(() => document.getElementById('addContactSubscreen').classList.contains('active'), null, { timeout: 5000 });
-    const bIdSeenByA = await waitFor(a.frame, () => {
-      const btn = document.querySelector('#friendsHereList button[data-action="add-friend"]');
-      return btn ? btn.dataset.id : null;
-    }, 'A\'s Add Contact tab to show an Add-friend button for B');
-    console.log('PASS: A sees exactly one addable visitor (B) in the Lobby');
+    await a.page.waitForTimeout(2500); // long enough for B to be in the same room and visible to the presence layer
+    const addContactHtml = await a.frame.evaluate(() => document.getElementById('addContactSubscreen').innerHTML);
+    if (/People here now|friendsHereList|data-action="add-friend"|accept-request/.test(addContactHtml)) {
+      throw new Error('Add Contact must not offer any presence-based friending, got: ' + addContactHtml.slice(0, 400));
+    }
+    if (await a.frame.evaluate(() => typeof presenceRosterMeta !== 'undefined' || typeof sendSignal !== 'undefined' || typeof handleIncomingSignal !== 'undefined')) {
+      throw new Error('The presence friend-signal machinery must be gone from the viewer');
+    }
+    console.log('PASS: no presence-based friend discovery in the UI or the viewer script');
 
-    console.log('STEP 2: A clicks Add friend — a live signal goes out, and the button flips to "Request sent"');
-    await a.frame.locator('#friendsHereList button[data-action="add-friend"]').click();
-    await waitFor(a.frame, () => {
-      const card = document.querySelector('#friendsHereList .info-card');
-      return card && card.textContent.includes('Request sent');
-    }, 'A\'s own card for B to show "Request sent"');
-    console.log('PASS: request-sent state shown immediately, no round trip needed to update A\'s own UI');
+    console.log('STEP 2: the presence server never receives either wallet identity');
+    const roomView = await (await fetch('http://localhost:8004/presence/poll/join', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain: 'localhost:8001', world: 'lobby', name: 'Probe' })
+    })).json();
+    const roomText = JSON.stringify(roomView);
+    if (roomText.includes(pkA) || roomText.includes(pkB) || roomText.includes(pkA.slice(0, 10)) || roomText.includes(pkB.slice(0, 10))) {
+      throw new Error('A wallet key (or a fragment of one) is visible in the room roster: ' + roomText);
+    }
+    if (!roomView.roster.every((m) => !('publicKey' in m) && m.name === 'Visitor')) throw new Error('Expected only keyless "Visitor" entries, got: ' + roomText);
+    await fetch('http://localhost:8004/presence/poll/leave', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: roomView.id }) });
+    console.log('PASS: the Lobby roster holds keyless "Visitor" entries only');
 
-    console.log('STEP 3: B sees the incoming request under Add Contact\'s Friend requests, and BOTH the outer Contacts badge and the Add Contact badge reflect it even unopened, bubbling up to the Social badge too');
-    await waitFor(b.frame, () => document.getElementById('friendRequestsBadge').classList.contains('show'), 'B\'s outer Contacts sub-tab badge to show before opening it');
-    if (!(await b.frame.evaluate(() => document.getElementById('socialBadge').classList.contains('show')))) throw new Error('Expected the outer Social badge to already reflect the pending request before opening anything');
-    await openContactsTab(b.frame);
-    if (!(await b.frame.evaluate(() => document.getElementById('addContactBadge').classList.contains('show')))) throw new Error('Expected the Add Contact inner sub-tab badge to show the same pending count');
-    await b.frame.locator('#addContactSubtabBtn').click();
-    await waitFor(b.frame, () => {
-      const card = document.querySelector('#friendRequestsList .info-card');
-      return card && card.querySelector('button[data-action="accept-request"]');
-    }, 'B\'s Friend requests list to show A\'s incoming request');
-    console.log('PASS: B sees A\'s live friend request, badges correctly aggregate at every level (Add Contact -> Contacts -> Social)');
-
-    console.log('STEP 4: B accepts — B saves the contact immediately; A saves it too once the accepted signal arrives back');
-    await b.frame.locator('#friendRequestsList button[data-action="accept-request"]').click();
-    const bFriends = await waitFor(b.frame, () => AtlasWallet.getFriends().then((f) => (f.length > 0 ? f : null)), 'B to have saved A as a contact');
-    if (bFriends[0].publicKey !== pkA) throw new Error('Expected B\'s saved contact to be A\'s publicKey, got: ' + JSON.stringify(bFriends));
-    console.log('PASS: B saved A as a contact on Accept');
-
-    const aFriends = await waitFor(a.frame, () => AtlasWallet.getFriends().then((f) => (f.length > 0 ? f : null)), 'A to have saved B as a contact after the accepted signal arrives');
-    if (aFriends[0].publicKey !== pkB) throw new Error('Expected A\'s saved contact to be B\'s publicKey, got: ' + JSON.stringify(aFriends));
-    console.log('PASS: A saved B as a contact automatically once the friend-request-accepted signal came back — no second click needed');
+    console.log('STEP 3: A adds B as a contact by raw public key (the manual form), with no request or signal involved');
+    await a.frame.locator('#manualAddNameInput').fill('Bee');
+    await a.frame.locator('#manualAddToggleRawKeyBtn').click();
+    await a.frame.locator('#manualAddPublicKeyInput').fill(pkB);
+    await a.frame.locator('#manualAddContactBtn').click();
+    await a.frame.waitForFunction(() => document.getElementById('manualAddContactStatus').textContent === 'Added.', null, { timeout: 5000 });
+    await a.frame.locator('#manualAddToggleRawKeyBtn').click(); // back to handle mode
+    const aFriends = await a.frame.evaluate(() => AtlasWallet.getFriends());
+    if (aFriends.length !== 1 || aFriends[0].publicKey !== pkB) throw new Error('Expected A to hold exactly B as a contact, got: ' + JSON.stringify(aFriends));
+    if ((await b.frame.evaluate(() => AtlasWallet.getFriends())).length !== 0) throw new Error('B must not gain a contact from A adding them by key');
+    console.log('PASS: contact saved locally for A only');
 
     console.log('STEP 5: the three Contacts inner sub-tabs each render the right content');
     await a.frame.locator('#contactsListSubtabBtn').click();
@@ -269,10 +258,10 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     await a.frame.locator('#addContactSubtabBtn').click();
     await a.frame.waitForFunction(() => document.getElementById('addContactSubscreen').classList.contains('active'), null, { timeout: 5000 });
     const addContactText = await a.frame.locator('#addContactSubscreen').textContent();
-    if (!addContactText.includes('People here now') || !addContactText.includes('Friend requests') || !addContactText.includes('Add by address')) {
-      throw new Error('Expected Add Contact to render People here now, Friend requests, AND the manual add-by-address form, got: ' + addContactText);
+    if (!addContactText.includes('Friend requests') || !addContactText.includes('Send a friend request') || !addContactText.includes('Add by address')) {
+      throw new Error('Expected Add Contact to render Friend requests, the by-handle request form AND the manual add-by-address form, got: ' + addContactText);
     }
-    console.log('PASS: Add Contact inner tab shows all three of its sections');
+    console.log('PASS: Add Contact inner tab shows its sections');
     await a.frame.locator('#contactGroupsSubtabBtn').click();
     await a.frame.waitForFunction(() => document.getElementById('contactGroupsSubscreen').classList.contains('active'), null, { timeout: 5000 });
     await a.frame.waitForFunction(() => document.getElementById('contactGroupsList').textContent.includes('No groups yet'), null, { timeout: 5000 });
@@ -389,17 +378,17 @@ async function waitFor(frame, fn, description, timeoutMs = 8000) {
     if (!friendsAfterGroupDelete.some((f) => f.publicKey === pkC)) throw new Error('Deleting a group should not remove its members as contacts');
     console.log('PASS: group deleted, its member contacts remain untouched');
 
-    console.log('STEP 12: Favorites — favoriting the current domain, then seeing a live status line that names the friend who\'s there');
+    console.log('STEP 12: Favorites — favoriting the current domain shows a visitor count and names nobody');
     await a.frame.locator('#favoritesSubtabBtn').click();
     await a.frame.locator('#addCurrentFavoriteBtn').click();
     await waitFor(a.frame, () => {
       const card = document.querySelector('#favoritesList .info-card');
-      return card && /here now/.test(card.textContent) ? card.textContent : null;
-    }, 'A\'s Favorites list to show a live status line for the Lobby');
+      return card && /visitors? here now/.test(card.textContent) ? card.textContent : null;
+    }, 'A\'s Favorites list to show a visitor count for the Lobby');
     const favoriteCardText = await a.frame.locator('#favoritesList .info-card').first().textContent();
-    if (!favoriteCardText.includes('friends here')) throw new Error('Expected the favorite\'s status line to name a friend present, got: ' + favoriteCardText);
+    if (/friends here/i.test(favoriteCardText) || favoriteCardText.includes('Bee')) throw new Error('Favorites must not say which contacts are present, got: ' + favoriteCardText);
     if (!favoriteCardText.includes('You are here')) throw new Error('Expected the currently-occupied favorite to be marked "You are here" instead of offering a Go button, got: ' + favoriteCardText);
-    console.log('PASS: Favorites shows a live headcount AND names the friend who\'s actually there');
+    console.log('PASS: Favorites shows a visitor count only');
 
     console.log('STEP 13: the quick Lock button — hidden while there\'s nothing unlocked, appears once unlocked, actually locks on click');
     const quickLockHiddenBeforeCheck = await b.frame.evaluate(() => getComputedStyle(document.getElementById('quickLockWalletBtn')).display);

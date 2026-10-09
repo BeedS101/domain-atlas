@@ -1,23 +1,15 @@
 <?php
-// POST /presence/poll/chat-send — mirrors presence-server/server.js's
-// identical route. Validates and appends a message from an
-// already-joined member, same fixed short rejection reasons the
-// WebSocket path's 'chat-error' carries and extension/viewer.js's
-// chatErrorText() already knows how to turn into a status line:
-//   'login-required' — this member joined with no publicKey (anonymous/
-//                       locked wallet) — reading never requires one,
-//                       sending always does (per the user's own spec).
-//   'empty'           — nothing left after trimming.
-//   'blocked'         — the SERVER's own profanity check (authoritative —
-//                       see chat_text_contains_blocked_word() in
-//                       lib/store.php), independent of whatever the
-//                       client already checked before even sending this
-//                       request, since a client can always be modified to
-//                       skip its own check.
-// Always a 200 with {ok:false, reason:...} for these — a validation
-// rejection isn't a transport error, same reasoning presence's own
-// poll/signal.php's {ok} shape uses. A genuinely unknown/expired id is
-// the one case that gets a real 404, same as every other route here.
+// POST /presence/poll/chat-send — body {id, text}. Validates and appends a
+// message from a joined member. A rejected send answers 200 {ok:false,
+// reason} with one of the fixed short reasons the client turns into a status
+// line:
+//   'rate-limited' — sent faster than CHAT_MIN_INTERVAL_MS.
+//   'empty'        — nothing left after cleaning and trimming.
+//   'blocked'      — the server's own profanity check (authoritative; see
+//                    chat_text_contains_blocked_word() in lib/store.php).
+// An unknown or expired id is 404 (the client rejoins). Sending does not
+// require a wallet identity and messages carry none: the display name is
+// whatever the sender announced and is not authenticated.
 require_once __DIR__ . '/../lib/bootstrap.php';
 handle_preflight();
 require_post();

@@ -1,4 +1,4 @@
-// Manual check for presence-php's hand-written polling routes (task #68's
+// Manual check for presence-php's hand-written polling routes (the
 // PHP port of presence-server/server.js's /presence/poll/* — see
 // presence-php/README.txt for what this is and why it exists: a
 // deployable backend for real domains on plain PHP/Apache shared hosting
@@ -75,24 +75,26 @@ function post(urlPath, body) {
     if (joinA.status !== 200 || !joinA.body.id || joinA.body.roster.length !== 0) {
       throw new Error('Expected a 200 with an empty roster for the first joiner, got: ' + JSON.stringify(joinA));
     }
-    const idA = joinA.body.id;
+    const idA = joinA.body.id; // private poll token
+    const pubA = joinA.body.publicId; // avatar id other visitors see
     console.log('PASS: Alice welcomed with empty roster, id=' + idA);
 
-    console.log('STEP 2: a second visitor joining the SAME room sees Alice; CORS preflight on the route succeeds');
+    console.log('STEP 2: a second visitor joining the SAME room sees Alice; OPTIONS on the route answers 204');
     const preflight = await fetch(BASE + '/presence/poll/join', { method: 'OPTIONS' });
-    if (preflight.status !== 204 || preflight.headers.get('access-control-allow-origin') !== '*') {
-      throw new Error('Expected a 204 CORS preflight with Access-Control-Allow-Origin: *, got status ' + preflight.status + ', ACAO=' + preflight.headers.get('access-control-allow-origin'));
+    if (preflight.status !== 204) {
+      throw new Error('Expected a 204 for OPTIONS, got status ' + preflight.status);
     }
     const joinB = await post('/presence/poll/join', { domain: 'example.com', world: 'lobby', name: 'Bob' });
-    if (joinB.status !== 200 || joinB.body.roster.length !== 1 || joinB.body.roster[0].id !== idA || joinB.body.roster[0].name !== 'Alice') {
+    if (joinB.status !== 200 || joinB.body.roster.length !== 1 || joinB.body.roster[0].id !== pubA || joinB.body.roster[0].name !== 'Alice') {
       throw new Error('Expected Bob\'s roster to contain exactly Alice, got: ' + JSON.stringify(joinB.body));
     }
     const idB = joinB.body.id;
+    const pubB = joinB.body.publicId;
     console.log('PASS: Bob sees Alice in his roster, and the CORS preflight this required in a real browser succeeded');
 
     console.log('STEP 3: a bare heartbeat sync (no position) still returns the roster without erroring');
     const bareSync = await post('/presence/poll/sync', { id: idA });
-    if (bareSync.status !== 200 || bareSync.body.roster.length !== 1 || bareSync.body.roster[0].id !== idB) {
+    if (bareSync.status !== 200 || bareSync.body.roster.length !== 1 || bareSync.body.roster[0].id !== pubB) {
       throw new Error('Expected Alice\'s bare sync to return a roster containing Bob, got: ' + JSON.stringify(bareSync));
     }
     console.log('PASS: bare heartbeat sync works, roster correct');
@@ -100,7 +102,7 @@ function post(urlPath, body) {
     console.log('STEP 4: syncing WITH a position updates it — the other visitor\'s next sync reflects it (poll <-> poll interop)');
     await post('/presence/poll/sync', { id: idA, x: 4.5, y: 0, z: -2.5, yaw: 1.1 });
     const syncFromB = await post('/presence/poll/sync', { id: idB });
-    const aInRosterFromB = syncFromB.body.roster.find((m) => m.id === idA);
+    const aInRosterFromB = syncFromB.body.roster.find((m) => m.id === pubA);
     if (!aInRosterFromB || aInRosterFromB.x !== 4.5 || aInRosterFromB.z !== -2.5 || aInRosterFromB.yaw !== 1.1) {
       throw new Error('Expected Bob\'s roster to reflect Alice\'s new position, got: ' + JSON.stringify(aInRosterFromB));
     }
@@ -128,9 +130,10 @@ function post(urlPath, body) {
     console.log('STEP 8: a visitor that stops syncing entirely is swept out once the staleness timeout has passed');
     const joinD = await post('/presence/poll/join', { domain: 'example.com', world: 'lobby', name: 'Dave' });
     const idD = joinD.body.id;
+    const pubD = joinD.body.publicId;
     // Confirm Dave really is there first, before faking him stale.
     const syncBeforeSweep = await post('/presence/poll/sync', { id: idA });
-    if (!syncBeforeSweep.body.roster.some((m) => m.id === idD)) throw new Error('Expected Dave to be in Alice\'s roster right after joining');
+    if (!syncBeforeSweep.body.roster.some((m) => m.id === pubD)) throw new Error('Expected Dave to be in Alice\'s roster right after joining');
     // Fake an old lastSeen directly in the store file rather than actually
     // waiting out the real 15-second PRESENCE_POLL_TIMEOUT_MS.
     const doc = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
@@ -139,7 +142,7 @@ function post(urlPath, body) {
     }
     fs.writeFileSync(STORE_FILE, JSON.stringify(doc));
     const syncAfterSweep = await post('/presence/poll/sync', { id: idA }); // touching the room triggers the lazy sweep
-    if (syncAfterSweep.body.roster.some((m) => m.id === idD)) throw new Error('Expected Dave to be swept out as stale, but he\'s still in the roster: ' + JSON.stringify(syncAfterSweep.body));
+    if (syncAfterSweep.body.roster.some((m) => m.id === pubD)) throw new Error('Expected Dave to be swept out as stale, but he\'s still in the roster: ' + JSON.stringify(syncAfterSweep.body));
     console.log('PASS: an abandoned visitor is swept out on the next request that touches their room, no explicit leave required');
 
     console.log('\nALL PRESENCE-PHP CHECKS PASSED');

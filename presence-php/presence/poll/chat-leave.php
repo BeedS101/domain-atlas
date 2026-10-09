@@ -1,13 +1,7 @@
 <?php
-// POST /presence/poll/chat-leave — mirrors presence-server/server.js's
-// identical route. Best-effort: extension/viewer.js's
-// disconnectChat() calls this on a clean world switch, lock/unlock
-// reconnect, or overlay close, but a closed tab or crashed browser will
-// never reach it — that's what chat_sweep_domain()'s staleness check
-// (run on every join/sync that touches a domain) is for, same safety net
-// presence's own sweep provides. An unknown or already-gone id is a
-// silent no-op, not an error, matching the Node route's own leave
-// handling.
+// POST /presence/poll/chat-leave — body {id}. Best-effort explicit leave; a
+// closed tab never reaches it and is swept as stale instead. An unknown or
+// already-gone id is a silent no-op.
 require_once __DIR__ . '/../lib/bootstrap.php';
 handle_preflight();
 require_post();

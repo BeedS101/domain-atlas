@@ -131,6 +131,7 @@ async function clickChatTab(frame, tabId) {
 async function sendChat(frame, text) {
   await frame.locator('#chatTextInput').fill(text);
   await frame.locator('#chatTextInput').press('Enter');
+  await frame.page().waitForTimeout(450); // the server rate-limits one sender to a message per CHAT_MIN_INTERVAL_MS
 }
 
 (async () => {

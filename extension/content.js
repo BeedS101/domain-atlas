@@ -630,7 +630,8 @@
   // for today; left for the overlay itself to reveal once it's open,
   // rather than adding that plumbing just for a tooltip.
 
-  const PRESENCE_DEFAULT_BASE = 'http://localhost:8004'; // mirrors viewer.js's own fallback — see README's presence section
+  const PRESENCE_DEFAULT_BASE = 'http://localhost:8004'; // mirrors viewer.js's built-in local development server
+  const PRESENCE_APPROVALS_KEY = 'atlasPresenceEndpointApprovals'; // written by viewer.js's approval prompt
   const sizeCache = new Map(); // sceneUrl -> Promise<{bytes:number}|{unknown:true}>
 
   function formatBytes(bytes) {
@@ -685,13 +686,43 @@
     return bits.length ? bits.join(' · ') : 'no special capabilities declared';
   }
 
-  // Live participant count, via presence-server's read-only status
-  // endpoint (§7 of README — "reports who's here without creating a
-  // member the way joining would"). Presence is a pure enhancement
-  // everywhere else in this project, never an error, so a network failure
-  // here reads as "unavailable," never a misleading "0 people."
-  async function fetchParticipantCount(domain, worldId, presenceBase) {
-    const base = presenceBase || PRESENCE_DEFAULT_BASE;
+  // The presence endpoint this page's world may be asked for a count, under
+  // the same rule viewer.js applies before joining: an endpoint on the
+  // manifest's own origin is allowed, a built-in local server is allowed
+  // only for a loopback manifest, and any other origin only when the
+  // visitor already approved that (manifest origin, endpoint origin) pair
+  // in the viewer. This hover never opens the approval prompt itself.
+  async function allowedPresenceBase(manifestUrl, rawPresence) {
+    let manifestOrigin;
+    try { manifestOrigin = new URL(manifestUrl).origin; } catch (err) { return null; }
+    if (rawPresence === undefined || rawPresence === null || rawPresence === '') {
+      const host = new URL(manifestOrigin).hostname;
+      const loopback = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.localhost');
+      return loopback ? PRESENCE_DEFAULT_BASE : null;
+    }
+    if (typeof rawPresence !== 'string') return null;
+    let u;
+    try { u = new URL(rawPresence); } catch (err) { return null; }
+    if ((u.protocol !== 'http:' && u.protocol !== 'https:') || u.username || u.password) return null;
+    const base = u.origin + u.pathname.replace(/\/+$/, '');
+    if (u.origin === manifestOrigin) return base;
+    try {
+      const stored = await chrome.storage.local.get(PRESENCE_APPROVALS_KEY);
+      const record = (stored[PRESENCE_APPROVALS_KEY] || {})[manifestOrigin + ' -> ' + u.origin];
+      return record && record.decision === 'allow' ? base : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // Live participant count, via presence-server's read-only status endpoint
+  // (reports a count without creating a member the way joining would).
+  // Presence is a pure enhancement, never an error, so an unapproved or
+  // unreachable endpoint reads as "unavailable," never a misleading "0
+  // people."
+  async function fetchParticipantCount(domain, worldId, manifestUrl, presence) {
+    const base = await allowedPresenceBase(manifestUrl, presence);
+    if (!base) return null;
     try {
       const res = await fetch(base + '/presence/status?domain=' + encodeURIComponent(domain) + '&world=' + encodeURIComponent(worldId));
       if (!res.ok) return null;
@@ -852,7 +883,7 @@
       render(shown);
       panel.style.display = 'block';
 
-      fetchParticipantCount(manifest.domain, world.id, manifest.presence).then((count) => {
+      fetchParticipantCount(manifest.domain, world.id, manifestUrl, manifest.presence).then((count) => {
         shown = { ...shown, participants: count };
         if (panel.style.display === 'block') render(shown);
       });
