@@ -6,6 +6,9 @@ code exists, so no mitigation below has been tested; each row names the test
 that will check it (`docs/voice-calls-test-plan.md`). Nothing here is a claim
 of banking-grade security, and the design has had no independent review.
 
+Status note: amended after Phase 1A and Phase 1B (section 13). Test IDs refer
+to `docs/voice-calls-test-plan.md`; section 5 of that file says which have run.
+
 ## 1. Assets and assumptions
 
 Assets, most to least sensitive: (a) the privacy of conversation audio;
@@ -177,3 +180,24 @@ other side verifies.
   host-candidate masking).
 * No independent security review has taken place. Until one has, no deployment
   may describe this as secure to a banking standard.
+
+## 13. Amendments from Phase 1A and Phase 1B
+
+Evidence classes as in the architecture document (**Proposed**, **Automated**,
+**Real hardware**). Nothing below has reached **Real hardware**.
+
+| Ref | Amendment | Class |
+|---|---|---|
+| M1 | The certificate check is one of three layers (signed fingerprints before any SDP; strict SDP comparison; certificate read from the DTLS transport after connect). Phase 1A switched layers off one at a time: with all three off a substituted endpoint succeeds, so each layer does work. The post-connect check waits for the transport (an empty list is "unknown", retried), requires one source, requires sources to agree, and fails closed. A page-level patch that makes the browser report another certificate, or none, ends the call with no audio in both directions of the test. These simulate a substituted endpoint; they do not use a second real attacker. | Automated |
+| M1a | **What the check cannot do.** It cannot stop the browser from contacting a wrong endpoint during ICE; it only stops media being exchanged with it. A malicious peer can send candidate addresses that are not its own. The wallet now drops loopback, link-local, multicast, unspecified and named candidates, and everything else still lets a hostile peer make the user's browser send STUN checks to an address of the peer's choosing (address exposure and a limited probe). Relay-only mode (Phase 3) is the mitigation; it is not built. | Automated (filter); exposure not tested |
+| M2, M7 | Tampering with the offer content, the accept content, replaying an earlier valid message with a new event number, and injecting a message from an earlier call each end the call with `verify-failed` and no audio, driven through a relay that rewrites what the service says. | Automated |
+| M3, I1 | A forged `accept` signed by a stranger is refused by the caller; a forged `invite` (stranger, wrong signer, wrong tag, wrong callee, wrong audience, expired, replayed) never rings. | Automated |
+| M6 (new) | **Any failed verification ends the call.** A hostile or buggy service can therefore end a call by injecting one bad message. That is a denial of service the service could cause anyway by dropping messages; the design prefers it to ignoring a message that claims to be part of the call. | Automated |
+| M8 | A fabricated `ended` report from the service is shown as "not answered", never as a claim by the callee. | Proposed (code path exists, not asserted) |
+| M10 | Plain `http` is refused except for localhost and private addresses when the user turns on the per-wallet "private test network" switch (or the operator sets `CALL_DEV_ALLOW_HTTP`). In that mode signalling (tags, SDP, candidates, who calls whom) is readable and blockable by anyone on the same network. Audio still needs the signed certificates, so a network attacker can deny a call or learn who calls whom, but cannot read the audio unless one of the wallets or the signatures is compromised. | Automated (origin rule); network exposure by reasoning |
+| R1 | The seen-cache of call ids is kept in session storage for the invitation's lifetime plus 90 s. It does not survive a browser restart. | Automated |
+| I8 | The call card travels as Post Office mail. For a contact with whom no chat key has been exchanged, the first message is the existing signed-but-unencrypted bootstrap, so the mail relay can read that one card (and learn the tag exists). The tag is bound to the contact's key, so it is not usable by the relay. | Automated (card flow); disclosure by design |
+| S17 | The page signing bridge refuses any payload containing an `atlas.call.` type before any prompt; the generic wallet signing function refuses the same; other bridge actions give no access; a page cannot fetch, frame or `window.open` `call.html` (it is not in `web_accessible_resources`); the window refuses runtime messages whose sender is not an extension page of this extension. | Automated |
+| S19 | The microphone is requested only on the Call or Answer click; ringing, declining, cancelling and a refused microphone leave no live track and no connection. | Automated (fake capture device); the physical device and the operating system recording indicator are **Real hardware** and not observed |
+| K2 | A passkey identity cannot revoke a tag when a contact is removed (a signature needs a prompt); the callee-side contact check and the tag's expiry apply instead. The passkey signing path of the calling window was not exercised. | Proposed |
+| X6 | Browser coverage is Chromium (Playwright's build under Xvfb). Firefox and branded Chrome on Windows have not been run. | Not exercised |

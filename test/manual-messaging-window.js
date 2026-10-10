@@ -200,13 +200,14 @@ async function claimPostOfficeMembership(frame, label) {
     await a.frame.locator('.messaging-tab[data-messaging-tab="contacts"]').click();
     await a.frame.waitForFunction(() => document.getElementById('messagingContactsList').textContent.includes('Bob'), null, { timeout: 5000 });
     const bobContactRow = a.frame.locator('#messagingContactsList .messaging-list-item', { hasText: 'Bob' });
-    console.log('STEP 3a: clicking "Call" for Bob switches to the (placeholder) Calls tab, naming him');
+    console.log('STEP 3a: clicking "Call" for Bob switches to the Calls tab, naming him and offering the calling window');
     await bobContactRow.locator('button', { hasText: 'Call' }).click();
     await a.frame.waitForFunction(() => document.querySelector('.messaging-tab[data-messaging-tab="calls"]').classList.contains('active-subtab'), null, { timeout: 5000 });
     await a.frame.waitForFunction(() => document.getElementById('messagingCallsBody').textContent.includes('Bob'), null, { timeout: 5000 });
-    const callsPlaceholderText = await a.frame.locator('#messagingCallsBody').textContent();
-    if (!callsPlaceholderText.toLowerCase().includes("isn't built yet")) throw new Error('Expected an honest "not built yet" placeholder on the Calls tab, got: ' + callsPlaceholderText);
-    console.log('PASS: Calls tab shows an honest placeholder naming Bob, no fake calling UI');
+    const callsText = await a.frame.locator('#messagingCallsBody').textContent();
+    if (!callsText.includes('Open calling window') || !callsText.toLowerCase().includes('not set up')) throw new Error('Expected the Calls tab to say calling is not set up and offer the calling window, got: ' + callsText);
+    if (await a.frame.locator('#messagingCallsBody button[data-action="calls-dial"]').isEnabled()) throw new Error('Call button must be disabled without a call service and permission');
+    console.log('PASS: Calls tab names Bob, says calling is not set up, offers the calling window, Call disabled');
 
     console.log('STEP 3b: back to Contacts, clicking "Chat" for Bob opens (chat view) with the domain already resolved (only one membership)');
     await a.frame.locator('.messaging-tab[data-messaging-tab="contacts"]').click();

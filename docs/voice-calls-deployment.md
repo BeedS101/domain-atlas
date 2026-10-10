@@ -1,8 +1,10 @@
 # Secure voice calls: connectivity and deployment considerations
 
-Status: proposal for review (see `docs/voice-calls-architecture.md`). Nothing
-here is deployed, no configuration file is created by any software, and no live
-setting is to be edited until a separate, supervised deployment is authorized.
+Status: proposal for review (see `docs/voice-calls-architecture.md`), amended
+after Phase 1A and Phase 1B (section 8). `call-server/` now exists as local code
+and has been run only on loopback. Nothing here is deployed, no configuration
+file is created by any software, and no live setting is to be edited until a
+separate, supervised deployment is authorized.
 Figures marked *estimate* are planning arithmetic from stated assumptions, not
 measurements; Phase 3 replaces them with measured values.
 
@@ -168,3 +170,57 @@ the metadata the Call Service sees) is for the operator to settle with counsel;
 this document is not legal advice. No deployment may be described as secure to a
 banking standard until an independent security review of the finished system has
 been done.
+
+## 8. Amendments from Phase 1A and Phase 1B
+
+Evidence classes as in the architecture document. Everything below is
+**Automated** on one machine (loopback) or **Proposed**; no real network, TLS
+terminator, second PC or TURN server has been used.
+
+**What exists.** `call-server/server.js` (zero dependencies, written for Node 20 or newer and run only on Node 22, the
+shared `protocol.js` is byte-identical to the wallet's `extension/call-protocol.js`
+and a test enforces that). `call-server/README.md` lists every setting.
+
+**Settings as implemented** (environment variables, or a JSON file named by
+`CALL_CONFIG_FILE` using the same names without the prefix, camel-cased):
+`CALL_ORIGIN`, `CALL_DOMAIN`, `CALL_ISSUER_KEYS` (comma separated, 1 to 8 raw
+P-256 keys copied by the operator), `CALL_REVOCATIONS_URL`, `CALL_STATE_FILE`,
+`CALL_STUN_URLS`, plus `CALL_BIND` (default `127.0.0.1`), `CALL_PORT` (default
+`8787`), `CALL_TRUST_PROXY=1` (take the client address from `X-Forwarded-For`; only
+behind a proxy that sets it), `CALL_DEV_ALLOW_HTTP=1` (accept an `http` origin; for
+a private test network only) and `CALL_DEV_ALLOW_PRIVATE_FETCH=1` (let the
+revocation fetch use a private or loopback host). With none set the process
+answers `503 calls-not-configured` and creates no file; an invalid setting leaves
+it unconfigured and says why on the console without echoing values. The console
+prints only coarse lines (start, bind address, unconfigured reason); it never
+prints a tag, key, call id, nonce or SDP, and a test asserts that.
+
+**Binding.** The default bind is loopback. Reaching the service from a second
+machine needs the operator to set `CALL_BIND` to a LAN address (or `0.0.0.0`) and
+to allow the port in the operating system firewall; the software never opens a
+port, and says on the console when it is bound beyond loopback.
+
+**Connectivity as built.** STUN is advertised only if `CALL_STUN_URLS` is set;
+there is no TURN. On one LAN the host candidates connect directly. Across two
+different home networks, calls work only when both sides are behind cone-type NAT
+and a STUN server is configured, and fail otherwise (symmetric NAT, carrier-grade
+NAT, many corporate networks). This matches the Phase 3 plan: Phase 1B does not
+try to solve it.
+
+**Plain http.** `https` is required for the call service address. The private
+test network switch (wallet) and `CALL_DEV_ALLOW_HTTP` (service) allow `http` for
+`localhost` and private-range addresses only, so two PCs can be tried on one LAN
+without a certificate. Do not describe a deployment in that mode as secure
+signalling (threat model M10).
+
+**Post Office dependency.** Creating a permission needs a Post Office membership
+credential issued by `CALL_DOMAIN`, and both wallets reach that domain's Post Office
+to exchange contact cards. A wallet builds `http` URLs only for `localhost`,
+`127.0.0.1` and `[::1]`; every other domain is `https`. So two PCs need either an
+existing `https` Post Office, or a local demo domain made reachable as
+`localhost:<port>` on each PC. `docs/voice-calls-two-pc-setup.md` describes both.
+
+**Long-poll.** The service holds `listen` and `poll` for 25 s. The polling
+transport is plain request/response JSON, so a later PHP implementation can serve
+the same signed messages with shorter holds; the window already tolerates empty
+answers and re-polls.

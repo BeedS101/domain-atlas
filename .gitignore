@@ -82,3 +82,7 @@ presence-server/moderation-config.json
 
 # Private moderation audit log written by the presence server; never commit it.
 presence-server/moderation-audit.jsonl*
+
+# Call Service tag store (hashes of routing tags and wallet keys): runtime state.
+call-server/atlas-*.json
+call-server/*.tmp

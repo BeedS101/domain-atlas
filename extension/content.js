@@ -172,6 +172,12 @@
       // purpose not on that list gets no prompt at all, same "never bothers
       // the visitor with something not even declared" posture §3.8's read
       // gate already takes.
+      // Call messages (type "atlas.call.*") are never signed for a page, whatever the manifest
+      // whitelists: the calling window is the only signer for them. Any payload that mentions
+      // such a type anywhere is refused here with the same silent shape as an unlisted purpose.
+      if (payload && typeof payload === 'object' && JSON.stringify(payload).includes('"atlas.call.')) {
+        return { allowed: false, result: null };
+      }
       const purpose = payload && typeof payload === 'object' ? payload.purpose : null;
       if (typeof purpose !== 'string' || !purpose || !permissions.signPurposes.includes(purpose)) {
         return { allowed: false, result: null };

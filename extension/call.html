@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas Calls</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { font: 14px system-ui, sans-serif; margin: 0; background: #14181c; color: #e8e4dc; }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #1d2329; border-bottom: 1px solid #2d363f; }
+  header h1 { font-size: 15px; margin: 0; flex: 1; }
+  main { padding: 12px 14px 20px; }
+  section { margin-bottom: 14px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #9aa7b2; margin: 0 0 6px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid #4a5560; background: #26303a; color: inherit; cursor: pointer; }
+  button:hover:not(:disabled) { background: #2e3b47; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: #2f6f4d; border-color: #3d8d63; }
+  button.danger { background: #8a3030; border-color: #a74545; }
+  button.small { padding: 4px 9px; font-size: 12px; }
+  input[type=text] { font: inherit; padding: 6px 8px; width: 100%; border-radius: 6px; border: 1px solid #4a5560; background: #0f1316; color: inherit; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .note { color: #9aa7b2; font-size: 12px; margin: 4px 0; }
+  .banner { padding: 8px 10px; border-radius: 6px; background: #2b2f36; border: 1px solid #424b57; margin-bottom: 10px; }
+  .banner.warn { background: #3a3220; border-color: #6d5a26; }
+  .banner.bad { background: #3d2323; border-color: #7a3a3a; }
+  .banner.good { background: #1f3528; border-color: #3a6b4b; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; border: 1px solid #4a5560; }
+  .pill.verified { background: #1f3528; border-color: #3a6b4b; color: #9ee0b5; }
+  .pill.unverified { background: #3a3220; border-color: #6d5a26; color: #f0cf7a; }
+  .contact { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #262e36; }
+  .contact .who { flex: 1; min-width: 0; }
+  .contact .who b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .code { font: 16px ui-monospace, monospace; letter-spacing: .08em; padding: 8px; background: #0f1316; border-radius: 6px; margin: 6px 0; }
+  .big { font-size: 18px; font-weight: 600; }
+  .keyline { font: 11px ui-monospace, monospace; color: #9aa7b2; word-break: break-all; }
+  #screenCall { text-align: center; padding: 8px 0; }
+  #log { font: 11px ui-monospace, monospace; white-space: pre-wrap; max-height: 140px; overflow: auto; color: #8a97a3; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Domain Atlas Calls</h1>
+  <span id="availPill" class="pill">Do not disturb</span>
+</header>
+<main>
+  <div id="notice" class="banner" hidden></div>
+
+  <div id="screenLocked" hidden>
+    <div class="banner warn">Your wallet is locked or has no identity. Unlock it in the Domain Atlas side panel; this window picks up automatically.</div>
+  </div>
+
+  <div id="screenOtherWindow" hidden>
+    <div class="banner warn">Calling is already open in another window. Close this one.</div>
+  </div>
+
+  <div id="screenCall" hidden>
+    <div id="callState" class="note"></div>
+    <div id="callWho" class="big"></div>
+    <div id="callVerified"></div>
+    <div id="callKey" class="keyline"></div>
+    <div id="callTrust" class="note" style="text-align:left"></div>
+    <div class="row" style="justify-content:center;margin-top:12px">
+      <button id="btnStart" class="primary" hidden>Call</button>
+      <button id="btnAnswer" class="primary" hidden>Answer</button>
+      <button id="btnDecline" class="danger" hidden>Decline</button>
+      <button id="btnMute" hidden>Mute</button>
+      <button id="btnHangup" class="danger" hidden>Hang up</button>
+      <button id="btnDismiss" hidden>Close</button>
+    </div>
+    <audio id="remoteAudio" autoplay></audio>
+  </div>
+
+  <div id="screenHome" hidden>
+    <section>
+      <h2>Availability</h2>
+      <div class="row">
+        <button id="btnAvailable">Available</button>
+        <button id="btnDnd">Do not disturb</button>
+      </div>
+      <div id="availNote" class="note"></div>
+    </section>
+
+    <section>
+      <h2>Contacts</h2>
+      <div id="contacts"></div>
+      <div id="contactsEmpty" class="note" hidden>No contacts yet. Add contacts in Messaging first.</div>
+    </section>
+
+    <section id="safetyPanel" hidden>
+      <h2>Verify contact</h2>
+      <div id="safetyWho" class="note"></div>
+      <div id="safetyCode" class="code"></div>
+      <div class="note">Read this code to your contact over a channel you already trust (a phone call you placed to a number you know, in person). If they see exactly the same code, the two wallets hold each other's real keys.</div>
+      <div class="row"><button id="btnSafetyMatch" class="primary small">The codes match</button><button id="btnSafetyClose" class="small">Close</button></div>
+    </section>
+
+    <section>
+      <h2>Call service</h2>
+      <input id="serviceInput" type="text" placeholder="https://calls.example.com" autocomplete="off" spellcheck="false">
+      <label class="note"><input id="devHttp" type="checkbox"> Private test network (allow plain http for localhost and private addresses)</label>
+      <div class="row"><button id="btnSaveService" class="small">Save and check</button><button id="btnClearService" class="small">Remove</button></div>
+      <div id="serviceNote" class="note"></div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Activity</h2>
+    <div id="log"></div>
+  </section>
+</main>
+<script src="call-protocol.js"></script>
+<script src="wallet.js"></script>
+<script src="call.js"></script>
+</body>
+</html>

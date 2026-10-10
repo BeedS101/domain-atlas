@@ -533,7 +533,15 @@ const AtlasWallet = (() => {
     }
   }
 
+  // Call messages (type "atlas.call.*") are signed only by signCallPayload() in the
+  // calls section; this generic entry point, which the page signing bridge also
+  // reaches, refuses them.
   async function signWithSelf(payload) {
+    if (isCallPayload(payload)) throw new Error('Call messages are signed only by the calling window.');
+    return signWithSelfUnchecked(payload);
+  }
+
+  async function signWithSelfUnchecked(payload) {
     const mode = await getIdentityMode();
     if (mode === 'webauthn') return signWithWebAuthnIdentity(payload);
     const identity = await getIdentity();
@@ -2395,6 +2403,7 @@ const AtlasWallet = (() => {
     const friends = await getFriends();
     const remaining = friends.filter((f) => f.publicKey !== publicKey);
     await saveFriends(identity.publicKey, remaining);
+    try { await callOnFriendRemoved(publicKey); } catch (err) { /* call state is cleaned up on a later removal or expires */ }
     // A removed contact can't stay a member of any local group either —
     // see the Groups section below. Cheap either way (groups are a small
     // local list), and keeps memberPublicKeys from silently accumulating
@@ -5175,7 +5184,9 @@ const AtlasWallet = (() => {
     const to = { publicKey: target.publicKey };
     if (target.domain && target.domain !== toDomain) to.domain = target.domain;
     const payload = { to, subject, body };
-    const proof = await signWithSelf(payload);
+    // Mail bodies can legitimately contain call messages (contact cards), which the general entry
+    // point refuses; this function is only reachable from wallet code, never from a page.
+    const proof = await signWithSelfUnchecked(payload);
     const res = await fetch(baseUrl(toDomain) + '/atlas/postoffice/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -7414,13 +7425,16 @@ const AtlasWallet = (() => {
     const friendState = await getFriendRequestState(identity.publicKey);
     const friendHandledIds = new Set(friendState.seen);
     const friendWaitingIds = new Set(friendState.incoming.map((r) => r.messageId));
-    const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds, ...existingChat.map((e) => e.id), ...deletedChatIds, ...friendState.seen]);
+    // Call cards and withdrawals (CALL_SUBJECT_MARKER) are kept in their own store too.
+    const callSeenIds = new Set((await getCallState(identity.publicKey)).seen);
+    const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds, ...existingChat.map((e) => e.id), ...deletedChatIds, ...friendState.seen, ...callSeenIds]);
     // New arrivals are collected here and merged into the stored lists at
     // the end, under the lock, against a fresh read; `existing` and
     // `existingChat` above are only used to recognise what is already known.
     const incomingMail = [];
     const incomingChat = [];
     const incomingFriend = [];
+    const incomingCall = [];
 
     for (const [domain, idSet] of byDomain) {
       try {
@@ -7475,7 +7489,7 @@ const AtlasWallet = (() => {
             // Friend notices already handled count as deleted too; a request
             // still waiting for an answer is kept until it gets one.
             const handledFriendNotice = friendHandledIds.has(message.id) && !friendWaitingIds.has(message.id);
-            if (deletedIds.has(message.id) || deletedChatIds.has(message.id) || handledFriendNotice) staleOnServer.push(message.id);
+            if (deletedIds.has(message.id) || deletedChatIds.has(message.id) || handledFriendNotice || callSeenIds.has(message.id)) staleOnServer.push(message.id);
             continue;
           }
           const ok = await verifyMailMessage(domain, message);
@@ -7495,6 +7509,14 @@ const AtlasWallet = (() => {
                 sentAt: message.sentAt,
                 body: message.body
               });
+            }
+            continue;
+          }
+          // Call cards: processed only by a page that has the calling module loaded;
+          // anywhere else the message is left on the server for a later check.
+          if (isCallTransportMessage(message.subject)) {
+            if (message.from && message.from.publicKey && typeof AtlasCallProtocol !== 'undefined') {
+              incomingCall.push({ id: message.id, publicKey: message.from.publicKey, via: domain, sentAt: message.sentAt, body: message.body });
             }
             continue;
           }
@@ -7588,12 +7610,396 @@ const AtlasWallet = (() => {
     // Outside the lock above: processFriendMessages takes it itself, and
     // flushFriendNotices does network I/O.
     await processFriendMessages(identity, incomingFriend);
+    try { await processCallMessages(identity, incomingCall); } catch (err) { /* retried on the next check */ }
     try { await flushFriendNotices(); } catch (err) { /* retried on the next check */ }
     try { await syncFriendsToPostOffices(); } catch (err) { /* retried on the next check */ }
     const settings = await getMailSettings();
     settings.lastCheckedAt = new Date().toISOString();
     await chrome.storage.local.set({ atlasMailSettings: settings });
     return newCount;
+  }
+
+  // ---------- Secure voice calls: wallet side ----------
+  //
+  // Data and signing support for the calling window (call.html / call.js);
+  // the signed message formats live in call-protocol.js, shared with the Call
+  // Service. Three rules shape everything here:
+  //   - Call messages (type "atlas.call.*") are signed only through
+  //     signCallPayload() below, which accepts a fixed list of types and checks
+  //     each against the protocol schema. signWithSelf() refuses them, so the
+  //     page signing bridge and every other generic signing path cannot
+  //     produce one.
+  //   - Permission to call is a signed card (a routing tag at the contact's
+  //     Call Service, bound to the one caller key it was made for) that a
+  //     contact sends through the Post Office. A card is accepted only from an
+  //     existing contact, only when signed by that contact's identity key, and
+  //     only when it names that same key as the callee.
+  //   - The only network destination is the service named in this wallet's own
+  //     configuration or in a contact's verified card, and only over https
+  //     (plain http for localhost and private addresses when the test-network
+  //     switch is on).
+  const CALL_SUBJECT_MARKER = '\u0000atlas.call.v1';
+  const CALL_SEEN_CAP = 2000;
+  const CALL_GRANT_MS = 30 * 24 * 60 * 60 * 1000;
+  const CALL_GRANT_MAX_CALLS = 100;
+
+  function callProto() {
+    if (typeof AtlasCallProtocol === 'undefined') throw new Error('The calling module is not loaded in this page.');
+    return AtlasCallProtocol;
+  }
+
+  function isCallTransportMessage(subject) {
+    return subject === CALL_SUBJECT_MARKER;
+  }
+
+  // True for any payload that mentions an atlas.call.* type anywhere, not only at the top level,
+  // so a nested or re-labelled call message is refused as well. Anything unserializable is refused.
+  function isCallPayload(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    try { return JSON.stringify(payload).includes('"atlas.call.'); } catch (err) { return true; }
+  }
+
+  // Payload types the identity key itself may sign. Call keys and listening
+  // session keys sign the rest (poll, ice, listen, other signal kinds).
+  const CALL_IDENTITY_TYPES = ['atlas.call.tag', 'atlas.call.tag-revoke', 'atlas.call.tag-list', 'atlas.call.listen-session', 'atlas.call.invite', 'atlas.call.signal', 'atlas.call.card'];
+
+  async function signCallPayload(payload) {
+    const P = callProto();
+    if (!payload || typeof payload !== 'object' || !CALL_IDENTITY_TYPES.includes(payload.type)) throw new Error('That call message is not signed by the identity key.');
+    if (payload.type === 'atlas.call.card') {
+      if (!P.validateCardPayload(payload)) throw new Error('Refusing to sign a malformed call card.');
+    } else {
+      const shape = P.validatePayload(payload);
+      if (!shape.ok) throw new Error('Refusing to sign a malformed call message (' + shape.reason + ').');
+      if (payload.type === 'atlas.call.signal' && payload.kind !== 'accept') throw new Error('Only an accept is signed by the identity key.');
+    }
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    if (payload.type === 'atlas.call.invite' && payload.caller.publicKey !== identity.publicKey) throw new Error('An invitation must name this identity as the caller.');
+    const envelope = await signWithSelfUnchecked(payload);
+    if (envelope.publicKey !== identity.publicKey) throw new Error('The signing identity changed.');
+    return envelope;
+  }
+
+  // ----- where the wallet may connect -----
+
+  function callPrivateHost(hostname) {
+    const h = String(hostname).replace(/^\[|\]$/g, '');
+    if (h === 'localhost' || h === '::1') return true;
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (!m) return false;
+    const a = Number(m[1]), b = Number(m[2]);
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+  }
+
+  // Returns null when `origin` is acceptable, else a sentence to show the person.
+  function callOriginProblem(origin, devAllowHttp) {
+    let u;
+    try { u = new URL(origin); } catch (err) { return 'That is not a valid address.'; }
+    if (u.origin !== origin) return 'Use only the address of the service, such as https://calls.example.com (no path).';
+    if (u.protocol === 'https:') return null;
+    if (u.protocol === 'http:') {
+      if (!devAllowHttp) return 'Plain http is allowed only on a private test network, and only when the test-network switch is on.';
+      if (!callPrivateHost(u.hostname)) return 'Plain http is allowed only for localhost and private network addresses.';
+      return null;
+    }
+    return 'Only https addresses are supported.';
+  }
+
+  // ----- stored call state, per owner, encrypted at rest -----
+
+  function normalizeCallState(state) {
+    const s = (state && typeof state === 'object') ? state : {};
+    const c = (s.config && typeof s.config === 'object') ? s.config : {};
+    return {
+      config: { service: typeof c.service === 'string' ? c.service : null, domain: typeof c.domain === 'string' ? c.domain : null, devAllowHttp: c.devAllowHttp === true },
+      contacts: (s.contacts && typeof s.contacts === 'object' && !Array.isArray(s.contacts)) ? s.contacts : {},
+      seen: Array.isArray(s.seen) ? s.seen : []
+    };
+  }
+
+  async function getCallState(ownerPublicKey) {
+    const { atlasCallState } = await chrome.storage.local.get('atlasCallState');
+    const identity = await getIdentity();
+    const stored = (atlasCallState || {})[ownerPublicKey];
+    return normalizeCallState(await decryptAtRest(identity, 'callState', stored, null));
+  }
+
+  async function saveCallState(ownerPublicKey, state) {
+    const { atlasCallState } = await chrome.storage.local.get('atlasCallState');
+    const all = atlasCallState || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'callState', normalizeCallState(state));
+    await chrome.storage.local.set({ atlasCallState: all });
+  }
+
+  function updateCallState(ownerPublicKey, mutate) {
+    return withMessageLock(async () => {
+      const state = await getCallState(ownerPublicKey);
+      const result = await mutate(state);
+      await saveCallState(ownerPublicKey, state);
+      return result;
+    });
+  }
+
+  async function getCallConfig() {
+    const identity = await getIdentity();
+    if (!identity) return { service: null, domain: null, devAllowHttp: false };
+    return (await getCallState(identity.publicKey)).config;
+  }
+
+  async function callPost(origin, route, body, opts) {
+    opts = opts || {};
+    // The calling window passes the setting it already holds for requests sent while it is closing,
+    // where an extra storage read could outlive the page.
+    const devAllowHttp = typeof opts.devAllowHttp === 'boolean' ? opts.devAllowHttp : (await getCallConfig()).devAllowHttp;
+    const problem = callOriginProblem(origin, devAllowHttp);
+    if (problem) throw Object.assign(new Error(problem), { code: 'bad-service' });
+    if (typeof route !== 'string' || !/^\/atlas\/call\/[a-z/]+$/.test(route)) throw new Error('Not a call service route.');
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), opts.timeoutMs || 30000);
+    if (opts.signal) {
+      if (opts.signal.aborted) ctl.abort();
+      else opts.signal.addEventListener('abort', () => ctl.abort(), { once: true });
+    }
+    try {
+      const res = await fetch(origin + route, {
+        method: route === '/atlas/call/info' ? 'GET' : 'POST',
+        headers: route === '/atlas/call/info' ? {} : { 'Content-Type': 'application/json' },
+        body: route === '/atlas/call/info' ? undefined : JSON.stringify(body),
+        signal: ctl.signal, credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', redirect: 'error', keepalive: !!opts.keepalive
+      });
+      let json = null;
+      try { json = await res.json(); } catch (err) { /* no body */ }
+      return { status: res.status, json };
+    } catch (err) {
+      throw Object.assign(new Error(ctl.signal.aborted ? 'The call service did not answer in time.' : 'The call service could not be reached.'), { code: 'network' });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function setCallConfig({ service, devAllowHttp }) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const dev = devAllowHttp === true;
+    let domain = null;
+    if (service) {
+      const problem = callOriginProblem(service, dev);
+      if (problem) throw new Error(problem);
+      // The setting is stored first so callPost applies the same origin rule to the check itself.
+      await updateCallState(identity.publicKey, (s) => { s.config.devAllowHttp = dev; });
+      const res = await callPost(service, '/atlas/call/info');
+      const info = res.json;
+      if (res.status !== 200 || !info || info.service !== 'atlas-call') throw new Error('That address did not answer as a Domain Atlas call service.');
+      if (info.configured !== true) throw new Error('That call service is running but not configured yet.');
+      if (info.audience !== service) throw new Error('That call service identifies itself as ' + String(info.audience) + ', not the address you typed.');
+      domain = typeof info.domain === 'string' ? info.domain : null;
+    }
+    await updateCallState(identity.publicKey, (s) => { s.config = { service: service || null, domain, devAllowHttp: dev }; });
+    return { service: service || null, domain, devAllowHttp: dev };
+  }
+
+  // ----- contacts and permissions -----
+
+  const callGrantActive = (g, cfg, now) => !!g && g.service === cfg.service && Date.parse(g.expiresAt) > now;
+  const callCardUsable = (c, cfg, now) => !!c && Date.parse(c.expiresAt) > now && !callOriginProblem(c.service, cfg.devAllowHttp);
+
+  async function getCallContacts() {
+    const identity = await getIdentity();
+    if (!identity) return [];
+    const friends = await getFriends();
+    const state = await getCallState(identity.publicKey);
+    const now = Date.now();
+    return friends.map((f) => {
+      const c = state.contacts[f.publicKey] || {};
+      return {
+        publicKey: f.publicKey, name: f.name,
+        address: f.handle && f.handleDomain ? { handle: f.handle, domain: f.handleDomain } : null,
+        verified: !!c.verified, verifiedAt: c.verified ? c.verified.at : null,
+        canCall: callCardUsable(c.theirCard, state.config, now), cardExpiresAt: c.theirCard ? c.theirCard.expiresAt : null,
+        allowed: callGrantActive(c.grant, state.config, now), grantExpiresAt: c.grant ? c.grant.expiresAt : null
+      };
+    });
+  }
+
+  // The card a contact gave this wallet, only when it is still usable.
+  async function getCallCardFor(contactKey) {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const state = await getCallState(identity.publicKey);
+    const c = state.contacts[contactKey];
+    return c && callCardUsable(c.theirCard, state.config, Date.now()) ? Object.assign({}, c.theirCard) : null;
+  }
+
+  // For an incoming call: is `callerKey` a current contact holding the tag this wallet gave them?
+  async function getCallPolicyForCaller(callerKey, tag) {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const friends = await getFriends();
+    const friend = friends.find((f) => f.publicKey === callerKey);
+    if (!friend) return null;
+    const state = await getCallState(identity.publicKey);
+    const c = state.contacts[callerKey];
+    if (!c || !callGrantActive(c.grant, state.config, Date.now()) || c.grant.tag !== tag) return null;
+    return { publicKey: friend.publicKey, name: friend.name, verified: !!c.verified };
+  }
+
+  async function getContactSafetyCode(contactKey) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const friends = await getFriends();
+    if (!friends.some((f) => f.publicKey === contactKey)) throw new Error('No such contact.');
+    return callProto().safetyCode(identity.publicKey, contactKey);
+  }
+
+  async function setContactCallVerified(contactKey, verified) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const friends = await getFriends();
+    if (!friends.some((f) => f.publicKey === contactKey)) throw new Error('No such contact.');
+    const code = await callProto().safetyCode(identity.publicKey, contactKey);
+    await updateCallState(identity.publicKey, (s) => {
+      const c = s.contacts[contactKey] || (s.contacts[contactKey] = {});
+      c.verified = verified ? { at: new Date().toISOString(), code } : null;
+    });
+  }
+
+  // Which Post Office to send a card through: one this wallet belongs to, preferring the
+  // contact's own, then the call service's.
+  async function callCardRoute(identity, friend, serviceDomain) {
+    const memberships = await getPostOfficeMemberships(identity.publicKey);
+    const order = [friend.handleDomain, serviceDomain].filter(Boolean);
+    for (const d of order) if (memberships.some((m) => m.domain === d)) return d;
+    return memberships.length ? memberships[0].domain : null;
+  }
+
+  async function sendCallMessage(identity, friend, serviceDomain, plain) {
+    const via = await callCardRoute(identity, friend, serviceDomain);
+    if (!via) throw new Error('Join a Post Office first: contact cards travel through one.');
+    const wire = await wrapChatMessageForWire(identity, friend.publicKey, JSON.stringify(plain));
+    await postOfficeSendRaw(via, { publicKey: friend.publicKey, domain: friend.handleDomain || null }, CALL_SUBJECT_MARKER, wire);
+    return via;
+  }
+
+  async function grantCalling(contactKey) {
+    const P = callProto();
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const friends = await getFriends();
+    const friend = friends.find((f) => f.publicKey === contactKey);
+    if (!friend) throw new Error('No such contact.');
+    const cfg = await getCallConfig();
+    if (!cfg.service) throw new Error('Set up a call service first (Calls tab).');
+    const info = (await callPost(cfg.service, '/atlas/call/info')).json;
+    if (!info || info.configured !== true || info.audience !== cfg.service) throw new Error('The call service is not available.');
+    const wallet = await getWallet(identity.publicKey);
+    const membership = wallet.find((e) => e.credential && e.credential.asset && e.credential.asset.class === 'atlas.postoffice.membership' && e.credential.issuer && e.credential.issuer.domain === info.domain);
+    if (!membership) throw new Error('This call service admits members of ' + info.domain + '\'s Post Office. Join it first.');
+
+    const state = await getCallState(identity.publicKey);
+    const previous = state.contacts[contactKey] && state.contacts[contactKey].grant;
+    if (previous && previous.service === cfg.service) { try { await revokeGrantTag(identity, cfg.service, previous.tag); } catch (err) { /* the old tag expires on its own */ } }
+
+    const now = Date.now();
+    const tagPayload = {
+      type: 'atlas.call.tag', v: 1, audience: cfg.service, issuedAt: new Date(now).toISOString(), nonce: P.randomId(16),
+      bind: { kind: 'wallet', publicKey: contactKey }, calleeKey: identity.publicKey,
+      expiresAt: new Date(now + CALL_GRANT_MS).toISOString(), maxCalls: CALL_GRANT_MAX_CALLS
+    };
+    const res = await callPost(cfg.service, '/atlas/call/tag/create', { payload: tagPayload, proof: await signCallPayload(tagPayload), membership: membership.credential });
+    if (res.status !== 200 || !res.json || typeof res.json.tag !== 'string') {
+      throw new Error(res.json && res.json.code === 'membership-required' ? 'The call service did not accept your Post Office membership.' : 'The call service refused to create the permission' + (res.json && res.json.code ? ' (' + res.json.code + ')' : '') + '.');
+    }
+    const cardPayload = { type: 'atlas.call.card', v: 1, service: cfg.service, tag: res.json.tag, calleeKey: identity.publicKey, expiresAt: res.json.expiresAt, issuedAt: new Date().toISOString() };
+    const cardProof = await signCallPayload(cardPayload);
+    try {
+      await sendCallMessage(identity, friend, info.domain, { v: 1, type: 'card', card: { payload: cardPayload, proof: cardProof } });
+    } catch (err) {
+      try { await revokeGrantTag(identity, cfg.service, res.json.tag); } catch (e2) { /* expires on its own */ }
+      throw err;
+    }
+    await updateCallState(identity.publicKey, (s) => {
+      const c = s.contacts[contactKey] || (s.contacts[contactKey] = {});
+      c.grant = { service: cfg.service, tag: res.json.tag, createdAt: new Date().toISOString(), expiresAt: res.json.expiresAt };
+    });
+    return { expiresAt: res.json.expiresAt };
+  }
+
+  async function revokeGrantTag(identity, service, tag) {
+    const P = callProto();
+    const payload = { type: 'atlas.call.tag-revoke', v: 1, audience: service, issuedAt: new Date().toISOString(), nonce: P.randomId(16), tag };
+    const res = await callPost(service, '/atlas/call/tag/revoke', { payload, proof: await signCallPayload(payload) });
+    if (res.status !== 200) throw new Error('The call service did not confirm the change.');
+  }
+
+  async function revokeCalling(contactKey) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const state = await getCallState(identity.publicKey);
+    const grant = state.contacts[contactKey] && state.contacts[contactKey].grant;
+    if (!grant) return { revoked: false };
+    // The tag is revoked at the service first: a contact keeps the permission until that succeeds.
+    await revokeGrantTag(identity, grant.service, grant.tag);
+    await updateCallState(identity.publicKey, (s) => { if (s.contacts[contactKey]) s.contacts[contactKey].grant = null; });
+    try {
+      const friend = (await getFriends()).find((f) => f.publicKey === contactKey);
+      if (friend) await sendCallMessage(identity, friend, state.config.domain, { v: 1, type: 'withdrawn' });
+    } catch (err) { /* the contact finds out on their next call attempt */ }
+    return { revoked: true };
+  }
+
+  // Called when a contact is removed. Forgets the contact's call state; a local-password
+  // identity also revokes the tag at once, a passkey identity cannot do that without a prompt
+  // and relies on the callee-side contact check plus the tag's expiry.
+  async function callOnFriendRemoved(contactKey) {
+    const identity = await getIdentity();
+    if (!identity) return;
+    const state = await getCallState(identity.publicKey);
+    const grant = state.contacts[contactKey] && state.contacts[contactKey].grant;
+    if (grant && identity.mode === 'local') { try { await revokeGrantTag(identity, grant.service, grant.tag); } catch (err) { /* expires on its own */ } }
+    await updateCallState(identity.publicKey, (s) => { delete s.contacts[contactKey]; });
+  }
+
+  // Cards arrive as Post Office mail with the reserved subject. Only a contact's own signed card is kept.
+  async function processCallMessages(identity, items) {
+    if (!items.length) return;
+    const P = callProto();
+    const friendKeys = new Set((await getFriends()).map((f) => f.publicKey));
+    const alreadySeen = new Set((await getCallState(identity.publicKey)).seen);
+    items.sort((a, b) => new Date(a.sentAt) - new Date(b.sentAt));
+    const prepared = [];
+    for (const item of items) {
+      if (alreadySeen.has(item.id)) continue;
+      const entry = { item, kind: null, card: null };
+      prepared.push(entry);
+      if (!item.publicKey || item.publicKey === identity.publicKey || !friendKeys.has(item.publicKey)) continue;
+      let parsed = null;
+      try { parsed = JSON.parse(await unwrapChatMessageFromWire(identity, item.publicKey, item.body)); } catch (err) { continue; }
+      if (!parsed || parsed.v !== 1) continue;
+      if (parsed.type === 'withdrawn') { entry.kind = 'withdrawn'; continue; }
+      if (parsed.type !== 'card' || !parsed.card) continue;
+      const { payload, proof } = parsed.card;
+      if (!P.validateCardPayload(payload) || !(await P.verifyEnvelope(payload, proof))) continue;
+      if (proof.publicKey !== item.publicKey || payload.calleeKey !== item.publicKey) continue;
+      const now = Date.now(), issued = Date.parse(payload.issuedAt), expires = Date.parse(payload.expiresAt);
+      if (expires <= now || issued > now + P.LIMITS.walletSkewMs || expires - issued > P.LIMITS.tagMaxAheadMs) continue;
+      entry.kind = 'card';
+      entry.card = payload;
+    }
+    await updateCallState(identity.publicKey, (s) => {
+      const seen = new Set(s.seen);
+      for (const { item, kind, card } of prepared) {
+        seen.add(item.id);
+        if (!kind) continue;
+        const c = s.contacts[item.publicKey] || (s.contacts[item.publicKey] = {});
+        if (kind === 'withdrawn') { c.theirCard = null; continue; }
+        if (c.theirCard && Date.parse(c.theirCard.issuedAt) > Date.parse(card.issuedAt)) continue;
+        c.theirCard = { service: card.service, tag: card.tag, calleeKey: card.calleeKey, issuedAt: card.issuedAt, expiresAt: card.expiresAt, receivedAt: new Date().toISOString() };
+      }
+      s.seen = Array.from(seen).slice(-CALL_SEEN_CAP);
+    });
+    await forgetOnServers(identity.publicKey, items.map((item) => ({ id: item.id, domain: item.via })));
   }
 
   return {
@@ -7687,6 +8093,9 @@ const AtlasWallet = (() => {
     postOfficeSendRaw,
     getLastChatSendDomain, setLastChatSendDomain,
     getMessagingWindowSettings, setMessagingWindowSettings,
+    getCallConfig, setCallConfig, callOriginProblem, callPost, signCallPayload,
+    getCallContacts, getCallCardFor, getCallPolicyForCaller, getContactSafetyCode, setContactCallVerified,
+    grantCalling, revokeCalling,
     onWalletChanged
   };
 })();

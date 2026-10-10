@@ -1,8 +1,12 @@
 # Secure voice calls: endpoints, messages and state machines
 
-Status: proposal for review (see `docs/voice-calls-architecture.md`). Field
-names and limits are proposals; they become fixed only when the design is
-approved. Nothing here exists in code.
+Status: proposal for review (see `docs/voice-calls-architecture.md`), amended
+after Phase 1A and Phase 1B. The wallet-to-wallet subset now exists as local code
+in `call-server/server.js` and `extension/call-protocol.js` (the shared signed
+protocol, byte-identical in both places); domain callers, permits, `pkProof`,
+`chain` and TURN are still design only. Field names and limits stay proposals
+until the design is approved. Evidence classes are defined in the architecture
+document: **Proposed**, **Automated**, **Real hardware**.
 
 ## 1. Conventions
 
@@ -339,3 +343,28 @@ right key for that `kind`; `th`; then the content (for SDP, the strict parse of
 section 7 of the architecture document). A failure ends the call with
 `verify-failed` and tells the user plainly; it never silently ignores a message
 that claims to be part of the active call.
+
+## 8. Amendments from Phase 1A and Phase 1B
+
+Behavior fixed by the implementation, each with the test that exercises it
+(`test/manual-call-service.js`, `manual-call-protocol.js`, `manual-call-e2e.js`,
+`manual-call-adversary.js`; all **Automated**, none yet **Real hardware**).
+
+| Topic | Amendment |
+|---|---|
+| `poll.after` (section 2.4) | The last **mailbox event number** (`n`) the poller processed, not a signal `seq`. Poll answers are `{ "events": [ { "n": 1, "type": "signal", "message": {...} } | { "n": 2, "type": "ended", "reason": "..." } ], "serverTime": "..." }`. A window ignores any event whose `n` is not above the last one it processed. |
+| `listen` answers | `{ "events": [ { "id": <number>, "type": "invite" \| "cancel" \| "ended", "callId": "...", ... } ] }`; `ack` carries those ids. |
+| `listen` with `stop` | `atlas.call.listen` gains an optional `stop: true` (exactly `true`, otherwise `400`). The listener is removed at once, so an invite is refused immediately. Do Not Disturb, window close and wallet lock send it. |
+| `info` (section 2) | `GET /atlas/call/info` returns `service`, `configured`, `audience`, `domain`, `ice.stun`, `ice.turn: false`, and the effective limits; unconfigured it returns only `configured: false`. The wallet refuses a service whose `audience` differs from the address it was given. |
+| `tag/create` (2.1) | Signed by the callee's `IK`; `bind.publicKey` is the contact's `IK`; `calleeKey` is the callee's `IK`. `pkProof` and `bind.kind: "domain"` are not implemented. A wallet holds at most 200 live tags; the wallet creates one tag per contact and revokes the previous one when granting again. |
+| Admission | The membership credential is checked against the pinned issuer keys, the configured domain, class `atlas.postoffice.membership`, owner = signer, expiry and, when `CALL_REVOCATIONS_URL` is set, the revocation list; if the list cannot be read tag creation fails closed (`503 revocations-unavailable`). |
+| `invite` (2.2) | `chain` is not accepted in Phase 1. The service answers `404 unavailable` for every state-dependent refusal (unknown, revoked or exhausted tag, wrong caller, wrong callee, callee not listening, tag already ringing); state-independent failures stay `400`/`401` (`bad-schema`, `bad-signature`, `wrong-audience`, `stale-request`). A listener counts as present only if it is waiting or was seen within 40 s. |
+| Candidate addresses (2.3) | The wallet does not send, and drops on receipt, candidates whose address is loopback, link-local, multicast or unspecified, or is a host name other than a browser-generated `uuid.local`. The service does not interpret candidates. |
+| Offer and answer content (2.3) | The signed `sdp` is the description returned by `createOffer` / `createAnswer`, without candidates. |
+| Rate limits | Defaults: 6 invites per minute per caller key and per callee key, 20 per source, 600 requests per source, 30 tag creations per owner; callers receive `429 rate-limited`. The wallet shows at most 3 rings per contact in 60 s. |
+| Verification order (section 7) | In the window: size and schema, `callId`, `audience`, legal kind for the state, `seq`, signer, signature, `th`, content. `accept` is verified separately (signer is the expected callee, signature, `inviteHash`, call key not reused). Every failure ends the call with `verify-failed` and names the first check that failed (`failReason`, shown in the activity log and not as a remote claim). |
+| Duplicate events | Same `n` again: ignored (`duplicate-event-ignored`). Same message with a new `n`: fails on `seq`, `kind` or `callId`, which ends the call. |
+| Pagehide (section 6) | The signed `end` is sent by a keep-alive request that performs no storage reads before the fetch. |
+
+Not implemented, still as described above: `pkProof`, domain `bind`, `chain`,
+TURN credentials in `ice`, permits.

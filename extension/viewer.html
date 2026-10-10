@@ -956,17 +956,11 @@
     font-size: 11px; color: #a9b8bf; font-weight: 600; cursor: move;
   }
   .messaging-header-title { flex: 0 0 auto; }
-  /* Three-tab bar (Chats / Calls / Contacts) — deliberately plain buttons,
-     not the dynamic-width .chat-tab-bar (that one exists to handle a
-     VARIABLE number of scene-declared tabs; this is a fixed trio, same
-     reasoning .subtab-bar already covers elsewhere in the wallet panel).
-     flex: 0 0 auto (NOT 1 1 auto) so this hugs its own three-button width
-     instead of stretching to share the header's leftover space with
-     .messaging-header-spacer — adding the Calls tab (TODO round 1 item 3)
-     made that split leave almost no empty header area to grab for
-     drag-to-move (see #messagingHeader's mousedown handler in viewer.js);
-     letting the spacer alone claim all the slack keeps one comfortably
-     wide, reliably empty strip to drag from instead. */
+  /* Three-tab bar (Chats / Calls / Contacts): plain buttons rather than the dynamic-width
+     .chat-tab-bar, which exists for a variable number of scene-declared tabs; this is a fixed
+     trio. flex: 0 0 auto (not 1 1 auto) keeps the bar at its own width so the header's
+     leftover space goes to .messaging-header-spacer, leaving one wide, reliably empty strip
+     to drag from (see #messagingHeader's mousedown handler in viewer.js). */
   .messaging-tab-bar { display: flex; flex: 0 0 auto; min-width: 0; gap: 2px; margin-left: 4px; }
   .messaging-tab {
     flex: 0 0 auto; white-space: nowrap; background: none; border: none;
@@ -1021,9 +1015,8 @@
     border-radius: 999px; min-width: 16px; height: 16px; display: flex;
     align-items: center; justify-content: center; padding: 0 3px;
   }
-  /* Contacts tab (TODO round 1 item 4): "Chat"/"Call" instead of one
-     click-anywhere target — see the HTML comment on #messagingWidget for
-     why "Call" only switches to the (still placeholder) Calls tab. */
+  /* Contacts tab: "Chat"/"Call" instead of one click-anywhere target — see
+     the HTML comment on #messagingWidget for what "Call" does. */
   .messaging-contact-actions { display: flex; gap: 4px; flex: 0 0 auto; }
   .messaging-contact-actions button {
     font-size: 11px; padding: 4px 8px; border-radius: 6px;
@@ -1276,19 +1269,17 @@
            an inline confirm row, same pattern as the wallet's own Contacts
            list "Remove" — that forgets the whole conversation on this
            device via AtlasWallet.deleteChatThread().
-         - "Calls" (task #111's original framing was "Chats / Calls /
-           Contacts" — this tab was deferred out of the first slice and
-           added per Bruno's follow-up request, TODO round 1 item 3).
-           Real calling (voice/video/whatever it ends up being) has no
-           design done yet — #messagingCallsBody just shows an honest
-           placeholder rather than any fake "calling" UI.
+         - "Calls": status of the calling window plus a button that opens
+           it (call.html, a trusted extension-origin window). Placing,
+           answering and ending calls, signing and the microphone prompt
+           all live in that window; nothing in this tab signs anything or
+           contacts a call service.
          - "Contacts": the SAME saved-friends list Mail's own Contacts
            sub-tab shows (AtlasWallet.getFriends()), reused here purely as
-           a picker — clicking a contact now shows a "Chat"/"Call" choice
-           (TODO round 1 item 4) rather than jumping straight to the chat
-           view. "Chat" opens (chat view) ready for a brand-new message,
-           per Bruno's original spec; "Call" switches to the Calls tab
-           (which, per above, has nothing real behind it yet).
+           a picker — clicking a contact shows a "Chat"/"Call" choice
+           rather than jumping straight to the chat view. "Chat" opens
+           (chat view) ready for a brand-new message; "Call" switches to
+           the Calls tab with that contact selected.
        The (chat view) itself is a third kind of sub-screen inside
        #messagingBody, not a fourth tab — it's reached by clicking into a
        thread or choosing "Chat" for a contact, with its own Back button
@@ -1316,7 +1307,7 @@
         <div id="messagingChatsView" class="messaging-view">
           <div id="messagingChatsList" class="messaging-list"></div>
         </div>
-        <!-- Calls — placeholder only, see the comment above for why. -->
+        <!-- Calls — status and a button that opens the calling window (call.html). -->
         <div id="messagingCallsView" class="messaging-view" hidden>
           <div id="messagingCallsBody" class="messaging-list"></div>
         </div>
@@ -2809,6 +2800,7 @@
   </div>
 
   <script src="chess.js"></script>
+  <script src="call-protocol.js"></script>
   <script src="wallet.js"></script>
   <script src="gltf-mini.js"></script>
   <script src="viewer.js"></script>

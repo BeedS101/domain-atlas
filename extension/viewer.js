@@ -4748,25 +4748,76 @@ async function showMessagingTab(tab, callContext) {
   if (messagingContactsViewEl) messagingContactsViewEl.hidden = messagingActiveTab !== 'contacts';
   if (messagingChatViewEl) messagingChatViewEl.hidden = true;
   if (messagingActiveTab === 'chats') await renderMessagingChatsList();
-  else if (messagingActiveTab === 'calls') renderMessagingCallsPlaceholder(callContext);
+  else if (messagingActiveTab === 'calls') await renderMessagingCallsPanel(callContext);
   else await renderMessagingContactsList();
 }
 
-// Calls (TODO round 1 item 3 — added after Chats per Bruno's follow-up
-// request; task #111's ORIGINAL framing was "Chats / Calls / Contacts",
-// this tab was just deferred out of the first slice). No real calling
-// design exists yet (voice? video? just a log? — genuinely undecided, see
-// the private notes), so this deliberately shows an honest placeholder
-// rather than any fake "ringing"/"connected" UI that would mislead Bruno
-// into thinking calling actually works. `callContext` personalizes it
-// when reached via a Contacts row's "Call" button; reaching it via the
-// tab bar directly shows the generic version.
-function renderMessagingCallsPlaceholder(callContext) {
-  if (!messagingCallsBodyEl) return;
-  messagingCallsBodyEl.innerHTML = callContext
-    ? '<div class="empty-note">Voice/video calling isn\'t built yet. You chose Call for ' + escapeHtml(callContext) + ' — this is where that call would start once real-time calling ships.</div>'
-    : '<div class="empty-note">Voice/video calling isn\'t built yet — it\'s on the roadmap (task #111).</div>';
+// Calls tab: shows whether calling is set up and whether the calling window is open, and
+// opens it. Placing, answering and ending a call happens only in that window (call.html), which
+// has the microphone prompt, the signing prompts and the verification screens; nothing here signs
+// or contacts a call service. `callContext` is {key, name} when this is reached through a
+// contact's Call button, or a plain label (older callers), or undefined.
+async function readCallWindowStatus() {
+  try {
+    const { atlasCallStatus } = await chrome.storage.session.get('atlasCallStatus');
+    if (atlasCallStatus && Date.now() - atlasCallStatus.updatedAt < 30000) return atlasCallStatus;
+  } catch (err) { /* storage unavailable */ }
+  return null;
 }
+
+// Opens the calling window, or focuses it when it is already open. A contact key makes it show
+// that contact ready to call; the Call button inside that window is what starts the call.
+async function openCallWindow(dialKey) {
+  const status = await readCallWindowStatus();
+  if (status && status.windowId != null) {
+    try {
+      await chrome.windows.get(status.windowId);
+      await chrome.windows.update(status.windowId, { focused: true });
+      if (dialKey) await chrome.runtime.sendMessage({ type: 'atlas-call-ui', action: 'dial', key: dialKey });
+      return 'focused';
+    } catch (err) { /* the window is gone: open a new one */ }
+  }
+  await chrome.windows.create({ url: chrome.runtime.getURL('call.html') + (dialKey ? '#dial=' + encodeURIComponent(dialKey) : ''), type: 'popup', width: 440, height: 700 });
+  return 'opened';
+}
+
+async function renderMessagingCallsPanel(callContext) {
+  if (!messagingCallsBodyEl) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) {
+    messagingCallsBodyEl.innerHTML = '<div class="empty-note">Unlock your wallet to use calls.</div>';
+    return;
+  }
+  const cfg = await AtlasWallet.getCallConfig();
+  const status = await readCallWindowStatus();
+  const target = callContext && typeof callContext === 'object' ? callContext : null;
+  let html = '';
+  if (target) {
+    const contacts = await AtlasWallet.getCallContacts();
+    const c = contacts.find((x) => x.publicKey === target.key);
+    html += '<div class="messaging-list-item"><div class="messaging-list-item-main" style="cursor:default;"><div style="flex:1 1 auto;min-width:0;">' +
+      '<div class="name">' + escapeHtml(target.name || (c && c.name) || '') + (c && c.verified ? ' · verified contact' : ' · not verified') + '</div>' +
+      '<div class="preview">' + (!cfg.service ? 'Set up a call service first.' : (c && c.canCall) ? 'You have permission to call this contact.' : 'This contact has not allowed you to call them yet. Ask them to press Allow calls for you in the calling window.') + '</div>' +
+      '</div></div><div class="messaging-contact-actions">' +
+      '<button type="button" data-action="calls-dial" data-key="' + escapeHtml(target.key) + '"' + (c && c.canCall ? '' : ' disabled') + '>Call</button></div></div>';
+  } else if (typeof callContext === 'string' && callContext) {
+    html += '<div class="empty-note">Calling ' + escapeHtml(callContext) + ': open the calling window to check permission and place the call.</div>';
+  }
+  html += '<div class="empty-note">' +
+    (!cfg.service ? 'Calling is not set up on this device. Open the calling window to choose a call service.' :
+      status ? ('Calling window is open — ' + (status.state && status.state !== 'idle' ? 'call in progress (' + escapeHtml(status.state) + ')' : status.availability === 'available' ? 'you are available for calls' : 'do not disturb')) :
+        'Calling window is closed. People cannot call you until you open it and press Available.') +
+    '</div>' +
+    '<div class="messaging-contact-actions" style="padding:6px 10px;"><button type="button" data-action="calls-open-window">' + (status ? 'Show calling window' : 'Open calling window') + '</button></div>';
+  messagingCallsBodyEl.innerHTML = html;
+}
+
+messagingCallsBodyEl && messagingCallsBodyEl.addEventListener('click', async (e) => {
+  const dial = e.target.closest('[data-action="calls-dial"]');
+  const open = e.target.closest('[data-action="calls-open-window"]');
+  if (dial) { await openCallWindow(dial.dataset.key); return; }
+  if (open) { await openCallWindow(null); await renderMessagingCallsPanel(); }
+});
 
 function formatMessagingTime(iso) {
   try { return new Date(iso).toLocaleString(); } catch (err) { return ''; }
@@ -5017,7 +5068,7 @@ async function openMessagingWindow() {
   if (messagingContactsViewEl) messagingContactsViewEl.hidden = messagingActiveTab !== 'contacts';
   messagingCurrentChat = null;
   if (messagingActiveTab === 'chats') await renderMessagingChatsList();
-  else if (messagingActiveTab === 'calls') renderMessagingCallsPlaceholder();
+  else if (messagingActiveTab === 'calls') await renderMessagingCallsPanel();
   else await renderMessagingContactsList();
 }
 
@@ -5130,7 +5181,7 @@ messagingContactsListEl && messagingContactsListEl.addEventListener('click', (e)
   }
   const callBtn = e.target.closest('[data-action="messaging-contact-call"]');
   if (callBtn) {
-    showMessagingTab('calls', callBtn.dataset.handle || short(callBtn.dataset.key, 20));
+    showMessagingTab('calls', { key: callBtn.dataset.key, name: callBtn.dataset.handle || short(callBtn.dataset.key, 20) });
     return;
   }
 });
@@ -12215,6 +12266,12 @@ setInterval(async () => {
   if ((await AtlasWallet.getIdentityMode()) !== 'local') return;
   if (!(await AtlasWallet.isUnlocked())) return;
   if (Date.now() - lastActivityTime < minutes * 60 * 1000) return;
+  // A call in progress in the calling window counts as activity (it refreshes this marker every
+  // few seconds while connected; a stale marker from a crashed window stops counting after 30 s).
+  try {
+    const { atlasCallActive } = await chrome.storage.session.get('atlasCallActive');
+    if (atlasCallActive && Date.now() - atlasCallActive < 30000) return;
+  } catch (err) { /* storage unavailable */ }
   await AtlasWallet.lockIdentity();
   await refreshQuickLockButtonVisibility();
   await refreshMessagingLockGate();

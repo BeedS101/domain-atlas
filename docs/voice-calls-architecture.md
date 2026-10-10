@@ -1,9 +1,20 @@
 # Secure voice calls: architecture
 
-Status: **proposal for review. No call code exists and none should be written
-until this design is reviewed.** Nothing here is deployed, and nothing here may
-be described as banking-grade or independently reviewed. This is the first of
-five documents:
+Status: **proposal, amended after the Phase 1A feasibility spike and the Phase 1B
+implementation.** Phase 1B (wallet to wallet) now exists as local, unreviewed code
+(`docs/voice-calls-phase1b.md`); Phases 2 and 3 are still design only. Nothing here
+is deployed, and nothing here may be described as production-ready, banking-grade
+or independently reviewed. This is the first of five documents:
+
+Every claim in these documents carries one of three evidence classes, and an
+amendment names the class it has reached:
+
+* **Proposed**: design text that no code or test has confirmed.
+* **Automated**: an assertion that ran and passed (Chromium under Xvfb on one
+  machine, loopback network, fake capture device). Phase 1A is the spike in
+  `experiments/secure-comms-spike/`; Phase 1B is the real calling window and Call
+  Service under `test/manual-call-*.js`.
+* **Real hardware**: verified by the owner on real PCs. Not done yet for any item.
 
 | Document | Contents |
 |---|---|
@@ -322,7 +333,9 @@ and does not listen. Phase 1 has no background listening; the call window must
 be open while available (the Manifest V3 service worker cannot hold the
 connection reliably and an offscreen document cannot show a microphone
 prompt). Missed calls while unavailable simply fail with "unavailable" for the
-caller.
+caller. **Amended (Phase 1A/1B):** see section 14.1, item 6, and 14.2 for what the
+window does when it is hidden and for the `stop` flag that makes Do Not Disturb
+take effect at once.
 
 ### 5.5 Refusals and what a caller can learn
 
@@ -431,9 +444,13 @@ Why this resists the classic attacks:
 3. After the transport reports `connected`, the call window reads the remote
    certificate from the DTLS transport (`RTCDtlsTransport.getRemoteCertificates`),
    hashes it itself, and compares with the signed fingerprint. A mismatch
-   tears the call down with "could not verify the encryption keys". This check
-   is redundant with what the browser already does for the SDP, and is there
-   to catch a bug in the wallet's own SDP handling, not a browser flaw.
+   tears the call down with "could not verify the encryption keys". The
+   browser already compares the certificate with the SDP fingerprint; this check
+   is the wallet's independent confirmation that the certificate the browser
+   accepted is the one the *signed* messages named, and it catches a bug in the
+   wallet's own SDP handling. **Amended (Phase 1A, automated):** the exact
+   procedure is in section 14.1; `connectionState` alone is not enough, an empty
+   certificate list means "unknown", and the check fails closed.
 4. ICE candidates are signed in batches (so the service cannot inject them) but
    their *content* cannot be verified: a malicious peer can still send addresses
    that are not its own. An attacker who gets one accepted can at worst disturb
@@ -709,3 +726,92 @@ A domain endpoint that bridges audio to a human through a gateway terminates
 DTLS at the gateway: the call is encrypted to the domain's calling endpoint,
 not to a particular employee. The wallet says so ("encrypted to example.com's
 calling system").
+
+## 14. Amendments from Phase 1A and Phase 1B
+
+### 14.1 The seven Phase 1A amendments
+
+Source: `docs/voice-calls-phase1a-findings.md` section 9. "Phase 1A" is the
+isolated spike; "Phase 1B" is the implementation that now applies each rule. The
+last column is the highest evidence class reached, not the class the design
+started in.
+
+| # | Amendment | Where it applies | Phase 1B implementation | Evidence |
+|---|---|---|---|---|
+| 1 | Fingerprints are compared case-insensitively and normalized to one spelling (`getFingerprints()` is lower-case in Chromium, the SDP is upper-case). | section 7, items 1 and 2 | `normalizeFingerprint` in `call-protocol.js` (one `sha-256 AB:CD:...` spelling, upper-case hex), used for the signed lists, the SDP check and the certificate check. | Automated: Phase 1A `q3-q4`; Phase 1B `manual-call-protocol.js` (case-insensitive comparison), `manual-call-e2e.js`. |
+| 2 | Verification waits for the DTLS transport to be connected (`connectionState` alone is not trusted); an empty `getRemoteCertificates()` is "unknown" and is retried; at least one source must return a value; if two sources return values they must agree; the check fails closed. | section 7, item 3 | `remoteCertificateSources` retries the API for up to 3 s and also reads `getStats()` (`transport.remoteCertificateId`); `remoteCertMatches` requires one non-empty source and agreement of all non-empty ones. | Automated: `manual-call-protocol.js` (unknown, mismatch, two sources must agree) and `manual-call-adversary.js` (a certificate that is not the signed one, and an unreadable one, each end the call with no audio). The adversary cases change what the page reports; they are not a real network attacker. |
+| 3 | No microphone track is attached to the sender until both confirmations are exchanged and the remote certificate is verified (not `enabled = false`); Mute stops the capture track and detaches it; Unmute needs a new click and a new capture. | section 6, section 9, endpoints section 6 | The track is captured at the click (the permission needs the gesture) but `replaceTrack(track)` runs only in `maybeActivate`; mute is `track.stop()` plus `replaceTrack(null)`. | Automated: `manual-call-e2e.js` records the call state at every `getUserMedia` and `replaceTrack` call (exactly one attach per side, after both confirms and the certificate check); mute and unmute checks; withheld confirmation case in `manual-call-adversary.js`. |
+| 4 | The post-connect check cannot prevent contact with the wrong endpoint (address exposure to whoever a candidate points at), only media exchange with it. Relay-only mode stays the mitigation. | section 7, item 4; threat model sections 5 and 12 | Candidates are signed in batches but their content is not verified; remote candidates for loopback, link-local, multicast or unspecified addresses and for arbitrary host names are dropped, and none are sent. Relay-only mode is Phase 3 and not built. | Automated for the filter (`manual-call-protocol.js`, `manual-call-adversary.js`). The exposure itself is a property of ICE and is not tested. |
+| 5 | Only the description returned by `createOffer` / `createAnswer`, without candidates, is signed and checked (not `localDescription.sdp`, which grows candidates). | section 7, item 2; endpoints section 2.3 | `handleAccept` and `handleOffer` sign `offer.sdp` / `answer.sdp` as returned and check it against the signed fingerprints before sending; remote SDP is checked before `setRemoteDescription`. | Automated: Phase 1A; `manual-call-e2e.js` (calls connect); `manual-call-adversary.js` (a signed offer whose SDP fingerprint differs is refused). |
+| 6 | For incoming calls a hidden window receives, but a service-worker poll must not be relied on; missed-call display and the notification-click path are items for real hardware. | section 5.4, section 11 | Phase 1B has no background listening and no notification: the call window must be open and Available. When a call arrives it asks the window manager for attention (`drawAttention`) and sets the title. A missed call is simply "unavailable" for the caller. | Automated (limited): Phase 1A hidden-tab reception. Real hardware: minimized, occluded, discarded, slept and notification-click cases are not exercised. |
+| 7 | A generated DTLS certificate lives about 30 days; per-call certificates keep the signed fingerprint short-lived and avoid reuse. | section 4, section 7 item 1 | A new certificate and a new call key are generated for every call (caller at the Call click, callee at the Answer click) and dropped at teardown. | Automated: `manual-call-adversary.js` compares the invites of all calls in one run (distinct fingerprints and call keys per call). |
+
+### 14.2 Clarifications settled by the Phase 1B implementation
+
+These close points the Phase 0 text left open or described differently. None
+changes a security property.
+
+1. **`poll.after`** is the last mailbox event number `n` the poller processed (the
+   service numbers each call's events 1, 2, 3, ...), not a signal `seq`. A window
+   ignores an event whose `n` is not above the last one it processed
+   (`duplicate-event-ignored`), so a duplicated delivery is harmless; any other
+   verification failure ends the call (see endpoints section 7).
+2. **`listen` with `stop: true`** removes the caller's listener at once. Do Not
+   Disturb, closing the window and locking the wallet send it (signed by the
+   listening session key), so a caller is refused immediately instead of after the
+   listener goes stale (40 s).
+3. **The callee creates the tag.** `tag/create` is signed by the callee's `IK`,
+   with `bind.publicKey` the contact's `IK` and `calleeKey` the callee's own `IK`.
+   The tag is useless to anyone but the bound contact because the invite must be
+   signed by that key. One tag per contact; granting again revokes the previous
+   one; a call window shows a contact as callable only while it holds an unexpired
+   card.
+4. **The call card travels as Post Office mail** under the reserved subject
+   `\u0000atlas.call.v1`, wrapped with the existing chat end-to-end layer. The
+   first message to a contact that has not yet exchanged a chat key goes out in the
+   existing bootstrap form (signed, unencrypted, with a key announcement), so a
+   mail relay can read the tag in that one message. It cannot use it, since the tag
+   is bound to the contact's key, but it learns that a tag exists. Cards are
+   accepted only from existing contacts, signed by the contact's `IK`, with
+   `calleeKey` equal to the sender; a `withdrawn` message clears a card.
+5. **Wallet signing.** The generic signing entry point (which the page signing
+   bridge also reaches) refuses any payload that contains an `atlas.call.` type
+   anywhere, not only at the top level; the bridge's content script applies the
+   same test before any prompt. `IK` signs only tag, tag-revoke, tag-list,
+   listen-session, invite (caller must be the wallet itself), accept and card
+   payloads, and only through the calling code.
+6. **Verification order.** The window checks `audience` before whether the kind is
+   legal in the current state (the other way round in endpoints section 7). Both
+   orders refuse the same messages.
+7. **Auto-lock.** The side panel's idle auto-lock does not lock while a call is
+   connected: the call window writes a timestamp to `chrome.storage.session` that
+   the lock loop reads, and ignores it once it is 30 s old.
+8. **Plain-http test mode.** A call service address must be `https`, except that a
+   per-wallet "private test network" switch also allows `http` for localhost and
+   private-network addresses. It exists for the two-PC test and nothing else.
+9. **Callee-side ring limit.** At most three rings from one contact in 60 s are
+   shown; later invitations are dropped silently (the service also limits invites
+   per caller and per callee, 6 per minute by default).
+10. **Window close.** `pagehide` ends the call locally and sends the signed `end`
+    by a keep-alive request. A first implementation read the encrypted call
+    configuration from storage before sending and the page died first, so the
+    other side only noticed ICE failure about 15 s later (found by
+    `manual-call-e2e.js`); the send path now does no storage reads.
+11. **Seen-cache.** The call ids already rung are kept in `chrome.storage.session`
+    until each invitation's `expiresAt` plus 90 s, so reloading or reopening the
+    window does not make an old invitation ring again, as the threat model (R1)
+    requires. The cache does not survive a browser restart; an invitation lives at
+    most 60 s (plus the 30 s skew), and the service never redelivers an
+    acknowledged one, so the exposure after a browser restart is one repeated ring
+    from a hostile service within that window.
+
+### 14.3 What Phase 1B deliberately leaves unchanged
+
+Bank-to-wallet calls, issuer communications policies, permits, biometric
+requirements, transaction approval and multiple-device authorization are not
+implemented. The wire format keeps the discriminators that later phases need
+(`caller.kind`, `bind.kind`, `calleeKey` separate from the signer of a tag,
+envelope `signerRole`, the `chain` slot of `invite`), and `call-protocol.js` is
+transport independent so a PHP polling implementation of the service can reuse the
+same signed messages. No bank-verification badge exists; the window shows only
+"Verified contact" (safety code compared) or "Not verified".

@@ -1,7 +1,9 @@
 # Secure voice calls: test plan
 
-Status: proposal for review (see `docs/voice-calls-architecture.md`). No test
-exists yet. The plan keeps three kinds of evidence separate, and the reports for
+Status: proposal for review (see `docs/voice-calls-architecture.md`). Phase 1
+tests now exist for wallet to wallet calls; section 5 records, per ID, what ran and
+what did not (command lines and counts: `docs/voice-calls-phase1b.md`). Phases 2 and 3 have no
+test yet. The plan keeps three kinds of evidence separate, and the reports for
 each phase must too:
 
 * **Code review**: reading the implementation against the design.
@@ -64,7 +66,7 @@ requests, never to hide a prompt the test is meant to see.
 | S26 | clock skew: wallet +-20 s works; +-2 min fails with one `serverTime` retry | pass |
 | S27 | call-card forgery: a card altered in transit, signed by a key other than the stored contact key, replayed after expiry, naming a different service | refused; nothing stored |
 | S28 | contact key substitution: a relay replaces a contact's key at friend-add; the safety code differs; a later key change | the wallet labels the contact unverified, shows the code mismatch when compared, and warns on the key change |
-| S29 | SSRF: the Call Service and wallet asked to use a domain that resolves to a private, loopback or link-local address, or that redirects to another host | no request is made to the internal address; refused with a plain reason (a declared development mode is tested separately) |
+| S29 | Code review only | the service refuses to fetch the revocation list from a private or loopback address unless the declared test flag is set (`call-server/server.js`). No automated test drives this refusal. With the flag set, one scripted manual run read a local revocation list. Redirects and DNS rebinding: not run |
 | S30 | the real call, incoming and permit screens show the personal security phrase; a page cannot read it from the DOM, storage or messages | pass |
 
 ### 1.3 Browser boundary
@@ -130,3 +132,57 @@ For every phase: the exact commands, pass/fail counts, any check that could not
 be run (and why), the commit reviewed, and an explicit split between
 code-review findings, automated results and live-verification results. A test
 that did not execute is not reported as passing.
+
+## 5. Phase 1B results by test ID
+
+Evidence class for every "Automated" entry: Chromium under Xvfb, one Linux machine,
+loopback, synthetic capture device, in-process or child-process Call Service. A hostile
+peer or relay is simulated by an injecting proxy and page patches, so those results show
+that the wallet's checks reject the input, not that a network attacker was defeated.
+"Not run" means no test exists or it was not executed; it is not a pass. No Real
+hardware entry exists.
+
+| ID | Status | Where / what was actually checked |
+|---|---|---|
+| F1 | Automated, partial | `manual-call-e2e.js`: both sides active, bytes flow both ways, tracks released. Audio level of the synthetic tone was not measured (byte counts only) |
+| F2 | Automated, partial | decline: no microphone request and no connection on the callee. The caller's wording check accepts "declined" or "not answered"; neutral wording was not asserted |
+| F3 | Automated | caller ring timer fires and the callee stops ringing (timers shortened for the test) |
+| F4 | Automated | cancel while ringing; no microphone on the callee |
+| F5 | Automated, partial | mute stops the capture track and detaches it; unmute needs a new capture. The other side's inbound level going silent was not measured |
+| F6 | Not run | busy needs a third wallet |
+| F7 | Automated, partial | Do Not Disturb and permission withdrawn end as not available with nothing ringing. Equal delay across causes not measured |
+| F8 | Automated | lock ends the call, releases tracks and closes the connection |
+| F9 | Partial | tags survive a restart (`manual-call-service.js`). Calls in progress ending cleanly across a restart: not run |
+| S1 | Automated | service and protocol tests (missing and extra fields, wrong types, oversize, malformed JSON) |
+| S2 | Automated | service tests (expired, over 60 s, stale) and adversary suite (expired invitation never rings) |
+| S3 | Automated, partial | replay to the service refused; replay delivered to the wallet does not ring twice. After a wallet restart: not run |
+| S4 | Partial | edited invite, accept, offer, SDP and tag/create payloads are refused; a tampered offer and accept end the call with no audio. One byte flipped in each field of every message kind: not run |
+| S5 | Automated | invitation for another service refused at the service and at the wallet |
+| S6 | Automated | key not bound to the tag, other tag, unknown tag: same refusal at the service; no ring at the wallet |
+| S7 | Automated | wrong invite hash, replayed accept, wrong signer at the service; accept signed by someone else rejected by the caller |
+| S8 | Automated, partial | `manual-call-protocol.js`: substituted, extra, missing and sha-1 fingerprints, candidates in the SDP, non-SDP text. The adversary suite ends a call with a substituted fingerprint. `a=crypto`, `a=identity`, data channel, video, two audio sections and oversize are not each tested separately |
+| S9 | Automated | an SDP edited after signing fails verification |
+| S10 | Automated | skipped sequence, wrong transcript hash, answer before offer (service); replay with a fresh event number ends the call (adversary) |
+| S11 | Automated, partial | withheld confirmation ends the call on the confirm timer with no audio on the side that never received it. The other side may legitimately reach active meanwhile. Wrong nonce or fingerprints in a confirm: protocol tests only |
+| S12 | Automated | unusable candidate addresses are neither sent nor used; the per-call caps are enforced by the service (8 per message, the per-call total) |
+| S13 | Automated | a certificate that differs from the signed one, and an unreadable one, fail the call before any audio |
+| S14 | Not run | passkey envelopes are not part of this phase's tests |
+| S15 | Partial | unknown tag and not-listening give identical refusals; revoked tag equals unknown. Byte-identical responses for every cause and timing comparison: not run |
+| S16 | Partial | invite rate limit, caps on messages per call and on candidates tested; per-source, long-poll and global call limits are configured but not each driven to the limit |
+| S17 | Automated | `manual-call-bridge.js` |
+| S18 | Code review only | no static or runtime scan of key material was run |
+| S19 | Automated | microphone requests counted: none before the click, one at call or answer, one per unmute; none after terminal states; mute releases the device |
+| S20 | Not run as a scan | the service has no media route (code review); no static grep for recording APIs was run |
+| S21 | Partial | unconfigured service (`manual-call-unconfigured.js`) and the existing messaging/Post Office regression suites; unreachable and plain-http cases not each run |
+| S22 | Automated | session key cannot create tags or revoke all, expired and over-long sessions refused, wrong wallet's session cannot decline |
+| S23 | Automated | ring, accept, offer timers and retention in `manual-call-service.js`; the service's live-call count returns to zero in the browser tests. Wallet timer leaks beyond tracks and connections: not inspected |
+| S24 | Partial | events delivered once, duplicates ignored (adversary); redelivery after no ack: service tests only |
+| S25 | Automated, partial | revoking one tag and the wallet's permission withdrawal tested; "block" in the messaging sense was not run |
+| S26 | Partial | stale requests refused with the server time and a clock message in the window; wallet retry with the supplied time not run |
+| S27 | Partial | forged, wrong-signer and expired cards are covered by the wallet code and `manual-call-contacts.js` only for the genuine path and withdrawal; altered-in-transit and replay-after-expiry cards were not run |
+| S28 | Partial | safety code derivation and match flow tested. A key change is a new, unverified contact; no warning for a substituted key at friend-add exists |
+| S29 | Partial | the revocation fetch refuses loopback and private hosts unless the declared test flag is set (service tests). Redirect handling and DNS rebinding: not run |
+| S30 | Not implemented | no personal security phrase exists |
+| L1 to L8 | Not run | all require the owner on real hardware (`docs/voice-calls-phase1b.md` section 3.3, set-up in `docs/voice-calls-two-pc-setup.md`) |
+
+Items marked "Partial" or "Not run" are open; none was reported as passed.
