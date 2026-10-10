@@ -1,14 +1,17 @@
 # Moderator authorization
 
-Status: Phase 1C. The issuers (Node: `issuer-server/server.js`; PHP:
+Status: Phase 1D. The issuers (Node: `issuer-server/server.js`; PHP:
 `issuer-php/`) register moderators and sign short-lived moderation grants; the
 presence services (Node: `presence-server/`; PHP: `presence-php/presence/`)
-verify those grants and answer four operations: `roster.view` (the anonymous
-list of sessions in one world, section 8) and, since this phase, `chat.mute`,
-`chat.unmute` and `session.kick` (section 8A), which the presence service
-enforces itself. **There is no moderator interface, no persistent ban, no
-time-out operation and nothing that touches a wallet, credential or Post Office
-membership.** `session.timeout` exists only as a name a grant may carry.
+verify those grants and answer `roster.view` (the anonymous list of sessions in
+one world, section 8), `chat.mute`, `chat.unmute` and `session.kick`
+(section 8A), which the presence service enforces itself, and `audit.view`
+(section 8C). Since this phase there is a moderator interface (section 8B, a
+section of the existing admin page, signed through the wallet's signing bridge)
+and a private server-side audit log (section 8C). **There is no persistent ban,
+no time-out operation and nothing that touches a wallet, credential or Post
+Office membership.** `session.timeout` exists only as a name a grant may carry.
+Operator set-up is in `docs/moderation-setup.md`.
 
 The goal is narrow: a moderator can observe, and temporarily restrict, exactly
 the anonymous sessions of the domain and worlds they are authorized for,
@@ -22,9 +25,32 @@ PHP routes `presence-php/presence/moderation/roster.php` and `command.php`;
 restrictions `presence-server/lib-restrictions.js` and
 `presence-php/presence/lib/restrictions.php`; reference verifier
 `tools/lib/moderation-grant.js`; reference lookup `tools/moderation-ref.js`;
+audit log `presence-server/lib-audit.js` and `presence-php/presence/lib/audit.php`
+(PHP route `presence-php/presence/moderation/audit.php`); the panel in
+`issuer-server/admin-panel/index.html` (identical copy `issuer-php/atlas-admin/index.html`);
 tests `test/manual-moderator-authz.js`, `test/manual-presence-moderation.js`,
-`test/manual-presence-moderation-actions.js` and
-`test/manual-presence-moderation-wallet.js`.
+`test/manual-presence-moderation-actions.js`, `test/manual-presence-moderation-wallet.js`,
+`test/manual-moderation-audit.js` and `test/manual-moderation-panel.js`.
+
+### Changes from Phase 1C (compatibility)
+
+- **Vocabulary:** `audit.view` is a sixth operation name (issuers, reference verifier and
+  presence services). A grant without it stays valid and simply cannot read the log.
+- **Status statement:** each moderator entry may carry `role` (`admin` or `moderator`), used
+  only for the audit log. Verifiers accept entries with three or four members.
+  **A presence service from before this phase rejects four-member entries, so update the
+  presence services before the issuer** (section 13).
+- **Grant request:** may carry `purpose: "moderation-grant"` inside the signed payload. The
+  wallet's signing bridge requires it (section 8B). A request without it is still valid for
+  the issuer.
+- **New, issuer:** `POST /atlas/admin/moderation/config` (scope `moderation`; section 8B).
+  `GET /atlas/admin/is-admin` also returns `isModerator`.
+- **New, presence:** `POST /presence/moderation/audit` and CORS answers (preflight and
+  `Access-Control-Allow-Origin`) on the three moderation routes, for the configured
+  domains' own origins only.
+- **Behaviour:** a command is refused with `503 audit-unavailable` when its record cannot be
+  written.
+- **Wallet:** shows **Moderate** instead of **Admin** to a moderator-only key.
 
 ### Changes from Phase 1B (compatibility)
 
@@ -107,8 +133,8 @@ leading or trailing white space (including U+FEFF). Node and PHP apply the same 
 scope that **defaults to `admin`**. Every pre-existing admin route therefore
 refuses a moderator without having been edited, and a route added later is
 admin-only unless it asks for more. Only these accept scope `moderation`
-(administrators and moderators): `POST /atlas/admin/moderation/grant` and
-`POST /atlas/admin/session/whoami`.
+(administrators and moderators): `POST /atlas/admin/moderation/grant`,
+`POST /atlas/admin/moderation/config` and `POST /atlas/admin/session/whoami`.
 
 `isAdminKey` / `is_admin_key` now mean "active administrator" only, so the
 remaining direct roster checks (`GET /atlas/admin/is-admin`, delivery of
@@ -359,7 +385,7 @@ the issuer is configured to issue grants for, `503 moderation-not-configured`,
     "type": "atlas.moderation-status", "version": 1,
     "domain": "example.com", "audience": "https://presence.example.com",
     "issuedAt": "2026-10-10T09:00:00.000Z", "expiresAt": "2026-10-10T09:01:00.000Z",
-    "moderators": [ { "moderatorRef": "<43 chars>", "worlds": ["lobby"] , "operations": ["roster.view"] } ]
+    "moderators": [ { "moderatorRef": "<43 chars>", "role": "moderator", "worlds": ["lobby"] , "operations": ["roster.view"] } ]
   },
   "proof": { "signerRole": "raw-ecdsa", "publicKey": "<issuer key>", "signature": "..." }
 }
@@ -374,7 +400,7 @@ signature = ECDSA-P256-SHA256( UTF8("atlas-moderation-status/v1\n") || UTF8(cano
   scope. Revoked, removed, ambiguous and empty-scope entries are omitted.
   Entries are sorted by reference.
 - Lifetime is `ATLAS_MODERATION_STATUS_TTL_S` (default 60, clamped to 1 to 120).
-- It carries only pseudonymous references and scopes; no keys.
+- It carries only pseudonymous references, roles and scopes; no keys.
 
 **What a presence service does with it.**
 
@@ -537,6 +563,101 @@ Office membership, are private to the presence service, expire by themselves and
 Chat is shared by a whole domain and presence is per world; a command acts on the visit's sessions in the
 named world only, so no other world's sessions are affected (tested).
 
+## 8B. The moderation panel
+
+A "World moderation" section of the existing admin page (`/atlas-admin/`, Node
+`issuer-server/admin-panel/index.html`, PHP `issuer-php/atlas-admin/index.html`, kept
+byte-identical). The wallet opens the page with **Admin** for administrators and
+**Moderate** for moderator-only keys. A moderator-only session sees nothing but this
+section; every other panel is hidden, and every administration route still refuses the
+session (section 2).
+
+**Configuration comes from the issuer.** `POST /atlas/admin/moderation/config {token}`
+returns the presence addresses the issuer itself is configured for (`audiences`), the
+worlds the signed-in key may moderate, the operations it may use, the signing purpose, the
+grant lifetime the panel will request, and a list of `problems` in plain language when
+something is missing. The panel contacts only those addresses. It never reads an address
+from the manifest, the URL or a visitor.
+
+**Signing.** For each grant the panel creates an ephemeral ECDSA P-256 key in memory
+(non-extractable, never stored; the public half goes into the grant request) and asks the
+wallet's signing bridge (`window.atlasWallet.requestSignature`) to sign the grant request.
+The user sees the wallet's own approval prompt with the requesting site and every field:
+worlds, operations, presence address, lifetime and the ephemeral public key. The bridge
+signs only for a purpose the domain manifest allows
+(`walletBridge.sign: ["moderation-grant"]`); otherwise it shows no prompt and the panel
+says what the operator must change. The panel never reads or exports the wallet's private
+keys; it receives only the signature.
+
+**Renewal.** A grant is not renewed silently. When it is about to lapse, or has lapsed, the
+next action asks the wallet again for the same scope, with a new ephemeral key and nonce.
+It cannot widen the scope: the request lists exactly the worlds and operations the issuer
+config route returned. A revoked moderator's renewal is refused by the issuer; a grant
+already issued stops working at the presence service within the status lifetime (section 10).
+
+**Participants.** Loading the list, and each command, go to the presence service with the
+grant and a request signed by the ephemeral key. Display names are visitor-controlled; the
+panel builds every element with `textContent` (no `innerHTML`), shows names in isolated
+`<bdi>` elements, and truncates them to 60 characters. Rows show a name, presence and/or
+chat, join time, mute state and a temporary reference. A confirmation names the visitor and
+the world and offers the fixed reasons and the permitted durations before anything is sent;
+the result and the expiry are shown afterwards.
+
+## 8C. `audit.view` and the audit log
+
+The presence service writes one record for every moderation request that reaches a verified
+grant: the one place all three moderation routes share (Node `handleModeration` in
+`presence-server/server.js`; PHP `moderation_serve` in `presence-php/presence/lib/moderation.php`)
+does it, so no direct call bypasses it. A request without a verified grant is refused
+before any record (it has no trustworthy moderator or world); the existing per-source
+failure throttle covers those.
+
+| Field | Meaning |
+|---|---|
+| `seq`, `t` | position in the log; ISO time |
+| `domain`, `world` | where; `world` is null when the request never named a world in the grant's scope |
+| `operation` | `roster.view` (refusals only), `chat.mute`, `chat.unmute`, `session.kick`, `audit.view` |
+| `moderatorRef`, `role` | the issuer's pseudonymous reference and `admin` or `moderator` |
+| `grantId` | the grant's id (a reference, not a credential) |
+| `target` | the temporary participant reference |
+| `durationSeconds`, `cause` | the length and fixed reason code |
+| `outcome`, `code` | `success`, `refused` or `failed`, and a short result or refusal code |
+
+Never written: wallet keys, signatures, bearer tokens, ephemeral keys, request nonces, visit
+ids, network addresses, display names or chat content. Fields are checked against fixed
+shapes before writing; anything else is dropped, not stored.
+
+**Storage.** A JSON-lines file private to the presence service (Node
+`presence-server/moderation-audit.jsonl`, `PRESENCE_MODERATION_AUDIT_FILE`; PHP
+`presence/lib/atlas-presence-moderation-audit.jsonl`, in the web-denied `lib/`), created
+with mode 0600, git-ignored. It is bounded by size (`MODERATION_AUDIT_MAX_BYTES`, 1 MiB)
+and age (`MODERATION_AUDIT_RETENTION_DAYS`, 90); compaction drops the oldest entries and
+keeps the chain verifiable. Refusals are limited to `MODERATION_AUDIT_REFUSALS_PER_MIN`
+(10) per moderator per minute, then summarised in one `audit-throttled` entry. PHP appends
+under `flock`; Node serializes writes in its single thread. A successful `roster.view` is
+not recorded (it would only measure how often the list is refreshed).
+
+**Fail closed.** If the file cannot be written, `chat.mute`, `chat.unmute` and `session.kick`
+answer `503 audit-unavailable` and change nothing.
+
+**Reading.** `POST /presence/moderation/audit` takes the same signed request as `roster.view`
+with operation `audit.view` and a world. It needs a grant that lists `audit.view` for that
+world. The answer holds the entries for that domain and world only (newest first, at most
+`MODERATION_AUDIT_VIEW_LIMIT`, 200), plus `integrity` (`chain`, `entries`, `lastSeq`, `head`,
+`firstBadSeq`) and the retention bounds. Entries with no world appear only to a viewer whose
+scope is every world. The read is itself recorded. A moderator cannot reach another world or
+domain through it: the scope is taken from the verified grant, not from the request.
+
+**Integrity limits.** Each entry carries `h = SHA-256(previous h || canonical entry)`, so a
+changed, removed or reordered entry inside the file is reported as `chain: "broken"`. This is
+**not tamper-proofing**. The hash chain lives in the file it protects: anyone who can
+write the file (the host's operator, or an attacker with file access) can truncate it or
+rewrite every entry and every hash, and the log will report `chain: "ok"`. Compaction
+also removes old entries by design. Detecting truncation or a full rewrite needs the `head`
+(and entry count) to be copied to somewhere the presence host cannot alter, such as an
+operator's own notes or an external service; nothing here does that automatically. The log
+is the presence service's own record, not independent evidence.
+
 ## 9. Session association (visit id)
 
 A presence avatar and a chat member have independent random ids. To show them as
@@ -646,6 +767,8 @@ defaults the bounds are 15 s, 60 s and 60 s (90 s with maximum post-dating).
 
 ## 12. Operator set-up
 
+The step-by-step guide is `docs/moderation-setup.md`. Reference follows.
+
 ### Issuer (per domain)
 
 Node: set `ATLAS_MODERATION_AUDIENCES=https://presence.example.com` (and
@@ -705,8 +828,12 @@ endpoint. State is kept in `lib/atlas-presence-moderation-state.json` (the keys 
 derive references, spent nonces, the cached statement, failure counts).
 
 A moderator signs in exactly as an administrator does and then calls the grant route with a
-signed request. No client for this exists yet (the extension has no moderator UI); the
-tests show the calls. The wallet already understands what a restriction looks like to a visitor.
+signed request. The admin page's World moderation section (section 8B) does this through the
+wallet; the manifest must list `"walletBridge": {"sign": ["moderation-grant"]}` for the wallet to
+show the signing prompt. Optional issuer environment: `ATLAS_MODERATION_PANEL_GRANT_TTL_S` (at most 600).
+Phase 1D presence environment: `MODERATION_AUDIT_MAX_BYTES`, `MODERATION_AUDIT_RETENTION_DAYS`,
+`MODERATION_AUDIT_REFUSALS_PER_MIN`, `MODERATION_AUDIT_REFUSAL_WINDOW_MS`, `MODERATION_AUDIT_VIEW_LIMIT`,
+`PRESENCE_MODERATION_AUDIT_FILE`. Nothing creates or replaces a live configuration file.
 
 ### Key rotation
 
@@ -729,6 +856,15 @@ Phase 1C adds `presence-php/presence/lib/restrictions.php` and
 `presence-php/presence/moderation/command.php` (presence bundle, same relative paths under `presence/`) and
 `presence-server/lib-restrictions.js` (Node presence). The issuer bundle needs only the updated `lib/store.php`
 (vocabulary). See the commit hand-off for the complete list of files per bundle.
+
+Phase 1D, **deploy the presence services first, then the issuer** (the status statement now
+states each moderator's role, which an older presence service rejects). Presence bundle
+(under `presence/`): `lib/audit.php` (new), `lib/moderation.php`, `lib/store.php`,
+`moderation/roster.php`, `moderation/command.php`, `moderation/audit.php` (new). Issuer bundle:
+`lib/store.php`, `atlas/admin/moderation/config.php` (new), `atlas/admin/is-admin.php`,
+`atlas-admin/index.html`. Node: `presence-server/lib-audit.js` (new), `lib-moderation.js`,
+`server.js`; `issuer-server/server.js`, `issuer-server/admin-panel/index.html`. The audit file is
+created on first use and is not part of any upload; do not upload a local copy.
 
 ## 14. Tests
 
@@ -760,6 +896,26 @@ request stays retryable; bounded restriction storage; no identifying data in any
 file; identical answers across the four pairings. `node test/manual-presence-moderation-wallet.js` (browser) checks that
 the real wallet's presence and chat connections are paired and that a moderator's kick over both transports shows the
 visitor the removal message and is not undone by the wallet.
+
+`node test/manual-moderation-audit.js node|php|matrix` (Phase 1D, HTTP level): issuer config and `is-admin`
+shapes; role in the status statement; mute, unmute and kick recorded with the right fields and roles;
+every refusal kind recorded; entries limited to the viewer's world and domain; a revoked moderator
+refused and recorded; no key, token, visit id, address, name or chat text in the file or any response;
+file mode 0600 and the PHP `.htaccess`; hash-chain tamper detection; 30 concurrent writers with no
+lost or duplicated sequence numbers; size and age bounds and the refusal throttle; commands refused when
+the log is not writable; chat and presence working when moderation is unconfigured; CORS only for
+configured domains; Node/PHP parity across the four pairings.
+
+`xvfb-run -a node test/manual-moderation-panel.js node|php|matrix` (Phase 1D, real Chromium with the
+extension): a stranger gets no button; an administrator still has every existing panel plus the new
+section; the wallet's own prompt is shown, can be declined (no session) and approved; the grant names
+only what the panel offered; hostile display names (markup, script, svg handler, bidirectional override,
+over-long) appear as text and run nothing; mute, unmute and kick through the UI with the server really
+enforcing them; replayed and re-targeted commands refused; the audit viewer; a moderator-only key sees
+only the moderation section, only its own worlds, and is refused by administration routes; a manifest
+without the signing purpose gives no prompt; renewal asks the wallet again for the same scope with a new
+key; a mute expires on its own; a revoked moderator is refused; static check that the panel code builds
+no HTML from data and touches no wallet storage.
 
 ## 15. Limitations and unresolved decisions
 
@@ -795,8 +951,8 @@ visitor the removal message and is not undone by the wallet.
     hosting that blocks outbound requests will fail closed.
 13. **Hostnames on the PHP issuer.** The PHP issuer refuses grant requests that arrive under a host name other
     than the configured domain; the Node issuer signs for its configured `ATLAS_DOMAIN` whatever the Host header says.
-14. **Only mute, unmute and kick exist.** `session.timeout`, persistent bans, mandatory membership tickets and a
-    moderator interface are not implemented; a grant naming `session.timeout` authorizes nothing.
+14. **Only mute, unmute and kick exist.** `session.timeout`, persistent bans and mandatory membership tickets
+    are not implemented; a grant naming `session.timeout` authorizes nothing.
 15. **A new visit bypasses a mute or kick.** Restrictions follow the per-visit id the wallet generates, not a
     person: a page reload, or clearing the wallet's state, makes a new visit. This is a deliberate trade-off (no
     fingerprinting, no permanent identifiers, no address matching). Restrictions are cooldowns, not bans.
@@ -811,3 +967,21 @@ visitor the removal message and is not undone by the wallet.
     shares them between requests on one host.
 20. **A PHP reference is only valid for the 24-hour key period**; a command with a stale one answers `404` and the
     moderator lists again.
+21. **The audit log is not tamper-proof** (section 8C). It detects accidental damage and casual edits only; the
+    host's operator can rewrite it. Truncation and full rewrites are detectable only if the operator keeps the
+    `head` value elsewhere.
+22. **Some events are not recorded.** Successful `roster.view`; requests refused before a grant was verified
+    (bad signature, unknown issuer key, malformed body), which only count against the per-source throttle; and
+    refusals beyond the per-minute cap (summarised). Nothing is recorded if the host itself is compromised.
+23. **The panel's key is as safe as the admin page's origin.** The ephemeral signing key is non-extractable and
+    held in a script closure, never stored, but script running on the same origin (an XSS on the domain's
+    admin page) could ask it to sign while a session is active. The wallet prompt for each grant, short grant
+    lifetimes and the roster/scope limits bound the damage; they do not remove it.
+24. **The audit file is only as private as the host.** It is outside public paths and mode 0600, but PHP shared
+    hosting relies on `lib/.htaccess`; check that your server honours it. Backups of the host include it.
+25. **Retention is bounded by design.** Older entries are dropped (1 MiB or 90 days by default); copy the file
+    if you need a longer history.
+26. **Update order.** The presence service must be updated before the issuer (section 13).
+27. **Not exercised by the tests:** a live deployment, Apache `.htaccess` enforcement (the PHP built-in server used
+    in tests ignores it), real HTTPS and cross-site CORS between separate hosts, WebAuthn identity mode with the
+    panel, and multi-process Node presence.

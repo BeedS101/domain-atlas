@@ -2095,9 +2095,23 @@ simplifications are worth naming plainly rather than leaving implicit:
   `chat.mute`, `chat.unmute` and `session.kick`. A restriction follows the
   wallet's per-visit random id (one world visit), expires on its own, never
   touches a wallet, credential or membership, and is private to the presence
-  service; there is no persistent ban and no moderator interface yet.
-  The wire format, trust model, revocation bounds and limits are in
-  `docs/moderation-authorization.md`.
+  service; there is no persistent ban.
+  The admin page (`/atlas-admin/`) has a **World moderation** section for this:
+  the wallet shows **Moderate** to a moderator-only key (which sees nothing else
+  on that page) and **Admin** to an administrator. Starting a session asks the
+  wallet, through its signing bridge, to approve one signed grant request (the
+  admin page never touches the wallet's private keys); the panel lists a world's
+  anonymous participants by temporary reference and offers confirmed
+  mute/unmute/kick with fixed reasons and durations. It needs the issuer's own
+  moderation config, a presence config and `"walletBridge": {"sign":
+  ["moderation-grant"]}` in the manifest; with any of them missing it explains
+  what, and chat and multiplayer are unaffected. The presence service keeps a
+  private, bounded, hash-chained audit log of every moderation request that
+  reached a verified grant (no names, chat, keys, tokens or addresses). The chain
+  reveals accidental damage and casual edits; it is not tamper-proof, since
+  whoever can write the file can rewrite it all. Operator steps are in
+  `docs/moderation-setup.md`; the wire format, trust model, revocation bounds and
+  limits are in `docs/moderation-authorization.md`.
 - **Admin session primitive.** Re-signing every click with an ECDSA key
   works fine for a one-off CLI call, but gets impractical for anything
   resembling a real admin page — you'd need the key reachable for every

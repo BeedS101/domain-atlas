@@ -3515,9 +3515,10 @@ function readAdminKeys() {
   return JSON.parse(fs.readFileSync(ADMIN_KEYS_FILE, 'utf8'));
 }
 
-// Operation names a moderation grant may carry. Reserved vocabulary for the
-// moderator commands that follow; nothing in this server performs them.
-const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
+// Operation names a moderation grant may carry. The presence services perform
+// them; this server only names them in grants and in its status statement.
+// audit.view reads the presence service's private audit log of one world.
+const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout', 'audit.view'];
 const MODERATION_MAX_WORLDS = 32;
 const MODERATION_ID_FORBIDDEN = /[\u0000-\u001f\u007f\u2028\u2029]/;
 
@@ -3587,7 +3588,10 @@ const MODERATION_REF_CONTEXT = 'atlas-moderator-ref/v1\n';
 const MODERATION_GRANT_MAX_TTL_S = 600; // hard ceiling, 10 minutes
 const MODERATION_GRANT_DEFAULT_TTL_S = 300;
 const MODERATION_MAX_LIVE_GRANTS = envPositiveInt('ATLAS_MODERATION_MAX_LIVE_GRANTS', 10);
-const MODERATION_REQUEST_FIELDS = ['audience', 'worlds', 'operations', 'ttlSeconds', 'popPublicKey', 'adminAuth'];
+// `purpose` is the label the wallet bridge checks against the page's signing
+// whitelist; it is signed with the rest, and must be this value when present.
+const MODERATION_GRANT_PURPOSE = 'moderation-grant';
+const MODERATION_REQUEST_FIELDS = ['audience', 'worlds', 'operations', 'ttlSeconds', 'popPublicKey', 'adminAuth', 'purpose'];
 
 // Moderation status statement: an issuer-signed, short-lived list of the keys
 // that hold moderation authority right now, which a presence service must see
@@ -3641,6 +3645,7 @@ async function parseGrantRequest(payload, requesterKey, issuerKey) {
   const bad = (m) => ({ error: adminFailure(400, 'bad-request', m) });
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return bad('payload must be an object');
   for (const k of Object.keys(payload)) if (!MODERATION_REQUEST_FIELDS.includes(k)) return bad('unknown field in payload: ' + k);
+  if (payload.purpose !== undefined && payload.purpose !== MODERATION_GRANT_PURPOSE) return bad('payload.purpose must be ' + MODERATION_GRANT_PURPOSE + ' when present');
   if (typeof payload.audience !== 'string' || !isPresenceOrigin(payload.audience)) return bad('payload.audience must be a presence origin such as https://presence.example.com');
   let worlds = payload.worlds;
   if (worlds !== '*') {
@@ -3675,6 +3680,27 @@ function grantWithinAuthority(authority, request) {
   return opsOk && worldsOk;
 }
 
+// What the moderation panel is told about a key's authority and this domain's
+// moderation configuration. `problems` explains, in plain language, anything
+// that stops moderation from working (nothing is created or changed here).
+const MODERATION_PANEL_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'audit.view'];
+// How long a grant the panel asks for lasts: the grant ceiling unless the operator
+// sets a shorter lifetime (ATLAS_MODERATION_PANEL_GRANT_TTL_S, 1 to 600).
+const MODERATION_PANEL_GRANT_TTL_S = Math.min(MODERATION_GRANT_MAX_TTL_S, envPositiveInt('ATLAS_MODERATION_PANEL_GRANT_TTL_S', MODERATION_GRANT_MAX_TTL_S));
+function moderationPanelConfig(authority) {
+  const audiences = moderationAudiences();
+  const operations = MODERATION_PANEL_OPERATIONS.filter((o) => authority.operations === '*' || authority.operations.includes(o));
+  const allWorlds = authority.worlds === '*';
+  const worlds = allWorlds ? Array.from(declaredWorldIds()).filter(isValidWorldId).sort().slice(0, MODERATION_MAX_WORLDS) : authority.worlds.slice(0, MODERATION_MAX_WORLDS);
+  const problems = [];
+  if (!audiences.length) problems.push({ code: 'moderation-not-configured', message: 'This domain has no presence service configured for moderation. The operator needs to add its address to the issuer\'s moderation configuration (see docs/moderation-setup.md). Chat and multiplayer are not affected.' });
+  if (!worlds.length) problems.push({ code: 'no-worlds', message: allWorlds ? 'This domain\'s manifest declares no worlds to moderate.' : 'Your moderator entry does not list any world you may moderate.' });
+  if (!operations.includes('roster.view')) problems.push({ code: 'no-roster', message: 'Your moderator entry does not allow viewing the participant list, so there is nothing to act on.' });
+  return {
+    domain: DOMAIN, role: authority.role, configured: audiences.length > 0, audiences, worlds, allWorlds, operations,
+    purpose: MODERATION_GRANT_PURPOSE, grantTtlSeconds: MODERATION_PANEL_GRANT_TTL_S, problems
+  };
+}
 // Reserves one live-grant slot for the moderator and records the grant, in one
 // synchronous step. Returns false when the moderator already holds the maximum.
 function recordModerationGrant(entry, nowMs) {
@@ -3688,7 +3714,8 @@ function recordModerationGrant(entry, nowMs) {
 }
 
 // Every roster key that holds authority right now, as the status statement
-// lists it: the moderator reference and the worlds and operations in force.
+// lists it: the moderator reference, its role (admin or moderator) and the
+// worlds and operations in force.
 // Administrators appear with every world and operation. A key with no
 // authority, or with an empty scope, is left out.
 function moderationStatusModerators(domain) {
@@ -3704,7 +3731,7 @@ function moderationStatusModerators(domain) {
     const operations = a.operations === '*' ? MODERATION_OPERATIONS.slice() : a.operations;
     if (a.worlds !== '*' && !a.worlds.length) continue;
     if (!operations.length) continue;
-    out.push({ moderatorRef: moderatorRefFor(domain, k.publicKey), worlds: a.worlds, operations });
+    out.push({ moderatorRef: moderatorRefFor(domain, k.publicKey), role: a.role, worlds: a.worlds, operations });
   }
   out.sort((x, y) => (x.moderatorRef < y.moderatorRef ? -1 : x.moderatorRef > y.moderatorRef ? 1 : 0));
   return out;
@@ -6424,6 +6451,23 @@ async function main() {
         return sendJson(res, 200, { publicKey: auth.publicKey, role: auth.authority.role });
       }
 
+      // POST /atlas/admin/moderation/config — {token}. What the moderation panel
+      // needs to know before it asks for a grant: this key's role, the worlds and
+      // operations it may use, and the presence endpoints this domain is
+      // configured to address grants to. Read from this server's own
+      // configuration and the roster; never from the manifest or the request.
+      // Administrators and moderators (scope 'moderation'); the answer holds no
+      // secrets and names no other moderator.
+      if (req.method === 'POST' && req.url === '/atlas/admin/moderation/config') {
+        const { token } = await readAdminJson(req, ADMIN_SESSION_MAX_BODY_BYTES);
+        if (typeof token !== 'string' || !token) {
+          return sendAdminAuthFailure(res, adminFailure(401, 'session-invalid', 'session is missing, unknown, or expired'));
+        }
+        const auth = await requireAdminAuth(null, null, token, req, 'moderation');
+        if (auth.error) return sendAdminAuthFailure(res, auth);
+        return sendJson(res, 200, moderationPanelConfig(auth.authority));
+      }
+
       // POST /atlas/admin/moderation/grant — {payload, proof}, signed fresh for
       // this request (payload.adminAuth). Issues a short-lived, domain-signed
       // moderation grant to the signing key: administrators and moderators may
@@ -6517,7 +6561,8 @@ async function main() {
         return sendJson(res, 200, { status: 'logged out' });
       }
 
-      // GET /atlas/admin/is-admin?publicKey=... — ungated, boolean-only.
+      // GET /atlas/admin/is-admin?publicKey=... — ungated, booleans only
+      // (isAdmin for a full administrator, isModerator for a moderator).
       // Lets a wallet decide whether to show its own "Admin" entry point
       // for the identity it currently has active, without a full sign-a-
       // nonce round trip just to render a button. Confirms membership of
@@ -6528,7 +6573,8 @@ async function main() {
       // catalog lookups, and so on).
       if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/admin/is-admin') {
         const publicKey = new URLSearchParams(req.url.split('?')[1] || '').get('publicKey');
-        return sendJson(res, 200, { isAdmin: !!publicKey && isAdminKey(publicKey) });
+        const authority = publicKey ? adminAuthority(publicKey) : null;
+        return sendJson(res, 200, { isAdmin: !!authority && authority.role === 'admin', isModerator: !!authority && authority.role === 'moderator' });
       }
 
       // POST /atlas/admin/directory — admin-gated (requireAdminAuth, same

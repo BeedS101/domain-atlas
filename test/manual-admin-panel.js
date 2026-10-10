@@ -185,7 +185,7 @@ function postJson(port, urlPath, body) {
     console.log('PASS: landed on the admin panel, logged in as', whoText.trim());
 
     console.log('STEP 4: "Online now" counts a real anonymous visitor who joined via the presence server\'s own poll endpoint');
-    const joinRes = await postJson(PRESENCE_PORT, '/presence/poll/join', { domain: 'localhost:8001', world: 'plaza', name: 'Admin Panel Test Visitor' });
+    const joinRes = await postJson(PRESENCE_PORT, '/presence/poll/join', { domain: 'localhost:8001', world: 'plaza', name: 'Online Count Test Visitor' });
     if (!joinRes.id) throw new Error('Setup failed: could not join an anonymous visitor into the presence server, got: ' + JSON.stringify(joinRes));
     await page.evaluate(() => refreshOnlineNow());
     await page.waitForFunction(() => document.getElementById('onlineTotal').textContent === '1', null, { timeout: 10000 });
@@ -193,7 +193,7 @@ function postJson(port, urlPath, body) {
     if (!/\(1\)/.test(rosterText)) {
       throw new Error('Expected the visitor counted in the rendered "Online now" view, got: ' + rosterText);
     }
-    if (rosterText.includes('Admin Panel Test Visitor')) {
+    if (rosterText.includes('Online Count Test Visitor')) {
       throw new Error('"Online now" must show counts only, but it listed the visitor: ' + rosterText);
     }
     console.log('PASS: "Online now" counts the real anonymous visitor from the presence server and names nobody');

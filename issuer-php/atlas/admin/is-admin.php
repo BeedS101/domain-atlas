@@ -13,4 +13,5 @@ handle_preflight();
 require_get();
 
 $publicKey = $_GET['publicKey'] ?? null;
-send_json(200, ['isAdmin' => is_string($publicKey) && $publicKey !== '' && is_admin_key($publicKey)]);
+$authority = is_string($publicKey) && $publicKey !== '' ? admin_authority($publicKey) : null;
+send_json(200, ['isAdmin' => $authority !== null && $authority['role'] === 'admin', 'isModerator' => $authority !== null && $authority['role'] === 'moderator']);

@@ -89,6 +89,7 @@ define('PRESENCE_SOURCE_COOLDOWN_MAX_MS', presence_env_number('SOURCE_COOLDOWN_M
 define('PRESENCE_SOURCE_STRIKE_MEMORY_MS', presence_env_number('SOURCE_STRIKE_MEMORY_MS', 10 * 60 * 1000));
 // Smaller default than the Node server: the whole table is rewritten per join.
 require_once __DIR__ . '/restrictions.php';
+require_once __DIR__ . '/audit.php';
 define('PRESENCE_MAX_SOURCE_ENTRIES', (int) presence_env_number('MAX_SOURCE_ENTRIES', 2000));
 define('PRESENCE_SALT_ROTATE_MS', presence_env_number('SOURCE_SALT_ROTATE_MS', 24 * 60 * 60 * 1000));
 

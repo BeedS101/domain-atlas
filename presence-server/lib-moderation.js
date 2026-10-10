@@ -5,7 +5,8 @@
 // Zero dependencies, like server.js. This file only decides WHETHER a request
 // may proceed; server.js carries out the operations it names once authorize()
 // succeeds: roster.view (read-only list), chat.mute, chat.unmute and
-// session.kick (temporary, in-memory restrictions: lib-restrictions.js).
+// session.kick (temporary, in-memory restrictions: lib-restrictions.js) and
+// audit.view (read-only view of the private audit log: lib-audit.js).
 // presence-php/presence/lib/moderation.php implements the same rules, step
 // for step.
 //
@@ -70,7 +71,7 @@ const STATUS_TYPE = 'atlas.moderation-status';
 const GRANT_SIGN_CONTEXT = 'atlas-moderation-grant/v1\n';
 const POP_SIGN_CONTEXT = 'atlas-moderation-pop/v1\n';
 const STATUS_SIGN_CONTEXT = 'atlas-moderation-status/v1\n';
-const OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
+const OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout', 'audit.view'];
 const MAX_GRANT_LIFETIME_MS = 600 * 1000;
 const MAX_WORLDS = 32;
 const GRANT_FIELDS = ['type', 'version', 'grantId', 'domain', 'audience', 'moderatorRef', 'worlds', 'operations', 'issuedAt', 'expiresAt', 'cnf'];
@@ -252,11 +253,12 @@ async function verifyStatus(env, opts) {
   if (!Array.isArray(payload.moderators) || payload.moderators.length > 2000) return null;
   const moderators = new Map();
   for (const m of payload.moderators) {
-    if (!isObject(m) || !hasKeys(m, ['moderatorRef', 'worlds', 'operations'])) return null;
+    if (!isObject(m) || !hasKeys(m, ['moderatorRef', 'worlds', 'operations'], ['role'])) return null;
+    if ('role' in m && m.role !== 'admin' && m.role !== 'moderator') return null;
     if (typeof m.moderatorRef !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(m.moderatorRef) || moderators.has(m.moderatorRef)) return null;
     if (m.worlds !== '*' && (!Array.isArray(m.worlds) || m.worlds.length > 256 || !m.worlds.every(isValidWorldId))) return null;
     if (!Array.isArray(m.operations) || m.operations.length > OPERATIONS.length || !m.operations.every((o) => OPERATIONS.includes(o))) return null;
-    moderators.set(m.moderatorRef, { worlds: m.worlds, operations: m.operations });
+    moderators.set(m.moderatorRef, { worlds: m.worlds, operations: m.operations, role: m.role || null });
   }
   // Usable for its signed lifetime, counted from when this service ASKED, so
   // the issuer's clock cannot stretch it.
@@ -377,9 +379,9 @@ const COMMANDS = {
 
 // Checks the target and params of a request for `operation`. Returns
 // {ok:true, command:{target, durationSeconds, cause}} for a command,
-// {ok:true} for roster.view, or a failure (a 400, before anything is spent).
+// {ok:true} for roster.view and audit.view, or a failure (a 400, before anything is spent).
 function checkArguments(operation, r) {
-  if (operation === 'roster.view') {
+  if (operation === 'roster.view' || operation === 'audit.view') {
     if (r.target !== '') return fail(400, 'bad-request', 'target must be empty for ' + operation);
     if ('params' in r) return fail(400, 'bad-request', 'params are not accepted for ' + operation);
     return { ok: true };
@@ -426,8 +428,17 @@ function noteCommand(moderatorRef, now) {
 
 // body: {grant, request}. opts: {operations}, the operations the calling
 // endpoint implements. Returns {ok:true, domain, world, operation, command?,
-// grantId, moderatorRef} or {ok:false, status, code, message}.
+// grantId, moderatorRef, role, worlds} or {ok:false, status, code, message},
+// either with `audit`: what is known about the request once its grant has
+// verified (the audit log records refusals from it), or null before that.
 async function authorize(body, opts) {
+  const ctx = { value: null };
+  const out = await authorizeInner(body, opts, ctx);
+  out.audit = ctx.value;
+  return out;
+}
+
+async function authorizeInner(body, opts, ctx) {
   const now = Date.now();
   const cfg = loadConfig();
   if (cfg.state !== 'ok') return fail(503, 'moderation-not-configured', 'moderation is not enabled on this presence service');
@@ -439,21 +450,32 @@ async function authorize(body, opts) {
 
   const g = await verifyGrant(body.grant, { issuerKeys: dom.issuerKeys, audience: cfg.audience, domain: claimed.domain, now });
   if (!g.ok) return g;
+
+  // From here the grant is the issuer's own, so its domain and moderator
+  // reference are trustworthy. The world is noted only when the grant itself
+  // covers it, so nobody holding a grant can write into another world's log.
+  const named = isObject(body.request.payload) ? body.request.payload.operation : undefined;
+  const operation = typeof named === 'string' && opts.operations.includes(named) ? named : opts.operations[0];
+  const claimedWorld = isObject(body.request.payload) ? body.request.payload.world : undefined;
+  const known = ctx.value = {
+    domain: claimed.domain, grantId: g.payload.grantId, moderatorRef: g.payload.moderatorRef, role: null, operation,
+    world: isValidWorldId(claimedWorld) && (g.payload.worlds === '*' || g.payload.worlds.includes(claimedWorld)) ? claimedWorld : null
+  };
   if (cfg.revokedGrants.has(g.payload.grantId) || cfg.revokedModerators.has(g.payload.moderatorRef)) return fail(403, 'revoked', 'this grant or moderator has been revoked here');
 
   // The operation is the one the (signed) request names, provided this
   // endpoint implements it; verifyRequest then requires the grant to hold it.
-  const named = isObject(body.request.payload) ? body.request.payload.operation : undefined;
-  const operation = typeof named === 'string' && opts.operations.includes(named) ? named : opts.operations[0];
   const r = await verifyRequest(g.payload, g.expiresAt, body.request, operation, now);
   if (!r.ok) return r;
   const args = checkArguments(operation, r.request);
   if (!args.ok) return args;
+  if (args.command) Object.assign(known, { target: args.command.target, durationSeconds: args.command.durationSeconds, cause: args.command.cause });
 
   const status = await currentStatus(claimed.domain, dom, cfg.audience);
   if (!status) return fail(503, 'authorization-unavailable', 'the issuer\'s current authorization status could not be established');
   const entry = status.moderators.get(g.payload.moderatorRef);
   if (!entry) return fail(403, 'moderator-inactive', 'the issuer does not list this moderator as active');
+  known.role = entry.role;
   if (!entry.operations.includes(operation)) return fail(403, 'operation-denied', 'the operation is not currently permitted');
   if (entry.worlds !== '*' && !entry.worlds.includes(r.request.world)) return fail(403, 'world-denied', 'the world is not currently permitted');
 
@@ -467,7 +489,25 @@ async function authorize(body, opts) {
   if (spent === 'replay') return fail(401, 'replay', 'this request has already been used');
   if (spent === 'busy') return fail(429, 'rate-limited', 'too many requests for this grant');
   if (args.command) noteCommand(g.payload.moderatorRef, now);
-  return { ok: true, domain: claimed.domain, world: r.request.world, operation, command: args.command || null, grantId: g.payload.grantId, moderatorRef: g.payload.moderatorRef };
+  return { ok: true, domain: claimed.domain, world: r.request.world, operation, command: args.command || null, grantId: g.payload.grantId, moderatorRef: g.payload.moderatorRef, role: entry.role, worlds: entry.worlds };
+}
+
+// ---------- browser access to the moderation endpoints ----------
+
+// A moderation panel is served from the domain it moderates and calls this
+// service from there, so the moderation routes (and only those) answer CORS
+// for exactly the origins of the domains configured for moderation: https
+// always, http only for a local development host. Everything else gets no CORS
+// headers. The answer authorizes nothing: every request still needs a grant.
+function corsOriginFor(origin) {
+  if (typeof origin !== 'string' || origin.length > 300) return null;
+  const cfg = loadConfig();
+  if (cfg.state !== 'ok') return null;
+  for (const name of cfg.domains.keys()) {
+    if (origin === 'https://' + name) return origin;
+    if (origin === 'http://' + name && /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(name)) return origin;
+  }
+  return null;
 }
 
 // ---------- per-visit association and temporary references ----------
@@ -493,6 +533,6 @@ function participantRef(domain, world, groupKey) {
 }
 
 module.exports = {
-  authorize, visitHash, participantRef, failureRetryAfter, noteFailure,
+  authorize, corsOriginFor, visitHash, participantRef, failureRetryAfter, noteFailure,
   isValidWorldId, canonicalize, OPERATIONS, CAUSES, loadConfig
 };

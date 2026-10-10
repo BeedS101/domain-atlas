@@ -423,7 +423,10 @@ function atlas_admin_keys_file() {
 //     means "all"; an EMPTY list means none; anything that is not a list of
 //     valid strings means none. A moderator is never an admin.
 //   - anything else: no authority at all (a typo must not fall back to admin).
-const ATLAS_MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
+// The presence services perform them; this bundle only names them in grants and
+// in its status statement. audit.view reads the presence service's private audit
+// log of one world.
+const ATLAS_MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout', 'audit.view'];
 const ATLAS_MODERATION_MAX_WORLDS = 32;
 const ATLAS_MODERATION_EDGE_SPACE = '\x{0009}-\x{000d}\x{0020}\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}';
 
@@ -934,7 +937,10 @@ const ATLAS_MODERATION_GRANT_SIGN_CONTEXT = "atlas-moderation-grant/v1\n";
 const ATLAS_MODERATION_REF_CONTEXT = "atlas-moderator-ref/v1\n";
 const ATLAS_MODERATION_GRANT_MAX_TTL_S = 600; // hard ceiling, 10 minutes
 const ATLAS_MODERATION_GRANT_DEFAULT_TTL_S = 300;
-const ATLAS_MODERATION_REQUEST_FIELDS = ['audience', 'worlds', 'operations', 'ttlSeconds', 'popPublicKey', 'adminAuth'];
+// `purpose` is the label the wallet bridge checks against the page's signing
+// whitelist; it is signed with the rest, and must be this value when present.
+const ATLAS_MODERATION_GRANT_PURPOSE = 'moderation-grant';
+const ATLAS_MODERATION_REQUEST_FIELDS = ['audience', 'worlds', 'operations', 'ttlSeconds', 'popPublicKey', 'adminAuth', 'purpose'];
 // Moderation status statement: an issuer-signed, short-lived list of the keys
 // that hold moderation authority right now, which a presence service must see
 // (and re-fetch) before it acts on any grant. Mirrors issuer-server/server.js.
@@ -998,6 +1004,7 @@ function atlas_parse_grant_request($payload, $requesterKey, $issuerKey) {
   $bad = function ($m) { return ['error' => admin_failure(400, 'bad-request', $m)]; };
   if (!is_array($payload) || ($payload !== [] && atlas_array_is_list($payload))) return $bad('payload must be an object');
   foreach (array_keys($payload) as $k) if (!in_array($k, ATLAS_MODERATION_REQUEST_FIELDS, true)) return $bad('unknown field in payload: ' . $k);
+  if (array_key_exists('purpose', $payload) && $payload['purpose'] !== ATLAS_MODERATION_GRANT_PURPOSE) return $bad('payload.purpose must be ' . ATLAS_MODERATION_GRANT_PURPOSE . ' when present');
   $audience = $payload['audience'] ?? null;
   if (!is_string($audience) || !atlas_is_presence_origin($audience)) return $bad('payload.audience must be a presence origin such as https://presence.example.com');
   $worlds = $payload['worlds'] ?? null;
@@ -1035,6 +1042,34 @@ function atlas_grant_within_authority($authority, $request) {
   foreach ($request['worlds'] as $w) if (!in_array($w, $authority['worlds'], true)) return false;
   return true;
 }
+// What the moderation panel is told about a key's authority and this domain's
+// moderation configuration. `problems` explains, in plain language, anything
+// that stops moderation from working (nothing is created or changed here).
+const ATLAS_MODERATION_PANEL_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'audit.view'];
+// How long a grant the panel asks for lasts: the grant ceiling unless the operator
+// sets a shorter lifetime (ATLAS_MODERATION_PANEL_GRANT_TTL_S, 1 to 600).
+function atlas_moderation_panel_config($authority) {
+  $config = atlas_moderation_config();
+  $audiences = $config['domain'] ? $config['audiences'] : [];
+  $operations = [];
+  foreach (ATLAS_MODERATION_PANEL_OPERATIONS as $o) if ($authority['operations'] === '*' || in_array($o, $authority['operations'], true)) $operations[] = $o;
+  $allWorlds = $authority['worlds'] === '*';
+  if ($allWorlds) {
+    $worlds = array_values(array_filter(array_unique(declared_world_ids()), 'atlas_valid_world_id'));
+    sort($worlds, SORT_STRING);
+  } else {
+    $worlds = array_values($authority['worlds']);
+  }
+  $worlds = array_slice($worlds, 0, ATLAS_MODERATION_MAX_WORLDS);
+  $problems = [];
+  if (!$audiences) $problems[] = ['code' => 'moderation-not-configured', 'message' => 'This domain has no presence service configured for moderation. The operator needs to add its address to the issuer\'s moderation configuration (see docs/moderation-setup.md). Chat and multiplayer are not affected.'];
+  if (!$worlds) $problems[] = ['code' => 'no-worlds', 'message' => $allWorlds ? 'This domain\'s manifest declares no worlds to moderate.' : 'Your moderator entry does not list any world you may moderate.'];
+  if (!in_array('roster.view', $operations, true)) $problems[] = ['code' => 'no-roster', 'message' => 'Your moderator entry does not allow viewing the participant list, so there is nothing to act on.'];
+  return [
+    'domain' => $config['domain'] ?: atlas_domain(), 'role' => $authority['role'], 'configured' => count($audiences) > 0, 'audiences' => $audiences, 'worlds' => $worlds, 'allWorlds' => $allWorlds, 'operations' => $operations,
+    'purpose' => ATLAS_MODERATION_GRANT_PURPOSE, 'grantTtlSeconds' => min(ATLAS_MODERATION_GRANT_MAX_TTL_S, atlas_env_positive_int('ATLAS_MODERATION_PANEL_GRANT_TTL_S', ATLAS_MODERATION_GRANT_MAX_TTL_S)), 'problems' => $problems,
+  ];
+}
 // Reserves one live-grant slot for the moderator and records the grant, in one
 // locked step. Returns false when the moderator already holds the maximum.
 function atlas_record_moderation_grant($entry, $nowMs) {
@@ -1049,8 +1084,8 @@ function atlas_record_moderation_grant($entry, $nowMs) {
 }
 
 // Every roster key that holds authority right now, as the status statement
-// lists it: the moderator reference and the worlds and operations in force.
-// Administrators appear with every world and operation. A key with no
+// lists it: the moderator reference, its role (admin or moderator) and the
+// worlds and operations in force. Administrators appear with every world and operation. A key with no
 // authority, or with an empty scope, is left out.
 function atlas_moderation_status_moderators($domain) {
   $path = atlas_admin_keys_file();
@@ -1067,7 +1102,7 @@ function atlas_moderation_status_moderators($domain) {
     $operations = $a['operations'] === '*' ? ATLAS_MODERATION_OPERATIONS : $a['operations'];
     if ($a['worlds'] !== '*' && !count($a['worlds'])) continue;
     if (!count($operations)) continue;
-    $out[] = ['moderatorRef' => atlas_moderator_ref($domain, $k['publicKey']), 'worlds' => $a['worlds'], 'operations' => array_values($operations)];
+    $out[] = ['moderatorRef' => atlas_moderator_ref($domain, $k['publicKey']), 'role' => $a['role'], 'worlds' => $a['worlds'], 'operations' => array_values($operations)];
   }
   usort($out, function ($x, $y) { return strcmp($x['moderatorRef'], $y['moderatorRef']); });
   return $out;

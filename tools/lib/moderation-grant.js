@@ -23,7 +23,7 @@ const STATUS_SIGN_CONTEXT = 'atlas-moderation-status/v1\n';
 const STATUS_FIELDS = ['type', 'version', 'domain', 'audience', 'issuedAt', 'expiresAt', 'moderators'];
 const STATUS_MAX_TTL_MS = 120 * 1000;
 const REF_CONTEXT = 'atlas-moderator-ref/v1\n';
-const OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
+const OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout', 'audit.view'];
 const MAX_GRANT_LIFETIME_MS = 600 * 1000;
 const MAX_WORLDS = 32;
 const REQUEST_SKEW_MS = 60 * 1000;
@@ -136,7 +136,7 @@ async function verifyStatus(env, opts) {
   if (!Array.isArray(payload.moderators)) return fail('malformed', 'moderators');
   const moderators = new Map();
   for (const m of payload.moderators) {
-    if (!isObject(m) || Object.keys(m).length !== 3 || typeof m.moderatorRef !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(m.moderatorRef) || moderators.has(m.moderatorRef)) return fail('malformed', 'moderator entry');
+    if (!isObject(m) || !['moderatorRef', 'worlds', 'operations'].every((k) => k in m) || Object.keys(m).some((k) => !['moderatorRef', 'worlds', 'operations', 'role'].includes(k)) || ('role' in m && m.role !== 'admin' && m.role !== 'moderator') || typeof m.moderatorRef !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(m.moderatorRef) || moderators.has(m.moderatorRef)) return fail('malformed', 'moderator entry');
     if (m.worlds !== '*' && !(Array.isArray(m.worlds) && m.worlds.length >= 1 && m.worlds.length <= MAX_WORLDS && m.worlds.every(isValidWorldId))) return fail('malformed', 'moderator worlds');
     if (!Array.isArray(m.operations) || !m.operations.length || !m.operations.every((o) => OPERATIONS.includes(o))) return fail('malformed', 'moderator operations');
     moderators.set(m.moderatorRef, { worlds: m.worlds, operations: m.operations });

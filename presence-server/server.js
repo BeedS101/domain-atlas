@@ -63,8 +63,10 @@
 // Moderation (lib-moderation.js): a moderator holding an issuer-signed grant
 // can list the anonymous sessions of one world they are authorized for
 // (POST /presence/moderation/roster) and mute, unmute or kick one of them
-// (POST /presence/moderation/command). Neither takes a wallet identity, and
-// both trust only issuer keys named in this server's own configuration.
+// (POST /presence/moderation/command), and read the private audit log of that
+// world (POST /presence/moderation/audit, lib-audit.js). None takes a wallet
+// identity, and all trust only issuer keys named in this server's own
+// configuration.
 // A client may also send a random per-visit id with its presence and chat joins
 // (`visit`); only a keyed hash of it is kept. It pairs the two sessions of one
 // visit in the roster and is the key of a mute or kick, which therefore covers
@@ -75,6 +77,7 @@ const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
 const moderation = require('./lib-moderation');
+const audit = require('./lib-audit');
 const restrictions = require('./lib-restrictions');
 
 const PORT = process.env.PORT || 8004;
@@ -1046,32 +1049,77 @@ function executeModerationCommand(auth) {
   return { status: 200, body: Object.assign(base, { durationSeconds: command.durationSeconds, cause: command.cause, mutedUntil: new Date(until).toISOString() }) };
 }
 
-// POST /presence/moderation/roster and /presence/moderation/command — body
-// {grant, request}; see lib-moderation.js for what must hold. Failures never
-// reveal whether a room exists.
+// POST /presence/moderation/roster, /command and /audit — body {grant,
+// request}; see lib-moderation.js for what must hold. Failures never reveal
+// whether a room exists. Every moderation route goes through this one function,
+// which is also where the private audit log (lib-audit.js) is written: a
+// request that reached a verified grant is recorded whether it succeeded or
+// was refused, and a command is not carried out when it could not be recorded.
 const MODERATION_MAX_BODY_BYTES = envNumber('MODERATION_MAX_BODY_BYTES', 32 * 1024);
 const NO_STORE = { 'Cache-Control': 'no-store' };
+
+// CORS for the moderation routes only: the configured domains' own origins.
+function moderationCorsHeaders(req) {
+  const origin = moderation.corsOriginFor(req.headers.origin);
+  return origin ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : { Vary: 'Origin' };
+}
+function moderationPreflight(req, res) {
+  const headers = moderationCorsHeaders(req);
+  if (headers['Access-Control-Allow-Origin']) Object.assign(headers, { 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Max-Age': '600' });
+  res.writeHead(204, headers);
+  res.end();
+}
+
+function auditEntryFor(auth, outcome, code) {
+  const c = auth.command;
+  return {
+    domain: auth.domain, world: auth.world, operation: auth.operation, moderatorRef: auth.moderatorRef, role: auth.role, grantId: auth.grantId,
+    target: c ? c.target : null, durationSeconds: c && auth.operation !== 'chat.unmute' ? c.durationSeconds : null, cause: c && auth.operation !== 'chat.unmute' ? c.cause : null,
+    outcome, code
+  };
+}
+
 async function handleModeration(req, res, operations, respond) {
+  const cors = Object.assign({}, NO_STORE, moderationCorsHeaders(req));
   const src = sourceKeyOf(peerOf(req));
   const retryAfter = moderation.failureRetryAfter(src, Date.now());
-  if (retryAfter) return sendJson(res, 429, { error: 'too many failed moderation requests; try again later', code: 'rate-limited', retryAfter }, false, Object.assign({ 'Retry-After': String(retryAfter) }, NO_STORE));
+  if (retryAfter) return sendJson(res, 429, { error: 'too many failed moderation requests; try again later', code: 'rate-limited', retryAfter }, false, Object.assign({ 'Retry-After': String(retryAfter) }, cors));
   let body;
   try { body = JSON.parse((await readBody(req, MODERATION_MAX_BODY_BYTES)) || '{}'); } catch (err) {
     if (err && err.message === 'body too large') throw err;
     moderation.noteFailure(src, Date.now());
-    return sendJson(res, 400, { error: 'malformed request', code: 'bad-request' }, false, NO_STORE);
+    return sendJson(res, 400, { error: 'malformed request', code: 'bad-request' }, false, cors);
   }
   const auth = await moderation.authorize(body, { operations });
   if (!auth.ok) {
     if (auth.status < 500 && auth.code !== 'rate-limited') moderation.noteFailure(src, Date.now());
-    const headers = auth.retryAfter ? Object.assign({ 'Retry-After': String(auth.retryAfter) }, NO_STORE) : NO_STORE;
+    if (auth.audit) audit.record(Object.assign({}, auth.audit, { outcome: 'refused', code: auth.code }));
+    const headers = auth.retryAfter ? Object.assign({ 'Retry-After': String(auth.retryAfter) }, cors) : cors;
     return sendJson(res, auth.status, auth.retryAfter ? { error: auth.message, code: auth.code, retryAfter: auth.retryAfter } : { error: auth.message, code: auth.code }, false, headers);
   }
-  const out = respond(auth);
-  return sendJson(res, out.status, out.body, false, NO_STORE);
+  if (auth.command && !audit.writable()) {
+    return sendJson(res, 503, { error: 'the moderation audit log cannot be written; no action was taken', code: 'audit-unavailable' }, false, cors);
+  }
+  let out;
+  try { out = respond(auth); } catch (err) {
+    audit.record(auditEntryFor(auth, 'failed', 'internal-error'));
+    throw err;
+  }
+  // Reading the roster is not recorded (the panel refreshes it often); every
+  // command and every audit read is.
+  if (auth.operation !== 'roster.view') {
+    audit.record(auditEntryFor(auth, out.status < 300 ? 'success' : 'failed', out.status < 300 ? 'ok' : (out.body && out.body.code) || 'failed'));
+  }
+  return sendJson(res, out.status, out.body, false, cors);
 }
 const handleModerationRoster = (req, res) => handleModeration(req, res, ['roster.view'], (auth) => ({ status: 200, body: buildModerationRoster(auth.domain, auth.world) }));
 const handleModerationCommand = (req, res) => handleModeration(req, res, ['chat.mute', 'chat.unmute', 'session.kick'], executeModerationCommand);
+// The log of one world: the entries of this domain and world, plus (to a
+// moderator whose scope is every world) the ones no world could be attributed to.
+const handleModerationAudit = (req, res) => handleModeration(req, res, ['audit.view'], (auth) => ({
+  status: 200,
+  body: Object.assign({ domain: auth.domain, world: auth.world, generatedAt: new Date().toISOString() }, audit.read({ domain: auth.domain, world: auth.world, allWorlds: auth.worlds === '*' }))
+}));
 
 // The answer for a polling id this server does not know. A session a moderator
 // removed gets 403 {reason:'removed'} (the client must not rejoin on its own);
@@ -1092,6 +1140,7 @@ function peerOf(req) { return req.socket && req.socket.remoteAddress; }
 // ---------- HTTP server + upgrade handling ----------
 
 const server = http.createServer(async (req, res) => {
+  if (req.method === 'OPTIONS' && /^\/presence\/moderation\/(roster|command|audit)$/.test(req.url)) return moderationPreflight(req, res);
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
@@ -1171,6 +1220,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && req.url === '/presence/moderation/command') {
       return await handleModerationCommand(req, res);
+    }
+    if (req.method === 'POST' && req.url === '/presence/moderation/audit') {
+      return await handleModerationAudit(req, res);
     }
 
     // Read-only status: how many people are in this world right now, for a

@@ -5,7 +5,8 @@
 // docs/moderation-authorization.md and decides whether a request may use one.
 // This is the PHP port of presence-server/lib-moderation.js; the two follow the
 // same rules in the same order. Nothing here moderates anyone: the only
-// operation implemented is roster.view (presence/moderation/roster.php).
+// operations are roster.view, chat.mute, chat.unmute, session.kick and audit.view
+// (presence/moderation/*.php, all through moderation_serve() below).
 //
 // Trust comes from explicit configuration only (atlas-presence-moderation-
 // config.json in this folder, or the file named by PRESENCE_MODERATION_CONFIG):
@@ -60,7 +61,7 @@ const MODERATION_STATUS_TYPE = 'atlas.moderation-status';
 const MODERATION_GRANT_SIGN_CONTEXT = "atlas-moderation-grant/v1\n";
 const MODERATION_POP_SIGN_CONTEXT = "atlas-moderation-pop/v1\n";
 const MODERATION_STATUS_SIGN_CONTEXT = "atlas-moderation-status/v1\n";
-const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
+const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout', 'audit.view'];
 const MODERATION_MAX_GRANT_LIFETIME_MS = 600 * 1000;
 const MODERATION_MAX_WORLDS = 32;
 const MODERATION_GRANT_FIELDS = ['type', 'version', 'grantId', 'domain', 'audience', 'moderatorRef', 'worlds', 'operations', 'issuedAt', 'expiresAt', 'cnf'];
@@ -391,7 +392,8 @@ function moderation_verify_status($env, $issuerKeys, $audience, $domain, $sentAt
   if (!is_array($list) || ($list !== [] && !moderation_is_list($list)) || count($list) > 2000) return null;
   $moderators = [];
   foreach ($list as $m) {
-    if (!moderation_has_keys($m, ['moderatorRef', 'worlds', 'operations'])) return null;
+    if (!moderation_has_keys($m, ['moderatorRef', 'worlds', 'operations'], ['role'])) return null;
+    if (array_key_exists('role', $m) && $m['role'] !== 'admin' && $m['role'] !== 'moderator') return null;
     $ref = $m['moderatorRef'];
     if (!is_string($ref) || preg_match('/^[A-Za-z0-9_-]{43}$/', $ref) !== 1 || isset($moderators[$ref])) return null;
     if ($m['worlds'] !== '*') {
@@ -400,7 +402,7 @@ function moderation_verify_status($env, $issuerKeys, $audience, $domain, $sentAt
     }
     if (!is_array($m['operations']) || ($m['operations'] !== [] && !moderation_is_list($m['operations'])) || count($m['operations']) > count(MODERATION_OPERATIONS)) return null;
     foreach ($m['operations'] as $o) if (!is_string($o) || !in_array($o, MODERATION_OPERATIONS, true)) return null;
-    $moderators[$ref] = ['worlds' => $m['worlds'], 'operations' => $m['operations']];
+    $moderators[$ref] = ['worlds' => $m['worlds'], 'operations' => $m['operations'], 'role' => isset($m['role']) ? $m['role'] : null];
   }
   // Usable for its signed lifetime, counted from when this service ASKED, so
   // the issuer's clock cannot stretch it.
@@ -532,9 +534,9 @@ function moderation_command_rules() {
 
 // Checks the target and params of a request for $operation. Returns
 // ['ok'=>true, 'command'=>[target, durationSeconds, cause]] for a command,
-// ['ok'=>true] for roster.view, or a failure (a 400, before anything is spent).
+// ['ok'=>true] for roster.view and audit.view, or a failure (a 400, before anything is spent).
 function moderation_check_arguments($operation, $r) {
-  if ($operation === 'roster.view') {
+  if ($operation === 'roster.view' || $operation === 'audit.view') {
     if ($r['target'] !== '') return moderation_fail(400, 'bad-request', 'target must be empty for ' . $operation);
     if (array_key_exists('params', $r)) return moderation_fail(400, 'bad-request', 'params are not accepted for ' . $operation);
     return ['ok' => true];
@@ -589,8 +591,17 @@ function moderation_note_command($moderatorRef) {
 // $body: {grant, request}. $operations: the operations the calling endpoint
 // implements; the one the (signed) request names is used when it is among
 // them. Returns ['ok'=>true, 'domain','world','operation','command','grantId',
-// 'moderatorRef'] or ['ok'=>false, 'status','code','message'[, 'retryAfter']].
+// 'moderatorRef','role','worlds'] or ['ok'=>false, 'status','code','message'[,
+// 'retryAfter']], either with 'audit': what is known about the request once its
+// grant has verified (the audit log records refusals from it), or null before.
 function moderation_authorize($body, $operations) {
+  $ctx = null;
+  $out = moderation_authorize_inner($body, $operations, $ctx);
+  $out['audit'] = $ctx;
+  return $out;
+}
+
+function moderation_authorize_inner($body, $operations, &$ctx) {
   $now = moderation_now_ms();
   $cfg = moderation_load_config();
   if ($cfg['state'] !== 'ok') return moderation_fail(503, 'moderation-not-configured', 'moderation is not enabled on this presence service');
@@ -602,19 +613,30 @@ function moderation_authorize($body, $operations) {
 
   $g = moderation_verify_grant($body['grant'], $dom['issuerKeys'], $cfg['audience'], $claimed['domain'], $now);
   if (!$g['ok']) return $g;
-  if (in_array($g['payload']['grantId'], $cfg['revokedGrants'], true) || in_array($g['payload']['moderatorRef'], $cfg['revokedModerators'], true)) return moderation_fail(403, 'revoked', 'this grant or moderator has been revoked here');
 
+  // From here the grant is the issuer's own, so its domain and moderator
+  // reference are trustworthy. The world is noted only when the grant itself
+  // covers it, so nobody holding a grant can write into another world's log.
   $named = isset($body['request']['payload']) && moderation_is_object($body['request']['payload']) && isset($body['request']['payload']['operation']) ? $body['request']['payload']['operation'] : null;
   $operation = is_string($named) && in_array($named, $operations, true) ? $named : $operations[0];
+  $claimedWorld = isset($body['request']['payload']) && moderation_is_object($body['request']['payload']) && isset($body['request']['payload']['world']) ? $body['request']['payload']['world'] : null;
+  $ctx = [
+    'domain' => $claimed['domain'], 'grantId' => $g['payload']['grantId'], 'moderatorRef' => $g['payload']['moderatorRef'], 'role' => null, 'operation' => $operation,
+    'world' => moderation_valid_world_id($claimedWorld) && ($g['payload']['worlds'] === '*' || in_array($claimedWorld, $g['payload']['worlds'], true)) ? $claimedWorld : null,
+  ];
+  if (in_array($g['payload']['grantId'], $cfg['revokedGrants'], true) || in_array($g['payload']['moderatorRef'], $cfg['revokedModerators'], true)) return moderation_fail(403, 'revoked', 'this grant or moderator has been revoked here');
+
   $r = moderation_verify_request($g['payload'], $body['request'], $operation, $now);
   if (!$r['ok']) return $r;
   $args = moderation_check_arguments($operation, $r['request']);
   if (!$args['ok']) return $args;
+  if (isset($args['command'])) { $ctx['target'] = $args['command']['target']; $ctx['durationSeconds'] = $args['command']['durationSeconds']; $ctx['cause'] = $args['command']['cause']; }
 
   $status = moderation_current_status($claimed['domain'], $dom, $cfg['audience']);
   if ($status === null) return moderation_fail(503, 'authorization-unavailable', 'the issuer\'s current authorization status could not be established');
   if (!isset($status['moderators'][$g['payload']['moderatorRef']])) return moderation_fail(403, 'moderator-inactive', 'the issuer does not list this moderator as active');
   $entry = $status['moderators'][$g['payload']['moderatorRef']];
+  $ctx['role'] = $entry['role'];
   if (!in_array($operation, $entry['operations'], true)) return moderation_fail(403, 'operation-denied', 'the operation is not currently permitted');
   if ($entry['worlds'] !== '*' && !in_array($r['request']['world'], $entry['worlds'], true)) return moderation_fail(403, 'world-denied', 'the world is not currently permitted');
 
@@ -628,7 +650,102 @@ function moderation_authorize($body, $operations) {
   if ($spent === 'replay') return moderation_fail(401, 'replay', 'this request has already been used');
   if ($spent === 'busy') return moderation_fail(429, 'rate-limited', 'too many requests for this grant');
   if (isset($args['command'])) moderation_note_command($g['payload']['moderatorRef']);
-  return ['ok' => true, 'domain' => $claimed['domain'], 'world' => $r['request']['world'], 'operation' => $operation, 'command' => isset($args['command']) ? $args['command'] : null, 'grantId' => $g['payload']['grantId'], 'moderatorRef' => $g['payload']['moderatorRef']];
+  return ['ok' => true, 'domain' => $claimed['domain'], 'world' => $r['request']['world'], 'operation' => $operation, 'command' => isset($args['command']) ? $args['command'] : null, 'grantId' => $g['payload']['grantId'], 'moderatorRef' => $g['payload']['moderatorRef'], 'role' => $entry['role'], 'worlds' => $entry['worlds']];
+}
+
+// ---------- browser access to the moderation endpoints ----------
+
+// A moderation panel is served from the domain it moderates and calls this
+// service from there, so the moderation routes (and only those) answer CORS for
+// exactly the origins of the domains configured for moderation: https always,
+// http only for a local development host. Everything else gets no CORS
+// headers. The answer authorizes nothing: every request still needs a grant.
+function moderation_cors_origin($origin) {
+  if (!is_string($origin) || strlen($origin) > 300) return null;
+  $cfg = moderation_load_config();
+  if ($cfg['state'] !== 'ok') return null;
+  foreach (array_keys($cfg['domains']) as $name) {
+    $name = (string) $name;
+    if ($origin === 'https://' . $name) return $origin;
+    if ($origin === 'http://' . $name && preg_match('/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/', $name) === 1) return $origin;
+  }
+  return null;
+}
+function moderation_cors_headers() {
+  $origin = moderation_cors_origin(isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : null);
+  $h = ['Vary: Origin'];
+  if ($origin !== null) $h[] = 'Access-Control-Allow-Origin: ' . $origin;
+  return $h;
+}
+function moderation_preflight() {
+  if ($_SERVER['REQUEST_METHOD'] !== 'OPTIONS') return;
+  http_response_code(204);
+  foreach (moderation_cors_headers() as $h) header($h);
+  if (moderation_cors_origin(isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : null) !== null) {
+    header('Access-Control-Allow-Methods: POST, OPTIONS');
+    header('Access-Control-Allow-Headers: Content-Type');
+    header('Access-Control-Max-Age: 600');
+  }
+  exit;
+}
+
+// ---------- the one entry point of every moderation endpoint ----------
+
+function moderation_audit_entry($auth, $outcome, $code) {
+  $c = $auth['command'];
+  $keep = $c !== null && $auth['operation'] !== 'chat.unmute';
+  return [
+    'domain' => $auth['domain'], 'world' => $auth['world'], 'operation' => $auth['operation'], 'moderatorRef' => $auth['moderatorRef'], 'role' => $auth['role'], 'grantId' => $auth['grantId'],
+    'target' => $c !== null ? $c['target'] : null, 'durationSeconds' => $keep ? $c['durationSeconds'] : null, 'cause' => $keep ? $c['cause'] : null,
+    'outcome' => $outcome, 'code' => $code,
+  ];
+}
+
+// Serves one moderation request: source throttle, authorization, the audit log,
+// the operation itself and the response. Every moderation endpoint calls this and
+// nothing else, which is what ties the audit log to the enforcement: a request
+// that reached a verified grant is recorded whether it succeeded or was refused,
+// and a command is not carried out when it could not be recorded. $respond($auth)
+// returns [status, body]. Does not return.
+function moderation_serve($operations, $respond) {
+  moderation_preflight();
+  require_post();
+  $cors = moderation_cors_headers();
+  $nostore = array_merge(['Cache-Control: no-store'], $cors);
+  $addr = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '';
+
+  $retryAfter = moderation_failure_retry_after($addr);
+  if ($retryAfter) send_json(429, ['error' => 'too many failed moderation requests; try again later', 'code' => 'rate-limited', 'retryAfter' => $retryAfter], false, array_merge(['Retry-After: ' . $retryAfter], $nostore));
+
+  try {
+    $body = read_json_body(MODERATION_MAX_BODY_BYTES);
+  } catch (Exception $e) {
+    moderation_note_failure($addr);
+    send_json(400, ['error' => 'malformed request', 'code' => 'bad-request'], false, $nostore);
+  }
+
+  $auth = moderation_authorize($body, $operations);
+  if (!$auth['ok']) {
+    if ($auth['status'] < 500 && $auth['code'] !== 'rate-limited') moderation_note_failure($addr);
+    if ($auth['audit'] !== null) audit_record($auth['audit'] + ['outcome' => 'refused', 'code' => $auth['code']]);
+    if (isset($auth['retryAfter'])) send_json($auth['status'], ['error' => $auth['message'], 'code' => $auth['code'], 'retryAfter' => $auth['retryAfter']], false, array_merge(['Retry-After: ' . $auth['retryAfter']], $nostore));
+    send_json($auth['status'], ['error' => $auth['message'], 'code' => $auth['code']], false, $nostore);
+  }
+  if ($auth['command'] !== null && !audit_writable()) {
+    send_json(503, ['error' => 'the moderation audit log cannot be written; no action was taken', 'code' => 'audit-unavailable'], false, $nostore);
+  }
+  try {
+    list($status, $out) = $respond($auth);
+  } catch (Exception $e) {
+    audit_record(moderation_audit_entry($auth, 'failed', 'internal-error'));
+    send_json(500, ['error' => 'internal error', 'code' => 'internal-error'], false, $nostore);
+  }
+  // Reading the roster is not recorded (the panel refreshes it often); every
+  // command and every audit read is.
+  if ($auth['operation'] !== 'roster.view') {
+    audit_record(moderation_audit_entry($auth, $status < 300 ? 'success' : 'failed', $status < 300 ? 'ok' : (isset($out['code']) && is_string($out['code']) ? $out['code'] : 'failed')));
+  }
+  send_json($status, $out, false, $nostore);
 }
 
 // ---------- the anonymous roster ----------

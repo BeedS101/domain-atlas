@@ -6630,17 +6630,21 @@ async function refreshQuickLockButtonVisibility() {
 
 // Shown only when the active identity is unlocked, standing in a real
 // (non-key-anchored) domain, AND that domain's own admin roster lists this
-// identity's public key — AtlasWallet.isAdminForDomain fails closed (false)
-// on an unreachable domain or an older issuer without the /is-admin route,
-// same posture as everything else here. Called wherever the active
+// identity's public key, as an administrator ("Admin") or as a moderator
+// ("Moderate"; the panel then offers world moderation only).
+// AtlasWallet.adminRoleForDomain fails closed (null) on an unreachable domain
+// or an older issuer without the /is-admin route. Called wherever the active
 // identity or the current domain can change: enterWorld() (every domain
-// landing) and refreshIdentityDisplay() (unlock/lock/identity-switch
-// without a domain change).
+// landing) and refreshIdentityDisplay() (unlock/lock/identity-switch without a
+// domain change).
 async function refreshAdminButtonVisibility() {
   if (!adminBtn) return;
   const domain = currentManifest ? manifestDomainOf(currentManifest) : null;
   if (!domain || !(await AtlasWallet.isUnlocked())) { adminBtn.style.display = 'none'; return; }
-  adminBtn.style.display = (await AtlasWallet.isAdminForDomain(domain)) ? '' : 'none';
+  const role = await AtlasWallet.adminRoleForDomain(domain);
+  adminBtn.style.display = role ? '' : 'none';
+  adminBtn.textContent = role === 'moderator' ? '🛡️ Moderate' : '🛡️ Admin';
+  adminBtn.title = role === 'moderator' ? "Open this domain's moderation panel" : "Open this domain's admin panel";
 }
 
 // Admin button click: log into (or reuse) this domain's admin session,

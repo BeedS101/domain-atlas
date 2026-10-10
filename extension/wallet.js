@@ -591,6 +591,23 @@ const AtlasWallet = (() => {
     }
   }
 
+  // The role this identity holds on a domain's admin roster: 'admin',
+  // 'moderator', or null (not listed, unreachable, or an older issuer). Only
+  // decides whether to show the entry point; the issuer re-checks everything.
+  async function adminRoleForDomain(domain) {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    try {
+      const res = await fetch(baseUrl(domain) + '/atlas/admin/is-admin?publicKey=' + encodeURIComponent(identity.publicKey));
+      if (!res.ok) return null;
+      const body = await res.json();
+      if (body.isAdmin) return 'admin';
+      return body.isModerator ? 'moderator' : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
   // Returns a still-valid cached session for this domain, scoped to
   // whichever identity is active right now — a session cached under a
   // different public key (an identity switch without an intervening lock)
@@ -7595,7 +7612,7 @@ const AtlasWallet = (() => {
     // boundary: every extension page already has the same unrestricted
     // signing access this adds one more caller to.
     signWithSelf,
-    isAdminForDomain, adminLoginForDomain, adminLogoutForDomain,
+    isAdminForDomain, adminRoleForDomain, adminLoginForDomain, adminLogoutForDomain,
     getIdentityMode, setIdentityMode, hasLocalIdentity, hasWebAuthnIdentity,
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
     getCounterparty, createCounterparty,

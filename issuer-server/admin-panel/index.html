@@ -15,7 +15,8 @@
   a cross-origin request by nature since that's a different service.
 
   It never asks for a password or a private key: the only way in is a
-  session token handed off by the wallet extension's own "Admin" button
+  session token handed off by the wallet extension's own "Admin" (or, for a
+  moderator-only key, "Moderate") button
   (see extension/viewer.js's admin button handler and extension/
   content.js's 'domain-atlas-admin-handoff' listener) after it already
   proved this identity is on the domain's admin roster by signing a
@@ -40,7 +41,7 @@
     padding: 6px 12px; cursor: pointer; font-size: 12px;
   }
   header button:hover { background: #3c4e57; }
-  main { max-width: 720px; margin: 0 auto; padding: 24px; }
+  main { max-width: 880px; margin: 0 auto; padding: 24px; }
   #loggedOutNotice { text-align: center; padding: 60px 20px; color: #9fb0b8; }
   #loggedOutNotice a { color: #f2c98d; }
   section.panel {
@@ -99,19 +100,54 @@
   .class-patch-list li:last-child { border-bottom: none; }
   .class-patch-list .class-patch-name { color: #d7e0e4; font-family: ui-monospace, monospace; }
   .class-patch-list li.empty { font-style: italic; color: #6c7d85; }
+  [hidden] { display: none !important; }
+  section.panel.moderation { border-color: #4f7893; box-shadow: 0 0 0 1px #4f789333; }
+  .mod-banner { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8cc4e6; margin-bottom: 6px; }
+  section.panel.moderation button.submit.secondary { background: #2c3c44; color: #d7e0e4; margin-left: 8px; }
+  section.panel.moderation button.submit.secondary:hover:not(:disabled) { background: #3c4e57; }
+  .mod-status { font-size: 13px; color: #9fb0b8; margin-bottom: 10px; }
+  .mod-status.err { color: #e08a8a; }
+  .mod-status.ok { color: #8fd19e; }
+  .mod-problems { background: #2a1d1d; border: 1px solid #5b3535; border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; color: #e8b4b4; }
+  .mod-problems p { margin: 0 0 6px; }
+  .mod-problems p:last-child { margin: 0; }
+  .mod-session { font-size: 12px; color: #8fd19e; margin-left: 10px; }
+  .mod-toolbar { display: flex; align-items: center; gap: 12px; margin: 14px 0 6px; }
+  .mod-toolbar button, #modAuditBtn { background: #2c3c44; color: #d7e0e4; border: 1px solid #3c4e57; border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
+  .mod-toolbar button:hover, #modAuditBtn:hover { background: #3c4e57; }
+  .mod-toolbar .hint { margin: 0; }
+  .mod-empty { font-size: 12px; color: #6c7d85; font-style: italic; padding: 8px 0; }
+  .mod-empty.err { color: #e08a8a; font-style: normal; }
+  .mod-table-wrap { overflow-x: auto; }
+  table.mod-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  table.mod-table th, table.mod-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #202f36; color: #9fb0b8; vertical-align: top; }
+  table.mod-table th { color: #d7e0e4; font-weight: 600; white-space: nowrap; }
+  table.mod-table td.visitor { color: #d7e0e4; max-width: 220px; }
+  .pname { unicode-bidi: isolate; overflow-wrap: anywhere; font-weight: 600; }
+  .pref { font-family: ui-monospace, monospace; font-size: 11px; }
+  .mod-actions button { background: #2c3c44; color: #d7e0e4; border: 1px solid #3c4e57; border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 11px; margin: 0 4px 4px 0; }
+  .mod-actions button:hover:not(:disabled) { background: #3c4e57; }
+  .mod-actions button.danger { border-color: #8a3f3f; color: #f0b4b4; }
+  .mod-actions button:disabled { opacity: .45; cursor: default; }
+  .mod-confirm { margin-top: 14px; padding: 12px 14px; border: 1px solid #8a6a2f; border-radius: 8px; background: #231d12; }
+  #modConfirmText { font-size: 13px; color: #f2dfb8; }
+  .mod-audit { margin-top: 20px; padding-top: 12px; border-top: 1px solid #2c3c44; }
+  .mod-audit h3 { margin: 0 0 4px; font-size: 13px; color: #d7e0e4; }
+  td.outcome-success { color: #8fd19e; }
+  td.outcome-refused, td.outcome-failed { color: #e08a8a; }
 </style>
 </head>
 <body>
   <header>
-    <h1>🛡️ Domain Atlas — Admin</h1>
+    <h1 id="pageTitle">🛡️ Domain Atlas — Admin</h1>
     <span class="who" id="whoDisplay"></span>
     <button id="logoutBtn" type="button" style="display: none;">Log out</button>
   </header>
 
   <main>
     <div id="loggedOutNotice">
-      Not logged in as this domain's admin.<br>
-      Open the wallet on this site and click its <strong>🛡️ Admin</strong> button.
+      Not logged in as this domain's admin or moderator.<br>
+      Open the wallet on this site and click its <strong>🛡️ Admin</strong> (or <strong>🛡️ Moderate</strong>) button.
       <br><br><a href="/">← Back to the site</a>
     </div>
 
@@ -143,6 +179,76 @@
           <table class="visits" id="visitsDailyTable"><tbody id="visitsDailyBody"></tbody></table>
         </div>
         <div id="visitsError"></div>
+      </section>
+
+      <section class="panel moderation" id="moderationPanel" aria-labelledby="modTitle">
+        <div class="mod-banner">World moderation</div>
+        <h2 id="modTitle">World moderation</h2>
+        <p class="hint">Mute, unmute or remove anonymous visitors from a world for a limited time. Visitors appear only under a temporary reference and the name they chose; wallet keys and network addresses are never shown. Your wallet asks you to approve each moderation session, and this page never sees your keys.</p>
+        <div id="modStatus" class="mod-status" role="status" aria-live="polite">Loading moderation settings…</div>
+        <div id="modProblems" class="mod-problems" hidden></div>
+
+        <div id="modSetup" hidden>
+          <div class="row">
+            <div>
+              <label for="modWorld">World</label>
+              <select id="modWorld"></select>
+            </div>
+            <div id="modAudienceWrap">
+              <label for="modAudience">Presence service</label>
+              <select id="modAudience"></select>
+            </div>
+          </div>
+          <p class="hint" id="modConsent"></p>
+          <button class="submit" id="modStartBtn" type="button">Start moderating</button>
+          <button class="submit secondary" id="modEndBtn" type="button" hidden>End session</button>
+          <span class="mod-session" id="modSessionInfo"></span>
+        </div>
+
+        <div id="modWork" hidden>
+          <div class="mod-toolbar">
+            <button type="button" id="modRefreshBtn">Refresh participants</button>
+            <span id="modRosterInfo" class="hint"></span>
+          </div>
+          <div id="modRosterState" class="mod-empty"></div>
+          <div class="mod-table-wrap">
+            <table class="mod-table" id="modRosterTable" hidden>
+              <thead><tr><th>Visitor</th><th>In</th><th>Joined</th><th>State</th><th>Reference</th><th>Actions</th></tr></thead>
+              <tbody id="modRosterBody"></tbody>
+            </table>
+          </div>
+
+          <div id="modConfirm" class="mod-confirm" hidden role="alertdialog" aria-labelledby="modConfirmText">
+            <div id="modConfirmText"></div>
+            <div class="row">
+              <div id="modReasonWrap">
+                <label for="modReason">Reason</label>
+                <select id="modReason"></select>
+              </div>
+              <div id="modDurationWrap">
+                <label for="modDuration">Duration</label>
+                <select id="modDuration"></select>
+              </div>
+            </div>
+            <p class="hint" id="modConfirmNote"></p>
+            <button class="submit" id="modConfirmBtn" type="button">Confirm</button>
+            <button class="submit secondary" id="modCancelBtn" type="button">Cancel</button>
+          </div>
+          <div class="result" id="modResult" role="status" aria-live="polite"></div>
+
+          <div id="modAuditWrap" class="mod-audit" hidden>
+            <h3>Audit log for this world</h3>
+            <p class="hint">A private record kept by the presence service of every moderation action in this world, including refused ones. It never contains chat text, wallet keys or network addresses.</p>
+            <button type="button" id="modAuditBtn">Show audit log</button>
+            <div id="modAuditInfo" class="hint"></div>
+            <div class="mod-table-wrap">
+              <table class="mod-table" id="modAuditTable" hidden>
+                <thead><tr><th>#</th><th>Time</th><th>Moderator</th><th>Action</th><th>Visitor ref</th><th>Length</th><th>Reason</th><th>Outcome</th></tr></thead>
+                <tbody id="modAuditBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="panel">
@@ -598,7 +704,18 @@
       loggedOutNotice.style.display = 'none';
       main.style.display = 'block';
       logoutBtn.style.display = '';
+      if (whoami.body.role === 'moderator') {
+        // A moderator-only key sees the World moderation section and nothing
+        // else: every other panel is administration and would only be refused.
+        document.title = 'Domain Atlas — Moderation';
+        document.getElementById('pageTitle').textContent = '🛡️ Domain Atlas — Moderation';
+        whoDisplay.textContent = 'Moderator: ' + whoami.body.publicKey.slice(0, 20) + '…';
+        main.querySelectorAll('section.panel').forEach((panel) => { if (panel.id !== 'moderationPanel') panel.style.display = 'none'; });
+        moderation.init({ publicKey: whoami.body.publicKey });
+        return;
+      }
       whoDisplay.textContent = 'Admin: ' + whoami.body.publicKey.slice(0, 20) + '…';
+      moderation.init({ publicKey: whoami.body.publicKey });
       refreshOnlineNow();
       refreshVisits();
       refreshClassPatchClassOptions();
@@ -610,6 +727,7 @@
     }
 
     document.getElementById('logoutBtn').addEventListener('click', async () => {
+      moderation.end();
       if (session) await postJson('/atlas/admin/session/logout', { token: session.token }).catch(() => {});
       clearSession();
       location.href = '/';
@@ -1232,6 +1350,456 @@
         btn.disabled = false;
       }
     });
+
+    // ---------- world moderation ----------
+    // Drives the presence service's moderation endpoints (roster, mute, unmute,
+    // kick, audit log). Nothing here holds a wallet key. A moderation session
+    // starts with ONE signature made by the wallet extension, after its own
+    // approval prompt: window.atlasWallet.requestSignature() over a grant
+    // request that names the presence service, worlds and operations and carries
+    // a fresh ephemeral public key. The issuer answers with a short-lived grant.
+    // The matching private key is generated here, as a non-extractable Web Crypto
+    // key kept only in this closure (never stored, never sent), and signs each
+    // later request. When the grant runs out the next action asks the wallet
+    // again, for exactly the same scope; nothing widens on its own.
+    // Visitor-controlled text (display names) is only ever put into the page with
+    // textContent. Nothing in this block uses innerHTML.
+    const moderation = (function () {
+      const $ = (id) => document.getElementById(id);
+      const CAUSES = [['spam', 'Spam'], ['abuse', 'Abusive behaviour'], ['harassment', 'Harassment'], ['inappropriate', 'Inappropriate content'], ['disruption', 'Disruption'], ['other', 'Other breach of the world rules']];
+      const MUTE_DURATIONS = [[60, '1 minute'], [300, '5 minutes'], [600, '10 minutes'], [3600, '1 hour'], [21600, '6 hours'], [86400, '24 hours']];
+      const KICK_DURATIONS = [[60, '1 minute'], [300, '5 minutes'], [900, '15 minutes'], [3600, '1 hour']];
+
+      let cfg = null;        // what the issuer says this key may do here
+      let sessionKey = null; // the public key of the logged-in admin session
+      let active = null;     // {grant, popKey, audience, worlds, operations, expiresAtMs}
+      let pending = null;    // the action waiting for confirmation
+      let roster = [];
+      let ticker = null;
+      let busy = false;
+
+      // ----- small helpers -----
+      function el(tag, className, text) {
+        const e = document.createElement(tag);
+        if (className) e.className = className;
+        if (text !== undefined) e.textContent = text;
+        return e;
+      }
+      function clear(node) { node.replaceChildren(); }
+      function b64url(buf) {
+        const a = new Uint8Array(buf);
+        let s = '';
+        for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]);
+        return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      }
+      function canonicalize(v) {
+        if (v === null || typeof v !== 'object') return JSON.stringify(v);
+        if (Array.isArray(v)) return '[' + v.map(canonicalize).join(',') + ']';
+        return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonicalize(v[k])).join(',') + '}';
+      }
+      const randomId = (n) => b64url(crypto.getRandomValues(new Uint8Array(n)));
+      function shortText(s, max) {
+        const chars = Array.from(String(s));
+        return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : chars.join('');
+      }
+      function fmtTime(iso) {
+        const d = new Date(iso);
+        return Number.isNaN(d.getTime()) ? '—' : d.toLocaleTimeString();
+      }
+      function fmtLength(seconds) {
+        if (!seconds) return '—';
+        if (seconds < 60) return seconds + ' s';
+        if (seconds < 3600) return Math.round(seconds / 60) + ' min';
+        return Math.round(seconds / 3600) + ' h';
+      }
+      function fmtAge(seconds) {
+        if (seconds < 60) return 'under a minute ago';
+        if (seconds < 3600) return Math.floor(seconds / 60) + ' min ago';
+        return Math.floor(seconds / 3600) + ' h ago';
+      }
+      function causeLabel(code) {
+        const hit = CAUSES.find((c) => c[0] === code);
+        return hit ? hit[1] : (code || '—');
+      }
+      // A visitor name as a node: isolated for bidirectional text, plain text only.
+      function nameNode(name) {
+        return el('bdi', 'pname', shortText(name, 60));
+      }
+      function setStatus(kind, text) {
+        const s = $('modStatus');
+        s.className = 'mod-status' + (kind ? ' ' + kind : '');
+        s.textContent = text;
+      }
+      function setResult(ok, ...parts) {
+        const r = $('modResult');
+        r.className = 'result ' + (ok ? 'ok' : 'err');
+        clear(r);
+        parts.forEach((p) => r.append(p instanceof Node ? p : document.createTextNode(String(p))));
+      }
+
+      // Plain-language messages for the codes the services answer with.
+      const MESSAGES = {
+        'moderation-not-configured': 'Moderation is not switched on for this domain. Chat and multiplayer are not affected. See docs/moderation-setup.md for how the operator turns it on.',
+        'authorization-unavailable': 'The presence service could not confirm your authority with this domain right now. Nothing was changed. Try again in a moment.',
+        'moderator-inactive': 'This domain no longer lists you as a moderator. End the session and ask the operator.',
+        'world-denied': 'You are not permitted to moderate that world.',
+        'operation-denied': 'You are not permitted to do that in this world.',
+        'domain-not-configured': 'The presence service is not set up to accept moderation for this domain.',
+        'untrusted-issuer': 'The presence service does not trust this domain\'s signing key. The operator needs to check its moderation configuration.',
+        'wrong-audience': 'The session was made for a different presence service. End it and start again.',
+        'rate-limited': 'Too many moderation actions in a short time. Wait a moment and try again.',
+        'replay': 'That request was already used. Try again.',
+        'stale-request': 'This computer\'s clock differs too much from the server\'s. Check the date and time and try again.',
+        'bad-pop': 'The request could not be verified. End the session and start again.',
+        'expired': 'The moderation session has expired. Start a new one.',
+        'revoked': 'This session or moderator has been revoked at the presence service.',
+        'unknown-participant': 'That visitor is no longer in the world. Refresh the list.',
+        'not-in-chat': 'That visitor has not joined chat, so there is nothing to mute.',
+        'restrictions-full': 'The presence service is holding too many temporary restrictions right now. Try again later.',
+        'audit-unavailable': 'The audit log could not be written, so no action was taken. The operator needs to check the presence service\'s storage.',
+        'grant-quota': 'You already have the maximum number of live moderation sessions. Wait for one to expire (at most 10 minutes).',
+        'scope-denied': 'Your moderator entry no longer allows everything this session asked for. Reload the page.',
+        'audience-not-trusted': 'This domain is not set up to use that presence service.',
+        'insufficient-role': 'This key may not do that.',
+        'session-invalid': 'Your login has expired. Open the wallet and click its button again.',
+        'not-admin': 'This domain no longer lists your key as an administrator or moderator.',
+        'bad-signature': 'The domain could not verify the wallet\'s signature.',
+        'auth-required': 'The domain needs a fresh signed request from your wallet.',
+        'busy': 'The domain is busy right now. Try again in a moment.'
+      };
+      function explain(code, fallback) { return MESSAGES[code] || fallback || 'The request was refused.'; }
+
+      function fail(code, message) { const e = new Error(message || explain(code)); e.code = code; return e; }
+
+      // ----- configuration -----
+      async function loadConfig() {
+        setStatus('', 'Loading moderation settings…');
+        $('modSetup').hidden = true;
+        $('modWork').hidden = true;
+        $('modProblems').hidden = true;
+        let res;
+        try { res = await postJson('/atlas/admin/moderation/config', { token: session.token }); } catch (err) { res = null; }
+        if (!res || !res.ok) {
+          setStatus('err', res ? explain(res.body && res.body.code, 'Could not load the moderation settings.') : 'Could not reach this domain\'s issuer.');
+          return;
+        }
+        cfg = res.body;
+        renderConfig();
+      }
+      function renderConfig() {
+        const problems = $('modProblems');
+        clear(problems);
+        (cfg.problems || []).forEach((p) => problems.append(el('p', '', p.message)));
+        problems.hidden = !(cfg.problems && cfg.problems.length);
+        const usable = cfg.configured && cfg.worlds.length > 0 && cfg.operations.includes('roster.view');
+        if (!usable) {
+          setStatus('err', 'World moderation is not available yet.');
+          return;
+        }
+        setStatus('', 'You may moderate ' + cfg.worlds.length + (cfg.worlds.length === 1 ? ' world' : ' worlds') + ' on this domain (' + cfg.role + ').');
+        const worldSel = $('modWorld');
+        clear(worldSel);
+        cfg.worlds.forEach((w) => { const o = el('option', '', shortText(w, 80)); o.value = w; worldSel.append(o); });
+        const audSel = $('modAudience');
+        clear(audSel);
+        cfg.audiences.forEach((a) => { const o = el('option', '', a); o.value = a; audSel.append(o); });
+        $('modAudienceWrap').hidden = cfg.audiences.length < 2;
+        const mins = Math.round(cfg.grantTtlSeconds / 60);
+        $('modConsent').textContent = 'Starting a session asks your wallet to approve a ' + mins + '-minute moderation grant covering ' +
+          (cfg.worlds.length === 1 ? 'the world "' + shortText(cfg.worlds[0], 60) + '"' : 'these ' + cfg.worlds.length + ' worlds') +
+          ' with these actions: ' + cfg.operations.join(', ') + '. Review it in the wallet prompt before you approve.';
+        $('modSetup').hidden = false;
+        renderSession();
+      }
+
+      // ----- the signing flow -----
+      async function acquireGrant() {
+        const wallet = window.atlasWallet;
+        if (!wallet || typeof wallet.requestSignature !== 'function') {
+          throw fail('no-wallet', 'The Domain Atlas wallet extension is not available on this page. Open this panel from the wallet\'s button, in a browser where the extension is installed.');
+        }
+        const audience = active ? active.audience : $('modAudience').value;
+        const worlds = active ? active.worlds : cfg.worlds.slice();
+        const operations = active ? active.operations : cfg.operations.slice();
+        const popKey = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+        const popPublicKey = b64url(await crypto.subtle.exportKey('raw', popKey.publicKey));
+        const payload = {
+          purpose: cfg.purpose, audience, worlds, operations, ttlSeconds: cfg.grantTtlSeconds, popPublicKey,
+          adminAuth: { action: '/atlas/admin/moderation/grant', domain: cfg.domain, issuedAt: new Date().toISOString(), nonce: randomId(16) }
+        };
+        setStatus('', 'Waiting for your approval in the wallet…');
+        const signed = await wallet.requestSignature(payload);
+        if (!signed || !signed.allowed) {
+          throw fail('not-whitelisted', 'The wallet will not sign for this page. The site\'s manifest must allow the signing purpose "' + cfg.purpose + '" (walletBridge.sign); see docs/moderation-setup.md.');
+        }
+        if (!signed.result) throw fail('declined', 'The wallet request was declined, closed, or timed out. No session was started.');
+        if (sessionKey && signed.result.publicKey !== sessionKey) throw fail('wrong-identity', 'The wallet signed with a different identity from the one you are logged in with. Switch identity in the wallet and try again.');
+        const res = await postJson('/atlas/admin/moderation/grant', { payload, proof: signed.result });
+        if (!res.ok) throw fail(res.body && res.body.code, explain(res.body && res.body.code, 'The domain refused to issue a moderation grant.'));
+        const expiresAtMs = Date.parse(res.body.expiresAt);
+        active = { grant: res.body.grant, popKey: popKey.privateKey, audience, worlds, operations, expiresAtMs };
+        renderSession();
+        return active;
+      }
+      async function ensureGrant() {
+        // A grant this close to its end is renewed before use (a quarter of its life, at most 20 s).
+        const margin = Math.min(20000, cfg.grantTtlSeconds * 250);
+        if (active && Date.now() < active.expiresAtMs - margin) return active;
+        return acquireGrant();
+      }
+      function endSession() {
+        active = null;
+        pending = null;
+        roster = [];
+        $('modConfirm').hidden = true;
+        $('modRosterTable').hidden = true;
+        clear($('modRosterBody'));
+        clear($('modAuditBody'));
+        $('modAuditTable').hidden = true;
+        $('modAuditInfo').textContent = '';
+        $('modRosterState').textContent = '';
+        $('modResult').textContent = '';
+        $('modResult').className = 'result';
+        renderSession();
+      }
+      function renderSession() {
+        const on = !!active;
+        $('modStartBtn').hidden = on;
+        $('modEndBtn').hidden = !on;
+        $('modWork').hidden = !on;
+        $('modAudience').disabled = on; // the grant is bound to its audience; the world can change within the grant's scope
+        $('modAuditWrap').hidden = !(on && active.operations.includes('audit.view'));
+        clearInterval(ticker);
+        if (!on) { $('modSessionInfo').textContent = ''; return; }
+        const tick = () => {
+          const left = Math.max(0, Math.round((active.expiresAtMs - Date.now()) / 1000));
+          $('modSessionInfo').textContent = left > 0
+            ? 'Session active, grant renewed on demand · ' + Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + ' left on this grant'
+            : 'Grant expired · the next action will ask your wallet to approve again';
+        };
+        tick();
+        ticker = setInterval(tick, 1000);
+      }
+
+      // ----- talking to the presence service -----
+      async function signedRequest(operation, world, target, params) {
+        const a = await ensureGrant();
+        const payload = {
+          type: 'atlas.moderation-request', version: 1, grantId: a.grant.payload.grantId, audience: a.audience, domain: cfg.domain,
+          world, operation, target, issuedAt: new Date().toISOString(), nonce: randomId(16)
+        };
+        if (params && Object.keys(params).length) payload.params = params;
+        const data = new TextEncoder().encode('atlas-moderation-pop/v1\n' + canonicalize(payload));
+        const signature = b64url(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, a.popKey, data));
+        return { active: a, body: { grant: a.grant, request: { payload, signature } } };
+      }
+      async function callPresence(path, operation, world, target, params) {
+        const built = await signedRequest(operation, world, target, params);
+        let res;
+        try {
+          res = await fetch(built.active.audience + path, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(built.body),
+            mode: 'cors', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer'
+          });
+        } catch (err) {
+          throw fail('unreachable', 'Could not reach the presence service at ' + built.active.audience + '. Check that it is running and that it is set up for this domain (see docs/moderation-setup.md).');
+        }
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (['expired', 'revoked', 'moderator-inactive', 'untrusted-issuer', 'wrong-audience', 'bad-pop'].includes(body.code)) active.expiresAtMs = 0; // the next action asks the wallet again
+          const e = fail(body.code, explain(body.code, body.error));
+          e.retryAfter = body.retryAfter;
+          throw e;
+        }
+        return body;
+      }
+
+      // ----- participants -----
+      async function loadRoster() {
+        if (!active || busy) return;
+        const world = $('modWorld').value;
+        const state = $('modRosterState');
+        state.className = 'mod-empty';
+        state.textContent = 'Loading participants…';
+        $('modRosterTable').hidden = true;
+        busy = true;
+        try {
+          const body = await callPresence('/presence/moderation/roster', 'roster.view', world, '');
+          roster = Array.isArray(body.participants) ? body.participants : [];
+          renderRoster(body);
+        } catch (err) {
+          roster = [];
+          state.className = 'mod-empty err';
+          state.textContent = err.message;
+        } finally {
+          busy = false;
+        }
+      }
+      function renderRoster(body) {
+        const state = $('modRosterState');
+        const tbody = $('modRosterBody');
+        clear(tbody);
+        $('modRosterInfo').textContent = 'Updated ' + fmtTime(body.generatedAt) + ' · ' + roster.length + (roster.length === 1 ? ' participant' : ' participants');
+        if (!roster.length) {
+          state.className = 'mod-empty';
+          state.textContent = 'No one is in this world right now.';
+          $('modRosterTable').hidden = true;
+          return;
+        }
+        state.textContent = '';
+        $('modRosterTable').hidden = false;
+        const can = (op) => active.operations.includes(op);
+        roster.forEach((p) => {
+          const tr = el('tr');
+          const who = el('td', 'visitor');
+          who.append(nameNode(p.name));
+          if (p.chatName && p.chatName !== p.name) { who.append(document.createElement('br'), el('span', 'hint', 'chat name: '), nameNode(p.chatName)); }
+          tr.append(who);
+          tr.append(el('td', '', [p.presence && p.presence.joined ? 'presence' : '', p.chat && p.chat.joined ? 'chat' : ''].filter(Boolean).join(' + ') || '—'));
+          tr.append(el('td', '', fmtTime(p.joinedAt) + ' (' + fmtAge(p.ageSeconds || 0) + ')'));
+          tr.append(el('td', '', p.mutedUntil ? 'Muted until ' + fmtTime(p.mutedUntil) : 'Not muted'));
+          tr.append(el('td', 'pref', shortText(p.ref, 8)));
+          const actions = el('td', 'mod-actions');
+          const add = (label, op, danger) => {
+            const b = el('button', danger ? 'danger' : '', label);
+            b.type = 'button';
+            b.disabled = !can(op) || (op === 'chat.unmute' && !p.mutedUntil) || (op !== 'session.kick' && !(p.chat && p.chat.joined));
+            b.addEventListener('click', () => askConfirm(op, p));
+            actions.append(b);
+          };
+          add('Mute', 'chat.mute');
+          add('Unmute', 'chat.unmute');
+          add('Kick', 'session.kick', true);
+          tr.append(actions);
+          tbody.append(tr);
+        });
+      }
+
+      // ----- confirmation and commands -----
+      function fillSelect(sel, pairs, chosen) {
+        clear(sel);
+        pairs.forEach(([value, label]) => { const o = el('option', '', label); o.value = String(value); if (String(value) === String(chosen)) o.selected = true; sel.append(o); });
+      }
+      function askConfirm(op, p) {
+        pending = { op, ref: p.ref, name: p.name, world: $('modWorld').value };
+        const text = $('modConfirmText');
+        clear(text);
+        const verb = op === 'chat.mute' ? 'Mute' : op === 'chat.unmute' ? 'Unmute' : 'Remove';
+        text.append(verb + ' ', nameNode(p.name), ' (' + shortText(p.ref, 8) + ') ' + (op === 'chat.unmute' ? 'in' : 'from') + ' "' + shortText(pending.world, 60) + '"?');
+        $('modReasonWrap').hidden = op === 'chat.unmute';
+        $('modDurationWrap').hidden = op === 'chat.unmute';
+        fillSelect($('modReason'), CAUSES, 'other');
+        if (op === 'chat.mute') fillSelect($('modDuration'), MUTE_DURATIONS, 600);
+        if (op === 'session.kick') fillSelect($('modDuration'), KICK_DURATIONS, 300);
+        $('modConfirmNote').textContent = op === 'session.kick'
+          ? 'They are removed from the world now and cannot rejoin until the time is up. The visitor is told the reason category and the time, nothing else.'
+          : op === 'chat.mute'
+            ? 'They can still look around and read chat, but cannot send messages until the time is up. The visitor is told the reason category and the time.'
+            : 'They can send chat messages again straight away.';
+        $('modConfirmBtn').textContent = verb === 'Remove' ? 'Remove visitor' : verb;
+        $('modConfirm').hidden = false;
+        $('modConfirmBtn').focus();
+      }
+      function cancelConfirm() { pending = null; $('modConfirm').hidden = true; }
+      async function runConfirmed() {
+        if (!pending || busy) return;
+        const a = pending;
+        const btn = $('modConfirmBtn');
+        const params = {};
+        if (a.op !== 'chat.unmute') {
+          params.durationSeconds = Number($('modDuration').value);
+          params.cause = $('modReason').value;
+        }
+        btn.disabled = true;
+        busy = true;
+        try {
+          const body = await callPresence('/presence/moderation/command', a.op, a.world, a.ref, params);
+          cancelConfirm();
+          if (a.op === 'chat.mute') setResult(true, 'Muted ', nameNode(a.name), ' until ' + fmtTime(body.mutedUntil) + ' (' + causeLabel(body.cause) + ').');
+          else if (a.op === 'chat.unmute') setResult(true, body.wasMuted ? 'Unmuted ' : 'Was not muted: ', nameNode(a.name), '.');
+          else setResult(true, 'Removed ', nameNode(a.name), '. They can rejoin after ' + fmtTime(body.rejoinAfter) + ' (' + causeLabel(body.cause) + ').');
+        } catch (err) {
+          cancelConfirm();
+          setResult(false, err.message + (err.retryAfter ? ' (try again in ' + err.retryAfter + ' s)' : ''));
+        } finally {
+          btn.disabled = false;
+          busy = false;
+        }
+        loadRoster();
+      }
+
+      // ----- audit log -----
+      async function loadAudit() {
+        if (!active || busy) return;
+        const info = $('modAuditInfo');
+        info.textContent = 'Loading…';
+        busy = true;
+        try {
+          const body = await callPresence('/presence/moderation/audit', 'audit.view', $('modWorld').value, '');
+          renderAudit(body);
+        } catch (err) {
+          info.textContent = err.message;
+          $('modAuditTable').hidden = true;
+        } finally {
+          busy = false;
+        }
+      }
+      function renderAudit(body) {
+        const tbody = $('modAuditBody');
+        clear(tbody);
+        const entries = Array.isArray(body.entries) ? body.entries : [];
+        const integ = body.integrity || {};
+        const chain = integ.chain === 'ok' ? 'chain intact' : 'CHAIN BROKEN' + (integ.firstBadSeq ? ' at entry ' + integ.firstBadSeq : '');
+        $('modAuditInfo').textContent = (entries.length ? entries.length + ' entries' + (body.truncated ? ' (newest shown)' : '') : 'Nothing recorded for this world yet.') +
+          ' · Integrity: ' + chain + (integ.head ? ' · head ' + shortText(integ.head, 12) : '') +
+          ' · This is the presence service\'s own record: it is not independently anchored, so it shows accidental damage and casual edits but does not prove the service itself was never changed.';
+        $('modAuditTable').hidden = !entries.length;
+        entries.forEach((e) => {
+          const tr = el('tr');
+          tr.append(el('td', '', String(e.seq)));
+          tr.append(el('td', '', new Date(e.t).toLocaleString()));
+          tr.append(el('td', 'pref', (e.moderatorRef ? shortText(e.moderatorRef, 8) : '—') + (e.role ? ' (' + e.role + ')' : '')));
+          tr.append(el('td', '', e.operation || '—'));
+          tr.append(el('td', 'pref', e.target ? shortText(e.target, 8) : '—'));
+          tr.append(el('td', '', fmtLength(e.durationSeconds)));
+          tr.append(el('td', '', e.cause ? causeLabel(e.cause) : '—'));
+          tr.append(el('td', 'outcome-' + (['success', 'refused', 'failed'].includes(e.outcome) ? e.outcome : 'failed'), e.outcome + (e.code && e.code !== 'ok' ? ' · ' + e.code : '')));
+          tbody.append(tr);
+        });
+      }
+
+      // ----- wiring -----
+      $('modStartBtn').addEventListener('click', async () => {
+        const btn = $('modStartBtn');
+        btn.disabled = true;
+        try {
+          await acquireGrant();
+          setStatus('ok', 'Moderation session started.');
+          loadRoster();
+        } catch (err) {
+          setStatus('err', err.message);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+      $('modEndBtn').addEventListener('click', () => { endSession(); setStatus('', 'Session ended. Nothing is kept; start a new one when you need it.'); });
+      $('modRefreshBtn').addEventListener('click', loadRoster);
+      $('modWorld').addEventListener('change', () => {
+        clear($('modAuditBody'));
+        $('modAuditTable').hidden = true;
+        $('modAuditInfo').textContent = '';
+        if (active) loadRoster();
+      });
+      $('modConfirmBtn').addEventListener('click', runConfirmed);
+      $('modCancelBtn').addEventListener('click', cancelConfirm);
+      $('modAuditBtn').addEventListener('click', loadAudit);
+      document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && !$('modConfirm').hidden) cancelConfirm(); });
+
+      return {
+        init(info) { sessionKey = info && info.publicKey; return loadConfig(); },
+        end() { endSession(); }
+      };
+    })();
 
     verifySessionOrShowLoggedOut();
   </script>

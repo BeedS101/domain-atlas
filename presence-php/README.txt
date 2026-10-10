@@ -73,8 +73,35 @@ presence/lib/atlas-presence-moderation-config.json (not part of the repository; 
 - An unparseable or invalid file turns moderation off. A bad domain entry
   is ignored and that domain is refused.
 
+Moderator panel and audit log
+------------------------------
+The domain's admin page has a "World moderation" section (a "Moderate" button
+in the wallet) that talks to roster.php, command.php and audit.php. It needs
+this config file, the issuer's own moderation config (see the setup guide) and
+"walletBridge": {"sign": ["moderation-grant"]} in the domain manifest. The
+browser calls cross-origin; these three files answer the browser's check only
+for https://<domain> of the domains listed in the config above.
+
+moderation/audit.php returns the audit entries of one world to a moderator
+whose grant allows "audit.view" there. Every moderation request that reached a
+verified grant is written to presence/lib/atlas-presence-moderation-audit.jsonl
+(created on first use, mode 0600, ignored by Git, web-denied with the rest of
+lib/ - request it by URL once to confirm your host really refuses it). It holds
+references, world, action, length, reason code and outcome only: never names,
+chat text, keys, tokens, visit ids or network addresses. It is capped at 1 MiB
+and 90 days (MODERATION_AUDIT_MAX_BYTES, MODERATION_AUDIT_RETENTION_DAYS); writes
+are serialized with flock. If the file cannot be written, mute/unmute/kick are
+refused. Entries are hash-chained, which exposes accidental damage and casual
+edits but is NOT tamper-proof: whoever can write the file can rewrite it.
+
+Upload presence/lib/audit.php, lib/moderation.php, lib/store.php and
+moderation/roster.php, command.php, audit.php. Update this presence service
+BEFORE the issuer (the issuer's status statement now includes a role that older
+presence code rejects). Never upload a local audit or config file.
+
 Full design, wire format, revocation bounds and limits:
-docs/moderation-authorization.md in the main repository.
+docs/moderation-authorization.md in the main repository; step-by-step setup:
+docs/moderation-setup.md.
 
 
 Requirements
@@ -106,6 +133,8 @@ What's in this folder
       roster.php     - POST /presence/moderation/roster (read-only anonymous
                         session list for an authorized moderator; answers 503
                         until you configure it — see "Moderator session list")
+      audit.php      - POST /presence/moderation/audit (the private audit log
+                        of one world, for a moderator allowed "audit.view")
       command.php    - POST /presence/moderation/command (mute, unmute or
                         kick one listed session, for an authorized moderator;
                         same configuration)
@@ -113,6 +142,8 @@ What's in this folder
       moderation.php             - moderator-grant verification (shared code,
                                     not a web route)
       restrictions.php           - temporary mutes and kicks (shared code)
+      audit.php                  - the private moderation audit log (shared
+                                    code; its file is created on first use)
       bootstrap.php, store.php  - shared code, not web routes — store.php
                                     holds BOTH the presence room logic and
                                     the chat room logic (see its own
