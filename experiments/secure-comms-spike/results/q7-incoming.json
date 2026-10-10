@@ -1,0 +1,132 @@
+{
+  "script": "q7-incoming",
+  "ranAt": "2026-10-10T19:48:25.788Z",
+  "browser": "Chromium (Playwright bundled, headed under Xvfb)",
+  "passed": 15,
+  "failed": 0,
+  "observations": {
+    "L1.visible.incoming": {
+      "at": 1791661298545,
+      "visibilityState": "visible",
+      "hasFocus": true,
+      "hidden": false,
+      "title": "Atlas Comms Spike (test only)",
+      "titleAfter": "Incoming call from alice"
+    },
+    "L1.visible.latencyMs": 108,
+    "L1.visible.attention": {
+      "windowState": "normal",
+      "windowFocused": true,
+      "drawAttention": "called-ok",
+      "notification": "created:incoming-UDW7BnzCc8Ov9ZrB"
+    },
+    "L2.listener.readyVisibility": "hidden",
+    "ring.t+25s": {
+      "label": "t+25s",
+      "atSecondsSinceLaunch": 27,
+      "received": true,
+      "latencyMs": 113,
+      "visibilityState": "hidden",
+      "hasFocus": false,
+      "attention": {
+        "windowState": "normal",
+        "windowFocused": true,
+        "drawAttention": "called-ok",
+        "notification": "created:incoming-uheDRh7zaCrhtplc"
+      }
+    },
+    "sw.invite.t+30s": {
+      "touch": {
+        "received": true,
+        "latencyMs": 8,
+        "beats": 2,
+        "instance": "8v54px"
+      },
+      "plain": {
+        "received": true,
+        "latencyMs": 5,
+        "beats": 2,
+        "instance": "wvs7tx"
+      }
+    },
+    "sw.pollActivity.t+120s": {
+      "touch": {
+        "count": 6,
+        "secondsSinceLastPollStart": 17
+      },
+      "plain": {
+        "count": 6,
+        "secondsSinceLastPollStart": 17
+      }
+    },
+    "ring.t+120s": {
+      "label": "t+120s",
+      "atSecondsSinceLaunch": 122,
+      "received": true,
+      "latencyMs": 55,
+      "visibilityState": "hidden",
+      "hasFocus": false,
+      "attention": {
+        "windowState": "normal",
+        "windowFocused": true,
+        "notification": "created:incoming-DOQo7vuTjB7whq2q",
+        "drawAttention": "called-ok"
+      }
+    },
+    "sw.invite.t+120s": {
+      "touch": {
+        "received": true,
+        "latencyMs": 5,
+        "beats": 6,
+        "instance": "8v54px"
+      },
+      "plain": {
+        "received": true,
+        "latencyMs": 4,
+        "beats": 6,
+        "instance": "wvs7tx"
+      }
+    },
+    "sw.pureFetchLoopReceivedAt.t+120s": true,
+    "sw.pollActivity.t+400s": {
+      "touch": {
+        "count": 18,
+        "secondsSinceLastPollStart": 2
+      },
+      "plain": {
+        "count": 18,
+        "secondsSinceLastPollStart": 1
+      }
+    },
+    "ring.t+400s": {
+      "label": "t+400s",
+      "atSecondsSinceLaunch": 402,
+      "received": true,
+      "latencyMs": 45,
+      "visibilityState": "hidden",
+      "hasFocus": false,
+      "attention": {
+        "windowState": "normal",
+        "windowFocused": true,
+        "notification": "created:incoming-JAOc9hq3y7vvhNgt",
+        "drawAttention": "called-ok"
+      }
+    },
+    "sw.invite.t+400s": {
+      "touch": {
+        "received": true,
+        "latencyMs": 7,
+        "beats": 18,
+        "instance": "8v54px"
+      },
+      "plain": {
+        "received": true,
+        "latencyMs": 3,
+        "beats": 18,
+        "instance": "wvs7tx"
+      }
+    },
+    "sw.pureFetchLoopReceivedAt.t+400s": true,
+    "L3.listenerPageLifecycleEvents": []
+  }
+}

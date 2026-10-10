@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Atlas Comms Spike (test only)</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; padding: 16px; background: #14161a; color: #e6e6e6; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  .warn { color: #e0b050; font-size: 12px; margin-bottom: 12px; }
+  #state { font-weight: 600; margin: 8px 0; }
+  button { font: inherit; padding: 8px 14px; margin: 0 6px 6px 0; border-radius: 6px; border: 1px solid #555; background: #262a31; color: inherit; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  #log { font: 11px ui-monospace, monospace; white-space: pre-wrap; max-height: 260px; overflow: auto; color: #9aa; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h1>Atlas Comms Spike</h1>
+<div class="warn">Feasibility experiment with synthetic test keys. Not the Atlas calling protocol. Nothing here is verified or secure.</div>
+<div>Peer: <span id="peer"></span></div>
+<div style="margin:8px 0">
+  <label>My test key (copy to the other window)<br><input id="mykey" readonly size="46"></label><br>
+  <label>Peer's test key<br><input id="peerkey" size="46"></label>
+  <button id="setpeer">Set</button>
+</div>
+<div id="state">idle</div>
+<div>
+  <button id="call">Call</button>
+  <button id="answer" disabled>Answer</button>
+  <button id="decline" disabled>Decline</button>
+  <button id="mute" disabled>Mute</button>
+  <button id="hangup" disabled>Hang up</button>
+</div>
+<div id="log"></div>
+<audio id="remote" autoplay></audio>
+<script src="spike-lib.js"></script>
+<script src="call.js"></script>
+</body>
+</html>

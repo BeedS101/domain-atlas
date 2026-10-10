@@ -1,0 +1,19 @@
+{
+  "script": "q5-teardown",
+  "ranAt": "2026-10-10T19:53:12.794Z",
+  "browser": "Chromium (Playwright bundled, headed under Xvfb)",
+  "passed": 37,
+  "failed": 0,
+  "observations": {
+    "lock.latencyMs": 9,
+    "windowClose.peerLearnedWithin12s": true,
+    "windowClose.peerLearnedAfterMs": 109,
+    "windowClose.peerReason": "peer-end",
+    "mute.peerPacketsDuringMute": {
+      "before": 11,
+      "p1": 12,
+      "p2": 12,
+      "grewDuring1500ms": 0
+    }
+  }
+}

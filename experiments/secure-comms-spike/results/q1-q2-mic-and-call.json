@@ -1,0 +1,85 @@
+{
+  "script": "q1-q2-mic-and-call",
+  "ranAt": "2026-10-10T19:40:38.713Z",
+  "browser": "Chromium (Playwright bundled, headed under Xvfb)",
+  "passed": 32,
+  "failed": 0,
+  "observations": {
+    "held.alice.track": [
+      {
+        "readyState": "live",
+        "enabled": true
+      }
+    ],
+    "held.bob.track": [
+      {
+        "readyState": "live",
+        "enabled": true
+      }
+    ],
+    "held.outbound": {
+      "alice": {
+        "packetsSent": 0,
+        "bytesSent": 0
+      },
+      "bob": {
+        "packetsSent": 0,
+        "bytesSent": 0
+      }
+    },
+    "inbound.alice": {
+      "packetsReceived": 30,
+      "bytesReceived": 1193,
+      "totalAudioEnergy": 0.11624885622299513,
+      "totalSamplesReceived": 28320
+    },
+    "inbound.bob": {
+      "packetsReceived": 31,
+      "bytesReceived": 1251,
+      "totalAudioEnergy": 0.11979663104025207,
+      "totalSamplesReceived": 29280
+    },
+    "transport": {
+      "dtlsState": "connected",
+      "tlsVersion": "FEFD",
+      "dtlsCipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "srtpCipher": "AES_CM_128_HMAC_SHA1_80"
+    },
+    "selectedPair": {
+      "alice": {
+        "local": "host",
+        "remote": "host",
+        "localAddressKnown": true,
+        "localAddress": "192.0.2.2"
+      },
+      "bob": {
+        "local": "host",
+        "remote": "host",
+        "localAddressKnown": true,
+        "localAddress": "192.0.2.2"
+      }
+    },
+    "localSdpContainsCandidatesAfterGathering": true,
+    "candidateTypes": {
+      "alice": [
+        "host"
+      ],
+      "bob": [
+        "host"
+      ]
+    },
+    "realPrompt.permissionStateBeforeClick": "prompt",
+    "realPrompt.outcomeAfter6s": {
+      "state": "calling",
+      "failure": null,
+      "events": [
+        "state:idle",
+        "peer-key-set",
+        "state:calling",
+        "gum-request:call-click"
+      ]
+    },
+    "realPrompt.permissionStateAfterClick": "prompt",
+    "realPrompt.grantPermissionsForExtensionOrigin": "browserContext.grantPermissions: Protocol error (Browser.grantPermissions): Permission can't be granted to opaque origins."
+  }
+}

@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebRTC capability probe (secure-comms spike, test only)</title>
+<style>body{font:14px system-ui,sans-serif;margin:16px;max-width:60em}pre{background:#f4f4f4;padding:8px;overflow:auto}button{padding:6px 12px;margin-right:8px}</style>
+<h1>WebRTC capability probe</h1>
+<p>Test only, not part of any Atlas service. <b>Run probe</b> connects two peer connections inside this page using a synthetic tone (no microphone) and reports which fingerprint and encryption APIs this browser actually provides. <b>Test microphone</b> asks for the microphone once, on this click, and stops it immediately.</p>
+<button id="run">Run probe</button><button id="mic">Test microphone</button>
+<pre id="out">not run</pre>
+<script src="/probe.js"></script>

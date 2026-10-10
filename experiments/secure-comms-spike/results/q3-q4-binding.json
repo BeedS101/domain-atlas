@@ -1,0 +1,190 @@
+{
+  "script": "q3-q4-binding",
+  "ranAt": "2026-10-10T19:41:08.286Z",
+  "browser": "Chromium (Playwright bundled, headed under Xvfb)",
+  "passed": 36,
+  "failed": 0,
+  "observations": {
+    "probe": {
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+      "when": "2026-10-10T19:40:40.721Z",
+      "apis": {
+        "RTCPeerConnection": "function",
+        "generateCertificate": "function",
+        "RTCDtlsTransport": "function",
+        "getRemoteCertificatesOnPrototype": "function",
+        "RTCCertificateGetFingerprints": "function",
+        "mediaDevices": true,
+        "setCodecPreferences": "function"
+      },
+      "certificate": {
+        "expires": 1794253240000,
+        "fingerprints": [
+          {
+            "algorithm": "sha-256",
+            "value": "17:53:65:52:43:5d:b6:34:3a:ce:92:6d:93:5a:7c:d9:4f:91:1e:28:a8:49:ef:91:f5:31:67:2f:e5:de:e8:88"
+          }
+        ]
+      },
+      "sdpFingerprintsOffer": [
+        "17:53:65:52:43:5D:B6:34:3A:CE:92:6D:93:5A:7C:D9:4F:91:1E:28:A8:49:EF:91:F5:31:67:2F:E5:DE:E8:88"
+      ],
+      "sdpFingerprintsAnswer": [
+        "54:06:C2:38:F9:6C:3A:81:D4:1F:F1:D0:55:47:9B:B4:2B:B0:1E:F3:CC:8B:F0:E8:05:02:20:80:99:24:E6:98"
+      ],
+      "sdpHasCrypto": false,
+      "stateA": "connected",
+      "stateB": "connected",
+      "pcA": {
+        "hasTransport": true,
+        "dtlsState": "connected",
+        "getRemoteCertificatesType": "function",
+        "remoteCertCount": 1,
+        "remoteCertSha256": "54:06:C2:38:F9:6C:3A:81:D4:1F:F1:D0:55:47:9B:B4:2B:B0:1E:F3:CC:8B:F0:E8:05:02:20:80:99:24:E6:98",
+        "statsCertificates": [
+          {
+            "id": "CF17:53:65:52:43:5D:B6:34:3A:CE:92:6D:93:5A:7C:D9:4F:91:1E:28:A8:49:EF:91:F5:31:67:2F:E5:DE:E8:88",
+            "fingerprint": "17:53:65:52:43:5D:B6:34:3A:CE:92:6D:93:5A:7C:D9:4F:91:1E:28:A8:49:EF:91:F5:31:67:2F:E5:DE:E8:88",
+            "algorithm": "sha-256",
+            "hasBase64": true
+          },
+          {
+            "id": "CF54:06:C2:38:F9:6C:3A:81:D4:1F:F1:D0:55:47:9B:B4:2B:B0:1E:F3:CC:8B:F0:E8:05:02:20:80:99:24:E6:98",
+            "fingerprint": "54:06:C2:38:F9:6C:3A:81:D4:1F:F1:D0:55:47:9B:B4:2B:B0:1E:F3:CC:8B:F0:E8:05:02:20:80:99:24:E6:98",
+            "algorithm": "sha-256",
+            "hasBase64": true
+          }
+        ],
+        "transport": {
+          "dtlsState": "connected",
+          "dtlsRole": "server",
+          "tlsVersion": "FEFD",
+          "dtlsCipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+          "srtpCipher": "AES_CM_128_HMAC_SHA1_80",
+          "hasRemoteCertificateId": true,
+          "hasLocalCertificateId": true
+        },
+        "statsRemoteCertSha256": "54:06:C2:38:F9:6C:3A:81:D4:1F:F1:D0:55:47:9B:B4:2B:B0:1E:F3:CC:8B:F0:E8:05:02:20:80:99:24:E6:98",
+        "statsRemoteCertFingerprintField": "54:06:C2:38:F9:6C:3A:81:D4:1F:F1:D0:55:47:9B:B4:2B:B0:1E:F3:CC:8B:F0:E8:05:02:20:80:99:24:E6:98",
+        "inboundAudio": {
+          "packetsReceived": 130,
+          "totalAudioEnergy": 0,
+          "audioLevel": 0
+        }
+      },
+      "pcB": {
+        "hasTransport": true,
+        "dtlsState": "connected",
+        "getRemoteCertificatesType": "function",
+        "remoteCertCount": 1,
+        "remoteCertSha256": "17:53:65:52:43:5D:B6:34:3A:CE:92:6D:93:5A:7C:D9:4F:91:1E:28:A8:49:EF:91:F5:31:67:2F:E5:DE:E8:88",
+        "statsCertificates": [
+          {
+            "id": "CF17:53:65:52:43:5D:B6:34:3A:CE:92:6D:93:5A:7C:D9:4F:91:1E:28:A8:49:EF:91:F5:31:67:2F:E5:DE:E8:88",
+            "fingerprint": "17:53:65:52:43:5D:B6:34:3A:CE:92:6D:93:5A:7C:D9:4F:91:1E:28:A8:49:EF:91:F5:31:67:2F:E5:DE:E8:88",
+            "algorithm": "sha-256",
+            "hasBase64": true
+          },
+          {
+            "id": "CF54:06:C2:38:F9:6C:3A:81:D4:1F:F1:D0:55:47:9B:B4:2B:B0:1E:F3:CC:8B:F0:E8:05:02:20:80:99:24:E6:98",
+            "fingerprint": "54:06:C2:38:F9:6C:3A:81:D4:1F:F1:D0:55:47:9B:B4:2B:B0:1E:F3:CC:8B:F0:E8:05:02:20:80:99:24:E6:98",
+            "algorithm": "sha-256",
+            "hasBase64": true
+          }
+        ],
+        "transport": {
+          "dtlsState": "connected",
+          "dtlsRole": "client",
+          "tlsVersion": "FEFD",
+          "dtlsCipher": "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+          "srtpCipher": "AES_CM_128_HMAC_SHA1_80",
+          "hasRemoteCertificateId": true,
+          "hasLocalCertificateId": true
+        },
+        "statsRemoteCertSha256": "17:53:65:52:43:5D:B6:34:3A:CE:92:6D:93:5A:7C:D9:4F:91:1E:28:A8:49:EF:91:F5:31:67:2F:E5:DE:E8:88",
+        "statsRemoteCertFingerprintField": "17:53:65:52:43:5D:B6:34:3A:CE:92:6D:93:5A:7C:D9:4F:91:1E:28:A8:49:EF:91:F5:31:67:2F:E5:DE:E8:88",
+        "inboundAudio": {
+          "packetsReceived": 130,
+          "totalAudioEnergy": 0,
+          "audioLevel": 0
+        }
+      },
+      "checks": {
+        "certFingerprintEqualsOfferSdp": true,
+        "remoteCertOnBEqualsAnchoredOfferFp": true,
+        "statsRemoteCertOnBEqualsOfferFp": true,
+        "remoteCertOnAEqualsAnswerSdpFp": true,
+        "statsRemoteCertOnAEqualsAnswerSdpFp": true
+      },
+      "tamperedAnswerFingerprint": {
+        "state": "failed",
+        "afterMs": 100
+      }
+    },
+    "remoteCertificateRetrieval": {
+      "alice": {
+        "attempts": 2,
+        "emptyAttempts": 1,
+        "dtlsStates": [
+          "connecting",
+          "connected"
+        ]
+      },
+      "bob": {
+        "attempts": 2,
+        "emptyAttempts": 1,
+        "dtlsStates": [
+          "connecting",
+          "connected"
+        ]
+      }
+    },
+    "fingerprintLinesInOffer": [
+      "a=fingerprint:sha-256 28:FC:2A:00:98:D0:B3:EC:2D:08:30:55:82:F3:29:9D:45:3C:25:6A:2C:33:3A:22:A0:5B:DF:F4:08:07:01:9D",
+      "a=setup:actpass"
+    ],
+    "fingerprintLevel": {
+      "session": false,
+      "media": true
+    },
+    "tamper.all checks on": {
+      "alice": null,
+      "aliceFailure": null,
+      "bob": "verification-failed",
+      "bobFailure": "offer:bad-message-signature"
+    },
+    "tamper.message signatures off, SDP-fingerprint check on": {
+      "alice": null,
+      "aliceFailure": null,
+      "bob": "verification-failed",
+      "bobFailure": "offer:fingerprint-not-signed"
+    },
+    "tamper.message signatures and SDP-fingerprint check both off (browser DTLS only)": {
+      "alice": "connection-failed",
+      "aliceFailure": null,
+      "bob": "connection-failed",
+      "bobFailure": null
+    },
+    "mitm.all checks on": {
+      "failure": "answer:bad-message-signature",
+      "attackerInbound": null
+    },
+    "mitm.message signatures off (SDP-fingerprint check on)": {
+      "failure": "answer:fingerprint-not-signed",
+      "attackerInbound": null
+    },
+    "mitm.message signatures and SDP check off (post-connect certificate check only)": {
+      "failure": "remote-cert-mismatch",
+      "attackerInbound": null
+    },
+    "mitm.control": {
+      "aliceState": "in-call",
+      "malloryInbound": {
+        "packetsReceived": 24,
+        "bytesReceived": 967,
+        "totalAudioEnergy": 0.10000000061471041,
+        "totalSamplesReceived": 22560
+      }
+    }
+  }
+}

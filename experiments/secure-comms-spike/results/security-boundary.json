@@ -1,0 +1,31 @@
+{
+  "script": "security-boundary",
+  "ranAt": "2026-10-10T19:41:36.814Z",
+  "browser": "Chromium (Playwright bundled, headed under Xvfb)",
+  "passed": 25,
+  "failed": 0,
+  "observations": {
+    "acquireMicCallSites": [
+      "acquireMic('attacker')",
+      "acquireMic('call-click')",
+      "acquireMic('answer-click')",
+      "acquireMic('unmute-click')"
+    ],
+    "changedPaths": [
+      "docs/voice-calls-phase1a-findings.md",
+      "experiments/"
+    ],
+    "hostilePage": {
+      "fetchCallPage": "blocked: TypeError",
+      "chromeRuntime": "undefined",
+      "sendMessage": "not available",
+      "iframeAccess": "null document",
+      "windowOpen": "skipped"
+    },
+    "otherExtensionPage": {
+      "answered": false,
+      "resp": null,
+      "error": "The message port closed before a response was received."
+    }
+  }
+}

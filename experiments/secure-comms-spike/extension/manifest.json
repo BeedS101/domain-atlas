@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Atlas Comms Spike (test only)",
+  "version": "0.0.1",
+  "description": "Feasibility spike for browser audio calls. Synthetic test keys only; not the Domain Atlas wallet and not a calling protocol.",
+  "permissions": ["notifications", "storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Atlas Comms Spike (test only)" },
+  "icons": { "48": "icon.png" }
+}
