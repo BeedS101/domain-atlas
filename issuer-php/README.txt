@@ -71,7 +71,8 @@ What's in this folder
     admin/session/start.php  - POST /atlas/admin/session/start   (sign the nonce as a roster admin, get a session token back)
     admin/session/whoami.php - POST /atlas/admin/session/whoami  (check/refresh a session token, no signature needed)
     admin/session/logout.php - POST /atlas/admin/session/logout  (end a session token early)
-    admin/moderation/grant.php - POST /atlas/admin/moderation/grant  (signed, short-lived moderation grant for a moderator or admin; see docs/moderation-authorization.md)
+    admin/moderation/grant.php - POST /atlas/admin/moderation/grant  (signed, short-lived moderation grant for a moderator or admin; the request must carry a fresh signature, a session token alone is refused; see docs/moderation-authorization.md)
+    moderation/status.php    - GET  /atlas/moderation/status?audience=...  (public: issuer-signed, short-lived list of who holds moderation authority now; presence services use it to honour revocation)
     admin/is-admin.php       - GET  /atlas/admin/is-admin  (public, boolean-only: is this key on the roster? — see "Admin panel" below)
     admin/directory.php      - POST /atlas/admin/directory (admin-gated: subscriber + Post Office rosters, for the admin panel's own dropdowns — see "Admin panel" below)
     admin/class-patch.php    - POST /atlas/admin/class-patch   (admin-gated: set/clear a properties+tradeScope patch for a whole non-fungible class — see "Class-wide patches" below)
@@ -954,8 +955,12 @@ docs/admin-auth-hardening.md in the project repository.
  - To issue moderation grants, create lib/atlas-moderation-config.json (it is
    not in the repository):
      {"domain": "example.com", "audiences": ["https://presence.example.com"]}
-   Without it atlas/admin/moderation/grant.php answers 503. Nothing in the
-   presence service uses grants yet.
+   Without it atlas/admin/moderation/grant.php and atlas/moderation/status.php
+   answer 503. The same file lets presence-php (or presence-server) verify
+   grants; the presence side is configured separately (presence-php/README.txt).
+   Optional: ATLAS_MODERATION_STATUS_TTL_S (default 60 s, 1-120) sets how long a
+   status statement is valid, which bounds how long a removed moderator can keep
+   acting. Upload atlas/moderation/ together with the rest of atlas/.
  - Sessions are re-checked against lib/atlas-admin-keys-store.json on every
    request: removing a key, or adding "revoked": true to it, ends its
    sessions on their next use. Sessions also end 8 hours after login.

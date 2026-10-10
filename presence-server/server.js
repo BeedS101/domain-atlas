@@ -59,10 +59,19 @@
 // secret; it is kept only in memory, only for the life of a session or a
 // rate-limit window, and is never sent to any client. Forwarded-for headers
 // are not read.
+//
+// Moderation (lib-moderation.js): POST /presence/moderation/roster answers a
+// moderator holding an issuer-signed grant with the anonymous sessions in one
+// world they are authorized for. It is read-only, takes no wallet identity,
+// and trusts only issuer keys named in this server's own configuration.
+// A client may also send a random per-visit id with its presence and chat joins
+// (`visit`); only a keyed hash of it is kept, and it only lets the roster show
+// the two sessions of one visit together. See docs/moderation-authorization.md.
 
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
+const moderation = require('./lib-moderation');
 
 const PORT = process.env.PORT || 8004;
 
@@ -487,7 +496,7 @@ function rosterOf(room, exceptConnId) {
 // retryAfter]} with reason 'invalid', 'join-rate-limited', 'name-not-allowed',
 // 'source-limit', 'room-full' or 'server-busy'. A refused join creates no
 // member, so it never changes a room's count.
-function addMember(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress) {
+function addMember(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress, visitRaw) {
   const domain = cleanId(domainRaw);
   const world = cleanId(worldRaw);
   if (!domain || !world) return { ok: false, reason: 'invalid' };
@@ -507,7 +516,7 @@ function addMember(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress) {
   const name = cleanName(nameRaw);
   const publicId = randomId();
   const roster = rosterOf(room, connId);
-  const member = Object.assign({ publicId, name, x: 0, y: 0, z: 0, yaw: 0, src }, extra);
+  const member = Object.assign({ publicId, name, x: 0, y: 0, z: 0, yaw: 0, src, joinedAt: Date.now(), visit: moderation.visitHash(domain, world, visitRaw) }, extra);
   room.set(connId, member);
   connIndex.set(connId, { roomKey, room });
 
@@ -632,7 +641,7 @@ function currentChatSeq(domain) {
 // addMember). A poll member's `cursor` starts at "already seen everything in
 // the history handed back", so its first sync only returns messages that
 // arrive after this join.
-function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress) {
+function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress, visitRaw) {
   const domain = cleanId(domainRaw);
   const world = cleanId(worldRaw);
   if (!domain || !world) return { ok: false, reason: 'invalid' };
@@ -649,7 +658,7 @@ function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress) {
   if (!room) { room = new Map(); chatRooms.set(domain, room); }
   const history = chatHistory.get(domain) || [];
   const senderId = randomId();
-  const member = Object.assign({ name: cleanName(nameRaw), senderId, world, cursor: currentChatSeq(domain), lastSendAt: 0, src }, extra);
+  const member = Object.assign({ name: cleanName(nameRaw), senderId, world, cursor: currentChatSeq(domain), lastSendAt: 0, src, joinedAt: Date.now(), visit: moderation.visitHash(domain, world, visitRaw) }, extra);
   room.set(connId, member);
   chatConnIndex.set(connId, { domain, room });
   return { ok: true, senderId, history };
@@ -752,7 +761,7 @@ function handleConnection(socket, peerAddress) {
 
       if (msg.type === 'join') {
         if (joined) return; // one join per connection
-        const result = addMember(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket }, peerAddress);
+        const result = addMember(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket }, peerAddress, msg.visit);
         if (!result.ok) { sendText(socket, Object.assign({ type: 'join-denied' }, denial(result))); return; }
         joined = true;
         sendText(socket, { type: 'welcome', id: result.publicId, roster: result.roster });
@@ -774,7 +783,7 @@ function handleConnection(socket, peerAddress) {
       // connectChat()) but is handled by this same dispatcher.
       if (msg.type === 'chat-join') {
         if (chatJoined) return; // one chat-join per connection
-        const result = joinChatRoom(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket }, peerAddress);
+        const result = joinChatRoom(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket }, peerAddress, msg.visit);
         if (!result.ok) { sendText(socket, Object.assign({ type: 'chat-error' }, denial(result))); return; }
         chatJoined = true;
         sendText(socket, { type: 'chat-history', senderId: result.senderId, messages: result.history });
@@ -838,7 +847,8 @@ const sweepTimer = setInterval(() => {
 }, POLL_SWEEP_INTERVAL_MS);
 sweepTimer.unref();
 
-function readBody(req) {
+function readBody(req, limit) {
+  const max = limit || MAX_BODY_BYTES;
   return new Promise((resolve, reject) => {
     let data = '';
     let size = 0;
@@ -846,7 +856,7 @@ function readBody(req) {
     req.on('data', (chunk) => {
       if (tooLarge) return; // keep draining so the 413 can be delivered, but stop buffering
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) { tooLarge = true; data = ''; reject(new Error('body too large')); return; }
+      if (size > max) { tooLarge = true; data = ''; reject(new Error('body too large')); return; }
       data += chunk;
     });
     req.on('end', () => resolve(data));
@@ -878,6 +888,68 @@ function sendJoinFailure(res, result) {
   return sendJson(res, JOIN_FAILURE_STATUS[result.reason] || 503, Object.assign({ error: d.message }, d), false, headers);
 }
 
+// The anonymous sessions of one world, for an authorized moderator. Presence
+// and chat sessions of the same visit (same keyed visit hash) appear as one
+// entry. Each entry carries only: a temporary locator (`ref`, derived from a
+// per-process secret and never accepted as a credential anywhere), the display
+// name(s), the world, when the visit began, whether it is in presence and/or
+// chat, and the public avatar and chat sender ids that every participant
+// already sees. Never wallet keys, credentials, network addresses or hashes of
+// them, connection tokens, or the visit id itself.
+function buildModerationRoster(domain, world) {
+  const now = Date.now();
+  const groups = new Map(); // group key -> entry under construction
+  function slot(key, kind) {
+    let k = key;
+    for (let n = 2; groups.has(k) && groups.get(k)[kind]; n++) k = key + '#' + n; // one presence and one chat per visit
+    if (!groups.has(k)) groups.set(k, { key: k, presence: null, chat: null });
+    return groups.get(k);
+  }
+  const room = rooms.get(roomKeyFor(domain, world));
+  if (room) room.forEach((m, connId) => { slot(m.visit ? 'v:' + m.visit : 'p:' + connId, 'presence').presence = m; });
+  const chat = chatRooms.get(domain);
+  if (chat) chat.forEach((m, connId) => { if (m.world === world) slot(m.visit ? 'v:' + m.visit : 'c:' + connId, 'chat').chat = m; });
+  const participants = [];
+  groups.forEach((g) => {
+    const joined = Math.min(g.presence ? g.presence.joinedAt : Infinity, g.chat ? g.chat.joinedAt : Infinity);
+    const entry = {
+      ref: moderation.participantRef(domain, world, g.key),
+      name: g.presence ? g.presence.name : g.chat.name,
+      world,
+      joinedAt: new Date(joined).toISOString(),
+      ageSeconds: Math.max(0, Math.floor((now - joined) / 1000)),
+      presence: { joined: !!g.presence, avatarId: g.presence ? g.presence.publicId : null },
+      chat: { joined: !!g.chat, senderId: g.chat ? g.chat.senderId : null },
+      linked: !!(g.presence && g.chat)
+    };
+    if (g.presence && g.chat && g.chat.name !== g.presence.name) entry.chatName = g.chat.name;
+    participants.push(entry);
+  });
+  participants.sort((a, b) => (a.joinedAt < b.joinedAt ? -1 : a.joinedAt > b.joinedAt ? 1 : a.ref < b.ref ? -1 : 1));
+  return { domain, world, generatedAt: new Date(now).toISOString(), count: participants.length, participants };
+}
+
+// POST /presence/moderation/roster — body {grant, request}; see lib-moderation.js
+// for what must hold. Failures never reveal whether a room exists.
+const MODERATION_MAX_BODY_BYTES = envNumber('MODERATION_MAX_BODY_BYTES', 32 * 1024);
+async function handleModerationRoster(req, res) {
+  const src = sourceKeyOf(peerOf(req));
+  const retryAfter = moderation.failureRetryAfter(src, Date.now());
+  if (retryAfter) return sendJson(res, 429, { error: 'too many failed moderation requests; try again later', code: 'rate-limited', retryAfter }, false, { 'Retry-After': String(retryAfter), 'Cache-Control': 'no-store' });
+  let body;
+  try { body = JSON.parse((await readBody(req, MODERATION_MAX_BODY_BYTES)) || '{}'); } catch (err) {
+    if (err && err.message === 'body too large') throw err;
+    moderation.noteFailure(src, Date.now());
+    return sendJson(res, 400, { error: 'malformed request', code: 'bad-request' }, false, { 'Cache-Control': 'no-store' });
+  }
+  const auth = await moderation.authorize(body, { operation: 'roster.view' });
+  if (!auth.ok) {
+    if (auth.status < 500 && auth.code !== 'rate-limited') moderation.noteFailure(src, Date.now());
+    return sendJson(res, auth.status, { error: auth.message, code: auth.code }, false, { 'Cache-Control': 'no-store' });
+  }
+  return sendJson(res, 200, buildModerationRoster(auth.domain, auth.world), false, { 'Cache-Control': 'no-store' });
+}
+
 // The socket peer address; never a header (see "network sources").
 function peerOf(req) { return req.socket && req.socket.remoteAddress; }
 
@@ -899,7 +971,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/presence/poll/join') {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = randomToken();
-      const result = addMember(connId, body.domain, body.world, body.name, { transport: 'poll', lastSeen: Date.now() }, peerOf(req));
+      const result = addMember(connId, body.domain, body.world, body.name, { transport: 'poll', lastSeen: Date.now() }, peerOf(req), body.visit);
       if (!result.ok) return sendJoinFailure(res, result);
       return sendJson(res, 200, { id: connId, publicId: result.publicId, roster: result.roster });
     }
@@ -928,7 +1000,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/presence/poll/chat-join') {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = randomToken();
-      const result = joinChatRoom(connId, body.domain, body.world, body.name, { transport: 'poll', lastSeen: Date.now() }, peerOf(req));
+      const result = joinChatRoom(connId, body.domain, body.world, body.name, { transport: 'poll', lastSeen: Date.now() }, peerOf(req), body.visit);
       if (!result.ok) return sendJoinFailure(res, result);
       return sendJson(res, 200, { id: connId, senderId: result.senderId, messages: result.history });
     }
@@ -956,6 +1028,10 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)) || '{}');
       leaveChatRoom(String(body.id || ''));
       return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && req.url === '/presence/moderation/roster') {
+      return await handleModerationRoster(req, res);
     }
 
     // Read-only status: how many people are in this world right now, for a

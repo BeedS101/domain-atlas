@@ -20,6 +20,11 @@
 // extension/viewer.js tries WebSocket first regardless of backend and falls
 // back to polling on its own when that fails.
 //
+// Moderation (lib/moderation.php) reads the anonymous roster from these
+// stores. To let a moderator see a presence avatar and a chat member of the
+// same visit as one participant, each member may carry `visit`: a keyed hash of
+// a per-visit random id the wallet supplies (never the raw id), plus `joinedAt`.
+//
 // All room state lives in ONE JSON file (atlas-presence-store.json, next to
 // this file — not web-reachable), read-modify-written under an exclusive
 // flock on every request. Fine at demo / small-site scale; a busy site would
@@ -38,6 +43,8 @@
 // official-title name guard. A source is REMOTE_ADDR only, hashed with a
 // secret kept in atlas-presence-ratelimit-store.json; forwarded-for headers
 // are never read.
+
+require_once __DIR__ . '/moderation.php';
 
 function atlas_presence_store_file() {
   return __DIR__ . '/atlas-presence-store.json';
@@ -447,12 +454,13 @@ function with_presence_store_locked($mutator) {
 // 'reason'=>..., 'retryAfter'=>?] with reason 'join-rate-limited',
 // 'name-not-allowed', 'source-limit', 'room-full' or 'server-busy'. A refused
 // join creates no member, so it never changes a room's count.
-function presence_join($domain, $world, $name, $addr = '') {
+function presence_join($domain, $world, $name, $addr = '', $visit = null) {
   $gate = presence_source_gate('presence', $addr);
   if ($gate['retryAfter'] !== null) return ['ok' => false, 'reason' => 'join-rate-limited', 'retryAfter' => $gate['retryAfter']];
   if (presence_name_looks_official($name, $domain)) return ['ok' => false, 'reason' => 'name-not-allowed'];
   $srcs = $gate['srcs'];
-  return with_presence_store_locked(function (&$doc) use ($domain, $world, $name, $srcs) {
+  $visitHash = moderation_visit_hash($domain, $world, $visit);
+  return with_presence_store_locked(function (&$doc) use ($domain, $world, $name, $srcs, $visitHash) {
     $roomKey = presence_room_key($domain, $world);
     $exists = isset($doc['rooms'][$roomKey]);
     $total = 0;
@@ -473,8 +481,9 @@ function presence_join($domain, $world, $name, $addr = '') {
     $roster = presence_roster_of($doc['rooms'][$roomKey], null);
     $doc['rooms'][$roomKey][$token] = [
       'publicId' => $publicId, 'name' => $name, 'x' => 0.0, 'y' => 0.0, 'z' => 0.0, 'yaw' => 0.0,
-      'lastSeen' => presence_now_ms(), 'src' => $srcs[0]
+      'lastSeen' => presence_now_ms(), 'joinedAt' => presence_now_ms(), 'src' => $srcs[0]
     ];
+    if ($visitHash !== null) $doc['rooms'][$roomKey][$token]['visit'] = $visitHash;
     return ['ok' => true, 'token' => $token, 'publicId' => $publicId, 'roster' => $roster];
   });
 }
@@ -596,12 +605,13 @@ function with_chat_store_locked($mutator) {
 // 'id'=>token, 'senderId'=>..., 'messages'=>history] or ['ok'=>false,
 // 'reason'=>..., 'retryAfter'=>?] (the same reasons as presence_join). The new
 // member's cursor starts at "already seen the history just handed back".
-function chat_join_room($domain, $world, $name, $addr = '') {
+function chat_join_room($domain, $world, $name, $addr = '', $visit = null) {
   $gate = presence_source_gate('chat', $addr);
   if ($gate['retryAfter'] !== null) return ['ok' => false, 'reason' => 'join-rate-limited', 'retryAfter' => $gate['retryAfter']];
   if (presence_name_looks_official($name, $domain)) return ['ok' => false, 'reason' => 'name-not-allowed'];
   $srcs = $gate['srcs'];
-  return with_chat_store_locked(function (&$doc) use ($domain, $world, $name, $srcs) {
+  $visitHash = moderation_visit_hash($domain, $world, $visit);
+  return with_chat_store_locked(function (&$doc) use ($domain, $world, $name, $srcs, $visitHash) {
     $exists = isset($doc['domains'][$domain]);
     $total = 0;
     foreach ($doc['domains'] as $d) $total += presence_count_source(isset($d['members']) ? $d['members'] : [], $srcs);
@@ -620,8 +630,9 @@ function chat_join_room($domain, $world, $name, $addr = '') {
     $lastSeq = count($entry['history']) ? $entry['history'][count($entry['history']) - 1]['seq'] : 0;
     $entry['members'][$token] = [
       'name' => $name, 'senderId' => $senderId, 'world' => $world,
-      'lastSeen' => presence_now_ms(), 'cursor' => $lastSeq, 'lastSendAt' => 0, 'src' => $srcs[0]
+      'lastSeen' => presence_now_ms(), 'cursor' => $lastSeq, 'lastSendAt' => 0, 'joinedAt' => presence_now_ms(), 'src' => $srcs[0]
     ];
+    if ($visitHash !== null) $entry['members'][$token]['visit'] = $visitHash;
     $history = $entry['history'];
     unset($entry);
     return ['ok' => true, 'id' => $token, 'senderId' => $senderId, 'messages' => $history];

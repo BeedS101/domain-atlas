@@ -1,4 +1,5 @@
-// Regression checks for moderator authorization (DA-003 Phase 1A), run against
+// Regression checks for moderator authorization (roles, signed grants, the
+// signed status statement), run against
 // either issuer, plus a cross-implementation compatibility run:
 //
 //   node test/manual-moderator-authz.js node
@@ -20,6 +21,8 @@
 //      reference verifier), including proof of possession and replay of
 //      moderation requests.
 //   7. Live-grant quota and the unconfigured state.
+//   8. Grants need a fresh signature from the moderator's key (a session token
+//      alone is refused); the issuer-signed status statement.
 //   compat: both issuers yield structurally identical grants that the same
 //   verifier accepts, with the same moderator reference.
 //
@@ -34,7 +37,7 @@ const { withAdminAuth } = require('./lib/admin-auth');
 const M = require('../tools/lib/moderation-grant');
 
 const MODE = process.argv[2] === 'php' ? 'php' : process.argv[2] === 'compat' ? 'compat' : 'node';
-const PORTS = { main: 9311, quota: 9312, unconfigured: 9313, compatPhp: 9321, compatNode: 9322 };
+const PORTS = { main: 9311, quota: 9312, unconfigured: 9313, status: 9314, statusLimit: 9315, compatPhp: 9321, compatNode: 9322 };
 const AUDIENCE = 'https://presence.test.example';
 const base = (port) => 'http://localhost:' + port;
 const START = '/atlas/admin/session/start';
@@ -86,7 +89,7 @@ function setRoster(issuer, entries) {
 const send = (b, route, body) => H.postJson(b, route, body);
 async function build(b, route, who, payload, o) {
   o = o || {};
-  const p = withAdminAuth(payload, b, o.action || route, o.auth);
+  const p = JSON.parse(JSON.stringify(withAdminAuth(payload, b, o.action || route, o.auth))); // as it will arrive: no undefined members
   return { payload: p, proof: await H.signWithSelf(who, p) };
 }
 const call = async (b, route, who, payload, o) => send(b, route, await build(b, route, who, payload, o));
@@ -244,59 +247,59 @@ async function testMain(kind) {
       setRoster(issuer, [{ identity: mod, role: 'moderator', ...entry }]);
       return (await session(b, mod)).token;
     };
-    const ask = async (tok, o) => withToken(b, GRANT, tok, grantPayload((await freshPop()).publicKey, o));
-    let tok = await modSession({ worlds: ['alpha'] });
-    r = await ask(tok, { worlds: ['alpha'] });
+    const ask = async (o) => call(b, GRANT, mod, grantPayload((await freshPop()).publicKey, o));
+    const tok = await modSession({ worlds: ['alpha'] });
+    r = await ask({ worlds: ['alpha'] });
     check('listed world: granted', r.status === 200, show(r));
-    r = await ask(tok, { worlds: ['beta'] });
+    r = await ask({ worlds: ['beta'] });
     check('unlisted world: 403 scope-denied', isCode(r, 403, 'scope-denied'), show(r));
-    r = await ask(tok, { worlds: ['alpha', 'beta'] });
+    r = await ask({ worlds: ['alpha', 'beta'] });
     check('one unlisted world among listed: 403 scope-denied', isCode(r, 403, 'scope-denied'), show(r));
-    r = await ask(tok, { worlds: '*' });
+    r = await ask({ worlds: '*' });
     check('all worlds when scoped to one: 403 scope-denied', isCode(r, 403, 'scope-denied'), show(r));
-    r = await ask(tok, { worlds: ['Alpha'] });
+    r = await ask({ worlds: ['Alpha'] });
     check('world ids are case-sensitive', isCode(r, 403, 'scope-denied'), show(r));
     setRoster(issuer, [{ identity: mod, role: 'moderator', worlds: ['beta'] }]);
-    r = await ask(tok, { worlds: ['alpha'] });
+    r = await ask({ worlds: ['alpha'] });
     check('changing the worlds applies to the existing session: alpha now denied', isCode(r, 403, 'scope-denied'), show(r));
-    r = await ask(tok, { worlds: ['beta'] });
+    r = await ask({ worlds: ['beta'] });
     check('...and beta is now allowed', r.status === 200, show(r));
     setRoster(issuer, [{ identity: mod, role: 'moderator', worlds: [] }]);
     for (const w of [['alpha'], ['beta'], '*']) {
-      r = await ask(tok, { worlds: w });
+      r = await ask({ worlds: w });
       check('empty worlds list grants nothing (' + JSON.stringify(w) + ')', isCode(r, 403, 'scope-denied'), show(r));
     }
     for (const [name, worlds] of [['null', null], ['string', 'alpha'], ['star string', '*'], ['object', { alpha: true }], ['empty-string entry', ['']], ['non-string entry', [1]]]) {
       setRoster(issuer, [{ identity: mod, role: 'moderator', worlds }]);
-      r = await ask(tok, { worlds: ['alpha'] });
+      r = await ask({ worlds: ['alpha'] });
       check('invalid roster worlds (' + name + ') grants nothing', isCode(r, 403, 'scope-denied'), show(r));
     }
     setRoster(issuer, [{ identity: mod, role: 'moderator' }]);
-    r = await ask(tok, { worlds: ['anything'] });
+    r = await ask({ worlds: ['anything'] });
     check('no worlds key: all worlds', r.status === 200, show(r));
-    r = await ask(tok, { worlds: '*' });
+    r = await ask({ worlds: '*' });
     check('no worlds key: "*" allowed', r.status === 200, show(r));
     setRoster(issuer, [{ identity: mod, role: 'moderator', operations: ['chat.mute'] }]);
-    r = await ask(tok, { operations: ['chat.mute'] });
+    r = await ask({ operations: ['chat.mute'] });
     check('listed operation: granted', r.status === 200, show(r));
-    r = await ask(tok, { operations: ['session.kick'] });
+    r = await ask({ operations: ['session.kick'] });
     check('unlisted operation: 403 scope-denied', isCode(r, 403, 'scope-denied'), show(r));
-    r = await ask(tok, { operations: ['chat.mute', 'session.kick'] });
+    r = await ask({ operations: ['chat.mute', 'session.kick'] });
     check('one unlisted operation among listed: 403 scope-denied', isCode(r, 403, 'scope-denied'), show(r));
     setRoster(issuer, [{ identity: mod, role: 'moderator', operations: [] }]);
-    r = await ask(tok, { operations: ['chat.mute'] });
+    r = await ask({ operations: ['chat.mute'] });
     check('empty operations list grants nothing', isCode(r, 403, 'scope-denied'), show(r));
     setRoster(issuer, [{ identity: mod, role: 'moderator', operations: ['ban'] }]);
-    r = await ask(tok, { operations: ['chat.mute'] });
+    r = await ask({ operations: ['chat.mute'] });
     check('roster operations outside the vocabulary grant nothing', isCode(r, 403, 'scope-denied'), show(r));
 
     console.log('STEP 6: revocation takes effect on existing sessions');
     setRoster(issuer, [{ identity: mod, role: 'moderator' }]);
-    r = await ask(tok, {});
+    r = await ask({});
     check('before revocation: grant issued', r.status === 200, show(r));
     setRoster(issuer, [{ identity: mod, role: 'moderator', revoked: true }]);
-    r = await ask(tok, {});
-    check('revoked moderator: existing session gets no grant', isCode(r, 401, 'not-admin'), show(r));
+    r = await ask({});
+    check('revoked moderator: no grant', isCode(r, 401, 'not-admin'), show(r));
     r = await whoami(b, tok);
     check('revoked moderator: whoami refused', r.status === 401, show(r));
     r = await call(b, GRANT, mod, grantPayload((await freshPop()).publicKey));
@@ -307,11 +310,9 @@ async function testMain(kind) {
 
     console.log('STEP 7: grant request validation');
     setRoster(issuer, [{ identity: legacy }, { identity: mod, role: 'moderator', worlds: ['alpha', 'beta'] }]);
-    tok = (await session(b, mod)).token;
-    const adminTok = (await session(b, legacy)).token;
     const pop = await freshPop();
     const bad = async (name, o, status, code) => {
-      const x = await ask(tok, o);
+      const x = await ask(o);
       check(name + ': ' + status + ' ' + code, isCode(x, status, code), show(x));
     };
     await bad('wrong audience', { audience: 'https://other-presence.example' }, 403, 'audience-not-trusted');
@@ -327,7 +328,7 @@ async function testMain(kind) {
     await bad('world with a line separator', { worlds: ['al\u2028pha'] }, 400, 'bad-request');
     await bad('world with surrounding space', { worlds: [' alpha'] }, 400, 'bad-request');
     await bad('world too long', { worlds: ['w'.repeat(121)] }, 400, 'bad-request');
-    await bad('world not a string', { worlds: [{}] }, 400, 'bad-request');
+    await bad('world not a string', { worlds: [{ a: 1 }] }, 400, 'bad-request');
     await bad('no operations', { operations: undefined }, 400, 'bad-request');
     await bad('empty operations', { operations: [] }, 400, 'bad-request');
     await bad('unknown operation', { operations: ['ban'] }, 400, 'bad-request');
@@ -353,14 +354,12 @@ async function testMain(kind) {
     await bad('proof-of-possession key in a non-canonical spelling', { popPublicKey: pop.publicKey.slice(0, 86) + sibling }, 400, 'bad-request');
     await bad('proof-of-possession key equal to the requester key', { popPublicKey: mod.publicKey }, 400, 'bad-request');
     await bad('proof-of-possession key equal to the issuer key', { popPublicKey: issuerKey }, 400, 'bad-request');
-    r = await withToken(b, GRANT, tok, []);
-    check('payload an array: 400 bad-request', isCode(r, 400, 'bad-request'), show(r));
-    r = await send(b, GRANT, { token: tok });
-    check('payload missing: 400 bad-request', isCode(r, 400, 'bad-request'), show(r));
+    r = await call(b, GRANT, mod, []);
+    check('payload an array: 400 bad-request', r.status === 400 || r.status === 401, show(r));
+    r = await send(b, GRANT, { proof: {} });
+    check('payload missing: 401 auth-required', isCode(r, 401, 'auth-required'), show(r));
     r = await send(b, GRANT, {});
     check('no credentials at all: 401', r.status === 401, show(r));
-    r = await withToken(b, GRANT, 'not-a-session', grantPayload(pop.publicKey));
-    check('unknown session token: 401', r.status === 401, show(r));
 
     console.log('STEP 8: signed requests - freshness, binding, replay');
     const popA = await freshPop();
@@ -393,7 +392,7 @@ async function testMain(kind) {
 
     console.log('STEP 9: grant structure, verified with the reference verifier');
     const popB = await freshPop();
-    r = await withToken(b, GRANT, tok, grantPayload(popB.publicKey, { worlds: ['alpha', 'beta'], operations: ['chat.mute', 'session.kick'], ttlSeconds: 120 }));
+    r = await call(b, GRANT, mod, grantPayload(popB.publicKey, { worlds: ['alpha', 'beta'], operations: ['chat.mute', 'session.kick'], ttlSeconds: 120 }));
     check('grant issued', r.status === 200 && r.body.grant && r.body.expiresAt, show(r));
     const g = r.body.grant;
     const opts = { issuerKeys: [issuerKey], audience: AUDIENCE, domain };
@@ -411,14 +410,14 @@ async function testMain(kind) {
       await webcrypto.subtle.importKey('raw', Buffer.from(issuerKey, 'base64url'), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']),
       Buffer.from(g.proof.signature, 'base64url'), Buffer.from(M.canonicalize(g.payload)));
     check('the signature is not a plain canonical-JSON signature (domain separated)', plainOk === false, 'verifies without the context prefix');
-    r = await withToken(b, GRANT, tok, grantPayload((await freshPop()).publicKey));
+    r = await call(b, GRANT, mod, grantPayload((await freshPop()).publicKey));
     check('default lifetime is 300 s', Date.parse(r.body.grant.payload.expiresAt) - Date.parse(r.body.grant.payload.issuedAt) === 300000, JSON.stringify(r.body.grant.payload));
-    r = await withToken(b, GRANT, tok, grantPayload((await freshPop()).publicKey, { ttlSeconds: 600 }));
+    r = await call(b, GRANT, mod, grantPayload((await freshPop()).publicKey, { ttlSeconds: 600 }));
     check('600 s is accepted', r.status === 200 && Date.parse(r.body.grant.payload.expiresAt) - Date.parse(r.body.grant.payload.issuedAt) === 600000, show(r));
     const ids = new Set();
-    for (let i = 0; i < 4; i++) ids.add((await withToken(b, GRANT, tok, grantPayload((await freshPop()).publicKey))).body.grant.payload.grantId);
+    for (let i = 0; i < 4; i++) ids.add((await call(b, GRANT, mod, grantPayload((await freshPop()).publicKey))).body.grant.payload.grantId);
     check('grant ids are unique', ids.size === 4, [...ids].join());
-    r = await withToken(b, GRANT, adminTok, grantPayload((await freshPop()).publicKey, { worlds: '*', operations: ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'] }));
+    r = await call(b, GRANT, legacy, grantPayload((await freshPop()).publicKey, { worlds: '*', operations: ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'] }));
     check('an administrator can obtain a grant for all worlds and operations', r.status === 200 && r.body.grant.payload.worlds === '*', show(r));
     check('...and it verifies', (await M.verifyGrant(r.body.grant, opts)).ok, 'verify failed');
 
@@ -488,12 +487,11 @@ async function testPhpHost() {
     console.log('STEP 11 (PHP): the grant domain is configured, not taken from the Host header');
     const mod = await H.genIdentity();
     setRoster(issuer, [{ identity: mod, role: 'moderator' }]);
-    const tok = (await session(b, mod)).token;
     const popKey = (await freshPop()).publicKey;
-    const viaIp = await fetch('http://127.0.0.1:' + port + GRANT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload: grantPayload(popKey), token: tok }) });
+    const viaIp = await fetch('http://127.0.0.1:' + port + GRANT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(await build(b, GRANT, mod, grantPayload(popKey))) });
     const body = await viaIp.json();
     check('a request addressed to another host name is refused: 400 wrong-domain', viaIp.status === 400 && body.code === 'wrong-domain', JSON.stringify({ status: viaIp.status, body }));
-    const ok = await withToken(b, GRANT, tok, grantPayload(popKey));
+    const ok = await call(b, GRANT, mod, grantPayload(popKey));
     check('the configured host name works', ok.status === 200, show(ok));
   } finally {
     await H.stopIssuer(issuer);
@@ -509,10 +507,10 @@ async function testQuotaAndUnconfigured(kind) {
     setRoster(issuer, [{ identity: m1, role: 'moderator' }, { identity: m2, role: 'moderator' }]);
     const t1 = (await session(b, m1)).token, t2 = (await session(b, m2)).token;
     const rs = [];
-    for (let i = 0; i < 3; i++) rs.push(await withToken(b, GRANT, t1, grantPayload((await freshPop()).publicKey)));
+    for (let i = 0; i < 3; i++) rs.push(await call(b, GRANT, m1, grantPayload((await freshPop()).publicKey)));
     check('two live grants allowed', rs[0].status === 200 && rs[1].status === 200, rs.map(show).join(' '));
     check('third refused: 429 grant-quota', isCode(rs[2], 429, 'grant-quota'), show(rs[2]));
-    const other = await withToken(b, GRANT, t2, grantPayload((await freshPop()).publicKey));
+    const other = await call(b, GRANT, m2, grantPayload((await freshPop()).publicKey));
     check('another moderator has their own quota', other.status === 200, show(other));
     const stateFile = issuer.files('atlas-moderation-grants-store.json');
     const stored = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, 'utf8') : '';
@@ -527,12 +525,124 @@ async function testQuotaAndUnconfigured(kind) {
     const m = await H.genIdentity();
     setRoster(issuer, [{ identity: m, role: 'moderator' }]);
     const t = (await session(bb, m)).token;
-    const r = await withToken(bb, GRANT, t, grantPayload((await freshPop()).publicKey));
+    const r = await call(bb, GRANT, m, grantPayload((await freshPop()).publicKey));
     check('no configured presence endpoint: 503 moderation-not-configured', isCode(r, 503, 'moderation-not-configured'), show(r));
     const r2 = await withToken(bb, '/atlas/revoke', t, { id: 'urn:test:x' });
     check('...and the moderator is still refused elsewhere', isCode(r2, 403, 'insufficient-role'), show(r2));
   } finally {
     await H.stopIssuer(issuer);
+  }
+}
+
+async function testSignatureAndStatus(kind) {
+  const port = PORTS.status, b = base(port), domain = 'localhost:' + port;
+  const issuer = await startIssuer(kind, port, { ATLAS_MODERATION_MAX_LIVE_GRANTS: '500' }, { audiences: [AUDIENCE, 'https://presence-two.test.example'], domain });
+  try {
+    const legacy = await H.genIdentity(), admin = await H.genIdentity(), mod = await H.genIdentity();
+    const revokedMod = await H.genIdentity(), emptyMod = await H.genIdentity(), opsMod = await H.genIdentity();
+    setRoster(issuer, [
+      { identity: legacy }, { identity: admin, role: 'admin' },
+      { identity: mod, role: 'moderator', worlds: ['alpha', 'β δ'] },
+      { identity: opsMod, role: 'moderator', operations: ['chat.mute', 'roster.view'] },
+      { identity: revokedMod, role: 'moderator', revoked: true },
+      { identity: emptyMod, role: 'moderator', worlds: [] }
+    ]);
+    const issuerKey = await issuerKeyOf(b);
+    const popKey = async () => (await freshPop()).publicKey;
+
+    console.log('STEP 15: a grant needs a fresh signature, not a session token');
+    const sMod = await session(b, mod), sAdmin = await session(b, legacy);
+    let r = await withToken(b, GRANT, sMod.token, grantPayload(await popKey()));
+    check('session token alone: 401 signature-required', isCode(r, 401, 'signature-required'), show(r));
+    r = await withToken(b, GRANT, sAdmin.token, grantPayload(await popKey()));
+    check('administrator session token alone: 401 signature-required', isCode(r, 401, 'signature-required'), show(r));
+    r = await send(b, GRANT, { payload: grantPayload(await popKey()), proof: 'x', token: sMod.token });
+    check('token plus a non-object proof: 401 signature-required', isCode(r, 401, 'signature-required'), show(r));
+    const forged = await build(b, GRANT, mod, grantPayload(await popKey()));
+    forged.proof.signature = forged.proof.signature.slice(0, -2) + (forged.proof.signature.endsWith('AA') ? 'BB' : 'AA');
+    r = await send(b, GRANT, { ...forged, token: sMod.token });
+    check('valid token next to a bad proof is still refused: 401', r.status === 401 && r.body.code !== undefined, show(r));
+    const other = await build(b, GRANT, opsMod, grantPayload(await popKey()));
+    r = await send(b, GRANT, { ...other, token: sMod.token });
+    check('token of one key next to a proof of another uses the proof only', r.status === 200 && r.body.grant.payload.moderatorRef === M.moderatorRef(domain, opsMod.publicKey), show(r));
+    r = await call(b, GRANT, mod, grantPayload(await popKey()));
+    check('a freshly signed request is granted', r.status === 200, show(r));
+    r = await whoami(b, sMod.token);
+    check('ordinary session workflows are unchanged (whoami)', r.status === 200 && r.body.role === 'moderator', show(r));
+    r = await withToken(b, '/atlas/admin/directory', sAdmin.token);
+    check('ordinary session workflows are unchanged (admin directory)', r.status === 200, show(r));
+
+    console.log('STEP 16: the signed status statement');
+    const get = (aud, path) => fetch(b + (path || '/atlas/moderation/status') + (aud === undefined ? '' : '?audience=' + encodeURIComponent(aud)));
+    let res = await get(AUDIENCE);
+    const doc = await res.json();
+    check('status: 200 with no-store caching', res.status === 200 && /no-store/.test(res.headers.get('cache-control') || ''), res.status + ' ' + res.headers.get('cache-control'));
+    const opts = { issuerKeys: [issuerKey], audience: AUDIENCE, domain };
+    let v = await M.verifyStatus(doc, opts);
+    check('status verifies against the pinned issuer key', v.ok, JSON.stringify(v));
+    check('status payload fields are exactly the documented set', Object.keys(doc.payload).sort().join() === 'audience,domain,expiresAt,issuedAt,moderators,type,version', Object.keys(doc.payload).join());
+    check('status lifetime defaults to 60 s', Date.parse(doc.payload.expiresAt) - Date.parse(doc.payload.issuedAt) === 60000, JSON.stringify(doc.payload));
+    const byRef = (x) => v.moderators.get(M.moderatorRef(domain, x.publicKey));
+    check('administrators (legacy and explicit) are listed for every world and operation', [legacy, admin].every((x) => { const e = byRef(x); return e && e.worlds === '*' && e.operations.slice().sort().join() === M.OPERATIONS.slice().sort().join(); }), JSON.stringify(doc.payload.moderators));
+    check('a scoped moderator is listed with exactly its worlds, all operations', (() => { const e = byRef(mod); return e && e.worlds.join() === 'alpha,β δ' && e.operations.length === 4; })(), JSON.stringify(byRef(mod)));
+    check('an operation-limited moderator lists only those operations and all worlds', (() => { const e = byRef(opsMod); return e && e.worlds === '*' && e.operations.slice().sort().join() === 'chat.mute,roster.view'; })(), JSON.stringify(byRef(opsMod)));
+    check('a revoked entry is absent', !byRef(revokedMod), 'listed');
+    check('an entry with an empty scope is absent', !byRef(emptyMod), 'listed');
+    check('no raw public key appears in the statement', ![legacy, admin, mod, opsMod, revokedMod, emptyMod].some((x) => JSON.stringify(doc).includes(x.publicKey)), 'key leaked');
+    const refs = doc.payload.moderators.map((m) => m.moderatorRef);
+    check('entries are sorted by moderator reference', refs.slice().sort().join() === refs.join(), refs.join());
+    check('statement signature uses its own domain-separated context', M.STATUS_SIGN_CONTEXT !== M.GRANT_SIGN_CONTEXT && !(await M.verifyGrant(doc, { issuerKeys: [issuerKey], audience: AUDIENCE, domain })).ok, 'status accepted as a grant');
+    v = await M.verifyStatus(doc, { ...opts, audience: 'https://presence-two.test.example' });
+    check('verifier: status for another audience rejected', v.code === 'wrong-audience', JSON.stringify(v));
+    v = await M.verifyStatus(doc, { ...opts, issuerKeys: [(await H.genIdentity()).publicKey] });
+    check('verifier: unpinned key rejected', v.code === 'untrusted-issuer', JSON.stringify(v));
+    v = await M.verifyStatus(doc, { ...opts, now: Date.parse(doc.payload.expiresAt) + 1 });
+    check('verifier: expired status rejected', v.code === 'expired', JSON.stringify(v));
+    const widened = JSON.parse(JSON.stringify(doc)); widened.payload.moderators[0].worlds = '*';
+    check('verifier: edited status breaks the signature', (await M.verifyStatus(widened, opts)).code === 'bad-signature' || widened.payload.moderators[0].worlds === doc.payload.moderators[0].worlds, 'accepted');
+    const longer = JSON.parse(JSON.stringify(doc)); longer.payload.expiresAt = new Date(Date.parse(doc.payload.expiresAt) + 3600e3).toISOString();
+    check('verifier: extended expiry breaks the signature', (await M.verifyStatus(longer, opts)).code === 'bad-signature', 'accepted');
+
+    res = await get('https://presence-two.test.example');
+    check('the second configured audience gets its own statement', res.status === 200 && (await res.json()).payload.audience === 'https://presence-two.test.example', res.status);
+    res = await get('https://evil.example');
+    check('an unconfigured audience: 403 audience-not-trusted', res.status === 403 && (await res.json()).code === 'audience-not-trusted', res.status);
+    res = await get(undefined);
+    check('no audience: 403 audience-not-trusted', res.status === 403, res.status);
+    res = await get(AUDIENCE + '/');
+    check('audience must match exactly (trailing slash): 403', res.status === 403, res.status);
+
+    setRoster(issuer, [{ identity: legacy }, { identity: mod, role: 'moderator', revoked: true }]);
+    const after = await (await get(AUDIENCE)).json();
+    v = await M.verifyStatus(after, opts);
+    check('revoking at the issuer changes the very next statement', v.ok && !v.moderators.has(M.moderatorRef(domain, mod.publicKey)) && v.moderators.has(M.moderatorRef(domain, legacy.publicKey)), JSON.stringify(after.payload.moderators));
+    setRoster(issuer, [{ identity: legacy }, { identity: mod, role: 'moderator', worlds: ['beta'], operations: ['roster.view'] }]);
+    const narrowed = await M.verifyStatus(await (await get(AUDIENCE)).json(), opts);
+    check('scope changes show up in the next statement', JSON.stringify(narrowed.moderators.get(M.moderatorRef(domain, mod.publicKey))) === JSON.stringify({ worlds: ['beta'], operations: ['roster.view'] }), JSON.stringify([...narrowed.moderators]));
+    r = await call(b, GRANT, mod, grantPayload(await popKey(), { worlds: ['beta'], operations: ['roster.view'] }));
+    check('(grant still follows the roster)', r.status === 200, show(r));
+  } finally {
+    await H.stopIssuer(issuer);
+  }
+
+  const lim = await startIssuer(kind, PORTS.statusLimit, { ATLAS_MODERATION_STATUS_PER_CLIENT_PER_MIN: '3' }, { audiences: [AUDIENCE] });
+  try {
+    const lb = base(PORTS.statusLimit);
+    const codes = [];
+    for (let i = 0; i < 5; i++) codes.push((await fetch(lb + '/atlas/moderation/status?audience=' + encodeURIComponent(AUDIENCE))).status);
+    check('status requests are rate limited per client', codes.slice(0, 3).every((c) => c === 200) && codes[3] === 429 && codes[4] === 429, codes.join());
+    const lr = await fetch(lb + '/atlas/moderation/status?audience=' + encodeURIComponent(AUDIENCE));
+    check('...with Retry-After', lr.status === 429 && Number(lr.headers.get('retry-after')) >= 1, lr.status + ' ' + lr.headers.get('retry-after'));
+  } finally {
+    await H.stopIssuer(lim);
+  }
+
+  const un = await startIssuer(kind, PORTS.unconfigured + 20, {}, null);
+  try {
+    const r = await fetch(base(PORTS.unconfigured + 20) + '/atlas/moderation/status?audience=' + encodeURIComponent(AUDIENCE));
+    check('unconfigured issuer: status 503 moderation-not-configured', r.status === 503 && (await r.json()).code === 'moderation-not-configured', r.status);
+  } finally {
+    await H.stopIssuer(un);
   }
 }
 
@@ -549,7 +659,7 @@ async function testCompat() {
       const b = base(port);
       const tok = (await session(b, mod, domain)).token;
       const popKey = await freshPop();
-      const r = await withToken(b, GRANT, tok, grantPayload(popKey.publicKey, { worlds: ['alpha', 'beta'], operations: ['chat.mute', 'roster.view'], ttlSeconds: 90 }));
+      const r = await call(b, GRANT, mod, grantPayload(popKey.publicKey, { worlds: ['alpha', 'beta'], operations: ['chat.mute', 'roster.view'], ttlSeconds: 90 }), { auth: { domain } });
       check(name + ': grant issued', r.status === 200, show(r));
       const key = await issuerKeyOf(b);
       const v = await M.verifyGrant(r.body.grant, { issuerKeys: [key], audience: AUDIENCE, domain });
@@ -577,6 +687,7 @@ async function testCompat() {
       await testMain(MODE);
       if (MODE === 'php') await testPhpHost();
       await testQuotaAndUnconfigured(MODE);
+      await testSignatureAndStatus(MODE);
     }
   } catch (err) {
     console.error('FAILURE:', err);

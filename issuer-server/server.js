@@ -3589,6 +3589,16 @@ const MODERATION_GRANT_DEFAULT_TTL_S = 300;
 const MODERATION_MAX_LIVE_GRANTS = envPositiveInt('ATLAS_MODERATION_MAX_LIVE_GRANTS', 10);
 const MODERATION_REQUEST_FIELDS = ['audience', 'worlds', 'operations', 'ttlSeconds', 'popPublicKey', 'adminAuth'];
 
+// Moderation status statement: an issuer-signed, short-lived list of the keys
+// that hold moderation authority right now, which a presence service must see
+// (and re-fetch) before it acts on any grant. See docs/moderation-authorization.md.
+const MODERATION_STATUS_TYPE = 'atlas.moderation-status';
+const MODERATION_STATUS_VERSION = 1;
+const MODERATION_STATUS_SIGN_CONTEXT = 'atlas-moderation-status/v1\n';
+const MODERATION_STATUS_TTL_S = Math.min(120, Math.max(1, envPositiveInt('ATLAS_MODERATION_STATUS_TTL_S', 60)));
+const MODERATION_STATUS_PER_CLIENT_PER_MIN = envPositiveInt('ATLAS_MODERATION_STATUS_PER_CLIENT_PER_MIN', 120);
+const moderationStatusHits = new Map(); // client -> ms timestamps
+
 // Stable, non-reversible reference to a moderator for one domain. Presence
 // services log and revoke by this; it does not reveal the wallet public key.
 function moderatorRefFor(domain, publicKey) {
@@ -3675,6 +3685,29 @@ function recordModerationGrant(entry, nowMs) {
   live.push(entry);
   fs.writeFileSync(MODERATION_GRANTS_FILE, JSON.stringify({ grants: live }));
   return true;
+}
+
+// Every roster key that holds authority right now, as the status statement
+// lists it: the moderator reference and the worlds and operations in force.
+// Administrators appear with every world and operation. A key with no
+// authority, or with an empty scope, is left out.
+function moderationStatusModerators(domain) {
+  let keys;
+  try { keys = readAdminKeys().keys; } catch (e) { return []; }
+  const seen = new Set();
+  const out = [];
+  for (const k of Array.isArray(keys) ? keys : []) {
+    if (!k || typeof k.publicKey !== 'string' || seen.has(k.publicKey)) continue;
+    seen.add(k.publicKey);
+    const a = adminAuthority(k.publicKey);
+    if (!a) continue;
+    const operations = a.operations === '*' ? MODERATION_OPERATIONS.slice() : a.operations;
+    if (a.worlds !== '*' && !a.worlds.length) continue;
+    if (!operations.length) continue;
+    out.push({ moderatorRef: moderatorRefFor(domain, k.publicKey), worlds: a.worlds, operations });
+  }
+  out.sort((x, y) => (x.moderatorRef < y.moderatorRef ? -1 : x.moderatorRef > y.moderatorRef ? 1 : 0));
+  return out;
 }
 
 // Trading Station membership roster — same read/append shape as
@@ -6391,17 +6424,22 @@ async function main() {
         return sendJson(res, 200, { publicKey: auth.publicKey, role: auth.authority.role });
       }
 
-      // POST /atlas/admin/moderation/grant — {payload, proof} or {payload,
-      // token}. Issues a short-lived, domain-signed moderation grant to the
-      // authenticated key: administrators and moderators may ask (scope
-      // 'moderation'), no other route accepts a moderator. The key's CURRENT
+      // POST /atlas/admin/moderation/grant — {payload, proof}, signed fresh for
+      // this request (payload.adminAuth). Issues a short-lived, domain-signed
+      // moderation grant to the signing key: administrators and moderators may
+      // ask (scope 'moderation'), no other route accepts a moderator. The key's CURRENT
       // roster authority bounds the worlds and operations; the audience must
       // be a configured presence endpoint; the grant is bound to the
       // requester's ephemeral proof-of-possession key. See
       // docs/moderation-authorization.md for the format.
       if (req.method === 'POST' && req.url === '/atlas/admin/moderation/grant') {
-        const { payload, proof, token } = await readAdminJson(req);
-        const auth = await requireAdminAuth(payload, proof, token, req, 'moderation');
+        const { payload, proof } = await readAdminJson(req);
+        // A session token is not accepted here, even next to a proof: every
+        // grant needs a signature made for this request by the moderator's own key.
+        if (!proof || typeof proof !== 'object') {
+          return sendAdminAuthFailure(res, adminFailure(401, 'signature-required', 'a moderation grant needs a fresh signed request; a session token alone is not accepted'));
+        }
+        const auth = await requireAdminAuth(payload, proof, null, req, 'moderation');
         if (auth.error) return sendAdminAuthFailure(res, auth);
         const audiences = moderationAudiences();
         if (!audiences.length) return sendAdminAuthFailure(res, adminFailure(503, 'moderation-not-configured', 'no presence endpoint is configured to receive moderation grants'));
@@ -6432,6 +6470,42 @@ async function main() {
           grant: { payload: grantPayload, proof: { signerRole: 'raw-ecdsa', publicKey: publicKeyB64url, signature } },
           expiresAt: grantPayload.expiresAt
         });
+      }
+
+      // GET /atlas/moderation/status?audience=<presence origin> — ungated. Returns
+      // an issuer-signed statement of who holds moderation authority right now,
+      // addressed to one configured presence service and valid for
+      // ATLAS_MODERATION_STATUS_TTL_S seconds. A presence service refuses to act
+      // on a grant unless it holds a current statement that lists the grant's
+      // moderator, so removing a key from the roster ends its authority within
+      // that lifetime. The statement holds only pseudonymous moderator
+      // references and their scopes. Rate limited per client address.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/moderation/status') {
+        const client = adminClientKey(req);
+        const retryAfter = adminRetryAfter(moderationStatusHits, client, MODERATION_STATUS_PER_CLIENT_PER_MIN, 60 * 1000);
+        if (retryAfter) {
+          res.setHeader('Retry-After', String(retryAfter));
+          return sendJson(res, 429, { error: 'too many status requests; try again later', code: 'rate-limited', retryAfter });
+        }
+        noteHit(moderationStatusHits, client, Date.now());
+        const audiences = moderationAudiences();
+        if (!audiences.length) return sendJson(res, 503, { error: 'no presence endpoint is configured to receive moderation grants', code: 'moderation-not-configured' });
+        const audience = new URLSearchParams(req.url.split('?')[1] || '').get('audience');
+        if (!audience || !audiences.includes(audience)) return sendJson(res, 403, { error: 'this presence endpoint is not configured for this domain', code: 'audience-not-trusted' });
+        const nowMs = Date.now();
+        const statusPayload = {
+          type: MODERATION_STATUS_TYPE,
+          version: MODERATION_STATUS_VERSION,
+          domain: DOMAIN,
+          audience,
+          issuedAt: new Date(nowMs).toISOString(),
+          expiresAt: new Date(nowMs + MODERATION_STATUS_TTL_S * 1000).toISOString(),
+          moderators: moderationStatusModerators(DOMAIN)
+        };
+        const statusData = Buffer.concat([Buffer.from(MODERATION_STATUS_SIGN_CONTEXT, 'utf8'), Buffer.from(canonicalize(statusPayload), 'utf8')]);
+        const statusSignature = b64url(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, statusData));
+        res.setHeader('Cache-Control', 'no-store');
+        return sendJson(res, 200, { payload: statusPayload, proof: { signerRole: 'raw-ecdsa', publicKey: publicKeyB64url, signature: statusSignature } });
       }
 
       // POST /atlas/admin/session/logout — {token}. Always 200 regardless

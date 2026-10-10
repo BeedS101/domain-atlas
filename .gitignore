@@ -73,3 +73,7 @@ directory-server/directory-index.json
 tools/.admin-identity.json
 presence-php/presence/lib/atlas-*.json
 presence-php/presence/lib/atlas-*.json.lock
+
+# Operator configuration for presence-side moderation (pinned issuer keys,
+# local revocations). Deployment-specific; see docs/moderation-authorization.md.
+presence-server/moderation-config.json

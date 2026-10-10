@@ -1,5 +1,5 @@
 <?php
-// POST /presence/poll/chat-join — body {domain, world, name}. Joins the
+// POST /presence/poll/chat-join — body {domain, world, name[, visit]}. Joins the
 // domain's chat room and returns {id, senderId, messages}: `id` is the
 // private connection token for sync/send/leave, `senderId` the random
 // per-join id other members see on this member's messages (it is not an
@@ -20,6 +20,6 @@ $world = presence_clean_id(isset($body['world']) ? $body['world'] : null);
 if ($domain === null || $world === null) send_json(400, ['error' => 'a valid domain and world are required', 'reason' => 'invalid']);
 $name = presence_clean_name(isset($body['name']) ? $body['name'] : '');
 
-$result = chat_join_room($domain, $world, $name, isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '');
+$result = chat_join_room($domain, $world, $name, isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '', isset($body['visit']) ? $body['visit'] : null);
 if (!$result['ok']) join_failure_response($result);
 send_json(200, ['id' => $result['id'], 'senderId' => $result['senderId'], 'messages' => $result['messages']]);

@@ -68,11 +68,13 @@ function require_post() {
   }
 }
 
-// Reads the JSON body, refusing anything over PRESENCE_MAX_BODY_BYTES.
-function read_json_body() {
-  $raw = file_get_contents('php://input', false, null, 0, PRESENCE_MAX_BODY_BYTES + 1);
+// Reads the JSON body, refusing anything over `$limit` bytes (default
+// PRESENCE_MAX_BODY_BYTES).
+function read_json_body($limit = null) {
+  if ($limit === null) $limit = PRESENCE_MAX_BODY_BYTES;
+  $raw = file_get_contents('php://input', false, null, 0, $limit + 1);
   if ($raw === '' || $raw === false) return [];
-  if (strlen($raw) > PRESENCE_MAX_BODY_BYTES) send_json(413, ['error' => 'request body too large']);
+  if (strlen($raw) > $limit) send_json(413, ['error' => 'request body too large']);
   $data = json_decode($raw, true);
   if (!is_array($data)) throw new Exception('invalid JSON body');
   return $data;

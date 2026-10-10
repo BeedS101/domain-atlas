@@ -18,6 +18,10 @@ const GRANT_TYPE = 'atlas.moderation-grant';
 const REQUEST_TYPE = 'atlas.moderation-request';
 const GRANT_SIGN_CONTEXT = 'atlas-moderation-grant/v1\n';
 const POP_SIGN_CONTEXT = 'atlas-moderation-pop/v1\n';
+const STATUS_TYPE = 'atlas.moderation-status';
+const STATUS_SIGN_CONTEXT = 'atlas-moderation-status/v1\n';
+const STATUS_FIELDS = ['type', 'version', 'domain', 'audience', 'issuedAt', 'expiresAt', 'moderators'];
+const STATUS_MAX_TTL_MS = 120 * 1000;
 const REF_CONTEXT = 'atlas-moderator-ref/v1\n';
 const OPERATIONS = ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'];
 const MAX_GRANT_LIFETIME_MS = 600 * 1000;
@@ -105,6 +109,39 @@ async function verifyGrant(grant, opts) {
   return { ok: true, payload };
 }
 
+// Verifies an issuer-signed status statement (the current allow-list of
+// moderators). opts: {issuerKeys, audience, domain, now, maxTtlMs?}. Returns
+// {ok, payload, moderators: Map(ref -> {worlds, operations})}. A presence
+// service must additionally bound how long it relies on a statement; see
+// docs/moderation-authorization.md.
+async function verifyStatus(env, opts) {
+  const now = opts.now === undefined ? Date.now() : opts.now;
+  if (!isObject(env) || !isObject(env.payload) || !isObject(env.proof)) return fail('malformed', 'status must be {payload, proof}');
+  const { payload, proof } = env;
+  if (proof.signerRole !== 'raw-ecdsa') return fail('malformed', 'proof.signerRole must be raw-ecdsa');
+  if (!Array.isArray(opts.issuerKeys) || !opts.issuerKeys.includes(proof.publicKey)) return fail('untrusted-issuer', 'signing key is not pinned for this domain');
+  if (!(await verifySig(proof.publicKey, proof.signature, STATUS_SIGN_CONTEXT, payload))) return fail('bad-signature', 'status signature does not verify');
+  const keys = Object.keys(payload);
+  if (keys.length !== STATUS_FIELDS.length || !STATUS_FIELDS.every((k) => keys.includes(k))) return fail('malformed', 'status payload has missing or unknown fields');
+  if (payload.type !== STATUS_TYPE || payload.version !== 1) return fail('malformed', 'unsupported status type or version');
+  if (payload.domain !== opts.domain) return fail('wrong-domain', 'status is for another domain');
+  if (payload.audience !== opts.audience) return fail('wrong-audience', 'status is for another presence service');
+  const issuedAt = strictIso(payload.issuedAt), expiresAt = strictIso(payload.expiresAt);
+  if (Number.isNaN(issuedAt) || Number.isNaN(expiresAt)) return fail('malformed', 'issuedAt/expiresAt');
+  if (expiresAt <= issuedAt || expiresAt - issuedAt > (opts.maxTtlMs || STATUS_MAX_TTL_MS)) return fail('malformed', 'lifetime out of range');
+  if (now >= expiresAt) return fail('expired', 'status has expired');
+  if (issuedAt > now + ISSUE_SKEW_MS) return fail('not-yet-valid', 'status is issued in the future');
+  if (!Array.isArray(payload.moderators)) return fail('malformed', 'moderators');
+  const moderators = new Map();
+  for (const m of payload.moderators) {
+    if (!isObject(m) || Object.keys(m).length !== 3 || typeof m.moderatorRef !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(m.moderatorRef) || moderators.has(m.moderatorRef)) return fail('malformed', 'moderator entry');
+    if (m.worlds !== '*' && !(Array.isArray(m.worlds) && m.worlds.length >= 1 && m.worlds.length <= MAX_WORLDS && m.worlds.every(isValidWorldId))) return fail('malformed', 'moderator worlds');
+    if (!Array.isArray(m.operations) || !m.operations.length || !m.operations.every((o) => OPERATIONS.includes(o))) return fail('malformed', 'moderator operations');
+    moderators.set(m.moderatorRef, { worlds: m.worlds, operations: m.operations });
+  }
+  return { ok: true, payload, moderators };
+}
+
 // --- proof of possession ---
 
 async function generatePopKey() {
@@ -153,6 +190,6 @@ function createNonceLedger() {
 }
 
 module.exports = {
-  GRANT_TYPE, REQUEST_TYPE, GRANT_SIGN_CONTEXT, POP_SIGN_CONTEXT, REF_CONTEXT, OPERATIONS, MAX_GRANT_LIFETIME_MS,
-  canonicalize, isValidWorldId, moderatorRef, verifyGrant, verifyRequest, generatePopKey, signRequest, createNonceLedger
+  GRANT_TYPE, REQUEST_TYPE, STATUS_TYPE, GRANT_SIGN_CONTEXT, POP_SIGN_CONTEXT, STATUS_SIGN_CONTEXT, REF_CONTEXT, OPERATIONS, MAX_GRANT_LIFETIME_MS,
+  canonicalize, isValidWorldId, moderatorRef, verifyGrant, verifyStatus, verifyRequest, generatePopKey, signRequest, createNonceLedger
 };

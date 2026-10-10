@@ -305,6 +305,23 @@ let presenceMoveTimer = null;
 let presencePollToken = null;
 let presencePollId = null; // private poll token, set once the join resolves and this attempt is still current
 let presencePollTimer = null;
+// Random id for one visit to a world, sent privately in the presence and chat
+// joins so a moderator's roster can show the two connections as one anonymous
+// participant. It is fresh random bytes (never derived from the wallet key or
+// any identity), is not shown to other participants, and is replaced as soon
+// as a different domain or world is entered. Reconnects within the same visit
+// reuse it. Servers that do not know the field ignore it.
+let visitMemo = null;
+function visitIdFor(domain, worldId) {
+  if (!visitMemo || visitMemo.domain !== domain || visitMemo.world !== worldId) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    visitMemo = { domain, world: worldId, id: btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') };
+  }
+  return visitMemo.id;
+}
+
 let presencePollHttpBase = null; // base the poll token belongs to, needed by disconnectPresence()'s leave beacon
 // The currently attached visibilitychange listener of the live poll attempt,
 // removed explicitly on every reconnect so listeners never accumulate.
@@ -559,7 +576,7 @@ function pollPresence(domain, worldId, displayName, base) {
 
   fetch(base + '/presence/poll/join', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ domain, world: worldId, name: displayName })
+    body: JSON.stringify({ domain, world: worldId, name: displayName, visit: visitIdFor(domain, worldId) })
   })
     .then((r) => r.json().then((body) => ({ ok: r.ok, body })).catch(() => ({ ok: false, body: {} })))
     .then(({ ok, body }) => {
@@ -604,7 +621,7 @@ function connectPresence(domain, worldId, displayName, base) {
     if (presenceSocket !== socket) { try { socket.close(); } catch (err) {} return; }
     settled = true;
     clearTimeout(fallbackTimer);
-    socket.send(JSON.stringify({ type: 'join', domain, world: worldId, name: displayName }));
+    socket.send(JSON.stringify({ type: 'join', domain, world: worldId, name: displayName, visit: visitIdFor(domain, worldId) }));
     presenceMoveTimer = setInterval(() => {
       const pose = currentLocalPose();
       if (!pose || socket.readyState !== WebSocket.OPEN) return;
@@ -1118,7 +1135,7 @@ function pollChat(domain, worldId, displayName, canSend, base, historyOnJoin) {
 
   fetch(base + '/presence/poll/chat-join', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ domain, world: worldId, name: displayName })
+    body: JSON.stringify({ domain, world: worldId, name: displayName, visit: visitIdFor(domain, worldId) })
   })
     .then((r) => r.json().then((body) => ({ ok: r.ok, status: r.status, body })).catch(() => ({ ok: false, status: r.status, body: {} })))
     .then(({ ok, status, body: welcome }) => {
@@ -1239,7 +1256,7 @@ function connectChat(domain, worldId, base) {
       if (chatSocket !== socket) { try { socket.close(); } catch (err) {} return; }
       settled = true;
       clearTimeout(fallbackTimer);
-      socket.send(JSON.stringify({ type: 'chat-join', domain, world: worldId, name: displayName }));
+      socket.send(JSON.stringify({ type: 'chat-join', domain, world: worldId, name: displayName, visit: visitIdFor(domain, worldId) }));
     });
 
     socket.addEventListener('message', (ev) => {

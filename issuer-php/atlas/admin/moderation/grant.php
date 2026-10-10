@@ -1,9 +1,9 @@
 <?php
 // POST /atlas/admin/moderation/grant — mirrors issuer-server/server.js's same
-// route. {payload, proof} or {payload, token}. Issues a short-lived,
-// domain-signed moderation grant to the authenticated key: administrators and
-// moderators may ask (scope 'moderation'); no other route accepts a
-// moderator. The key's CURRENT roster authority bounds the worlds and
+// route. {payload, proof}, signed fresh for this request (payload.adminAuth).
+// Issues a short-lived, domain-signed moderation grant to the signing key:
+// administrators and moderators may ask (scope 'moderation'); no other route
+// accepts a moderator. A session token is not accepted, even next to a proof. The key's CURRENT roster authority bounds the worlds and
 // operations, the audience must be a configured presence endpoint, and the
 // grant is bound to the requester's ephemeral proof-of-possession key.
 // Format and verification: docs/moderation-authorization.md.
@@ -15,8 +15,10 @@ $kp = atlas_load_keys();
 $requestBody = read_admin_json_body();
 $payload = $requestBody['payload'] ?? null;
 $proof = $requestBody['proof'] ?? null;
-$token = $requestBody['token'] ?? null;
-$auth = require_admin_auth($payload, $proof, $token, '/atlas/admin/moderation/grant', 'moderation');
+if (!is_array($proof)) {
+  admin_auth_fail(admin_failure(401, 'signature-required', 'a moderation grant needs a fresh signed request; a session token alone is not accepted'));
+}
+$auth = require_admin_auth($payload, $proof, null, '/atlas/admin/moderation/grant', 'moderation');
 if (isset($auth['error'])) admin_auth_fail($auth);
 
 $config = atlas_moderation_config();

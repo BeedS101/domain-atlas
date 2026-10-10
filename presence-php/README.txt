@@ -16,7 +16,50 @@ version — just on a ~2 second update cycle instead of continuous, since
 there's no persistent connection to push updates down.
 
 This bundle deliberately does NOT include a WebSocket server, and never
-will — see "Why there's no WebSocket version of this" below. It's not a
+will — see "Moderator session list (optional)
+------------------------------------
+presence/moderation/roster.php lets a moderator whose domain issuer has
+signed a grant see who is in one world: display name, world, when they
+joined, whether they are in presence and/or chat, and the public avatar and
+chat ids. It never returns wallet keys, credential ids, network addresses or
+connection tokens, and it can do nothing else (no mute, kick or ban). It is
+off until you create presence/lib/atlas-presence-moderation-config.json
+(not part of the repository; lib/ is web-denied by .htaccess):
+
+  {
+    "enabled": true,
+    "audience": "https://presence.example.com",
+    "domains": {
+      "example.com": {
+        "issuerKeys": ["<the domain's public key from /.well-known/atlas-key.json>"],
+        "statusUrl": "https://example.com/atlas/moderation/status"
+      }
+    },
+    "revokedModerators": [],
+    "revokedGrants": []
+  }
+
+- "audience" is this presence service's own origin; it must equal one of the
+  origins listed in the issuer's moderation config.
+- "issuerKeys" are the ONLY keys trusted for that domain. Nothing is fetched
+  from a manifest or taken from a request. During an issuer key rotation list
+  both keys, then remove the old one.
+- "statusUrl" must be https (http only for localhost). Each request checks a
+  short-lived signed statement from the issuer saying who is still a
+  moderator; if it cannot be obtained the request is refused (fail closed).
+- Emergency revocation: add a moderator's reference to "revokedModerators"
+  (print it on any machine with Node: node tools/moderation-ref.js <domain>
+  <moderator public key>), or a grant id to "revokedGrants", or set "enabled"
+  to false, or delete the key from "issuerKeys". Each takes effect on the
+  next request; the file is read every time.
+- An unparseable or invalid file turns moderation off. A bad domain entry
+  is ignored and that domain is refused.
+
+Full design, wire format, revocation bounds and limits:
+docs/moderation-authorization.md in the main repository.
+
+
+Why there's no WebSocket version of this" below. It's not a
 missing feature; it's a hosting constraint that has nothing to do with
 PHP specifically.
 
@@ -29,8 +72,12 @@ Requirements
 -------------
 - Apache with mod_rewrite and AllowOverride enabled for your account
   (virtually always the default on cPanel, same as issuer-php needs).
-- PHP with nothing special enabled — no openssl needed here (presence
-  isn't a signed/credentialed operation, unlike everything in issuer-php).
+- PHP with nothing special enabled for presence and chat — no openssl
+  needed for those (they are not signed/credentialed operations). The
+  OPTIONAL moderation endpoint (see "Moderator session list" below) verifies
+  ECDSA signatures and needs the openssl extension plus curl or
+  allow_url_fopen to reach your issuer; without a moderation config file it
+  answers 503 and nothing else is affected.
 - No composer, no Node, no build step. Just upload the files.
 
 
@@ -46,7 +93,13 @@ What's in this folder
       chat-send.php  - POST /presence/poll/chat-send  (send one chat message)
       chat-leave.php - POST /presence/poll/chat-leave (a visitor explicitly leaves chat)
     status.php       - GET /presence/status (how many are in a world right now; a count only)
+    moderation/
+      roster.php     - POST /presence/moderation/roster (read-only anonymous
+                        session list for an authorized moderator; answers 503
+                        until you configure it — see "Moderator session list")
     lib/
+      moderation.php             - moderator-grant verification (shared code,
+                                    not a web route)
       bootstrap.php, store.php  - shared code, not web routes — store.php
                                     holds BOTH the presence room logic and
                                     the chat room logic (see its own

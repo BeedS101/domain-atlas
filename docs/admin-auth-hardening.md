@@ -75,7 +75,8 @@ end.
 
 Roster entries may now carry a `role` (`admin`, the default, or `moderator`).
 A moderator can log in but is refused (`403 insufficient-role`) by every route
-above; only the moderation grant route accepts it. See
+above; only the moderation grant route accepts it, and that route needs a
+fresh signature (a session token alone is refused). See
 `docs/moderation-authorization.md`.
 
 ## Incompatible changes

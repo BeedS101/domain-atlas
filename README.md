@@ -2086,9 +2086,13 @@ simplifications are worth naming plainly rather than leaving implicit:
 - **Moderator role.** A roster entry may carry `"role": "moderator"` (with
   optional `worlds` and `operations` lists). A moderator can sign in but is
   refused by every issuer-admin route; the only thing it can do is ask
-  `POST /atlas/admin/moderation/grant` for a short-lived, domain-signed grant
-  bound to an ephemeral key. Nothing consumes grants yet, and there are no
-  moderation commands. The wire format, trust model and limits are in
+  `POST /atlas/admin/moderation/grant` (with a fresh signature; a session
+  token alone is refused) for a short-lived, domain-signed grant bound to an
+  ephemeral key. The presence services verify grants against an
+  issuer-signed, short-lived status statement (`GET /atlas/moderation/status`)
+  and answer one read-only operation, `roster.view`, an anonymous list of one
+  world's sessions. There are no moderation commands (no mute, kick or ban).
+  The wire format, trust model, revocation bounds and limits are in
   `docs/moderation-authorization.md`.
 - **Admin session primitive.** Re-signing every click with an ECDSA key
   works fine for a one-off CLI call, but gets impractical for anything

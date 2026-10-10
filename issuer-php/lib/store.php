@@ -615,7 +615,7 @@ function atlas_admin_client_key() {
 // only when under the limit). Returns seconds until the client may try again,
 // or 0 when it is under the limit (for 'take', 0 means the hit was recorded).
 function atlas_admin_limiter($bucket, $mode, $limit, $windowMs) {
-  return atlas_admin_locked(atlas_admin_ratelimit_file(), ['failures' => [], 'nonceIssues' => []], function ($doc) use ($bucket, $mode, $limit, $windowMs) {
+  return atlas_admin_locked(atlas_admin_ratelimit_file(), ['failures' => [], 'nonceIssues' => [], 'moderationStatus' => []], function ($doc) use ($bucket, $mode, $limit, $windowMs) {
     $nowMs = atlas_now_ms();
     $client = atlas_admin_client_key();
     $map = isset($doc[$bucket]) && is_array($doc[$bucket]) ? $doc[$bucket] : [];
@@ -641,6 +641,8 @@ function atlas_admin_record_failure() { atlas_admin_limiter('failures', 'note', 
 // Seconds until another login nonce may be issued to this client, or 0 after
 // recording the issue.
 function atlas_admin_take_nonce_slot() { return atlas_admin_limiter('nonceIssues', 'take', atlas_admin_nonce_per_client_per_min(), 60000); }
+// Same, for moderation status statements.
+function atlas_moderation_take_status_slot() { return atlas_admin_limiter('moderationStatus', 'take', atlas_moderation_status_per_client_per_min(), 60000); }
 
 // Result shape shared by every admin gate: ['error','status','code'(,
 // 'retryAfter','serverTime')] on refusal, ['publicKey'] on success.
@@ -933,6 +935,14 @@ const ATLAS_MODERATION_REF_CONTEXT = "atlas-moderator-ref/v1\n";
 const ATLAS_MODERATION_GRANT_MAX_TTL_S = 600; // hard ceiling, 10 minutes
 const ATLAS_MODERATION_GRANT_DEFAULT_TTL_S = 300;
 const ATLAS_MODERATION_REQUEST_FIELDS = ['audience', 'worlds', 'operations', 'ttlSeconds', 'popPublicKey', 'adminAuth'];
+// Moderation status statement: an issuer-signed, short-lived list of the keys
+// that hold moderation authority right now, which a presence service must see
+// (and re-fetch) before it acts on any grant. Mirrors issuer-server/server.js.
+const ATLAS_MODERATION_STATUS_TYPE = 'atlas.moderation-status';
+const ATLAS_MODERATION_STATUS_VERSION = 1;
+const ATLAS_MODERATION_STATUS_SIGN_CONTEXT = "atlas-moderation-status/v1\n";
+function atlas_moderation_status_ttl_s() { return min(120, max(1, atlas_env_positive_int('ATLAS_MODERATION_STATUS_TTL_S', 60))); }
+function atlas_moderation_status_per_client_per_min() { return atlas_env_positive_int('ATLAS_MODERATION_STATUS_PER_CLIENT_PER_MIN', 120); }
 
 function atlas_moderation_config_file() {
   return __DIR__ . '/atlas-moderation-config.json';
@@ -1036,6 +1046,31 @@ function atlas_record_moderation_grant($entry, $nowMs) {
     $live[] = $entry;
     return [['grants' => $live], true];
   });
+}
+
+// Every roster key that holds authority right now, as the status statement
+// lists it: the moderator reference and the worlds and operations in force.
+// Administrators appear with every world and operation. A key with no
+// authority, or with an empty scope, is left out.
+function atlas_moderation_status_moderators($domain) {
+  $path = atlas_admin_keys_file();
+  if (!file_exists($path)) return [];
+  $doc = json_decode(file_get_contents($path), true);
+  $keys = is_array($doc) && isset($doc['keys']) && is_array($doc['keys']) ? $doc['keys'] : [];
+  $seen = [];
+  $out = [];
+  foreach ($keys as $k) {
+    if (!is_array($k) || !isset($k['publicKey']) || !is_string($k['publicKey']) || isset($seen[$k['publicKey']])) continue;
+    $seen[$k['publicKey']] = true;
+    $a = admin_authority($k['publicKey']);
+    if (!$a) continue;
+    $operations = $a['operations'] === '*' ? ATLAS_MODERATION_OPERATIONS : $a['operations'];
+    if ($a['worlds'] !== '*' && !count($a['worlds'])) continue;
+    if (!count($operations)) continue;
+    $out[] = ['moderatorRef' => atlas_moderator_ref($domain, $k['publicKey']), 'worlds' => $a['worlds'], 'operations' => array_values($operations)];
+  }
+  usort($out, function ($x, $y) { return strcmp($x['moderatorRef'], $y['moderatorRef']); });
+  return $out;
 }
 
 // Trading Station membership roster — same flat-array
