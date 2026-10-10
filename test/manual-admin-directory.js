@@ -31,6 +31,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const PORT = 8117; // isolated — distinct from every other manual-*.js test's own port
@@ -76,7 +77,7 @@ async function issueAsset(ownerPublicKey, assetClass) {
 }
 async function login(admin) {
   const nonce = (await get('/atlas/admin/session/nonce')).body.nonce;
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, BASE, '/atlas/admin/session/start');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   const res = await postJson('/atlas/admin/session/start', { payload, proof });
   if (res.status !== 200) throw new Error('login failed: ' + JSON.stringify(res));

@@ -2,12 +2,12 @@
 // /atlas/admin/session/nonce, POST /atlas/admin/session/start, POST
 // /atlas/admin/session/whoami, POST /atlas/admin/session/logout
 // (issuer-server/server.js). A short-lived bearer-token layer on top of
-// the existing admin roster/requireAdmin() gate — lets a roster key sign
+// the existing admin roster/requireAdminAuth() gate — lets a roster key sign
 // in ONCE (over a fresh nonce, so the login itself can't be replayed) and
 // use a random token for everything after that, instead of re-signing
 // every request with its ECDSA key. The roster stays the one source of
 // truth for who's an admin; this only ever hands out a session to a key
-// that already passes requireAdmin().
+// that already passes requireAdminAuth().
 //
 // HTTP layer directly, same style as manual-calendar-protocol.js — no
 // browser/extension involved, and this test needs to backdate nonce/
@@ -43,6 +43,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const NODE_PORT = 8113; // isolated — distinct from every other manual-*.js test's chosen port
@@ -94,7 +95,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 async function login(base, identity, nonce) {
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, base, '/atlas/admin/session/start');
   const proof = await signWithSelf(identity.kp, identity.publicKey, payload);
   return postJson(base, '/atlas/admin/session/start', { payload, proof });
 }

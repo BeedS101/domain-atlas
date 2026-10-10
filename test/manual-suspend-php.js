@@ -44,6 +44,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const PORT = 8172; // isolated — distinct from every other manual-*.js/-php.js test's chosen port (see manual-suspend.js's 8171 for this feature's Node-side companion)
@@ -77,6 +78,7 @@ function postJson(urlPath, body) {
     .then(async (r) => ({ status: r.status, body: await r.json() }));
 }
 async function adminCall(urlPath, admin, payload) {
+  payload = withAdminAuth(payload, BASE, urlPath);
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(urlPath, { payload, proof });
 }

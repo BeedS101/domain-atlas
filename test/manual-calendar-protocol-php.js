@@ -10,7 +10,7 @@
 // separately-rooted instances, not two state files under one bundle.
 //
 // GET /atlas/calendar is a plain, unsigned, ungated fetch (§12.1); POST
-// /atlas/calendar requires a signed admin proof envelope (require_admin(),
+// /atlas/calendar requires a signed admin proof envelope (require_admin_auth(),
 // lib/store.php), the same as /atlas/revoke, /atlas/mail/send, and
 // /atlas/asset/reissue.
 //
@@ -29,6 +29,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const BUNDLE_DIR = path.resolve(__dirname, '..', 'issuer-php');
@@ -80,6 +81,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 async function postAsAdmin(base, urlPath, admin, payload) {
+  payload = withAdminAuth(payload, base, urlPath);
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return post(base, urlPath, { payload, proof });
 }

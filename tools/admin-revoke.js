@@ -2,7 +2,7 @@
 // Revokes a credential as a registered domain admin — the CLI replacement
 // for the plain, unauthenticated `curl -d '{"id":...}' /atlas/revoke` the
 // README used to document, now that revoke requires a signed admin proof
-// envelope (requireAdmin(), issuer-server/server.js) instead of trusting
+// envelope (requireAdminAuth(), issuer-server/server.js) instead of trusting
 // whoever can reach the endpoint.
 //
 // This is deliberately a local operator tool, not a general client: it
@@ -23,6 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { adminAuth, argValue } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
@@ -35,6 +36,7 @@ if (!credentialId) {
 }
 
 const DOMAIN_URL = useDomainB ? 'http://localhost:8002' : 'http://localhost:8001';
+const ADMIN_DOMAIN = new URL(DOMAIN_URL).host;
 const STATE_DIR = useDomainB
   ? path.resolve(__dirname, '..', 'issuer-server', 'domain-b-state')
   : path.resolve(__dirname, '..', 'issuer-server');
@@ -87,6 +89,7 @@ function ensureRegistered(publicKey) {
   ensureRegistered(admin.publicKey);
 
   const payload = { id: credentialId, reason: reason || 'issuer-request' };
+  payload.adminAuth = adminAuth(ADMIN_DOMAIN, '/atlas/revoke');
   const data = new TextEncoder().encode(canonicalize(payload));
   const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, admin.privateKey, data));
   const proof = { signerRole: 'raw-ecdsa', publicKey: admin.publicKey, signature: b64url(sig) };

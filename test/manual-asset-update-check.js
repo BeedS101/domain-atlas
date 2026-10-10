@@ -41,6 +41,7 @@ const path = require('path');
 const http = require('http');
 const fs = require('fs');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
@@ -74,7 +75,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 // /atlas/asset/reissue now requires a registered domain admin's signature
-// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// (requireAdminAuth(), issuer-server/server.js) — seeds one directly into the
 // admin roster file, the same "plain operator-edited JSON" bootstrap a
 // real domain operator would do by hand.
 function seedAdmin(publicKey) {
@@ -182,10 +183,10 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('STEP 1: issuer reissues that exact item server-side (POST /atlas/asset/reissue) — the demo/admin trigger');
     const admin = await genIdentity();
     seedAdmin(admin.publicKey);
-    const reissue1Payload = {
+    const reissue1Payload = withAdminAuth({
       credential: held1,
       properties: { 'com.example.condition': 'restored' }
-    };
+    }, 'http://localhost:8001', '/atlas/asset/reissue');
     const reissue1Proof = await signWithSelf(admin.kp, admin.publicKey, reissue1Payload);
     const reissue1 = await postJson(8001, '/atlas/asset/reissue', { payload: reissue1Payload, proof: reissue1Proof });
     if (!reissue1.newCredential || reissue1.newCredential.supersedes !== held1.id) {
@@ -232,10 +233,10 @@ async function clickPortalTo(frame, targetWorld) {
     console.log('PASS: item-update badge cleared on open, same unobtrusive pattern as mail\'s own badge');
 
     console.log('STEP 5: a SECOND reissue, picked up WITHOUT clicking Check now — just by walking Plaza -> Museum -> Plaza (same domain)');
-    const reissue2Payload = {
+    const reissue2Payload = withAdminAuth({
       credential: held2,
       properties: { 'com.example.condition': 'pristine' }
-    };
+    }, 'http://localhost:8001', '/atlas/asset/reissue');
     const reissue2Proof = await signWithSelf(admin.kp, admin.publicKey, reissue2Payload);
     const reissue2 = await postJson(8001, '/atlas/asset/reissue', { payload: reissue2Payload, proof: reissue2Proof });
     if (!reissue2.newCredential || reissue2.newCredential.supersedes !== held2.id) {

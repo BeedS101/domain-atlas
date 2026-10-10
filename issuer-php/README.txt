@@ -165,8 +165,8 @@ endpoint — hiding or deleting the membership card locally in the wallet
 is what stops future mail for it.
 
 To actually send mail to a subscriber, POST to /atlas/mail/send — but note
-this endpoint now requires a signed admin proof envelope (require_admin(),
-lib/store.php), not a bare body: SPEC.md §11.1 already calls sending
+this endpoint now requires a signed admin proof envelope
+(require_admin_auth(), lib/store.php), not a bare body: SPEC.md §11.1 already calls sending
 "authenticated as the domain operator, not as any visitor," and a plain
 unauthenticated endpoint meant anyone could get your domain to sign and
 deliver an arbitrary message (or mint a gift asset, see below) to any
@@ -233,7 +233,7 @@ SSH and loop the credential ids into tools/admin-mail-send.js --print-only
 calls yourself (see "Sending mail to subscribers" above). There's still no
 UI for a one-click broadcast, but the endpoint itself is no longer
 unauthenticated — it now requires a signed admin proof envelope
-(require_admin(), lib/store.php), the same as /atlas/revoke.
+(require_admin_auth(), lib/store.php), the same as /atlas/revoke.
 
 
 Post Office — user-to-user mail (task #75/#87/#94/#95/#96, SPEC.md §11.3)
@@ -768,7 +768,7 @@ in lib/store.php), never by reissuing one specific balance; the endpoint
 rejects a fungible credential with a clear error.
 
 To do this, POST to /atlas/asset/reissue — but note this endpoint now
-requires a signed admin proof envelope (require_admin(), lib/store.php),
+requires a signed admin proof envelope (require_admin_auth(), lib/store.php),
 not a bare body, same as /atlas/mail/send above: left open, anyone who
 could observe a credential (many are publicly visible via trade listings
 or gifts) could silently rewrite its properties or loosen/tighten its
@@ -907,10 +907,11 @@ of the roster, without changing what the roster means.
 
 /session/start still requires a full signed proof envelope — over a
 single-use nonce from /session/nonce, so the login itself can't be
-replayed — checked against the exact same roster require_admin() already
-enforces everywhere else in this bundle. Only once that succeeds does it
+replayed — checked against the exact same roster (is_admin_key()) every
+other admin route enforces in this bundle. Only once that succeeds does it
 hand back a random token (lib/atlas-admin-sessions-store.json, next to the
-other private state files), good for 30 minutes and sliding forward on
+other private state files), good for 30 minutes idle (and at most 8 hours
+from login) and sliding forward on
 every authenticated request that uses it (not just /whoami —
 require_admin_auth(), the shared gate every admin-gated endpoint now
 calls, treats any check as activity). /logout (or the token simply
@@ -925,6 +926,46 @@ atlas/asset/reissue.php, and atlas/calendar.php's POST side all now accept
 that makes the session actually useful for something, rather than only
 ever being able to answer "am I an admin". See "Admin panel" below for the
 page that now actually consumes it.
+
+
+Admin authentication hardening
+--------------------------------
+Changes to the admin layer that you must act on when upgrading. The full
+write-up (wire format, every incompatible change, limits) is
+docs/admin-auth-hardening.md in the project repository.
+
+ - Every request signed with a key (instead of a session token) must carry
+   payload.adminAuth = {action, domain, issuedAt, nonce}. action is the
+   route path (for example "/atlas/revoke"), domain is this domain's name,
+   issuedAt is an ISO timestamp within 2 minutes of the server clock, and
+   nonce is 16 to 128 characters, used once. A request without it gets 401
+   "auth-required". The login payload for /atlas/admin/session/start
+   carries adminAuth {action: "/atlas/admin/session/start", domain} next to
+   its nonce. Use the tools/admin-*.js scripts, which do this.
+ - Set $forced in atlas_domain() (lib/store.php) to your domain. Otherwise
+   the domain comes from the Host header.
+ - Sessions are re-checked against lib/atlas-admin-keys-store.json on every
+   request: removing a key, or adding "revoked": true to it, ends its
+   sessions on their next use. Sessions also end 8 hours after login.
+   Every existing session stops working on upgrade; admins sign in again.
+ - A signed request body can no longer be saved and re-sent. If a cron job
+   posts a saved poll-now body, replace it with
+     node tools/admin-poll-now-sign.js --post https://your-domain.example
+   (needs Node and tools/.admin-identity.json on the machine running cron).
+ - Request bodies over 2 MB (admin routes: 256 KB, session routes: 16 KB)
+   get 413. Failed admin authentications are limited per client address
+   (REMOTE_ADDR; forwarding headers are ignored, so behind a reverse proxy
+   all clients share one limit), 10 per 5 minutes by default; at most 200
+   login nonces are outstanding, 10 requested per client per minute.
+ - New private state files in lib/: atlas-admin-proof-nonces-store.json and
+   atlas-admin-ratelimit-store.json (covered by lib/.htaccess like the
+   others). Defaults can be changed with the environment variables
+   ATLAS_ADMIN_SESSION_MAX_MS, ATLAS_ADMIN_REQUEST_WINDOW_MS,
+   ATLAS_ADMIN_NONCE_CAP, ATLAS_ADMIN_NONCE_PER_CLIENT_PER_MIN,
+   ATLAS_ADMIN_FAIL_LIMIT, ATLAS_ADMIN_FAIL_WINDOW_MS and
+   ATLAS_ADMIN_MAX_BODY_BYTES where your host lets you set them.
+ - Session tokens are still stored in plaintext in
+   lib/atlas-admin-sessions-store.json.
 
 
 Admin panel

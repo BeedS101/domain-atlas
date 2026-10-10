@@ -38,6 +38,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const BACKEND = process.argv[2] === 'php' ? 'php' : 'node';
@@ -156,7 +157,7 @@ const OWNER = 'test-owner-public-key-serialized-assets-demo';
     console.log('STEP 4: reissuing a ring leaves its serial/editionSize untouched');
     const admin = await genIdentity();
     fs.writeFileSync(ADMIN_KEYS_FILE, JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
-    const reissuePayload = { credential: held[0], properties: { 'com.example.condition': 'slightly tarnished' } };
+    const reissuePayload = withAdminAuth({ credential: held[0], properties: { 'com.example.condition': 'slightly tarnished' } }, BASE, '/atlas/asset/reissue');
     const reissueProof = await signWithSelf(admin.kp, admin.publicKey, reissuePayload);
     const reissue = await postJson('/atlas/asset/reissue', { payload: reissuePayload, proof: reissueProof });
     assert(reissue.status === 200, 'expected reissue to succeed, got ' + reissue.status + ' ' + JSON.stringify(reissue.body));

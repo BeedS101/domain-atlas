@@ -348,7 +348,7 @@ const RELAY_RATE_FILE = path.join(STATE_DIR, 'atlas-federation-relay-rate-store.
 // uses, for the same reason: there's an unavoidable bootstrap problem
 // (something has to seed the very first admin key), so this is edited by
 // hand rather than through a self-service registration endpoint. See
-// requireAdmin() below for how a request actually gets checked against
+// requireAdminAuth() below for how a request actually gets checked against
 // it, and the admin session layer just below for the short-lived bearer
 // token a roster key can trade one signature for.
 const ADMIN_KEYS_FILE = path.join(STATE_DIR, 'atlas-admin-keys-store.json');
@@ -360,11 +360,34 @@ const ADMIN_KEYS_FILE = path.join(STATE_DIR, 'atlas-admin-keys-store.json');
 // so the login itself can't be replayed) and use a random bearer token
 // for everything after that, until it's logged out or the token times
 // out. See issueAdminNonce/consumeAdminNonce and createAdminSession/
-// touchAdminSession/deleteAdminSession below.
+// checkAdminSession/deleteAdminSession below.
 const ADMIN_NONCES_FILE = path.join(STATE_DIR, 'atlas-admin-nonces-store.json');
 const ADMIN_SESSIONS_FILE = path.join(STATE_DIR, 'atlas-admin-sessions-store.json');
 const ADMIN_NONCE_TTL_MS = 2 * 60 * 1000; // long enough to sign and post, short enough a stale one is worthless
-const ADMIN_SESSION_TTL_MS = 30 * 60 * 1000; // slides forward on every check — see touchAdminSession
+const ADMIN_SESSION_TTL_MS = 30 * 60 * 1000; // idle expiry; slides forward on every check — see checkAdminSession
+// Hard ceiling on a session's life from login, however active it is.
+const ADMIN_SESSION_MAX_MS = envPositiveInt('ATLAS_ADMIN_SESSION_MAX_MS', 8 * 60 * 60 * 1000);
+// A signed admin request (no session) is accepted only when adminAuth.issuedAt
+// is within this window of the server clock, and its nonce is remembered for
+// twice that, so a captured request cannot be replayed inside the window or
+// after it. See authenticateAdminProof.
+const ADMIN_REQUEST_WINDOW_MS = envPositiveInt('ATLAS_ADMIN_REQUEST_WINDOW_MS', 2 * 60 * 1000);
+const ADMIN_PROOF_NONCE_RETAIN_MS = 2 * ADMIN_REQUEST_WINDOW_MS + 30 * 1000;
+const ADMIN_PROOF_NONCE_CAP = 20000;
+const ADMIN_PROOF_NONCES_FILE = path.join(STATE_DIR, 'atlas-admin-proof-nonces-store.json');
+// Abuse bounds on the admin surface. Clients are told apart by socket peer
+// address only; forwarding headers are never read, so a client cannot choose
+// its own bucket. Behind a reverse proxy every visitor shares the proxy's
+// address and therefore one bucket.
+const ADMIN_NONCE_CAP = envPositiveInt('ATLAS_ADMIN_NONCE_CAP', 200); // outstanding login nonces, all clients
+const ADMIN_NONCE_PER_CLIENT_PER_MIN = envPositiveInt('ATLAS_ADMIN_NONCE_PER_CLIENT_PER_MIN', 10);
+const ADMIN_FAIL_LIMIT = envPositiveInt('ATLAS_ADMIN_FAIL_LIMIT', 10); // failed authentications per client per window
+const ADMIN_FAIL_WINDOW_MS = envPositiveInt('ATLAS_ADMIN_FAIL_WINDOW_MS', 5 * 60 * 1000);
+// Request body bounds in bytes: a general ceiling for every route, a smaller
+// one for admin routes, and a tiny one for the session routes.
+const MAX_BODY_BYTES = envPositiveInt('ATLAS_MAX_BODY_BYTES', 2 * 1024 * 1024);
+const ADMIN_MAX_BODY_BYTES = envPositiveInt('ATLAS_ADMIN_MAX_BODY_BYTES', 256 * 1024);
+const ADMIN_SESSION_MAX_BODY_BYTES = 16 * 1024;
 // Demo login (credential-based second factor, demo-domain-a/login-demo.html):
 // same single-use-nonce shape as the admin login above, but with no session
 // layer on top — a "login" here is just proving, fresh each time, that the
@@ -1550,6 +1573,12 @@ const MIME = {
   '.png': 'image/png', '.svg': 'image/svg+xml', '.css': 'text/css', '.glb': 'model/gltf-binary'
 };
 
+// A positive integer from the environment, or the default when unset/invalid.
+function envPositiveInt(name, fallback) {
+  const n = parseInt(process.env[name] || '', 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
 function fromB64url(str) { return new Uint8Array(Buffer.from(str, 'base64url')); }
 
@@ -1616,18 +1645,164 @@ async function verifyEnvelope(payload, envelope) {
   return false;
 }
 
-// Gates an admin-only action the same way any other signed action in this
-// spec is checked (verifyEnvelope above, §6.2), with one extra condition:
-// the signing key also has to appear on ADMIN_KEYS_FILE's roster, not just
-// be internally consistent. Returns an error string when the request
-// should be rejected, or null when it's authorized — callers just need to
-// check truthiness, same shape checkPresentedAsset's own callers already
-// use for their per-field validation.
-async function requireAdmin(payload, proof) {
-  if (!payload || !proof) return 'payload and proof are required';
-  const sigOk = await verifyEnvelope(payload, proof);
-  if (!sigOk) return 'admin signature does not check out';
-  if (!isAdminKey(proof.publicKey)) return 'this key is not a registered domain admin';
+// ---------- Admin request authentication ----------
+//
+// Two ways to authorise an admin route: a bearer session (checkAdminSession)
+// or a freshly signed request (authenticateAdminProof). Both end in the same
+// roster lookup, so removing a key from the roster takes effect on its next
+// request whichever way it authenticates.
+
+// Failed-authentication and nonce-issue history per client, in memory. A
+// restart clears it, which only ever relaxes a limit; it never locks anyone
+// out. Bounded so a flood of distinct addresses cannot grow it without limit.
+const adminFailures = new Map(); // client -> ms timestamps
+const adminNonceIssues = new Map(); // client -> ms timestamps
+const ADMIN_LIMITER_MAX_CLIENTS = 5000;
+
+function adminClientKey(req) {
+  const addr = req && req.socket && req.socket.remoteAddress;
+  return typeof addr === 'string' && addr ? addr.replace(/^::ffff:/, '') : 'unknown';
+}
+function recentHits(map, client, windowMs, nowMs) {
+  const kept = (map.get(client) || []).filter((t) => nowMs - t < windowMs);
+  if (kept.length) map.set(client, kept); else map.delete(client);
+  return kept;
+}
+function noteHit(map, client, nowMs) {
+  const hits = map.get(client) || [];
+  hits.push(nowMs);
+  map.delete(client); // re-insert so Map order stays oldest-first
+  map.set(client, hits);
+  while (map.size > ADMIN_LIMITER_MAX_CLIENTS) map.delete(map.keys().next().value);
+}
+// Seconds until the client may try again, or 0 when it is under the limit.
+function adminRetryAfter(map, client, limit, windowMs) {
+  const nowMs = Date.now();
+  const hits = recentHits(map, client, windowMs, nowMs);
+  if (hits.length < limit) return 0;
+  return Math.max(1, Math.ceil((hits[0] + windowMs - nowMs) / 1000));
+}
+function recordAdminFailure(req) { noteHit(adminFailures, adminClientKey(req), Date.now()); }
+function adminFailureRetryAfter(req) {
+  return adminRetryAfter(adminFailures, adminClientKey(req), ADMIN_FAIL_LIMIT, ADMIN_FAIL_WINDOW_MS);
+}
+
+// Result shape shared by every admin gate: {error, status, code[, retryAfter]}
+// on refusal, {publicKey} on success. sendAdminAuthFailure writes it out.
+function adminFailure(status, code, message, extra) {
+  return { error: message, status, code, ...(extra || {}) };
+}
+function adminRateLimited(retryAfter) {
+  return adminFailure(429, 'rate-limited', 'too many failed admin authentication attempts; try again later', { retryAfter });
+}
+function sendAdminAuthFailure(res, auth) {
+  if (auth.retryAfter) res.setHeader('Retry-After', String(auth.retryAfter));
+  const body = { error: auth.error, code: auth.code };
+  if (auth.serverTime) body.serverTime = auth.serverTime;
+  if (auth.retryAfter) body.retryAfter = auth.retryAfter;
+  return sendJson(res, auth.status || 401, body);
+}
+
+// verifyEnvelope() plus what an admin assertion needs from a passkey: it must
+// be a "get" assertion and the user must have been present. Same rule the
+// signed mail reads use (verifyMailEnvelope).
+const verifyAdminEnvelope = (payload, envelope) => verifyMailEnvelope(payload, envelope);
+
+// The nonce store for signed admin requests: [sha256(signerKey|nonce),
+// expiresAtMs] pairs. The check and the write are one synchronous step with
+// no await between them, so two concurrent requests carrying the same nonce
+// cannot both pass. Returns 'ok', 'replayed' or 'full'.
+function consumeAdminProofNonce(signerKey, nonce, nowMs) {
+  let doc = { nonces: [] };
+  try { if (fs.existsSync(ADMIN_PROOF_NONCES_FILE)) doc = JSON.parse(fs.readFileSync(ADMIN_PROOF_NONCES_FILE, 'utf8')); } catch (e) { doc = { nonces: [] }; }
+  const live = (Array.isArray(doc.nonces) ? doc.nonces : []).filter((n) => Array.isArray(n) && n[1] > nowMs);
+  const key = require('crypto').createHash('sha256').update(signerKey + '|' + nonce).digest('base64url');
+  if (live.some((n) => n[0] === key)) return 'replayed';
+  if (live.length >= ADMIN_PROOF_NONCE_CAP) return 'full';
+  live.push([key, nowMs + ADMIN_PROOF_NONCE_RETAIN_MS]);
+  fs.writeFileSync(ADMIN_PROOF_NONCES_FILE, JSON.stringify({ nonces: live }));
+  return 'ok';
+}
+
+// Checks payload.adminAuth = {action, domain, issuedAt, nonce} against the
+// route being called. Returns an adminFailure, or null when it is well formed
+// and fresh. Does not look at the signature.
+function checkAdminAuthFields(payload, action, nowMs) {
+  const a = payload && payload.adminAuth;
+  if (!a || typeof a !== 'object' || Array.isArray(a)) {
+    return adminFailure(401, 'auth-required', 'signed admin requests must carry payload.adminAuth {action, domain, issuedAt, nonce}');
+  }
+  if (a.action !== action) return adminFailure(400, 'bad-request', 'payload.adminAuth.action must be ' + action);
+  if (a.domain !== DOMAIN) return adminFailure(400, 'wrong-domain', 'payload.adminAuth.domain does not name this domain');
+  if (typeof a.nonce !== 'string' || a.nonce.length < 16 || a.nonce.length > 128) {
+    return adminFailure(400, 'bad-request', 'payload.adminAuth.nonce must be a string of 16 to 128 characters');
+  }
+  const issuedMs = typeof a.issuedAt === 'string' ? Date.parse(a.issuedAt) : NaN;
+  if (!Number.isFinite(issuedMs)) return adminFailure(400, 'bad-request', 'payload.adminAuth.issuedAt must be an ISO timestamp');
+  if (Math.abs(nowMs - issuedMs) > ADMIN_REQUEST_WINDOW_MS) {
+    return adminFailure(401, 'stale-request', 'request is outside the allowed time window', { serverTime: new Date(nowMs).toISOString() });
+  }
+  return null;
+}
+
+// Authenticates one signed admin request for `action` (the route path).
+// Order matters: shape and freshness are cheap and need no secret, the
+// signature and the roster come next, and the nonce is spent only after both
+// have passed, so unauthenticated traffic can never fill the nonce store.
+async function authenticateAdminProof(payload, proof, action, req) {
+  if (!payload || typeof payload !== 'object' || !proof || typeof proof !== 'object') {
+    return adminFailure(401, 'auth-required', 'payload and proof are required');
+  }
+  const retryAfter = adminFailureRetryAfter(req);
+  if (retryAfter) return adminRateLimited(retryAfter);
+  const nowMs = Date.now();
+  const fieldError = checkAdminAuthFields(payload, action, nowMs);
+  if (fieldError) return fieldError;
+  if (typeof proof.publicKey !== 'string' || !proof.publicKey || !(await verifyAdminEnvelope(payload, proof))) {
+    recordAdminFailure(req);
+    return adminFailure(401, 'bad-signature', 'admin signature does not check out');
+  }
+  if (!isAdminKey(proof.publicKey)) {
+    recordAdminFailure(req);
+    return adminFailure(401, 'not-admin', 'this key is not a registered domain admin');
+  }
+  const spent = consumeAdminProofNonce(proof.publicKey, payload.adminAuth.nonce, nowMs);
+  if (spent === 'replayed') {
+    recordAdminFailure(req);
+    return adminFailure(401, 'replayed-request', 'this request has already been used');
+  }
+  if (spent === 'full') return adminFailure(503, 'busy', 'too many recent admin requests; try again shortly');
+  return { publicKey: proof.publicKey };
+}
+
+// Authenticates a login: a roster key's signature over a server-issued
+// single-use nonce, bound to this route and domain so a signature obtained
+// for one cannot be presented to another. Returns an adminFailure, or null
+// (the nonce is then spent). Same ordering as authenticateAdminProof.
+async function authenticateAdminLogin(payload, proof, req) {
+  if (!payload || typeof payload !== 'object' || !proof || typeof proof !== 'object') {
+    return adminFailure(401, 'auth-required', 'payload and proof are required');
+  }
+  const retryAfter = adminFailureRetryAfter(req);
+  if (retryAfter) return adminRateLimited(retryAfter);
+  const a = payload.adminAuth;
+  if (!a || typeof a !== 'object' || a.action !== '/atlas/admin/session/start') {
+    return adminFailure(401, 'auth-required', 'login payload must carry adminAuth {action: "/atlas/admin/session/start", domain}');
+  }
+  if (a.domain !== DOMAIN) return adminFailure(400, 'wrong-domain', 'payload.adminAuth.domain does not name this domain');
+  if (typeof payload.nonce !== 'string' || !payload.nonce) return adminFailure(400, 'bad-request', 'payload.nonce is required');
+  if (typeof proof.publicKey !== 'string' || !proof.publicKey || !(await verifyAdminEnvelope(payload, proof))) {
+    recordAdminFailure(req);
+    return adminFailure(401, 'bad-signature', 'admin signature does not check out');
+  }
+  if (!isAdminKey(proof.publicKey)) {
+    recordAdminFailure(req);
+    return adminFailure(401, 'not-admin', 'this key is not a registered domain admin');
+  }
+  if (!consumeAdminNonce(payload.nonce)) {
+    recordAdminFailure(req);
+    return adminFailure(401, 'bad-nonce', 'nonce is missing, unknown, already used, or expired');
+  }
   return null;
 }
 
@@ -1644,10 +1819,13 @@ function readAdminNonces() {
 function writeAdminNonces(doc) {
   fs.writeFileSync(ADMIN_NONCES_FILE, JSON.stringify(doc, null, 2));
 }
+// Returns a fresh nonce, or null while ADMIN_NONCE_CAP unexpired ones are
+// already outstanding.
 function issueAdminNonce() {
   const now = Date.now();
   const doc = readAdminNonces();
   doc.nonces = doc.nonces.filter((n) => n.expiresAt > now);
+  if (doc.nonces.length >= ADMIN_NONCE_CAP) { writeAdminNonces(doc); return null; }
   const nonce = b64url(webcrypto.getRandomValues(new Uint8Array(24)));
   doc.nonces.push({ nonce, expiresAt: now + ADMIN_NONCE_TTL_MS });
   writeAdminNonces(doc);
@@ -1709,15 +1887,20 @@ function readAdminSessions() {
 function writeAdminSessions(doc) {
   fs.writeFileSync(ADMIN_SESSIONS_FILE, JSON.stringify(doc, null, 2));
 }
+// A session records when it was created and the latest moment it may live
+// until however active it is (absoluteExpiresAt). Sessions written before
+// absoluteExpiresAt existed carry neither and are refused (see
+// checkAdminSession), so every admin signs in again once after an upgrade.
 function createAdminSession(publicKey) {
   const now = Date.now();
   const doc = readAdminSessions();
   doc.sessions = doc.sessions.filter((s) => s.expiresAt > now);
   const token = b64url(webcrypto.getRandomValues(new Uint8Array(32)));
-  const expiresAt = now + ADMIN_SESSION_TTL_MS;
-  doc.sessions.push({ token, publicKey, expiresAt });
+  const absoluteExpiresAt = now + ADMIN_SESSION_MAX_MS;
+  const expiresAt = Math.min(now + ADMIN_SESSION_TTL_MS, absoluteExpiresAt);
+  doc.sessions.push({ token, publicKey, createdAt: now, expiresAt, absoluteExpiresAt });
   writeAdminSessions(doc);
-  return { token, expiresAt };
+  return { token, expiresAt, absoluteExpiresAt };
 }
 // Constant-time compare so a session token can't be singled out any faster
 // by timing how quickly a near-miss fails — the token is 32 random bytes,
@@ -1729,20 +1912,32 @@ function tokensEqual(a, b) {
   if (bufA.length !== bufB.length) return false;
   return timingSafeEqual(bufA, bufB);
 }
-// Validates a session token and slides its expiry forward on every
-// successful check — an admin actively using the page never gets logged
-// out mid-session, but an abandoned tab's token still dies on its own.
-// Returns the session's public key, or null if the token doesn't match any
-// live session.
-function touchAdminSession(token) {
+// Validates a session token and, on success, slides its idle expiry forward
+// (never past absoluteExpiresAt). The session is re-checked against the
+// CURRENT roster on every call: when its key has been removed or marked
+// revoked, that key's sessions are all deleted and the request is refused,
+// so removing an admin takes effect on their next request. Returns
+// {publicKey} or {code} where code is 'unknown' (no live session) or
+// 'not-admin' (key no longer on the roster).
+function checkAdminSession(token) {
   const now = Date.now();
   const doc = readAdminSessions();
-  const session = typeof token === 'string' ? doc.sessions.find((s) => s.expiresAt > now && tokensEqual(s.token, token)) : null;
-  doc.sessions = doc.sessions.filter((s) => s.expiresAt > now);
-  if (!session) { writeAdminSessions(doc); return null; }
-  session.expiresAt = now + ADMIN_SESSION_TTL_MS;
+  const live = doc.sessions.filter((s) => s.expiresAt > now && Number.isFinite(s.absoluteExpiresAt) && s.absoluteExpiresAt > now);
+  const session = typeof token === 'string' && token ? live.find((s) => tokensEqual(s.token, token)) : null;
+  let result;
+  if (!session) {
+    result = { code: 'unknown' };
+  } else if (!isAdminKey(session.publicKey)) {
+    doc.sessions = live.filter((s) => s.publicKey !== session.publicKey);
+    writeAdminSessions(doc);
+    return { code: 'not-admin' };
+  } else {
+    session.expiresAt = Math.min(now + ADMIN_SESSION_TTL_MS, session.absoluteExpiresAt);
+    result = { publicKey: session.publicKey };
+  }
+  doc.sessions = live;
   writeAdminSessions(doc);
-  return session.publicKey;
+  return result;
 }
 // Logout is idempotent and looks the same whether or not the token was
 // ever valid — nothing here should let a caller distinguish "wrong token"
@@ -1755,28 +1950,29 @@ function deleteAdminSession(token) {
 }
 
 // The authorization check every admin-gated route below actually uses:
-// EITHER a fresh signed proof envelope (requireAdmin above) OR an active
-// session token (touchAdminSession) — the session layer's whole reason to
-// exist, so a page holding a token can act as admin without the visitor's
-// ECDSA key needing to be reachable for every click. A token, when given,
-// takes priority and is checked on its own; payload/proof are only
-// consulted when no token was sent, so a request never needs to carry
-// both. Using a valid token here also slides its expiry forward, same as
-// /whoami — any authenticated action counts as activity, not just an
-// explicit status check. Returns { error } when the request should be
-// rejected, or { publicKey } when it's authorized.
-async function requireAdminAuth(payload, proof, token) {
+// EITHER an active session token (checkAdminSession) OR a freshly signed
+// request (authenticateAdminProof) bound to this route and domain. A token,
+// when given, takes priority and is checked on its own; payload/proof are
+// only consulted when no token was sent. Using a valid token also slides its
+// idle expiry forward, so any authenticated action counts as activity. A
+// valid session is honoured even while the client's failed-attempt budget is
+// spent; only a failed one counts against it. Returns an adminFailure
+// (rejected; pass it to sendAdminAuthFailure) or { publicKey }.
+async function requireAdminAuth(payload, proof, token, req) {
   if (typeof token === 'string' && token) {
-    const publicKey = touchAdminSession(token);
-    if (!publicKey) return { error: 'session is missing, unknown, or expired' };
-    return { publicKey };
+    const checked = checkAdminSession(token);
+    if (checked.publicKey) return { publicKey: checked.publicKey };
+    const retryAfter = adminFailureRetryAfter(req);
+    if (retryAfter) return adminRateLimited(retryAfter);
+    recordAdminFailure(req);
+    return checked.code === 'not-admin'
+      ? adminFailure(401, 'not-admin', 'this key is not a registered domain admin')
+      : adminFailure(401, 'session-invalid', 'session is missing, unknown, or expired');
   }
-  const error = await requireAdmin(payload, proof);
-  if (error) return { error };
-  return { publicKey: proof.publicKey };
+  return authenticateAdminProof(payload, proof, req.url.split('?')[0], req);
 }
 
-// Task #97 (SPEC.md §11.4): reads the operator's own federation blocklist —
+// SPEC.md §11.4: reads the operator's own federation blocklist —
 // see FEDERATION_BLOCKLIST_FILE's own comment above for what this is and
 // isn't. Missing file means nothing is blocked, same "absence is the empty
 // case" convention every other store file in this server already uses.
@@ -3582,13 +3778,35 @@ function findHandleHolder(doc, handle) {
   return doc.members.find((m) => m.handle && m.handle.toLowerCase() === target && !isRevoked(m.credentialId));
 }
 
-function readBody(req) {
+// Reads the request body as a string, refusing anything over `limit` bytes
+// with a 413. A declared Content-Length over the limit is refused without
+// reading; otherwise reading stops the moment the running total passes it.
+function readBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk) => { data += chunk; });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
+    const declared = parseInt(req.headers['content-length'] || '', 10);
+    const tooLarge = () => Object.assign(new Error('request body too large'), { statusCode: 413 });
+    if (Number.isFinite(declared) && declared > limit) { reject(tooLarge()); return; }
+    const chunks = [];
+    let size = 0;
+    let done = false;
+    req.on('data', (chunk) => {
+      if (done) return;
+      size += chunk.length;
+      if (size > limit) { done = true; chunks.length = 0; reject(tooLarge()); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => { if (!done) { done = true; resolve(Buffer.concat(chunks).toString('utf8')); } });
+    req.on('error', (err) => { if (!done) { done = true; reject(err); } });
   });
+}
+// readBody + JSON.parse for admin routes: a body over `limit` is a 413 and
+// anything that is not a JSON object is a 400, never an unhandled 500.
+async function readAdminJson(req, limit = ADMIN_MAX_BODY_BYTES) {
+  const raw = (await readBody(req, limit)) || '{}';
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (e) { throw Object.assign(new Error('invalid JSON body'), { statusCode: 400 }); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw Object.assign(new Error('request body must be a JSON object'), { statusCode: 400 });
+  return parsed;
 }
 
 function sendJson(res, status, obj) {
@@ -4981,9 +5199,9 @@ async function main() {
       // behalf, not a visitor joining something or mining their own
       // supply, and those two things shouldn't be conflated.
       if (req.method === 'POST' && req.url === '/atlas/asset/mint') {
-        const { payload: mintPayload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(mintPayload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload: mintPayload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(mintPayload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         if (!mintPayload || !mintPayload.ownerPublicKey) return sendJson(res, 400, { error: 'payload.ownerPublicKey is required' });
         const { ownerPublicKey, assetClass, quantity, properties } = mintPayload;
         const catalogEntry = ASSET_CATALOG[assetClass];
@@ -5537,12 +5755,12 @@ async function main() {
       // server to the requesting domain's own approve route — the exact
       // outbound shape relayTradeLock/relayTradeSettle already use.
       if (req.method === 'POST' && req.url === '/atlas/demo/reserve/consortium/co-sign') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = await readAdminJson(req);
         if (!payload || !payload.requestingDomain || !payload.id) {
           return sendJson(res, 400, { error: 'payload.requestingDomain and payload.id are both required' });
         }
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
 
         const { requestingDomain, id } = payload;
         let fetched;
@@ -5921,43 +6139,56 @@ async function main() {
       // GET /atlas/admin/session/nonce — ungated. Handing out a nonce to
       // anyone who asks is harmless: it's worthless without a roster key's
       // signature over it, same "the endpoint's existence isn't the
-      // secret" posture every other write endpoint here already has before
-      // requireAdmin runs.
+      // secret" posture every other write endpoint here already has. Issue
+      // rate per client and the number outstanding are both bounded.
       if (req.method === 'GET' && req.url === '/atlas/admin/session/nonce') {
-        return sendJson(res, 200, { nonce: issueAdminNonce() });
+        const client = adminClientKey(req);
+        const retryAfter = adminRetryAfter(adminNonceIssues, client, ADMIN_NONCE_PER_CLIENT_PER_MIN, 60 * 1000);
+        if (retryAfter) {
+          res.setHeader('Retry-After', String(retryAfter));
+          return sendJson(res, 429, { error: 'too many login nonce requests; try again later', code: 'rate-limited', retryAfter });
+        }
+        const nonce = issueAdminNonce();
+        if (!nonce) return sendJson(res, 503, { error: 'too many login attempts are in progress; try again shortly', code: 'busy' });
+        noteHit(adminNonceIssues, client, Date.now());
+        return sendJson(res, 200, { nonce });
       }
 
-      // POST /atlas/admin/session/start — {payload: {nonce}, proof}, the
-      // same envelope every other admin action here uses, just signing a
-      // fresh nonce instead of an action. Trades one real signature for a
-      // session token good for ADMIN_SESSION_TTL_MS (slides forward on
-      // each /whoami check — see touchAdminSession).
+      // POST /atlas/admin/session/start — {payload: {nonce, adminAuth:
+      // {action, domain}}, proof}. Signs a server-issued single-use nonce
+      // bound to this route and domain, and trades that one signature for a
+      // session token: idle expiry ADMIN_SESSION_TTL_MS (slides forward on
+      // use), absolute expiry ADMIN_SESSION_MAX_MS from now.
       if (req.method === 'POST' && req.url === '/atlas/admin/session/start') {
-        const { payload: loginPayload, proof } = JSON.parse((await readBody(req)) || '{}');
-        const authError = await requireAdmin(loginPayload, proof);
-        if (authError) return sendJson(res, 401, { error: authError });
-        if (typeof loginPayload.nonce !== 'string' || !consumeAdminNonce(loginPayload.nonce)) {
-          return sendJson(res, 401, { error: 'nonce is missing, unknown, already used, or expired' });
-        }
-        const { token, expiresAt } = createAdminSession(proof.publicKey);
-        return sendJson(res, 200, { token, expiresAt });
+        const { payload: loginPayload, proof } = await readAdminJson(req, ADMIN_SESSION_MAX_BODY_BYTES);
+        const failed = await authenticateAdminLogin(loginPayload, proof, req);
+        if (failed) return sendAdminAuthFailure(res, failed);
+        const { token, expiresAt, absoluteExpiresAt } = createAdminSession(proof.publicKey);
+        return sendJson(res, 200, { token, expiresAt, absoluteExpiresAt });
       }
 
       // POST /atlas/admin/session/whoami — {token}, no signature. The
       // bearer token itself IS the credential once a session exists —
-      // that's the whole point of not re-signing every request.
+      // that's the whole point of not re-signing every request. Counts as
+      // use, so it slides the idle expiry, and fails once the key has left
+      // the roster.
       if (req.method === 'POST' && req.url === '/atlas/admin/session/whoami') {
-        const { token } = JSON.parse((await readBody(req)) || '{}');
-        const publicKey = touchAdminSession(token);
-        if (!publicKey) return sendJson(res, 401, { error: 'session is missing, unknown, or expired' });
-        return sendJson(res, 200, { publicKey });
+        const { token } = await readAdminJson(req, ADMIN_SESSION_MAX_BODY_BYTES);
+        // No token at all is an answer, not a guess, so it does not count
+        // against the failed-attempt budget; a wrong one does.
+        if (typeof token !== 'string' || !token) {
+          return sendAdminAuthFailure(res, adminFailure(401, 'session-invalid', 'session is missing, unknown, or expired'));
+        }
+        const auth = await requireAdminAuth(null, null, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
+        return sendJson(res, 200, { publicKey: auth.publicKey });
       }
 
       // POST /atlas/admin/session/logout — {token}. Always 200 regardless
       // of whether the token was ever valid, deliberately — see
       // deleteAdminSession's own comment on why.
       if (req.method === 'POST' && req.url === '/atlas/admin/session/logout') {
-        const { token } = JSON.parse((await readBody(req)) || '{}');
+        const { token } = await readAdminJson(req, ADMIN_SESSION_MAX_BODY_BYTES);
         if (typeof token === 'string') deleteAdminSession(token);
         return sendJson(res, 200, { status: 'logged out' });
       }
@@ -5994,9 +6225,9 @@ async function main() {
       // operator managing this directory needs to still see, to decide
       // whether to lift it.
       if (req.method === 'POST' && req.url === '/atlas/admin/directory') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const subscribers = readSubscribers().subscribers.filter((s) => !isRevoked(s.credentialId));
         const postOfficeMembers = readPostOfficeMembers().members.filter((m) => !isRevoked(m.credentialId));
         return sendJson(res, 200, { subscribers, postOfficeMembers });
@@ -6081,9 +6312,9 @@ async function main() {
       // tradeScope}, proof} or {payload, token}, the same envelope every
       // other admin action here uses.
       if (req.method === 'POST' && req.url === '/atlas/asset/reissue') {
-        const { payload: reissuePayload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(reissuePayload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload: reissuePayload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(reissuePayload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const { credential, properties, tradeScope } = reissuePayload;
         if (!credential || credential.credential !== 'domain-atlas-asset/1.0') {
           return sendJson(res, 400, { error: 'payload.credential must be a domain-atlas-asset/1.0 credential' });
@@ -6170,9 +6401,9 @@ async function main() {
       // itself merges a new call onto whatever patch is already stored)
       // removes that key's own earlier override from the stored patch too.
       if (req.method === 'POST' && req.url === '/atlas/admin/class-patch') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const { assetClass, properties, tradeScope, clear } = payload || {};
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) return sendJson(res, 400, { error: 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ASSET_CATALOG in issuer-server/server.js for the full list.' });
@@ -6224,9 +6455,9 @@ async function main() {
       // Visits section aggregates. `today` is the server's own UTC date so
       // the panel never has to trust its browser's clock or timezone.
       if (req.method === 'POST' && req.url === '/atlas/admin/visits') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         return sendJson(res, 200, { today: utcDay(new Date()), retentionDays: VISITS_RETENTION_DAYS, days: readVisits().days });
       }
 
@@ -6236,9 +6467,9 @@ async function main() {
       // can show what's currently active and let the operator edit or
       // clear one instead of guessing from memory what's already set.
       if (req.method === 'POST' && req.url === '/atlas/admin/class-patches') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         return sendJson(res, 200, { patches: readClassPatches().patches });
       }
 
@@ -6254,9 +6485,9 @@ async function main() {
       // holds one, only the same static catalog config /atlas/trade/catalog
       // already publishes for the non-bound subset.
       if (req.method === 'POST' && req.url === '/atlas/admin/asset-classes') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         // `properties`/`randomized` (new) let the class-patch form pre-fill
         // itself instead of asking the operator to type a patch blind: the
         // catalog's own base `properties` are exactly what an untouched
@@ -6291,10 +6522,10 @@ async function main() {
       // session endpoints) works in place of proof, for a page that's
       // already logged in rather than signing every click fresh.
       if (req.method === 'POST' && req.url === '/atlas/revoke') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = await readAdminJson(req);
         if (!payload || !payload.id) return sendJson(res, 400, { error: 'payload.id is required' });
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         revoke(payload.id, payload.reason || 'issuer-request');
         console.log('Revoked', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { ok: true });
@@ -6309,13 +6540,13 @@ async function main() {
       // optional — omit it for an indefinite suspension, or give an ISO
       // timestamp for one that lifts itself without a follow-up call.
       if (req.method === 'POST' && req.url === '/atlas/suspend') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = await readAdminJson(req);
         if (!payload || !payload.id) return sendJson(res, 400, { error: 'payload.id is required' });
         if (payload.expiresAt !== undefined && payload.expiresAt !== null && typeof payload.expiresAt !== 'string') {
           return sendJson(res, 400, { error: 'payload.expiresAt, when given, must be an ISO timestamp string' });
         }
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         suspend(payload.id, payload.reason || 'issuer-request', payload.expiresAt || null);
         console.log('Suspended', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...', payload.expiresAt ? ('until ' + payload.expiresAt) : '(indefinite)');
         return sendJson(res, 200, { ok: true });
@@ -6326,10 +6557,10 @@ async function main() {
       // had already expired on its own, rather than treating "nothing to
       // lift" as an error.
       if (req.method === 'POST' && req.url === '/atlas/unsuspend') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = await readAdminJson(req);
         if (!payload || !payload.id) return sendJson(res, 400, { error: 'payload.id is required' });
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const wasSuspended = unsuspend(payload.id);
         console.log('Unsuspended', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { ok: true, wasSuspended });
@@ -6346,9 +6577,9 @@ async function main() {
       // the same URL on both backends means one shared admin-panel page
       // works unmodified against either).
       if (req.method === 'POST' && req.url === '/atlas/admin/trusted-trade-peers/') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         return sendJson(res, 200, { peers: readTrustedTradePeers().peers });
       }
 
@@ -6358,12 +6589,12 @@ async function main() {
       // something this endpoint can verify on its own, the same way an
       // operator hand-editing the old literal never had it verified either.
       if (req.method === 'POST' && req.url === '/atlas/admin/trusted-trade-peers/add') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = await readAdminJson(req);
         if (!payload || !payload.domain || typeof payload.domain !== 'string') {
           return sendJson(res, 400, { error: 'payload.domain is required' });
         }
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const added = addTrustedTradePeer(payload.domain);
         console.log('Trusted trade peer', payload.domain, added ? 'added' : '(already trusted)', 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { ok: true, added, peers: readTrustedTradePeers().peers });
@@ -6376,12 +6607,12 @@ async function main() {
       // domain — see TRUSTED_TRADE_PEERS_FILE's own comment on why this is
       // mutual by convention, not by enforcement.
       if (req.method === 'POST' && req.url === '/atlas/admin/trusted-trade-peers/remove') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = await readAdminJson(req);
         if (!payload || !payload.domain || typeof payload.domain !== 'string') {
           return sendJson(res, 400, { error: 'payload.domain is required' });
         }
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const removed = removeTrustedTradePeer(payload.domain);
         console.log('Trusted trade peer', payload.domain, removed ? 'removed' : '(was not trusted)', 'by admin', auth.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { ok: true, removed, peers: readTrustedTradePeers().peers });
@@ -6440,12 +6671,12 @@ async function main() {
       // response, same as /atlas/asset/transfer already leaves delivery to
       // the caller when the recipient has no reachable mailbox here.
       if (req.method === 'POST' && req.url === '/atlas/clawback') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = await readAdminJson(req);
         if (!payload || !payload.credential || !payload.toPublicKey) {
           return sendJson(res, 400, { error: 'payload.credential and payload.toPublicKey are both required' });
         }
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
 
         const credential = payload.credential;
         const toPublicKey = payload.toPublicKey;
@@ -6807,9 +7038,9 @@ async function main() {
       // the mint. Only a non-fungible, non-bound class is eligible, as for
       // any email ticket.
       if (req.method === 'POST' && req.url === '/atlas/admin/send-ticket-to-email') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const { assetClass, recipientEmail, properties } = payload || {};
         if (typeof recipientEmail !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
           return sendJson(res, 400, { error: 'recipientEmail does not look like an email address' });
@@ -7062,9 +7293,9 @@ async function main() {
       // this and read back an exact summary rather than racing a real
       // ATLAS_EMAIL_IMAP_POLL_MS interval.
       if (req.method === 'POST' && req.url === '/atlas/admin/email-tickets/poll-now') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         // Deliveries left part-way by a stop are finished on every pass.
         await deliveryEngine.sweep().catch((err) => console.error('Delivery sweep failed:', err.message));
         if (!EMAIL_TICKETS_CONFIG.imapHost) {
@@ -7177,10 +7408,10 @@ async function main() {
       // redeem (holder-authorized) already has against §5.3's revoke
       // (operator-authorized) for the exact same underlying primitive.
       if (req.method === 'POST' && req.url === '/atlas/asset/fulfill') {
-        const { payload, proof, token } = JSON.parse((await readBody(req)) || '{}');
+        const { payload, proof, token } = await readAdminJson(req);
         if (!payload || !payload.credential) return sendJson(res, 400, { error: 'payload.credential is required' });
-        const auth = await requireAdminAuth(payload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
 
         const { credential } = payload;
         const problem = await checkPresentedFulfillableAsset(credential);
@@ -7943,9 +8174,9 @@ async function main() {
       // before}, proof} or {payload, token}, the same envelope every other
       // admin action here uses.
       if (req.method === 'POST' && req.url === '/atlas/mail/send') {
-        const { payload: sendPayload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(sendPayload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload: sendPayload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(sendPayload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const { credentialId, subject, body, giftAssetClass, giftOwnerPublicKey, giftQuantity } = sendPayload;
         if (!credentialId || !subject || !body) {
           return sendJson(res, 400, { error: 'payload.credentialId, payload.subject, and payload.body are required' });
@@ -8167,9 +8398,9 @@ async function main() {
       // has `calendar: true` before accepting an event for it (see
       // CALENDAR_FILE's own comment on why).
       if (req.method === 'POST' && req.url === '/atlas/calendar') {
-        const { payload: calendarPayload, proof, token } = JSON.parse((await readBody(req)) || '{}');
-        const auth = await requireAdminAuth(calendarPayload, proof, token);
-        if (auth.error) return sendJson(res, 401, { error: auth.error });
+        const { payload: calendarPayload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(calendarPayload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
         const { action, worldId, event, id } = calendarPayload || {};
         const normalizedWorldId = worldId || null;
 
@@ -8640,7 +8871,13 @@ async function main() {
       res.writeHead(405);
       res.end('Method not allowed');
     } catch (err) {
-      console.error(err);
+      if (err.statusCode === 413) {
+        // Stop the client sending the rest of an oversized body.
+        res.setHeader('Connection', 'close');
+        res.once('finish', () => req.destroy());
+      } else if (!err.statusCode || err.statusCode >= 500) {
+        console.error(err);
+      }
       sendJson(res, err.statusCode || 500, { error: err.message });
     }
   }));

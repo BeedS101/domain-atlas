@@ -23,17 +23,13 @@ handle_preflight();
 require_post();
 $kp = atlas_load_keys();
 
-try {
-  $requestBody = read_json_body();
-} catch (Exception $e) {
-  send_json(400, ['error' => 'invalid JSON body']);
-}
+$requestBody = read_admin_json_body();
 
 $sendPayload = $requestBody['payload'] ?? null;
 $proof = $requestBody['proof'] ?? null;
 $token = $requestBody['token'] ?? null;
-$auth = require_admin_auth($sendPayload, $proof, $token);
-if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
+$auth = require_admin_auth($sendPayload, $proof, $token, '/atlas/mail/send');
+if (isset($auth['error'])) admin_auth_fail($auth);
 
 $credentialId = $sendPayload['credentialId'] ?? null;
 $subject = $sendPayload['subject'] ?? null;

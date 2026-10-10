@@ -17,17 +17,13 @@ handle_preflight();
 require_post();
 $kp = atlas_load_keys();
 
-try {
-  $body = read_json_body();
-} catch (Exception $e) {
-  send_json(400, ['error' => 'invalid JSON body']);
-}
+$body = read_admin_json_body();
 
 $payload = $body['payload'] ?? null;
 $proof = $body['proof'] ?? null;
 $token = $body['token'] ?? null;
-$auth = require_admin_auth($payload, $proof, $token);
-if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
+$auth = require_admin_auth($payload, $proof, $token, '/atlas/admin/email-tickets/poll-now');
+if (isset($auth['error'])) admin_auth_fail($auth);
 
 // Deliveries left part-way by a stop are finished on every pass.
 require_once __DIR__ . '/../../../lib/delivery.php';

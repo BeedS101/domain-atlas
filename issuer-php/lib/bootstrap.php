@@ -107,11 +107,43 @@ function require_get() {
   }
 }
 
-function read_json_body() {
-  $raw = file_get_contents('php://input');
-  if ($raw === '' || $raw === false) return [];
+// Request bodies larger than this are refused with a 413 before parsing, the
+// same default issuer-server/server.js applies (MAX_BODY_BYTES). Admin routes
+// use the smaller atlas_admin_max_body_bytes() (lib/store.php).
+const ATLAS_MAX_BODY_BYTES = 2097152;
+
+// Reads the raw request body, ending the request with a 413 when it exceeds
+// $limit bytes. A declared Content-Length over the limit is refused without
+// reading; otherwise at most $limit + 1 bytes are read.
+function read_limited_body($limit) {
+  $declared = isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0;
+  if ($declared > $limit) send_json(413, ['error' => 'request body too large', 'code' => 'too-large']);
+  $raw = file_get_contents('php://input', false, null, 0, $limit + 1);
+  if ($raw === false) return '';
+  if (strlen($raw) > $limit) send_json(413, ['error' => 'request body too large', 'code' => 'too-large']);
+  return $raw;
+}
+
+function read_json_body($limit = null) {
+  $raw = read_limited_body($limit === null ? ATLAS_MAX_BODY_BYTES : $limit);
+  if ($raw === '') return [];
   $data = json_decode($raw, true);
   if (!is_array($data)) throw new Exception('invalid JSON body');
+  return $data;
+}
+
+// read_json_body() for admin routes: the smaller admin body limit, and a body
+// that is not a JSON object (a list, a scalar, null) is a 400 rather than
+// something the route has to defend against. Ends the request on failure.
+function read_admin_json_body($limit = null) {
+  try {
+    $data = read_json_body($limit === null ? atlas_admin_max_body_bytes() : $limit);
+  } catch (Exception $e) {
+    send_json(400, ['error' => 'invalid JSON body', 'code' => 'bad-request']);
+  }
+  if ($data !== [] && array_keys($data) === range(0, count($data) - 1)) {
+    send_json(400, ['error' => 'request body must be a JSON object', 'code' => 'bad-request']);
+  }
   return $data;
 }
 

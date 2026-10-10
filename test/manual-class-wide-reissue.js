@@ -64,6 +64,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const NODE_PORT = 8119; // isolated — distinct from every other manual-*.js test's chosen port
@@ -117,6 +118,7 @@ async function signWithSelf(kp, publicKey, payload) {
   return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
 }
 async function setClassPatchAsAdmin(base, admin, payload) {
+  payload = withAdminAuth(payload, base, '/atlas/admin/class-patch');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(base, '/atlas/admin/class-patch', { payload, proof });
 }
@@ -125,7 +127,7 @@ async function setClassPatchAsAdmin(base, admin, payload) {
 // with {token}, never a fresh {payload, proof} over an empty payload.
 async function login(base, admin) {
   const nonce = (await fetch(base + '/atlas/admin/session/nonce').then((r) => r.json())).nonce;
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, base, '/atlas/admin/session/start');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   const res = await postJson(base, '/atlas/admin/session/start', { payload, proof });
   if (res.status !== 200) throw new Error('login failed at ' + base + ': ' + JSON.stringify(res));

@@ -37,16 +37,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-  try {
-    $requestBody = read_json_body();
-  } catch (Exception $e) {
-    send_json(400, ['error' => 'invalid JSON body']);
-  }
+  $requestBody = read_admin_json_body();
   $calendarPayload = $requestBody['payload'] ?? null;
   $proof = $requestBody['proof'] ?? null;
   $token = $requestBody['token'] ?? null;
-  $auth = require_admin_auth($calendarPayload, $proof, $token);
-  if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
+  $auth = require_admin_auth($calendarPayload, $proof, $token, '/atlas/calendar');
+  if (isset($auth['error'])) admin_auth_fail($auth);
 
   $action = $calendarPayload['action'] ?? null;
   $worldId = (isset($calendarPayload['worldId']) && $calendarPayload['worldId'] !== '') ? $calendarPayload['worldId'] : null;

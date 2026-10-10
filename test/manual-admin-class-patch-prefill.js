@@ -54,6 +54,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const NODE_PORT = 8121; // isolated — distinct from every other manual-*.js test's chosen port
@@ -96,7 +97,7 @@ async function signWithSelf(kp, publicKey, payload) {
 // used here only to obtain a real, server-valid token to hand the page.
 async function login(admin) {
   const nonce = (await fetch(NODE_BASE + '/atlas/admin/session/nonce').then((r) => r.json())).nonce;
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, NODE_BASE, '/atlas/admin/session/start');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   const res = await postJson(NODE_BASE, '/atlas/admin/session/start', { payload, proof });
   if (res.status !== 200) throw new Error('login failed: ' + JSON.stringify(res));
@@ -126,7 +127,7 @@ async function login(admin) {
   console.log('SETUP: seeding an admin identity and two pre-existing class patches (a plain one on the trophy, a delete-a-property one on the badge)');
   const admin = await genIdentity();
   fs.writeFileSync(path.join(NODE_STATE_DIR, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKey, addedAt: new Date().toISOString() }] }, null, 2));
-  const patchPayload = { assetClass: 'atlas.trophy.chess', properties: { 'com.example.awardedFor': 'Season 2 Champion' } };
+  const patchPayload = withAdminAuth({ assetClass: 'atlas.trophy.chess', properties: { 'com.example.awardedFor': 'Season 2 Champion' } }, NODE_BASE, '/atlas/admin/class-patch');
   const patchProof = await signWithSelf(admin.kp, admin.publicKey, patchPayload);
   const patchRes = await postJson(NODE_BASE, '/atlas/admin/class-patch', { payload: patchPayload, proof: patchProof });
   assert(patchRes.status === 200, 'expected seeding the class patch to succeed, got: ' + JSON.stringify(patchRes));
@@ -138,7 +139,7 @@ async function login(admin) {
   // class from every other step here (atlas.badge, untouched elsewhere in
   // this file) so it doesn't interfere with step 2's "never patched"
   // premise for atlas.wearable.
-  const deletePatchPayload = { assetClass: 'atlas.badge', properties: { 'com.example.season': null } };
+  const deletePatchPayload = withAdminAuth({ assetClass: 'atlas.badge', properties: { 'com.example.season': null } }, NODE_BASE, '/atlas/admin/class-patch');
   const deletePatchProof = await signWithSelf(admin.kp, admin.publicKey, deletePatchPayload);
   const deletePatchRes = await postJson(NODE_BASE, '/atlas/admin/class-patch', { payload: deletePatchPayload, proof: deletePatchProof });
   assert(deletePatchRes.status === 200, 'expected seeding the delete-property class patch to succeed, got: ' + JSON.stringify(deletePatchRes));

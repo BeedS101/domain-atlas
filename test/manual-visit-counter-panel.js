@@ -37,6 +37,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const PORT = 8211; // isolated — distinct from every other manual-*.js test's chosen port
@@ -96,7 +97,7 @@ async function postJson(urlPath, body) {
   // A real admin session, obtained the way the wallet does (nonce -> signed
   // login), so the panel's own whoami check passes.
   const nonce = (await (await fetch(BASE + '/atlas/admin/session/nonce')).json()).nonce;
-  const loginPayload = { nonce };
+  const loginPayload = withAdminAuth({ nonce }, BASE, '/atlas/admin/session/start');
   const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, new TextEncoder().encode(canonicalize(loginPayload))));
   const login = await postJson('/atlas/admin/session/start', { payload: loginPayload, proof: { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) } });
   assert(login.status === 200 && login.body.token, 'could not start an admin session: ' + JSON.stringify(login));

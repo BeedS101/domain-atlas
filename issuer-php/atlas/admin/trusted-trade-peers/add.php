@@ -14,11 +14,7 @@ handle_preflight();
 require_post();
 atlas_load_keys(); // ensures .well-known files exist even if this is the very first request the site ever gets
 
-try {
-  $body = read_json_body();
-} catch (Exception $e) {
-  send_json(400, ['error' => 'invalid JSON body']);
-}
+$body = read_admin_json_body();
 
 $payload = $body['payload'] ?? null;
 $proof = $body['proof'] ?? null;
@@ -26,7 +22,7 @@ $token = $body['token'] ?? null;
 if (!is_array($payload) || empty($payload['domain']) || !is_string($payload['domain'])) {
   send_json(400, ['error' => 'payload.domain is required']);
 }
-$auth = require_admin_auth($payload, $proof, $token);
-if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
+$auth = require_admin_auth($payload, $proof, $token, '/atlas/admin/trusted-trade-peers/add');
+if (isset($auth['error'])) admin_auth_fail($auth);
 $added = atlas_add_trusted_trade_peer($payload['domain']);
 send_json(200, ['ok' => true, 'added' => $added, 'peers' => atlas_trusted_trade_peers()]);

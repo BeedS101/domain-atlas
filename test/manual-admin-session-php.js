@@ -26,6 +26,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const BUNDLE_DIR = path.resolve(__dirname, '..', 'issuer-php');
@@ -72,7 +73,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 async function login(base, identity, nonce) {
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, base, '/atlas/admin/session/start');
   const proof = await signWithSelf(identity.kp, identity.publicKey, payload);
   return postJson(base, '/atlas/admin/session/start', { payload, proof });
 }

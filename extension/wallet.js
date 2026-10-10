@@ -600,7 +600,7 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     if (!identity) return null;
     const session = (await getAdminSessionsMap())[domain];
-    if (!session || session.publicKey !== identity.publicKey || session.expiresAt <= Date.now()) return null;
+    if (!session || session.publicKey !== identity.publicKey || session.expiresAt <= Date.now() || (session.absoluteExpiresAt && session.absoluteExpiresAt <= Date.now())) return null;
     return { token: session.token, expiresAt: session.expiresAt };
   }
 
@@ -617,14 +617,17 @@ const AtlasWallet = (() => {
     const nonceRes = await fetch(baseUrl(domain) + '/atlas/admin/session/nonce');
     if (!nonceRes.ok) throw new Error('Could not reach ' + domain + ' to start an admin session.');
     const { nonce } = await nonceRes.json();
-    const proof = await signWithSelf({ nonce });
+    // adminAuth binds the signature to this route and domain; servers that
+    // predate it ignore the extra field.
+    const loginPayload = { nonce, adminAuth: { action: '/atlas/admin/session/start', domain: new URL(baseUrl(domain)).host } };
+    const proof = await signWithSelf(loginPayload);
     const startRes = await fetch(baseUrl(domain) + '/atlas/admin/session/start', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload: { nonce }, proof })
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload: loginPayload, proof })
     });
     const body = await startRes.json();
     if (!startRes.ok) throw new Error(body.error || 'Admin login was rejected.');
     const sessions = await getAdminSessionsMap();
-    sessions[domain] = { token: body.token, expiresAt: body.expiresAt, publicKey: identity.publicKey };
+    sessions[domain] = { token: body.token, expiresAt: body.expiresAt, absoluteExpiresAt: body.absoluteExpiresAt, publicKey: identity.publicKey };
     await chrome.storage.session.set({ atlasAdminSessions: sessions });
     return { token: body.token, expiresAt: body.expiresAt };
   }

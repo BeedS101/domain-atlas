@@ -29,6 +29,7 @@ const path = require('path');
 const http = require('http');
 const fs = require('fs');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
@@ -62,7 +63,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 // /atlas/mail/send now requires a registered domain admin's signature
-// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// (requireAdminAuth(), issuer-server/server.js) — seeds one directly into the
 // admin roster file, the same "plain operator-edited JSON" bootstrap a
 // real domain operator would do by hand.
 function seedAdmin(publicKey) {
@@ -126,13 +127,13 @@ function postJson(port, urlPath, body) {
     console.log('STEP 1: domain sends a message with an attached gift (giftAssetClass on /atlas/mail/send), signed as a registered admin');
     const admin = await genIdentity();
     seedAdmin(admin.publicKey);
-    const sendPayload = {
+    const sendPayload = withAdminAuth({
       credentialId,
       subject: 'A little gift',
       body: "Here's something for being an early visitor.",
       giftAssetClass: 'atlas.badge',
       giftOwnerPublicKey: ownerPublicKey
-    };
+    }, 'http://localhost:8001', '/atlas/mail/send');
     const sendProof = await signWithSelf(admin.kp, admin.publicKey, sendPayload);
     const sent = await postJson(8001, '/atlas/mail/send', { payload: sendPayload, proof: sendProof });
     if (!sent.id) throw new Error('Expected /atlas/mail/send to return a signed message, got: ' + JSON.stringify(sent));

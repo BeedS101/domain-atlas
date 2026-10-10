@@ -2,8 +2,8 @@
 // Sends domain-to-subscriber mail as a registered admin — the replacement
 // for the plain, unauthenticated curl command issuer-php/README.txt and
 // this project's own manual-*.js tests used to document, now that
-// /atlas/mail/send requires a signed admin proof envelope (requireAdmin()/
-// require_admin()) instead of trusting whoever could reach the endpoint.
+// /atlas/mail/send requires a signed admin proof envelope (requireAdminAuth()/
+// require_admin_auth()) instead of trusting whoever could reach the endpoint.
 //
 // Two modes:
 //
@@ -26,6 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { adminAuth, argValue } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const flags = process.argv.filter((a) => a.startsWith('--'));
@@ -40,6 +41,14 @@ if (!credentialId || !subject || !body) {
 }
 
 const DOMAIN_URL = useDomainB ? 'http://localhost:8002' : 'http://localhost:8001';
+// Host the request is signed for (adminAuth.domain). The local demo servers are
+// known; with --print-only, name the real domain with --domain <host>, exactly as
+// the server sees it (ATLAS_DOMAIN, or the Host header on issuer-php).
+const ADMIN_DOMAIN = argValue('domain') || (printOnly ? '' : new URL(DOMAIN_URL).host);
+if (!ADMIN_DOMAIN) {
+  console.error('--print-only needs --domain <host>, e.g. --domain example.com');
+  process.exit(1);
+}
 const STATE_DIR = useDomainB
   ? path.resolve(__dirname, '..', 'issuer-server', 'domain-b-state')
   : path.resolve(__dirname, '..', 'issuer-server');
@@ -90,6 +99,7 @@ function ensureRegistered(publicKey) {
   const admin = await loadOrCreateAdminIdentity();
 
   const payload = { credentialId, subject, body };
+  payload.adminAuth = adminAuth(ADMIN_DOMAIN, '/atlas/mail/send');
   const data = new TextEncoder().encode(canonicalize(payload));
   const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, admin.privateKey, data));
   const proof = { signerRole: 'raw-ecdsa', publicKey: admin.publicKey, signature: b64url(sig) };

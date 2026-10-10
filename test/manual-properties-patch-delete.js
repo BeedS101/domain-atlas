@@ -52,6 +52,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const NODE_PORT = 8122; // isolated — distinct from every other manual-*.js test's chosen port
@@ -102,10 +103,12 @@ async function signWithSelf(kp, publicKey, payload) {
   return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
 }
 async function reissueAsAdmin(base, admin, payload) {
+  payload = withAdminAuth(payload, base, '/atlas/asset/reissue');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(base, '/atlas/asset/reissue', { payload, proof });
 }
 async function setClassPatchAsAdmin(base, admin, payload) {
+  payload = withAdminAuth(payload, base, '/atlas/admin/class-patch');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(base, '/atlas/admin/class-patch', { payload, proof });
 }

@@ -17,6 +17,7 @@ const { webcrypto } = require('crypto');
 const crypto = webcrypto;
 const { subtle } = webcrypto;
 const { buildMimeMessage } = require('../../issuer-server/lib-smtp');
+const { withAdminAuth } = require('./admin-auth');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
@@ -127,6 +128,7 @@ async function fileStatus(base, id) {
   return r.body;
 }
 async function adminSend(base, admin, payload) {
+  payload = withAdminAuth(payload, base, '/atlas/admin/send-ticket-to-email');
   return postJson(base, '/atlas/admin/send-ticket-to-email', { payload, proof: await signWithSelf(admin, payload) });
 }
 async function adminPollNow(base, admin) {

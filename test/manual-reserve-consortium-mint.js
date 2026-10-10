@@ -38,6 +38,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const REPO = path.resolve(__dirname, '..');
@@ -73,7 +74,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 async function login(base, admin) {
   const nonce = (await get(base, '/atlas/admin/session/nonce')).body.nonce;
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, base, '/atlas/admin/session/start');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   const res = await postJson(base, '/atlas/admin/session/start', { payload, proof });
   if (res.status !== 200) throw new Error('login failed: ' + JSON.stringify(res));

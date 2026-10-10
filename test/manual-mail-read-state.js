@@ -16,6 +16,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
@@ -83,7 +84,7 @@ function stopIssuer() {
 }
 
 async function sendMail(admin, credentialId, subject) {
-  const payload = { credentialId, subject, body: 'Body of ' + subject };
+  const payload = withAdminAuth({ credentialId, subject, body: 'Body of ' + subject }, 'http://' + DOMAIN, '/atlas/mail/send');
   return postJson('/atlas/mail/send', { payload, proof: await signWithSelf(admin, payload) });
 }
 function mailState(frame) {

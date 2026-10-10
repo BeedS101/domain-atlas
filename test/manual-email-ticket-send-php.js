@@ -46,6 +46,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const PHP_PORT = 8178; // isolated — distinct from every other manual-*.js test's chosen port
@@ -101,6 +102,7 @@ async function publicStatus(base, id) {
   return entry ? { id, status: 'revoked', reason: entry.reason } : null;
 }
 async function adminSend(base, admin, payload) {
+  payload = withAdminAuth(payload, base, '/atlas/admin/send-ticket-to-email');
   return postJson(base, '/atlas/admin/send-ticket-to-email', { payload, proof: await signWithSelf(admin.kp, admin.publicKey, payload) });
 }
 async function transferToEmail(base, credential, ownerKp, ownerPublicKey, recipientEmail) {

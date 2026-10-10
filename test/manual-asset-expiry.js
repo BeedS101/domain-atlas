@@ -38,6 +38,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const NODE_PORT = 8135; // isolated — distinct from every other manual-*.js test's chosen port
@@ -86,7 +87,7 @@ async function signWithSelf(kp, publicKey, payload) {
   return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
 }
 async function fulfillAsAdmin(base, admin, credential) {
-  const payload = { credential };
+  const payload = withAdminAuth({ credential }, base, '/atlas/asset/fulfill');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(base, '/atlas/asset/fulfill', { payload, proof });
 }

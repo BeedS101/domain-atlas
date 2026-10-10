@@ -10,7 +10,7 @@
 // GET /atlas/calendar is a plain, unsigned, ungated fetch (§12.1 — "the
 // same plain-HTTPS trust boundary the manifest and §7's catalog already
 // rely on"); POST /atlas/calendar requires a signed admin proof envelope
-// (requireAdmin(), issuer-server/server.js), the same as /atlas/revoke,
+// (requireAdminAuth(), issuer-server/server.js), the same as /atlas/revoke,
 // /atlas/mail/send, and /atlas/asset/reissue.
 //
 // Requires domain A's issuer-server on 8001 AND domain B's on 8002 (same as
@@ -39,6 +39,7 @@
 const fs = require('fs');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const DOMAIN_A_BASE = 'http://localhost:8001';
@@ -88,7 +89,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 // POST /atlas/calendar now requires a registered domain admin's signature
-// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// (requireAdminAuth(), issuer-server/server.js) — seeds one directly into the
 // admin roster file, the same "plain operator-edited JSON" bootstrap a
 // real domain operator would do by hand.
 function seedAdmin(publicKey) {
@@ -96,6 +97,7 @@ function seedAdmin(publicKey) {
 }
 
 async function postAsAdmin(base, urlPath, admin, payload) {
+  payload = withAdminAuth(payload, base, urlPath);
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return post(base, urlPath, { payload, proof });
 }

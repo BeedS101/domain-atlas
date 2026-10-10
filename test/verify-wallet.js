@@ -10,6 +10,7 @@ const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
@@ -47,7 +48,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 // /atlas/revoke now requires a registered domain admin's signature
-// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// (requireAdminAuth(), issuer-server/server.js) — seeds one directly into the
 // admin roster file, the same "plain operator-edited JSON" bootstrap a
 // real domain operator would do by hand, since there's no self-service
 // admin registration.
@@ -206,7 +207,7 @@ async function projectPortals(frame) {
     const issuedId = exported.credentials[0].id;
     const admin = await genIdentity();
     seedAdmin(admin.publicKey);
-    const revokePayload = { id: issuedId, reason: 'issuer-request' };
+    const revokePayload = withAdminAuth({ id: issuedId, reason: 'issuer-request' }, 'http://localhost:8001', '/atlas/revoke');
     const revokeProof = await signWithSelf(admin.kp, admin.publicKey, revokePayload);
     const revokeHttpRes = await fetch('http://localhost:8001/atlas/revoke', {
       method: 'POST',

@@ -21,6 +21,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const MODE = process.argv[2] === 'php' ? 'php' : 'node';
@@ -112,7 +113,7 @@ async function resolve(handle) {
   return post('/atlas/postoffice/resolve', { handle });
 }
 async function adminAct(admin, route, id) {
-  const payload = { id, reason: 'test' };
+  const payload = withAdminAuth({ id, reason: 'test' }, BASE, route);
   const r = await post(route, { payload, proof: await proofFor(admin, payload) });
   assert(r.status === 200, route + ' failed: ' + r.text);
 }

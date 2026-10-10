@@ -33,6 +33,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const PORT = 8208; // isolated — distinct from every other manual-*.js test's chosen port
@@ -71,7 +72,7 @@ function post(urlPath, rawBody) {
   }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
 }
 async function adminRead(identity) {
-  const payload = { action: 'visits' };
+  const payload = withAdminAuth({ action: 'visits' }, BASE, '/atlas/admin/visits');
   const proof = await signWithSelf(identity, payload);
   return post('/atlas/admin/visits', { payload, proof });
 }

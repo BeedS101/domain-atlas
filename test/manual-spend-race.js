@@ -18,6 +18,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const MODE = process.argv[2] === 'php' ? 'php' : 'node';
@@ -126,7 +127,7 @@ function makeSpends(owner, other, admin) {
       return post('/atlas/asset/transfer-to-file', { credential: c, intent: { payload, proof: await proofFor(owner, payload) } });
     },
     reissue: async (c) => {
-      const payload = { credential: c, properties: { note: 'race' } };
+      const payload = withAdminAuth({ credential: c, properties: { note: 'race' } }, BASE, '/atlas/asset/reissue');
       return post('/atlas/asset/reissue', { payload, proof: await proofFor(admin, payload) });
     }
   };

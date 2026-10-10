@@ -60,6 +60,7 @@ const path = require('path');
 const { webcrypto } = require('crypto');
 const { subtle } = webcrypto;
 const { buildMimeMessage } = require('../issuer-server/lib-smtp');
+const { withAdminAuth } = require('./lib/admin-auth');
 
 const PORT = 8177; // isolated — distinct from every other manual-*.js test's chosen port
 const SMTP_PORT = 8976;
@@ -124,7 +125,7 @@ async function transferToEmail(base, credential, ownerKp, ownerPublicKey, recipi
   return res.body;
 }
 async function pollNow(base, admin) {
-  const payload = { action: 'poll-now' };
+  const payload = withAdminAuth({ action: 'poll-now' }, base, '/atlas/admin/email-tickets/poll-now');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(base, '/atlas/admin/email-tickets/poll-now', { payload, proof });
 }

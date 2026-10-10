@@ -14,17 +14,13 @@ handle_preflight();
 require_post();
 atlas_load_keys(); // ensures .well-known files exist even if this is the very first request the site ever gets
 
-try {
-  $body = read_json_body();
-} catch (Exception $e) {
-  send_json(400, ['error' => 'invalid JSON body']);
-}
+$body = read_admin_json_body();
 
 $payload = $body['payload'] ?? null;
 $proof = $body['proof'] ?? null;
 $token = $body['token'] ?? null;
 if (!is_array($payload) || empty($payload['id'])) send_json(400, ['error' => 'payload.id is required']);
-$auth = require_admin_auth($payload, $proof, $token);
-if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
+$auth = require_admin_auth($payload, $proof, $token, '/atlas/revoke');
+if (isset($auth['error'])) admin_auth_fail($auth);
 atlas_revoke($payload['id'], $payload['reason'] ?? 'issuer-request');
 send_json(200, ['ok' => true]);

@@ -41,6 +41,7 @@ const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
@@ -80,7 +81,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 // POST /atlas/calendar now requires a registered domain admin's signature
-// (requireAdmin(), issuer-server/server.js) — this test seeds events on
+// (requireAdminAuth(), issuer-server/server.js) — this test seeds events on
 // BOTH demo domains, so the same identity is registered on both instances'
 // admin rosters, the same "plain operator-edited JSON" bootstrap a real
 // domain operator would do by hand.
@@ -89,6 +90,7 @@ function seedAdmin(stateDir, publicKey) {
 }
 
 async function postAsAdmin(base, urlPath, admin, payload) {
+  payload = withAdminAuth(payload, base, urlPath);
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return post(base, urlPath, { payload, proof });
 }

@@ -35,6 +35,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const ROOT = path.resolve(__dirname, '..');
@@ -194,8 +195,9 @@ async function runBackend(kind) {
 
     console.log('STEP 6 ' + tag + 'the admin panel\'s Online now counts the visitor under their 2D world');
     const nonce = (await (await fetch(BASE + '/atlas/admin/session/nonce')).json()).nonce;
-    const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, new TextEncoder().encode(canonicalize({ nonce }))));
-    const login = await postJson(BASE, '/atlas/admin/session/start', { payload: { nonce }, proof: { signerRole: 'raw-ecdsa', publicKey: adminKey, signature: b64url(sig) } });
+    const loginPayload = withAdminAuth({ nonce }, BASE, '/atlas/admin/session/start');
+    const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.privateKey, new TextEncoder().encode(canonicalize(loginPayload))));
+    const login = await postJson(BASE, '/atlas/admin/session/start', { payload: loginPayload, proof: { signerRole: 'raw-ecdsa', publicKey: adminKey, signature: b64url(sig) } });
     assert(login.status === 200 && login.body.token, 'could not start an admin session: ' + JSON.stringify(login));
     const adminPage = await context.newPage();
     await adminPage.addInitScript((t) => {

@@ -2079,8 +2079,9 @@ simplifications are worth naming plainly rather than leaving implicit:
   the roster means: `/session/start` still requires a full signed proof
   envelope — over a single-use nonce from `/session/nonce`, so the login
   itself can't be replayed — checked against the exact same roster
-  `requireAdmin()` already enforces everywhere else. Only once that
-  succeeds does it hand back a random token, good for 30 minutes and
+  (`isAdminKey()`/`is_admin_key()`) every other admin route enforces. Only
+  once that succeeds does it hand back a random token, good for 30 minutes
+  idle (to a hard cap of 8 hours from login) and
   sliding forward on every authenticated request that uses it (not just
   `/whoami` — `requireAdminAuth()`/`require_admin_auth()`, the shared gate
   every admin-gated endpoint now calls, treats any check as activity), so
@@ -2101,6 +2102,17 @@ simplifications are worth naming plainly rather than leaving implicit:
   `manual-admin-session-actions-php.js` for the four endpoints consuming a
   token) — see "Admin panel" just below for the actual page that now
   consumes it.
+- **Admin authentication hardening.** Sessions are re-checked against the
+  roster on every request (a revoked key loses access at once), end at an
+  absolute 8-hour cap, and every signed admin request must carry
+  `payload.adminAuth {action, domain, issuedAt, nonce}`: bound to the route
+  and domain, valid for about two minutes, and accepted once. Request
+  bodies, outstanding login nonces and failed attempts per socket address
+  are bounded. This breaks any client that signs admin calls without
+  `adminAuth`, including saved poll-now bodies, and signs everyone out once;
+  `docs/admin-auth-hardening.md` has the wire format, the incompatible
+  changes, the deployment order and the limits. Tested by
+  `test/manual-admin-hardening.js` and `manual-admin-hardening-php.js`.
 - **Admin panel.** The wallet's top bar grows a 🛡️ Admin button, shown only
   when the currently unlocked identity is on the CURRENT domain's own admin
   roster (`GET /atlas/admin/is-admin?publicKey=...` — a cheap, ungated,

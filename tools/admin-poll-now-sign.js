@@ -5,18 +5,16 @@
 // timer of its own to run the inbound mailbox poll on (see lib/store.php's
 // own atlas_email_tickets_config() comment).
 //
-// The one thing that makes this different from every other admin-*.js
-// tool here: require_admin()'s raw-signature path (issuer-server/
-// server.js, issuer-php/lib/store.php) carries no nonce or timestamp at
-// all, unlike the admin SESSION layer's own login step — a signature over
-// this fixed payload ({action: 'poll-now'}) checks out just as well on
-// its hundredth use as its first. So this only ever needs to run ONCE per
-// deployment: sign it, save the resulting body to a file on the server,
-// and point cron at a plain `curl --data-binary @that-file.json` forever,
-// no re-signing per run.
+// Every signed admin request now carries a timestamp and a single-use nonce
+// (payload.adminAuth) and is accepted once, within a couple of minutes of
+// signing, so a signed body can no longer be saved and replayed from cron.
+// The cron job runs this tool with --post instead, which signs a fresh
+// request each time. That means the cron host needs Node and the admin
+// identity file (.admin-identity.json, an admin private key); keep it
+// readable by that user only.
 //
-// Two modes, same as admin-reissue.js/admin-revoke.js/admin-mail-send.js/
-// admin-mint.js:
+// Three modes, same shape as admin-reissue.js/admin-revoke.js/admin-mail-send.js/
+// admin-mint.js plus --post:
 //
 //   Local demo (Node issuer-server on localhost:8001/8002): writes the
 //   admin public key straight into the target's admin roster file and
@@ -24,14 +22,20 @@
 //
 //     node tools/admin-poll-now-sign.js [--domain-b]
 //
-//   Any other domain (in particular a real issuer-php deployment this
-//   script has no filesystem or network access to): --print-only signs
-//   the request and prints the admin public key to register yourself
-//   (paste it into lib/atlas-admin-keys-store.json by hand, if it isn't
-//   there already) plus the ready, reusable {payload, proof} body and a
-//   sample cron line.
+//   Real deployment, from cron: signs a fresh request and POSTs it to
+//   <base-url>/atlas/admin/email-tickets/poll-now. The admin public key
+//   must already be on that domain's roster. --domain is the host as the
+//   server sees it (defaults to the host in <base-url>).
 //
-//     node tools/admin-poll-now-sign.js --print-only
+//     node tools/admin-poll-now-sign.js --post https://your-domain.example [--domain your-domain.example]
+//
+//     */5 * * * * node /home/youruser/domain-atlas/tools/admin-poll-now-sign.js --post https://your-domain.example >/dev/null 2>&1
+//
+//   Any other case: --print-only signs one request and prints it with the
+//   admin public key to register. The body is good for one POST within a
+//   couple of minutes; --domain <host> is required.
+//
+//     node tools/admin-poll-now-sign.js --print-only --domain your-domain.example
 //
 // Shares the same local admin identity file (.admin-identity.json) as
 // every other admin-*.js tool here, so one registered key covers this
@@ -40,13 +44,23 @@
 const fs = require('fs');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { adminAuth, argValue } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const flags = process.argv.filter((a) => a.startsWith('--'));
 const useDomainB = flags.includes('--domain-b');
 const printOnly = flags.includes('--print-only');
+const postBase = argValue('post');
 
-const DOMAIN_URL = useDomainB ? 'http://localhost:8002' : 'http://localhost:8001';
+const DOMAIN_URL = postBase ? postBase.replace(/\/+$/, '') : (useDomainB ? 'http://localhost:8002' : 'http://localhost:8001');
+// Host the request is signed for (adminAuth.domain). The local demo servers are
+// known; with --print-only, name the real domain with --domain <host>, exactly as
+// the server sees it (ATLAS_DOMAIN, or the Host header on issuer-php).
+const ADMIN_DOMAIN = argValue('domain') || (printOnly ? '' : new URL(DOMAIN_URL).host);
+if (!ADMIN_DOMAIN) {
+  console.error('--print-only needs --domain <host>, e.g. --domain example.com');
+  process.exit(1);
+}
 const STATE_DIR = useDomainB
   ? path.resolve(__dirname, '..', 'issuer-server', 'domain-b-state')
   : path.resolve(__dirname, '..', 'issuer-server');
@@ -98,6 +112,7 @@ function ensureRegistered(publicKey) {
   const admin = await loadOrCreateAdminIdentity();
 
   const payload = { action: 'poll-now' };
+  payload.adminAuth = adminAuth(ADMIN_DOMAIN, '/atlas/admin/email-tickets/poll-now');
   const data = new TextEncoder().encode(canonicalize(payload));
   const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, admin.privateKey, data));
   const proof = { signerRole: 'raw-ecdsa', publicKey: admin.publicKey, signature: b64url(sig) };
@@ -107,19 +122,13 @@ function ensureRegistered(publicKey) {
     console.log('Admin public key (register this in your domain\'s admin roster, e.g.');
     console.log('lib/atlas-admin-keys-store.json for issuer-php, if it is not already there):');
     console.log(admin.publicKey);
-    console.log('\nSigned request body — no nonce, so this exact body is good for every future');
-    console.log('cron run, not just one. Save it to a file on the server, e.g.:\n');
-    console.log('  cat > poll-now-body.json <<\'EOF\'');
+    console.log('\nSigned request body — valid for one POST within a couple of minutes:\n');
     console.log(JSON.stringify(requestBody, null, 2));
-    console.log('EOF');
-    console.log('\nThen point a cron job at it (adjust the path and the schedule to taste):\n');
-    console.log('  */5 * * * * curl -fsS -X POST -H "Content-Type: application/json" \\');
-    console.log('    --data-binary @/home/youruser/poll-now-body.json \\');
-    console.log('    https://your-domain.example/atlas/admin/email-tickets/poll-now >/dev/null 2>&1');
+    console.log('\nFor a recurring job use --post instead; see the top of this file.');
     return;
   }
 
-  ensureRegistered(admin.publicKey);
+  if (!postBase) ensureRegistered(admin.publicKey);
   const res = await fetch(DOMAIN_URL + '/atlas/admin/email-tickets/poll-now', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

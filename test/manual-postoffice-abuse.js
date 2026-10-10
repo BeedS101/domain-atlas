@@ -46,6 +46,7 @@
 const { webcrypto } = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const DOMAIN_B = 'http://localhost:8002';
@@ -102,7 +103,7 @@ function readMemberByCredentialId(credentialId) {
 }
 
 // /atlas/revoke now requires a registered domain admin's signature
-// (requireAdmin(), issuer-server/server.js) instead of a bare
+// (requireAdminAuth(), issuer-server/server.js) instead of a bare
 // unauthenticated body — seeds one directly into the admin roster file,
 // the same "plain operator-edited JSON" bootstrap a real domain operator
 // would do by hand, since there's no self-service admin registration.
@@ -146,7 +147,7 @@ async function seedAdmin(publicKey) {
   console.log('STEP 4: operator revokes A\'s flagged membership via the EXISTING /atlas/revoke endpoint, now signed as an admin');
   const admin = await genIdentity();
   await seedAdmin(admin.publicKey);
-  const revokePayload = { id: credA.id, reason: 'flagged for irregular send activity' };
+  const revokePayload = withAdminAuth({ id: credA.id, reason: 'flagged for irregular send activity' }, DOMAIN_B, '/atlas/revoke');
   const revokeProof = await signWithSelf(admin.kp, admin.publicKey, revokePayload);
   const revokeRes = await fetch(DOMAIN_B + '/atlas/revoke', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

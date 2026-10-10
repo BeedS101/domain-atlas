@@ -40,6 +40,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
@@ -101,7 +102,7 @@ async function postJson(urlPath, body) {
 // wallet extension's own login UI in the way.
 async function startAdminSession(admin) {
   const nonce = (await fetch(NODE_BASE + '/atlas/admin/session/nonce').then((r) => r.json())).nonce;
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, NODE_BASE, '/atlas/admin/session/start');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   const res = await postJson('/atlas/admin/session/start', { payload, proof });
   if (res.status !== 200) throw new Error('admin login failed: ' + JSON.stringify(res.body));

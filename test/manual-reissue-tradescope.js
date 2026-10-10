@@ -53,6 +53,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const NODE_PORT = 8105; // isolated — distinct from every other manual-*.js test's chosen port
@@ -107,11 +108,12 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 // /atlas/asset/reissue now requires a registered domain admin's signature
-// on both backends (requireAdmin() / require_admin()) — one identity is
+// on both backends (requireAdminAuth() / require_admin_auth()) — one identity is
 // seeded into each isolated instance's own admin roster file below, the
 // same "plain operator-edited JSON" bootstrap a real domain operator would
 // do by hand.
 async function reissueAsAdmin(base, admin, payload) {
+  payload = withAdminAuth(payload, base, '/atlas/asset/reissue');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(base, '/atlas/asset/reissue', { payload, proof });
 }

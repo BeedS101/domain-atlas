@@ -38,6 +38,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const NODE_PORT = 8115; // isolated — distinct from every other manual-*.js test's own port
@@ -94,7 +95,7 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
 
 async function login(admin) {
   const nonce = (await get(NODE_BASE, '/atlas/admin/session/nonce')).body.nonce;
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, NODE_BASE, '/atlas/admin/session/start');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   const res = await postJson(NODE_BASE, '/atlas/admin/session/start', { payload, proof });
   if (res.status !== 200) throw new Error('login failed: ' + JSON.stringify(res));
@@ -160,12 +161,12 @@ async function login(admin) {
     assert(badTokenRes.status === 401, 'expected a garbage token to be rejected, got: ' + JSON.stringify(badTokenRes));
     console.log('PASS: garbage token rejected ->', badTokenRes.body.error);
 
-    console.log('STEP 7: regression — {payload, proof} with NO token still works on /atlas/revoke');
-    const proofOnlyPayload = { id: anotherToRevoke.id, reason: 'proof-path-still-works' };
+    console.log('STEP 7: regression — {payload, proof} with adminAuth and NO token still works on /atlas/revoke');
+    const proofOnlyPayload = withAdminAuth({ id: anotherToRevoke.id, reason: 'proof-path-still-works' }, NODE_BASE, '/atlas/revoke');
     const proof = await signWithSelf(admin.kp, admin.publicKey, proofOnlyPayload);
     const proofOnlyRes = await postJson(NODE_BASE, '/atlas/revoke', { payload: proofOnlyPayload, proof });
     assert(proofOnlyRes.status === 200 && proofOnlyRes.body.ok === true, 'expected the pre-existing proof-only path to still work, got: ' + JSON.stringify(proofOnlyRes));
-    console.log('PASS: proof-only path still works unchanged');
+    console.log('PASS: proof-only path still works with adminAuth');
 
     console.log('\nALL ADMIN SESSION ACTION-TOKEN CHECKS PASSED');
   } catch (err) {

@@ -18,15 +18,11 @@ handle_preflight();
 require_post();
 $kp = atlas_load_keys();
 
-try {
-  $body = read_json_body();
-} catch (Exception $e) {
-  send_json(400, ['error' => 'invalid JSON body']);
-}
+$body = read_admin_json_body();
 
 $payload = $body['payload'] ?? null;
-$auth = require_admin_auth($payload, $body['proof'] ?? null, $body['token'] ?? null);
-if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
+$auth = require_admin_auth($payload, $body['proof'] ?? null, $body['token'] ?? null, '/atlas/admin/send-ticket-to-email');
+if (isset($auth['error'])) admin_auth_fail($auth);
 
 $assetClass = $payload['assetClass'] ?? null;
 $recipientEmail = $payload['recipientEmail'] ?? null;

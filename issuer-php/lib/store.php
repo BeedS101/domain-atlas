@@ -425,78 +425,243 @@ function is_admin_key($publicKey) {
   return false;
 }
 
-// Gates an admin-only action the same way verify_envelope() checks any
-// other signed action, with the extra condition that the signing key also
-// has to appear on the admin roster above. Returns an error string when
-// the request should be rejected, or null when it's authorized — mirrors
-// issuer-server/server.js's requireAdmin().
-function require_admin($payload, $proof) {
-  if (!is_array($payload) || !is_array($proof)) return 'payload and proof are required';
-  if (!verify_envelope($payload, $proof)) return 'admin signature does not check out';
-  if (empty($proof['publicKey']) || !is_admin_key($proof['publicKey'])) return 'this key is not a registered domain admin';
-  return null;
-}
-
-// Short-lived admin session layer on top of the roster above — mirrors
+// Admin session layer on top of the roster above — mirrors
 // issuer-server/server.js's ADMIN_NONCES_FILE/ADMIN_SESSIONS_FILE. The
-// roster stays the one source of truth for who's an admin; this just lets
-// a roster key sign in ONCE (over a fresh nonce, so the login itself can't
-// be replayed) and use a random bearer token for everything after that,
-// instead of re-signing every request with its ECDSA key. Same
-// flock-guarded read/modify/write shape as the pending-trades and calendar
-// stores above — unlike the roster file (hand-edited, never written by a
-// request), nonces and sessions ARE written by concurrent HTTP requests,
-// so a plain read-then-write would race.
+// roster stays the one source of truth for who's an admin; this lets a
+// roster key sign in ONCE (over a fresh single-use nonce, so the login can't
+// be replayed) and use a random bearer token afterwards. Every file below is
+// written by concurrent HTTP requests, so each read/modify/write runs under
+// one exclusive flock (atlas_admin_locked()).
 function atlas_admin_nonces_file() {
   return __DIR__ . '/atlas-admin-nonces-store.json';
 }
 function atlas_admin_sessions_file() {
   return __DIR__ . '/atlas-admin-sessions-store.json';
 }
-const ATLAS_ADMIN_NONCE_TTL_MS = 120000; // 2 minutes, in ms — long enough to sign and post, short enough a stale one is worthless
-const ATLAS_ADMIN_SESSION_TTL_MS = 1800000; // 30 minutes, in ms — slides forward on every check, see touch_admin_session()
-
-function issue_admin_nonce() {
-  $fh = fopen(atlas_admin_nonces_file(), 'c+');
-  flock($fh, LOCK_EX);
-  $doc = json_decode(stream_get_contents($fh), true);
-  if (!is_array($doc) || !isset($doc['nonces'])) $doc = ['nonces' => []];
-  $nowMs = (int) round(microtime(true) * 1000);
-  $doc['nonces'] = array_values(array_filter($doc['nonces'], function ($n) use ($nowMs) { return ($n['expiresAt'] ?? 0) > $nowMs; }));
-  $nonce = b64url_encode(random_bytes(24));
-  $doc['nonces'][] = ['nonce' => $nonce, 'expiresAt' => $nowMs + ATLAS_ADMIN_NONCE_TTL_MS];
-  ftruncate($fh, 0);
-  rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-  fflush($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
-  return $nonce;
+function atlas_admin_proof_nonces_file() {
+  return __DIR__ . '/atlas-admin-proof-nonces-store.json';
 }
-// Single-use: removed the moment it's successfully consumed, same
-// reasoning as issuer-server/server.js's consumeAdminNonce() — a failed
-// attempt (bad signature, key not on the roster) does not burn the nonce.
-function consume_admin_nonce($nonce) {
-  $fh = fopen(atlas_admin_nonces_file(), 'c+');
+function atlas_admin_ratelimit_file() {
+  return __DIR__ . '/atlas-admin-ratelimit-store.json';
+}
+
+function atlas_env_positive_int($name, $fallback) {
+  $v = getenv($name);
+  if ($v === false || !preg_match('/^[1-9][0-9]*$/', $v)) return $fallback;
+  return (int) $v;
+}
+const ATLAS_ADMIN_NONCE_TTL_MS = 120000; // login nonce lifetime
+const ATLAS_ADMIN_SESSION_TTL_MS = 1800000; // idle expiry; slides forward on every check
+const ATLAS_ADMIN_PROOF_NONCE_CAP = 20000;
+const ATLAS_ADMIN_LIMITER_MAX_CLIENTS = 5000;
+const ATLAS_ADMIN_SESSION_MAX_BODY_BYTES = 16384;
+function atlas_admin_session_max_ms() { return atlas_env_positive_int('ATLAS_ADMIN_SESSION_MAX_MS', 8 * 60 * 60 * 1000); }
+function atlas_admin_request_window_ms() { return atlas_env_positive_int('ATLAS_ADMIN_REQUEST_WINDOW_MS', 2 * 60 * 1000); }
+function atlas_admin_proof_nonce_retain_ms() { return 2 * atlas_admin_request_window_ms() + 30000; }
+function atlas_admin_nonce_cap() { return atlas_env_positive_int('ATLAS_ADMIN_NONCE_CAP', 200); }
+function atlas_admin_nonce_per_client_per_min() { return atlas_env_positive_int('ATLAS_ADMIN_NONCE_PER_CLIENT_PER_MIN', 10); }
+function atlas_admin_fail_limit() { return atlas_env_positive_int('ATLAS_ADMIN_FAIL_LIMIT', 10); }
+function atlas_admin_fail_window_ms() { return atlas_env_positive_int('ATLAS_ADMIN_FAIL_WINDOW_MS', 5 * 60 * 1000); }
+function atlas_admin_max_body_bytes() { return atlas_env_positive_int('ATLAS_ADMIN_MAX_BODY_BYTES', 256 * 1024); }
+
+function atlas_now_ms() { return (int) round(microtime(true) * 1000); }
+
+// Runs $fn(array $doc) under an exclusive lock on $file and writes back the
+// document it returns as [$newDoc, $result]. Returns $result. Everything in
+// $fn is atomic with respect to other requests using the same file.
+function atlas_admin_locked($file, $default, $fn) {
+  $fh = fopen($file, 'c+');
   flock($fh, LOCK_EX);
   $doc = json_decode(stream_get_contents($fh), true);
-  if (!is_array($doc) || !isset($doc['nonces'])) $doc = ['nonces' => []];
-  $nowMs = (int) round(microtime(true) * 1000);
-  $found = false;
-  $remaining = [];
-  foreach ($doc['nonces'] as $n) {
-    if (($n['expiresAt'] ?? 0) <= $nowMs) continue;
-    if (!$found && is_string($nonce) && ($n['nonce'] ?? null) === $nonce) { $found = true; continue; }
-    $remaining[] = $n;
-  }
-  $doc['nonces'] = $remaining;
+  if (!is_array($doc)) $doc = $default;
+  list($newDoc, $result) = $fn($doc);
   ftruncate($fh, 0);
   rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+  fwrite($fh, json_encode($newDoc, JSON_UNESCAPED_SLASHES));
   fflush($fh);
   flock($fh, LOCK_UN);
   fclose($fh);
-  return $found;
+  return $result;
+}
+
+// Returns a fresh login nonce, or null while atlas_admin_nonce_cap() unexpired
+// ones are already outstanding.
+function issue_admin_nonce() {
+  return atlas_admin_locked(atlas_admin_nonces_file(), ['nonces' => []], function ($doc) {
+    $nowMs = atlas_now_ms();
+    $nonces = array_values(array_filter(isset($doc['nonces']) && is_array($doc['nonces']) ? $doc['nonces'] : [], function ($n) use ($nowMs) { return ($n['expiresAt'] ?? 0) > $nowMs; }));
+    if (count($nonces) >= atlas_admin_nonce_cap()) return [['nonces' => $nonces], null];
+    $nonce = b64url_encode(random_bytes(24));
+    $nonces[] = ['nonce' => $nonce, 'expiresAt' => $nowMs + ATLAS_ADMIN_NONCE_TTL_MS];
+    return [['nonces' => $nonces], $nonce];
+  });
+}
+// Single-use: removed the moment it's consumed, under the same lock that
+// finds it, so two concurrent logins carrying one nonce cannot both succeed.
+// Call it only after the signature and roster checks pass; a failed attempt
+// does not burn the nonce.
+function consume_admin_nonce($nonce) {
+  return atlas_admin_locked(atlas_admin_nonces_file(), ['nonces' => []], function ($doc) use ($nonce) {
+    $nowMs = atlas_now_ms();
+    $found = false;
+    $remaining = [];
+    foreach (isset($doc['nonces']) && is_array($doc['nonces']) ? $doc['nonces'] : [] as $n) {
+      if (($n['expiresAt'] ?? 0) <= $nowMs) continue;
+      if (!$found && is_string($nonce) && ($n['nonce'] ?? null) === $nonce) { $found = true; continue; }
+      $remaining[] = $n;
+    }
+    return [['nonces' => $remaining], $found];
+  });
+}
+
+// Spent request nonces for signed admin requests, as [sha256(signerKey|nonce),
+// expiresAtMs] pairs; check and write happen under one exclusive lock.
+// Returns 'ok', 'replayed' or 'full'. Mirrors consumeAdminProofNonce().
+function consume_admin_proof_nonce($signerKey, $nonce, $nowMs) {
+  return atlas_admin_locked(atlas_admin_proof_nonces_file(), ['nonces' => []], function ($doc) use ($signerKey, $nonce, $nowMs) {
+    $live = [];
+    foreach (isset($doc['nonces']) && is_array($doc['nonces']) ? $doc['nonces'] : [] as $n) {
+      if (is_array($n) && count($n) === 2 && $n[1] > $nowMs) $live[] = $n;
+    }
+    $key = rtrim(strtr(base64_encode(hash('sha256', $signerKey . '|' . $nonce, true)), '+/', '-_'), '=');
+    foreach ($live as $n) { if ($n[0] === $key) return [['nonces' => $live], 'replayed']; }
+    if (count($live) >= ATLAS_ADMIN_PROOF_NONCE_CAP) return [['nonces' => $live], 'full'];
+    $live[] = [$key, $nowMs + atlas_admin_proof_nonce_retain_ms()];
+    return [['nonces' => $live], 'ok'];
+  });
+}
+
+// Failed-authentication and nonce-issue history per client. The key is the
+// socket peer address (REMOTE_ADDR) only — never a forwarded-for header, which
+// a client controls — hashed so addresses aren't stored. Behind a reverse
+// proxy every client shares the proxy's address and so one budget. Bounded to
+// ATLAS_ADMIN_LIMITER_MAX_CLIENTS entries per bucket.
+function atlas_admin_client_key() {
+  $addr = isset($_SERVER['REMOTE_ADDR']) && is_string($_SERVER['REMOTE_ADDR']) ? preg_replace('/^::ffff:/', '', $_SERVER['REMOTE_ADDR']) : 'unknown';
+  return substr(hash('sha256', $addr), 0, 16);
+}
+// $mode: 'peek' (retry-after only), 'note' (record a hit), 'take' (record a hit
+// only when under the limit). Returns seconds until the client may try again,
+// or 0 when it is under the limit (for 'take', 0 means the hit was recorded).
+function atlas_admin_limiter($bucket, $mode, $limit, $windowMs) {
+  return atlas_admin_locked(atlas_admin_ratelimit_file(), ['failures' => [], 'nonceIssues' => []], function ($doc) use ($bucket, $mode, $limit, $windowMs) {
+    $nowMs = atlas_now_ms();
+    $client = atlas_admin_client_key();
+    $map = isset($doc[$bucket]) && is_array($doc[$bucket]) ? $doc[$bucket] : [];
+    foreach ($map as $k => $hits) {
+      $kept = array_values(array_filter(is_array($hits) ? $hits : [], function ($t) use ($nowMs, $windowMs) { return is_int($t) && $nowMs - $t < $windowMs; }));
+      if ($kept) $map[$k] = $kept; else unset($map[$k]);
+    }
+    $hits = isset($map[$client]) ? $map[$client] : [];
+    $retry = 0;
+    if ($mode !== 'note' && count($hits) >= $limit) $retry = max(1, (int) ceil(($hits[0] + $windowMs - $nowMs) / 1000));
+    if ($mode === 'note' || ($mode === 'take' && !$retry)) {
+      $hits[] = $nowMs;
+      unset($map[$client]); // re-insert so array order stays oldest-first
+      $map[$client] = $hits;
+      while (count($map) > ATLAS_ADMIN_LIMITER_MAX_CLIENTS) { reset($map); unset($map[key($map)]); }
+    }
+    $doc[$bucket] = $map;
+    return [$doc, $retry];
+  });
+}
+function atlas_admin_failure_retry_after() { return atlas_admin_limiter('failures', 'peek', atlas_admin_fail_limit(), atlas_admin_fail_window_ms()); }
+function atlas_admin_record_failure() { atlas_admin_limiter('failures', 'note', atlas_admin_fail_limit(), atlas_admin_fail_window_ms()); }
+// Seconds until another login nonce may be issued to this client, or 0 after
+// recording the issue.
+function atlas_admin_take_nonce_slot() { return atlas_admin_limiter('nonceIssues', 'take', atlas_admin_nonce_per_client_per_min(), 60000); }
+
+// Result shape shared by every admin gate: ['error','status','code'(,
+// 'retryAfter','serverTime')] on refusal, ['publicKey'] on success.
+function admin_failure($status, $code, $message, $extra = []) {
+  return array_merge(['error' => $message, 'status' => $status, 'code' => $code], $extra);
+}
+function admin_rate_limited($retryAfter) {
+  return admin_failure(429, 'rate-limited', 'too many failed admin authentication attempts; try again later', ['retryAfter' => $retryAfter]);
+}
+// Ends the request with the response for a refusal from admin_failure().
+function admin_auth_fail($auth) {
+  if (!empty($auth['retryAfter'])) header('Retry-After: ' . (int) $auth['retryAfter']);
+  $body = ['error' => $auth['error'], 'code' => $auth['code']];
+  if (!empty($auth['serverTime'])) $body['serverTime'] = $auth['serverTime'];
+  if (!empty($auth['retryAfter'])) $body['retryAfter'] = (int) $auth['retryAfter'];
+  send_json($auth['status'] ?? 401, $body);
+}
+
+// Checks payload.adminAuth = {action, domain, issuedAt, nonce} against the
+// route being called. Returns a refusal, or null when it is well formed and
+// fresh. Does not look at the signature.
+function check_admin_auth_fields($payload, $action, $nowMs) {
+  $a = is_array($payload) ? ($payload['adminAuth'] ?? null) : null;
+  if (!is_array($a) || (array_keys($a) === range(0, count($a) - 1) && count($a) > 0)) {
+    return admin_failure(401, 'auth-required', 'signed admin requests must carry payload.adminAuth {action, domain, issuedAt, nonce}');
+  }
+  if (($a['action'] ?? null) !== $action) return admin_failure(400, 'bad-request', 'payload.adminAuth.action must be ' . $action);
+  if (($a['domain'] ?? null) !== atlas_domain()) return admin_failure(400, 'wrong-domain', 'payload.adminAuth.domain does not name this domain');
+  $nonce = $a['nonce'] ?? null;
+  if (!is_string($nonce) || strlen($nonce) < 16 || strlen($nonce) > 128) return admin_failure(400, 'bad-request', 'payload.adminAuth.nonce must be a string of 16 to 128 characters');
+  $issuedMs = parse_iso_ms($a['issuedAt'] ?? null);
+  if ($issuedMs === null) return admin_failure(400, 'bad-request', 'payload.adminAuth.issuedAt must be an ISO timestamp');
+  if (abs($nowMs - $issuedMs) > atlas_admin_request_window_ms()) {
+    return admin_failure(401, 'stale-request', 'request is outside the allowed time window', ['serverTime' => gmdate('Y-m-d\TH:i:s', intdiv($nowMs, 1000)) . sprintf('.%03dZ', $nowMs % 1000)]);
+  }
+  return null;
+}
+
+// Authenticates one signed admin request for $action (the route path). Shape
+// and freshness first (cheap, no secret), then signature and roster, and the
+// nonce is spent only after both pass, so unauthenticated traffic can never
+// fill the nonce store. Mirrors authenticateAdminProof().
+function authenticate_admin_proof($payload, $proof, $action) {
+  if (!is_array($payload) || !is_array($proof)) return admin_failure(401, 'auth-required', 'payload and proof are required');
+  $retryAfter = atlas_admin_failure_retry_after();
+  if ($retryAfter) return admin_rate_limited($retryAfter);
+  $nowMs = atlas_now_ms();
+  $fieldError = check_admin_auth_fields($payload, $action, $nowMs);
+  if ($fieldError) return $fieldError;
+  if (!is_string($proof['publicKey'] ?? null) || $proof['publicKey'] === '' || !verify_mail_envelope($payload, $proof)) {
+    atlas_admin_record_failure();
+    return admin_failure(401, 'bad-signature', 'admin signature does not check out');
+  }
+  if (!is_admin_key($proof['publicKey'])) {
+    atlas_admin_record_failure();
+    return admin_failure(401, 'not-admin', 'this key is not a registered domain admin');
+  }
+  $spent = consume_admin_proof_nonce($proof['publicKey'], $payload['adminAuth']['nonce'], $nowMs);
+  if ($spent === 'replayed') {
+    atlas_admin_record_failure();
+    return admin_failure(401, 'replayed-request', 'this request has already been used');
+  }
+  if ($spent === 'full') return admin_failure(503, 'busy', 'too many recent admin requests; try again shortly');
+  return ['publicKey' => $proof['publicKey']];
+}
+
+// Authenticates a login: a roster key's signature over a server-issued
+// single-use nonce, bound to this route and domain. Returns a refusal, or
+// null (the nonce is then spent). Mirrors authenticateAdminLogin().
+function authenticate_admin_login($payload, $proof) {
+  if (!is_array($payload) || !is_array($proof)) return admin_failure(401, 'auth-required', 'payload and proof are required');
+  $retryAfter = atlas_admin_failure_retry_after();
+  if ($retryAfter) return admin_rate_limited($retryAfter);
+  $a = $payload['adminAuth'] ?? null;
+  if (!is_array($a) || ($a['action'] ?? null) !== '/atlas/admin/session/start') {
+    return admin_failure(401, 'auth-required', 'login payload must carry adminAuth {action: "/atlas/admin/session/start", domain}');
+  }
+  if (($a['domain'] ?? null) !== atlas_domain()) return admin_failure(400, 'wrong-domain', 'payload.adminAuth.domain does not name this domain');
+  if (!is_string($payload['nonce'] ?? null) || $payload['nonce'] === '') return admin_failure(400, 'bad-request', 'payload.nonce is required');
+  if (!is_string($proof['publicKey'] ?? null) || $proof['publicKey'] === '' || !verify_mail_envelope($payload, $proof)) {
+    atlas_admin_record_failure();
+    return admin_failure(401, 'bad-signature', 'admin signature does not check out');
+  }
+  if (!is_admin_key($proof['publicKey'])) {
+    atlas_admin_record_failure();
+    return admin_failure(401, 'not-admin', 'this key is not a registered domain admin');
+  }
+  if (!consume_admin_nonce($payload['nonce'])) {
+    atlas_admin_record_failure();
+    return admin_failure(401, 'bad-nonce', 'nonce is missing, unknown, already used, or expired');
+  }
+  return null;
 }
 
 // Demo login (atlas-admin/../login-demo.html): same single-use-nonce
@@ -585,92 +750,88 @@ function consume_mail_nonce($signerKey, $nonce, $nowMs, $retainMs) {
   return $result;
 }
 
+// A session records when it was created and the latest moment it may live
+// until however active it is (absoluteExpiresAt). Sessions written before
+// absoluteExpiresAt existed carry neither and are refused (see
+// check_admin_session()), so every admin signs in again once after an upgrade.
 function create_admin_session($publicKey) {
-  $fh = fopen(atlas_admin_sessions_file(), 'c+');
-  flock($fh, LOCK_EX);
-  $doc = json_decode(stream_get_contents($fh), true);
-  if (!is_array($doc) || !isset($doc['sessions'])) $doc = ['sessions' => []];
-  $nowMs = (int) round(microtime(true) * 1000);
-  $doc['sessions'] = array_values(array_filter($doc['sessions'], function ($s) use ($nowMs) { return ($s['expiresAt'] ?? 0) > $nowMs; }));
-  $token = b64url_encode(random_bytes(32));
-  $expiresAt = $nowMs + ATLAS_ADMIN_SESSION_TTL_MS;
-  $doc['sessions'][] = ['token' => $token, 'publicKey' => $publicKey, 'expiresAt' => $expiresAt];
-  ftruncate($fh, 0);
-  rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-  fflush($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
-  return ['token' => $token, 'expiresAt' => $expiresAt];
+  return atlas_admin_locked(atlas_admin_sessions_file(), ['sessions' => []], function ($doc) use ($publicKey) {
+    $nowMs = atlas_now_ms();
+    $sessions = array_values(array_filter(isset($doc['sessions']) && is_array($doc['sessions']) ? $doc['sessions'] : [], function ($s) use ($nowMs) { return ($s['expiresAt'] ?? 0) > $nowMs; }));
+    $token = b64url_encode(random_bytes(32));
+    $absoluteExpiresAt = $nowMs + atlas_admin_session_max_ms();
+    $expiresAt = min($nowMs + ATLAS_ADMIN_SESSION_TTL_MS, $absoluteExpiresAt);
+    $sessions[] = ['token' => $token, 'publicKey' => $publicKey, 'createdAt' => $nowMs, 'expiresAt' => $expiresAt, 'absoluteExpiresAt' => $absoluteExpiresAt];
+    return [['sessions' => $sessions], ['token' => $token, 'expiresAt' => $expiresAt, 'absoluteExpiresAt' => $absoluteExpiresAt]];
+  });
 }
-// Validates a token and slides its expiry forward on every successful
-// check, same reasoning as issuer-server/server.js's touchAdminSession().
-// hash_equals() keeps the comparison constant-time.
-function touch_admin_session($token) {
-  $fh = fopen(atlas_admin_sessions_file(), 'c+');
-  flock($fh, LOCK_EX);
-  $doc = json_decode(stream_get_contents($fh), true);
-  if (!is_array($doc) || !isset($doc['sessions'])) $doc = ['sessions' => []];
-  $nowMs = (int) round(microtime(true) * 1000);
-  $publicKey = null;
-  $remaining = [];
-  foreach ($doc['sessions'] as $s) {
-    if (($s['expiresAt'] ?? 0) <= $nowMs) continue;
-    if ($publicKey === null && is_string($token) && hash_equals((string) ($s['token'] ?? ''), $token)) {
-      $publicKey = $s['publicKey'];
-      $s['expiresAt'] = $nowMs + ATLAS_ADMIN_SESSION_TTL_MS;
+// Validates a session token and, on success, slides its idle expiry forward
+// (never past absoluteExpiresAt). The session is re-checked against the
+// CURRENT roster on every call: when its key has been removed or marked
+// revoked, all of that key's sessions are deleted and the request is refused.
+// Returns ['publicKey'] or ['code' => 'unknown'|'not-admin']. hash_equals()
+// keeps the token comparison constant-time.
+function check_admin_session($token) {
+  return atlas_admin_locked(atlas_admin_sessions_file(), ['sessions' => []], function ($doc) use ($token) {
+    $nowMs = atlas_now_ms();
+    $live = [];
+    foreach (isset($doc['sessions']) && is_array($doc['sessions']) ? $doc['sessions'] : [] as $s) {
+      if (($s['expiresAt'] ?? 0) <= $nowMs) continue;
+      if (!isset($s['absoluteExpiresAt']) || !is_int($s['absoluteExpiresAt']) || $s['absoluteExpiresAt'] <= $nowMs) continue;
+      $live[] = $s;
     }
-    $remaining[] = $s;
-  }
-  $doc['sessions'] = $remaining;
-  ftruncate($fh, 0);
-  rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-  fflush($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
-  return $publicKey;
+    $idx = null;
+    if (is_string($token) && $token !== '') {
+      foreach ($live as $i => $s) {
+        if (hash_equals((string) ($s['token'] ?? ''), $token)) { $idx = $i; break; }
+      }
+    }
+    if ($idx === null) return [['sessions' => $live], ['code' => 'unknown']];
+    $publicKey = $live[$idx]['publicKey'];
+    if (!is_admin_key($publicKey)) {
+      $kept = array_values(array_filter($live, function ($s) use ($publicKey) { return $s['publicKey'] !== $publicKey; }));
+      return [['sessions' => $kept], ['code' => 'not-admin']];
+    }
+    $live[$idx]['expiresAt'] = min($nowMs + ATLAS_ADMIN_SESSION_TTL_MS, $live[$idx]['absoluteExpiresAt']);
+    return [['sessions' => $live], ['publicKey' => $publicKey]];
+  });
 }
 // Idempotent and constant-shape whether or not the token was ever valid —
 // same reasoning as issuer-server/server.js's deleteAdminSession().
 function delete_admin_session($token) {
-  $fh = fopen(atlas_admin_sessions_file(), 'c+');
-  flock($fh, LOCK_EX);
-  $doc = json_decode(stream_get_contents($fh), true);
-  if (!is_array($doc) || !isset($doc['sessions'])) $doc = ['sessions' => []];
-  $nowMs = (int) round(microtime(true) * 1000);
-  $doc['sessions'] = array_values(array_filter($doc['sessions'], function ($s) use ($nowMs, $token) {
-    if (($s['expiresAt'] ?? 0) <= $nowMs) return false;
-    if (is_string($token) && hash_equals((string) ($s['token'] ?? ''), $token)) return false;
-    return true;
-  }));
-  ftruncate($fh, 0);
-  rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-  fflush($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
+  atlas_admin_locked(atlas_admin_sessions_file(), ['sessions' => []], function ($doc) use ($token) {
+    $nowMs = atlas_now_ms();
+    $sessions = array_values(array_filter(isset($doc['sessions']) && is_array($doc['sessions']) ? $doc['sessions'] : [], function ($s) use ($nowMs, $token) {
+      if (($s['expiresAt'] ?? 0) <= $nowMs) return false;
+      if (is_string($token) && hash_equals((string) ($s['token'] ?? ''), $token)) return false;
+      return true;
+    }));
+    return [['sessions' => $sessions], null];
+  });
 }
 
-// Unifies the two ways an admin action can now be authorized: EITHER a
-// fresh signed proof envelope (require_admin() above) OR an active session
-// token from the primitive above. A token, when present, takes priority —
-// checking it also slides the session's expiry forward (touch_admin_session()),
-// so any authenticated action counts as activity, not just a /whoami check.
-// Returns ['error' => ...] or ['publicKey' => ...], mirroring
-// issuer-server/server.js's requireAdminAuth().
-function require_admin_auth($payload, $proof, $token) {
+// The authorization check every admin-gated route uses: EITHER an active
+// session token (check_admin_session()) OR a freshly signed request
+// (authenticate_admin_proof()) bound to $action, the route path. A token,
+// when given, takes priority and is checked on its own. A valid session is
+// honoured even while the client's failed-attempt budget is spent; only a
+// failed one counts against it. Returns a refusal (isset($r['error']); pass it
+// to admin_auth_fail()) or ['publicKey' => ...].
+function require_admin_auth($payload, $proof, $token, $action) {
   if (is_string($token) && $token !== '') {
-    $publicKey = touch_admin_session($token);
-    if ($publicKey === null) return ['error' => 'session is missing, unknown, or expired'];
-    return ['publicKey' => $publicKey];
+    $checked = check_admin_session($token);
+    if (isset($checked['publicKey'])) return ['publicKey' => $checked['publicKey']];
+    $retryAfter = atlas_admin_failure_retry_after();
+    if ($retryAfter) return admin_rate_limited($retryAfter);
+    atlas_admin_record_failure();
+    return $checked['code'] === 'not-admin'
+      ? admin_failure(401, 'not-admin', 'this key is not a registered domain admin')
+      : admin_failure(401, 'session-invalid', 'session is missing, unknown, or expired');
   }
-  $error = require_admin($payload, $proof);
-  if ($error) return ['error' => $error];
-  return ['publicKey' => $proof['publicKey']];
+  return authenticate_admin_proof($payload, $proof, $action);
 }
 
-// Trading Station membership roster (task #144 Phase 1) — same flat-array
+// Trading Station membership roster — same flat-array
 // shape as atlas_postoffice_members_file() above, kept as its own file for
 // the same reason Post Office's is separate from the plain subscriber
 // roster: a Trading Station membership is a different class, gating a
@@ -680,7 +841,7 @@ function require_admin_auth($payload, $proof, $token) {
 // membership credential presented WITH the request (same "prove you hold
 // it, right now, signed" shape check_presented_asset already uses for a
 // trade balance) — this roster exists for the same future-facing reason
-// task #144's own notes flag for directory federation: a self-contained,
+// as directory federation: a self-contained,
 // appendable record of who's joined. Mirrors issuer-server/server.js's
 // TRADINGSTATION_MEMBERS_FILE.
 function atlas_tradingstation_members_file() {

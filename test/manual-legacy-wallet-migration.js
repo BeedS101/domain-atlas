@@ -48,6 +48,7 @@ const path = require('path');
 const http = require('http');
 const fs = require('fs');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
@@ -81,7 +82,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 // /atlas/asset/reissue now requires a registered domain admin's signature
-// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// (requireAdminAuth(), issuer-server/server.js) — seeds one directly into the
 // admin roster file, the same "plain operator-edited JSON" bootstrap a
 // real domain operator would do by hand.
 function seedAdmin(publicKey) {
@@ -208,10 +209,10 @@ function postJson(port, urlPath, body) {
     console.log('STEP 6: exercising the update/reissue pipeline on this same freshly-minted item, end to end (as requested alongside the self-correct fix)');
     const admin = await genIdentity();
     seedAdmin(admin.publicKey);
-    const reissuePayload = {
+    const reissuePayload = withAdminAuth({
       credential: held1,
       properties: { 'com.example.condition': 'freshly re-collected' }
-    };
+    }, 'http://localhost:8001', '/atlas/asset/reissue');
     const reissueProof = await signWithSelf(admin.kp, admin.publicKey, reissuePayload);
     const reissue = await postJson(8001, '/atlas/asset/reissue', { payload: reissuePayload, proof: reissueProof });
     if (!reissue.newCredential || reissue.newCredential.supersedes !== held1.id) {

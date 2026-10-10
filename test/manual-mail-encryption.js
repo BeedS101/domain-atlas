@@ -40,6 +40,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const EXT_PATH = path.resolve(__dirname, '..', 'extension');
@@ -77,7 +78,7 @@ async function signWithSelf(kp, publicKey, payload) {
 }
 
 // /atlas/mail/send now requires a registered domain admin's signature
-// (requireAdmin(), issuer-server/server.js) — seeds one directly into the
+// (requireAdminAuth(), issuer-server/server.js) — seeds one directly into the
 // admin roster file, the same "plain operator-edited JSON" bootstrap a
 // real domain operator would do by hand.
 function seedAdmin(publicKey) {
@@ -85,6 +86,7 @@ function seedAdmin(publicKey) {
 }
 
 async function sendAsAdmin(port, admin, sendPayload) {
+  sendPayload = withAdminAuth(sendPayload, 'http://localhost:' + port, '/atlas/mail/send');
   const proof = await signWithSelf(admin.kp, admin.publicKey, sendPayload);
   return postJson(port, '/atlas/mail/send', { payload: sendPayload, proof });
 }

@@ -37,6 +37,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const PORT = 8164; // isolated — distinct from every other manual-*.js/-php.js test's chosen port
@@ -74,6 +75,7 @@ async function signWithSelf(kp, publicKey, payload) {
   return { signerRole: 'raw-ecdsa', publicKey, signature: b64url(sig) };
 }
 async function adminCall(urlPath, admin, payload) {
+  payload = withAdminAuth(payload, BASE, urlPath);
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(urlPath, { payload, proof });
 }

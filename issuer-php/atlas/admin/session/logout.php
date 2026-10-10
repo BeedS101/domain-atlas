@@ -8,11 +8,7 @@ require_once __DIR__ . '/../../../lib/bootstrap.php';
 handle_preflight();
 require_post();
 
-try {
-  $requestBody = read_json_body();
-} catch (Exception $e) {
-  send_json(400, ['error' => 'invalid JSON body']);
-}
+$requestBody = read_admin_json_body(ATLAS_ADMIN_SESSION_MAX_BODY_BYTES);
 
 $token = $requestBody['token'] ?? null;
 if (is_string($token)) delete_admin_session($token);

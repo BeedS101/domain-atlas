@@ -27,6 +27,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const NODE_PORT = 8137; // isolated — distinct from every other manual-*.js test's chosen port
@@ -81,7 +82,7 @@ async function login(base, identity, credential) {
   return { res: await postJson(base, '/atlas/login/verify', { credential, intent: { payload, proof } }), payload, proof };
 }
 async function revokeAsAdmin(base, admin, id) {
-  const payload = { id };
+  const payload = withAdminAuth({ id }, base, '/atlas/revoke');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   return postJson(base, '/atlas/revoke', { payload, proof });
 }

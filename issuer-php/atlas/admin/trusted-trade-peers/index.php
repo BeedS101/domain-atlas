@@ -11,16 +11,12 @@ require_once __DIR__ . '/../../../lib/bootstrap.php';
 handle_preflight();
 require_post();
 
-try {
-  $body = read_json_body();
-} catch (Exception $e) {
-  send_json(400, ['error' => 'invalid JSON body']);
-}
+$body = read_admin_json_body();
 
 $payload = $body['payload'] ?? [];
 $proof = $body['proof'] ?? null;
 $token = $body['token'] ?? null;
-$auth = require_admin_auth($payload, $proof, $token);
-if (isset($auth['error'])) send_json(401, ['error' => $auth['error']]);
+$auth = require_admin_auth($payload, $proof, $token, '/atlas/admin/trusted-trade-peers/');
+if (isset($auth['error'])) admin_auth_fail($auth);
 
 send_json(200, ['peers' => atlas_trusted_trade_peers()]);

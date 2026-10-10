@@ -26,6 +26,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { webcrypto } = require('crypto');
+const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
 
 const BUNDLE_DIR = path.resolve(__dirname, '..', 'issuer-php');
@@ -79,7 +80,7 @@ async function issueAsset(base, ownerPublicKey, assetClass, quantity) {
 
 async function login(admin) {
   const nonce = (await get(BASE, '/atlas/admin/session/nonce')).body.nonce;
-  const payload = { nonce };
+  const payload = withAdminAuth({ nonce }, BASE, '/atlas/admin/session/start');
   const proof = await signWithSelf(admin.kp, admin.publicKey, payload);
   const res = await postJson(BASE, '/atlas/admin/session/start', { payload, proof });
   if (res.status !== 200) throw new Error('login failed: ' + JSON.stringify(res));
@@ -146,12 +147,12 @@ function startPhpServer(bundleDir, port) {
     assert(badTokenRes.status === 401, 'expected a garbage token to be rejected, got: ' + JSON.stringify(badTokenRes));
     console.log('PASS: garbage token rejected ->', badTokenRes.body.error);
 
-    console.log('STEP 7: regression — {payload, proof} with NO token still works on /atlas/revoke');
-    const proofOnlyPayload = { id: anotherToRevoke.id, reason: 'proof-path-still-works' };
+    console.log('STEP 7: regression — {payload, proof} with adminAuth and NO token still works on /atlas/revoke');
+    const proofOnlyPayload = withAdminAuth({ id: anotherToRevoke.id, reason: 'proof-path-still-works' }, BASE, '/atlas/revoke');
     const proof = await signWithSelf(admin.kp, admin.publicKey, proofOnlyPayload);
     const proofOnlyRes = await postJson(BASE, '/atlas/revoke', { payload: proofOnlyPayload, proof });
     assert(proofOnlyRes.status === 200 && proofOnlyRes.body.ok === true, 'expected the pre-existing proof-only path to still work, got: ' + JSON.stringify(proofOnlyRes));
-    console.log('PASS: proof-only path still works unchanged');
+    console.log('PASS: proof-only path still works with adminAuth');
 
     console.log('\nALL ADMIN SESSION ACTION-TOKEN PHP CHECKS PASSED');
   } catch (err) {
