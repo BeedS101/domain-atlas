@@ -352,6 +352,13 @@ const RELAY_RATE_FILE = path.join(STATE_DIR, 'atlas-federation-relay-rate-store.
 // it, and the admin session layer just below for the short-lived bearer
 // token a roster key can trade one signature for.
 const ADMIN_KEYS_FILE = path.join(STATE_DIR, 'atlas-admin-keys-store.json');
+// Moderation grants (docs/moderation-authorization.md). The config file is
+// operator-edited like the roster: {"audiences": ["https://presence.example"]}
+// lists the only presence endpoints a grant may be addressed to. The grants
+// store records the grants issued and still live, to bound how many one
+// moderator can hold; it holds no secrets.
+const MODERATION_CONFIG_FILE = path.join(STATE_DIR, 'atlas-moderation-config.json');
+const MODERATION_GRANTS_FILE = path.join(STATE_DIR, 'atlas-moderation-grants-store.json');
 // Short-lived admin session layer on top of the roster above: the roster
 // stays the one source of truth for who's an admin — nothing here can
 // make a non-roster key an admin — but re-signing every click with an
@@ -1708,6 +1715,18 @@ function sendAdminAuthFailure(res, auth) {
 // signed mail reads use (verifyMailEnvelope).
 const verifyAdminEnvelope = (payload, envelope) => verifyMailEnvelope(payload, envelope);
 
+// What each scope needs. 'admin' (the default for every route) is the
+// administrator role only; 'moderation' is the moderation-grant route and
+// accepts administrators and moderators.
+function authorityAllows(authority, need) {
+  if (!authority) return false;
+  if (authority.role === 'admin') return true;
+  return authority.role === 'moderator' && need === 'moderation';
+}
+function insufficientRole(authority) {
+  return adminFailure(403, 'insufficient-role', 'this key is registered as ' + authority.role + ' and may not use this endpoint');
+}
+
 // The nonce store for signed admin requests: [sha256(signerKey|nonce),
 // expiresAtMs] pairs. The check and the write are one synchronous step with
 // no await between them, so two concurrent requests carrying the same nonce
@@ -1749,7 +1768,7 @@ function checkAdminAuthFields(payload, action, nowMs) {
 // Order matters: shape and freshness are cheap and need no secret, the
 // signature and the roster come next, and the nonce is spent only after both
 // have passed, so unauthenticated traffic can never fill the nonce store.
-async function authenticateAdminProof(payload, proof, action, req) {
+async function authenticateAdminProof(payload, proof, action, req, need) {
   if (!payload || typeof payload !== 'object' || !proof || typeof proof !== 'object') {
     return adminFailure(401, 'auth-required', 'payload and proof are required');
   }
@@ -1762,17 +1781,21 @@ async function authenticateAdminProof(payload, proof, action, req) {
     recordAdminFailure(req);
     return adminFailure(401, 'bad-signature', 'admin signature does not check out');
   }
-  if (!isAdminKey(proof.publicKey)) {
+  const authority = adminAuthority(proof.publicKey);
+  if (!authority) {
     recordAdminFailure(req);
     return adminFailure(401, 'not-admin', 'this key is not a registered domain admin');
   }
+  // A valid signature from a key without the needed role is refused before the
+  // nonce is spent; it is not a failed authentication, so it is not throttled.
+  if (!authorityAllows(authority, need)) return insufficientRole(authority);
   const spent = consumeAdminProofNonce(proof.publicKey, payload.adminAuth.nonce, nowMs);
   if (spent === 'replayed') {
     recordAdminFailure(req);
     return adminFailure(401, 'replayed-request', 'this request has already been used');
   }
   if (spent === 'full') return adminFailure(503, 'busy', 'too many recent admin requests; try again shortly');
-  return { publicKey: proof.publicKey };
+  return { publicKey: proof.publicKey, authority };
 }
 
 // Authenticates a login: a roster key's signature over a server-issued
@@ -1795,7 +1818,9 @@ async function authenticateAdminLogin(payload, proof, req) {
     recordAdminFailure(req);
     return adminFailure(401, 'bad-signature', 'admin signature does not check out');
   }
-  if (!isAdminKey(proof.publicKey)) {
+  // Any active roster role may sign in; what the session can then do is
+  // decided per request by requireAdminAuth().
+  if (!adminAuthority(proof.publicKey)) {
     recordAdminFailure(req);
     return adminFailure(401, 'not-admin', 'this key is not a registered domain admin');
   }
@@ -1917,8 +1942,8 @@ function tokensEqual(a, b) {
 // CURRENT roster on every call: when its key has been removed or marked
 // revoked, that key's sessions are all deleted and the request is refused,
 // so removing an admin takes effect on their next request. Returns
-// {publicKey} or {code} where code is 'unknown' (no live session) or
-// 'not-admin' (key no longer on the roster).
+// {publicKey, authority} or {code} where code is 'unknown' (no live session)
+// or 'not-admin' (key no longer on the roster).
 function checkAdminSession(token) {
   const now = Date.now();
   const doc = readAdminSessions();
@@ -1927,13 +1952,17 @@ function checkAdminSession(token) {
   let result;
   if (!session) {
     result = { code: 'unknown' };
-  } else if (!isAdminKey(session.publicKey)) {
-    doc.sessions = live.filter((s) => s.publicKey !== session.publicKey);
-    writeAdminSessions(doc);
-    return { code: 'not-admin' };
   } else {
+    // The role is looked up now, not stored in the session: a demotion or
+    // removal applies to the next request.
+    const authority = adminAuthority(session.publicKey);
+    if (!authority) {
+      doc.sessions = live.filter((s) => s.publicKey !== session.publicKey);
+      writeAdminSessions(doc);
+      return { code: 'not-admin' };
+    }
     session.expiresAt = Math.min(now + ADMIN_SESSION_TTL_MS, session.absoluteExpiresAt);
-    result = { publicKey: session.publicKey };
+    result = { publicKey: session.publicKey, authority };
   }
   doc.sessions = live;
   writeAdminSessions(doc);
@@ -1956,12 +1985,20 @@ function deleteAdminSession(token) {
 // only consulted when no token was sent. Using a valid token also slides its
 // idle expiry forward, so any authenticated action counts as activity. A
 // valid session is honoured even while the client's failed-attempt budget is
-// spent; only a failed one counts against it. Returns an adminFailure
-// (rejected; pass it to sendAdminAuthFailure) or { publicKey }.
-async function requireAdminAuth(payload, proof, token, req) {
+// spent; only a failed one counts against it.
+//
+// `need` is the scope the route requires and defaults to 'admin': a route
+// that says nothing is administrator-only, so a moderator can reach only the
+// routes that explicitly ask for 'moderation'. Returns an adminFailure
+// (rejected; pass it to sendAdminAuthFailure) or { publicKey, authority }.
+async function requireAdminAuth(payload, proof, token, req, need) {
+  const scope = need || 'admin';
   if (typeof token === 'string' && token) {
     const checked = checkAdminSession(token);
-    if (checked.publicKey) return { publicKey: checked.publicKey };
+    if (checked.publicKey) {
+      if (!authorityAllows(checked.authority, scope)) return insufficientRole(checked.authority);
+      return { publicKey: checked.publicKey, authority: checked.authority };
+    }
     const retryAfter = adminFailureRetryAfter(req);
     if (retryAfter) return adminRateLimited(retryAfter);
     recordAdminFailure(req);
@@ -1969,7 +2006,7 @@ async function requireAdminAuth(payload, proof, token, req) {
       ? adminFailure(401, 'not-admin', 'this key is not a registered domain admin')
       : adminFailure(401, 'session-invalid', 'session is missing, unknown, or expired');
   }
-  return authenticateAdminProof(payload, proof, req.url.split('?')[0], req);
+  return authenticateAdminProof(payload, proof, req.url.split('?')[0], req, scope);
 }
 
 // SPEC.md §11.4: reads the operator's own federation blocklist —
@@ -3462,12 +3499,182 @@ function saveOraclePolicy(policy) {
 // own `revoked` flag (not the shared REVOCATIONS_FILE, which is scoped to
 // asset/membership credentials, not admin keys) is how an admin key is
 // retired without needing a separate mechanism.
+//
+// An entry may carry a role:
+//   - no `role` (or null): "admin", full issuer administration. Entries
+//     written before roles existed therefore keep working unchanged.
+//   - "admin": the same.
+//   - "moderator": world moderation only. Optional `worlds` (array of world
+//     ids) restricts the worlds, optional `operations` (subset of
+//     MODERATION_OPERATIONS) restricts the operations. An absent list means
+//     "all"; an EMPTY list means none; a list that is not an array of valid
+//     strings means none. A moderator is never an admin: see adminAuthority().
+//   - anything else: no authority at all (a typo must not fall back to admin).
 function readAdminKeys() {
   if (!fs.existsSync(ADMIN_KEYS_FILE)) return { keys: [] };
   return JSON.parse(fs.readFileSync(ADMIN_KEYS_FILE, 'utf8'));
 }
+
+// Operation names a moderation grant may carry. Reserved vocabulary for the
+// moderator commands that follow; nothing in this server performs them.
+const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'];
+const MODERATION_MAX_WORLDS = 32;
+const MODERATION_ID_FORBIDDEN = /[\u0000-\u001f\u007f\u2028\u2029]/;
+
+// A world id as a moderation scope names it: 1 to 120 characters (code
+// points), valid Unicode, no control characters or line/paragraph separators,
+// and no leading or trailing white space (the presence service trims ids, so a
+// padded id would never match). The same rule is in issuer-php.
+const MODERATION_EDGE_SPACE = /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]$/;
+function isValidWorldId(w) {
+  if (typeof w !== 'string' || !w.isWellFormed()) return false;
+  const n = Array.from(w).length;
+  return n >= 1 && n <= 120 && !MODERATION_ID_FORBIDDEN.test(w) && !MODERATION_EDGE_SPACE.test(w);
+}
+
+// '*' when the field is absent, otherwise the validated list. Anything that
+// is present but not a list of valid entries yields [] (none), never '*'.
+function parseScopeList(entry, field, isValid, max) {
+  if (!Object.prototype.hasOwnProperty.call(entry, field) || entry[field] === undefined) return '*';
+  const raw = entry[field];
+  if (!Array.isArray(raw) || raw.length > max || !raw.every(isValid)) return [];
+  return Array.from(new Set(raw));
+}
+
+// The effective authority of a roster key RIGHT NOW: null (not on the
+// roster, revoked, unknown role, or ambiguous), or {role, worlds,
+// operations} where worlds/operations are '*' or an array. Read from the
+// roster file on every call, so a change applies to the next request.
+// If a key has several active entries they must all be plain admin entries;
+// any mix, or two moderator entries, is ambiguous and grants nothing.
+function adminAuthority(publicKey) {
+  if (typeof publicKey !== 'string' || !publicKey) return null;
+  let keys;
+  try { keys = readAdminKeys().keys; } catch (e) { return null; }
+  const active = (Array.isArray(keys) ? keys : []).filter((k) => k && typeof k === 'object' && k.publicKey === publicKey && !k.revoked);
+  if (!active.length) return null;
+  const roles = active.map((k) => (k.role === undefined || k.role === null ? 'admin' : k.role));
+  if (roles.every((r) => r === 'admin')) return { role: 'admin', worlds: '*', operations: '*' };
+  if (active.length === 1 && roles[0] === 'moderator') {
+    return {
+      role: 'moderator',
+      worlds: parseScopeList(active[0], 'worlds', isValidWorldId, 256),
+      operations: parseScopeList(active[0], 'operations', (o) => MODERATION_OPERATIONS.includes(o), MODERATION_OPERATIONS.length)
+    };
+  }
+  return null;
+}
+// True only for a FULL administrator. Every pre-existing check of "is this an
+// admin?" goes through here, so a moderator can never satisfy one.
 function isAdminKey(publicKey) {
-  return readAdminKeys().keys.some((k) => k.publicKey === publicKey && !k.revoked);
+  const a = adminAuthority(publicKey);
+  return !!a && a.role === 'admin';
+}
+
+// ---------- Moderation grants ----------
+//
+// A grant is a short-lived statement, signed by this domain's issuer key, that
+// one roster key may perform named moderation operations in named worlds at one
+// presence service, provable only by whoever holds an ephemeral private key.
+// The wire format, trust model and verification steps are in
+// docs/moderation-authorization.md; tools/lib/moderation-grant.js is the
+// reference verifier. Nothing here moderates anything.
+
+const MODERATION_GRANT_TYPE = 'atlas.moderation-grant';
+const MODERATION_GRANT_VERSION = 1;
+const MODERATION_GRANT_SIGN_CONTEXT = 'atlas-moderation-grant/v1\n';
+const MODERATION_REF_CONTEXT = 'atlas-moderator-ref/v1\n';
+const MODERATION_GRANT_MAX_TTL_S = 600; // hard ceiling, 10 minutes
+const MODERATION_GRANT_DEFAULT_TTL_S = 300;
+const MODERATION_MAX_LIVE_GRANTS = envPositiveInt('ATLAS_MODERATION_MAX_LIVE_GRANTS', 10);
+const MODERATION_REQUEST_FIELDS = ['audience', 'worlds', 'operations', 'ttlSeconds', 'popPublicKey', 'adminAuth'];
+
+// Stable, non-reversible reference to a moderator for one domain. Presence
+// services log and revoke by this; it does not reveal the wallet public key.
+function moderatorRefFor(domain, publicKey) {
+  return require('crypto').createHash('sha256').update(MODERATION_REF_CONTEXT + domain + '\n' + publicKey).digest('base64url');
+}
+
+// A presence endpoint identifier: scheme://host[:port], lowercase, no path.
+function isPresenceOrigin(s) {
+  return typeof s === 'string' && s.length <= 255 && /^https?:\/\/(\[[0-9a-f:]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)(:\d{1,5})?$/.test(s);
+}
+
+// The presence endpoints this domain is willing to address grants to. The
+// environment variable (comma-separated) wins; otherwise the config file.
+// Nothing is ever taken from a manifest or from a request.
+function moderationAudiences() {
+  let list = [];
+  if (process.env.ATLAS_MODERATION_AUDIENCES !== undefined) {
+    list = process.env.ATLAS_MODERATION_AUDIENCES.split(',').map((x) => x.trim()).filter(Boolean);
+  } else {
+    try { const f = JSON.parse(fs.readFileSync(MODERATION_CONFIG_FILE, 'utf8')); if (f && Array.isArray(f.audiences)) list = f.audiences; } catch (e) { /* not configured */ }
+  }
+  return list.filter(isPresenceOrigin);
+}
+
+async function isValidPopPublicKey(b64) {
+  try {
+    if (typeof b64 !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(b64)) return false;
+    const raw = fromB64url(b64);
+    if (raw.length !== 65 || raw[0] !== 0x04) return false;
+    if (b64url(raw) !== b64) return false; // one canonical spelling per key
+    await subtle.importKey('raw', raw, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']); // rejects points not on the curve
+    return true;
+  } catch (e) { return false; }
+}
+
+// Validates a grant request body (the signed payload, or the payload next to a
+// session token) and returns {request} or {error: adminFailure}. Strict: an
+// unknown field is an error, never ignored.
+async function parseGrantRequest(payload, requesterKey, issuerKey) {
+  const bad = (m) => ({ error: adminFailure(400, 'bad-request', m) });
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return bad('payload must be an object');
+  for (const k of Object.keys(payload)) if (!MODERATION_REQUEST_FIELDS.includes(k)) return bad('unknown field in payload: ' + k);
+  if (typeof payload.audience !== 'string' || !isPresenceOrigin(payload.audience)) return bad('payload.audience must be a presence origin such as https://presence.example.com');
+  let worlds = payload.worlds;
+  if (worlds !== '*') {
+    if (!Array.isArray(worlds) || worlds.length < 1 || worlds.length > MODERATION_MAX_WORLDS || !worlds.every(isValidWorldId) || new Set(worlds).size !== worlds.length) {
+      return bad('payload.worlds must be "*" or an array of 1 to ' + MODERATION_MAX_WORLDS + ' distinct world ids');
+    }
+  }
+  const ops = payload.operations;
+  if (!Array.isArray(ops) || ops.length < 1 || ops.length > MODERATION_OPERATIONS.length || !ops.every((o) => MODERATION_OPERATIONS.includes(o)) || new Set(ops).size !== ops.length) {
+    return bad('payload.operations must be 1 or more distinct names from: ' + MODERATION_OPERATIONS.join(', '));
+  }
+  let ttl = MODERATION_GRANT_DEFAULT_TTL_S;
+  if (payload.ttlSeconds !== undefined) {
+    if (!Number.isInteger(payload.ttlSeconds) || payload.ttlSeconds < 1 || payload.ttlSeconds > MODERATION_GRANT_MAX_TTL_S) {
+      return bad('payload.ttlSeconds must be an integer from 1 to ' + MODERATION_GRANT_MAX_TTL_S);
+    }
+    ttl = payload.ttlSeconds;
+  }
+  if (!(await isValidPopPublicKey(payload.popPublicKey))) return bad('payload.popPublicKey must be a raw P-256 public key (65 bytes, base64url)');
+  if (payload.popPublicKey === requesterKey || payload.popPublicKey === issuerKey) {
+    return bad('payload.popPublicKey must be a fresh ephemeral key, not a long-term identity or issuer key');
+  }
+  return { request: { audience: payload.audience, worlds, operations: ops, ttl, popPublicKey: payload.popPublicKey } };
+}
+
+// Is every requested world and operation inside the key's CURRENT authority?
+function grantWithinAuthority(authority, request) {
+  const opsOk = request.operations.every((o) => authority.operations === '*' || authority.operations.includes(o));
+  let worldsOk;
+  if (request.worlds === '*') worldsOk = authority.worlds === '*';
+  else worldsOk = authority.worlds === '*' || request.worlds.every((w) => authority.worlds.includes(w));
+  return opsOk && worldsOk;
+}
+
+// Reserves one live-grant slot for the moderator and records the grant, in one
+// synchronous step. Returns false when the moderator already holds the maximum.
+function recordModerationGrant(entry, nowMs) {
+  let doc = { grants: [] };
+  try { if (fs.existsSync(MODERATION_GRANTS_FILE)) doc = JSON.parse(fs.readFileSync(MODERATION_GRANTS_FILE, 'utf8')); } catch (e) { doc = { grants: [] }; }
+  const live = (Array.isArray(doc.grants) ? doc.grants : []).filter((g) => g && g.expiresAtMs > nowMs);
+  if (live.filter((g) => g.moderatorRef === entry.moderatorRef).length >= MODERATION_MAX_LIVE_GRANTS) return false;
+  live.push(entry);
+  fs.writeFileSync(MODERATION_GRANTS_FILE, JSON.stringify({ grants: live }));
+  return true;
 }
 
 // Trading Station membership roster — same read/append shape as
@@ -6164,7 +6371,7 @@ async function main() {
         const failed = await authenticateAdminLogin(loginPayload, proof, req);
         if (failed) return sendAdminAuthFailure(res, failed);
         const { token, expiresAt, absoluteExpiresAt } = createAdminSession(proof.publicKey);
-        return sendJson(res, 200, { token, expiresAt, absoluteExpiresAt });
+        return sendJson(res, 200, { token, expiresAt, absoluteExpiresAt, role: adminAuthority(proof.publicKey).role });
       }
 
       // POST /atlas/admin/session/whoami — {token}, no signature. The
@@ -6179,9 +6386,52 @@ async function main() {
         if (typeof token !== 'string' || !token) {
           return sendAdminAuthFailure(res, adminFailure(401, 'session-invalid', 'session is missing, unknown, or expired'));
         }
-        const auth = await requireAdminAuth(null, null, token, req);
+        const auth = await requireAdminAuth(null, null, token, req, 'moderation');
         if (auth.error) return sendAdminAuthFailure(res, auth);
-        return sendJson(res, 200, { publicKey: auth.publicKey });
+        return sendJson(res, 200, { publicKey: auth.publicKey, role: auth.authority.role });
+      }
+
+      // POST /atlas/admin/moderation/grant — {payload, proof} or {payload,
+      // token}. Issues a short-lived, domain-signed moderation grant to the
+      // authenticated key: administrators and moderators may ask (scope
+      // 'moderation'), no other route accepts a moderator. The key's CURRENT
+      // roster authority bounds the worlds and operations; the audience must
+      // be a configured presence endpoint; the grant is bound to the
+      // requester's ephemeral proof-of-possession key. See
+      // docs/moderation-authorization.md for the format.
+      if (req.method === 'POST' && req.url === '/atlas/admin/moderation/grant') {
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req, 'moderation');
+        if (auth.error) return sendAdminAuthFailure(res, auth);
+        const audiences = moderationAudiences();
+        if (!audiences.length) return sendAdminAuthFailure(res, adminFailure(503, 'moderation-not-configured', 'no presence endpoint is configured to receive moderation grants'));
+        const parsed = await parseGrantRequest(payload, auth.publicKey, publicKeyB64url);
+        if (parsed.error) return sendAdminAuthFailure(res, parsed.error);
+        const r = parsed.request;
+        if (!audiences.includes(r.audience)) return sendAdminAuthFailure(res, adminFailure(403, 'audience-not-trusted', 'this presence endpoint is not configured for this domain'));
+        if (!grantWithinAuthority(auth.authority, r)) return sendAdminAuthFailure(res, adminFailure(403, 'scope-denied', 'the requested worlds or operations are outside this key\'s authority'));
+        const nowMs = Date.now();
+        const grantPayload = {
+          type: MODERATION_GRANT_TYPE,
+          version: MODERATION_GRANT_VERSION,
+          grantId: b64url(webcrypto.getRandomValues(new Uint8Array(16))),
+          domain: DOMAIN,
+          audience: r.audience,
+          moderatorRef: moderatorRefFor(DOMAIN, auth.publicKey),
+          worlds: r.worlds,
+          operations: r.operations,
+          issuedAt: new Date(nowMs).toISOString(),
+          expiresAt: new Date(nowMs + r.ttl * 1000).toISOString(),
+          cnf: { alg: 'ES256', publicKey: r.popPublicKey }
+        };
+        const recorded = recordModerationGrant({ grantId: grantPayload.grantId, moderatorRef: grantPayload.moderatorRef, audience: r.audience, issuedAt: grantPayload.issuedAt, expiresAtMs: nowMs + r.ttl * 1000 }, nowMs);
+        if (!recorded) return sendAdminAuthFailure(res, adminFailure(429, 'grant-quota', 'too many live moderation grants for this moderator; wait for one to expire'));
+        const data = Buffer.concat([Buffer.from(MODERATION_GRANT_SIGN_CONTEXT, 'utf8'), Buffer.from(canonicalize(grantPayload), 'utf8')]);
+        const signature = b64url(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, data));
+        return sendJson(res, 200, {
+          grant: { payload: grantPayload, proof: { signerRole: 'raw-ecdsa', publicKey: publicKeyB64url, signature } },
+          expiresAt: grantPayload.expiresAt
+        });
       }
 
       // POST /atlas/admin/session/logout — {token}. Always 200 regardless

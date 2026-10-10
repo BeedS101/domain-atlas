@@ -414,15 +414,86 @@ function atlas_federation_relay_rate_file() {
 function atlas_admin_keys_file() {
   return __DIR__ . '/atlas-admin-keys-store.json';
 }
-function is_admin_key($publicKey) {
+// An entry may carry a role (mirrors issuer-server/server.js):
+//   - no `role` (or null): "admin", full issuer administration, so entries
+//     written before roles existed keep working unchanged.
+//   - "admin": the same.
+//   - "moderator": world moderation only. Optional `worlds` (list of world ids)
+//     and `operations` (subset of ATLAS_MODERATION_OPERATIONS). An absent list
+//     means "all"; an EMPTY list means none; anything that is not a list of
+//     valid strings means none. A moderator is never an admin.
+//   - anything else: no authority at all (a typo must not fall back to admin).
+const ATLAS_MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'];
+const ATLAS_MODERATION_MAX_WORLDS = 32;
+const ATLAS_MODERATION_EDGE_SPACE = '\x{0009}-\x{000d}\x{0020}\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}';
+
+// A world id as a moderation scope names it: 1 to 120 characters (code
+// points), valid UTF-8, no control characters or line/paragraph separators,
+// and no leading or trailing white space. Same rule as the Node issuer.
+function atlas_valid_world_id($w) {
+  if (!is_string($w) || preg_match('//u', $w) !== 1) return false;
+  $n = preg_match_all('/./su', $w);
+  if ($n < 1 || $n > 120) return false;
+  if (preg_match('/[\x00-\x1f\x7f\x{2028}\x{2029}]/u', $w) === 1) return false;
+  if (preg_match('/^[' . ATLAS_MODERATION_EDGE_SPACE . ']|[' . ATLAS_MODERATION_EDGE_SPACE . ']$/u', $w) === 1) return false;
+  return true;
+}
+// '*' when the field is absent, otherwise the validated list. Anything that
+// is present but not a list of valid entries yields [] (none), never '*'.
+function atlas_parse_scope_list($entry, $field, $isValid, $max) {
+  if (!array_key_exists($field, $entry)) return '*';
+  $raw = $entry[$field];
+  if (!is_array($raw) || count($raw) > $max || ($raw !== [] && !atlas_array_is_list($raw))) return [];
+  foreach ($raw as $v) if (!$isValid($v)) return [];
+  return array_values(array_unique($raw));
+}
+// The effective authority of a roster key RIGHT NOW: null (not on the roster,
+// revoked, unknown role, or ambiguous) or ['role', 'worlds', 'operations'],
+// the last two '*' or a list. Read from the roster file on every call. If a
+// key has several active entries they must all be plain admin entries; any
+// mix, or two moderator entries, is ambiguous and grants nothing.
+function admin_authority($publicKey) {
+  if (!is_string($publicKey) || $publicKey === '') return null;
   $path = atlas_admin_keys_file();
-  if (!file_exists($path)) return false;
+  if (!file_exists($path)) return null;
   $doc = json_decode(file_get_contents($path), true);
-  $keys = is_array($doc) && isset($doc['keys']) ? $doc['keys'] : [];
+  $keys = is_array($doc) && isset($doc['keys']) && is_array($doc['keys']) ? $doc['keys'] : [];
+  $active = [];
   foreach ($keys as $k) {
-    if (isset($k['publicKey']) && $k['publicKey'] === $publicKey && empty($k['revoked'])) return true;
+    if (is_array($k) && isset($k['publicKey']) && $k['publicKey'] === $publicKey && empty($k['revoked'])) $active[] = $k;
   }
-  return false;
+  if (!$active) return null;
+  $allAdmin = true;
+  foreach ($active as $k) {
+    $role = array_key_exists('role', $k) ? $k['role'] : null;
+    if (!($role === null || $role === 'admin')) $allAdmin = false;
+  }
+  if ($allAdmin) return ['role' => 'admin', 'worlds' => '*', 'operations' => '*'];
+  if (count($active) === 1 && ($active[0]['role'] ?? null) === 'moderator') {
+    return [
+      'role' => 'moderator',
+      'worlds' => atlas_parse_scope_list($active[0], 'worlds', 'atlas_valid_world_id', 256),
+      'operations' => atlas_parse_scope_list($active[0], 'operations', function ($o) { return is_string($o) && in_array($o, ATLAS_MODERATION_OPERATIONS, true); }, count(ATLAS_MODERATION_OPERATIONS))
+    ];
+  }
+  return null;
+}
+// True only for a FULL administrator. Every pre-existing check of "is this an
+// admin?" goes through here, so a moderator can never satisfy one.
+function is_admin_key($publicKey) {
+  $a = admin_authority($publicKey);
+  return $a !== null && $a['role'] === 'admin';
+}
+// What each scope needs: 'admin' (the default for every route) is the
+// administrator role only; 'moderation' is the moderation-grant route and
+// accepts administrators and moderators.
+function admin_authority_allows($authority, $need) {
+  if (!$authority) return false;
+  if ($authority['role'] === 'admin') return true;
+  return $authority['role'] === 'moderator' && $need === 'moderation';
+}
+function admin_insufficient_role($authority) {
+  return admin_failure(403, 'insufficient-role', 'this key is registered as ' . $authority['role'] . ' and may not use this endpoint');
 }
 
 // Admin session layer on top of the roster above — mirrors
@@ -612,7 +683,7 @@ function check_admin_auth_fields($payload, $action, $nowMs) {
 // and freshness first (cheap, no secret), then signature and roster, and the
 // nonce is spent only after both pass, so unauthenticated traffic can never
 // fill the nonce store. Mirrors authenticateAdminProof().
-function authenticate_admin_proof($payload, $proof, $action) {
+function authenticate_admin_proof($payload, $proof, $action, $need = 'admin') {
   if (!is_array($payload) || !is_array($proof)) return admin_failure(401, 'auth-required', 'payload and proof are required');
   $retryAfter = atlas_admin_failure_retry_after();
   if ($retryAfter) return admin_rate_limited($retryAfter);
@@ -623,17 +694,21 @@ function authenticate_admin_proof($payload, $proof, $action) {
     atlas_admin_record_failure();
     return admin_failure(401, 'bad-signature', 'admin signature does not check out');
   }
-  if (!is_admin_key($proof['publicKey'])) {
+  $authority = admin_authority($proof['publicKey']);
+  if (!$authority) {
     atlas_admin_record_failure();
     return admin_failure(401, 'not-admin', 'this key is not a registered domain admin');
   }
+  // A valid signature from a key without the needed role is refused before the
+  // nonce is spent; it is not a failed authentication, so it is not throttled.
+  if (!admin_authority_allows($authority, $need)) return admin_insufficient_role($authority);
   $spent = consume_admin_proof_nonce($proof['publicKey'], $payload['adminAuth']['nonce'], $nowMs);
   if ($spent === 'replayed') {
     atlas_admin_record_failure();
     return admin_failure(401, 'replayed-request', 'this request has already been used');
   }
   if ($spent === 'full') return admin_failure(503, 'busy', 'too many recent admin requests; try again shortly');
-  return ['publicKey' => $proof['publicKey']];
+  return ['publicKey' => $proof['publicKey'], 'authority' => $authority];
 }
 
 // Authenticates a login: a roster key's signature over a server-issued
@@ -653,7 +728,9 @@ function authenticate_admin_login($payload, $proof) {
     atlas_admin_record_failure();
     return admin_failure(401, 'bad-signature', 'admin signature does not check out');
   }
-  if (!is_admin_key($proof['publicKey'])) {
+  // Any active roster role may sign in; what the session can then do is
+  // decided per request by require_admin_auth().
+  if (!admin_authority($proof['publicKey'])) {
     atlas_admin_record_failure();
     return admin_failure(401, 'not-admin', 'this key is not a registered domain admin');
   }
@@ -769,7 +846,7 @@ function create_admin_session($publicKey) {
 // (never past absoluteExpiresAt). The session is re-checked against the
 // CURRENT roster on every call: when its key has been removed or marked
 // revoked, all of that key's sessions are deleted and the request is refused.
-// Returns ['publicKey'] or ['code' => 'unknown'|'not-admin']. hash_equals()
+// Returns ['publicKey', 'authority'] or ['code' => 'unknown'|'not-admin']. hash_equals()
 // keeps the token comparison constant-time.
 function check_admin_session($token) {
   return atlas_admin_locked(atlas_admin_sessions_file(), ['sessions' => []], function ($doc) use ($token) {
@@ -788,12 +865,15 @@ function check_admin_session($token) {
     }
     if ($idx === null) return [['sessions' => $live], ['code' => 'unknown']];
     $publicKey = $live[$idx]['publicKey'];
-    if (!is_admin_key($publicKey)) {
+    // The role is looked up now, not stored in the session: a demotion or
+    // removal applies to the next request.
+    $authority = admin_authority($publicKey);
+    if (!$authority) {
       $kept = array_values(array_filter($live, function ($s) use ($publicKey) { return $s['publicKey'] !== $publicKey; }));
       return [['sessions' => $kept], ['code' => 'not-admin']];
     }
     $live[$idx]['expiresAt'] = min($nowMs + ATLAS_ADMIN_SESSION_TTL_MS, $live[$idx]['absoluteExpiresAt']);
-    return [['sessions' => $live], ['publicKey' => $publicKey]];
+    return [['sessions' => $live], ['publicKey' => $publicKey, 'authority' => $authority]];
   });
 }
 // Idempotent and constant-shape whether or not the token was ever valid —
@@ -815,12 +895,19 @@ function delete_admin_session($token) {
 // (authenticate_admin_proof()) bound to $action, the route path. A token,
 // when given, takes priority and is checked on its own. A valid session is
 // honoured even while the client's failed-attempt budget is spent; only a
-// failed one counts against it. Returns a refusal (isset($r['error']); pass it
-// to admin_auth_fail()) or ['publicKey' => ...].
-function require_admin_auth($payload, $proof, $token, $action) {
+// failed one counts against it.
+//
+// $need is the scope the route requires and defaults to 'admin': a route that
+// says nothing is administrator-only, so a moderator reaches only the routes
+// that explicitly ask for 'moderation'. Returns a refusal (isset($r['error']);
+// pass it to admin_auth_fail()) or ['publicKey', 'authority'].
+function require_admin_auth($payload, $proof, $token, $action, $need = 'admin') {
   if (is_string($token) && $token !== '') {
     $checked = check_admin_session($token);
-    if (isset($checked['publicKey'])) return ['publicKey' => $checked['publicKey']];
+    if (isset($checked['publicKey'])) {
+      if (!admin_authority_allows($checked['authority'], $need)) return admin_insufficient_role($checked['authority']);
+      return ['publicKey' => $checked['publicKey'], 'authority' => $checked['authority']];
+    }
     $retryAfter = atlas_admin_failure_retry_after();
     if ($retryAfter) return admin_rate_limited($retryAfter);
     atlas_admin_record_failure();
@@ -828,7 +915,127 @@ function require_admin_auth($payload, $proof, $token, $action) {
       ? admin_failure(401, 'not-admin', 'this key is not a registered domain admin')
       : admin_failure(401, 'session-invalid', 'session is missing, unknown, or expired');
   }
-  return authenticate_admin_proof($payload, $proof, $action);
+  return authenticate_admin_proof($payload, $proof, $action, $need);
+}
+
+// ---------- Moderation grants ----------
+//
+// Mirrors issuer-server/server.js. A grant is a short-lived statement, signed
+// by this domain's issuer key, that one roster key may perform named
+// moderation operations in named worlds at one presence service, provable only
+// by whoever holds an ephemeral private key. Format, trust model and
+// verification steps: docs/moderation-authorization.md. Nothing here moderates
+// anything.
+const ATLAS_MODERATION_GRANT_TYPE = 'atlas.moderation-grant';
+const ATLAS_MODERATION_GRANT_VERSION = 1;
+const ATLAS_MODERATION_GRANT_SIGN_CONTEXT = "atlas-moderation-grant/v1\n";
+const ATLAS_MODERATION_REF_CONTEXT = "atlas-moderator-ref/v1\n";
+const ATLAS_MODERATION_GRANT_MAX_TTL_S = 600; // hard ceiling, 10 minutes
+const ATLAS_MODERATION_GRANT_DEFAULT_TTL_S = 300;
+const ATLAS_MODERATION_REQUEST_FIELDS = ['audience', 'worlds', 'operations', 'ttlSeconds', 'popPublicKey', 'adminAuth'];
+
+function atlas_moderation_config_file() {
+  return __DIR__ . '/atlas-moderation-config.json';
+}
+function atlas_moderation_grants_file() {
+  return __DIR__ . '/atlas-moderation-grants-store.json';
+}
+function atlas_moderation_max_live_grants() { return atlas_env_positive_int('ATLAS_MODERATION_MAX_LIVE_GRANTS', 10); }
+
+// Operator-edited, like the roster: {"domain": "example.com", "audiences":
+// ["https://presence.example.com"]}. `domain` is the domain name the grants
+// carry; it is configured here, never taken from the Host header, and the
+// grant route refuses when Host disagrees. `audiences` lists the only presence
+// endpoints a grant may be addressed to; the environment variable
+// ATLAS_MODERATION_AUDIENCES (comma-separated) overrides the file's list.
+function atlas_moderation_config() {
+  $cfg = ['domain' => null, 'audiences' => []];
+  $path = atlas_moderation_config_file();
+  if (file_exists($path)) {
+    $f = json_decode(file_get_contents($path), true);
+    if (is_array($f)) {
+      if (isset($f['domain']) && is_string($f['domain']) && $f['domain'] !== '') $cfg['domain'] = $f['domain'];
+      if (isset($f['audiences']) && is_array($f['audiences'])) $cfg['audiences'] = $f['audiences'];
+    }
+  }
+  $env = getenv('ATLAS_MODERATION_AUDIENCES');
+  if ($env !== false) $cfg['audiences'] = array_values(array_filter(array_map('trim', explode(',', $env)), 'strlen'));
+  $cfg['audiences'] = array_values(array_filter($cfg['audiences'], 'atlas_is_presence_origin'));
+  return $cfg;
+}
+// A presence endpoint identifier: scheme://host[:port], lowercase, no path.
+function atlas_is_presence_origin($s) {
+  return is_string($s) && strlen($s) <= 255 && preg_match('#^https?://(\[[0-9a-f:]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)(:\d{1,5})?$#', $s) === 1;
+}
+// Stable, non-reversible reference to a moderator for one domain.
+function atlas_moderator_ref($domain, $publicKey) {
+  return b64url_encode(hash('sha256', ATLAS_MODERATION_REF_CONTEXT . $domain . "\n" . $publicKey, true));
+}
+function atlas_valid_pop_public_key($b64) {
+  if (!is_string($b64) || preg_match('/^[A-Za-z0-9_-]{87}$/', $b64) !== 1) return false;
+  $raw = b64url_decode($b64);
+  if (!is_string($raw) || strlen($raw) !== 65 || ord($raw[0]) !== 4) return false;
+  if (b64url_encode($raw) !== $b64) return false; // one canonical spelling per key
+  try {
+    return openssl_pkey_get_public(ec_raw_point_to_pem($raw)) !== false; // rejects points not on the curve
+  } catch (Exception $e) {
+    return false;
+  }
+}
+// Validates a grant request payload. Returns ['request' => [...]] or
+// ['error' => admin_failure(...)]. Strict: an unknown field is an error.
+function atlas_parse_grant_request($payload, $requesterKey, $issuerKey) {
+  $bad = function ($m) { return ['error' => admin_failure(400, 'bad-request', $m)]; };
+  if (!is_array($payload) || ($payload !== [] && atlas_array_is_list($payload))) return $bad('payload must be an object');
+  foreach (array_keys($payload) as $k) if (!in_array($k, ATLAS_MODERATION_REQUEST_FIELDS, true)) return $bad('unknown field in payload: ' . $k);
+  $audience = $payload['audience'] ?? null;
+  if (!is_string($audience) || !atlas_is_presence_origin($audience)) return $bad('payload.audience must be a presence origin such as https://presence.example.com');
+  $worlds = $payload['worlds'] ?? null;
+  if ($worlds !== '*') {
+    if (!is_array($worlds) || !atlas_array_is_list($worlds) || count($worlds) < 1 || count($worlds) > ATLAS_MODERATION_MAX_WORLDS) {
+      return $bad('payload.worlds must be "*" or an array of 1 to ' . ATLAS_MODERATION_MAX_WORLDS . ' distinct world ids');
+    }
+    foreach ($worlds as $w) if (!atlas_valid_world_id($w)) return $bad('payload.worlds must be "*" or an array of 1 to ' . ATLAS_MODERATION_MAX_WORLDS . ' distinct world ids');
+    if (count(array_unique($worlds)) !== count($worlds)) return $bad('payload.worlds must be "*" or an array of 1 to ' . ATLAS_MODERATION_MAX_WORLDS . ' distinct world ids');
+  }
+  $ops = $payload['operations'] ?? null;
+  $opsMsg = 'payload.operations must be 1 or more distinct names from: ' . implode(', ', ATLAS_MODERATION_OPERATIONS);
+  if (!is_array($ops) || !atlas_array_is_list($ops) || count($ops) < 1 || count($ops) > count(ATLAS_MODERATION_OPERATIONS)) return $bad($opsMsg);
+  foreach ($ops as $o) if (!is_string($o) || !in_array($o, ATLAS_MODERATION_OPERATIONS, true)) return $bad($opsMsg);
+  if (count(array_unique($ops)) !== count($ops)) return $bad($opsMsg);
+  $ttl = ATLAS_MODERATION_GRANT_DEFAULT_TTL_S;
+  if (array_key_exists('ttlSeconds', $payload)) {
+    $t = $payload['ttlSeconds'];
+    $isInt = is_int($t) || (is_float($t) && floor($t) == $t && is_finite($t));
+    if (!$isInt || $t < 1 || $t > ATLAS_MODERATION_GRANT_MAX_TTL_S) return $bad('payload.ttlSeconds must be an integer from 1 to ' . ATLAS_MODERATION_GRANT_MAX_TTL_S);
+    $ttl = (int) $t;
+  }
+  $pop = $payload['popPublicKey'] ?? null;
+  if (!atlas_valid_pop_public_key($pop)) return $bad('payload.popPublicKey must be a raw P-256 public key (65 bytes, base64url)');
+  if ($pop === $requesterKey || $pop === $issuerKey) return $bad('payload.popPublicKey must be a fresh ephemeral key, not a long-term identity or issuer key');
+  return ['request' => ['audience' => $audience, 'worlds' => $worlds, 'operations' => array_values($ops), 'ttl' => $ttl, 'popPublicKey' => $pop]];
+}
+// Is every requested world and operation inside the key's CURRENT authority?
+function atlas_grant_within_authority($authority, $request) {
+  foreach ($request['operations'] as $o) {
+    if ($authority['operations'] !== '*' && !in_array($o, $authority['operations'], true)) return false;
+  }
+  if ($request['worlds'] === '*') return $authority['worlds'] === '*';
+  if ($authority['worlds'] === '*') return true;
+  foreach ($request['worlds'] as $w) if (!in_array($w, $authority['worlds'], true)) return false;
+  return true;
+}
+// Reserves one live-grant slot for the moderator and records the grant, in one
+// locked step. Returns false when the moderator already holds the maximum.
+function atlas_record_moderation_grant($entry, $nowMs) {
+  return atlas_admin_locked(atlas_moderation_grants_file(), ['grants' => []], function ($doc) use ($entry, $nowMs) {
+    $live = array_values(array_filter(isset($doc['grants']) && is_array($doc['grants']) ? $doc['grants'] : [], function ($g) use ($nowMs) { return is_array($g) && ($g['expiresAtMs'] ?? 0) > $nowMs; }));
+    $mine = 0;
+    foreach ($live as $g) if (($g['moderatorRef'] ?? null) === $entry['moderatorRef']) $mine++;
+    if ($mine >= atlas_moderation_max_live_grants()) return [['grants' => $live], false];
+    $live[] = $entry;
+    return [['grants' => $live], true];
+  });
 }
 
 // Trading Station membership roster — same flat-array

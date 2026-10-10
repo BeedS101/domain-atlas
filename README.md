@@ -2083,6 +2083,13 @@ simplifications are worth naming plainly rather than leaving implicit:
   would break that flow rather than protect anything; a real admin surface
   would need to distinguish a self-service request from an operator-only
   mint, not gate the whole endpoint.
+- **Moderator role.** A roster entry may carry `"role": "moderator"` (with
+  optional `worlds` and `operations` lists). A moderator can sign in but is
+  refused by every issuer-admin route; the only thing it can do is ask
+  `POST /atlas/admin/moderation/grant` for a short-lived, domain-signed grant
+  bound to an ephemeral key. Nothing consumes grants yet, and there are no
+  moderation commands. The wire format, trust model and limits are in
+  `docs/moderation-authorization.md`.
 - **Admin session primitive.** Re-signing every click with an ECDSA key
   works fine for a one-off CLI call, but gets impractical for anything
   resembling a real admin page — you'd need the key reachable for every

@@ -16,4 +16,6 @@ $proof = $requestBody['proof'] ?? null;
 $failed = authenticate_admin_login($loginPayload, $proof);
 if ($failed) admin_auth_fail($failed);
 
-send_json(200, create_admin_session($proof['publicKey']));
+$session = create_admin_session($proof['publicKey']);
+$session['role'] = admin_authority($proof['publicKey'])['role'];
+send_json(200, $session);

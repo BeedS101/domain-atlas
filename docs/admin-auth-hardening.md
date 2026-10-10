@@ -71,6 +71,13 @@ end.
    `session-invalid`, `rate-limited`, `busy`, `too-large`). The `error` text is
    still present.
 
+## Roles
+
+Roster entries may now carry a `role` (`admin`, the default, or `moderator`).
+A moderator can log in but is refused (`403 insufficient-role`) by every route
+above; only the moderation grant route accepts it. See
+`docs/moderation-authorization.md`.
+
 ## Incompatible changes
 
 | Change | Who is affected |

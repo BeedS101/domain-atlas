@@ -71,6 +71,7 @@ What's in this folder
     admin/session/start.php  - POST /atlas/admin/session/start   (sign the nonce as a roster admin, get a session token back)
     admin/session/whoami.php - POST /atlas/admin/session/whoami  (check/refresh a session token, no signature needed)
     admin/session/logout.php - POST /atlas/admin/session/logout  (end a session token early)
+    admin/moderation/grant.php - POST /atlas/admin/moderation/grant  (signed, short-lived moderation grant for a moderator or admin; see docs/moderation-authorization.md)
     admin/is-admin.php       - GET  /atlas/admin/is-admin  (public, boolean-only: is this key on the roster? — see "Admin panel" below)
     admin/directory.php      - POST /atlas/admin/directory (admin-gated: subscriber + Post Office rosters, for the admin panel's own dropdowns — see "Admin panel" below)
     admin/class-patch.php    - POST /atlas/admin/class-patch   (admin-gated: set/clear a properties+tradeScope patch for a whole non-fungible class — see "Class-wide patches" below)
@@ -944,6 +945,17 @@ docs/admin-auth-hardening.md in the project repository.
    its nonce. Use the tools/admin-*.js scripts, which do this.
  - Set $forced in atlas_domain() (lib/store.php) to your domain. Otherwise
    the domain comes from the Host header.
+ - Roster entries may carry "role": "moderator" (optionally with "worlds" and
+   "operations" lists). A moderator can sign in but every admin route refuses
+   it with 403 insufficient-role; only atlas/admin/moderation/grant.php and
+   session/whoami.php accept one. An entry without "role" is a full
+   administrator, as before. An unknown role value gives no access at all, and
+   so does an empty "worlds" list. Details: docs/moderation-authorization.md.
+ - To issue moderation grants, create lib/atlas-moderation-config.json (it is
+   not in the repository):
+     {"domain": "example.com", "audiences": ["https://presence.example.com"]}
+   Without it atlas/admin/moderation/grant.php answers 503. Nothing in the
+   presence service uses grants yet.
  - Sessions are re-checked against lib/atlas-admin-keys-store.json on every
    request: removing a key, or adding "revoked": true to it, ends its
    sessions on their next use. Sessions also end 8 hours after login.

@@ -3,6 +3,7 @@
 // same route. {token}, no signature — the bearer token itself IS the
 // credential once a session exists (start.php). Counts as use, so it
 // slides the idle expiry, and fails once the key has left the roster.
+// Accepts moderators as well as administrators and reports the role.
 require_once __DIR__ . '/../../../lib/bootstrap.php';
 handle_preflight();
 require_post();
@@ -12,7 +13,7 @@ $token = $requestBody['token'] ?? null;
 // No token at all is an answer, not a guess, so it does not count against the
 // failed-attempt budget; a wrong one does.
 if (!is_string($token) || $token === '') admin_auth_fail(admin_failure(401, 'session-invalid', 'session is missing, unknown, or expired'));
-$auth = require_admin_auth(null, null, $token, '/atlas/admin/session/whoami');
+$auth = require_admin_auth(null, null, $token, '/atlas/admin/session/whoami', 'moderation');
 if (isset($auth['error'])) admin_auth_fail($auth);
 
-send_json(200, ['publicKey' => $auth['publicKey']]);
+send_json(200, ['publicKey' => $auth['publicKey'], 'role' => $auth['authority']['role']]);
