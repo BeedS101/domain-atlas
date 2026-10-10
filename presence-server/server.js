@@ -60,18 +60,22 @@
 // rate-limit window, and is never sent to any client. Forwarded-for headers
 // are not read.
 //
-// Moderation (lib-moderation.js): POST /presence/moderation/roster answers a
-// moderator holding an issuer-signed grant with the anonymous sessions in one
-// world they are authorized for. It is read-only, takes no wallet identity,
-// and trusts only issuer keys named in this server's own configuration.
+// Moderation (lib-moderation.js): a moderator holding an issuer-signed grant
+// can list the anonymous sessions of one world they are authorized for
+// (POST /presence/moderation/roster) and mute, unmute or kick one of them
+// (POST /presence/moderation/command). Neither takes a wallet identity, and
+// both trust only issuer keys named in this server's own configuration.
 // A client may also send a random per-visit id with its presence and chat joins
-// (`visit`); only a keyed hash of it is kept, and it only lets the roster show
-// the two sessions of one visit together. See docs/moderation-authorization.md.
+// (`visit`); only a keyed hash of it is kept. It pairs the two sessions of one
+// visit in the roster and is the key of a mute or kick, which therefore covers
+// exactly one world visit (lib-restrictions.js). See
+// docs/moderation-authorization.md.
 
 const http = require('http');
 const net = require('net');
 const crypto = require('crypto');
 const moderation = require('./lib-moderation');
+const restrictions = require('./lib-restrictions');
 
 const PORT = process.env.PORT || 8004;
 
@@ -358,14 +362,16 @@ const DENIAL_TEXT = {
   'room-full': 'This room is full right now. Try again in a moment.',
   'source-limit': 'Too many sessions are already open from your network connection. Close other tabs or wait a few seconds, then try again.',
   'join-rate-limited': 'Too many join attempts from your network connection. Wait a moment, then try again.',
-  'name-not-allowed': 'That display name looks like an official title (moderator, admin, staff, ...). Display names are not verified, so titles are not allowed. Choose a different name.'
+  'name-not-allowed': 'That display name looks like an official title (moderator, admin, staff, ...). Display names are not verified, so titles are not allowed. Choose a different name.',
+  'removed': 'A moderator has removed you from this world. You can rejoin shortly.'
 };
 const DENIAL_RETRY_S = { 'room-full': 10, 'source-limit': 10, 'server-busy': 15 };
 
 function denial(result) {
-  const out = { reason: result.reason, message: DENIAL_TEXT[result.reason] || result.reason };
+  const out = { reason: result.reason, message: result.message || DENIAL_TEXT[result.reason] || result.reason };
   const retry = result.retryAfter || DENIAL_RETRY_S[result.reason];
   if (retry) out.retryAfter = retry;
+  if (result.cause) out.cause = result.cause;
   return out;
 }
 
@@ -489,6 +495,17 @@ function rosterOf(room, exceptConnId) {
   return roster;
 }
 
+// The refusal a kicked visit gets when it tries to join again, or null. A
+// session without a visit id is restricted by its own connection (`c:<id>`),
+// which only matters to a WebSocket that tries to join again on the same
+// connection.
+function removedAnswer(visit, connId) {
+  const now = Date.now();
+  const kick = (visit && restrictions.kickOf(visit, now)) || restrictions.kickOf('c:' + connId, now);
+  if (!kick) return null;
+  return { ok: false, reason: 'removed', cause: kick.cause, message: restrictions.kickMessage(kick.until, kick.cause, now), retryAfter: Math.max(1, Math.ceil((kick.until - now) / 1000)) };
+}
+
 // Shared join path for both transports. `extra` carries the
 // transport-specific fields ({transport:'ws', socket} or {transport:'poll',
 // lastSeen}); `rawAddress` is the socket peer address. Returns
@@ -500,6 +517,12 @@ function addMember(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress, visi
   const domain = cleanId(domainRaw);
   const world = cleanId(worldRaw);
   if (!domain || !world) return { ok: false, reason: 'invalid' };
+  // A kicked visit cannot rejoin until the kick expires. Checked before the
+  // source's join budget is touched, so a removed visitor retrying does not
+  // push a shared network address into a cooldown for everyone behind it.
+  const visit = moderation.visitHash(domain, world, visitRaw);
+  const removed = removedAnswer(visit, connId);
+  if (removed) return removed;
   const src = sourceKeyOf(rawAddress);
   const retryAfter = noteJoinAttempt(src, 'presence', Date.now());
   if (retryAfter !== null) return { ok: false, reason: 'join-rate-limited', retryAfter };
@@ -516,7 +539,7 @@ function addMember(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress, visi
   const name = cleanName(nameRaw);
   const publicId = randomId();
   const roster = rosterOf(room, connId);
-  const member = Object.assign({ publicId, name, x: 0, y: 0, z: 0, yaw: 0, src, joinedAt: Date.now(), visit: moderation.visitHash(domain, world, visitRaw) }, extra);
+  const member = Object.assign({ publicId, name, x: 0, y: 0, z: 0, yaw: 0, src, joinedAt: Date.now(), visit }, extra);
   room.set(connId, member);
   connIndex.set(connId, { roomKey, room });
 
@@ -645,6 +668,9 @@ function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress, v
   const domain = cleanId(domainRaw);
   const world = cleanId(worldRaw);
   if (!domain || !world) return { ok: false, reason: 'invalid' };
+  const visit = moderation.visitHash(domain, world, visitRaw);
+  const removed = removedAnswer(visit, connId);
+  if (removed) return removed;
   const src = sourceKeyOf(rawAddress);
   const retryAfter = noteJoinAttempt(src, 'chat', Date.now());
   if (retryAfter !== null) return { ok: false, reason: 'join-rate-limited', retryAfter };
@@ -658,7 +684,7 @@ function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress, v
   if (!room) { room = new Map(); chatRooms.set(domain, room); }
   const history = chatHistory.get(domain) || [];
   const senderId = randomId();
-  const member = Object.assign({ name: cleanName(nameRaw), senderId, world, cursor: currentChatSeq(domain), lastSendAt: 0, src, joinedAt: Date.now(), visit: moderation.visitHash(domain, world, visitRaw) }, extra);
+  const member = Object.assign({ name: cleanName(nameRaw), senderId, world, cursor: currentChatSeq(domain), lastSendAt: 0, src, joinedAt: Date.now(), visit }, extra);
   room.set(connId, member);
   chatConnIndex.set(connId, { domain, room });
   return { ok: true, senderId, history };
@@ -674,13 +700,18 @@ function leaveChatRoom(connId) {
 
 // Validates and broadcasts a chat send from a joined connId. Returns
 // {ok:true, message} or {ok:false, reason} with a short machine reason:
-// 'not-joined' | 'rate-limited' | 'empty' | 'blocked'.
+// 'not-joined' | 'muted' | 'rate-limited' | 'empty' | 'blocked'.
 function sendChatMessage(connId, textRaw) {
   const loc = chatConnIndex.get(connId);
   if (!loc) return { ok: false, reason: 'not-joined' };
   const member = loc.room.get(connId);
   if (!member) return { ok: false, reason: 'not-joined' };
   const now = Date.now();
+  // Enforced here, on the server, for WebSocket and polling alike. A muted
+  // visit's send is refused before anything else is looked at, so it also
+  // leaves the rate-limit clock alone.
+  const mute = restrictions.muteOf(member.visit || 'c:' + connId, now);
+  if (mute) return { ok: false, reason: 'muted', cause: mute.cause, message: restrictions.muteMessage(mute.until, mute.cause, now), retryAfter: Math.max(1, Math.ceil((mute.until - now) / 1000)) };
   if (now - member.lastSendAt < CHAT_MIN_INTERVAL_MS) return { ok: false, reason: 'rate-limited' };
   const text = String(textRaw || '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, MAX_CHAT_TEXT_LEN);
   if (!text) return { ok: false, reason: 'empty' };
@@ -761,7 +792,7 @@ function handleConnection(socket, peerAddress) {
 
       if (msg.type === 'join') {
         if (joined) return; // one join per connection
-        const result = addMember(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket }, peerAddress, msg.visit);
+        const result = addMember(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket, onRemoved: () => { joined = false; } }, peerAddress, msg.visit);
         if (!result.ok) { sendText(socket, Object.assign({ type: 'join-denied' }, denial(result))); return; }
         joined = true;
         sendText(socket, { type: 'welcome', id: result.publicId, roster: result.roster });
@@ -783,7 +814,7 @@ function handleConnection(socket, peerAddress) {
       // connectChat()) but is handled by this same dispatcher.
       if (msg.type === 'chat-join') {
         if (chatJoined) return; // one chat-join per connection
-        const result = joinChatRoom(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket }, peerAddress, msg.visit);
+        const result = joinChatRoom(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket, onRemoved: () => { chatJoined = false; } }, peerAddress, msg.visit);
         if (!result.ok) { sendText(socket, Object.assign({ type: 'chat-error' }, denial(result))); return; }
         chatJoined = true;
         sendText(socket, { type: 'chat-history', senderId: result.senderId, messages: result.history });
@@ -793,7 +824,7 @@ function handleConnection(socket, peerAddress) {
       if (msg.type === 'chat-send') {
         if (!chatJoined) return;
         const result = sendChatMessage(connId, msg.text);
-        if (!result.ok) sendText(socket, { type: 'chat-error', reason: result.reason });
+        if (!result.ok) sendText(socket, Object.assign({ type: 'chat-error', reason: result.reason }, result.message ? { message: result.message, retryAfter: result.retryAfter } : {}));
         return;
       }
 
@@ -844,6 +875,7 @@ const sweepTimer = setInterval(() => {
   const domains = new Set([...chatHistory.keys(), ...chatSeqCounters.keys()]);
   domains.forEach((domain) => pruneChatHistory(domain, now));
   pruneSourceLimits(now);
+  restrictions.sweep(now);
 }, POLL_SWEEP_INTERVAL_MS);
 sweepTimer.unref();
 
@@ -877,7 +909,7 @@ function sendJson(res, status, obj, cors, extraHeaders) {
   res.end(JSON.stringify(obj));
 }
 
-const JOIN_FAILURE_STATUS = { 'invalid': 400, 'name-not-allowed': 400, 'join-rate-limited': 429, 'source-limit': 429 };
+const JOIN_FAILURE_STATUS = { 'invalid': 400, 'name-not-allowed': 400, 'removed': 403, 'join-rate-limited': 429, 'source-limit': 429 };
 
 // Sends a refused polling join: 400 (fix the request or name), 429 (this
 // source is over its limits) or 503 (the room or server is full), with
@@ -888,29 +920,42 @@ function sendJoinFailure(res, result) {
   return sendJson(res, JOIN_FAILURE_STATUS[result.reason] || 503, Object.assign({ error: d.message }, d), false, headers);
 }
 
-// The anonymous sessions of one world, for an authorized moderator. Presence
-// and chat sessions of the same visit (same keyed visit hash) appear as one
-// entry. Each entry carries only: a temporary locator (`ref`, derived from a
-// per-process secret and never accepted as a credential anywhere), the display
-// name(s), the world, when the visit began, whether it is in presence and/or
-// chat, and the public avatar and chat sender ids that every participant
-// already sees. Never wallet keys, credentials, network addresses or hashes of
-// them, connection tokens, or the visit id itself.
-function buildModerationRoster(domain, world) {
-  const now = Date.now();
-  const groups = new Map(); // group key -> entry under construction
+// The anonymous sessions of one world, grouped by visit. Presence and chat
+// sessions of the same visit (same keyed visit hash) form one group.
+function collectGroups(domain, world) {
+  const groups = new Map(); // group key -> {key, presence, chat, presenceConn, chatConn}
   function slot(key, kind) {
     let k = key;
     for (let n = 2; groups.has(k) && groups.get(k)[kind]; n++) k = key + '#' + n; // one presence and one chat per visit
-    if (!groups.has(k)) groups.set(k, { key: k, presence: null, chat: null });
+    if (!groups.has(k)) groups.set(k, { key: k, presence: null, chat: null, presenceConn: null, chatConn: null });
     return groups.get(k);
   }
   const room = rooms.get(roomKeyFor(domain, world));
-  if (room) room.forEach((m, connId) => { slot(m.visit ? 'v:' + m.visit : 'p:' + connId, 'presence').presence = m; });
+  if (room) room.forEach((m, connId) => { const g = slot(m.visit ? 'v:' + m.visit : 'p:' + connId, 'presence'); g.presence = m; g.presenceConn = connId; });
   const chat = chatRooms.get(domain);
-  if (chat) chat.forEach((m, connId) => { if (m.world === world) slot(m.visit ? 'v:' + m.visit : 'c:' + connId, 'chat').chat = m; });
+  if (chat) chat.forEach((m, connId) => { if (m.world === world) { const g = slot(m.visit ? 'v:' + m.visit : 'c:' + connId, 'chat'); g.chat = m; g.chatConn = connId; } });
+  return groups;
+}
+
+// The key a mute on this group is stored under: the visit, or (for a session
+// without one) its chat connection. Null when there is nothing to mute.
+function muteKeyOf(g) {
+  const m = g.chat || g.presence;
+  if (m && m.visit) return m.visit;
+  return g.chatConn ? 'c:' + g.chatConn : null;
+}
+
+// The anonymous sessions of one world, for an authorized moderator. Each entry
+// carries only: a temporary locator (`ref`, derived from a per-process secret
+// and never accepted as a credential anywhere), the display name(s), the
+// world, when the visit began, whether it is in presence and/or chat, whether
+// it is currently muted, and the public avatar and chat sender ids that every
+// participant already sees. Never wallet keys, credentials, network
+// addresses or hashes of them, connection tokens, or the visit id itself.
+function buildModerationRoster(domain, world) {
+  const now = Date.now();
   const participants = [];
-  groups.forEach((g) => {
+  collectGroups(domain, world).forEach((g) => {
     const joined = Math.min(g.presence ? g.presence.joinedAt : Infinity, g.chat ? g.chat.joinedAt : Infinity);
     const entry = {
       ref: moderation.participantRef(domain, world, g.key),
@@ -923,31 +968,122 @@ function buildModerationRoster(domain, world) {
       linked: !!(g.presence && g.chat)
     };
     if (g.presence && g.chat && g.chat.name !== g.presence.name) entry.chatName = g.chat.name;
+    const mk = muteKeyOf(g);
+    const mute = mk && restrictions.muteOf(mk, now);
+    if (mute) entry.mutedUntil = new Date(mute.until).toISOString();
     participants.push(entry);
   });
   participants.sort((a, b) => (a.joinedAt < b.joinedAt ? -1 : a.joinedAt > b.joinedAt ? 1 : a.ref < b.ref ? -1 : 1));
   return { domain, world, generatedAt: new Date(now).toISOString(), count: participants.length, participants };
 }
 
-// POST /presence/moderation/roster — body {grant, request}; see lib-moderation.js
-// for what must hold. Failures never reveal whether a room exists.
+// Removes every session of the group's visit (or the group's own sessions when
+// it has no visit id) and tells each WebSocket one why. Polling sessions
+// leave a tombstone on their token instead, so their next request is answered
+// "removed" rather than "unknown, rejoin". Returns how many were removed.
+function removeGroup(domain, world, g, until, cause, now) {
+  const visit = (g.presence || g.chat) && (g.presence || g.chat).visit;
+  const doomed = { presence: [], chat: [] };
+  const room = rooms.get(roomKeyFor(domain, world));
+  if (visit) {
+    if (room) room.forEach((m, id) => { if (m.visit === visit) doomed.presence.push(id); });
+    const chat = chatRooms.get(domain);
+    if (chat) chat.forEach((m, id) => { if (m.visit === visit) doomed.chat.push(id); });
+  } else {
+    if (g.presenceConn) doomed.presence.push(g.presenceConn);
+    if (g.chatConn) doomed.chat.push(g.chatConn);
+  }
+  const notice = { cause, message: restrictions.kickMessage(until, cause, now), retryAfter: Math.max(1, Math.ceil((until - now) / 1000)) };
+  function drop(scope, connId, loc, leave) {
+    const m = loc.room.get(connId);
+    if (!m) return;
+    if (m.transport === 'ws') {
+      if (m.onRemoved) m.onRemoved();
+      sendText(m.socket, Object.assign({ type: scope === 'chat' ? 'chat-removed' : 'removed' }, notice));
+    } else {
+      restrictions.addTomb(connId, scope, until, cause, now);
+    }
+    leave(connId);
+  }
+  doomed.presence.forEach((id) => { const loc = connIndex.get(id); if (loc) drop('presence', id, loc, removeMember); });
+  doomed.chat.forEach((id) => { const loc = chatConnIndex.get(id); if (loc) drop('chat', id, loc, leaveChatRoom); });
+  return { presence: doomed.presence.length, chat: doomed.chat.length };
+}
+
+// Runs a verified chat.mute / chat.unmute / session.kick. The target is a
+// roster reference, resolved only within the world the moderator is
+// authorized for; a reference from any other world or domain simply does not
+// match.
+function executeModerationCommand(auth) {
+  const { domain, world, operation, command } = auth;
+  const now = Date.now();
+  let group = null;
+  collectGroups(domain, world).forEach((g) => { if (!group && moderation.participantRef(domain, world, g.key) === command.target) group = g; });
+  if (!group) return { status: 404, body: { error: 'no such participant in this world (the list may be out of date)', code: 'unknown-participant' } };
+  const base = { ok: true, operation, ref: command.target, world };
+
+  if (operation === 'session.kick') {
+    const until = now + command.durationSeconds * 1000;
+    const visit = (group.presence || group.chat).visit;
+    const keys = visit ? [visit] : [group.presenceConn, group.chatConn].filter(Boolean).map((id) => 'c:' + id);
+    const room = roomKeyFor(domain, world);
+    for (const k of keys) {
+      if (restrictions.setKick(k, room, until, command.cause, now) === 'full') return { status: 503, body: { error: 'too many temporary restrictions are active here; try again later', code: 'restrictions-full' } };
+    }
+    const removed = removeGroup(domain, world, group, until, command.cause, now);
+    return { status: 200, body: Object.assign(base, { removed, durationSeconds: command.durationSeconds, cause: command.cause, rejoinAfter: new Date(until).toISOString() }) };
+  }
+
+  const key = muteKeyOf(group);
+  if (!key) return { status: 409, body: { error: 'this participant is not in chat', code: 'not-in-chat' } };
+  if (operation === 'chat.unmute') {
+    const wasMuted = !!restrictions.muteOf(key, now);
+    restrictions.clearMute(key);
+    return { status: 200, body: Object.assign(base, { wasMuted }) };
+  }
+  const until = now + command.durationSeconds * 1000;
+  if (restrictions.setMute(key, roomKeyFor(domain, world), until, command.cause, now) === 'full') return { status: 503, body: { error: 'too many temporary restrictions are active here; try again later', code: 'restrictions-full' } };
+  return { status: 200, body: Object.assign(base, { durationSeconds: command.durationSeconds, cause: command.cause, mutedUntil: new Date(until).toISOString() }) };
+}
+
+// POST /presence/moderation/roster and /presence/moderation/command — body
+// {grant, request}; see lib-moderation.js for what must hold. Failures never
+// reveal whether a room exists.
 const MODERATION_MAX_BODY_BYTES = envNumber('MODERATION_MAX_BODY_BYTES', 32 * 1024);
-async function handleModerationRoster(req, res) {
+const NO_STORE = { 'Cache-Control': 'no-store' };
+async function handleModeration(req, res, operations, respond) {
   const src = sourceKeyOf(peerOf(req));
   const retryAfter = moderation.failureRetryAfter(src, Date.now());
-  if (retryAfter) return sendJson(res, 429, { error: 'too many failed moderation requests; try again later', code: 'rate-limited', retryAfter }, false, { 'Retry-After': String(retryAfter), 'Cache-Control': 'no-store' });
+  if (retryAfter) return sendJson(res, 429, { error: 'too many failed moderation requests; try again later', code: 'rate-limited', retryAfter }, false, Object.assign({ 'Retry-After': String(retryAfter) }, NO_STORE));
   let body;
   try { body = JSON.parse((await readBody(req, MODERATION_MAX_BODY_BYTES)) || '{}'); } catch (err) {
     if (err && err.message === 'body too large') throw err;
     moderation.noteFailure(src, Date.now());
-    return sendJson(res, 400, { error: 'malformed request', code: 'bad-request' }, false, { 'Cache-Control': 'no-store' });
+    return sendJson(res, 400, { error: 'malformed request', code: 'bad-request' }, false, NO_STORE);
   }
-  const auth = await moderation.authorize(body, { operation: 'roster.view' });
+  const auth = await moderation.authorize(body, { operations });
   if (!auth.ok) {
     if (auth.status < 500 && auth.code !== 'rate-limited') moderation.noteFailure(src, Date.now());
-    return sendJson(res, auth.status, { error: auth.message, code: auth.code }, false, { 'Cache-Control': 'no-store' });
+    const headers = auth.retryAfter ? Object.assign({ 'Retry-After': String(auth.retryAfter) }, NO_STORE) : NO_STORE;
+    return sendJson(res, auth.status, auth.retryAfter ? { error: auth.message, code: auth.code, retryAfter: auth.retryAfter } : { error: auth.message, code: auth.code }, false, headers);
   }
-  return sendJson(res, 200, buildModerationRoster(auth.domain, auth.world), false, { 'Cache-Control': 'no-store' });
+  const out = respond(auth);
+  return sendJson(res, out.status, out.body, false, NO_STORE);
+}
+const handleModerationRoster = (req, res) => handleModeration(req, res, ['roster.view'], (auth) => ({ status: 200, body: buildModerationRoster(auth.domain, auth.world) }));
+const handleModerationCommand = (req, res) => handleModeration(req, res, ['chat.mute', 'chat.unmute', 'session.kick'], executeModerationCommand);
+
+// The answer for a polling id this server does not know. A session a moderator
+// removed gets 403 {reason:'removed'} (the client must not rejoin on its own);
+// anything else is the usual 404 (swept as stale: rejoin).
+function unknownSession(res, connId, scope) {
+  const now = Date.now();
+  const tomb = restrictions.tombOf(connId, now);
+  if (tomb) {
+    const retryAfter = Math.max(1, Math.ceil((tomb.until - now) / 1000));
+    return sendJson(res, 403, { error: restrictions.kickMessage(tomb.until, tomb.cause, now), reason: 'removed', cause: tomb.cause, scope: tomb.scope, message: restrictions.kickMessage(tomb.until, tomb.cause, now), retryAfter }, false, { 'Retry-After': String(retryAfter) });
+  }
+  return sendJson(res, 404, { error: 'unknown or expired ' + (scope === 'chat' ? 'chat' : 'presence') + ' id — rejoin' });
 }
 
 // The socket peer address; never a header (see "network sources").
@@ -980,7 +1116,7 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = String(body.id || '');
       const loc = connIndex.get(connId);
-      if (!loc) return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin' });
+      if (!loc) return unknownSession(res, connId, 'presence');
       const member = loc.room.get(connId);
       if (!member || member.transport !== 'poll') return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin' });
       member.lastSeen = Date.now();
@@ -1009,7 +1145,7 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = String(body.id || '');
       const delta = pollChatSync(connId);
-      if (delta === null) return sendJson(res, 404, { error: 'unknown or expired chat id — rejoin' });
+      if (delta === null) return unknownSession(res, connId, 'chat');
       return sendJson(res, 200, { messages: delta });
     }
 
@@ -1017,7 +1153,7 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = String(body.id || '');
       const loc = chatConnIndex.get(connId);
-      if (!loc) return sendJson(res, 404, { error: 'unknown or expired chat id — rejoin' });
+      if (!loc) return unknownSession(res, connId, 'chat');
       const member = loc.room.get(connId);
       if (member) member.lastSeen = Date.now(); // sending counts as activity
       const result = sendChatMessage(connId, body.text);
@@ -1032,6 +1168,9 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && req.url === '/presence/moderation/roster') {
       return await handleModerationRoster(req, res);
+    }
+    if (req.method === 'POST' && req.url === '/presence/moderation/command') {
+      return await handleModerationCommand(req, res);
     }
 
     // Read-only status: how many people are in this world right now, for a

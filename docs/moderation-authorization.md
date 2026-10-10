@@ -1,24 +1,51 @@
 # Moderator authorization
 
-Status: Phase 1B. The issuers (Node: `issuer-server/server.js`; PHP:
+Status: Phase 1C. The issuers (Node: `issuer-server/server.js`; PHP:
 `issuer-php/`) register moderators and sign short-lived moderation grants; the
 presence services (Node: `presence-server/`; PHP: `presence-php/presence/`)
-verify those grants and answer one read-only operation, `roster.view`: the
-anonymous list of sessions in one world. **There is still no way to mute,
-kick, ban or time out anyone and no moderator interface.** The other
-operations in the vocabulary exist only as names a grant may carry.
+verify those grants and answer four operations: `roster.view` (the anonymous
+list of sessions in one world, section 8) and, since this phase, `chat.mute`,
+`chat.unmute` and `session.kick` (section 8A), which the presence service
+enforces itself. **There is no moderator interface, no persistent ban, no
+time-out operation and nothing that touches a wallet, credential or Post Office
+membership.** `session.timeout` exists only as a name a grant may carry.
 
-The goal is narrow: a moderator can observe exactly the anonymous sessions of
-the domain and worlds they are authorized for, without issuer-administrator
-powers and without learning any wallet identity.
+The goal is narrow: a moderator can observe, and temporarily restrict, exactly
+the anonymous sessions of the domain and worlds they are authorized for,
+without issuer-administrator powers and without learning any wallet identity.
 
 Files: roster and routes in `issuer-server/server.js` and `issuer-php/lib/store.php`;
 PHP routes `issuer-php/atlas/admin/moderation/grant.php` and
 `issuer-php/atlas/moderation/status.php`; presence verification in
 `presence-server/lib-moderation.js` and `presence-php/presence/lib/moderation.php`;
-PHP route `presence-php/presence/moderation/roster.php`; reference verifier
+PHP routes `presence-php/presence/moderation/roster.php` and `command.php`;
+restrictions `presence-server/lib-restrictions.js` and
+`presence-php/presence/lib/restrictions.php`; reference verifier
 `tools/lib/moderation-grant.js`; reference lookup `tools/moderation-ref.js`;
-tests `test/manual-moderator-authz.js` and `test/manual-presence-moderation.js`.
+tests `test/manual-moderator-authz.js`, `test/manual-presence-moderation.js`,
+`test/manual-presence-moderation-actions.js` and
+`test/manual-presence-moderation-wallet.js`.
+
+### Changes from Phase 1B (compatibility)
+
+- **Vocabulary:** `chat.unmute` is a fifth operation name (issuers, reference
+  verifier and presence services all accept it). A grant that lists only the old
+  four stays valid; it simply cannot unmute.
+- **Wire format:** the request payload keeps its ten fixed fields and may carry
+  one optional member, `params`, only on `chat.mute` and `session.kick`
+  (section 8A). A `roster.view` request with `params` is refused. Requests
+  without `params` are byte-for-byte what Phase 1B accepted.
+- **New, presence:** `POST /presence/moderation/command` (Node
+  `presence-server/server.js`; PHP `presence-php/presence/moderation/command.php`).
+  `POST /presence/moderation/roster` now also reports `mutedUntil`.
+- **New, presence, visitor-facing:** a refused join answers `403` with
+  `reason: "removed"`; a polling id whose session a moderator removed answers
+  `403` instead of `404`; a muted chat send answers `reason: "muted"` (section 8A).
+- **New, PHP presence:** `lib/restrictions.php` and its state file
+  `lib/atlas-presence-restrictions.json` (git-ignored by the existing
+  `atlas-*.json` rule, denied by `lib/.htaccess`).
+- **Wallet:** shows the removal and mute messages and does not rejoin on its
+  own after a removal. No moderator UI.
 
 ### Changes from Phase 1A (compatibility)
 
@@ -237,7 +264,8 @@ that a grant signature does not verify as a plain canonical-JSON signature).
 ## 6. Using a grant
 
 The moderator keeps the ephemeral private key generated with the request and
-signs every command with it. Presenting the grant alone is never enough.
+signs every command with it. Presenting the grant alone is never enough. The
+example is a `roster.view`; commands use the same envelope (section 8A).
 
 ```json
 {
@@ -259,8 +287,8 @@ signature = ECDSA-P256-SHA256( UTF8("atlas-moderation-pop/v1\n") || UTF8(canonic
 ```
 
 The body has exactly the members `grant` and `request`; anything else is a
-`400`. The request payload has exactly the ten fields shown: a client cannot add
-a role, a permission or a key.
+`400`. The request payload has exactly the ten fields shown, plus `params` where
+section 8A allows it: a client cannot add a role, a permission or a key.
 
 ### Verification a presence service performs, in order
 
@@ -280,17 +308,23 @@ a role, a permission or a key.
 10. The operator has not revoked the grant id or the moderator reference
     locally (`403 revoked`).
 11. Request: `grantId` matches (`401 wrong-grant`); `audience` and `domain` match
-    the grant (`403 wrong-audience`); `operation` is `roster.view` and is in
+    the grant (`403 wrong-audience`); `operation` is the one the endpoint implements
+    for this request (`roster.view` on the roster route; `chat.mute`,
+    `chat.unmute` or `session.kick` on the command route) and is in
     `grant.operations` (`403 operation-denied`); `world` is a valid id and is in
-    `grant.worlds` (`403 world-denied`); `target` is empty; `issuedAt` within 60 s of
+    `grant.worlds` (`403 world-denied`); `issuedAt` within 60 s of
     now (`401 stale-request`); nonce well formed.
 12. The request signature verifies under `cnf.publicKey` with the PoP context
-    (`401 bad-pop`).
+    (`401 bad-pop`). Then the arguments: the target and `params` of section 8A
+    (`400 bad-request`); nothing has been spent yet.
 13. **A current issuer status statement lists the moderator, with this operation
     and this world, right now** (section 7). No statement: `503
     authorization-unavailable`. Not listed: `403 moderator-inactive`; operation
     or world no longer permitted: `403 operation-denied` / `403 world-denied`.
-14. The nonce has not been used with this `grantId` (`401 replay`). It is spent
+14. For a command, the moderator is within the command rate limit (`429
+    rate-limited` with `Retry-After`; section 8A). This comes before the nonce is
+    spent, so the same request can be sent again once the window has passed.
+15. The nonce has not been used with this `grantId` (`401 replay`). It is spent
     only after every check above passed, kept until the grant expires plus 60 s, and
     bounded (per grant and in total; beyond the bound: `429 rate-limited`).
 
@@ -336,7 +370,7 @@ signature = ECDSA-P256-SHA256( UTF8("atlas-moderation-status/v1\n") || UTF8(cano
 ```
 
 - It lists every key that holds authority at that moment, administrators as
-  `worlds: "*"` with all four operations, moderators with their effective
+  `worlds: "*"` with every operation in the vocabulary, moderators with their effective
   scope. Revoked, removed, ambiguous and empty-scope entries are omitted.
   Entries are sorted by reference.
 - Lifetime is `ATLAS_MODERATION_STATUS_TTL_S` (default 60, clamped to 1 to 120).
@@ -400,11 +434,108 @@ Response `200`:
   hours), so it changes when the process restarts or the secret rotates and means
   nothing in another domain or world. **It is never accepted as a credential**:
   it is not a connection token, a grant id, a request target or anything else a
-  route reads (tested). Later phases may accept it as the *target* of a command, and
-  then only together with a valid grant, proof and status.
+  route reads (tested). Its one use is as the *target* of a command (section 8A),
+  and then only together with a valid grant, proof and status.
+- `mutedUntil` (ISO time) appears on an entry while its visitor is muted.
 - Never returned: wallet public keys, credential ids, permanent identities, IP
   addresses or source hashes, connection tokens, Post Office relationships,
   the visit id, other domains or worlds.
+
+## 8A. Commands: `chat.mute`, `chat.unmute`, `session.kick`
+
+`POST /presence/moderation/command`, body `{grant, request}` exactly as in section 6, with
+`operation` one of the three and the grant holding it. Nothing else authenticates a command:
+there is no second mechanism. The route runs the same checks as the roster route, in the
+order of section 6, and, because it changes state, the issuer status statement (section 7)
+must list the moderator with this operation and this world at the moment of the command.
+
+```json
+{ "type": "atlas.moderation-request", "version": 1, "grantId": "...", "audience": "...",
+  "domain": "example.com", "world": "lobby", "operation": "chat.mute",
+  "target": "<22-character reference from the roster>", "issuedAt": "...", "nonce": "...",
+  "params": { "durationSeconds": 600, "cause": "spam" } }
+```
+
+**Target.** The `ref` of a roster entry for the same domain and world. It is resolved
+only among the sessions of the world the request names and the grant allows; a reference
+from another world or domain, a stale one, or any other string simply is not found
+(`404 unknown-participant`; a malformed target is `400`). Wallet keys, addresses, tokens and
+visit ids cannot be named. A PHP reference stops matching when the 24-hour key rotates; list again.
+
+**`params`** (only on `chat.mute` and `session.kick`; omit the member when empty):
+
+| Member | Meaning | Limits |
+|---|---|---|
+| `durationSeconds` | how long the restriction lasts | integer; mute 1 to 86400 (default 600), kick 1 to 3600 (default 300); `MODERATION_MUTE_DEFAULT_S`, `MODERATION_MUTE_MAX_S`, `MODERATION_KICK_DEFAULT_S`, `MODERATION_KICK_MAX_S` |
+| `cause` | why, as a fixed code | `spam`, `abuse`, `harassment`, `inappropriate`, `disruption`, `other` (default) |
+
+Anything else (an unknown member, a free-text reason, `params: {}`, params on an unmute) is
+`400`. The visitor never sees moderator-written text: they see a fixed sentence per cause code,
+produced by the presence service. A reason is not stored beyond the restriction and is not
+published (nothing is written under `.well-known`). (A PHP service reads an empty JSON object
+as an empty array, so a signed `params: {}` is answered `401 bad-pop` there instead of `400`; wallets omit empty `params`.)
+
+**Answers** (`200`, `Cache-Control: no-store`): `{ok, operation, ref, world}` plus
+`mutedUntil`, `durationSeconds`, `cause` for a mute; `wasMuted` for an unmute (unmuting someone
+who is not muted is harmless); `removed {presence, chat}`, `durationSeconds`, `cause`,
+`rejoinAfter` for a kick. Other answers: `404 unknown-participant`; `409 not-in-chat` (a mute
+needs a chat session or a visit id to attach to); `429 rate-limited` (below);
+`503 restrictions-full` (the bounded store is full; replacing an existing entry still works).
+Nothing in an answer identifies a wallet, visit id, connection token or address.
+
+**Rate limit.** `MODERATION_COMMANDS_PER_MIN` (30) commands per moderator reference per
+`MODERATION_COMMAND_WINDOW_MS` (60000); listings are not counted. It is checked before the
+nonce is spent: a limited request gets `429` with `Retry-After` and can be sent again unchanged.
+The per-source failed-request throttle of section 6 still applies.
+
+### What a restriction is
+
+A restriction is **keyed by the visit** (the keyed hash of section 9, which includes domain and
+world), so it covers exactly one visit to one world on one domain. The same visit id in another
+world or domain, and a new visit, are not affected. A session without a visit id (an older
+wallet) is restricted by its own connection only: a mute lasts as long as that chat connection;
+a kick removes the session and, on the Node WebSocket server, refuses a join on that connection;
+a new connection is a new participant. Restrictions never touch a wallet, credential or Post
+Office membership, are private to the presence service, expire by themselves and are bounded
+(`MODERATION_MAX_RESTRICTIONS` 2000, `MODERATION_MAX_RESTRICTIONS_PER_WORLD` 200,
+`MODERATION_MAX_TOMBSTONES` 5000). Node keeps them in memory (a restart clears them); PHP keeps them in
+`lib/atlas-presence-restrictions.json`, which holds only visit hashes, cause codes and times.
+
+- **Mute.** The server refuses `chat-send` for the visit, by WebSocket (`chat-error` with
+  `reason: "muted"`) and by polling (`200 {ok:false, reason:"muted"}`), each carrying `cause`, the
+  templated `message` and `retryAfter`. It is checked before the per-member rate limit. The visitor still
+  sees the world and reads chat; reconnecting chat with the same visit stays muted (a mute set before
+  the visitor joined chat applies when they do). History is not deleted and no client-side filtering is
+  involved. A mute lasts `durationSeconds`, or until `chat.unmute`.
+- **Kick.** The presence and chat sessions of the visit are removed together. A WebSocket is sent
+  `removed` / `chat-removed` (with `cause`, `message`, `retryAfter`) and stops being a member; it
+  cannot send. A polling session's token is remembered for the length of the kick, so its next sync
+  or send is answered `403 {reason:"removed", cause, scope, message, retryAfter}` and **not** the
+  `404` the wallet treats as "swept, rejoin". A join (WebSocket or polling, presence or chat, over any
+  transport) with the same visit is refused `403 {reason:"removed"}` until the kick expires. The kick check comes before the
+  source's join budget, so repeated refused rejoins do not put a shared network address into a join cooldown.
+  On PHP the restriction is set before the sessions are removed, with the store locks taken first and the
+  restriction file last, so a join racing the kick is either refused or removed.
+- **Expiry.** At `durationSeconds` the restriction is gone; the same visit may rejoin and chat. There is
+  no escalation and no memory of past restrictions.
+
+### Reconnection
+
+| Situation | Result |
+|---|---|
+| Network drop, same visit, not restricted | joins as before (nothing changed) |
+| Muted visit reconnects chat or presence | joins; still cannot send until the mute ends |
+| Kicked visit reconnects (WebSocket, polling, either order, presence or chat) | `403 removed` until the kick expires |
+| Kicked polling client keeps polling | `403 removed`, not `404`; the wallet stops and shows the message |
+| Kicked WebSocket client sends or joins again on the same connection | nothing is accepted; a join answers `join-denied` / `chat-error` with `reason: "removed"` |
+| WebSocket to polling fallback | same visit id, so the same restriction |
+| Wallet lock/unlock (chat reconnect) | same visit id; the restriction still applies |
+| Page reload, or a new visit | a new visit id: **not** restricted (accepted; see section 15) |
+| Same visit id in another world or domain | not restricted |
+| A bystander in the same world | untouched |
+
+Chat is shared by a whole domain and presence is per world; a command acts on the visit's sessions in the
+named world only, so no other world's sessions are affected (tested).
 
 ## 9. Session association (visit id)
 
@@ -565,14 +696,17 @@ Optional environment (same names, both backends): `MODERATION_STATUS_REFRESH_S` 
 `MODERATION_REQUEST_WINDOW_S` (60), `MODERATION_FETCH_TIMEOUT_MS` (3000),
 `MODERATION_MAX_TRACKED_GRANTS` (5000), `MODERATION_MAX_NONCES_PER_GRANT` (1000),
 `MODERATION_FAIL_MAX` (20), `MODERATION_FAIL_WINDOW_MS` (60000), `MODERATION_MAX_BODY_BYTES` (32768).
+Phase 1C: `MODERATION_COMMANDS_PER_MIN` (30), `MODERATION_COMMAND_WINDOW_MS` (60000), `MODERATION_MUTE_DEFAULT_S` (600),
+`MODERATION_MUTE_MAX_S` (86400), `MODERATION_KICK_DEFAULT_S` (300), `MODERATION_KICK_MAX_S` (3600),
+`MODERATION_MAX_RESTRICTIONS` (2000), `MODERATION_MAX_RESTRICTIONS_PER_WORLD` (200), `MODERATION_MAX_TOMBSTONES` (5000).
 
 PHP presence needs the `openssl` extension, and `curl` or `allow_url_fopen`, only for this
 endpoint. State is kept in `lib/atlas-presence-moderation-state.json` (the keys that hash visit ids and
 derive references, spent nonces, the cached statement, failure counts).
 
 A moderator signs in exactly as an administrator does and then calls the grant route with a
-signed request. No client for this exists yet (the extension has no moderator UI in this phase); the
-tests show the calls.
+signed request. No client for this exists yet (the extension has no moderator UI); the
+tests show the calls. The wallet already understands what a restriction looks like to a visitor.
 
 ### Key rotation
 
@@ -591,7 +725,10 @@ Two different `lib/store.php` files exist. They belong to different bundles and 
 | `issuer-php/lib/store.php` | **issuer** | `lib/store.php` |
 | `presence-php/presence/lib/store.php` | **presence** | `presence/lib/store.php` |
 
-See the commit hand-off for the complete list of files per bundle.
+Phase 1C adds `presence-php/presence/lib/restrictions.php` and
+`presence-php/presence/moderation/command.php` (presence bundle, same relative paths under `presence/`) and
+`presence-server/lib-restrictions.js` (Node presence). The issuer bundle needs only the updated `lib/store.php`
+(vocabulary). See the commit hand-off for the complete list of files per bundle.
 
 ## 14. Tests
 
@@ -610,6 +747,19 @@ another domain's sessions; roster references used as connection credentials; the
 pairing and untrusted-client behaviour; measured revocation windows; issuer isolation; every kind of bad status
 statement (redirect, garbage, HTML, oversize, error, wrong audience, slow, down, replayed); key removal,
 rotation and local emergency revocation; the per-source throttle; and identical answers across pairings.
+
+`node test/manual-presence-moderation-actions.js node|php|matrix [issuer]` (Phase 1C): authorized mute, unmute and
+kick over polling and (Node) WebSocket; a muted visitor's chat refused by the server; timed expiry and explicit
+unmute; history kept; presence and chat sessions of a visit removed together and nothing else; `403 removed`
+instead of `404`; rejoin with the same visit refused until the kick expires, without using up the source's join
+budget; a new visit, and the same visit id in another world or domain, unaffected; a presence-only visit muted
+before it joins chat; sessions with no visit id; wrong domain, world, unknown and cross-domain references; read-only,
+mute-only and expired grants; forged and edited grants and params; replay; every argument rule; revoked moderator and
+narrowed operations within the status window; local emergency revocation; the command rate limit and that a limited
+request stays retryable; bounded restriction storage; no identifying data in any response or in the PHP restriction
+file; identical answers across the four pairings. `node test/manual-presence-moderation-wallet.js` (browser) checks that
+the real wallet's presence and chat connections are paired and that a moderator's kick over both transports shows the
+visitor the removal message and is not undone by the wallet.
 
 ## 15. Limitations and unresolved decisions
 
@@ -645,5 +795,19 @@ rotation and local emergency revocation; the per-source throttle; and identical 
     hosting that blocks outbound requests will fail closed.
 13. **Hostnames on the PHP issuer.** The PHP issuer refuses grant requests that arrive under a host name other
     than the configured domain; the Node issuer signs for its configured `ATLAS_DOMAIN` whatever the Host header says.
-14. **No moderator actions.** Mute, kick, timeout and ban are not implemented and a grant for them authorizes
-    nothing in this phase.
+14. **Only mute, unmute and kick exist.** `session.timeout`, persistent bans, mandatory membership tickets and a
+    moderator interface are not implemented; a grant naming `session.timeout` authorizes nothing.
+15. **A new visit bypasses a mute or kick.** Restrictions follow the per-visit id the wallet generates, not a
+    person: a page reload, or clearing the wallet's state, makes a new visit. This is a deliberate trade-off (no
+    fingerprinting, no permanent identifiers, no address matching). Restrictions are cooldowns, not bans.
+16. **Sessions with no visit id** (older wallets) are restricted only for the life of the connection: a mute
+    follows that chat connection; a kick removes the sessions, but a new connection joins freely.
+17. **Chat's world field is declared by the client.** A chat session is listed, and therefore targetable,
+    under the world it says it joined from; a visitor that lies is moderated, or missed, accordingly.
+18. **PHP clients learn of a kick on their next poll** (there are no pushes), within one polling interval; a
+    kicked session is already gone from the roster and can send nothing in the meantime.
+19. **Restrictions are not shared between presence processes.** Node keeps them in memory (a restart clears
+    them); two presence services for one domain would each need the command. PHP keeps them in a file and
+    shares them between requests on one host.
+20. **A PHP reference is only valid for the 24-hour key period**; a command with a stale one answers `404` and the
+    moderator lists again.

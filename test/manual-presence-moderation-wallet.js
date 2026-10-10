@@ -17,6 +17,10 @@
 //   3. Nothing in the list identifies a wallet (no key, credential id, address,
 //      token) and the visit id the wallet generated never appears.
 //   4. After a visitor leaves, the list shrinks.
+//   5. A moderator's session.kick removes the visitor on both transports: the
+//      wallet shows the removal message in the presence hint and the chat
+//      status line, and does not rejoin on its own (the list stays empty well
+//      past a polling interval).
 //
 // Not part of the permanent suite, same reasoning as the other manual-*.js scripts.
 
@@ -96,10 +100,15 @@ async function startPresence(env, cfgFile) {
 
 async function getGrant(issuerBase, mod) {
   const pop = await M.generatePopKey();
-  const payload = JSON.parse(JSON.stringify(withAdminAuth({ audience: AUDIENCE, worlds: [WORLD], operations: ['roster.view'], popPublicKey: pop.publicKey }, issuerBase, '/atlas/admin/moderation/grant')));
+  const payload = JSON.parse(JSON.stringify(withAdminAuth({ audience: AUDIENCE, worlds: [WORLD], operations: ['roster.view', 'session.kick'], popPublicKey: pop.publicKey }, issuerBase, '/atlas/admin/moderation/grant')));
   const g = await H.postJson(issuerBase, '/atlas/admin/moderation/grant', { payload, proof: await H.signWithSelf(mod, payload) });
   if (g.status !== 200) throw new Error('grant refused: ' + JSON.stringify(g.body));
   return { grant: g.body.grant, pop };
+}
+async function kick(g, target) {
+  const req = await M.signRequest(g.pop.privateKey, { type: 'atlas.moderation-request', version: 1, grantId: g.grant.payload.grantId, audience: AUDIENCE, domain: DOMAIN, world: WORLD, operation: 'session.kick', target, issuedAt: new Date().toISOString(), nonce: Buffer.from(require('crypto').randomBytes(16)).toString('base64url'), params: { durationSeconds: 60, cause: 'disruption' } });
+  const res = await fetch('http://localhost:' + PRESENCE_PORT + '/presence/moderation/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grant: g.grant, request: req }) });
+  return { status: res.status, body: await res.json() };
 }
 async function listLobby(g) {
   const req = await M.signRequest(g.pop.privateKey, { type: 'atlas.moderation-request', version: 1, grantId: g.grant.payload.grantId, audience: AUDIENCE, domain: DOMAIN, world: WORLD, operation: 'roster.view', target: '', issuedAt: new Date().toISOString(), nonce: Buffer.from(require('crypto').randomBytes(16)).toString('base64url') });
@@ -142,6 +151,19 @@ async function run(label, presenceEnv, ctx) {
     const after = await waitFor(async () => { const l = await listLobby(grant); return l.status === 200 && l.body.count === 1 ? l : null; }, 'the list to shrink after B leaves', 20000).catch(() => null);
     const last = after || await listLobby(grant);
     check('after B closes its wallet the list shows one visitor', !!after && after.body.participants[0].presence.avatarId === aId, last.text);
+
+    // A moderator removes the remaining visitor.
+    const target = after && after.body.participants[0].ref;
+    const k = await kick(grant, target);
+    check('the kick is accepted and removes presence and chat', k.status === 200 && k.body.removed.presence === 1 && k.body.removed.chat === 1, JSON.stringify(k));
+    const hint = await waitFor(() => a.frame.evaluate(() => { const el = document.getElementById('presenceTransientHint'); return el && /removed you from this world/.test(el.textContent) ? el.textContent : null; }), 'the removal message in the presence hint', 15000).catch(() => null);
+    check('the wallet tells the visitor why (presence hint, templated text with the cause)', !!hint && /\(disruption\)/.test(hint), String(hint));
+    const chatLine = await waitFor(() => a.frame.evaluate(() => { const el = document.getElementById('chatSendStatus'); return el && /removed you from this world/.test(el.textContent) ? el.textContent : null; }), 'the removal message in the chat status line', 15000).catch(() => null);
+    check('...and in the chat status line', !!chatLine, String(chatLine));
+    await a.page.waitForTimeout(6000); // several polling intervals, and past the WebSocket reconnect paths
+    const stay = await listLobby(grant);
+    check('the wallet does not rejoin on its own while the kick lasts', stay.status === 200 && stay.body.count === 0, stay.text);
+    check('the wallet holds no live presence id after the removal', (await a.frame.evaluate(() => window.__atlasPresenceOwnId)) === null, 'still has an id');
   } finally {
     await contextA.close().catch(() => {});
     await contextB.close().catch(() => {});
@@ -155,7 +177,7 @@ async function run(label, presenceEnv, ctx) {
   fs.cpSync(path.join(H.ROOT, 'demo-domain-a'), docroot, { recursive: true });
   const stateDir = H.tmpDir('atlas-mw-state-');
   const mod = await H.genIdentity();
-  fs.writeFileSync(path.join(stateDir, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: mod.publicKey, addedAt: new Date().toISOString(), role: 'moderator', worlds: [WORLD], operations: ['roster.view'] }] }));
+  fs.writeFileSync(path.join(stateDir, 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: mod.publicKey, addedAt: new Date().toISOString(), role: 'moderator', worlds: [WORLD], operations: ['roster.view', 'session.kick'] }] }));
   const issuer = await H.startNodeIssuer({ port: ISSUER_PORT, stateDir, docrootDir: docroot, env: { ATLAS_MODERATION_AUDIENCES: AUDIENCE, ATLAS_ADMIN_FAIL_LIMIT: '1000', ATLAS_ADMIN_NONCE_PER_CLIENT_PER_MIN: '1000', ATLAS_ADMIN_NONCE_CAP: '1000' } });
   try {
     const issuerBase = 'http://localhost:' + ISSUER_PORT;

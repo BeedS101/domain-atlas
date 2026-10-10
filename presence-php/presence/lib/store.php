@@ -25,6 +25,11 @@
 // same visit as one participant, each member may carry `visit`: a keyed hash of
 // a per-visit random id the wallet supplies (never the raw id), plus `joinedAt`.
 //
+// A moderator's mute or kick (lib/restrictions.php) is enforced here: joins
+// check for a kick and a chat send checks for a mute, both inside the store
+// lock; a removed session's token is remembered so that its next poll is
+// answered "removed" rather than "unknown, rejoin".
+//
 // All room state lives in ONE JSON file (atlas-presence-store.json, next to
 // this file — not web-reachable), read-modify-written under an exclusive
 // flock on every request. Fine at demo / small-site scale; a busy site would
@@ -83,6 +88,7 @@ define('PRESENCE_SOURCE_COOLDOWN_MS', presence_env_number('SOURCE_COOLDOWN_MS', 
 define('PRESENCE_SOURCE_COOLDOWN_MAX_MS', presence_env_number('SOURCE_COOLDOWN_MAX_MS', 5 * 60 * 1000));
 define('PRESENCE_SOURCE_STRIKE_MEMORY_MS', presence_env_number('SOURCE_STRIKE_MEMORY_MS', 10 * 60 * 1000));
 // Smaller default than the Node server: the whole table is rewritten per join.
+require_once __DIR__ . '/restrictions.php';
 define('PRESENCE_MAX_SOURCE_ENTRIES', (int) presence_env_number('MAX_SOURCE_ENTRIES', 2000));
 define('PRESENCE_SALT_ROTATE_MS', presence_env_number('SOURCE_SALT_ROTATE_MS', 24 * 60 * 60 * 1000));
 
@@ -268,6 +274,7 @@ function presence_denial_text($reason) {
     'room-full' => 'This room is full right now. Try again in a moment.',
     'source-limit' => 'Too many sessions are already open from your network connection. Close other tabs or wait a few seconds, then try again.',
     'join-rate-limited' => 'Too many join attempts from your network connection. Wait a moment, then try again.',
+    'removed' => 'A moderator has removed you from this world.',
     'name-not-allowed' => 'That display name looks like an official title (moderator, admin, staff, ...). Display names are not verified, so titles are not allowed. Choose a different name.'
   ];
   return isset($t[$reason]) ? $t[$reason] : $reason;
@@ -455,12 +462,22 @@ function with_presence_store_locked($mutator) {
 // 'name-not-allowed', 'source-limit', 'room-full' or 'server-busy'. A refused
 // join creates no member, so it never changes a room's count.
 function presence_join($domain, $world, $name, $addr = '', $visit = null) {
+  // A kicked visit cannot rejoin until the kick expires. Checked before the
+  // source's join budget is touched, so a removed visitor retrying does not
+  // push a shared network address into a cooldown for everyone behind it.
+  $visitHash = moderation_visit_hash($domain, $world, $visit);
+  $removed = restrictions_removed_answer($visitHash);
+  if ($removed !== null) return $removed;
   $gate = presence_source_gate('presence', $addr);
   if ($gate['retryAfter'] !== null) return ['ok' => false, 'reason' => 'join-rate-limited', 'retryAfter' => $gate['retryAfter']];
   if (presence_name_looks_official($name, $domain)) return ['ok' => false, 'reason' => 'name-not-allowed'];
   $srcs = $gate['srcs'];
-  $visitHash = moderation_visit_hash($domain, $world, $visit);
   return with_presence_store_locked(function (&$doc) use ($domain, $world, $name, $srcs, $visitHash) {
+    // Checked again under the store lock: a kick sets its restriction before
+    // it removes members, so a join that slipped past the check above is
+    // either refused here or already a member the kick will remove.
+    $removed = restrictions_removed_answer($visitHash);
+    if ($removed !== null) return $removed;
     $roomKey = presence_room_key($domain, $world);
     $exists = isset($doc['rooms'][$roomKey]);
     $total = 0;
@@ -606,12 +623,16 @@ function with_chat_store_locked($mutator) {
 // 'reason'=>..., 'retryAfter'=>?] (the same reasons as presence_join). The new
 // member's cursor starts at "already seen the history just handed back".
 function chat_join_room($domain, $world, $name, $addr = '', $visit = null) {
+  $visitHash = moderation_visit_hash($domain, $world, $visit);
+  $removed = restrictions_removed_answer($visitHash);
+  if ($removed !== null) return $removed;
   $gate = presence_source_gate('chat', $addr);
   if ($gate['retryAfter'] !== null) return ['ok' => false, 'reason' => 'join-rate-limited', 'retryAfter' => $gate['retryAfter']];
   if (presence_name_looks_official($name, $domain)) return ['ok' => false, 'reason' => 'name-not-allowed'];
   $srcs = $gate['srcs'];
-  $visitHash = moderation_visit_hash($domain, $world, $visit);
   return with_chat_store_locked(function (&$doc) use ($domain, $world, $name, $srcs, $visitHash) {
+    $removed = restrictions_removed_answer($visitHash);
+    if ($removed !== null) return $removed;
     $exists = isset($doc['domains'][$domain]);
     $total = 0;
     foreach ($doc['domains'] as $d) $total += presence_count_source(isset($d['members']) ? $d['members'] : [], $srcs);
@@ -659,7 +680,8 @@ function chat_sync_member($token) {
 
 // Validates and appends a chat send from a joined member. Returns
 // ['found'=>false] for an unknown token, else ['found'=>true, 'ok'=>bool,
-// 'reason'|'message']. Reasons: 'rate-limited' | 'empty' | 'blocked'.
+// 'reason'|'message']. Reasons: 'muted' (with cause, message, retryAfter) |
+// 'rate-limited' | 'empty' | 'blocked'.
 function chat_send_message($token, $textRaw) {
   return with_chat_store_locked(function (&$doc) use ($token, $textRaw) {
     foreach ($doc['domains'] as $domain => &$entry) {
@@ -667,6 +689,11 @@ function chat_send_message($token, $textRaw) {
       $member = &$entry['members'][$token];
       $now = presence_now_ms();
       $member['lastSeen'] = $now;
+      // Enforced here, under the store lock, for every send. A muted visit's
+      // send is refused before anything else is looked at, so it also leaves
+      // the rate-limit clock alone.
+      $muted = restrictions_muted_answer(!empty($member['visit']) ? $member['visit'] : 'c:' . $token);
+      if ($muted !== null) { unset($member, $entry); return ['found' => true, 'ok' => false] + $muted; }
       if (($now - (isset($member['lastSendAt']) ? $member['lastSendAt'] : 0)) < CHAT_MIN_INTERVAL_MS) { unset($member, $entry); return ['found' => true, 'ok' => false, 'reason' => 'rate-limited']; }
       $text = chat_clean_text($textRaw);
       if ($text === '') { unset($member, $entry); return ['found' => true, 'ok' => false, 'reason' => 'empty']; }

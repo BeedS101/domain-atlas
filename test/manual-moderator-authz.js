@@ -417,7 +417,7 @@ async function testMain(kind) {
     const ids = new Set();
     for (let i = 0; i < 4; i++) ids.add((await call(b, GRANT, mod, grantPayload((await freshPop()).publicKey))).body.grant.payload.grantId);
     check('grant ids are unique', ids.size === 4, [...ids].join());
-    r = await call(b, GRANT, legacy, grantPayload((await freshPop()).publicKey, { worlds: '*', operations: ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'] }));
+    r = await call(b, GRANT, legacy, grantPayload((await freshPop()).publicKey, { worlds: '*', operations: M.OPERATIONS }));
     check('an administrator can obtain a grant for all worlds and operations', r.status === 200 && r.body.grant.payload.worlds === '*', show(r));
     check('...and it verifies', (await M.verifyGrant(r.body.grant, opts)).ok, 'verify failed');
 
@@ -584,7 +584,7 @@ async function testSignatureAndStatus(kind) {
     check('status lifetime defaults to 60 s', Date.parse(doc.payload.expiresAt) - Date.parse(doc.payload.issuedAt) === 60000, JSON.stringify(doc.payload));
     const byRef = (x) => v.moderators.get(M.moderatorRef(domain, x.publicKey));
     check('administrators (legacy and explicit) are listed for every world and operation', [legacy, admin].every((x) => { const e = byRef(x); return e && e.worlds === '*' && e.operations.slice().sort().join() === M.OPERATIONS.slice().sort().join(); }), JSON.stringify(doc.payload.moderators));
-    check('a scoped moderator is listed with exactly its worlds, all operations', (() => { const e = byRef(mod); return e && e.worlds.join() === 'alpha,β δ' && e.operations.length === 4; })(), JSON.stringify(byRef(mod)));
+    check('a scoped moderator is listed with exactly its worlds, all operations', (() => { const e = byRef(mod); return e && e.worlds.join() === 'alpha,β δ' && e.operations.length === M.OPERATIONS.length; })(), JSON.stringify(byRef(mod)));
     check('an operation-limited moderator lists only those operations and all worlds', (() => { const e = byRef(opsMod); return e && e.worlds === '*' && e.operations.slice().sort().join() === 'chat.mute,roster.view'; })(), JSON.stringify(byRef(opsMod)));
     check('a revoked entry is absent', !byRef(revokedMod), 'listed');
     check('an entry with an empty scope is absent', !byRef(emptyMod), 'listed');

@@ -2,10 +2,12 @@
 //
 // Verifies the signed moderation grants described in
 // docs/moderation-authorization.md and decides whether a request may use one.
-// Zero dependencies, like server.js. Nothing here moderates anyone: the only
-// operation implemented is roster.view, which server.js answers once
-// authorize() succeeds. presence-php/presence/lib/moderation.php implements
-// the same rules, step for step.
+// Zero dependencies, like server.js. This file only decides WHETHER a request
+// may proceed; server.js carries out the operations it names once authorize()
+// succeeds: roster.view (read-only list), chat.mute, chat.unmute and
+// session.kick (temporary, in-memory restrictions: lib-restrictions.js).
+// presence-php/presence/lib/moderation.php implements the same rules, step
+// for step.
 //
 // Trust comes from explicit configuration only (moderation-config.json, or the
 // file named by PRESENCE_MODERATION_CONFIG): for each domain, the issuer
@@ -52,6 +54,13 @@ const STATUS_MAX_BYTES = 256 * 1024;
 const MAX_TRACKED_GRANTS = envNumber('MODERATION_MAX_TRACKED_GRANTS', 5000);
 const MAX_NONCES_PER_GRANT = envNumber('MODERATION_MAX_NONCES_PER_GRANT', 1000);
 const FAIL_MAX = envNumber('MODERATION_FAIL_MAX', 20);
+// Commands per moderator per minute, and how long a mute or a kick may last.
+const COMMANDS_PER_MIN = envNumber('MODERATION_COMMANDS_PER_MIN', 30);
+const COMMAND_WINDOW_MS = envNumber('MODERATION_COMMAND_WINDOW_MS', 60 * 1000);
+const MUTE_DEFAULT_S = envNumber('MODERATION_MUTE_DEFAULT_S', 600);
+const MUTE_MAX_S = envNumber('MODERATION_MUTE_MAX_S', 24 * 60 * 60);
+const KICK_DEFAULT_S = envNumber('MODERATION_KICK_DEFAULT_S', 300);
+const KICK_MAX_S = envNumber('MODERATION_KICK_MAX_S', 60 * 60);
 const FAIL_WINDOW_MS = envNumber('MODERATION_FAIL_WINDOW_MS', 60 * 1000);
 const MAX_FAIL_SOURCES = 5000;
 
@@ -61,11 +70,14 @@ const STATUS_TYPE = 'atlas.moderation-status';
 const GRANT_SIGN_CONTEXT = 'atlas-moderation-grant/v1\n';
 const POP_SIGN_CONTEXT = 'atlas-moderation-pop/v1\n';
 const STATUS_SIGN_CONTEXT = 'atlas-moderation-status/v1\n';
-const OPERATIONS = ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'];
+const OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
 const MAX_GRANT_LIFETIME_MS = 600 * 1000;
 const MAX_WORLDS = 32;
 const GRANT_FIELDS = ['type', 'version', 'grantId', 'domain', 'audience', 'moderatorRef', 'worlds', 'operations', 'issuedAt', 'expiresAt', 'cnf'];
 const REQUEST_FIELDS = ['type', 'version', 'grantId', 'audience', 'domain', 'world', 'operation', 'target', 'issuedAt', 'nonce'];
+// Optional members. `params` carries a command's arguments (duration and cause
+// code); a request that has none must omit the member entirely.
+const REQUEST_OPTIONAL_FIELDS = ['params'];
 const STATUS_FIELDS = ['type', 'version', 'domain', 'audience', 'issuedAt', 'expiresAt', 'moderators'];
 
 function canonicalize(value) {
@@ -76,7 +88,11 @@ function canonicalize(value) {
 }
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-const hasKeys = (o, keys) => { const k = Object.keys(o); return k.length === keys.length && keys.every((x) => Object.prototype.hasOwnProperty.call(o, x)); };
+const hasKeys = (o, keys, optional) => {
+  const k = Object.keys(o);
+  const allowed = keys.concat(optional || []);
+  return keys.every((x) => Object.prototype.hasOwnProperty.call(o, x)) && k.every((x) => allowed.includes(x));
+};
 const fail = (status, code, message) => ({ ok: false, status, code, message });
 
 // Same world-id rule as the issuers: 1 to 120 code points, valid Unicode, no
@@ -198,11 +214,12 @@ async function verifyGrant(grant, opts) {
 }
 
 // The request is {payload, signature}: the moderator's command, signed by the
-// grant's ephemeral key. `operation` is what this endpoint implements.
+// grant's ephemeral key. `operation` is the one this request names, already
+// checked against what the endpoint implements.
 async function verifyRequest(grantPayload, grantExpiresAt, envelope, operation, now) {
   if (!isObject(envelope) || !isObject(envelope.payload)) return fail(400, 'bad-request', 'request must be {payload, signature}');
   const r = envelope.payload;
-  if (!hasKeys(r, REQUEST_FIELDS)) return fail(400, 'bad-request', 'the request has missing or unknown fields');
+  if (!hasKeys(r, REQUEST_FIELDS, REQUEST_OPTIONAL_FIELDS)) return fail(400, 'bad-request', 'the request has missing or unknown fields');
   if (r.type !== REQUEST_TYPE || r.version !== 1) return fail(400, 'bad-request', 'unsupported request type or version');
   if (r.grantId !== grantPayload.grantId) return fail(401, 'wrong-grant', 'the request names another grant');
   if (r.audience !== grantPayload.audience || r.domain !== grantPayload.domain) return fail(403, 'wrong-audience', 'the request is bound to another audience or domain');
@@ -344,9 +361,71 @@ function noteFailure(src, now) {
   while (failures.size > MAX_FAIL_SOURCES) failures.delete(failures.keys().next().value);
 }
 
+// ---------- command arguments ----------
+
+// Fixed vocabulary of reasons a moderator may give. The visitor sees only the
+// templated text for the code (lib-restrictions.js); nothing free-form from a
+// moderator ever reaches a visitor, and no reason is stored beyond the
+// restriction itself.
+const CAUSES = ['spam', 'abuse', 'harassment', 'inappropriate', 'disruption', 'other'];
+const TARGET_RE = /^[A-Za-z0-9_-]{22}$/;
+const COMMANDS = {
+  'chat.mute': { defaultS: MUTE_DEFAULT_S, maxS: MUTE_MAX_S, params: true },
+  'chat.unmute': { params: false },
+  'session.kick': { defaultS: KICK_DEFAULT_S, maxS: KICK_MAX_S, params: true }
+};
+
+// Checks the target and params of a request for `operation`. Returns
+// {ok:true, command:{target, durationSeconds, cause}} for a command,
+// {ok:true} for roster.view, or a failure (a 400, before anything is spent).
+function checkArguments(operation, r) {
+  if (operation === 'roster.view') {
+    if (r.target !== '') return fail(400, 'bad-request', 'target must be empty for ' + operation);
+    if ('params' in r) return fail(400, 'bad-request', 'params are not accepted for ' + operation);
+    return { ok: true };
+  }
+  const rule = COMMANDS[operation];
+  if (!rule) return fail(403, 'operation-denied', 'the operation is not implemented here');
+  if (typeof r.target !== 'string' || !TARGET_RE.test(r.target)) return fail(400, 'bad-request', 'target must be a participant reference');
+  let durationSeconds = rule.defaultS || null, cause = 'other';
+  if ('params' in r) {
+    const p = r.params;
+    if (!rule.params || !isObject(p) || Object.keys(p).length < 1) return fail(400, 'bad-request', 'params are not accepted for ' + operation);
+    if (Object.keys(p).some((k) => k !== 'durationSeconds' && k !== 'cause')) return fail(400, 'bad-request', 'unknown params member');
+    if ('durationSeconds' in p) {
+      if (!Number.isInteger(p.durationSeconds) || p.durationSeconds < 1 || p.durationSeconds > rule.maxS) return fail(400, 'bad-request', 'durationSeconds must be an integer from 1 to ' + rule.maxS);
+      durationSeconds = p.durationSeconds;
+    }
+    if ('cause' in p) {
+      if (typeof p.cause !== 'string' || !CAUSES.includes(p.cause)) return fail(400, 'bad-request', 'cause must be one of: ' + CAUSES.join(', '));
+      cause = p.cause;
+    }
+  }
+  return { ok: true, command: { target: r.target, durationSeconds, cause } };
+}
+
+// ---------- command rate limit, per moderator ----------
+
+const commandHits = new Map(); // moderatorRef -> ms timestamps
+const MAX_COMMAND_MODERATORS = 5000;
+function commandRetryAfter(moderatorRef, now) {
+  const kept = (commandHits.get(moderatorRef) || []).filter((t) => now - t < COMMAND_WINDOW_MS);
+  if (kept.length) commandHits.set(moderatorRef, kept); else commandHits.delete(moderatorRef);
+  if (kept.length < COMMANDS_PER_MIN) return 0;
+  return Math.max(1, Math.ceil((kept[0] + COMMAND_WINDOW_MS - now) / 1000));
+}
+function noteCommand(moderatorRef, now) {
+  const hits = commandHits.get(moderatorRef) || [];
+  hits.push(now);
+  commandHits.delete(moderatorRef);
+  commandHits.set(moderatorRef, hits);
+  while (commandHits.size > MAX_COMMAND_MODERATORS) commandHits.delete(commandHits.keys().next().value);
+}
+
 // ---------- the entry point ----------
 
-// body: {grant, request}. opts: {operation}. Returns {ok:true, domain, world,
+// body: {grant, request}. opts: {operations}, the operations the calling
+// endpoint implements. Returns {ok:true, domain, world, operation, command?,
 // grantId, moderatorRef} or {ok:false, status, code, message}.
 async function authorize(body, opts) {
   const now = Date.now();
@@ -362,21 +441,33 @@ async function authorize(body, opts) {
   if (!g.ok) return g;
   if (cfg.revokedGrants.has(g.payload.grantId) || cfg.revokedModerators.has(g.payload.moderatorRef)) return fail(403, 'revoked', 'this grant or moderator has been revoked here');
 
-  const r = await verifyRequest(g.payload, g.expiresAt, body.request, opts.operation, now);
+  // The operation is the one the (signed) request names, provided this
+  // endpoint implements it; verifyRequest then requires the grant to hold it.
+  const named = isObject(body.request.payload) ? body.request.payload.operation : undefined;
+  const operation = typeof named === 'string' && opts.operations.includes(named) ? named : opts.operations[0];
+  const r = await verifyRequest(g.payload, g.expiresAt, body.request, operation, now);
   if (!r.ok) return r;
-  if (r.request.target !== '') return fail(400, 'bad-request', 'target must be empty for ' + opts.operation);
+  const args = checkArguments(operation, r.request);
+  if (!args.ok) return args;
 
   const status = await currentStatus(claimed.domain, dom, cfg.audience);
   if (!status) return fail(503, 'authorization-unavailable', 'the issuer\'s current authorization status could not be established');
   const entry = status.moderators.get(g.payload.moderatorRef);
   if (!entry) return fail(403, 'moderator-inactive', 'the issuer does not list this moderator as active');
-  if (!entry.operations.includes(opts.operation)) return fail(403, 'operation-denied', 'the operation is not currently permitted');
+  if (!entry.operations.includes(operation)) return fail(403, 'operation-denied', 'the operation is not currently permitted');
   if (entry.worlds !== '*' && !entry.worlds.includes(r.request.world)) return fail(403, 'world-denied', 'the world is not currently permitted');
 
+  // A command over the moderator's rate is refused before its nonce is spent,
+  // so it can be sent again unchanged once the window has passed.
+  if (args.command) {
+    const wait = commandRetryAfter(g.payload.moderatorRef, now);
+    if (wait) return Object.assign(fail(429, 'rate-limited', 'too many moderation commands; try again shortly'), { retryAfter: wait });
+  }
   const spent = spendNonce(g.payload.grantId, r.request.nonce, g.expiresAt, now);
   if (spent === 'replay') return fail(401, 'replay', 'this request has already been used');
   if (spent === 'busy') return fail(429, 'rate-limited', 'too many requests for this grant');
-  return { ok: true, domain: claimed.domain, world: r.request.world, grantId: g.payload.grantId, moderatorRef: g.payload.moderatorRef };
+  if (args.command) noteCommand(g.payload.moderatorRef, now);
+  return { ok: true, domain: claimed.domain, world: r.request.world, operation, command: args.command || null, grantId: g.payload.grantId, moderatorRef: g.payload.moderatorRef };
 }
 
 // ---------- per-visit association and temporary references ----------
@@ -403,5 +494,5 @@ function participantRef(domain, world, groupKey) {
 
 module.exports = {
   authorize, visitHash, participantRef, failureRetryAfter, noteFailure,
-  isValidWorldId, canonicalize, OPERATIONS, loadConfig
+  isValidWorldId, canonicalize, OPERATIONS, CAUSES, loadConfig
 };

@@ -2090,8 +2090,12 @@ simplifications are worth naming plainly rather than leaving implicit:
   token alone is refused) for a short-lived, domain-signed grant bound to an
   ephemeral key. The presence services verify grants against an
   issuer-signed, short-lived status statement (`GET /atlas/moderation/status`)
-  and answer one read-only operation, `roster.view`, an anonymous list of one
-  world's sessions. There are no moderation commands (no mute, kick or ban).
+  and answer `roster.view` (an anonymous list of one world's sessions) and
+  three temporary, server-enforced commands on one of those sessions:
+  `chat.mute`, `chat.unmute` and `session.kick`. A restriction follows the
+  wallet's per-visit random id (one world visit), expires on its own, never
+  touches a wallet, credential or membership, and is private to the presence
+  service; there is no persistent ban and no moderator interface yet.
   The wire format, trust model, revocation bounds and limits are in
   `docs/moderation-authorization.md`.
 - **Admin session primitive.** Re-signing every click with an ECDSA key

@@ -5,9 +5,12 @@
 // line:
 //   'rate-limited' — sent faster than CHAT_MIN_INTERVAL_MS.
 //   'empty'        — nothing left after cleaning and trimming.
+//   'muted'        — a moderator muted this visit; also carries `cause` (a
+//                    fixed code), `message` (templated text) and `retryAfter`.
 //   'blocked'      — the server's own profanity check (authoritative; see
 //                    chat_text_contains_blocked_word() in lib/store.php).
-// An unknown or expired id is 404 (the client rejoins). Sending does not
+// An unknown or expired id is 404 (the client rejoins); a session a moderator
+// removed is 403 {reason:'removed'}. Sending does not
 // require a wallet identity and messages carry none: the display name is
 // whatever the sender announced and is not authenticated.
 require_once __DIR__ . '/../lib/bootstrap.php';
@@ -25,6 +28,10 @@ if ($id === '') send_json(400, ['error' => 'id is required']);
 $text = isset($body['text']) ? $body['text'] : '';
 
 $result = chat_send_message($id, $text);
-if (!$result['found']) send_json(404, ['error' => 'unknown or expired chat id — rejoin']);
-if (!$result['ok']) send_json(200, ['ok' => false, 'reason' => $result['reason']]);
+if (!$result['found']) unknown_session_response($id, 'chat');
+if (!$result['ok']) {
+  $out = ['ok' => false, 'reason' => $result['reason']];
+  if ($result['reason'] === 'muted') $out += ['cause' => $result['cause'], 'message' => $result['message'], 'retryAfter' => $result['retryAfter']];
+  send_json(200, $out);
+}
 send_json(200, ['ok' => true, 'message' => $result['message']]);

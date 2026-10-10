@@ -60,11 +60,24 @@ const MODERATION_STATUS_TYPE = 'atlas.moderation-status';
 const MODERATION_GRANT_SIGN_CONTEXT = "atlas-moderation-grant/v1\n";
 const MODERATION_POP_SIGN_CONTEXT = "atlas-moderation-pop/v1\n";
 const MODERATION_STATUS_SIGN_CONTEXT = "atlas-moderation-status/v1\n";
-const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'];
+const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
 const MODERATION_MAX_GRANT_LIFETIME_MS = 600 * 1000;
 const MODERATION_MAX_WORLDS = 32;
 const MODERATION_GRANT_FIELDS = ['type', 'version', 'grantId', 'domain', 'audience', 'moderatorRef', 'worlds', 'operations', 'issuedAt', 'expiresAt', 'cnf'];
 const MODERATION_REQUEST_FIELDS = ['type', 'version', 'grantId', 'audience', 'domain', 'world', 'operation', 'target', 'issuedAt', 'nonce'];
+const MODERATION_REQUEST_OPTIONAL_FIELDS = ['params'];
+// Fixed vocabulary of reasons a moderator may give. The visitor sees only the
+// templated text for the code (lib/restrictions.php); nothing free-form from a
+// moderator ever reaches a visitor, and no reason is stored beyond the
+// restriction itself.
+const MODERATION_CAUSES = ['spam', 'abuse', 'harassment', 'inappropriate', 'disruption', 'other'];
+define('MODERATION_COMMANDS_PER_MIN', (int) moderation_env_number('MODERATION_COMMANDS_PER_MIN', 30));
+define('MODERATION_COMMAND_WINDOW_MS', moderation_env_number('MODERATION_COMMAND_WINDOW_MS', 60 * 1000));
+define('MODERATION_MAX_COMMAND_MODERATORS', 5000);
+define('MODERATION_MUTE_DEFAULT_S', (int) moderation_env_number('MODERATION_MUTE_DEFAULT_S', 600));
+define('MODERATION_MUTE_MAX_S', (int) moderation_env_number('MODERATION_MUTE_MAX_S', 24 * 60 * 60));
+define('MODERATION_KICK_DEFAULT_S', (int) moderation_env_number('MODERATION_KICK_DEFAULT_S', 300));
+define('MODERATION_KICK_MAX_S', (int) moderation_env_number('MODERATION_KICK_MAX_S', 60 * 60));
 const MODERATION_STATUS_FIELDS = ['type', 'version', 'domain', 'audience', 'issuedAt', 'expiresAt', 'moderators'];
 const MODERATION_EDGE_SPACE = '\x{0009}-\x{000d}\x{0020}\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}';
 
@@ -90,9 +103,11 @@ function moderation_is_list($a) {
 function moderation_is_object($v) {
   return is_array($v) && ($v === [] || !moderation_is_list($v));
 }
-function moderation_has_keys($o, $keys) {
-  if (!moderation_is_object($o) || count($o) !== count($keys)) return false;
+// True when $o has every key in $keys and, beyond them, only keys in $optional.
+function moderation_has_keys($o, $keys, $optional = []) {
+  if (!moderation_is_object($o)) return false;
   foreach ($keys as $k) if (!array_key_exists($k, $o)) return false;
+  foreach (array_keys($o) as $k) if (!in_array($k, $keys, true) && !in_array($k, $optional, true)) return false;
   return true;
 }
 function moderation_fail($status, $code, $message) {
@@ -270,7 +285,7 @@ function moderation_state_locked($fn) {
     $doc['refKeyAt'] = $now;
     $doc['fails'] = [];
   }
-  foreach (['nonces', 'status', 'fails'] as $k) if (!isset($doc[$k]) || !is_array($doc[$k])) $doc[$k] = [];
+  foreach (['nonces', 'status', 'fails', 'commands'] as $k) if (!isset($doc[$k]) || !is_array($doc[$k])) $doc[$k] = [];
   $result = $fn($doc);
   ftruncate($fh, 0);
   rewind($fh);
@@ -339,7 +354,7 @@ function moderation_verify_grant($grant, $issuerKeys, $audience, $domain, $now) 
 function moderation_verify_request($grantPayload, $envelope, $operation, $now) {
   if (!moderation_is_object($envelope) || !isset($envelope['payload']) || !moderation_is_object($envelope['payload'])) return moderation_fail(400, 'bad-request', 'request must be {payload, signature}');
   $r = $envelope['payload'];
-  if (!moderation_has_keys($r, MODERATION_REQUEST_FIELDS)) return moderation_fail(400, 'bad-request', 'the request has missing or unknown fields');
+  if (!moderation_has_keys($r, MODERATION_REQUEST_FIELDS, MODERATION_REQUEST_OPTIONAL_FIELDS)) return moderation_fail(400, 'bad-request', 'the request has missing or unknown fields');
   if ($r['type'] !== MODERATION_REQUEST_TYPE || $r['version'] !== 1) return moderation_fail(400, 'bad-request', 'unsupported request type or version');
   if ($r['grantId'] !== $grantPayload['grantId']) return moderation_fail(401, 'wrong-grant', 'the request names another grant');
   if ($r['audience'] !== $grantPayload['audience'] || $r['domain'] !== $grantPayload['domain']) return moderation_fail(403, 'wrong-audience', 'the request is bound to another audience or domain');
@@ -505,11 +520,77 @@ function moderation_note_failure($addr) {
   });
 }
 
+// ---------- command arguments ----------
+
+function moderation_command_rules() {
+  return [
+    'chat.mute' => ['defaultS' => MODERATION_MUTE_DEFAULT_S, 'maxS' => MODERATION_MUTE_MAX_S, 'params' => true],
+    'chat.unmute' => ['params' => false],
+    'session.kick' => ['defaultS' => MODERATION_KICK_DEFAULT_S, 'maxS' => MODERATION_KICK_MAX_S, 'params' => true]
+  ];
+}
+
+// Checks the target and params of a request for $operation. Returns
+// ['ok'=>true, 'command'=>[target, durationSeconds, cause]] for a command,
+// ['ok'=>true] for roster.view, or a failure (a 400, before anything is spent).
+function moderation_check_arguments($operation, $r) {
+  if ($operation === 'roster.view') {
+    if ($r['target'] !== '') return moderation_fail(400, 'bad-request', 'target must be empty for ' . $operation);
+    if (array_key_exists('params', $r)) return moderation_fail(400, 'bad-request', 'params are not accepted for ' . $operation);
+    return ['ok' => true];
+  }
+  $rules = moderation_command_rules();
+  if (!isset($rules[$operation])) return moderation_fail(403, 'operation-denied', 'the operation is not implemented here');
+  $rule = $rules[$operation];
+  if (!is_string($r['target']) || preg_match('/^[A-Za-z0-9_-]{22}$/', $r['target']) !== 1) return moderation_fail(400, 'bad-request', 'target must be a participant reference');
+  $duration = isset($rule['defaultS']) ? $rule['defaultS'] : null;
+  $cause = 'other';
+  if (array_key_exists('params', $r)) {
+    $p = $r['params'];
+    if (!$rule['params'] || !moderation_is_object($p) || count($p) < 1) return moderation_fail(400, 'bad-request', 'params are not accepted for ' . $operation);
+    foreach (array_keys($p) as $k) if ($k !== 'durationSeconds' && $k !== 'cause') return moderation_fail(400, 'bad-request', 'unknown params member');
+    if (array_key_exists('durationSeconds', $p)) {
+      if (!is_int($p['durationSeconds']) || $p['durationSeconds'] < 1 || $p['durationSeconds'] > $rule['maxS']) return moderation_fail(400, 'bad-request', 'durationSeconds must be an integer from 1 to ' . $rule['maxS']);
+      $duration = $p['durationSeconds'];
+    }
+    if (array_key_exists('cause', $p)) {
+      if (!is_string($p['cause']) || !in_array($p['cause'], MODERATION_CAUSES, true)) return moderation_fail(400, 'bad-request', 'cause must be one of: ' . implode(', ', MODERATION_CAUSES));
+      $cause = $p['cause'];
+    }
+  }
+  return ['ok' => true, 'command' => ['target' => $r['target'], 'durationSeconds' => $duration, 'cause' => $cause]];
+}
+
+// ---------- command rate limit, per moderator ----------
+
+// Seconds until this moderator may send another command, or 0.
+function moderation_command_retry_after($moderatorRef) {
+  return moderation_state_locked(function (&$doc) use ($moderatorRef) {
+    $now = moderation_now_ms();
+    $kept = array_values(array_filter(isset($doc['commands'][$moderatorRef]) ? $doc['commands'][$moderatorRef] : [], function ($t) use ($now) { return $now - $t < MODERATION_COMMAND_WINDOW_MS; }));
+    if ($kept) $doc['commands'][$moderatorRef] = $kept; else unset($doc['commands'][$moderatorRef]);
+    if (count($kept) < MODERATION_COMMANDS_PER_MIN) return 0;
+    return max(1, (int) ceil(($kept[0] + MODERATION_COMMAND_WINDOW_MS - $now) / 1000));
+  });
+}
+function moderation_note_command($moderatorRef) {
+  moderation_state_locked(function (&$doc) use ($moderatorRef) {
+    $now = moderation_now_ms();
+    $hits = isset($doc['commands'][$moderatorRef]) ? $doc['commands'][$moderatorRef] : [];
+    $hits[] = $now;
+    unset($doc['commands'][$moderatorRef]);
+    $doc['commands'][$moderatorRef] = $hits;
+    while (count($doc['commands']) > MODERATION_MAX_COMMAND_MODERATORS) { reset($doc['commands']); unset($doc['commands'][key($doc['commands'])]); }
+  });
+}
+
 // ---------- the entry point ----------
 
-// $body: {grant, request}. Returns ['ok'=>true, 'domain','world','grantId',
-// 'moderatorRef'] or ['ok'=>false, 'status','code','message'].
-function moderation_authorize($body, $operation) {
+// $body: {grant, request}. $operations: the operations the calling endpoint
+// implements; the one the (signed) request names is used when it is among
+// them. Returns ['ok'=>true, 'domain','world','operation','command','grantId',
+// 'moderatorRef'] or ['ok'=>false, 'status','code','message'[, 'retryAfter']].
+function moderation_authorize($body, $operations) {
   $now = moderation_now_ms();
   $cfg = moderation_load_config();
   if ($cfg['state'] !== 'ok') return moderation_fail(503, 'moderation-not-configured', 'moderation is not enabled on this presence service');
@@ -523,9 +604,12 @@ function moderation_authorize($body, $operation) {
   if (!$g['ok']) return $g;
   if (in_array($g['payload']['grantId'], $cfg['revokedGrants'], true) || in_array($g['payload']['moderatorRef'], $cfg['revokedModerators'], true)) return moderation_fail(403, 'revoked', 'this grant or moderator has been revoked here');
 
+  $named = isset($body['request']['payload']) && moderation_is_object($body['request']['payload']) && isset($body['request']['payload']['operation']) ? $body['request']['payload']['operation'] : null;
+  $operation = is_string($named) && in_array($named, $operations, true) ? $named : $operations[0];
   $r = moderation_verify_request($g['payload'], $body['request'], $operation, $now);
   if (!$r['ok']) return $r;
-  if ($r['request']['target'] !== '') return moderation_fail(400, 'bad-request', 'target must be empty for ' . $operation);
+  $args = moderation_check_arguments($operation, $r['request']);
+  if (!$args['ok']) return $args;
 
   $status = moderation_current_status($claimed['domain'], $dom, $cfg['audience']);
   if ($status === null) return moderation_fail(503, 'authorization-unavailable', 'the issuer\'s current authorization status could not be established');
@@ -534,22 +618,26 @@ function moderation_authorize($body, $operation) {
   if (!in_array($operation, $entry['operations'], true)) return moderation_fail(403, 'operation-denied', 'the operation is not currently permitted');
   if ($entry['worlds'] !== '*' && !in_array($r['request']['world'], $entry['worlds'], true)) return moderation_fail(403, 'world-denied', 'the world is not currently permitted');
 
+  // A command over the moderator's rate is refused before its nonce is spent,
+  // so it can be sent again unchanged once the window has passed.
+  if (isset($args['command'])) {
+    $wait = moderation_command_retry_after($g['payload']['moderatorRef']);
+    if ($wait) return moderation_fail(429, 'rate-limited', 'too many moderation commands; try again shortly') + ['retryAfter' => $wait];
+  }
   $spent = moderation_spend_nonce($g['payload']['grantId'], $r['request']['nonce'], $g['expiresAt'], $now);
   if ($spent === 'replay') return moderation_fail(401, 'replay', 'this request has already been used');
   if ($spent === 'busy') return moderation_fail(429, 'rate-limited', 'too many requests for this grant');
-  return ['ok' => true, 'domain' => $claimed['domain'], 'world' => $r['request']['world'], 'grantId' => $g['payload']['grantId'], 'moderatorRef' => $g['payload']['moderatorRef']];
+  if (isset($args['command'])) moderation_note_command($g['payload']['moderatorRef']);
+  return ['ok' => true, 'domain' => $claimed['domain'], 'world' => $r['request']['world'], 'operation' => $operation, 'command' => isset($args['command']) ? $args['command'] : null, 'grantId' => $g['payload']['grantId'], 'moderatorRef' => $g['payload']['moderatorRef']];
 }
 
 // ---------- the anonymous roster ----------
 
-// The anonymous sessions of one world. Presence and chat sessions of the same
-// visit (same keyed visit hash) appear as one entry. Each entry carries only: a
-// temporary locator (`ref`), the display name(s), the world, when the visit
-// began, whether it is in presence and/or chat, and the public avatar and chat
-// sender ids every participant already sees. Never wallet keys, credentials,
-// network addresses or hashes of them, connection tokens, or the visit id.
-function moderation_build_roster($domain, $world) {
-  $now = moderation_now_ms();
+// The anonymous sessions of one world, grouped by visit. Presence and chat
+// sessions of the same visit (same keyed visit hash) form one group. Returns
+// ['refKey'=>..., 'groups'=>[key => [key, presence, chat, presenceToken,
+// chatToken]]].
+function moderation_collect_groups($domain, $world) {
   $presence = with_presence_store_locked(function (&$doc) use ($domain, $world) {
     $key = presence_room_key($domain, $world);
     return isset($doc['rooms'][$key]) ? $doc['rooms'][$key] : [];
@@ -562,27 +650,49 @@ function moderation_build_roster($domain, $world) {
   $slot = function ($key, $kind) use (&$groups) {
     $k = $key;
     for ($n = 2; isset($groups[$k]) && $groups[$k][$kind] !== null; $n++) $k = $key . '#' . $n; // one presence and one chat per visit
-    if (!isset($groups[$k])) $groups[$k] = ['key' => $k, 'presence' => null, 'chat' => null];
+    if (!isset($groups[$k])) $groups[$k] = ['key' => $k, 'presence' => null, 'chat' => null, 'presenceToken' => null, 'chatToken' => null];
     return $k;
   };
   foreach ($presence as $token => $m) {
     if (!is_array($m)) continue;
     $k = $slot(!empty($m['visit']) ? 'v:' . $m['visit'] : 'p:' . $token, 'presence');
     $groups[$k]['presence'] = $m;
+    $groups[$k]['presenceToken'] = (string) $token;
   }
   foreach ($chat as $token => $m) {
     if (!is_array($m) || !isset($m['world']) || $m['world'] !== $world) continue;
     $k = $slot(!empty($m['visit']) ? 'v:' . $m['visit'] : 'c:' . $token, 'chat');
     $groups[$k]['chat'] = $m;
+    $groups[$k]['chatToken'] = (string) $token;
   }
+  return ['refKey' => $refKey, 'groups' => $groups];
+}
+
+// The key a mute on this group is stored under: the visit, or (for a session
+// without one) its chat token. Null when there is nothing to mute.
+function moderation_mute_key($g) {
+  $m = $g['chat'] !== null ? $g['chat'] : $g['presence'];
+  if ($m !== null && !empty($m['visit'])) return $m['visit'];
+  return $g['chatToken'] !== null ? 'c:' . $g['chatToken'] : null;
+}
+
+// The anonymous sessions of one world, for an authorized moderator. Each entry
+// carries only: a temporary locator (`ref`), the display name(s), the world,
+// when the visit began, whether it is in presence and/or chat, whether it is
+// currently muted, and the public avatar and chat sender ids every participant
+// already sees. Never wallet keys, credentials, network addresses or hashes of
+// them, connection tokens, or the visit id.
+function moderation_build_roster($domain, $world) {
+  $now = moderation_now_ms();
+  $c = moderation_collect_groups($domain, $world);
   $participants = [];
-  foreach ($groups as $g) {
+  foreach ($c['groups'] as $g) {
     $times = [];
     if ($g['presence'] !== null) $times[] = isset($g['presence']['joinedAt']) ? $g['presence']['joinedAt'] : (isset($g['presence']['lastSeen']) ? $g['presence']['lastSeen'] : $now);
     if ($g['chat'] !== null) $times[] = isset($g['chat']['joinedAt']) ? $g['chat']['joinedAt'] : (isset($g['chat']['lastSeen']) ? $g['chat']['lastSeen'] : $now);
     $joined = (int) min($times);
     $entry = [
-      'ref' => moderation_participant_ref($refKey, $domain, $world, $g['key']),
+      'ref' => moderation_participant_ref($c['refKey'], $domain, $world, $g['key']),
       'name' => $g['presence'] !== null ? $g['presence']['name'] : $g['chat']['name'],
       'world' => $world,
       'joinedAt' => moderation_iso($joined),
@@ -592,8 +702,83 @@ function moderation_build_roster($domain, $world) {
       'linked' => $g['presence'] !== null && $g['chat'] !== null,
     ];
     if ($g['presence'] !== null && $g['chat'] !== null && $g['chat']['name'] !== $g['presence']['name']) $entry['chatName'] = $g['chat']['name'];
+    $mk = moderation_mute_key($g);
+    $mute = $mk !== null ? restrictions_mute_of($mk) : null;
+    if ($mute !== null) $entry['mutedUntil'] = moderation_iso($mute['until']);
     $participants[] = $entry;
   }
   usort($participants, function ($a, $b) { return $a['joinedAt'] === $b['joinedAt'] ? strcmp($a['ref'], $b['ref']) : strcmp($a['joinedAt'], $b['joinedAt']); });
   return ['domain' => $domain, 'world' => $world, 'generatedAt' => moderation_iso($now), 'count' => count($participants), 'participants' => $participants];
+}
+
+// ---------- commands ----------
+
+// Removes every session of the group's visit (or the group's own sessions when
+// it has no visit id). A polling session leaves a tombstone on its token, so
+// its next request is answered "removed" rather than "unknown, rejoin".
+// Returns how many sessions were removed.
+function moderation_remove_group($domain, $world, $g, $until, $cause) {
+  $m = $g['presence'] !== null ? $g['presence'] : $g['chat'];
+  $visit = $m !== null && !empty($m['visit']) ? $m['visit'] : null;
+  $matches = function ($member, $token, $ownToken) use ($visit) {
+    if (!is_array($member)) return false;
+    return $visit !== null ? (isset($member['visit']) && $member['visit'] === $visit) : ((string) $token === $ownToken);
+  };
+  $presenceCount = with_presence_store_locked(function (&$doc) use ($domain, $world, $g, $until, $cause, $matches) {
+    $key = presence_room_key($domain, $world);
+    if (!isset($doc['rooms'][$key])) return 0;
+    $gone = [];
+    foreach ($doc['rooms'][$key] as $token => $member) {
+      if ($matches($member, $token, (string) $g['presenceToken'])) { $gone[(string) $token] = 'presence'; unset($doc['rooms'][$key][$token]); }
+    }
+    if (count($doc['rooms'][$key]) === 0) unset($doc['rooms'][$key]);
+    restrictions_add_tombs($gone, $until, $cause);
+    return count($gone);
+  });
+  $chatCount = with_chat_store_locked(function (&$doc) use ($domain, $g, $until, $cause, $matches) {
+    if (!isset($doc['domains'][$domain]['members'])) return 0;
+    $gone = [];
+    foreach ($doc['domains'][$domain]['members'] as $token => $member) {
+      if ($matches($member, $token, (string) $g['chatToken'])) { $gone[(string) $token] = 'chat'; unset($doc['domains'][$domain]['members'][$token]); }
+    }
+    restrictions_add_tombs($gone, $until, $cause);
+    return count($gone);
+  });
+  return ['presence' => $presenceCount, 'chat' => $chatCount];
+}
+
+// Runs a verified chat.mute / chat.unmute / session.kick. The target is a
+// roster reference, resolved only within the world the moderator is
+// authorized for; a reference from any other world or domain simply does not
+// match. Returns [status, body].
+function moderation_execute_command($auth) {
+  $domain = $auth['domain']; $world = $auth['world']; $operation = $auth['operation']; $cmd = $auth['command'];
+  $now = moderation_now_ms();
+  $c = moderation_collect_groups($domain, $world);
+  $group = null;
+  foreach ($c['groups'] as $g) {
+    if (hash_equals(moderation_participant_ref($c['refKey'], $domain, $world, $g['key']), $cmd['target'])) { $group = $g; break; }
+  }
+  if ($group === null) return [404, ['error' => 'no such participant in this world (the list may be out of date)', 'code' => 'unknown-participant']];
+  $base = ['ok' => true, 'operation' => $operation, 'ref' => $cmd['target'], 'world' => $world];
+  $room = presence_room_key($domain, $world);
+  $full = [503, ['error' => 'too many temporary restrictions are active here; try again later', 'code' => 'restrictions-full']];
+
+  if ($operation === 'session.kick') {
+    $until = $now + $cmd['durationSeconds'] * 1000;
+    $m = $group['presence'] !== null ? $group['presence'] : $group['chat'];
+    // The restriction is set before the sessions are removed (lock order and
+    // race: see lib/restrictions.php), so a join in between is refused or is
+    // a member the removal below catches.
+    if (!empty($m['visit']) && restrictions_set_kick($m['visit'], $room, $until, $cmd['cause']) === 'full') return $full;
+    $removed = moderation_remove_group($domain, $world, $group, $until, $cmd['cause']);
+    return [200, $base + ['removed' => $removed, 'durationSeconds' => $cmd['durationSeconds'], 'cause' => $cmd['cause'], 'rejoinAfter' => moderation_iso($until)]];
+  }
+
+  $key = moderation_mute_key($group);
+  if ($key === null) return [409, ['error' => 'this participant is not in chat', 'code' => 'not-in-chat']];
+  if ($operation === 'chat.unmute') return [200, $base + ['wasMuted' => restrictions_clear_mute($key)]];
+  $until = $now + $cmd['durationSeconds'] * 1000;
+  if (restrictions_set_mute($key, $room, $until, $cmd['cause']) === 'full') return $full;
+  return [200, $base + ['durationSeconds' => $cmd['durationSeconds'], 'cause' => $cmd['cause'], 'mutedUntil' => moderation_iso($until)]];
 }

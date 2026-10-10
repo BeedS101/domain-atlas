@@ -23,7 +23,7 @@ const STATUS_SIGN_CONTEXT = 'atlas-moderation-status/v1\n';
 const STATUS_FIELDS = ['type', 'version', 'domain', 'audience', 'issuedAt', 'expiresAt', 'moderators'];
 const STATUS_MAX_TTL_MS = 120 * 1000;
 const REF_CONTEXT = 'atlas-moderator-ref/v1\n';
-const OPERATIONS = ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'];
+const OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
 const MAX_GRANT_LIFETIME_MS = 600 * 1000;
 const MAX_WORLDS = 32;
 const REQUEST_SKEW_MS = 60 * 1000;
@@ -31,6 +31,8 @@ const ISSUE_SKEW_MS = 30 * 1000;
 
 const GRANT_FIELDS = ['type', 'version', 'grantId', 'domain', 'audience', 'moderatorRef', 'worlds', 'operations', 'issuedAt', 'expiresAt', 'cnf'];
 const REQUEST_FIELDS = ['type', 'version', 'grantId', 'audience', 'domain', 'world', 'operation', 'target', 'issuedAt', 'nonce'];
+// Present only on a command that takes arguments ({durationSeconds?, cause?}).
+const REQUEST_OPTIONAL_FIELDS = ['params'];
 
 function canonicalize(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -160,7 +162,7 @@ async function verifyRequest(grantPayload, envelope, opts) {
   if (!isObject(envelope) || !isObject(envelope.payload)) return fail('malformed', 'request must be {payload, signature}');
   const r = envelope.payload;
   const keys = Object.keys(r);
-  if (keys.length !== REQUEST_FIELDS.length || !REQUEST_FIELDS.every((k) => keys.includes(k))) return fail('malformed', 'request has missing or unknown fields');
+  if (!REQUEST_FIELDS.every((k) => keys.includes(k)) || !keys.every((k) => REQUEST_FIELDS.includes(k) || REQUEST_OPTIONAL_FIELDS.includes(k))) return fail('malformed', 'request has missing or unknown fields');
   if (r.type !== REQUEST_TYPE || r.version !== 1) return fail('malformed', 'unsupported request type or version');
   if (now >= strictIso(grantPayload.expiresAt)) return fail('expired', 'grant has expired');
   if (r.grantId !== grantPayload.grantId) return fail('wrong-grant', 'request names another grant');

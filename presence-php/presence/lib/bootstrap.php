@@ -81,15 +81,33 @@ function read_json_body($limit = null) {
 }
 
 // Answers a refused join with its readable message: 400 (fix the name),
+// 403 (a moderator removed this visit; wait out the cooldown),
 // 429 (this source is over its limits) or 503 (the room or server is full),
 // with Retry-After where waiting helps. `error` is the message; `reason` and
 // `retryAfter` are the machine-readable parts.
 function join_failure_response($result) {
   $reason = $result['reason'];
-  $status = ['invalid' => 400, 'name-not-allowed' => 400, 'join-rate-limited' => 429, 'source-limit' => 429];
+  $status = ['invalid' => 400, 'name-not-allowed' => 400, 'removed' => 403, 'join-rate-limited' => 429, 'source-limit' => 429];
   $defaultRetry = ['room-full' => 10, 'source-limit' => 10, 'server-busy' => 15];
   $retry = isset($result['retryAfter']) ? (int) $result['retryAfter'] : (isset($defaultRetry[$reason]) ? $defaultRetry[$reason] : 0);
-  $body = ['error' => presence_denial_text($reason), 'reason' => $reason, 'message' => presence_denial_text($reason)];
+  // A removal carries its own templated message and fixed cause code.
+  $text = isset($result['message']) ? $result['message'] : presence_denial_text($reason);
+  $body = ['error' => $text, 'reason' => $reason, 'message' => $text];
+  if (isset($result['cause'])) $body['cause'] = $result['cause'];
   if ($retry > 0) $body['retryAfter'] = $retry;
   send_json(isset($status[$reason]) ? $status[$reason] : 503, $body, false, $retry > 0 ? ['Retry-After: ' . $retry] : []);
+}
+
+// The answer for a polling token this service does not know. A session a
+// moderator removed gets 403 {reason:'removed'} (the client must not rejoin on
+// its own); anything else is the usual 404 (swept as stale: rejoin).
+function unknown_session_response($token, $scope) {
+  $tomb = restrictions_tomb_of($token);
+  if ($tomb !== null) {
+    $now = moderation_now_ms();
+    $text = restrictions_kick_message($tomb['until'], $tomb['cause'], $now);
+    $retry = restrictions_retry_after($tomb['until'], $now);
+    send_json(403, ['error' => $text, 'reason' => 'removed', 'cause' => $tomb['cause'], 'scope' => $tomb['scope'], 'message' => $text, 'retryAfter' => $retry], false, ['Retry-After: ' . $retry]);
+  }
+  send_json(404, ['error' => 'unknown or expired ' . ($scope === 'chat' ? 'chat' : 'presence') . ' id — rejoin']);
 }

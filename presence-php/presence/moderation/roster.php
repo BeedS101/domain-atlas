@@ -5,7 +5,8 @@
 // lib/moderation.php and docs/moderation-authorization.md). Read-only. No
 // CORS: the response is not for pages to read.
 //
-// Success: {domain, world, generatedAt, count, participants[]}. Failure:
+// Success: {domain, world, generatedAt, count, participants[]} (each entry
+// has `mutedUntil` while that visitor is muted). Failure:
 // {error, code} with 400 (malformed), 401 (bad or replayed proof), 403 (not
 // authorized for that domain, world or operation), 429 (too many failed
 // attempts from this source) or 503 (moderation not configured, or the
@@ -27,7 +28,7 @@ try {
   send_json(400, ['error' => 'malformed request', 'code' => 'bad-request'], false, $nostore);
 }
 
-$auth = moderation_authorize($body, 'roster.view');
+$auth = moderation_authorize($body, ['roster.view']);
 if (!$auth['ok']) {
   if ($auth['status'] < 500 && $auth['code'] !== 'rate-limited') moderation_note_failure($addr);
   send_json($auth['status'], ['error' => $auth['message'], 'code' => $auth['code']], false, $nostore);

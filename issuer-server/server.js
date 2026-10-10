@@ -3517,7 +3517,7 @@ function readAdminKeys() {
 
 // Operation names a moderation grant may carry. Reserved vocabulary for the
 // moderator commands that follow; nothing in this server performs them.
-const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'];
+const MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
 const MODERATION_MAX_WORLDS = 32;
 const MODERATION_ID_FORBIDDEN = /[\u0000-\u001f\u007f\u2028\u2029]/;
 

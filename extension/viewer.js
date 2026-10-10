@@ -139,11 +139,11 @@ window.addEventListener('unhandledrejection', (event) => {
 // for the previous one. See enterWorld().
 let active3D = null;
 
-// ---------- presence (multiplayer, #66 + polling fallback #68) ----------
+// ---------- presence (multiplayer, with a polling fallback) ----------
 // A live connection to presence-server telling this domain+world "room"
 // who else is here and where. Only meaningful for 3D (gltf-mini-v1)
 // worlds, since that's the only renderer with a visible character at all
-// (#33) — see enterWorld() for where this connects/disconnects. Its own
+// — see enterWorld() for where this connects/disconnects. Its own
 // small lifecycle, deliberately separate from active3D's: a presence
 // server that's down, slow, or unreachable must never block or break
 // entering a world — multiplayer is an enhancement layered on top of
@@ -345,7 +345,10 @@ function showPresenceTransientHint(text, durationMs = 6000) {
   }, durationMs);
 }
 
-function presenceDeniedHint(reason) {
+// `message` is the server's own templated text for a removal; it is shown as
+// given (a fixed sentence per cause code, never moderator-written text).
+function presenceDeniedHint(reason, message) {
+  if (reason === 'removed') return typeof message === 'string' && message ? message : 'A moderator has removed you from this world. You can rejoin shortly.';
   if (reason === 'room-full') return 'This world is full — you can look around, but other visitors will not see you.';
   if (reason === 'server-busy') return 'The presence server is busy — you will not appear to other visitors.';
   if (reason === 'source-limit') return 'Too many sessions are open from your network connection — close other tabs or wait a few seconds.';
@@ -546,6 +549,15 @@ function pollPresence(domain, worldId, displayName, base) {
       })
         .then((r) => r.json().then((body) => ({ status: r.status, body })).catch(() => ({ status: r.status, body: {} })))
         .then(({ status, body }) => {
+          if (status === 403 && body && body.reason === 'removed') {
+            // A moderator removed this session. Stop here: rejoining on our
+            // own would only be refused again until the cooldown has passed.
+            if (presencePollToken === token) {
+              disconnectPresence();
+              showPresenceTransientHint(presenceDeniedHint('removed', body.message), 12000);
+            }
+            return Promise.reject(new Error('presence session removed'));
+          }
           if (status === 404) {
             // The server no longer knows this token: swept as stale (most
             // often a backgrounded tab whose timer was throttled past the
@@ -581,7 +593,7 @@ function pollPresence(domain, worldId, displayName, base) {
     .then((r) => r.json().then((body) => ({ ok: r.ok, body })).catch(() => ({ ok: false, body: {} })))
     .then(({ ok, body }) => {
       if (!ok || !body || typeof body.id !== 'string') {
-        if (presencePollToken === token) showPresenceTransientHint(presenceDeniedHint(body && body.reason));
+        if (presencePollToken === token) showPresenceTransientHint(presenceDeniedHint(body && body.reason, body && body.message), body && body.reason === 'removed' ? 12000 : undefined);
         return;
       }
       finishJoin(body);
@@ -638,7 +650,11 @@ function connectPresence(domain, worldId, displayName, base) {
       window.__atlasPresenceOwnId = msg.id; // test-observability, same convention as window.__atlasActive3D/__atlasScene
       (msg.roster || []).forEach((m) => { if (active3D) active3D.upsertRemotePlayer(m.id, m); });
     } else if (msg.type === 'join-denied') {
-      showPresenceTransientHint(presenceDeniedHint(msg.reason));
+      showPresenceTransientHint(presenceDeniedHint(msg.reason, msg.message), msg.reason === 'removed' ? 12000 : undefined);
+      disconnectPresence();
+    } else if (msg.type === 'removed') {
+      // A moderator removed this session: leave quietly and say why.
+      showPresenceTransientHint(presenceDeniedHint('removed', msg.message), 12000);
       disconnectPresence();
     } else if (msg.type === 'joined') {
       if (active3D) active3D.upsertRemotePlayer(msg.id, msg);
@@ -671,7 +687,7 @@ function connectPresence(domain, worldId, displayName, base) {
   socket.addEventListener('error', () => {});
 }
 
-// ---------- in-world chat (#105-109, polling fallback #110) ----------
+// ---------- in-world chat (with a polling fallback) ----------
 // A read-by-anyone, send-when-unlocked text chat, riding the SAME
 // presence-server process (see server.js's own "chat" section) but as a
 // fully INDEPENDENT WebSocket connection from presence's — presence can be
@@ -1035,7 +1051,11 @@ async function refreshChatAvailability(manifest, world) {
   refreshChatSendability();
 }
 
-function chatErrorText(reason) {
+// `message` is the server's own templated text for a mute or removal, shown as
+// given (a fixed sentence per cause code, never moderator-written text).
+function chatErrorText(reason, message) {
+  if (reason === 'muted') return typeof message === 'string' && message ? message : 'A moderator has muted you in this world.';
+  if (reason === 'removed') return typeof message === 'string' && message ? message : 'A moderator has removed you from this world. You can rejoin shortly.';
   if (reason === 'login-required') return 'Unlock your wallet to send chat messages.';
   if (reason === 'blocked') return 'Message blocked — please rephrase.';
   if (reason === 'empty') return 'Type a message first.';
@@ -1051,11 +1071,32 @@ function chatErrorText(reason) {
   return 'Message not sent.';
 }
 
-function showChatSendStatus(text) {
+function showChatSendStatus(text, durationMs = 4000) {
   if (!chatSendStatusEl) return;
   chatSendStatusEl.textContent = text || '';
   if (chatSendStatusTimer) clearTimeout(chatSendStatusTimer);
-  if (text) chatSendStatusTimer = setTimeout(() => { chatSendStatusEl.textContent = ''; }, 4000);
+  if (text) chatSendStatusTimer = setTimeout(() => { chatSendStatusEl.textContent = ''; }, durationMs);
+}
+
+// A moderator removed this chat session. The connection is dropped and not
+// reopened on its own (the server would refuse until the cooldown has
+// passed); the message list stays readable.
+let chatRemovalMessage = null;
+function chatWasRemoved(message) {
+  chatRemovalMessage = typeof message === 'string' ? message : null;
+  if (chatSocket) {
+    const socket = chatSocket;
+    chatSocket = null;
+    try { socket.close(); } catch (err) {}
+  }
+  chatPollToken = null;
+  if (chatPollTimer) { clearInterval(chatPollTimer); chatPollTimer = null; }
+  chatPollId = null;
+  chatPollHttpBase = null;
+  chatJoined = false;
+  chatJoinFailure = 'removed';
+  refreshChatSendability();
+  showChatSendStatus(chatErrorText('removed', chatRemovalMessage), 12000);
 }
 
 // Send eligibility depends on two independent things: whether the wallet
@@ -1142,7 +1183,8 @@ function pollChat(domain, worldId, displayName, canSend, base, historyOnJoin) {
       if (!ok || !welcome || typeof welcome.id !== 'string') {
         if (chatPollToken === token) {
           chatJoinFailure = (welcome && welcome.reason) || ('http-' + status);
-          showChatSendStatus(chatErrorText(chatJoinFailure));
+          if (chatJoinFailure === 'removed') chatRemovalMessage = welcome.message || null;
+          showChatSendStatus(chatErrorText(chatJoinFailure, welcome && welcome.message), chatJoinFailure === 'removed' ? 12000 : undefined);
         }
         return;
       }
@@ -1175,6 +1217,7 @@ function pollChat(domain, worldId, displayName, canSend, base, historyOnJoin) {
           .then((r) => r.json().then((body) => ({ status: r.status, body })).catch(() => ({ status: r.status, body: {} })))
           .then(({ status, body: res }) => {
             if (chatPollToken !== token) return;
+            if (status === 403 && res && res.reason === 'removed') { chatWasRemoved(res.message); return; }
             if (status === 404) {
               // The server swept this chat session as stale (backgrounded
               // tab, say). Rejoin with a fresh sender id.
@@ -1278,9 +1321,12 @@ function connectChat(domain, worldId, base) {
         chatMessages.push(msg.message);
         if (chatMessages.length > CHAT_MESSAGES_CAP) chatMessages.shift();
         renderChatMessages();
+      } else if (msg.type === 'chat-removed') {
+        chatWasRemoved(msg.message);
       } else if (msg.type === 'chat-error') {
         if (!chatJoined) chatJoinFailure = msg.reason || 'not-joined';
-        showChatSendStatus(chatErrorText(msg.reason));
+        if (!chatJoined && msg.reason === 'removed') chatRemovalMessage = msg.message || null;
+        showChatSendStatus(chatErrorText(msg.reason, msg.message), msg.reason === 'removed' ? 12000 : (msg.reason === 'muted' ? 8000 : undefined));
       }
     });
 
@@ -1363,7 +1409,7 @@ chatTextInput && chatTextInput.addEventListener('keydown', (e) => {
     showChatSendStatus('Switch here or to Domain to send a message');
     return;
   }
-  if (!chatIsConnected()) { showChatSendStatus(chatErrorText(chatJoinFailure || 'not-joined')); return; }
+  if (!chatIsConnected()) { showChatSendStatus(chatErrorText(chatJoinFailure || 'not-joined', chatJoinFailure === 'removed' ? chatRemovalMessage : undefined)); return; }
   if (AtlasWallet.chatMessageContainsBlockedWord(text)) { showChatSendStatus(chatErrorText('blocked')); return; }
 
   if (chatSocket && chatSocket.readyState === WebSocket.OPEN) {
@@ -1384,8 +1430,10 @@ chatTextInput && chatTextInput.addEventListener('keydown', (e) => {
           chatMessages.push(result.message);
           if (chatMessages.length > CHAT_MESSAGES_CAP) chatMessages.shift();
           renderChatMessages();
+        } else if (result.reason === 'removed') {
+          chatWasRemoved(result.message);
         } else {
-          showChatSendStatus(chatErrorText(result.reason));
+          showChatSendStatus(chatErrorText(result.reason, result.message), result.reason === 'muted' ? 8000 : undefined);
         }
       })
       .catch(() => showChatSendStatus('Not connected — try again in a moment.'));

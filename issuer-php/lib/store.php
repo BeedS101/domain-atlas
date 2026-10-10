@@ -423,7 +423,7 @@ function atlas_admin_keys_file() {
 //     means "all"; an EMPTY list means none; anything that is not a list of
 //     valid strings means none. A moderator is never an admin.
 //   - anything else: no authority at all (a typo must not fall back to admin).
-const ATLAS_MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'session.kick', 'session.timeout'];
+const ATLAS_MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 'session.kick', 'session.timeout'];
 const ATLAS_MODERATION_MAX_WORLDS = 32;
 const ATLAS_MODERATION_EDGE_SPACE = '\x{0009}-\x{000d}\x{0020}\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}';
 

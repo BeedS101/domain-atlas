@@ -16,15 +16,33 @@ version — just on a ~2 second update cycle instead of continuous, since
 there's no persistent connection to push updates down.
 
 This bundle deliberately does NOT include a WebSocket server, and never
-will — see "Moderator session list (optional)
+will — see "Why there's no WebSocket version of this" below. It's not a
+missing feature; it's a hosting constraint that has nothing to do with
+PHP specifically.
+
+Nothing in the browser extension needs to change to use this, beyond one
+line in your manifest (see "Turning this on" below) — it calls the exact
+same /presence/poll/join, /sync, /leave shapes either way.
+
+
+Moderator session list (optional)
 ------------------------------------
 presence/moderation/roster.php lets a moderator whose domain issuer has
 signed a grant see who is in one world: display name, world, when they
 joined, whether they are in presence and/or chat, and the public avatar and
-chat ids. It never returns wallet keys, credential ids, network addresses or
-connection tokens, and it can do nothing else (no mute, kick or ban). It is
-off until you create presence/lib/atlas-presence-moderation-config.json
-(not part of the repository; lib/ is web-denied by .htaccess):
+chat ids (and whether the visitor is currently muted). It never returns wallet
+keys, credential ids, network addresses or connection tokens.
+presence/moderation/command.php lets the same moderator mute, unmute or kick
+one of those listed sessions for a limited time (the only other things a
+grant can do). A mute refuses the visitor's chat messages; a kick removes
+their presence and chat sessions and refuses the same visit for a while.
+Both are private to this service: they are kept in
+presence/lib/atlas-presence-restrictions.json (hashes, cause codes and
+expiry times only; created on first use, ignored by Git, web-denied with the
+rest of lib/), expire by themselves and are bounded. There is no persistent ban.
+Starting a new visit (a page reload) is not blocked: this is a cooldown, not
+an identity ban. Moderation is off until you create
+presence/lib/atlas-presence-moderation-config.json (not part of the repository; lib/ is web-denied by .htaccess):
 
   {
     "enabled": true,
@@ -59,15 +77,6 @@ Full design, wire format, revocation bounds and limits:
 docs/moderation-authorization.md in the main repository.
 
 
-Why there's no WebSocket version of this" below. It's not a
-missing feature; it's a hosting constraint that has nothing to do with
-PHP specifically.
-
-Nothing in the browser extension needs to change to use this, beyond one
-line in your manifest (see "Turning this on" below) — it calls the exact
-same /presence/poll/join, /sync, /leave shapes either way.
-
-
 Requirements
 -------------
 - Apache with mod_rewrite and AllowOverride enabled for your account
@@ -97,9 +106,13 @@ What's in this folder
       roster.php     - POST /presence/moderation/roster (read-only anonymous
                         session list for an authorized moderator; answers 503
                         until you configure it — see "Moderator session list")
+      command.php    - POST /presence/moderation/command (mute, unmute or
+                        kick one listed session, for an authorized moderator;
+                        same configuration)
     lib/
       moderation.php             - moderator-grant verification (shared code,
                                     not a web route)
+      restrictions.php           - temporary mutes and kicks (shared code)
       bootstrap.php, store.php  - shared code, not web routes — store.php
                                     holds BOTH the presence room logic and
                                     the chat room logic (see its own
