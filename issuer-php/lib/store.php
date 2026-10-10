@@ -430,6 +430,16 @@ const ATLAS_MODERATION_OPERATIONS = ['roster.view', 'chat.mute', 'chat.unmute', 
 const ATLAS_MODERATION_MAX_WORLDS = 32;
 const ATLAS_MODERATION_EDGE_SPACE = '\x{0009}-\x{000d}\x{0020}\x{0085}\x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}';
 
+// A roster entry is revoked unless its `revoked` member is absent or one of the
+// values JavaScript treats as false (false, null, 0, ""). Anything else, such as
+// "0", [] or {}, counts as revoked, as it does on the Node issuer, so a
+// hand-edited entry can never stay active on one backend and not the other.
+function atlas_roster_entry_revoked($k) {
+  if (!is_array($k) || !array_key_exists('revoked', $k)) return false;
+  $r = $k['revoked'];
+  return !($r === false || $r === null || $r === 0 || $r === 0.0 || $r === '');
+}
+
 // A world id as a moderation scope names it: 1 to 120 characters (code
 // points), valid UTF-8, no control characters or line/paragraph separators,
 // and no leading or trailing white space. Same rule as the Node issuer.
@@ -463,7 +473,7 @@ function admin_authority($publicKey) {
   $keys = is_array($doc) && isset($doc['keys']) && is_array($doc['keys']) ? $doc['keys'] : [];
   $active = [];
   foreach ($keys as $k) {
-    if (is_array($k) && isset($k['publicKey']) && $k['publicKey'] === $publicKey && empty($k['revoked'])) $active[] = $k;
+    if (is_array($k) && isset($k['publicKey']) && $k['publicKey'] === $publicKey && !atlas_roster_entry_revoked($k)) $active[] = $k;
   }
   if (!$active) return null;
   $allAdmin = true;

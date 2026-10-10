@@ -693,7 +693,7 @@ function chat_send_message($token, $textRaw) {
       // Enforced here, under the store lock, for every send. A muted visit's
       // send is refused before anything else is looked at, so it also leaves
       // the rate-limit clock alone.
-      $muted = restrictions_muted_answer(!empty($member['visit']) ? $member['visit'] : 'c:' . $token);
+      $muted = restrictions_muted_answer(!empty($member['visit']) ? $member['visit'] : restrictions_token_key($token));
       if ($muted !== null) { unset($member, $entry); return ['found' => true, 'ok' => false] + $muted; }
       if (($now - (isset($member['lastSendAt']) ? $member['lastSendAt'] : 0)) < CHAT_MIN_INTERVAL_MS) { unset($member, $entry); return ['found' => true, 'ok' => false, 'reason' => 'rate-limited']; }
       $text = chat_clean_text($textRaw);

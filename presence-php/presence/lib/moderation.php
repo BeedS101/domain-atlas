@@ -790,7 +790,7 @@ function moderation_collect_groups($domain, $world) {
 function moderation_mute_key($g) {
   $m = $g['chat'] !== null ? $g['chat'] : $g['presence'];
   if ($m !== null && !empty($m['visit'])) return $m['visit'];
-  return $g['chatToken'] !== null ? 'c:' . $g['chatToken'] : null;
+  return $g['chatToken'] !== null ? restrictions_token_key($g['chatToken']) : null;
 }
 
 // The anonymous sessions of one world, for an authorized moderator. Each entry

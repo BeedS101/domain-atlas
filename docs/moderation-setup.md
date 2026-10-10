@@ -73,7 +73,10 @@ Create the file yourself (it is git-ignored and web-denied):
 }
 ```
 
-`audience` must be the same origin you listed in step 1. With no file, an
+`issuerKeys` takes the `publicKey` value of the first entry under `keys` in
+`https://example.com/.well-known/atlas-key.json` (copy it; do not let software fetch
+it for you, the point is that you chose it). `audience` must be the same origin you
+listed in step 1. With no file, an
 invalid file or `"enabled": false`, moderation answers "not available" and
 everything else about the presence service is unchanged.
 
@@ -99,7 +102,10 @@ list.
 ## 4. Name the moderators
 
 Add entries to the issuer's admin key list (`atlas-admin-keys-store.json`; Node: the
-state directory, PHP: `lib/`). This is hand-edited on purpose.
+state directory, PHP: `lib/`). This is hand-edited on purpose. The file is
+`{ "keys": [ ... ] }`: **add the new entry to the existing `keys` list; do not replace the
+file or remove existing entries**, or you lock out the current administrators. An entry
+with no `role` is an administrator.
 
 ```json
 { "publicKey": "<moderator's wallet public key>", "addedAt": "2026-10-10T00:00:00Z",
@@ -107,8 +113,11 @@ state directory, PHP: `lib/`). This is hand-edited on purpose.
   "operations": ["roster.view", "chat.mute", "chat.unmute", "session.kick", "audit.view"] }
 ```
 
-* `worlds` limits which worlds the person can see and act on. Without it they have
-  none.
+* **Always list both `worlds` and `operations`.** A moderator entry that leaves either
+  out is not "none", it is **everything**: no `worlds` means every world, no
+  `operations` means every operation (including `session.kick` and `audit.view`). Only
+  a field that is present but empty, or invalid, means none.
+* `worlds` limits which worlds the person can see and act on.
 * `operations` limits what they may do. `roster.view` is needed to see anyone.
   `audit.view` lets them read the audit log for their own worlds.
 * Administrators keep every moderation operation in every world. A moderator-only
@@ -159,13 +168,21 @@ visit ids or network addresses.
   `PRESENCE_MODERATION_AUDIT_FILE`).
 * PHP: `presence/lib/atlas-presence-moderation-audit.jsonl` (inside the web-denied `lib/`).
 * The file is created on first use with mode 0600. Keep it outside any folder the
-  web server publishes; the PHP location relies on the `lib/.htaccess` deny rule,
-  so check that it works on your host (request the file by URL; it must not be served).
+  web server publishes. The PHP location relies on the `lib/.htaccess` deny rule, so
+  check that your host honours it. The audit file does not exist until the first
+  moderation request, so a 404 for it proves nothing; instead request a file that does
+  exist once any visitor has joined, such as
+  `https://example.com/presence/lib/atlas-presence-store.json`. It must answer 403 (or
+  404), never the file's contents.
 * It is bounded: 1 MiB and 90 days by default (`MODERATION_AUDIT_MAX_BYTES`,
   `MODERATION_AUDIT_RETENTION_DAYS`); the oldest entries are dropped first. Copy it
   somewhere safe if you need a longer history.
-* Refusals are rate-limited per moderator (`MODERATION_AUDIT_REFUSALS_PER_MIN`, 10),
-  so a stolen grant cannot fill it; the rest are summarised in one entry.
+* Refusals and audit reads are rate-limited per moderator together
+  (`MODERATION_AUDIT_REFUSALS_PER_MIN`, 10 a minute), so a stolen grant cannot fill it
+  with them; the rest are summarised in one entry. Real mute/unmute/kick entries are
+  limited only by the command rate limit (30 a minute per moderator), so a moderator
+  who keeps issuing commands can still push the oldest entries out of the 1 MiB file:
+  copy the file somewhere safe from time to time.
 * If the log cannot be written, mute, unmute and kick are refused ("audit unavailable"),
   so an action is never taken without a record. Chat and presence are unaffected.
 * In the panel, *Show audit log* lists the entries for the selected world only, from
@@ -182,7 +199,10 @@ presence host's operator cannot change.
 ## 7. Deployment order
 
 1. Update and restart the **presence** service first (Node: `presence-server/`,
-   PHP: upload the presence bundle files).
+   PHP: upload the presence bundle files). On PHP, upload `presence/lib/audit.php` in the
+   same batch as (or before) `presence/lib/store.php`, which now requires it: a
+   `store.php` without `audit.php` beside it stops presence and chat entirely until the
+   missing file is uploaded.
 2. Then update the **issuer**. Its status statement now states each moderator's
    role, and an older presence service rejects that.
 3. Add the manifest line (step 3), the config files (steps 1 and 2) and the moderator

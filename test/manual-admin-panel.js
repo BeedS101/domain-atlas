@@ -344,6 +344,39 @@ function postJson(port, urlPath, body) {
     }
     console.log('PASS: switching back to "add" disables Event id again and clears any leftover id');
 
+    console.log('STEP 7b: the co-sign preview shows what another domain returned as plain text, never as markup');
+    const remoteServer = require('http').createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ request: {
+        action: { amount: '<b id="amt">5</b>', assetClass: '<img src=x onerror="window.__pwned=1">', toPublicKey: '<svg/onload=window.__pwned=2>' + 'x'.repeat(40) },
+        approverDomains: ['<script>window.__pwned=3</script>'],
+        approvals: [{ domain: '<i id="ap">x</i>' }],
+        requiredApprovals: 2,
+        status: '<u id="st">pending</u>'
+      } }));
+    });
+    await new Promise((resolve) => remoteServer.listen(8099, resolve));
+    try {
+      await page.locator('#consortiumRequestingDomain').fill('localhost:8099');
+      await page.locator('#consortiumRequestId').fill('urn:atlas:reserve-mint-consortium:escape-check');
+      await page.locator('#consortiumFetchBtn').click();
+      await page.waitForFunction(() => document.getElementById('consortiumPreview').textContent.includes('Pending action'), null, { timeout: 10000 });
+      const previewState = await page.evaluate(() => ({
+        pwned: window.__pwned,
+        elements: document.querySelectorAll('#consortiumPreview img, #consortiumPreview svg, #consortiumPreview script, #consortiumPreview b, #consortiumPreview i, #consortiumPreview u').length,
+        text: document.getElementById('consortiumPreview').textContent
+      }));
+      if (previewState.pwned !== undefined || previewState.elements !== 0) {
+        throw new Error('Expected the other domain\'s data to be inert text, got: ' + JSON.stringify(previewState));
+      }
+      if (!previewState.text.includes('<img src=x') || !previewState.text.includes('<script>window.__pwned=3</script>') || !previewState.text.includes('<u id="st">pending</u>')) {
+        throw new Error('Expected the markup to be visible as literal text, got: ' + previewState.text);
+      }
+      console.log('PASS: markup and script in another domain\'s co-sign request render as literal text and run nothing');
+    } finally {
+      remoteServer.close();
+    }
+
     console.log('STEP 8: logging out clears the session — reloading the panel afterward shows the logged-out notice again');
     await page.locator('#logoutBtn').click();
     await page.waitForURL((url) => !url.pathname.includes('atlas-admin'), { timeout: 10000 });

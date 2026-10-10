@@ -301,7 +301,7 @@
         <h2>Consortium mint co-signing</h2>
         <p class="hint">This domain's own half of a domain-quorum reserve mint (reserve-bank-demo.html's Act 8, POST /atlas/demo/reserve/consortium/co-sign) — the admin-gated step a sibling domain's own operator has to take, since a domain's approval can only ever come from that domain's own server signing with its own key. Enter the requesting domain and the pending request's id (both shown on the requesting domain's own reserve-bank-demo.html page), then co-sign: this fetches the real pending action from that domain first and signs exactly that, never a value typed in below.</p>
         <label for="consortiumRequestingDomain">Requesting domain</label>
-        <input type="text" id="consortiumRequestingDomain" placeholder="evtec.co.za">
+        <input type="text" id="consortiumRequestingDomain" placeholder="example.com">
         <label for="consortiumRequestId">Request id</label>
         <input type="text" id="consortiumRequestId" placeholder="urn:atlas:reserve-mint-consortium:...">
         <div class="row">
@@ -733,6 +733,13 @@
       location.href = '/';
     });
 
+    // Everything interpolated into a markup string below passes through this:
+    // values that came from another domain's server or from stored settings are
+    // data, never markup.
+    function escapeHtml(v) {
+      return String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
     function showResult(el, ok, text) {
       el.className = 'result ' + (ok ? 'ok' : 'err');
       el.textContent = text;
@@ -810,7 +817,7 @@
       if (!res.ok) return; // best-effort — the form still works without this
       const peers = res.body.peers || [];
       const items = peers.length
-        ? peers.map((d) => '<li>' + d + '</li>').join('')
+        ? peers.map((d) => '<li>' + escapeHtml(d) + '</li>').join('')
         : '<li class="empty">None trusted yet.</li>';
       container.innerHTML = '<div class="class-patch-list"><h3>Currently trusted</h3><ul>' + items + '</ul></div>';
     }
@@ -877,10 +884,10 @@
         const req = body.request;
         showResult(result, true, 'Fetched — review the pending action below before co-signing.');
         preview.innerHTML = '<div class="class-patch-list"><h3>Pending action</h3><ul>' +
-          '<li>Mint <span class="class-patch-name">' + req.action.amount + '</span> of ' + req.action.assetClass + ' to ' + req.action.toPublicKey.slice(0, 20) + '…</li>' +
-          '<li>Approver domains: ' + req.approverDomains.join(', ') + '</li>' +
-          '<li>' + req.approvals.length + ' of ' + req.requiredApprovals + ' required domains signed so far (' + (req.approvals.map((a) => a.domain).join(', ') || 'none yet') + ')</li>' +
-          '<li>Status: ' + req.status + '</li></ul></div>';
+          '<li>Mint <span class="class-patch-name">' + escapeHtml(req.action.amount) + '</span> of ' + escapeHtml(req.action.assetClass) + ' to ' + escapeHtml(String(req.action.toPublicKey).slice(0, 20)) + '…</li>' +
+          '<li>Approver domains: ' + escapeHtml(req.approverDomains.join(', ')) + '</li>' +
+          '<li>' + escapeHtml(req.approvals.length) + ' of ' + escapeHtml(req.requiredApprovals) + ' required domains signed so far (' + escapeHtml(req.approvals.map((a) => a.domain).join(', ') || 'none yet') + ')</li>' +
+          '<li>Status: ' + escapeHtml(req.status) + '</li></ul></div>';
       } catch (err) {
         showResult(result, false, 'Could not reach ' + requestingDomain + ': ' + err.message);
       } finally {
@@ -1050,7 +1057,7 @@
             const parts = [];
             if (patch.properties) parts.push('properties ' + JSON.stringify(patch.properties));
             if (patch.tradeScope) parts.push('tradeScope: ' + patch.tradeScope);
-            return '<li><span class="class-patch-name">' + cls + '</span> — ' + parts.join(', ') + '</li>';
+            return '<li><span class="class-patch-name">' + escapeHtml(cls) + '</span> — ' + escapeHtml(parts.join(', ')) + '</li>';
           }).join('')
         : '<li class="empty">None set.</li>';
       container.innerHTML = '<div class="class-patch-list"><h3>Active class patches</h3><ul>' + items + '</ul></div>';

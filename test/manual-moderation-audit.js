@@ -265,7 +265,7 @@ async function scenario(presenceKind, issuerKind) {
   const iss1 = await startIssuer(issuerKind, PORTS.issuer1);
   const iss2 = await startIssuer(issuerKind, PORTS.issuer2);
 
-  const admin = await ident(), modA = await ident(), modB = await ident(), modNoAudit = await ident(), modRev = await ident(), mod2 = await ident(), outsider = await ident();
+  const admin = await ident(), modA = await ident(), modB = await ident(), modNoAudit = await ident(), modRev = await ident(), mod2 = await ident(), outsider = await ident(), modT = await ident();
   setRoster(iss1, [
     { identity: admin, role: 'admin' },
     { identity: modA, role: 'moderator', worlds: ['alpha'], operations: ALL_OPS },
@@ -276,7 +276,8 @@ async function scenario(presenceKind, issuerKind) {
   setRoster(iss2, [{ identity: mod2, role: 'moderator', worlds: ['alpha'], operations: ALL_OPS }]);
   key1 = await issuerKeyOf(iss1); key2 = await issuerKeyOf(iss2);
   setConfig(baseConfig());
-  await startPresence(presenceKind);
+  // The audit-read allowance is raised here so steps that read the log many times can count entries; step 10b restores it.
+  await startPresence(presenceKind, { MODERATION_AUDIT_REFUSALS_PER_MIN: '100000' });
 
   console.log('STEP 1: the issuer tells the panel what it needs (and only to those who may moderate)');
   const sessionOf = async (issuer, who) => { const nonce = (await H.getJson(issuer.base, '/atlas/admin/session/nonce')).body.nonce; const payload = withAdminAuth({ nonce }, issuer.base, '/atlas/admin/session/start'); return (await H.postJson(issuer.base, '/atlas/admin/session/start', { payload, proof: await H.signWithSelf(who, payload) })).body; };
@@ -454,7 +455,7 @@ async function scenario(presenceKind, issuerKind) {
   check('the sequence numbers are contiguous', seqs.every((s, i) => i === 0 || s === seqs[i - 1] + 1), JSON.stringify(seqs.slice(-40)));
 
   console.log('STEP 10: bounds');
-  await restartPresence(presenceKind, { MODERATION_AUDIT_MAX_BYTES: '6000', MODERATION_AUDIT_RETENTION_DAYS: '0.00006' });
+  await restartPresence(presenceKind, { MODERATION_AUDIT_MAX_BYTES: '6000', MODERATION_AUDIT_RETENTION_DAYS: '0.00006', MODERATION_AUDIT_REFUSALS_PER_MIN: '100000' });
   const gAdmin2 = await getGrant(iss1, admin, { worlds: ['alpha'] });
   for (let i = 0; i < 40; i++) await audit(gAdmin2, 'alpha');
   const sizeNow = fs.statSync(auditFile).size;
@@ -467,6 +468,24 @@ async function scenario(presenceKind, issuerKind) {
   const aged = r.body.integrity.entries;
   check('entries older than the age bound are dropped (only the newest remain) and the chain verifies', r.body.integrity.chain === 'ok' && aged <= 3, JSON.stringify(r.body.integrity));
   results['bounds'] = 'size ok, age ok';
+
+  console.log('STEP 10b: audit reads cannot be used to flush the log');
+  await restartPresence(presenceKind, { MODERATION_AUDIT_REFUSALS_PER_MIN: '10' });
+  setRoster(iss1, [
+    { identity: admin, role: 'admin' },
+    { identity: modA, role: 'moderator', worlds: ['alpha'], operations: ALL_OPS },
+    { identity: modT, role: 'moderator', worlds: ['alpha'], operations: ALL_OPS }
+  ]);
+  const gT = await getGrant(iss1, modT);
+  const refT = noAuditRef(gT);
+  let readsOk = 0;
+  for (let i = 0; i < 16; i++) if ((await audit(gT, 'alpha')).status === 200) readsOk++;
+  const mine = auditLines().filter((x) => x.moderatorRef === refT);
+  check('every read is answered', readsOk === 16, String(readsOk));
+  check('...but only the first ten are recorded, followed by one summary entry', mine.filter((x) => x.operation === 'audit.view' && x.outcome === 'success').length === 10 && mine.filter((x) => x.code === 'audit-throttled' && x.outcome === 'refused').length === 1 && mine.length === 11, JSON.stringify(mine.map(brief)));
+  r = await audit(gAdmin2, 'alpha');
+  check('...and the chain still verifies', r.status === 200 && r.body.integrity.chain === 'ok', show(r));
+  results['audit read throttle'] = 'ok';
 
   console.log('STEP 11: no recording, no action');
   await restartPresence(presenceKind, { PRESENCE_MODERATION_AUDIT_FILE: path.join(os.tmpdir(), 'atlas-au-missing-dir-' + b64(6), 'nested', 'audit.jsonl') });

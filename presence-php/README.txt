@@ -86,7 +86,9 @@ moderation/audit.php returns the audit entries of one world to a moderator
 whose grant allows "audit.view" there. Every moderation request that reached a
 verified grant is written to presence/lib/atlas-presence-moderation-audit.jsonl
 (created on first use, mode 0600, ignored by Git, web-denied with the rest of
-lib/ - request it by URL once to confirm your host really refuses it). It holds
+lib/ - confirm your host really refuses it by requesting
+https://<your domain>/presence/lib/atlas-presence-store.json, which must not
+be served; the audit file itself only exists after the first moderation request). It holds
 references, world, action, length, reason code and outcome only: never names,
 chat text, keys, tokens, visit ids or network addresses. It is capped at 1 MiB
 and 90 days (MODERATION_AUDIT_MAX_BYTES, MODERATION_AUDIT_RETENTION_DAYS); writes
@@ -95,7 +97,9 @@ refused. Entries are hash-chained, which exposes accidental damage and casual
 edits but is NOT tamper-proof: whoever can write the file can rewrite it.
 
 Upload presence/lib/audit.php, lib/moderation.php, lib/store.php and
-moderation/roster.php, command.php, audit.php. Update this presence service
+moderation/roster.php, command.php, audit.php. lib/store.php requires
+lib/audit.php: if store.php is uploaded without audit.php, presence and chat
+stop working until it is. Update this presence service
 BEFORE the issuer (the issuer's status statement now includes a role that older
 presence code rejects). Never upload a local audit or config file.
 

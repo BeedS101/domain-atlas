@@ -96,10 +96,10 @@ Each entry in the administrator roster (`atlas-admin-keys-store.json`) may carry
 |---|---|
 | `role` | Absent or `null`: administrator (backward compatible). `"admin"`: administrator. `"moderator"`: moderation only. **Any other value, including a different case, a number or an empty string, gives no authority at all.** |
 | `worlds` | Moderators only. Absent: every world. An array of world ids: exactly those worlds. **An empty array: no world.** Present but not an array of valid ids (`null`, a string such as `"*"`, an object, an empty-string entry): no world. |
-| `operations` | Moderators only. Same rules as `worlds`, over the vocabulary `roster.view`, `chat.mute`, `session.kick`, `session.timeout`. Absent: all of them. An empty or invalid list: none. |
+| `operations` | Moderators only. Same rules as `worlds`, over the vocabulary `roster.view`, `chat.mute`, `chat.unmute`, `session.kick`, `audit.view` (and `session.timeout`, which authorizes nothing). Absent: all of them. An empty or invalid list: none. |
 | `revoked` | `true` ends the entry (unchanged). |
 
-The vocabulary is reserved for later phases; nothing implements an operation.
+**An entry that omits `worlds` or `operations` is not restricted, it is unrestricted in that respect.** Operators should always list both.
 There is deliberately no `ban`.
 
 A key's authority is computed from its **active** (non-revoked) entries:
@@ -525,7 +525,7 @@ a new connection is a new participant. Restrictions never touch a wallet, creden
 Office membership, are private to the presence service, expire by themselves and are bounded
 (`MODERATION_MAX_RESTRICTIONS` 2000, `MODERATION_MAX_RESTRICTIONS_PER_WORLD` 200,
 `MODERATION_MAX_TOMBSTONES` 5000). Node keeps them in memory (a restart clears them); PHP keeps them in
-`lib/atlas-presence-restrictions.json`, which holds only visit hashes, cause codes and times.
+`lib/atlas-presence-restrictions.json`, which holds only hashes (of visit ids and of the chat tokens of sessions without a visit id), cause codes and times, plus the connection tokens of sessions that have already been removed.
 
 - **Mute.** The server refuses `chat-send` for the visit, by WebSocket (`chat-error` with
   `reason: "muted"`) and by polling (`200 {ok:false, reason:"muted"}`), each carrying `cause`, the
@@ -635,7 +635,8 @@ and age (`MODERATION_AUDIT_RETENTION_DAYS`, 90); compaction drops the oldest ent
 keeps the chain verifiable. Refusals are limited to `MODERATION_AUDIT_REFUSALS_PER_MIN`
 (10) per moderator per minute, then summarised in one `audit-throttled` entry. PHP appends
 under `flock`; Node serializes writes in its single thread. A successful `roster.view` is
-not recorded (it would only measure how often the list is refreshed).
+not recorded (it would only measure how often the list is refreshed). Refusals and `audit.view` reads share one
+per-moderator allowance of `MODERATION_AUDIT_REFUSALS_PER_MIN` entries a minute; the excess is summarised.
 
 **Fail closed.** If the file cannot be written, `chat.mute`, `chat.unmute` and `session.kick`
 answer `503 audit-unavailable` and change nothing.
@@ -985,3 +986,30 @@ no HTML from data and touches no wallet storage.
 27. **Not exercised by the tests:** a live deployment, Apache `.htaccess` enforcement (the PHP built-in server used
     in tests ignores it), real HTTPS and cross-site CORS between separate hosts, WebAuthn identity mode with the
     panel, and multi-process Node presence.
+28. **Release review (Phase 2) findings left as limitations.**
+    - A command can be applied with no audit record if the log write fails after the pre-check (disk full). The
+      pre-check refuses most such cases; the PHP write is now checked, but a command already carried out cannot be
+      undone. An `audit-unavailable` answer still spends the request nonce and counts against the command rate limit.
+    - A moderator can keep issuing real commands (30 a minute) and so push the oldest entries out of the size-bounded log.
+    - A moderator key can spend request nonces by sending rejected grant requests (the issuer's signed-request nonce
+      store is shared with administrator signed requests); while it is full, signed-proof admin calls answer `503 busy`
+      for a few minutes. Administrator session tokens and the panel are unaffected.
+    - PHP presence only: chat world ids with leading or trailing Unicode white space (for example U+00A0) are kept as
+      sent, whereas Node trims them, so such a participant sits in a world no moderator can name. This is the same
+      evasion as limit 17 (a visitor can declare any chat world), not a new one.
+    - PHP signed requests with an integral float (`600.0`) are refused where Node accepts them; JavaScript clients
+      never send one.
+    - PHP: `roster.view` rewrites the restrictions file once per listed participant under its lock and is not rate
+      limited; a moderator can slow chat on a busy world. The PHP state and restrictions files are rewritten in place
+      (truncate then write), so a crash or full disk mid-write can empty them, which forgets active mutes and spent nonces.
+    - The per-source failure throttle is per socket address: behind a shared proxy address or NAT, junk requests from
+      one anonymous caller can make moderators on that address wait up to a minute.
+    - Without moderation configured the PHP presence still opens and locks `lib/atlas-presence-restrictions.json` on every
+      chat send and creates `lib/atlas-presence-moderation-state.json` on joins with a visit id: the `lib/` folder
+      must stay writable, as it already must for the other state files.
+    - The wallet's signing prompt signs the payload the page supplies for a whitelisted purpose and shows every field.
+      A script running on a page of a domain that whitelists `moderation-grant` could ask for a signature over a
+      different payload (for example an administrator request); the administrator would have to read the prompt
+      (`adminAuth.action` shows the target route) and approve it. Whitelist the purpose only where needed.
+    - Anyone can ask `GET /atlas/admin/is-admin?publicKey=` whether a key is an administrator or moderator (the
+      wallet's button uses it); public keys are not secret, but the answer confirms a key's role.

@@ -31,7 +31,7 @@
 
 define('AUDIT_MAX_BYTES', (int) moderation_env_number('MODERATION_AUDIT_MAX_BYTES', 1024 * 1024));
 define('AUDIT_RETENTION_MS', moderation_env_number('MODERATION_AUDIT_RETENTION_DAYS', 90) * 24 * 60 * 60 * 1000);
-// Refusals recorded per moderator per window; the rest are summarised by one
+// Refusals and audit reads recorded per moderator per window; the rest are summarised by one
 // "audit-throttled" entry, so a stolen grant cannot flood the log.
 define('AUDIT_REFUSALS_PER_WINDOW', (int) moderation_env_number('MODERATION_AUDIT_REFUSALS_PER_MIN', 10));
 define('AUDIT_REFUSAL_WINDOW_MS', moderation_env_number('MODERATION_AUDIT_REFUSAL_WINDOW_MS', 60 * 1000));
@@ -153,10 +153,12 @@ function audit_record($e) {
   $entry = audit_sanitize($e);
   if ($entry['domain'] === '') return false;
   try {
-    if ($entry['outcome'] === 'refused') {
+    // Refusals and audit reads (neither is limited by the command rate limit)
+    // share one per-moderator allowance, so neither can push older entries out.
+    if ($entry['outcome'] === 'refused' || $entry['operation'] === 'audit.view') {
       $verdict = $entry['moderatorRef'] !== null ? audit_refusal_verdict($entry['moderatorRef'], $now) : 'yes';
       if ($verdict === 'no') return true;
-      if ($verdict === 'note') { $entry['code'] = 'audit-throttled'; $entry['operation'] = null; $entry['target'] = null; $entry['durationSeconds'] = null; $entry['cause'] = null; }
+      if ($verdict === 'note') { $entry['outcome'] = 'refused'; $entry['code'] = 'audit-throttled'; $entry['operation'] = null; $entry['target'] = null; $entry['durationSeconds'] = null; $entry['cause'] = null; }
     }
     return audit_locked(function ($fh) use ($entry, $now) {
       $stat = fstat($fh);
@@ -180,7 +182,11 @@ function audit_record($e) {
       $body = ['seq' => $seq + 1, 't' => moderation_iso($now)] + $entry;
       $body['h'] = audit_chain_hash($prev, $body);
       fseek($fh, 0, SEEK_END);
-      fwrite($fh, ($endsNl ? '' : "\n") . json_encode($body, JSON_UNESCAPED_SLASHES) . "\n");
+      $line = ($endsNl ? '' : "\n") . json_encode($body, JSON_UNESCAPED_SLASHES) . "\n";
+      if (fwrite($fh, $line) !== strlen($line)) {
+        if ($size > 0) ftruncate($fh, $size); // drop a partial line
+        return false;
+      }
       $oldest = null;
       if ($size > 0) {
         rewind($fh);

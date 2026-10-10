@@ -357,6 +357,12 @@ async function scenario(presenceKind, issuerKind) {
   expect('muting a presence-only visit without a visit id: not in chat', await cmd(gA, 'chat.mute', ref.Ivan), 409, 'not-in-chat');
   expect('mute Dan (no visit id: his chat connection)', await cmd(gA, 'chat.mute', ref.Dan, { durationSeconds: 600, cause: 'other' }), 200);
   check('Dan\'s connection is muted', (await sendOk(dan, 'x')).body.reason === 'muted', 'not muted');
+  if (presence.dir) {
+    // A mute on a session with no visit id is keyed by its chat token; the file must hold a hash of it, never the token.
+    const restrictionsFile = path.join(presence.dir, 'presence/lib/atlas-presence-restrictions.json');
+    const stored = fs.existsSync(restrictionsFile) ? fs.readFileSync(restrictionsFile, 'utf8') : '';
+    check('the PHP restriction file holds Dan\'s mute but not his chat connection token', /"mutes"\s*:\s*\{\s*"/.test(stored) && !stored.includes(dan.c.id), stored.slice(0, 300));
+  }
   await cleave(dan.c.id);
   dan.c = await must(cjoin(D1, 'alpha', 'Dan'));
   check('a visitor with no visit id can only be muted for the life of the connection (accepted)', (await sendOk(dan, 'x')).body.ok === true, 'still muted');

@@ -96,6 +96,9 @@ function restrictions_get($kind, $key) {
     return isset($doc[$kind][$key]) ? $doc[$kind][$key] : null;
   });
 }
+// The key a mute on a chat session with no visit id is stored under. A hash,
+// so the state file never holds a token that could be used to speak as that session.
+function restrictions_token_key($token) { return 'c:' . hash('sha256', "atlas-restriction-token/v1\n" . (string) $token); }
 function restrictions_mute_of($key) { return restrictions_get('mutes', $key); }
 function restrictions_kick_of($key) { return restrictions_get('kicks', $key); }
 function restrictions_tomb_of($token) { return restrictions_get('tombs', (string) $token); }

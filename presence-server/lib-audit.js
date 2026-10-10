@@ -35,8 +35,8 @@ function envNumber(name, fallback) {
 const FILE = process.env.PRESENCE_MODERATION_AUDIT_FILE || path.join(__dirname, 'moderation-audit.jsonl');
 const MAX_BYTES = envNumber('MODERATION_AUDIT_MAX_BYTES', 1024 * 1024);
 const RETENTION_MS = envNumber('MODERATION_AUDIT_RETENTION_DAYS', 90) * 24 * 60 * 60 * 1000;
-// Refusals recorded per moderator per window; the rest are summarised by one
-// "audit-throttled" entry, so a stolen grant cannot flood the log.
+// Refusals and audit reads recorded per moderator per window; the rest are
+// summarised by one "audit-throttled" entry, so a stolen grant cannot flood the log.
 const REFUSALS_PER_WINDOW = envNumber('MODERATION_AUDIT_REFUSALS_PER_MIN', 10);
 const REFUSAL_WINDOW_MS = envNumber('MODERATION_AUDIT_REFUSAL_WINDOW_MS', 60 * 1000);
 const VIEW_LIMIT = envNumber('MODERATION_AUDIT_VIEW_LIMIT', 200);
@@ -179,10 +179,12 @@ function record(e, nowMs) {
   const now = nowMs || Date.now();
   const entry = sanitize(e);
   if (!entry.domain) return false;
-  if (entry.outcome === 'refused') {
+  // Refusals and audit reads (neither is limited by the command rate limit) share
+  // one per-moderator allowance, so neither can be used to push older entries out.
+  if (entry.outcome === 'refused' || entry.operation === 'audit.view') {
     const verdict = entry.moderatorRef ? refusalAllowed(entry.moderatorRef, now) : 'yes';
     if (verdict === 'no') return true;
-    if (verdict === 'note') { entry.code = 'audit-throttled'; entry.operation = null; entry.target = null; entry.durationSeconds = null; entry.cause = null; }
+    if (verdict === 'note') { entry.outcome = 'refused'; entry.code = 'audit-throttled'; entry.operation = null; entry.target = null; entry.durationSeconds = null; entry.cause = null; }
   }
   try {
     const t = tail();

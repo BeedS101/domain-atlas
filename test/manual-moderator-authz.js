@@ -241,6 +241,17 @@ async function testMain(kind) {
     setRoster(issuer, [{ identity: mod, raw: { role: 'moderator', revoked: true } }]);
     r = await login(b, mod);
     check('revoked moderator entry: cannot log in', isCode(r, 401, 'not-admin'), show(r));
+    // `revoked` follows JavaScript truthiness on both backends: only absent, false, null, 0 and "" leave an entry active.
+    for (const v of ['0', 'false', [], {}, 1, 'yes']) {
+      setRoster(issuer, [{ identity: mod, raw: { role: 'moderator', revoked: v } }]);
+      r = await login(b, mod);
+      check('revoked: ' + JSON.stringify(v) + ' counts as revoked', isCode(r, 401, 'not-admin'), show(r));
+    }
+    for (const v of [false, null, 0, '']) {
+      setRoster(issuer, [{ identity: mod, raw: { role: 'moderator', revoked: v } }]);
+      r = await login(b, mod);
+      check('revoked: ' + JSON.stringify(v) + ' leaves the entry active', r.status === 200 && r.body.role === 'moderator', show(r));
+    }
 
     console.log('STEP 5: effective scope on every grant request');
     const modSession = async (entry) => {
