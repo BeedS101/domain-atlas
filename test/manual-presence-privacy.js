@@ -28,7 +28,7 @@ const LEGACY_KEY = 'LEGACYKEY_' + 'Q'.repeat(60);
 const KEY = 'WALLETKEY_' + 'Z'.repeat(60); // stands in for a real public key a hostile or old client might send
 const POLL_TIMEOUT_MS = 2000;
 const CHAT_TTL_MS = 1500;
-const LIMITS = { MAX_MEMBERS_PER_ROOM: 3, MAX_ROOMS: 4, MAX_CHAT_MEMBERS_PER_DOMAIN: 3, MAX_CHAT_DOMAINS: 3, MAX_BODY_BYTES: 2048, CHAT_MIN_INTERVAL_MS: 300 };
+const LIMITS = { MAX_MEMBERS_PER_ROOM: 3, MAX_ROOMS: 4, MAX_CHAT_MEMBERS_PER_DOMAIN: 3, MAX_CHAT_DOMAINS: 3, MAX_BODY_BYTES: 2048, CHAT_MIN_INTERVAL_MS: 300, SOURCE_SOFT_FULL_MAX: 1000 };
 
 function check(cond, msg) {
   if (!cond) throw new Error(msg);

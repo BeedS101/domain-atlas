@@ -42,9 +42,10 @@ register_shutdown_function(function () {
   }
 });
 
-function send_json($status, $obj, $cors = false) {
+function send_json($status, $obj, $cors = false, $headers = []) {
   http_response_code($status);
   header('Content-Type: application/json');
+  foreach ($headers as $h) header($h);
   if ($cors) cors_headers();
   echo json_encode($obj, JSON_UNESCAPED_SLASHES);
   exit;
@@ -77,7 +78,16 @@ function read_json_body() {
   return $data;
 }
 
-// Maps a failed join ('room-full' / 'server-busy') to its HTTP status.
-function join_failure_response($reason) {
-  send_json(503, ['error' => $reason, 'reason' => $reason]);
+// Answers a refused join with its readable message: 400 (fix the name),
+// 429 (this source is over its limits) or 503 (the room or server is full),
+// with Retry-After where waiting helps. `error` is the message; `reason` and
+// `retryAfter` are the machine-readable parts.
+function join_failure_response($result) {
+  $reason = $result['reason'];
+  $status = ['invalid' => 400, 'name-not-allowed' => 400, 'join-rate-limited' => 429, 'source-limit' => 429];
+  $defaultRetry = ['room-full' => 10, 'source-limit' => 10, 'server-busy' => 15];
+  $retry = isset($result['retryAfter']) ? (int) $result['retryAfter'] : (isset($defaultRetry[$reason]) ? $defaultRetry[$reason] : 0);
+  $body = ['error' => presence_denial_text($reason), 'reason' => $reason, 'message' => presence_denial_text($reason)];
+  if ($retry > 0) $body['retryAfter'] = $retry;
+  send_json(isset($status[$reason]) ? $status[$reason] : 503, $body, false, $retry > 0 ? ['Retry-After: ' . $retry] : []);
 }

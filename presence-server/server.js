@@ -51,8 +51,17 @@
 // members, chat rooms and chat members, request body size, WebSocket frame
 // size, and a minimum interval between chat messages per member. Chat
 // history is capped by count and by age.
+//
+// Per-source abuse controls (see "network sources" below): concurrent
+// presence and chat sessions per source, a join-rate limit with an escalating
+// cooldown, a per-source share of any one room, and a cap on idle WebSocket
+// connections. A source is the socket peer address, hashed with a per-process
+// secret; it is kept only in memory, only for the life of a session or a
+// rate-limit window, and is never sent to any client. Forwarded-for headers
+// are not read.
 
 const http = require('http');
+const net = require('net');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 8004;
@@ -201,6 +210,210 @@ const MAX_CHAT_DOMAINS = envNumber('MAX_CHAT_DOMAINS', 500);
 const MAX_CHAT_MEMBERS_PER_DOMAIN = envNumber('MAX_CHAT_MEMBERS_PER_DOMAIN', 200);
 const MAX_BODY_BYTES = envNumber('MAX_BODY_BYTES', 8 * 1024);
 
+// ---------- network sources ----------
+//
+// Abuse limits are keyed on the TCP peer address and nothing else. Headers
+// such as X-Forwarded-For are client-controlled and are never read. Behind a
+// reverse proxy or NAT every client shares one source, so the defaults are
+// deliberately generous and operators behind a proxy should raise them (or
+// limit in front of this server).
+//
+// The address is reduced to a key (IPv4 as is, IPv6 to its /64, since one
+// subscriber normally controls a whole /64) and HMAC-hashed with a secret
+// generated at startup. The key lives in memory only: on a member record for
+// as long as the session exists, and in a rate-limit entry for as long as the
+// window/cooldown lasts. It is not an identity, is not shared across
+// restarts, and is never included in any response.
+
+const SOURCE_MAX_PRESENCE = envNumber('SOURCE_MAX_PRESENCE', 30); // concurrent presence sessions, all rooms
+const SOURCE_MAX_PRESENCE_PER_ROOM = envNumber('SOURCE_MAX_PRESENCE_PER_ROOM', 10);
+const SOURCE_MAX_CHAT = envNumber('SOURCE_MAX_CHAT', 20); // concurrent chat sessions, all domains
+const SOURCE_MAX_CHAT_PER_DOMAIN = envNumber('SOURCE_MAX_CHAT_PER_DOMAIN', 10);
+// Once a room is this full, a source that already holds SOURCE_SOFT_FULL_MAX
+// sessions in it is refused, so the last free places go to other sources.
+const SOURCE_SOFT_FULL_RATIO = Math.min(1, envNumber('SOURCE_SOFT_FULL_RATIO', 0.8));
+const SOURCE_SOFT_FULL_MAX = envNumber('SOURCE_SOFT_FULL_MAX', 3);
+const SOURCE_MAX_SOCKETS = envNumber('SOURCE_MAX_SOCKETS', 60); // open WebSocket connections, joined or not
+const SOURCE_JOIN_MAX = envNumber('SOURCE_JOIN_MAX', 60); // join attempts per window, presence and chat each
+const SOURCE_JOIN_WINDOW_MS = envNumber('SOURCE_JOIN_WINDOW_MS', 60 * 1000);
+const SOURCE_COOLDOWN_MS = envNumber('SOURCE_COOLDOWN_MS', 30 * 1000); // doubles per repeat trip
+const SOURCE_COOLDOWN_MAX_MS = envNumber('SOURCE_COOLDOWN_MAX_MS', 5 * 60 * 1000);
+const SOURCE_STRIKE_MEMORY_MS = envNumber('SOURCE_STRIKE_MEMORY_MS', 10 * 60 * 1000);
+const MAX_SOURCE_ENTRIES = envNumber('MAX_SOURCE_ENTRIES', 10000);
+
+const SOURCE_SALT = crypto.randomBytes(16);
+
+function ipv6Prefix64(a) {
+  if (a.includes('.')) return a; // embedded IPv4 other than ::ffff:a.b.c.d; keep whole
+  let groups;
+  const i = a.indexOf('::');
+  if (i >= 0) {
+    const left = a.slice(0, i) ? a.slice(0, i).split(':') : [];
+    const right = a.slice(i + 2) ? a.slice(i + 2).split(':') : [];
+    groups = left.concat(new Array(Math.max(0, 8 - left.length - right.length)).fill('0'), right);
+  } else {
+    groups = a.split(':');
+  }
+  return groups.slice(0, 4).map((g) => g.padStart(4, '0')).join(':') + '/64';
+}
+
+function sourceKeyOf(rawAddress) {
+  let a = String(rawAddress || '').split('%')[0].toLowerCase();
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(a);
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(a);
+  if (mapped) a = mapped[1];
+  else if (mappedHex) {
+    const hi = parseInt(mappedHex[1], 16), lo = parseInt(mappedHex[2], 16);
+    a = [hi >> 8, hi & 255, lo >> 8, lo & 255].join('.');
+  }
+  let key;
+  if (net.isIPv4(a)) key = a;
+  else if (net.isIPv6(a)) key = ipv6Prefix64(a);
+  else key = 'unknown'; // unparseable peers all share one bucket
+  return crypto.createHmac('sha256', SOURCE_SALT).update(key).digest('hex').slice(0, 16);
+}
+
+// src -> { presence: Bucket, chat: Bucket }, Bucket = {times, cooldownUntil, strikes, lastStrikeAt}.
+// Map insertion order doubles as LRU order (entries are re-inserted on use).
+const sourceLimits = new Map();
+
+function newBucket() { return { times: [], cooldownUntil: 0, strikes: 0, lastStrikeAt: 0 }; }
+
+function bucketFor(src, kind, now) {
+  let ent = sourceLimits.get(src);
+  if (ent) {
+    sourceLimits.delete(src);
+  } else {
+    if (sourceLimits.size >= MAX_SOURCE_ENTRIES) pruneSourceLimits(now);
+    // Still full of live entries: forget the least recently used one. Caps on
+    // sessions are computed from live members, so only rate history is lost.
+    while (sourceLimits.size >= MAX_SOURCE_ENTRIES) sourceLimits.delete(sourceLimits.keys().next().value);
+    ent = { presence: newBucket(), chat: newBucket() };
+  }
+  sourceLimits.set(src, ent);
+  return ent[kind];
+}
+
+// Records one join attempt for (src, kind). Returns null when allowed, else
+// the whole seconds until the source may try again. Attempts made during a
+// cooldown are refused without being recorded, so waiting it out always works.
+function noteJoinAttempt(src, kind, now) {
+  const b = bucketFor(src, kind, now);
+  if (b.cooldownUntil > now) return Math.ceil((b.cooldownUntil - now) / 1000);
+  const cutoff = now - SOURCE_JOIN_WINDOW_MS;
+  while (b.times.length && b.times[0] <= cutoff) b.times.shift();
+  b.times.push(now);
+  if (b.times.length <= SOURCE_JOIN_MAX) return null;
+  b.strikes = (now - b.lastStrikeAt > SOURCE_STRIKE_MEMORY_MS ? 0 : b.strikes) + 1;
+  b.lastStrikeAt = now;
+  const cooldown = Math.min(SOURCE_COOLDOWN_MAX_MS, SOURCE_COOLDOWN_MS * Math.pow(2, b.strikes - 1));
+  b.cooldownUntil = now + cooldown;
+  b.times = [];
+  return Math.ceil(cooldown / 1000);
+}
+
+function pruneSourceLimits(now) {
+  sourceLimits.forEach((ent, src) => {
+    const idle = ['presence', 'chat'].every((k) => {
+      const b = ent[k];
+      return b.cooldownUntil <= now
+        && (!b.times.length || b.times[b.times.length - 1] <= now - SOURCE_JOIN_WINDOW_MS)
+        && now - b.lastStrikeAt > SOURCE_STRIKE_MEMORY_MS;
+    });
+    if (idle) sourceLimits.delete(src);
+  });
+}
+
+const socketsBySource = new Map(); // src -> open WebSocket connections
+
+// Concurrency admission for one more session in `room` (a Map of members, or
+// undefined for a room that does not exist yet). `countAll` counts the
+// source's sessions across every room of this kind. Counts come from live
+// member records, so they cannot drift from the real state.
+function sourceAdmission(src, room, capacity, countAll, totalMax, perRoomMax) {
+  if (countAll(src) >= totalMax) return 'source-limit';
+  if (room) {
+    let mine = 0;
+    room.forEach((m) => { if (m.src === src) mine++; });
+    if (mine >= perRoomMax) return 'source-limit';
+    if (room.size >= capacity * SOURCE_SOFT_FULL_RATIO && mine >= SOURCE_SOFT_FULL_MAX) return 'source-limit';
+  }
+  return null;
+}
+
+// Readable text for every refusal. The server does not hide the reason: the
+// client shows `message` and may offer a retry after `retryAfter` seconds.
+const DENIAL_TEXT = {
+  'invalid': 'A valid domain and world are required.',
+  'server-busy': 'The presence server is busy. Try again shortly.',
+  'room-full': 'This room is full right now. Try again in a moment.',
+  'source-limit': 'Too many sessions are already open from your network connection. Close other tabs or wait a few seconds, then try again.',
+  'join-rate-limited': 'Too many join attempts from your network connection. Wait a moment, then try again.',
+  'name-not-allowed': 'That display name looks like an official title (moderator, admin, staff, ...). Display names are not verified, so titles are not allowed. Choose a different name.'
+};
+const DENIAL_RETRY_S = { 'room-full': 10, 'source-limit': 10, 'server-busy': 15 };
+
+function denial(result) {
+  const out = { reason: result.reason, message: DENIAL_TEXT[result.reason] || result.reason };
+  const retry = result.retryAfter || DENIAL_RETRY_S[result.reason];
+  if (retry) out.retryAfter = retry;
+  return out;
+}
+
+// ---------- display-name guard ----------
+//
+// A display name is typed by the visitor and nothing authenticates it. This
+// guard refuses names that read as an official title or badge so that an
+// ordinary visitor cannot present as "Moderator (official)". It is a
+// nuisance filter, not identity verification: it will miss disguises it does
+// not know, and an allowed name proves nothing. A genuine moderator marker
+// must be a separate field issued by the server, never text in the name.
+
+const GLYPH_CONFUSABLES = {
+  'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'у': 'y', 'х': 'x', 'і': 'i', 'ѕ': 's', 'ј': 'j', 'ԁ': 'd', 'ӏ': 'i', 'ı': 'i',
+  'м': 'm', 'т': 't', 'н': 'h', 'к': 'k', 'в': 'b', 'ո': 'n', 'ս': 'u', 'ɡ': 'g', 'ɩ': 'i',
+  'α': 'a', 'ε': 'e', 'ι': 'i', 'κ': 'k', 'ν': 'v', 'ο': 'o', 'ρ': 'p', 'τ': 't', 'υ': 'u', 'χ': 'x', 'η': 'n', 'μ': 'u'
+};
+const LEET = { '0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '@': 'a', '$': 's', '!': 'i', '|': 'i', 'l': 'i' };
+// Check marks, shields and similar badge glyphs read as a verification mark.
+const BADGE_GLYPHS = /[\u2713\u2714\u2705\u2611\u{1F6E1}\u{1F530}]/u;
+
+function foldName(raw) {
+  let t = String(raw || '').normalize('NFKD').replace(/\p{M}+/gu, '').replace(/[\p{Cf}\u00ad]/gu, '').toLowerCase();
+  let out = '';
+  for (const ch of t) out += GLYPH_CONFUSABLES[ch] || ch;
+  return out;
+}
+function leetCollapse(s) {
+  let out = '';
+  for (const ch of s) out += LEET[ch] || ch;
+  return out.replace(/[^a-z0-9]/g, '').replace(/(.)\1+/g, '$1');
+}
+
+// Titles matched as whole words (a trailing number is ignored: "admin2").
+const TITLE_TOKENS = new Set(['mod', 'mods', 'admin', 'admins', 'gm', 'owner', 'staff', 'system', 'support', 'security', 'operator', 'verified', 'official', 'moderator', 'moderators', 'sysop', 'webmaster'].map(leetCollapse));
+// Long enough that appearing anywhere in the squashed name is a signal.
+const TITLE_SUBSTRINGS = ['moderator', 'administrator', 'official', 'verified', 'sysop', 'webmaster', 'superuser', 'domainatlas'].map(leetCollapse);
+const NEGATED = ['unofficial', 'unverified'].map(leetCollapse);
+
+// True when `name` should be refused. `domain` (optional) is the domain being
+// joined: a name that spells out the domain itself is refused too.
+function nameLooksOfficial(name, domain) {
+  const folded = foldName(name);
+  if (BADGE_GLYPHS.test(String(name || '').normalize('NFKC'))) return true;
+  const rawTokens = folded.split(/[^a-z0-9@$!|]+/).filter(Boolean);
+  for (const tok of rawTokens) {
+    if (TITLE_TOKENS.has(leetCollapse(tok.replace(/[0-9]+$/, '')))) return true;
+  }
+  let squash = leetCollapse(folded);
+  NEGATED.forEach((n) => { squash = squash.split(n).join(''); });
+  if (TITLE_SUBSTRINGS.some((w) => squash.includes(w))) return true;
+  if (TITLE_TOKENS.has(squash)) return true; // letters spread out with punctuation: "m.o.d"
+  const dom = leetCollapse(foldName(domain)).replace(/^www/, '');
+  if (dom.length >= 5 && squash.includes(dom)) return true;
+  return false;
+}
+
 // Domain and world strings come from a manifest and name a room; they are
 // not validated against anything real. World ids are free-form in the
 // manifest, so only length, type and control characters are restricted —
@@ -269,14 +482,23 @@ function rosterOf(room, exceptConnId) {
 
 // Shared join path for both transports. `extra` carries the
 // transport-specific fields ({transport:'ws', socket} or {transport:'poll',
-// lastSeen}). Returns {ok:true, roomKey, room, roster, publicId}, or
-// {ok:false, reason} with reason 'invalid', 'room-full' or 'server-busy'.
-function addMember(connId, domainRaw, worldRaw, nameRaw, extra) {
+// lastSeen}); `rawAddress` is the socket peer address. Returns
+// {ok:true, roomKey, room, roster, publicId}, or {ok:false, reason[,
+// retryAfter]} with reason 'invalid', 'join-rate-limited', 'name-not-allowed',
+// 'source-limit', 'room-full' or 'server-busy'. A refused join creates no
+// member, so it never changes a room's count.
+function addMember(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress) {
   const domain = cleanId(domainRaw);
   const world = cleanId(worldRaw);
   if (!domain || !world) return { ok: false, reason: 'invalid' };
+  const src = sourceKeyOf(rawAddress);
+  const retryAfter = noteJoinAttempt(src, 'presence', Date.now());
+  if (retryAfter !== null) return { ok: false, reason: 'join-rate-limited', retryAfter };
+  if (nameLooksOfficial(cleanName(nameRaw), domain)) return { ok: false, reason: 'name-not-allowed' };
   const roomKey = roomKeyFor(domain, world);
   let room = rooms.get(roomKey);
+  const countAll = (k) => { let n = 0; connIndex.forEach((loc, id) => { const m = loc.room.get(id); if (m && m.src === k) n++; }); return n; };
+  if (sourceAdmission(src, room, MAX_MEMBERS_PER_ROOM, countAll, SOURCE_MAX_PRESENCE, SOURCE_MAX_PRESENCE_PER_ROOM)) return { ok: false, reason: 'source-limit' };
   if (!room && rooms.size >= MAX_ROOMS) return { ok: false, reason: 'server-busy' };
   if (connIndex.size >= MAX_TOTAL_MEMBERS) return { ok: false, reason: 'server-busy' };
   if (room && room.size >= MAX_MEMBERS_PER_ROOM) return { ok: false, reason: 'room-full' };
@@ -285,7 +507,7 @@ function addMember(connId, domainRaw, worldRaw, nameRaw, extra) {
   const name = cleanName(nameRaw);
   const publicId = randomId();
   const roster = rosterOf(room, connId);
-  const member = Object.assign({ publicId, name, x: 0, y: 0, z: 0, yaw: 0 }, extra);
+  const member = Object.assign({ publicId, name, x: 0, y: 0, z: 0, yaw: 0, src }, extra);
   room.set(connId, member);
   connIndex.set(connId, { roomKey, room });
 
@@ -406,21 +628,28 @@ function currentChatSeq(domain) {
 }
 
 // Joins connId into domain's chat room and returns {ok:true, senderId,
-// history} or {ok:false, reason}. A poll member's `cursor` starts at "already
-// seen everything in the history handed back", so its first sync only returns
-// messages that arrive after this join.
-function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, extra) {
+// history} or {ok:false, reason[, retryAfter]} (the same reasons as
+// addMember). A poll member's `cursor` starts at "already seen everything in
+// the history handed back", so its first sync only returns messages that
+// arrive after this join.
+function joinChatRoom(connId, domainRaw, worldRaw, nameRaw, extra, rawAddress) {
   const domain = cleanId(domainRaw);
   const world = cleanId(worldRaw);
   if (!domain || !world) return { ok: false, reason: 'invalid' };
+  const src = sourceKeyOf(rawAddress);
+  const retryAfter = noteJoinAttempt(src, 'chat', Date.now());
+  if (retryAfter !== null) return { ok: false, reason: 'join-rate-limited', retryAfter };
+  if (nameLooksOfficial(cleanName(nameRaw), domain)) return { ok: false, reason: 'name-not-allowed' };
   pruneChatHistory(domain, Date.now());
   let room = chatRooms.get(domain);
+  const countAll = (k) => { let n = 0; chatConnIndex.forEach((loc, id) => { const m = loc.room.get(id); if (m && m.src === k) n++; }); return n; };
+  if (sourceAdmission(src, room, MAX_CHAT_MEMBERS_PER_DOMAIN, countAll, SOURCE_MAX_CHAT, SOURCE_MAX_CHAT_PER_DOMAIN)) return { ok: false, reason: 'source-limit' };
   if (!room && chatRooms.size >= MAX_CHAT_DOMAINS) return { ok: false, reason: 'server-busy' };
   if (room && room.size >= MAX_CHAT_MEMBERS_PER_DOMAIN) return { ok: false, reason: 'room-full' };
   if (!room) { room = new Map(); chatRooms.set(domain, room); }
   const history = chatHistory.get(domain) || [];
   const senderId = randomId();
-  const member = Object.assign({ name: cleanName(nameRaw), senderId, world, cursor: currentChatSeq(domain), lastSendAt: 0 }, extra);
+  const member = Object.assign({ name: cleanName(nameRaw), senderId, world, cursor: currentChatSeq(domain), lastSendAt: 0, src }, extra);
   room.set(connId, member);
   chatConnIndex.set(connId, { domain, room });
   return { ok: true, senderId, history };
@@ -493,7 +722,7 @@ function pollChatSync(connId) {
 const HEARTBEAT_MS = 20000; // how often this server pings each connection
 const MOVE_MIN_INTERVAL_MS = 30; // drop 'move' messages arriving faster than this from one connection
 
-function handleConnection(socket) {
+function handleConnection(socket, peerAddress) {
   const connId = randomId() + randomId(); // never broadcast
   let joined = false;
   let alive = true;
@@ -523,8 +752,8 @@ function handleConnection(socket) {
 
       if (msg.type === 'join') {
         if (joined) return; // one join per connection
-        const result = addMember(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket });
-        if (!result.ok) { sendText(socket, { type: 'join-denied', reason: result.reason }); return; }
+        const result = addMember(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket }, peerAddress);
+        if (!result.ok) { sendText(socket, Object.assign({ type: 'join-denied' }, denial(result))); return; }
         joined = true;
         sendText(socket, { type: 'welcome', id: result.publicId, roster: result.roster });
         return;
@@ -545,8 +774,8 @@ function handleConnection(socket) {
       // connectChat()) but is handled by this same dispatcher.
       if (msg.type === 'chat-join') {
         if (chatJoined) return; // one chat-join per connection
-        const result = joinChatRoom(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket });
-        if (!result.ok) { sendText(socket, { type: 'chat-error', reason: result.reason }); return; }
+        const result = joinChatRoom(connId, msg.domain, msg.world, msg.name, { transport: 'ws', socket }, peerAddress);
+        if (!result.ok) { sendText(socket, Object.assign({ type: 'chat-error' }, denial(result))); return; }
         chatJoined = true;
         sendText(socket, { type: 'chat-history', senderId: result.senderId, messages: result.history });
         return;
@@ -565,6 +794,11 @@ function handleConnection(socket) {
 
   socket.on('close', () => { leaveRoom(); leaveChat(); });
   socket.on('error', () => { leaveRoom(); leaveChat(); });
+  // An HTTP-upgraded socket is half-open: a peer that drops the TCP
+  // connection without a close frame ends its side but the socket stays open
+  // until this side ends too. Release the seat as soon as the peer is gone
+  // instead of waiting for the heartbeat to notice.
+  socket.on('end', () => { leaveRoom(); leaveChat(); try { socket.end(); } catch (err) {} });
 
   // Heartbeat: catches connections that went dead without a clean TCP close
   // (a laptop put to sleep with the tab open) so they don't linger.
@@ -600,6 +834,7 @@ const sweepTimer = setInterval(() => {
   });
   const domains = new Set([...chatHistory.keys(), ...chatSeqCounters.keys()]);
   domains.forEach((domain) => pruneChatHistory(domain, now));
+  pruneSourceLimits(now);
 }, POLL_SWEEP_INTERVAL_MS);
 sweepTimer.unref();
 
@@ -622,8 +857,8 @@ function readBody(req) {
 // CORS is only opened for the read-only status route, which a content
 // script on any page calls to show a participant count. Every other route is
 // called from the extension's own pages, which do not need it.
-function sendJson(res, status, obj, cors) {
-  const headers = { 'Content-Type': 'application/json' };
+function sendJson(res, status, obj, cors, extraHeaders) {
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, extraHeaders);
   if (cors) {
     headers['Access-Control-Allow-Origin'] = '*';
     headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS';
@@ -632,7 +867,19 @@ function sendJson(res, status, obj, cors) {
   res.end(JSON.stringify(obj));
 }
 
-function joinFailureStatus(reason) { return reason === 'invalid' ? 400 : 503; }
+const JOIN_FAILURE_STATUS = { 'invalid': 400, 'name-not-allowed': 400, 'join-rate-limited': 429, 'source-limit': 429 };
+
+// Sends a refused polling join: 400 (fix the request or name), 429 (this
+// source is over its limits) or 503 (the room or server is full), with
+// Retry-After where waiting helps. `error` is the readable message.
+function sendJoinFailure(res, result) {
+  const d = denial(result);
+  const headers = d.retryAfter ? { 'Retry-After': String(d.retryAfter) } : undefined;
+  return sendJson(res, JOIN_FAILURE_STATUS[result.reason] || 503, Object.assign({ error: d.message }, d), false, headers);
+}
+
+// The socket peer address; never a header (see "network sources").
+function peerOf(req) { return req.socket && req.socket.remoteAddress; }
 
 // ---------- HTTP server + upgrade handling ----------
 
@@ -652,8 +899,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/presence/poll/join') {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = randomToken();
-      const result = addMember(connId, body.domain, body.world, body.name, { transport: 'poll', lastSeen: Date.now() });
-      if (!result.ok) return sendJson(res, joinFailureStatus(result.reason), { error: result.reason === 'invalid' ? 'a valid domain and world are required' : result.reason, reason: result.reason });
+      const result = addMember(connId, body.domain, body.world, body.name, { transport: 'poll', lastSeen: Date.now() }, peerOf(req));
+      if (!result.ok) return sendJoinFailure(res, result);
       return sendJson(res, 200, { id: connId, publicId: result.publicId, roster: result.roster });
     }
 
@@ -681,8 +928,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/presence/poll/chat-join') {
       const body = JSON.parse((await readBody(req)) || '{}');
       const connId = randomToken();
-      const result = joinChatRoom(connId, body.domain, body.world, body.name, { transport: 'poll', lastSeen: Date.now() });
-      if (!result.ok) return sendJson(res, joinFailureStatus(result.reason), { error: result.reason === 'invalid' ? 'a valid domain and world are required' : result.reason, reason: result.reason });
+      const result = joinChatRoom(connId, body.domain, body.world, body.name, { transport: 'poll', lastSeen: Date.now() }, peerOf(req));
+      if (!result.ok) return sendJoinFailure(res, result);
       return sendJson(res, 200, { id: connId, senderId: result.senderId, messages: result.history });
     }
 
@@ -748,6 +995,22 @@ server.on('upgrade', (req, socket) => {
   const clientKey = req.headers['sec-websocket-key'];
   if (!clientKey) { socket.destroy(); return; }
 
+  // Cap open connections per source, joined or not, so idle sockets cannot be
+  // used to hold resources. A client that is refused falls back to polling.
+  const peerAddress = socket.remoteAddress;
+  const src = sourceKeyOf(peerAddress);
+  const open = socketsBySource.get(src) || 0;
+  if (open >= SOURCE_MAX_SOCKETS) {
+    socket.write('HTTP/1.1 429 Too Many Requests\r\nRetry-After: 10\r\nContent-Length: 0\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  socketsBySource.set(src, open + 1);
+  socket.once('close', () => {
+    const n = (socketsBySource.get(src) || 1) - 1;
+    if (n > 0) socketsBySource.set(src, n); else socketsBySource.delete(src);
+  });
+
   const acceptKey = acceptKeyFor(clientKey);
   socket.write(
     'HTTP/1.1 101 Switching Protocols\r\n' +
@@ -756,11 +1019,11 @@ server.on('upgrade', (req, socket) => {
     'Sec-WebSocket-Accept: ' + acceptKey + '\r\n' +
     '\r\n'
   );
-  handleConnection(socket);
+  handleConnection(socket, peerAddress);
 });
 
 server.listen(PORT, () => {
   console.log('Domain Atlas presence server listening on http://localhost:' + PORT + ' (WebSocket at /presence)');
 });
 
-module.exports = { server, rooms };
+module.exports = { server, rooms, nameLooksOfficial, sourceKeyOf };

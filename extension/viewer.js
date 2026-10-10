@@ -331,6 +331,9 @@ function showPresenceTransientHint(text, durationMs = 6000) {
 function presenceDeniedHint(reason) {
   if (reason === 'room-full') return 'This world is full — you can look around, but other visitors will not see you.';
   if (reason === 'server-busy') return 'The presence server is busy — you will not appear to other visitors.';
+  if (reason === 'source-limit') return 'Too many sessions are open from your network connection — close other tabs or wait a few seconds.';
+  if (reason === 'join-rate-limited') return 'Too many join attempts from your network connection — wait a moment and re-enter the world.';
+  if (reason === 'name-not-allowed') return 'Your display name looks like an official title (moderator, admin, staff), which is not allowed — pick another name.';
   if (reason === 'invalid') return 'The presence server refused this world.';
   return 'The presence server refused the connection.';
 }
@@ -1022,6 +1025,9 @@ function chatErrorText(reason) {
   if (reason === 'rate-limited') return 'Slow down — wait a moment before sending again.';
   if (reason === 'room-full') return 'Chat is full for this domain.';
   if (reason === 'server-busy') return 'The chat server is busy.';
+  if (reason === 'source-limit') return 'Too many chat sessions are open from your network connection — close other tabs or wait a few seconds.';
+  if (reason === 'join-rate-limited') return 'Too many join attempts from your network connection — wait a moment, then reopen chat.';
+  if (reason === 'name-not-allowed') return 'Your display name looks like an official title (moderator, admin, staff), which is not allowed — pick another name.';
   if (reason === 'not-joined') return 'Not connected — try again in a moment.';
   if (reason === 'invalid') return 'The chat server refused this world.';
   if (typeof reason === 'string' && reason.indexOf('http-') === 0) return 'The chat server returned an error (' + reason.slice(5) + ').';

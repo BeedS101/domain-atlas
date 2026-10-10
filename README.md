@@ -544,12 +544,26 @@ who the visitor is. Worlds that require an authenticated identity to enter
 (`policy.identityRequired`) are enforced separately by the wallet and
 issuer and do not use presence data.
 
+**Abuse limits.** Presence and chat are open to anyone, so joins are limited
+per network source (the connection's peer address; forwarded-for headers are
+ignored): concurrent presence and chat sessions per source, a join-rate
+budget with an escalating cooldown, a per-source share of any one room, and
+a refusal of display names that read as an official title. A refused join
+gets a readable message (`429` too many sessions or joins, `503` room full,
+`400` name not allowed) and creates no visitor. The source is kept only as a
+short-lived hash on the server and is never sent to other visitors or
+administrators. Everyone behind one shared address counts as one source, so
+the defaults are tunable by environment variable. Details, limits and
+deployment steps: `docs/presence-abuse-protection.md`; the regression test
+is `test/manual-presence-abuse.js` (`node` or `php`).
+
 **Reconnects and duplicate sessions.** Presence cannot tell two sessions of
 the same person apart, so there is no duplicate-session guard: a reconnect
 (or a second tab) joins as a new visitor with a new avatar, and the old one
 disappears when its socket closes or its polling session times out. A
 polling client whose session was swept as stale rejoins automatically with
-a fresh id (its position resets).
+a fresh id (its position resets). What bounds duplicates is the per-source
+session limit, not an identity check.
 
 **Limits and retention.** Both servers cap rooms, members per room, total
 members, chat domains, chat members per domain, request body size (and, on

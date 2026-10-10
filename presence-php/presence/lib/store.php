@@ -31,6 +31,13 @@
 // this bundle. Records written by an earlier version of this bundle may
 // still carry publicKey / pendingSignals fields; they are stripped when the
 // store is loaded.
+//
+// Per-source abuse controls mirror presence-server/server.js (see "network
+// sources" below): concurrent-session caps, a join-rate limit with an
+// escalating cooldown, a per-source share of any one room, and the
+// official-title name guard. A source is REMOTE_ADDR only, hashed with a
+// secret kept in atlas-presence-ratelimit-store.json; forwarded-for headers
+// are never read.
 
 function atlas_presence_store_file() {
   return __DIR__ . '/atlas-presence-store.json';
@@ -55,6 +62,22 @@ define('PRESENCE_MAX_TOTAL_MEMBERS', (int) presence_env_number('MAX_TOTAL_MEMBER
 define('PRESENCE_MAX_CHAT_DOMAINS', (int) presence_env_number('MAX_CHAT_DOMAINS', 500));
 define('PRESENCE_MAX_CHAT_MEMBERS_PER_DOMAIN', (int) presence_env_number('MAX_CHAT_MEMBERS_PER_DOMAIN', 200));
 define('PRESENCE_MAX_BODY_BYTES', (int) presence_env_number('MAX_BODY_BYTES', 8 * 1024));
+
+// Per-source limits, env-overridable under the same names as the Node server.
+define('PRESENCE_SOURCE_MAX_PRESENCE', (int) presence_env_number('SOURCE_MAX_PRESENCE', 30));
+define('PRESENCE_SOURCE_MAX_PRESENCE_PER_ROOM', (int) presence_env_number('SOURCE_MAX_PRESENCE_PER_ROOM', 10));
+define('PRESENCE_SOURCE_MAX_CHAT', (int) presence_env_number('SOURCE_MAX_CHAT', 20));
+define('PRESENCE_SOURCE_MAX_CHAT_PER_DOMAIN', (int) presence_env_number('SOURCE_MAX_CHAT_PER_DOMAIN', 10));
+define('PRESENCE_SOURCE_SOFT_FULL_RATIO', min(1.0, presence_env_number('SOURCE_SOFT_FULL_RATIO', 0.8)));
+define('PRESENCE_SOURCE_SOFT_FULL_MAX', (int) presence_env_number('SOURCE_SOFT_FULL_MAX', 3));
+define('PRESENCE_SOURCE_JOIN_MAX', (int) presence_env_number('SOURCE_JOIN_MAX', 60));
+define('PRESENCE_SOURCE_JOIN_WINDOW_MS', presence_env_number('SOURCE_JOIN_WINDOW_MS', 60 * 1000));
+define('PRESENCE_SOURCE_COOLDOWN_MS', presence_env_number('SOURCE_COOLDOWN_MS', 30 * 1000));
+define('PRESENCE_SOURCE_COOLDOWN_MAX_MS', presence_env_number('SOURCE_COOLDOWN_MAX_MS', 5 * 60 * 1000));
+define('PRESENCE_SOURCE_STRIKE_MEMORY_MS', presence_env_number('SOURCE_STRIKE_MEMORY_MS', 10 * 60 * 1000));
+// Smaller default than the Node server: the whole table is rewritten per join.
+define('PRESENCE_MAX_SOURCE_ENTRIES', (int) presence_env_number('MAX_SOURCE_ENTRIES', 2000));
+define('PRESENCE_SALT_ROTATE_MS', presence_env_number('SOURCE_SALT_ROTATE_MS', 24 * 60 * 60 * 1000));
 
 // More generous than the Node server's POLL_TIMEOUT_MS default (8000): a
 // real request over the public internet to shared hosting is slower and less
@@ -97,6 +120,243 @@ function presence_clean_name($raw) {
   else $s = substr($s, 0, PRESENCE_MAX_NAME_LEN);
   if ($s !== '' && preg_match('//u', $s) !== 1) $s = '';
   return $s === '' ? 'Visitor' : $s;
+}
+
+// ---------- network sources ----------
+//
+// Abuse limits are keyed on REMOTE_ADDR and nothing else; X-Forwarded-For and
+// similar headers are client-controlled and are never read. Behind a reverse
+// proxy or NAT every client shares one source, so the defaults are generous
+// and an operator behind a proxy should raise them.
+//
+// The address is reduced to a key (IPv4 as is, IPv6 to its /64) and
+// HMAC-hashed with a random secret. The hash is stored in two places only:
+// on a member record for as long as that member exists (it is swept
+// PRESENCE_POLL_TIMEOUT_MS after the last sync), and in the rate-limit table
+// for as long as the join window or cooldown lasts. The raw address is never
+// written. The secret rotates every PRESENCE_SALT_ROTATE_MS; the previous one
+// is kept for one more period so sessions that outlive a rotation are still
+// counted. Hashing a 32-bit address is obfuscation, not anonymisation: the
+// protection is the short lifetime and that lib/ is not web-reachable.
+
+function atlas_presence_ratelimit_file() {
+  return __DIR__ . '/atlas-presence-ratelimit-store.json';
+}
+
+function presence_source_key_material($addr) {
+  $a = strtolower(explode('%', (string) $addr)[0]);
+  if (preg_match('/^::ffff:(\d+\.\d+\.\d+\.\d+)$/', $a, $m)) $a = $m[1];
+  if (filter_var($a, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false) return $a;
+  if (filter_var($a, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false) {
+    $bin = inet_pton($a);
+    if ($bin === false || strlen($bin) !== 16) return 'unknown';
+    if (substr($bin, 0, 12) === str_repeat("\0", 10) . "\xff\xff") return inet_ntop(substr($bin, 12)); // IPv4-mapped, hex spelling
+    return bin2hex(substr($bin, 0, 8)) . '/64';
+  }
+  return 'unknown'; // unparseable peers all share one bucket
+}
+
+function presence_source_hash($addr, $salt) {
+  return substr(hash_hmac('sha256', presence_source_key_material($addr), $salt), 0, 16);
+}
+
+function presence_empty_bucket() {
+  return ['t' => [], 'cu' => 0, 'st' => 0, 'ls' => 0];
+}
+
+// Records one join attempt for this source and kind ('presence' | 'chat').
+// Returns ['srcs' => [hash, ...], 'retryAfter' => null | seconds]. `srcs`
+// lists the current hash first and the previous period's second; a member
+// belongs to this source when its stored hash is in that list. Attempts made
+// during a cooldown are refused without being recorded, so waiting it out
+// always works.
+function presence_source_gate($kind, $addr) {
+  $fh = fopen(atlas_presence_ratelimit_file(), 'c+');
+  if ($fh === false) throw new Exception('could not open the presence rate-limit store file');
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  if (!is_array($doc)) $doc = [];
+  $now = presence_now_ms();
+  if (!isset($doc['sources']) || !is_array($doc['sources'])) $doc['sources'] = [];
+  if (!isset($doc['salt']) || !is_string($doc['salt']) || !isset($doc['saltAt']) || ($now - $doc['saltAt']) > PRESENCE_SALT_ROTATE_MS) {
+    $doc['prevSalt'] = isset($doc['salt']) && is_string($doc['salt']) ? $doc['salt'] : null;
+    $doc['salt'] = bin2hex(random_bytes(16));
+    $doc['saltAt'] = $now;
+    $doc['sources'] = []; // rate history is keyed by the old hash
+  }
+  $src = presence_source_hash($addr, $doc['salt']);
+  $srcs = [$src];
+  if (!empty($doc['prevSalt'])) $srcs[] = presence_source_hash($addr, $doc['prevSalt']);
+
+  // Drop idle entries, then the least recently touched if still over the bound.
+  foreach (array_keys($doc['sources']) as $k) {
+    $e = $doc['sources'][$k];
+    $idle = true;
+    foreach (['presence', 'chat'] as $kk) {
+      $b = isset($e[$kk]) ? $e[$kk] : presence_empty_bucket();
+      $last = count($b['t']) ? $b['t'][count($b['t']) - 1] : 0;
+      if ($b['cu'] > $now || $last > $now - PRESENCE_SOURCE_JOIN_WINDOW_MS || ($now - $b['ls']) <= PRESENCE_SOURCE_STRIKE_MEMORY_MS) $idle = false;
+    }
+    if ($idle && $k !== $src) unset($doc['sources'][$k]);
+  }
+  if (!isset($doc['sources'][$src])) {
+    while (count($doc['sources']) >= PRESENCE_MAX_SOURCE_ENTRIES) {
+      $oldest = null; $oldestAt = INF;
+      foreach ($doc['sources'] as $k => $e) { $at = isset($e['touch']) ? $e['touch'] : 0; if ($at < $oldestAt) { $oldestAt = $at; $oldest = $k; } }
+      if ($oldest === null) break;
+      unset($doc['sources'][$oldest]);
+    }
+    $doc['sources'][$src] = ['presence' => presence_empty_bucket(), 'chat' => presence_empty_bucket()];
+  }
+  $ent = &$doc['sources'][$src];
+  $ent['touch'] = $now;
+  $b = &$ent[$kind];
+  $retry = null;
+  if ($b['cu'] > $now) {
+    $retry = (int) ceil(($b['cu'] - $now) / 1000);
+  } else {
+    $cutoff = $now - PRESENCE_SOURCE_JOIN_WINDOW_MS;
+    $b['t'] = array_values(array_filter($b['t'], function ($t) use ($cutoff) { return $t > $cutoff; }));
+    $b['t'][] = $now;
+    if (count($b['t']) > PRESENCE_SOURCE_JOIN_MAX) {
+      $b['st'] = (($now - $b['ls']) > PRESENCE_SOURCE_STRIKE_MEMORY_MS ? 0 : $b['st']) + 1;
+      $b['ls'] = $now;
+      $cooldown = min(PRESENCE_SOURCE_COOLDOWN_MAX_MS, PRESENCE_SOURCE_COOLDOWN_MS * pow(2, $b['st'] - 1));
+      $b['cu'] = $now + $cooldown;
+      $b['t'] = [];
+      $retry = (int) ceil($cooldown / 1000);
+    }
+  }
+  unset($b, $ent);
+  ftruncate($fh, 0);
+  rewind($fh);
+  fwrite($fh, json_encode($doc, JSON_UNESCAPED_SLASHES));
+  fflush($fh);
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return ['srcs' => $srcs, 'retryAfter' => $retry];
+}
+
+// Concurrency admission for one more session in a room whose members are
+// $room (array or null). $totalMine is the source's session count across
+// every room of this kind.
+function presence_source_admission($mine, $totalMine, $roomSize, $capacity, $totalMax, $perRoomMax) {
+  if ($totalMine >= $totalMax) return 'source-limit';
+  if ($mine >= $perRoomMax) return 'source-limit';
+  if ($roomSize >= $capacity * PRESENCE_SOURCE_SOFT_FULL_RATIO && $mine >= PRESENCE_SOURCE_SOFT_FULL_MAX) return 'source-limit';
+  return null;
+}
+
+function presence_count_source($members, $srcs) {
+  $n = 0;
+  foreach ($members as $m) if (is_array($m) && isset($m['src']) && in_array($m['src'], $srcs, true)) $n++;
+  return $n;
+}
+
+// Readable text for every refusal; the same wording as the Node server.
+function presence_denial_text($reason) {
+  $t = [
+    'invalid' => 'A valid domain and world are required.',
+    'server-busy' => 'The presence server is busy. Try again shortly.',
+    'room-full' => 'This room is full right now. Try again in a moment.',
+    'source-limit' => 'Too many sessions are already open from your network connection. Close other tabs or wait a few seconds, then try again.',
+    'join-rate-limited' => 'Too many join attempts from your network connection. Wait a moment, then try again.',
+    'name-not-allowed' => 'That display name looks like an official title (moderator, admin, staff, ...). Display names are not verified, so titles are not allowed. Choose a different name.'
+  ];
+  return isset($t[$reason]) ? $t[$reason] : $reason;
+}
+
+// ---------- display-name guard ----------
+//
+// A display name is typed by the visitor and nothing authenticates it. This
+// guard refuses names that read as an official title or badge so that an
+// ordinary visitor cannot present as "Moderator (official)". It is a nuisance
+// filter, not identity verification: it misses disguises it does not know,
+// and an allowed name proves nothing. A genuine moderator marker must be a
+// separate field issued by the server, never text in the name. Same rules as
+// nameLooksOfficial() in presence-server/server.js.
+
+function presence_fold_name($raw) {
+  $t = (string) $raw;
+  if (class_exists('Normalizer') && getenv('PRESENCE_TEST_NO_INTL') !== '1') {
+    $n = Normalizer::normalize($t, Normalizer::FORM_KD);
+    if (is_string($n)) $t = $n;
+  } else {
+    $t = presence_fold_fallback($t); // no intl extension: table-based fold
+  }
+  $t = preg_replace('/\p{M}+/u', '', $t);
+  $t = preg_replace('/[\p{Cf}\x{00ad}]/u', '', $t);
+  $t = strtr($t, presence_confusables()); // before lowercasing, so both cases are listed
+  return function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
+}
+
+function presence_confusables() {
+  static $map = null;
+  if ($map !== null) return $map;
+  $pairs = [
+    'а' => 'a', 'е' => 'e', 'о' => 'o', 'р' => 'p', 'с' => 'c', 'у' => 'y', 'х' => 'x', 'і' => 'i', 'ѕ' => 's', 'ј' => 'j', 'ԁ' => 'd', 'ӏ' => 'i', 'ı' => 'i',
+    'м' => 'm', 'т' => 't', 'н' => 'h', 'к' => 'k', 'в' => 'b', 'ո' => 'n', 'ս' => 'u', 'ɡ' => 'g', 'ɩ' => 'i',
+    'α' => 'a', 'ε' => 'e', 'ι' => 'i', 'κ' => 'k', 'ν' => 'v', 'ο' => 'o', 'ρ' => 'p', 'τ' => 't', 'υ' => 'u', 'χ' => 'x', 'η' => 'n', 'μ' => 'u'
+  ];
+  $map = [];
+  foreach ($pairs as $k => $v) {
+    $map[$k] = $v;
+    $upper = function_exists('mb_strtoupper') ? mb_strtoupper($k, 'UTF-8') : $k;
+    if ($upper !== $k) $map[$upper] = $v;
+  }
+  return $map;
+}
+
+// Without the intl extension: fullwidth forms and common accented Latin
+// letters, which NFKD would otherwise have reduced to a base letter.
+function presence_fold_fallback($t) {
+  $t = preg_replace_callback('/[\x{FF01}-\x{FF5E}]/u', function ($m) {
+    $cp = mb_ord($m[0], 'UTF-8');
+    return chr($cp - 0xFEE0);
+  }, $t);
+  static $acc = null;
+  if ($acc === null) {
+    $acc = [];
+    $groups = ['a' => 'àáâãäåāăą', 'c' => 'çćĉċč', 'd' => 'ďđ', 'e' => 'èéêëēĕėęě', 'g' => 'ĝğġģ', 'h' => 'ĥħ', 'i' => 'ìíîïĩīĭįı', 'j' => 'ĵ', 'k' => 'ķ', 'l' => 'ĺļľŀł',
+      'n' => 'ñńņňŉ', 'o' => 'òóôõöøōŏő', 'r' => 'ŕŗř', 's' => 'śŝşš', 't' => 'ţťŧ', 'u' => 'ùúûüũūŭůűų', 'w' => 'ŵ', 'y' => 'ýÿŷ', 'z' => 'źżž'];
+    foreach ($groups as $base => $chars) {
+      foreach (preg_split('//u', $chars, -1, PREG_SPLIT_NO_EMPTY) as $c) {
+        $acc[$c] = $base;
+        $up = function_exists('mb_strtoupper') ? mb_strtoupper($c, 'UTF-8') : $c;
+        if ($up !== $c) $acc[$up] = strtoupper($base);
+      }
+    }
+  }
+  return strtr($t, $acc);
+}
+
+function presence_leet_collapse($s) {
+  $s = strtr($s, ['0' => 'o', '1' => 'i', '3' => 'e', '4' => 'a', '5' => 's', '7' => 't', '@' => 'a', '$' => 's', '!' => 'i', '|' => 'i', 'l' => 'i']);
+  $s = preg_replace('/[^a-z0-9]/', '', $s);
+  return preg_replace('/(.)\1+/', '$1', $s);
+}
+
+function presence_name_looks_official($name, $domain = '') {
+  static $tokens = null, $subs = null, $negated = null;
+  if ($tokens === null) {
+    $tokens = array_flip(array_map('presence_leet_collapse', ['mod', 'mods', 'admin', 'admins', 'gm', 'owner', 'staff', 'system', 'support', 'security', 'operator', 'verified', 'official', 'moderator', 'moderators', 'sysop', 'webmaster']));
+    $subs = array_map('presence_leet_collapse', ['moderator', 'administrator', 'official', 'verified', 'sysop', 'webmaster', 'superuser', 'domainatlas']);
+    $negated = array_map('presence_leet_collapse', ['unofficial', 'unverified']);
+  }
+  $name = (string) $name;
+  $nfkc = (class_exists('Normalizer') && getenv('PRESENCE_TEST_NO_INTL') !== '1') ? Normalizer::normalize($name, Normalizer::FORM_KC) : $name;
+  if (preg_match('/[\x{2713}\x{2714}\x{2705}\x{2611}\x{1F6E1}\x{1F530}]/u', is_string($nfkc) ? $nfkc : $name) === 1) return true;
+  $folded = presence_fold_name($name);
+  foreach (preg_split('/[^a-z0-9@$!|]+/', $folded, -1, PREG_SPLIT_NO_EMPTY) as $tok) {
+    if (isset($tokens[presence_leet_collapse(preg_replace('/[0-9]+$/', '', $tok))])) return true;
+  }
+  $squash = presence_leet_collapse($folded);
+  foreach ($negated as $n) $squash = str_replace($n, '', $squash);
+  foreach ($subs as $w) if (strpos($squash, $w) !== false) return true;
+  if (isset($tokens[$squash])) return true; // letters spread out with punctuation: "m.o.d"
+  $dom = preg_replace('/^www/', '', presence_leet_collapse(presence_fold_name($domain)));
+  if (strlen($dom) >= 5 && strpos($squash, $dom) !== false) return true;
+  return false;
 }
 
 function presence_sanitize_color($v) {
@@ -182,12 +442,27 @@ function with_presence_store_locked($mutator) {
   return $result;
 }
 
-// Joins a new member. Returns ['ok'=>true, 'token'=>..., 'publicId'=>...,
-// 'roster'=>[...]] or ['ok'=>false, 'reason'=>'room-full'|'server-busy'].
-function presence_join($domain, $world, $name) {
-  return with_presence_store_locked(function (&$doc) use ($domain, $world, $name) {
+// Joins a new member. `$addr` is REMOTE_ADDR. Returns ['ok'=>true,
+// 'token'=>..., 'publicId'=>..., 'roster'=>[...]] or ['ok'=>false,
+// 'reason'=>..., 'retryAfter'=>?] with reason 'join-rate-limited',
+// 'name-not-allowed', 'source-limit', 'room-full' or 'server-busy'. A refused
+// join creates no member, so it never changes a room's count.
+function presence_join($domain, $world, $name, $addr = '') {
+  $gate = presence_source_gate('presence', $addr);
+  if ($gate['retryAfter'] !== null) return ['ok' => false, 'reason' => 'join-rate-limited', 'retryAfter' => $gate['retryAfter']];
+  if (presence_name_looks_official($name, $domain)) return ['ok' => false, 'reason' => 'name-not-allowed'];
+  $srcs = $gate['srcs'];
+  return with_presence_store_locked(function (&$doc) use ($domain, $world, $name, $srcs) {
     $roomKey = presence_room_key($domain, $world);
     $exists = isset($doc['rooms'][$roomKey]);
+    $total = 0;
+    foreach ($doc['rooms'] as $r) $total += presence_count_source($r, $srcs);
+    $denied = presence_source_admission(
+      $exists ? presence_count_source($doc['rooms'][$roomKey], $srcs) : 0, $total,
+      $exists ? count($doc['rooms'][$roomKey]) : 0, PRESENCE_MAX_MEMBERS_PER_ROOM,
+      PRESENCE_SOURCE_MAX_PRESENCE, PRESENCE_SOURCE_MAX_PRESENCE_PER_ROOM
+    );
+    if ($denied) return ['ok' => false, 'reason' => $denied];
     if (!$exists && count($doc['rooms']) >= PRESENCE_MAX_ROOMS) return ['ok' => false, 'reason' => 'server-busy'];
     if (presence_total_members($doc) >= PRESENCE_MAX_TOTAL_MEMBERS) return ['ok' => false, 'reason' => 'server-busy'];
     if ($exists && count($doc['rooms'][$roomKey]) >= PRESENCE_MAX_MEMBERS_PER_ROOM) return ['ok' => false, 'reason' => 'room-full'];
@@ -198,7 +473,7 @@ function presence_join($domain, $world, $name) {
     $roster = presence_roster_of($doc['rooms'][$roomKey], null);
     $doc['rooms'][$roomKey][$token] = [
       'publicId' => $publicId, 'name' => $name, 'x' => 0.0, 'y' => 0.0, 'z' => 0.0, 'yaw' => 0.0,
-      'lastSeen' => presence_now_ms()
+      'lastSeen' => presence_now_ms(), 'src' => $srcs[0]
     ];
     return ['ok' => true, 'token' => $token, 'publicId' => $publicId, 'roster' => $roster];
   });
@@ -317,12 +592,25 @@ function with_chat_store_locked($mutator) {
   return $result;
 }
 
-// Joins the chat room. Returns ['ok'=>true, 'id'=>token, 'senderId'=>...,
-// 'messages'=>history] or ['ok'=>false, 'reason'=>...]. The new member's
-// cursor starts at "already seen the history just handed back".
-function chat_join_room($domain, $world, $name) {
-  return with_chat_store_locked(function (&$doc) use ($domain, $world, $name) {
+// Joins the chat room. `$addr` is REMOTE_ADDR. Returns ['ok'=>true,
+// 'id'=>token, 'senderId'=>..., 'messages'=>history] or ['ok'=>false,
+// 'reason'=>..., 'retryAfter'=>?] (the same reasons as presence_join). The new
+// member's cursor starts at "already seen the history just handed back".
+function chat_join_room($domain, $world, $name, $addr = '') {
+  $gate = presence_source_gate('chat', $addr);
+  if ($gate['retryAfter'] !== null) return ['ok' => false, 'reason' => 'join-rate-limited', 'retryAfter' => $gate['retryAfter']];
+  if (presence_name_looks_official($name, $domain)) return ['ok' => false, 'reason' => 'name-not-allowed'];
+  $srcs = $gate['srcs'];
+  return with_chat_store_locked(function (&$doc) use ($domain, $world, $name, $srcs) {
     $exists = isset($doc['domains'][$domain]);
+    $total = 0;
+    foreach ($doc['domains'] as $d) $total += presence_count_source(isset($d['members']) ? $d['members'] : [], $srcs);
+    $denied = presence_source_admission(
+      $exists ? presence_count_source($doc['domains'][$domain]['members'], $srcs) : 0, $total,
+      $exists ? count($doc['domains'][$domain]['members']) : 0, PRESENCE_MAX_CHAT_MEMBERS_PER_DOMAIN,
+      PRESENCE_SOURCE_MAX_CHAT, PRESENCE_SOURCE_MAX_CHAT_PER_DOMAIN
+    );
+    if ($denied) return ['ok' => false, 'reason' => $denied];
     if (!$exists && count($doc['domains']) >= PRESENCE_MAX_CHAT_DOMAINS) return ['ok' => false, 'reason' => 'server-busy'];
     if ($exists && count($doc['domains'][$domain]['members']) >= PRESENCE_MAX_CHAT_MEMBERS_PER_DOMAIN) return ['ok' => false, 'reason' => 'room-full'];
     if (!$exists) $doc['domains'][$domain] = ['nextSeq' => 0, 'history' => [], 'members' => []];
@@ -332,7 +620,7 @@ function chat_join_room($domain, $world, $name) {
     $lastSeq = count($entry['history']) ? $entry['history'][count($entry['history']) - 1]['seq'] : 0;
     $entry['members'][$token] = [
       'name' => $name, 'senderId' => $senderId, 'world' => $world,
-      'lastSeen' => presence_now_ms(), 'cursor' => $lastSeq, 'lastSendAt' => 0
+      'lastSeen' => presence_now_ms(), 'cursor' => $lastSeq, 'lastSendAt' => 0, 'src' => $srcs[0]
     ];
     $history = $entry['history'];
     unset($entry);

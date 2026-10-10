@@ -53,9 +53,11 @@ What's in this folder
                                     "in-world chat" section)
       .htaccess                  - blocks direct web access to this folder
                                     (this is where the two state JSON files
-                                    live: atlas-presence-store.json and
-                                    atlas-chat-store.json; both are runtime
-                                    state and ignored by Git)
+                                    live: atlas-presence-store.json,
+                                    atlas-chat-store.json and
+                                    atlas-presence-ratelimit-store.json;
+                                    all are runtime state, created on first
+                                    use, and ignored by Git)
     .htaccess        - makes the URLs above work without a .php extension,
                         matching what the extension calls
 
@@ -218,17 +220,65 @@ server-busy:
   CHAT_HISTORY_LIMIT (50)  CHAT_HISTORY_TTL_MS (86400000)
   POLL_TIMEOUT_MS (15000)
 domain and world ids must be 1-120 characters of valid UTF-8 with no control
-characters (spaces, slashes and non-ASCII are fine; they are only room keys). The limits are
-checked per request against the stored state, so they bound the store's
-size but are not a defence against a flood of requests; put rate limiting
-in front of the host if that matters to you.
+characters (spaces, slashes and non-ASCII are fine; they are only room keys).
+
+
+Abuse limits per network source
+---------------------------------
+One visitor must not be able to fill a world or a domain's chat with fake
+sessions, so joins are also limited per SOURCE. A source is the connection's
+REMOTE_ADDR (IPv6 grouped by /64) and nothing else: X-Forwarded-For and
+similar headers are ignored because a visitor controls them. The address is
+stored only as a keyed hash, never raw, and only for as long as it is needed:
+on a visitor's record until that record times out, and in the rate-limit
+table until the join window / cooldown has passed. It is never returned by any
+route or shown to other visitors or to world administrators.
+
+Defaults (environment variables, same names as the Node server):
+  SOURCE_MAX_PRESENCE (30)            presence sessions per source, all rooms
+  SOURCE_MAX_PRESENCE_PER_ROOM (10)   presence sessions per source in one room
+  SOURCE_MAX_CHAT (20)                chat sessions per source, all domains
+  SOURCE_MAX_CHAT_PER_DOMAIN (10)     chat sessions per source in one domain
+  SOURCE_SOFT_FULL_RATIO (0.8)        once a room is this full, a source that
+  SOURCE_SOFT_FULL_MAX (3)            already holds this many is refused, so
+                                      the last seats go to other sources
+  SOURCE_JOIN_MAX (60)                join attempts per window, presence and
+  SOURCE_JOIN_WINDOW_MS (60000)       chat counted separately
+  SOURCE_COOLDOWN_MS (30000)          pause after exceeding the budget;
+  SOURCE_COOLDOWN_MAX_MS (300000)     doubles on repeat offences, capped
+  SOURCE_STRIKE_MEMORY_MS (600000)    how long repeat offences are remembered
+  MAX_SOURCE_ENTRIES (2000)           size bound of the rate-limit table
+  SOURCE_SALT_ROTATE_MS (86400000)    how often the hash secret changes
+
+A refused join answers {error, reason, message, retryAfter} plus a
+Retry-After header: 429 source-limit (too many sessions open from this
+address) or 429 join-rate-limited (too many attempts; wait retryAfter
+seconds), 503 room-full / server-busy, 400 name-not-allowed (see
+docs/presence-abuse-protection.md). Refused joins create no visitor, so
+they never change a room's count.
+
+Everyone behind one shared address (a school, an office, a mobile carrier's
+NAT, or a reverse proxy in front of this bundle) counts as ONE source. The
+defaults leave room for a classroom of ten per world, but a larger shared
+group needs SOURCE_MAX_PRESENCE_PER_ROOM / SOURCE_MAX_PRESENCE raised, and
+one abusive visitor who trips the join cooldown pauses new joins for
+everyone on that address until it ends. On hosting where you cannot set
+environment variables, the defaults apply. See docs/presence-abuse-protection.md.
+
+Display names that read as an official title (moderator, admin, staff,
+verified, a check-mark badge, the domain's own name, and look-alike
+spellings of those) are refused with 400 name-not-allowed. That is a
+nuisance filter: display names are still not authenticated, and an allowed
+name proves nothing about who is behind it.
 
 
 Reconnects and duplicate sessions
 ----------------------------------
-There is no duplicate-session guard. Presence has no identity to compare, so
-a reconnect or a second tab simply joins as another visitor with a new
-random id; the old entry disappears when it stops syncing. A poll session
+There is no duplicate-session guard by identity: presence has no identity to
+compare, so a reconnect or a second tab simply joins as another visitor with
+a new random id; the old entry disappears when it stops syncing. What bounds
+duplicates is the per-source limit above: a source can hold at most
+SOURCE_MAX_PRESENCE_PER_ROOM sessions in a room, however often it rejoins. A poll session
 whose token has been swept gets 404 from /presence/poll/sync and the
 extension rejoins with a fresh id.
 
@@ -252,7 +302,22 @@ very different scale of problem than what this bundle is for.
 
 Upgrading from an earlier version
 ----------------------------------
-Upload the files in lib/ and poll/ over the old ones, then DELETE these
+Upload the files in lib/ and poll/ over the old ones. For the per-source
+abuse limits, the files that must be replaced are (paths from the folder that
+contains "presence"):
+  presence/lib/store.php
+  presence/lib/bootstrap.php
+  presence/poll/join.php
+  presence/poll/chat-join.php
+The new state file presence/lib/atlas-presence-ratelimit-store.json is
+created on the first join; the folder must be writable by PHP, as it already
+is for the other two stores, and lib/ stays denied to web requests by its
+.htaccess (open /presence/lib/atlas-presence-ratelimit-store.json in a
+browser; it must not load). Rolling back is replacing the four files again;
+the old code ignores the extra "src" field on stored visitors and the new
+file.
+
+Then DELETE these
 files from the live host, which no longer exist and must not stay reachable:
   presence/poll/signal.php
   presence/poll/join-status.php
