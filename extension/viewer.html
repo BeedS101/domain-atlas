@@ -2803,17 +2803,7 @@
   <script src="call-protocol.js"></script>
   <script src="wallet.js"></script>
   <script src="gltf-mini.js"></script>
-  <script>
-    // Preserve the proven engine for previews and normal 3D worlds.
-    window.AtlasOriginalMiniGLTF = window.MiniGLTF;
-  </script>
   <script src="gltf-mini-experimental.js"></script>
-  <script>
-    // The experimental script exports the same API; keep it under its own
-    // name so it never replaces the default renderer.
-    window.AtlasExperimentalMiniGLTF = window.MiniGLTF;
-    window.MiniGLTF = window.AtlasOriginalMiniGLTF;
-  </script>
   <script src="viewer.js"></script>
 </body>
 </html>
