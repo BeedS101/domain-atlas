@@ -442,8 +442,13 @@
     uniform float uAmbient;
     void main() {
       vec3 n = normalize(vNormal);
-      float diffuse = max(dot(n, -normalize(uLightDir)), 0.0);
-      float light = clamp(uAmbient + diffuse * (1.0 - uAmbient), 0.0, 1.0);
+      // Soft fill from above and subtle darkening beneath objects give the
+      // lightweight renderer depth without textures, extra draw calls or shadows.
+      float ndl = dot(n, -normalize(uLightDir));
+      float diffuse = max(ndl, 0.0);
+      float sky = 0.5 + 0.5 * clamp(n.y, -1.0, 1.0);
+      float fill = mix(0.72, 1.0, sky);
+      float light = clamp(uAmbient * fill + diffuse * (1.0 - uAmbient) * 0.85, 0.0, 1.0);
       gl_FragColor = vec4(uColor.rgb * light, uColor.a);
     }
   `;
