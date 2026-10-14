@@ -2547,7 +2547,7 @@
     };
   }
 
-  window.MiniGLTF = {
+  window.AtlasExperimentalMiniGLTF = {
     init,
     previewModel,
     previewCharacter,
