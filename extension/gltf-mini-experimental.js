@@ -902,25 +902,36 @@
     const ITEM_DROP_FLOAT_HEIGHT = 0.15;
     const ITEM_DROP_BOB_AMPLITUDE = 0.05;
 
-    // Camera distance (mouse scroll wheel) replaces the old discrete
-    // first-/third-person toggle with one continuous zoom: 0 is exactly
-    // the original first-person view (camera = eyes, nothing new added to
-    // the frustum — bit-for-bit the same as every release before this),
-    // and it smoothly pulls back into a third-person chase view as it
-    // increases. Always starts at 0 (first-person) on entering a world —
-    // deliberately NOT persisted the way the old toggle setting was, since
-    // "scroll to zoom" reads as a live camera control, not a saved
-    // preference.
+    // Experimental camera preference: a sensible third-person default
+    // avoids spawning inside the avatar. Remember the scroll-selected chase
+    // distance across scene visits in this browser extension only.
+    // Keep this distinct from character size and the authored spawn point.
     const MAX_CAMERA_DISTANCE = 5;
     const MAX_FOLLOW_HEIGHT = 1.7;
     const CAMERA_SCROLL_STEP = 0.4;
-    const HEAD_VISIBLE_DISTANCE = 0.4; // below this, camera is still basically at eye level — drawing the head would just block the view
-    let cameraDistance = 0;
+    const HEAD_VISIBLE_DISTANCE = 0.4;
+    const CAMERA_DISTANCE_KEY = 'atlas-experimental-camera-distance-v1';
+    const DEFAULT_CAMERA_DISTANCE = 2.8;
+    function clampCameraDistance(d) {
+      const n = Number(d);
+      return Number.isFinite(n) ? Math.max(0, Math.min(MAX_CAMERA_DISTANCE, n)) : DEFAULT_CAMERA_DISTANCE;
+    }
+    function readCameraDistance() {
+      try {
+        const stored = localStorage.getItem(CAMERA_DISTANCE_KEY);
+        return stored === null ? DEFAULT_CAMERA_DISTANCE : clampCameraDistance(stored);
+      } catch (_) { return DEFAULT_CAMERA_DISTANCE; }
+    }
+    function saveCameraDistance() {
+      try { localStorage.setItem(CAMERA_DISTANCE_KEY, String(cameraDistance)); } catch (_) {}
+    }
+    let cameraDistance = readCameraDistance();
 
     function onWheel(e) {
       e.preventDefault(); // this is a camera control, not a page-scroll gesture
       const dir = e.deltaY > 0 ? 1 : (e.deltaY < 0 ? -1 : 0);
-      cameraDistance = Math.max(0, Math.min(MAX_CAMERA_DISTANCE, cameraDistance + dir * CAMERA_SCROLL_STEP));
+      cameraDistance = clampCameraDistance(cameraDistance + dir * CAMERA_SCROLL_STEP);
+      saveCameraDistance();
     }
     canvas.addEventListener('wheel', onWheel, { passive: false });
     // The character's own facing, separate from camera.yaw (look
@@ -1935,7 +1946,7 @@
       // that wants to jump straight to a known distance without depending
       // on CAMERA_SCROLL_STEP's exact value.
       getCameraDistance: () => cameraDistance,
-      setCameraDistance: (d) => { cameraDistance = Math.max(0, Math.min(MAX_CAMERA_DISTANCE, Number(d) || 0)); },
+      setCameraDistance: (d) => { cameraDistance = clampCameraDistance(d); saveCameraDistance(); },
       getMaxCameraDistance: () => MAX_CAMERA_DISTANCE,
       // Whether the player is mid-drag actively looking around right now
       // (see `dragging` / onPointerDown/onPointerMove above). viewer.js's
