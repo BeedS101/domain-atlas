@@ -1365,17 +1365,23 @@
             lootMarker
           });
         });
-        // Bounding box for collision, in XZ, expanded from the model's own
-        // bounds and roughly re-centered at the placement (good enough —
-        // furniture is placed axis-aligned-ish and this only needs to feel
-        // right, not be exact).
+        // Collision is an oriented rectangle in XZ, matching the model's
+        // placement rotation AND its intrinsic local-space centre. Previously
+        // this used an unrotated box centred on obj.position; rotated sofas
+        // could consequently be walked through along their visible sides.
         const b = model.bounds;
         // Decorative geometry can stay visible without acting as a wall.
-        // Default remains solid so existing worlds and collectibles behave as before.
         if (obj.collision !== false && isFinite(b.min[0])) {
-          const cx = obj.position[0], cz = obj.position[2];
-          const hx = (b.size[0] * scale) / 2, hz = (b.size[2] * scale) / 2;
-          boundingBoxes.push({ min: [cx - hx, cz - hz], max: [cx + hx, cz + hz], lootMarker });
+          const c = Math.cos(rotY), sn = Math.sin(rotY);
+          const localCx = (b.min[0] + b.max[0]) / 2;
+          const localCz = (b.min[2] + b.max[2]) / 2;
+          boundingBoxes.push({
+            cx: obj.position[0] + scale * (c * localCx + sn * localCz),
+            cz: obj.position[2] + scale * (-sn * localCx + c * localCz),
+            hx: Math.abs(b.size[0] * scale) / 2,
+            hz: Math.abs(b.size[2] * scale) / 2,
+            c, sn, lootMarker
+          });
         }
       });
 
@@ -1523,10 +1529,15 @@
         // the draw loop above — no invisible wall left where a looted box
         // used to be.
         if (box.lootMarker && opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(box.lootMarker)) continue;
-        if (x + PLAYER_RADIUS > box.min[0] && x - PLAYER_RADIUS < box.max[0] &&
-            z + PLAYER_RADIUS > box.min[1] && z - PLAYER_RADIUS < box.max[1]) {
-          return true;
-        }
+        // Rotate the player into the object's local XZ axes, then measure
+        // circle-vs-rectangle distance. Handles 0/90/180/270 and arbitrary yaw.
+        const dx = x - box.cx, dz = z - box.cz;
+        const lx = box.c * dx - box.sn * dz;
+        const lz = box.sn * dx + box.c * dz;
+        const closestX = Math.max(-box.hx, Math.min(box.hx, lx));
+        const closestZ = Math.max(-box.hz, Math.min(box.hz, lz));
+        const ex = lx - closestX, ez = lz - closestZ;
+        if (ex * ex + ez * ez < PLAYER_RADIUS * PLAYER_RADIUS) return true;
       }
       return false;
     }
