@@ -26,7 +26,7 @@ small,p{color:#b6c8d7;line-height:1.5}#list{height:45%;overflow:auto;border:1px 
 </header>
 <main><section id="view"><div id="hint">Drag: rotate · Right drag: pan · Scroll: zoom · Click model: inspect</div></section>
 <aside><b>Scene Inspector</b><p>Uses actual scene.json and GLB assets. Select an object to highlight it and inspect its geometry bounds and world position.</p>
-<label><input id="roof" type="checkbox" checked> Show roof (V7)</label>
+<label><input id="roof" type="checkbox" checked> Show V7/V8 architectural shell</label>
 <label><input id="grid" type="checkbox" checked> Floor grid</label>
 <label><input id="bounds" type="checkbox" checked> Selected bounds</label>
 <label><input id="axes" type="checkbox"> Axes</label>
@@ -58,7 +58,7 @@ function baseUrl(){let v=$('base').value.trim()||'/';return new URL(v.endsWith('
 function assetUrl(model){const base=baseUrl();if(/^https?:\/\//i.test(model))return model;if(model.startsWith('/'))return new URL(model.slice(1),base).href;return new URL(model,base).href}
 function say(t,bad=false){status.textContent=t;status.id='status';status.style.color=bad?'#ffac96':'#a8c7d7'}
 function clear(){loadedScene=null;failedModels=[];scene.remove(group);group.traverse(x=>{if(x.geometry)x.geometry.dispose();});group=new THREE.Group();scene.add(group);entries=[];selected=null;if(selectionBox){scene.remove(selectionBox);selectionBox=null;}}
-function isRoof(item){return /\/architecture-v7\/roof-/.test(item.data.model||'')}
+function isRoof(item){return /\/architecture-v(?:7|8)\/(?:roof-|ridge-cap|gable-|portal-frame|globe-plinth-detail)/.test(item.data.model||'')}
 function setRoofVisibility(){entries.forEach(item=>{if(isRoof(item))item.root.visible=$('roof').checked});if(selected&&isRoof(selected)&&!$('roof').checked)select(null)}
 function select(item){selected=item;if(selectionBox){scene.remove(selectionBox);selectionBox.geometry.dispose();selectionBox.material.dispose();selectionBox=null;}
 for(const el of $('list').children)el.classList.toggle('active',Number(el.dataset.idx)===entries.indexOf(item));
