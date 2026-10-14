@@ -1888,7 +1888,15 @@
           drawPart(legRLocal, shoePair.shoeR, shoeColor);
         }
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale);
+      // At short zoom distances the camera sits inside (or intersects)
+      // the local avatar, especially at larger character sizes. Switch
+      // fully to first-person by hiding the LOCAL avatar, rather than
+      // hiding only its head while drawing its torso and arms around the eye.
+      // Remote avatars still render normally below.
+      const firstPersonCutoff = Math.max(0.8, 0.65 * characterScale);
+      if (cameraDistance >= firstPersonCutoff) {
+        drawCharacterAt(charBase, limbSwing, true, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale);
+      }
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
