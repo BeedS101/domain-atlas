@@ -1370,7 +1370,9 @@
         // furniture is placed axis-aligned-ish and this only needs to feel
         // right, not be exact).
         const b = model.bounds;
-        if (isFinite(b.min[0])) {
+        // Decorative geometry can stay visible without acting as a wall.
+        // Default remains solid so existing worlds and collectibles behave as before.
+        if (obj.collision !== false && isFinite(b.min[0])) {
           const cx = obj.position[0], cz = obj.position[2];
           const hx = (b.size[0] * scale) / 2, hz = (b.size[2] * scale) / 2;
           boundingBoxes.push({ min: [cx - hx, cz - hz], max: [cx + hx, cz + hz], lootMarker });
