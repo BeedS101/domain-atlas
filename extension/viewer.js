@@ -6522,6 +6522,8 @@ seedConfirmBtn.addEventListener('click', async () => {
   showWalletScreen('mainWalletScreen');
   await refreshIdentityDisplay();
   await refreshInventoryDisplay();
+  await refreshOwnedOncePerUserClassKeys();
+  await refreshSceneItemMarkers();
   refreshChatIdentity(); // a freshly-created identity is unlocked immediately — chat should recognize it right away, same as the unlock/lock paths
 });
 
@@ -6649,6 +6651,10 @@ unlockBtn.addEventListener('click', async () => {
     // re-entering) happened to refresh it — unlocking mid-visit should fix
     // this immediately instead.
     await refreshOwnedOncePerUserClassKeys();
+    // Reconcile drops and identity-dependent collectible visibility in-place
+    // after unlocking. Don't re-enter the world: that would reset the
+    // character's position and camera as well as reconnect presence/chat.
+    await refreshSceneItemMarkers();
     refreshChatIdentity(); // an in-progress chat session should reflect the newly-unlocked identity immediately, without requiring leaving the world
   } catch (err) {
     unlockScreenStatus.textContent = err.message;
