@@ -26,6 +26,7 @@ small,p{color:#b6c8d7;line-height:1.5}#list{height:45%;overflow:auto;border:1px 
 </header>
 <main><section id="view"><div id="hint">Drag: rotate · Right drag: pan · Scroll: zoom · Click model: inspect</div></section>
 <aside><b>Scene Inspector</b><p>Uses actual scene.json and GLB assets. Select an object to highlight it and inspect its geometry bounds and world position.</p>
+<label><input id="roof" type="checkbox" checked> Show roof (V7)</label>
 <label><input id="grid" type="checkbox" checked> Floor grid</label>
 <label><input id="bounds" type="checkbox" checked> Selected bounds</label>
 <label><input id="axes" type="checkbox"> Axes</label>
@@ -57,6 +58,8 @@ function baseUrl(){let v=$('base').value.trim()||'/';return new URL(v.endsWith('
 function assetUrl(model){const base=baseUrl();if(/^https?:\/\//i.test(model))return model;if(model.startsWith('/'))return new URL(model.slice(1),base).href;return new URL(model,base).href}
 function say(t,bad=false){status.textContent=t;status.id='status';status.style.color=bad?'#ffac96':'#a8c7d7'}
 function clear(){loadedScene=null;failedModels=[];scene.remove(group);group.traverse(x=>{if(x.geometry)x.geometry.dispose();});group=new THREE.Group();scene.add(group);entries=[];selected=null;if(selectionBox){scene.remove(selectionBox);selectionBox=null;}}
+function isRoof(item){return /\/architecture-v7\/roof-/.test(item.data.model||'')}
+function setRoofVisibility(){entries.forEach(item=>{if(isRoof(item))item.root.visible=$('roof').checked});if(selected&&isRoof(selected)&&!$('roof').checked)select(null)}
 function select(item){selected=item;if(selectionBox){scene.remove(selectionBox);selectionBox.geometry.dispose();selectionBox.material.dispose();selectionBox=null;}
 for(const el of $('list').children)el.classList.toggle('active',Number(el.dataset.idx)===entries.indexOf(item));
 if(!item){$('detail').textContent='Click a model.';return;}
@@ -68,12 +71,12 @@ async function load(data){clear();loadedScene=data;$('list').replaceChildren();c
 const floor=new THREE.Mesh(new THREE.PlaneGeometry(f[0],f[1]),new THREE.MeshStandardMaterial({color:data.floor?.color||'#4a4440',roughness:1,side:THREE.DoubleSide}));floor.rotation.x=-Math.PI/2;floor.position.y=-0.025;group.add(floor);
 let good=0,bad=0;const loaded=new Map();
 await Promise.all(objs.map(async(o,index)=>{if(!o.model)return;try{const url=assetUrl(o.model);if(!loaded.has(url))loaded.set(url,loader.loadAsync(url));const gltf=await loaded.get(url);const root=gltf.scene.clone(true);root.position.fromArray(o.position||[0,0,0]);root.rotation.y=THREE.MathUtils.degToRad(o.rotationY||0);const sc=Number(o.scale||1);root.scale.setScalar(sc);root.userData.index=index;root.traverse(c=>{c.userData.index=index});group.add(root);const item={root,data:o,index};entries.push(item);good++}catch(e){bad++;failedModels.push({index,model:o.model,error:String(e)});console.warn('Failed model',o.model,e)}}));
-entries.sort((a,b)=>a.index-b.index);entries.forEach(listEntry);$('counter').textContent=good+' models loaded · '+bad+' failed · '+objs.length+' objects';
+entries.sort((a,b)=>a.index-b.index);entries.forEach(listEntry);setRoofVisibility();$('counter').textContent=good+' models loaded · '+bad+' failed · '+objs.length+' objects';
 const start=data.camera?.start||[0,1.6,0];controls.target.set(start[0],2,start[2]);const distance=Math.max(14,Math.max(...f)*.7);camera.position.set(start[0]+distance*.7,Math.max(12,distance*.6),start[2]+distance*.75);controls.update();say(good+' objects loaded successfully'+(bad?' ('+bad+' failed: check DevTools/CORS)':''));}
 async function loadUrl(){try{const url=new URL($('sceneUrl').value,location.href);lastSceneUrl=url.href;const res=await fetch(url,{cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);await load(await res.json())}catch(e){say('Could not load scene: '+e.message,true)}}
 $('load').onclick=loadUrl;
 $('file').onchange=async e=>{const f=e.target.files?.[0];if(!f)return;try{await load(JSON.parse(await f.text()))}catch(err){say(err.message,true)}};
-$('grid').onchange=()=>grid.visible=$('grid').checked;$('axes').onchange=()=>axes.visible=$('axes').checked;$('bounds').onchange=()=>select(selected);
+$('roof').onchange=setRoofVisibility;$('grid').onchange=()=>grid.visible=$('grid').checked;$('axes').onchange=()=>axes.visible=$('axes').checked;$('bounds').onchange=()=>select(selected);
 $('shot').onclick=()=>{renderer.render(scene,camera);const a=document.createElement('a');a.download='domain-atlas-scene-lab.png';a.href=renderer.domElement.toDataURL('image/png');a.click()};
 // Portable, read-only diagnostic bundle. Never includes wallet data or credentials.
 // JSON preserves complete source scene for audit (including anchors/interactables),
