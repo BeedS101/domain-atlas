@@ -6524,6 +6524,9 @@ seedConfirmBtn.addEventListener('click', async () => {
   await refreshInventoryDisplay();
   await refreshOwnedOncePerUserClassKeys();
   await refreshSceneItemMarkers();
+  await applyAvatarLookToScene();
+  await applyAvatarHatToScene();
+  await applyAvatarShoesToScene();
   refreshChatIdentity(); // a freshly-created identity is unlocked immediately — chat should recognize it right away, same as the unlock/lock paths
 });
 
@@ -6655,6 +6658,12 @@ unlockBtn.addEventListener('click', async () => {
     // after unlocking. Don't re-enter the world: that would reset the
     // character's position and camera as well as reconnect presence/chat.
     await refreshSceneItemMarkers();
+    // Unlocking after entering a 3D world must reapply the active identity's
+    // equipment. World entry previously seeded these from a locked wallet,
+    // so merely refreshing the drops left the avatar with its default look.
+    await applyAvatarLookToScene();
+    await applyAvatarHatToScene();
+    await applyAvatarShoesToScene();
     refreshChatIdentity(); // an in-progress chat session should reflect the newly-unlocked identity immediately, without requiring leaving the world
   } catch (err) {
     unlockScreenStatus.textContent = err.message;
