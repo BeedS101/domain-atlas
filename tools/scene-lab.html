@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Domain Atlas — Scene Lab</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#111820;color:#e7eff6;font:14px system-ui}
+header{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#1c2834;flex-wrap:wrap}
+h1{font-size:16px;margin:0 18px 0 0}input,button{background:#263747;color:#fff;border:1px solid #567085;border-radius:5px;padding:7px}
+input[type=text]{width:min(34vw,430px)}button{cursor:pointer}button:hover{background:#355168}
+main{display:grid;grid-template-columns:minmax(0,1fr) 310px;height:calc(100vh - 105px)}#view{position:relative;min-height:200px}canvas{display:block}
+aside{padding:14px;background:#1b2733;overflow:auto;border-left:1px solid #435365}
+small,p{color:#b6c8d7;line-height:1.5}#list{height:45%;overflow:auto;border:1px solid #415464}
+.entry{padding:7px;border-bottom:1px solid #344553;cursor:pointer;word-break:break-word}
+.entry:hover,.entry.active{background:#34516a}label{display:block;margin-top:10px;color:#acc1d0}
+#detail{font:12px/1.6 monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+#status{padding:8px 14px;background:#17232e;color:#a8c7d7;min-height:33px}
+#error{color:#ffac96}.tag{font-size:12px;color:#7fe3c9}#hint{position:absolute;left:10px;bottom:12px;background:#111b24cc;padding:8px;border-radius:5px}
+@media(max-width:780px){main{grid-template-columns:1fr;grid-template-rows:55vh 1fr;height:auto}aside{height:42vh}input[type=text]{width:210px}}
+</style></head><body>
+<header><h1>🐹 Domain Atlas Scene Lab</h1>
+<input id="sceneUrl" type="text" value="/spatial/gallery-v4/scene.json" aria-label="Scene JSON URL">
+<button id="load">Load scene URL</button>
+<label style="margin:0">or <input id="file" type="file" accept=".json,application/json"></label>
+<label style="margin:0">Asset base <input id="base" type="text" value="/" title="Root URL for /assets/... model paths"></label>
+<button id="shot">Save screenshot</button>
+</header>
+<main><section id="view"><div id="hint">Drag: rotate · Right drag: pan · Scroll: zoom · Click model: inspect</div></section>
+<aside><b>Scene Inspector</b><p>Uses actual scene.json and GLB assets. Select an object to highlight it and inspect its geometry bounds and world position.</p>
+<label><input id="grid" type="checkbox" checked> Floor grid</label>
+<label><input id="bounds" type="checkbox" checked> Selected bounds</label>
+<label><input id="axes" type="checkbox"> Axes</label>
+<p class="tag" id="counter">No scene loaded</p>
+<div id="list"></div>
+<h3>Selected object</h3><div id="detail">Click an object in the viewport or list.</div>
+<p><small>This is an inspection tool, not a wallet renderer. It deliberately does not activate portals, credentials or scene scripts. All files load in your browser. GLBs on another domain require CORS permission.</small></p>
+</aside></main><div id="status">Ready. Serve this file over HTTP(S), not file://.</div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+const $=id=>document.getElementById(id);
+const host=$('view'), status=$('status'), loader=new GLTFLoader();
+const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(host.clientWidth,host.clientHeight);renderer.outputColorSpace=THREE.SRGBColorSpace;host.prepend(renderer.domElement);
+const scene=new THREE.Scene();scene.background=new THREE.Color('#101820');
+scene.add(new THREE.HemisphereLight(0xe8efff,0x475b67,2));
+const sun=new THREE.DirectionalLight(0xffeed0,2.3);sun.position.set(-12,24,14);scene.add(sun);
+const camera=new THREE.PerspectiveCamera(60,host.clientWidth/host.clientHeight,.05,1000);
+camera.position.set(20,18,25);
+const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.target.set(0,2,0);controls.update();
+const grid=new THREE.GridHelper(60,60,0x527888,0x2f4553);scene.add(grid);
+const axes=new THREE.AxesHelper(4);axes.visible=false;scene.add(axes);
+let group=new THREE.Group();scene.add(group);
+let entries=[], selected=null, selectionBox=null, ray=new THREE.Raycaster(), pointer=new THREE.Vector2(), lastSceneUrl='';
+function baseUrl(){let v=$('base').value.trim()||'/';return new URL(v.endsWith('/')?v:v+'/',location.href)}
+function assetUrl(model){const base=baseUrl();if(/^https?:\/\//i.test(model))return model;if(model.startsWith('/'))return new URL(model.slice(1),base).href;return new URL(model,base).href}
+function say(t,bad=false){status.textContent=t;status.id='status';status.style.color=bad?'#ffac96':'#a8c7d7'}
+function clear(){scene.remove(group);group.traverse(x=>{if(x.geometry)x.geometry.dispose();});group=new THREE.Group();scene.add(group);entries=[];selected=null;if(selectionBox){scene.remove(selectionBox);selectionBox=null;}}
+function select(item){selected=item;if(selectionBox){scene.remove(selectionBox);selectionBox.geometry.dispose();selectionBox.material.dispose();selectionBox=null;}
+for(const el of $('list').children)el.classList.toggle('active',Number(el.dataset.idx)===entries.indexOf(item));
+if(!item){$('detail').textContent='Click a model.';return;}
+const box=new THREE.Box3().setFromObject(item.root);const size=box.getSize(new THREE.Vector3()),center=box.getCenter(new THREE.Vector3());
+if($('bounds').checked&&!box.isEmpty()){selectionBox=new THREE.Box3Helper(box,0xffd45c);scene.add(selectionBox)}
+$('detail').textContent=JSON.stringify({index:item.index,model:item.data.model,position:item.data.position,rotationY:item.data.rotationY||0,scale:item.data.scale||1,collision:item.data.collision!==false,worldCenter:center.toArray().map(n=>+n.toFixed(2)),worldSize:size.toArray().map(n=>+n.toFixed(2))},null,2)}
+function listEntry(item){const d=document.createElement('div');d.className='entry';d.dataset.idx=entries.indexOf(item);d.textContent=(item.index+1)+'. '+(item.data.model||'unnamed').split('/').pop();d.onclick=()=>{select(item);const b=new THREE.Box3().setFromObject(item.root);if(!b.isEmpty()){controls.target.copy(b.getCenter(new THREE.Vector3()));controls.update()}};$('list').append(d)}
+async function load(data){clear();$('list').replaceChildren();const objs=Array.isArray(data.objects)?data.objects:[];const f=data.floor?.size||[40,40];grid.scale.set(f[0]/60,1,f[1]/60);
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(f[0],f[1]),new THREE.MeshStandardMaterial({color:data.floor?.color||'#4a4440',roughness:1,side:THREE.DoubleSide}));floor.rotation.x=-Math.PI/2;floor.position.y=-0.025;group.add(floor);
+let good=0,bad=0;const loaded=new Map();
+await Promise.all(objs.map(async(o,index)=>{if(!o.model)return;try{const url=assetUrl(o.model);if(!loaded.has(url))loaded.set(url,loader.loadAsync(url));const gltf=await loaded.get(url);const root=gltf.scene.clone(true);root.position.fromArray(o.position||[0,0,0]);root.rotation.y=THREE.MathUtils.degToRad(o.rotationY||0);const sc=Number(o.scale||1);root.scale.setScalar(sc);root.userData.index=index;root.traverse(c=>{c.userData.index=index});group.add(root);const item={root,data:o,index};entries.push(item);good++}catch(e){bad++;console.warn('Failed model',o.model,e)}}));
+entries.sort((a,b)=>a.index-b.index);entries.forEach(listEntry);$('counter').textContent=good+' models loaded · '+bad+' failed · '+objs.length+' objects';
+const start=data.camera?.start||[0,1.6,0];controls.target.set(start[0],2,start[2]);const distance=Math.max(14,Math.max(...f)*.7);camera.position.set(start[0]+distance*.7,Math.max(12,distance*.6),start[2]+distance*.75);controls.update();say(good+' objects loaded successfully'+(bad?' ('+bad+' failed: check DevTools/CORS)':''));}
+async function loadUrl(){try{const url=new URL($('sceneUrl').value,location.href);lastSceneUrl=url.href;const res=await fetch(url,{cache:'no-store'});if(!res.ok)throw Error('HTTP '+res.status);await load(await res.json())}catch(e){say('Could not load scene: '+e.message,true)}}
+$('load').onclick=loadUrl;
+$('file').onchange=async e=>{const f=e.target.files?.[0];if(!f)return;try{await load(JSON.parse(await f.text()))}catch(err){say(err.message,true)}};
+$('grid').onchange=()=>grid.visible=$('grid').checked;$('axes').onchange=()=>axes.visible=$('axes').checked;$('bounds').onchange=()=>select(selected);
+$('shot').onclick=()=>{renderer.render(scene,camera);const a=document.createElement('a');a.download='domain-atlas-scene-lab.png';a.href=renderer.domElement.toDataURL('image/png');a.click()};
+let down=null;renderer.domElement.addEventListener('pointerdown',e=>{down={x:e.clientX,y:e.clientY}});renderer.domElement.addEventListener('pointerup',e=>{if(!down||Math.hypot(e.clientX-down.x,e.clientY-down.y)>5)return;const rect=renderer.domElement.getBoundingClientRect();pointer.set((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1);ray.setFromCamera(pointer,camera);const hits=ray.intersectObjects(group.children,true);for(const hit of hits){const found=entries.find(x=>{let p=hit.object;while(p){if(p===x.root)return true;p=p.parent}return false});if(found){select(found);break}}});
+const resize=new ResizeObserver(()=>{if(!host.clientWidth||!host.clientHeight)return;camera.aspect=host.clientWidth/host.clientHeight;camera.updateProjectionMatrix();renderer.setSize(host.clientWidth,host.clientHeight)});resize.observe(host);
+function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,camera)}loop();
+if(new URLSearchParams(location.search).has('scene')){$('sceneUrl').value=new URLSearchParams(location.search).get('scene');loadUrl()}
+</script></body></html>
