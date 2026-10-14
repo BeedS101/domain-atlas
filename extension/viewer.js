@@ -2427,14 +2427,15 @@ async function enterWorld(worldId, anchorId) {
   // just be written for a newer wallet than this one — so it gets a clear
   // "can't render this" message instead of silently falling through to the
   // 2D path and drawing something the world never intended.
-  const KNOWN_RENDERERS = ['gltf-mini-v1', 'procedural-v1'];
+  const KNOWN_RENDERERS = ['gltf-mini-v1', 'gltf-mini-experimental', 'procedural-v1'];
   const declaredRenderers = (world.entry.renderer && world.entry.renderer.length) ? world.entry.renderer : ['procedural-v1'];
   if (!declaredRenderers.some((r) => KNOWN_RENDERERS.includes(r))) {
     show3DCanvas(false);
     statusEl.textContent = 'This world needs a renderer this wallet doesn\'t support yet (' + declaredRenderers.join(', ') + ') — try updating the extension.';
     return;
   }
-  const is3D = declaredRenderers.includes('gltf-mini-v1');
+  const experimental3D = declaredRenderers.includes('gltf-mini-experimental');
+  const is3D = experimental3D || declaredRenderers.includes('gltf-mini-v1');
   show3DCanvas(is3D);
 
   if (is3D) {
@@ -2487,7 +2488,7 @@ async function enterWorld(worldId, anchorId) {
       localAvatarHatInfo = await AtlasWallet.getAvatarHat();
       localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
 
-      active3D = MiniGLTF.init(scene3dCanvas, {
+      active3D = (experimental3D ? window.AtlasExperimentalMiniGLTF : MiniGLTF).init(scene3dCanvas, {
         // gltf-mini.js reads sceneData.camera.start once, at init time, as
         // this world's spawn point (see its own camera const) — overriding
         // just that one field, rather than mutating sceneData in place,
