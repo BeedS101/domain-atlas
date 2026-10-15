@@ -1,0 +1,6 @@
+# Clean URLs for the Call Service: /atlas/call/listen is served by listen.php, and
+# /atlas/call/tag/create by tag/create.php, which is what the wallet requests.
+RewriteEngine On
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.+)$ $1.php [L]

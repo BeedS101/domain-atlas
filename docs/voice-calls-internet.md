@@ -162,15 +162,24 @@ own ports (section 7).
 | Gap | Status |
 |---|---|
 | ICE answer lists STUN only (`turn: false`) | done in milestone 3 when `CALL_TURN_URLS` and a secret are set (section 7); still STUN only otherwise |
-| `info` reports no admitted domains | milestone 4 |
+| `info` reports no admitted domains | not built (section 6.2) |
 | No graceful drain on shutdown beyond closing connections | acceptable: callers see "not available" and retry |
 | The wallet takes the service address by hand | optional later: a reference-implementation manifest field naming the domain's call service, suggested to the person and confirmed by them, like the existing `presence` and `postOffice` fields (not part of `SPEC.md`) |
-| Pinned issuer keys have a documented rotation procedure but no automatic refresh | procedure in `docs/voice-calls-deploy-node.md` section 11; an optional timed refresh from the listed domain's own key document is milestone 4 |
+| Pinned issuer keys have a documented rotation procedure but no automatic refresh | procedure in `docs/voice-calls-deploy-node.md` section 11; an optional timed refresh from the listed domain's own key document is not built (section 6.2) |
 | Nothing has run on a real server, behind real nginx/Caddy, across real networks, or under real load; the limits are starting points | owner, with the guide |
 | Several people behind one shared address share one set of per-source limits | tunable; documented |
 | Many proxies or a CDN in front change which forwarded address is the real one | not supported at this stage; one proxy on the same host |
 
-## 5. Native PHP signalling service (Proposed design)
+## 5. Native PHP signalling service (built in milestone 4)
+
+Status: built and tested on Linux over loopback (`call-php/`, `docs/voice-calls-deploy-php.md`,
+`docs/voice-calls-test-plan.md` section 9). Never run on a real PHP host. Where the design below
+differs from what was built: it needs PHP 7.4 or newer (not 8.0); the folder is `atlas/call/` in the
+domain root, next to the issuer's `atlas/`, not a top-level `call/`; state lives in many small files
+(calls, tags, listeners and request records sharded by hash) rather than one JSON file, under one
+global lock; the wallet takes its re-ask delay from the service's `nextPollMs` hint; and the shared
+vectors became a differential test that compares the PHP and Node implementations on generated and
+mutated messages (`test/manual-call-php-protocol.js`).
 
 ### 5.1 Feasibility
 
@@ -178,7 +187,7 @@ Technically feasible on conventional PHP hosting, with different performance. Th
 protocol is transport independent (`extension/call-protocol.js` is the specification of every
 rule); the PHP service ports the route handlers and the call state, not new cryptography.
 
-* PHP 8.0 or newer with `openssl` and `hash`; no extensions beyond those the PHP issuer already
+* PHP 7.4 or newer with `openssl`, `hash` and `json`; no extensions beyond those the PHP issuer already
   needs (`issuer-php/lib/bootstrap.php` already verifies raw ECDSA P-256 envelopes with
   `openssl_verify`).
 * Layout and conventions follow `presence-php/`: a `call/` folder, one PHP file per route, a
@@ -225,7 +234,12 @@ Hosting limits that remain: no cron (sweeping on requests only), `flock` on netw
 systems can be unreliable, hosts that kill scripts after a short time are fine for short polls
 but not for any hold, and the file store does not scale to many simultaneous listeners.
 
-## 6. Cross-domain admission (Proposed)
+## 6. Cross-domain admission (Proposed; section 6.1 tested in milestone 4)
+
+Milestone 4 tested the situation section 6.1 describes, which needs no new mechanism: two services
+on two domains with two issuers, in every Node/PHP pairing that includes PHP, and two real
+browser wallets listening on different services. The admission list in section 6.2 was **not**
+built.
 
 ### 6.1 What is actually restricted today
 
@@ -330,7 +344,11 @@ directory of wallets, calling optional and isolated (section 3). Domain Atlas Co
   different internet connections with and without STUN.
 * Milestone 3 on a real host: a VPS running coturn with `coturn-turn.conf.example`, `turn-probe.js`
   against it, and relayed calls between two real networks (`docs/voice-calls-deploy-turn.md`
-  section 11 lists what is unverified). The PHP service once built.
+  section 11 lists what is unverified).
+* Milestone 4 on real PHP hosting (`docs/voice-calls-deploy-php.md` section 10): Apache with the
+  shipped `.htaccess` files, the deployment checker against the real address, the host's request
+  and CPU limits with wallets polling, then a real call between two wallets on two networks
+  through a PHP-hosted service, tried with direct connections first.
 * The checks listed in `docs/voice-calls-phase1b.md` section 3.3 that no automated test can
   make: the real microphone prompt, hidden or sleeping windows, the operating system's
   recording indicator, passkey identities, Firefox and branded Chrome.

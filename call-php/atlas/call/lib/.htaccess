@@ -1,0 +1,9 @@
+# Nothing in this folder is meant to be fetched over the web: it holds the service code, the
+# settings file (which can hold the TURN secret) and, by default, the state folder.
+<IfModule mod_authz_core.c>
+  Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+  Order deny,allow
+  Deny from all
+</IfModule>

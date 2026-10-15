@@ -313,3 +313,79 @@ lifetime setting was absent; IPv6 site-local addresses and hosts written as numb
 were not treated as private; the wallet's first filter looked at too few URLs per entry for the existing STUN suite. The
 simulated server and probe also showed that Chromium's TCP and TLS TURN connections follow the browser's proxy
 settings, and that a relayed call ends when its credential expires (guide section 3).
+
+## 9. Native PHP Call Service (milestone 4)
+
+Evidence classes are kept apart on purpose.
+
+- **Code review**: the PHP service was written against `call-server/server.js` and the shared
+  protocol module; every rule in section 5.3 of `docs/voice-calls-internet.md` was read on both sides.
+- **Automated, real code**: the PHP service under PHP 8.4's built-in web server (`php -S`, four to
+  eight workers, one PHP process per request like shared hosting), the Node service, the wallet
+  and Chromium 141 under Xvfb. Linux sandbox, loopback.
+- **Simulated hosting**: `call-php/test-router.php` imitates the `.htaccess` clean-URL rule and the
+  denial of `lib/`. No Apache, LiteSpeed or nginx was run, so the shipped `.htaccess` files have
+  never been read by a real web server.
+- **Real hardware / real hosting**: none. No real PHP host, certificate, CDN, NAT, second network,
+  microphone or speaker was used.
+
+| ID | Check | Suite | Status |
+|---|---|---|---|
+| P1 | the PHP protocol library agrees with the JavaScript module: canonical form, hashes, time parsing, payload and envelope validation, raw, DER-encoded, passkey and wallet-bound signatures, on generated and mutated messages (seeded; `SEED`, `ROUNDS`, `DUMP` variables) | `manual-call-php-protocol.js` | Automated. Disagreements exist only where PHP is stricter (lone surrogates, invalid UTF-8, trailing bytes in encoded keys); each is a named case in the test |
+| P2 | the shared 108-check service suite (tags, membership, invites, signalling, replay, tampering, limits, cleanup, persistence) gives the same verdicts against the PHP service as against the Node service, with the same wallet-side client | `manual-call-php-service.js`, `manual-call-service.js` | Automated |
+| P3 | unconfigured service: `503 calls-not-configured` on every route, nothing written; about 40 settings mistakes each leave it unconfigured with the first problem named; the operator checker prints OK or the problem | `manual-call-php-hosting.js` | Automated |
+| P4 | HTTP layer: methods, content type, body caps, origin refusal, CORS on the invite route only, https and proxy rules, address keying, security headers, JSON `500` with no paths | same | Automated |
+| P5 | short polling: no request is held; `nextPollMs` for idle, ringing, set-up and active; `info` states `listenHoldMs: 0`; the wallet's re-ask delay (hint followed and clamped, no tight loop without a hint) | same | Automated. The delay function is extracted from `extension/call.js` and run on its own |
+| P6 | time limits applied lazily: ring, accept to offer, offer to answer, confirm, silent call, maximum length, retention, cleanup of old state | same | Automated |
+| P7 | the lock: a request waits `lockWaitMs`, then answers `503 busy` and changes nothing; it never proceeds unlocked; works again once released | same | Automated |
+| P8 | revocations read from the issuer's file: taking effect on the next request, other credentials unaffected, unreadable or invalid file and missing file fail closed | same | Automated |
+| P9 | TURN credentials ported: HMAC-SHA1 form, only after accept, three per role, lifetime capped, secret absent from every response and state file | same | Automated against the PHP service. coturn was never run |
+| P10 | state files are 0600, nothing is written outside the state folder, expired entries are purged | same | Automated |
+| P11 | the upload folder holds exactly the 16 documented files; every file passes `php -l`; no syntax or function newer than PHP 7.4 (text scan); entry files are stubs; `lib/` is refused by the test router; `lib/config.php` and `lib/state/` are ignored by git | same | Automated. **Only PHP 8.4 was run**; 7.4 compatibility is unproven |
+| P12 | the deployment checker passes a correct PHP service, accepts a host that refuses `lib/`, and fails a host that serves the settings file, the code or state files | same | Automated against a stand-in front, not Apache |
+| P13 | two services on two domains with two issuers, in the pairings PHP+PHP, Node+PHP, PHP+Node: calls both ways through the callee's service, the caller having no membership there; a membership, tag, signed message or revocation from one service does nothing on the other; each service works with the other stopped | `manual-call-php-cross.js` | Automated, protocol level |
+| P14 | concurrency: 24 copies of one signed request, one is accepted; six invites on one tag, one rings; ten messages with the same sequence number, one is accepted; 12 simultaneous calls and tag creations all succeed with consistent counts; limits count exactly (6 of 16 invites, 30 of 45 tag creations); no PHP errors; no stray files. Repeated six times without a failure | `manual-call-php-concurrency.js` | Automated. Correctness under parallel requests; **throughput was not measured** |
+| P15 | real wallets in two browser profiles through the PHP service: the whole existing browser suite (call, mute, hang up, decline, cancel, no answer, do not disturb, permission revoked, wallet lock, window close, ring limit), audio flowing in both directions | `ATLAS_CALL_BACKEND=php node test/manual-call-e2e.js` | Automated, loopback, Chromium's fake capture device |
+| P16 | two real wallets, each listening on a different service for a different domain, call each other in both directions (Node+PHP and PHP+PHP), each caller using the service named in the callee's card; audio both ways; hang-up releases the microphone and the connection | `manual-call-php-e2e-cross.js` | Automated, loopback. Both wallets are also members of the same demo Post Office for mail |
+| P17 | the guide on a real PHP host: upload, settings, the checker against the real address, `.htaccess` under Apache, request and CPU limits with wallets polling | `docs/voice-calls-deploy-php.md` | **Not run: owner** |
+| P18 | a real call between two wallets on two networks through a PHP-hosted service, direct connections first | | **Not run: owner** |
+| P19 | PHP older than 8.4; nginx or LiteSpeed; behind a CDN; real TLS | | **Not run** |
+
+### 9.1 Whole call suite after milestone 4
+
+24 suites, 1077 checks, 0 failures in the final runs: protocol 59, ice-validation 48, service 108,
+unconfigured 15, php-protocol 15, php-service 108, php-hosting 147, php-cross 71,
+php-concurrency 26, internet-security 125, proxy 16, turn-service 73, turn-probe 17, turn-deploy 20,
+e2e 41, php-e2e-cross 18, contacts 20, messaging 12, mic 12, adversary 35, bridge 18, isolation 24,
+stun 13, turn 36. The eighteen earlier suites (692 checks) pass unchanged. In the single run of
+`run-call-tests.sh`, `manual-call-proxy` failed one check because this milestone had reworded a
+message the checker prints; the wording was restored and the suite re-run on its own (16 of 16).
+`manual-call-php-hosting` gained its last eight checks after that run and was re-run on its own
+(147 of 147). The script was not run again as a whole. The main browser suite also passes against
+the PHP service (41 of 41, run separately). Three older wallet suites that load the same
+extension (`manual-auto-backup`, `manual-page-wallet-bridge`, `manual-chat-e2ee`) pass;
+`manual-chat-e2ee` timed out once in `createIdentity` before passing on a clean re-run, which was
+not investigated.
+
+### 9.2 What found real problems
+
+- **Replay protection in the Node service had a gap**: request records were kept (150 s)
+  for less time than a signed request can stay acceptable (its issue time may run ahead of the service clock). Found while sizing the PHP records.
+  Fixed in `call-server/protocol.js` and `extension/call-protocol.js` (retention 270 s, still
+  byte-identical), so Node and PHP now keep records for the same period.
+- The difference tests found that the PHP DER reader differed from Node's on a truncated signature,
+  and the mutation tests that a changed user-present flag in a passkey signature was not detected
+  until targeted cases were added.
+- State files and the lock file were created world-readable; both are now 0600.
+- An invite could overwrite a newer call index loaded before the ringing check; reordered.
+- Settings that are valid on their own but not together (`sweepMs` under its minimum,
+  `listenerFreshMs` under twice the idle poll) were found by the test harness and are now refused
+  with the setting named.
+
+### 9.3 Known differences and gaps
+
+See `docs/voice-calls-deploy-php.md` sections 9 and 10. In short: short polling adds a few seconds to
+call set-up; the PHP service has no connection or in-flight limits (PHP has none to count) and
+approximate request-record capacity; it is stricter than Node about invalid text and about
+credentials with an unreadable expiry; and every real-hosting item above is unverified. The
+admission list across domains (`docs/voice-calls-internet.md` section 6.2) is still only proposed.

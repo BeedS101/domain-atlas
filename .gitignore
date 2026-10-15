@@ -25,10 +25,10 @@ demo-domain-a/.well-known/atlas-suspensions.json
 issuer-server/reviewer-private-key.jwk.json
 demo-domain-a/.well-known/atlas-reviewer-key.json
 
-# Same, for the second issuer-server instance README.md's "Serve the two
-# demo domains" now runs for demo-domain-b (task #75/#87's Post Office) —
-# its own private key + mail/roster state, plus demo-domain-b's own
-# generated .well-known files, mirroring the domain-a entries above.
+# Same, for the second issuer-server instance that README.md's "Serve the two
+# demo domains" runs for demo-domain-b (its Post Office): its own private key and
+# mail/roster state, plus demo-domain-b's generated .well-known files, mirroring
+# the domain-a entries above.
 issuer-server/domain-b-state/
 demo-domain-b/.well-known/atlas-key.json
 demo-domain-b/.well-known/atlas-revocations.json
@@ -86,3 +86,7 @@ presence-server/moderation-audit.jsonl*
 # Call Service tag store (hashes of routing tags and wallet keys): runtime state.
 call-server/atlas-*.json
 call-server/*.tmp
+
+# Native PHP Call Service: deployed settings and runtime state must never be committed.
+call-php/atlas/call/lib/config.php
+call-php/atlas/call/lib/state/

@@ -7,6 +7,9 @@
 // It creates no tag, needs no membership, signs nothing with a real identity, and leaves
 // nothing behind on the service beyond a listening slot that expires within a minute.
 // Plain http is accepted only with --allow-http, for a private test network.
+// It works for the Node Call Service and the PHP Call Service (call-php/): a service that holds
+// no request (listenHoldMs 0) is checked for prompt short-poll answers instead of a held listen,
+// and the folders a PHP host must never serve (settings, state, source) are probed for.
 // Exit status 0 when nothing failed (warnings do not fail), 1 otherwise.
 'use strict';
 
@@ -80,7 +83,7 @@ async function main() {
   if (info.json.configured === true) ok('the service is configured');
   else { bad('the service is configured', 'it reports configured:false; read its console for the setting that is wrong'); return 1; }
   if (info.json.audience === origin) ok('the service names exactly this address as its origin', origin);
-  else bad('the service names exactly this address as its origin', 'it says ' + info.json.audience + ' but you typed ' + origin + '; CALL_ORIGIN must match');
+  else bad('the service names exactly this address as its origin', 'it says ' + info.json.audience + ' but you typed ' + origin + '; CALL_ORIGIN must match (PHP service: origin in lib/config.php)');
   console.log('INFO domain admitted: ' + info.json.domain + '; STUN: ' + ((info.json.ice && info.json.ice.stun || []).join(', ') || 'none') + '; TURN: ' + (info.json.ice && info.json.ice.turn ? 'yes (' + (info.json.ice.turnUrls || []).join(', ') + ')' : 'no'));
   if (info.json.ice && info.json.ice.turn) console.log('INFO this checker does not test the TURN server; run call-server/turn-probe.js against it (docs/voice-calls-deploy-turn.md section 6)');
   const skew = Math.abs(Date.parse(info.json.serverTime) - Date.now());
@@ -129,9 +132,45 @@ async function main() {
   }
 
   // ---- a long poll survives the proxy ----
-  if (skipHold) { warn('a long poll survives the proxy', 'skipped'); }
+  const advertisedHold = info.json.limits ? info.json.limits.listenHoldMs : undefined;
+  if (advertisedHold === 0) {
+    // ---- short polling: every listen answers at once ----
+    const ident = await throwawayIdentity();
+    const session = await throwawayIdentity();
+    const iso = (ms) => new Date(ms).toISOString();
+    const delegationPayload = { type: 'atlas.call.listen-session', v: 1, audience: origin, issuedAt: iso(Date.now()), expiresAt: iso(Date.now() + 120000), sessionKey: session.pub };
+    const delegation = { payload: delegationPayload, proof: await signed(delegationPayload, ident) };
+    const listenPayload = { type: 'atlas.call.listen', v: 1, audience: origin, issuedAt: iso(Date.now()), nonce: P.randomId(16), ack: [] };
+    r = await post('/atlas/call/listen', { body: JSON.stringify({ payload: listenPayload, proof: await signed(listenPayload, session), session: delegation }) });
+    if (r.error) bad('a listen is answered at once', r.error);
+    else if (r.status === 401 && r.json && r.json.code === 'stale-request') bad('a listen is answered at once', 'the service says this computer\'s clock is out of step');
+    else if (r.status === 503) bad('a listen is answered at once', 'status 503 ' + (r.json && r.json.code) + '; the host may be refusing the state folder or a lock');
+    else if (r.status !== 200 || !r.json || !Array.isArray(r.json.events)) bad('a listen is answered at once', 'status ' + r.status);
+    else if (r.ms > 5000) warn('a listen is answered at once', 'took ' + Math.round(r.ms / 1000) + ' s; shared hosting may be slow or overloaded');
+    else ok('a listen is answered at once', r.ms + ' ms');
+    if (r.json && r.json.events) {
+      if (Number.isInteger(r.json.nextPollMs) && r.json.nextPollMs >= 100 && r.json.nextPollMs <= 15000) ok('the service gives a polling interval', r.json.nextPollMs + ' ms');
+      else bad('the service gives a polling interval', String(r.json.nextPollMs));
+    }
+    const replay = await post('/atlas/call/listen', { body: JSON.stringify({ payload: listenPayload, proof: await signed(listenPayload, session), session: delegation }) });
+    if (replay.status === 401 && replay.json && replay.json.code === 'replayed-request') ok('the same signed request sent again is refused');
+    else bad('the same signed request sent again is refused', 'status ' + (replay.status || replay.error) + '; the service is not keeping request records');
+    // The files a PHP deployment keeps next to the code must not be reachable from the web.
+    const probes = ['/atlas/call/lib/config.php', '/atlas/call/lib/config.example.php', '/atlas/call/lib/service.php', '/atlas/call/lib/protocol.php', '/atlas/call/lib/store.php', '/atlas/call/lib/bootstrap.php', '/atlas/call/lib/state/', '/atlas/call/lib/state/lock', '/atlas/call/lib/state/meta.json', '/atlas/call/lib/state/calls/index.json'];
+    const leaks = [], soft = [];
+    for (const path of probes) {
+      const g = await request(origin + path);
+      if (g.error) continue;
+      const showsSource = /<\?php|return \[|issuerKeys|turnSecret/.test(g.text || '');
+      if (showsSource || (g.status === 200 && !path.endsWith('.php'))) leaks.push(path + ' (' + g.status + ')');
+      else if (g.status === 200) soft.push(path);
+    }
+    if (leaks.length) bad('settings, state and source files are not served', leaks.join(', ') + '; lib/.htaccess is not being applied (AllowOverride) or the host is not Apache');
+    else if (soft.length) warn('settings, state and source files are not served', soft.join(', ') + ' answer 200 with nothing in them (PHP ran the file); lib/.htaccess is not being applied, so add the denial in the host panel');
+    else ok('settings, state and source files are not served', probes.length + ' paths refused');
+  } else if (skipHold) { warn('a long poll survives the proxy', 'skipped'); }
   else {
-    const holdMs = (info.json.limits && info.json.limits.listenHoldMs) || 25000;
+    const holdMs = advertisedHold || 25000;
     const ident = await throwawayIdentity();
     const session = await throwawayIdentity();
     const iso = (ms) => new Date(ms).toISOString();

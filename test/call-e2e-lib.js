@@ -41,7 +41,14 @@ async function domainKey() {
   return j.keys[j.keys.length - 1].publicKey;
 }
 
+// ATLAS_CALL_BACKEND=php runs the same browser tests against the PHP Call Service
+// (call-php/) under PHP's built-in web server instead of the Node Call Service.
 async function startCallService(over, opts) {
+  if (process.env.ATLAS_CALL_BACKEND === 'php') {
+    const php = require('./call-php-lib');
+    const ctx = await php.startPhpService(Object.assign({ domain: MAIL_DOMAIN, issuerKeys: [await domainKey()] }, over || {}), opts || {});
+    return { svc: ctx.svc, cfg: ctx.cfg, origin: ctx.origin, close: () => ctx.svc.close() };
+  }
   const port = await freePort();
   const cfg = Object.assign({
     configured: true, origin: 'http://127.0.0.1:' + port, domain: MAIL_DOMAIN, issuerKeys: [await domainKey()], revocationsUrl: null,

@@ -27,7 +27,7 @@
     inviteTtlMs: 60000,          // expiresAt - issuedAt at most
     walletSkewMs: 30000,         // a wallet's tolerance for issuedAt / expiresAt
     serviceWindowMs: 120000,     // a request to the service must be this fresh
-    nonceRetainMs: 150000,       // acceptance window plus the clock allowance
+    nonceRetainMs: 270000,       // twice serviceWindowMs plus a margin: a request stays fresh until issuedAt + window, and issuedAt may be a window ahead of the service clock
     listenSessionMs: 3600000,
     tagMaxAheadMs: 90 * 24 * 3600 * 1000,
     maxCallsPerTag: 100,

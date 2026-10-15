@@ -60,6 +60,16 @@
     el.textContent = (el.textContent + line + '\n').split('\n').slice(-30).join('\n');
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // A service that holds a request until something happens needs no pause between requests. One
+  // that answers at once (the PHP Call Service) says how long to wait in nextPollMs, kept within
+  // bounds so a service cannot stall a wallet or make it spin. A reply with no hint that came
+  // back empty almost immediately gets a short pause, so a service or proxy that does not hold
+  // requests cannot make the wallet send them in a tight loop.
+  function repollDelay(json, elapsedMs, eventCount, maxMs) {
+    const hint = json && Number.isInteger(json.nextPollMs) ? json.nextPollMs : null;
+    if (hint !== null) return Math.max(100, Math.min(hint, maxMs));
+    return !eventCount && elapsedMs < 250 ? 500 : 0;
+  }
   const shortKey = (k) => (k ? k.slice(0, 6) + '…' + k.slice(-6) : '');
 
   function notice(text, kind) {
@@ -312,6 +322,7 @@
       if (Date.now() >= token.expiresAt) { await goDnd('session-ended'); notice('Your availability ended after an hour. Press Available to continue receiving calls.', 'warn'); return; }
       try {
         const payload = base('atlas.call.listen', token.service, { nonce: P.randomId(16), ack: token.pendingAck.splice(0, P.LIMITS.ackMax) });
+        const startedAt = Date.now();
         const res = await W.callPost(token.service, '/atlas/call/listen', { payload, proof: await signRaw(token.sk, payload), session: token.delegation }, { signal: token.abort.signal, timeoutMs: 40000 });
         if (st.listen !== token) return;
         if (res.status === 200 && res.json && Array.isArray(res.json.events)) {
@@ -321,6 +332,8 @@
             token.pendingAck.push(ev.id);
             try { await handleListenEvent(ev); } catch (err) { log('listen-event-error', String(err && err.message)); }
           }
+          const pause = repollDelay(res.json, Date.now() - startedAt, res.json.events.length, 15000);
+          if (pause) await sleep(pause);
           continue;
         }
         const code = res.json && res.json.code;
@@ -592,6 +605,7 @@
     while (live(call)) {
       try {
         const payload = base('atlas.call.poll', call.service, { nonce: P.randomId(16), callId: call.id, after: call.pollAfter });
+        const startedAt = Date.now();
         const res = await W.callPost(call.service, '/atlas/call/poll', { payload, proof: await signRaw(call.ck, payload) }, { signal: call.abort.signal, timeoutMs: 40000 });
         if (!live(call)) return;
         if (res.status === 200 && res.json && Array.isArray(res.json.events)) {
@@ -603,6 +617,8 @@
             call.pollAfter = e.n;
             try { await handlePollEvent(call, e); } catch (err) { log('handler-error', String(err && err.message)); fail(call, 'handler-error'); return; }
           }
+          const pause = repollDelay(res.json, Date.now() - startedAt, res.json.events.length, 5000);
+          if (pause && live(call)) await sleep(pause);
           continue;
         }
         if (res.status === 404) { if (call.state === 'ringing' || call.state === 'await-offer') return endCall(call, 'unavailable'); failures += 2; }

@@ -6,6 +6,7 @@
 //   PORT=8002 ATLAS_DOMAIN=localhost:8002 ATLAS_DOCROOT=demo-domain-b \
 //     ATLAS_STATE_DIR=issuer-server/domain-b-state node issuer-server/server.js
 // Run: xvfb-run -a node test/manual-call-e2e.js
+// Against the PHP Call Service instead: ATLAS_CALL_BACKEND=php xvfb-run -a node test/manual-call-e2e.js
 //
 // Chromium's fake capture device stands in for a microphone; the real microphone prompt, a
 // passkey identity and two separate computers are not exercised here.
@@ -50,7 +51,7 @@ const callCount = (w) => w.callPage.evaluate(() => window.__atlasCall.history.le
     await sleep(2500);
     const sa = await alice.stats(), sb = await bob.stats();
     check('audio actually flows in both directions', sa.inBytes > 0 && sa.outBytes > 0 && sb.inBytes > 0 && sb.outBytes > 0, { sa, sb });
-    check('the service holds one live call', svc.svc.stats().liveCalls === 1);
+    check('the service holds one live call', (await svc.svc.stats()).liveCalls === 1);
 
     // ---------- 2. mute / unmute ----------
     await pa.click('#btnMute');
@@ -69,8 +70,8 @@ const callCount = (w) => w.callPage.evaluate(() => window.__atlasCall.history.le
     check('Hang up releases the microphone, detaches senders and closes the connection (caller)', tA && tA.micTrackStates.every((s) => s === 'ended') && tA.liveTracksAfter === 0 && tA.pcState === 'closed' && (tA.senderTracks || []).every((x) => x === null || x === 'ended'), tA);
     check('the other side ends and releases everything too', tB && tB.liveTracksAfter === 0 && tB.pcState === 'closed' && tB.micTrackStates.every((s) => s === 'ended'), tB);
     check('the callee saw the end as a hang-up by the other person', tB && tB.reason === 'hangup');
-    await until(() => svc.svc.stats().liveCalls === 0, 8000, 200);
-    check('the service marks the call ended', svc.svc.stats().liveCalls === 0);
+    await until(async () => (await svc.svc.stats()).liveCalls === 0, 8000, 200);
+    check('the service marks the call ended', (await svc.svc.stats()).liveCalls === 0);
 
     // ---------- 4. decline ----------
     await pa.click('#btnDismiss').catch(() => {}); await pb.click('#btnDismiss').catch(() => {});
@@ -150,8 +151,8 @@ const callCount = (w) => w.callPage.evaluate(() => window.__atlasCall.history.le
     const closedEnd = await until(async () => (await callCount(bob)) > bBefore && (await bob.teardown()), 15000, 200);
     check('closing the calling window ends the call for the other side', closedEnd && closedEnd.reason === 'hangup', closedEnd);
     check('Bob\'s microphone and connection are released', closedEnd && closedEnd.liveTracksAfter === 0 && closedEnd.pcState === 'closed');
-    await until(() => svc.svc.stats().liveCalls === 0, 8000, 200);
-    check('the service holds no live call afterwards', svc.svc.stats().liveCalls === 0);
+    await until(async () => (await svc.svc.stats()).liveCalls === 0, 8000, 200);
+    check('the service holds no live call afterwards', (await svc.svc.stats()).liveCalls === 0);
     // ---------- 11. a contact cannot ring the callee without limit ----------
     const pa2 = await alice.openCallWindow();
     await bob.setTimers({ ringRateWindowMs: 60000 });
@@ -180,6 +181,6 @@ const callCount = (w) => w.callPage.evaluate(() => window.__atlasCall.history.le
   } finally {
     await alice.close(); await bob.close(); await svc.close();
   }
-  exit = L.finish('manual-call-e2e');
+  exit = L.finish('manual-call-e2e' + (process.env.ATLAS_CALL_BACKEND === 'php' ? ' (php)' : ''));
   process.exit(exit);
 })();
