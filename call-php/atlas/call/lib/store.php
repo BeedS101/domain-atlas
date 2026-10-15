@@ -91,6 +91,21 @@ final class CallStore {
     if (!@rename($tmp, $file)) { @unlink($tmp); throw new RuntimeException('state-unwritable'); }
   }
 
+  // A short plain-text log inside the state folder (web-denied), kept to the last 64 KB. Called
+  // with the lock held; a failure to write it never affects a request.
+  function appendLog($name, $line) {
+    $file = $this->dir . '/' . $name;
+    $old = is_file($file) ? @file_get_contents($file) : '';
+    if (!is_string($old)) $old = '';
+    $text = $old . $line . "\n";
+    if (strlen($text) > 65536) {
+      $text = substr($text, -32768);
+      $cut = strpos($text, "\n");
+      if ($cut !== false) $text = substr($text, $cut + 1);
+    }
+    if (@file_put_contents($file, $text) !== false) @chmod($file, 0600);
+  }
+
   function get($kind, $key, $shard = true) {
     $file = $this->path($kind, $key, $shard);
     return $this->readFile($file);

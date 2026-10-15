@@ -39,9 +39,10 @@ return [
   // 'trustProxy' => true,
   // 'proxyAddrs' => ['203.0.113.10'],
 
-  // Troubleshooting only: write the reason an invitation was refused to the PHP error log
-  // (for example "callee-not-listening"). Callers still get the same uniform reply, and the log
-  // line carries no key, tag or address. Turn it off again when you are done.
+  // Troubleshooting only: record the reason an invitation was refused (for example
+  // "callee-not-listening") in the PHP error log and in refusals.log inside the state folder.
+  // Callers still get the same uniform reply, and the line carries no key, tag or address.
+  // Turn it off again when you are done.
   // 'logRefusals' => true,
 
   // Web pages allowed to send call invitations from the browser (exact https origins).

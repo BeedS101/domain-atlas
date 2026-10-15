@@ -630,11 +630,13 @@ final class CallService {
         if (!$failed && $this->limited('inv-callee:' . $tag['owner'], $this->L['invitesPerCalleePerMin'])) $failed[] = 'callee-rate-limited';
       }
       if ($failed) {
-        // The reply is the same for every reason. With logRefusals on, the operator's error log
-        // gets the reason, never the caller, the tag or any key.
+        // The reply is the same for every reason. With logRefusals on, the operator's error log and
+        // the state folder's refusals.log get the reason, never the caller, the tag or any key.
         if (!empty($this->cfg['logRefusals'])) {
           $age = ($tag && $mb !== null) ? (int)($t - $mb['lastSeen']) : null;
-          error_log('[atlas-call] invite refused: ' . implode(',', $failed) . ($age !== null ? ' (listener last seen ' . $age . ' ms ago, allowed ' . $this->T['listenerFreshMs'] . ')' : ''));
+          $msg = 'invite refused: ' . implode(',', $failed) . ($age !== null ? ' (listener last seen ' . $age . ' ms ago, allowed ' . $this->T['listenerFreshMs'] . ')' : '');
+          error_log('[atlas-call] ' . $msg);
+          $this->store->appendLog('refusals.log', CallProto::isoTime($t) . ' ' . $msg);
         }
         return $this->unavailable();
       }

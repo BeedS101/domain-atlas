@@ -92,7 +92,7 @@ so only your hosting account can read it (`chmod 600`). Until it exists, every r
 | `stunUrls`, `turnUrls`, `turnSecretFile` | Your own STUN and TURN servers, if any. Third-party public STUN and TURN services are refused. Leave empty for direct connections only. The TURN secret is better in a `chmod 600` file than in `config.php`. |
 | `trustProxy`, `proxyAddrs` | Only behind a reverse proxy or CDN you control. Without them the service uses the connecting address and checks that the request arrived over https. |
 | `inviteCorsOrigins` | Web pages (exact https origins) allowed to send invitations from a browser. Normally empty. |
-| `logRefusals` | Troubleshooting only. `true` writes the reason an invitation was refused to PHP's error log (section 5.1). Callers still get the same uniform reply. Turn it off again afterwards. |
+| `logRefusals` | Troubleshooting only. `true` records the reason an invitation was refused in `refusals.log` in the state folder and in PHP's error log (section 5.1). Callers still get the same uniform reply. Turn it off again afterwards. |
 | `limits`, `timers`, `poll` | Optional tuning, validated on load. Out-of-range values leave the service unconfigured and name the setting in PHP's error log. |
 
 If `config.php` has a mistake, the service answers `calls-not-configured` and writes the first

@@ -461,6 +461,24 @@ function checkConfig(cfg) {
       await ctx.svc.close();
     }
     check('the log holds no tag, no key and no caller address', on.ids.every((x) => !on.log.includes(x)));
+    {
+      const ctx = await L.startPhpService({ logRefusals: true }, {});
+      const a = await Wallet.create(ctx), b = await Wallet.create(ctx);
+      const tg = (await b.createTag(a.pub)).json;
+      await a.invite(await a.buildInvite(tg.tag, b.pub));
+      const f = path.join(ctx.svc.stateDir, 'refusals.log');
+      const text = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+      check('the reason is also written to refusals.log in the state folder, owner-only', /^\d{4}-\d\d-\d\dT[\d:.]+Z invite refused: callee-not-listening/.test(text) && (fs.statSync(f).mode & 0o077) === 0 && !text.includes(tg.tag) && !text.includes(a.pub), text);
+      const store = fs.readFileSync(path.join(ROOT, 'atlas', 'call', 'lib', 'store.php'), 'utf8');
+      check('the refusal log is bounded', /65536/.test(store));
+      await ctx.svc.close();
+      const quiet = await L.startPhpService({}, {});
+      const qa = await Wallet.create(quiet), qb = await Wallet.create(quiet);
+      const qt = (await qb.createTag(qa.pub)).json;
+      await qa.invite(await qa.buildInvite(qt.tag, qb.pub));
+      check('with logRefusals off no refusals.log is created', !fs.existsSync(path.join(quiet.svc.stateDir, 'refusals.log')));
+      await quiet.svc.close();
+    }
     check('the reply to a refused invitation is the same whatever the reason', new Set(on.replies.filter((r) => r.status === 404).map((r) => JSON.stringify(r))).size === 1 && on.replies.filter((r) => r.status === 404).length === 5, on.replies.map((r) => r.status));
     check('the accepted invitation is unaffected', on.ok.status === 202 && off.ok.status === 202);
     check('with logRefusals off nothing about refusals is logged and the replies are the same', !/invite refused/.test(off.log) && off.replies.map((r) => r.status).join() === on.replies.map((r) => r.status).join());
