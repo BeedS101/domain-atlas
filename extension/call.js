@@ -319,6 +319,9 @@
 
   async function runListen(token) {
     let failures = 0, failingSince = 0;
+    // Only a change of outcome is logged, so a service that keeps failing does not flood the log.
+    let lastOutcome = null;
+    const outcome = (text) => { if (text !== lastOutcome) { lastOutcome = text; log(text.startsWith('ok') ? 'listen-ok' : 'listen-failed', text.replace(/^ok ?/, '')); } };
     while (st.listen === token) {
       if (Date.now() >= token.expiresAt) { await goDnd('session-ended'); notice('Your availability ended after an hour. Press Available to continue receiving calls.', 'warn'); return; }
       try {
@@ -328,6 +331,7 @@
         if (st.listen !== token) return;
         if (res.status === 200 && res.json && Array.isArray(res.json.events)) {
           failures = 0; failingSince = 0;
+          outcome('ok ' + token.service);
           if (!$('notice').hidden && $('notice').dataset.listen) notice('');
           for (const ev of res.json.events) {
             token.pendingAck.push(ev.id);
@@ -338,6 +342,7 @@
           continue;
         }
         const code = res.json && res.json.code;
+        outcome('status ' + res.status + (code ? ' ' + code : '') + ' ' + token.service);
         if (code === 'session-expired') { await goDnd('session-expired'); notice('Your availability ended. Press Available to continue.', 'warn'); return; }
         if (code === 'stale-request') { notice('Your computer’s clock is out of step with the call service. Check the date and time.', 'warn'); }
         else if (code === 'calls-not-configured') { await goDnd('service-not-configured'); notice('The call service is not configured.', 'bad'); return; }
@@ -347,6 +352,7 @@
         await sleep(res.status === 429 ? 5000 : Math.min(30000, timers.retryMs * failures));
       } catch (err) {
         if (st.listen !== token) return;
+        outcome((err && err.code === 'network' ? 'unreachable ' : 'error ') + token.service);
         failures++;
         if (!failingSince) failingSince = Date.now();
         if (failures === 3) notice('Cannot reach the call service. Still trying…', 'warn');
