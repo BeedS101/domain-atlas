@@ -220,6 +220,21 @@ unverified. That is intentional.
 
 ## 11. Cleanup
 
-Close the calling windows (this hangs up and releases the microphone), stop the three
-Node windows with Ctrl+C, remove the firewall rule and the port proxies. The Call Service
-keeps only hashes of routing tags, and only in the state file if you named one.
+When the test is over, put the computer and the wallet back to normal:
+
+1. In each calling window press "Do not disturb", then under "Call service" press "Remove".
+   This forgets the service address, switches "Private test network" off, and removes the
+   cards and permissions that name a plain-http address. Contacts, safety-code
+   verification, mail and assets are not touched. Then close the calling window (this hangs
+   up and releases the microphone).
+2. Stop the three Node windows with Ctrl+C.
+3. On PC A remove the firewall rule (section 6); on PC B remove the port proxies (section 5).
+   A port proxy left behind keeps sending `localhost:8001` and `localhost:8002` to a
+   computer that may no longer be there, so anything in the wallet that still points at the
+   demo Post Office will wait for it to answer.
+4. The wallet keeps its demo Post Office membership at `localhost:8002`. That is harmless
+   when the demo server is gone: the wallet gives up on a domain that does not answer after
+   30 seconds, then skips it for a while, so it cannot hold up mail, assets or login.
+
+The Call Service keeps only hashes of routing tags, and only in the state file if you named
+one.

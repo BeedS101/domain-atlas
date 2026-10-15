@@ -46,6 +46,9 @@ same names without `CALL_`, camel-cased (`issuerKeys`, `stateFile`, ...).
 A misconfiguration (bad origin, malformed key, missing domain) leaves the service
 unconfigured and says which setting on the console.
 
+Running it on the internet (https, reverse proxy, operator checklist, known gaps) is described in
+`docs/voice-calls-internet.md` section 4. The service has not been deployed anywhere.
+
 ## Reverse proxy (when it is ever deployed)
 
 HTTPS only; read timeout above 30 s and response buffering off for

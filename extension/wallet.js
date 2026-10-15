@@ -82,6 +82,67 @@ const AtlasWallet = (() => {
     return raw.buffer;
   }
 
+  // ---------- bounded network access ----------
+  //
+  // Every request the wallet makes to a domain goes through this wrapper, which shadows the global
+  // fetch inside this file. A domain that accepts a connection and never answers (a stopped local
+  // test server behind a forwarded port, a hung host) would otherwise leave the caller waiting
+  // forever, and the periodic mail check, the post-login refresh and the friend sync wait with it.
+  // The wrapper bounds each request, and remembers for a while which origins just failed so the
+  // background loops can skip them (originIsDown) instead of paying the timeout again every cycle.
+  // Requests that manage their own deadline (the call service's long polls) call
+  // globalThis.fetch directly.
+  const NET_TIMEOUT_MS = 30000;
+  const NET_DOWN_BASE_MS = 30000;
+  const NET_DOWN_MAX_MS = 10 * 60 * 1000;
+  const netDown = new Map(); // origin -> { fails, until }
+
+  function netOrigin(url) {
+    try { return new URL(url).origin; } catch (err) { return null; }
+  }
+
+  function noteOriginDown(origin) {
+    const prev = netDown.get(origin);
+    const fails = Math.min((prev ? prev.fails : 0) + 1, 10);
+    netDown.set(origin, { fails, until: Date.now() + Math.min(NET_DOWN_MAX_MS, NET_DOWN_BASE_MS * Math.pow(2, fails - 1)) });
+  }
+
+  // True while an origin that recently failed is being given a rest. `domainOrUrl` is a domain as
+  // stored in the wallet (localhost:8002, example.com) or a full URL. Background loops use this;
+  // anything the person starts by hand still tries.
+  function originIsDown(domainOrUrl) {
+    let origin;
+    try { origin = netOrigin(String(domainOrUrl).startsWith('http') ? domainOrUrl : baseUrl(String(domainOrUrl))); } catch (err) { return false; }
+    const entry = origin && netDown.get(origin);
+    if (!entry) return false;
+    if (Date.now() >= entry.until) return false;
+    return true;
+  }
+
+  async function fetch(url, init) {
+    init = init || {};
+    const origin = netOrigin(url);
+    const ctl = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, NET_TIMEOUT_MS);
+    const outer = init.signal;
+    if (outer) {
+      if (outer.aborted) ctl.abort();
+      else outer.addEventListener('abort', () => ctl.abort(), { once: true });
+    }
+    try {
+      const res = await globalThis.fetch(url, Object.assign({}, init, { signal: ctl.signal }));
+      if (origin) netDown.delete(origin);
+      return res;
+    } catch (err) {
+      if (origin && !(outer && outer.aborted)) noteOriginDown(origin);
+      if (timedOut) throw Object.assign(new Error('The server did not answer in time.'), { code: 'timeout' });
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // Manifest/credential "domain" fields are bare hostnames (no scheme) per
   // the spec — something has to guess a protocol to actually fetch from
   // them. Guessing http:// unconditionally broke real HTTPS deployments:
@@ -6498,7 +6559,10 @@ const AtlasWallet = (() => {
       const identity = await getIdentity();
       if (!identity || identity.publicKey !== ownerPublicKey) return;
       const assets = await getWallet(identity.publicKey);
-      for (const [domain, ids] of byDomain) await deleteMessagesOnServer(identity, domain, ids, assets);
+      for (const [domain, ids] of byDomain) {
+        if (originIsDown(domain)) continue; // the next mail check notices what is still held and forgets it then
+        await deleteMessagesOnServer(identity, domain, ids, assets);
+      }
     })().catch(() => {});
   }
 
@@ -6979,6 +7043,7 @@ const AtlasWallet = (() => {
     for (const notice of state.notices) {
       const age = Date.now() - new Date(notice.queuedAt).getTime();
       if (age > FRIEND_NOTICE_MAX_AGE_MS) { done.add(notice.publicKey); continue; }
+      if (originIsDown(notice.via)) continue;
       try {
         await postOfficeSendRaw(notice.via, { publicKey: notice.publicKey, domain: notice.toDomain }, FRIEND_SUBJECT_MARKER, JSON.stringify({ v: 1, type: 'accepted' }));
         done.add(notice.publicKey);
@@ -7426,7 +7491,9 @@ const AtlasWallet = (() => {
     const friendHandledIds = new Set(friendState.seen);
     const friendWaitingIds = new Set(friendState.incoming.map((r) => r.messageId));
     // Call cards and withdrawals (CALL_SUBJECT_MARKER) are kept in their own store too.
-    const callSeenIds = new Set((await getCallState(identity.publicKey)).seen);
+    // Calling is optional: a fault in its stored state must never stop a mail check.
+    let callSeenIds = new Set();
+    try { callSeenIds = new Set((await getCallState(identity.publicKey)).seen); } catch (err) { /* treated as nothing seen */ }
     const knownIds = new Set([...existing.map((e) => e.message.id), ...deletedIds, ...existingChat.map((e) => e.id), ...deletedChatIds, ...friendState.seen, ...callSeenIds]);
     // New arrivals are collected here and merged into the stored lists at
     // the end, under the lock, against a fresh read; `existing` and
@@ -7439,6 +7506,7 @@ const AtlasWallet = (() => {
     for (const [domain, idSet] of byDomain) {
       try {
         const base = baseUrl(domain);
+        if (originIsDown(base)) continue; // failed moments ago; tried again on a later cycle
         // Best-effort: give this domain this identity's encryption key for
         // every credential it might address mail to (see
         // registerMailEncryptionKey's own comment for why domain-to-
@@ -7712,7 +7780,14 @@ const AtlasWallet = (() => {
     const s = (state && typeof state === 'object') ? state : {};
     const c = (s.config && typeof s.config === 'object') ? s.config : {};
     return {
-      config: { service: typeof c.service === 'string' ? c.service : null, domain: typeof c.domain === 'string' ? c.domain : null, devAllowHttp: c.devAllowHttp === true },
+      config: {
+        service: typeof c.service === 'string' ? c.service : null,
+        domain: typeof c.domain === 'string' ? c.domain : null,
+        // The private-test-network switch counts only while the chosen service is itself a plain
+        // http address; with an https service, or none, it is always off, so a switch left on
+        // during local testing cannot widen what the wallet will connect to afterwards.
+        devAllowHttp: c.devAllowHttp === true && typeof c.service === 'string' && c.service.startsWith('http:')
+      },
       contacts: (s.contacts && typeof s.contacts === 'object' && !Array.isArray(s.contacts)) ? s.contacts : {},
       seen: Array.isArray(s.seen) ? s.seen : []
     };
@@ -7763,7 +7838,7 @@ const AtlasWallet = (() => {
       else opts.signal.addEventListener('abort', () => ctl.abort(), { once: true });
     }
     try {
-      const res = await fetch(origin + route, {
+      const res = await globalThis.fetch(origin + route, {
         method: route === '/atlas/call/info' ? 'GET' : 'POST',
         headers: route === '/atlas/call/info' ? {} : { 'Content-Type': 'application/json' },
         body: route === '/atlas/call/info' ? undefined : JSON.stringify(body),
@@ -7787,17 +7862,44 @@ const AtlasWallet = (() => {
     if (service) {
       const problem = callOriginProblem(service, dev);
       if (problem) throw new Error(problem);
-      // The setting is stored first so callPost applies the same origin rule to the check itself.
-      await updateCallState(identity.publicKey, (s) => { s.config.devAllowHttp = dev; });
-      const res = await callPost(service, '/atlas/call/info');
+      // Nothing is stored until the service has answered correctly, so a failed attempt leaves the
+      // existing settings exactly as they were. The switch is applied to the check itself only.
+      const res = await callPost(service, '/atlas/call/info', null, { devAllowHttp: dev, timeoutMs: 10000 });
       const info = res.json;
       if (res.status !== 200 || !info || info.service !== 'atlas-call') throw new Error('That address did not answer as a Domain Atlas call service.');
       if (info.configured !== true) throw new Error('That call service is running but not configured yet.');
       if (info.audience !== service) throw new Error('That call service identifies itself as ' + String(info.audience) + ', not the address you typed.');
       domain = typeof info.domain === 'string' ? info.domain : null;
     }
-    await updateCallState(identity.publicKey, (s) => { s.config = { service: service || null, domain, devAllowHttp: dev }; });
-    return { service: service || null, domain, devAllowHttp: dev };
+    const plain = !!service && service.startsWith('http:') && dev;
+    await updateCallState(identity.publicKey, (s) => {
+      s.config = { service: service || null, domain, devAllowHttp: plain };
+      if (!plain) dropPlainHttpCallLeftovers(s);
+    });
+    return { service: service || null, domain, devAllowHttp: plain };
+  }
+
+  // Cards and permissions that name a plain-http address are test-network leftovers once the
+  // private-network switch is off; they are removed so they cannot be revived or shown as usable.
+  function dropPlainHttpCallLeftovers(state) {
+    for (const key of Object.keys(state.contacts)) {
+      const c = state.contacts[key];
+      if (!c || typeof c !== 'object') continue;
+      if (c.theirCard && !String(c.theirCard.service).startsWith('https:')) c.theirCard = null;
+      if (c.grant && !String(c.grant.service).startsWith('https:')) c.grant = null;
+    }
+  }
+
+  // Forgets every calling setting for this identity (service, switch, test-network cards and
+  // permissions). Contacts, their verification and everything outside calling are untouched.
+  async function resetCallSettings() {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    await updateCallState(identity.publicKey, (s) => {
+      s.config = { service: null, domain: null, devAllowHttp: false };
+      dropPlainHttpCallLeftovers(s);
+    });
+    return { service: null, domain: null, devAllowHttp: false };
   }
 
   // ----- contacts and permissions -----
@@ -8095,7 +8197,7 @@ const AtlasWallet = (() => {
     getMessagingWindowSettings, setMessagingWindowSettings,
     getCallConfig, setCallConfig, callOriginProblem, callPost, signCallPayload,
     getCallContacts, getCallCardFor, getCallPolicyForCaller, getContactSafetyCode, setContactCallVerified,
-    grantCalling, revokeCalling,
+    grantCalling, revokeCalling, resetCallSettings,
     onWalletChanged
   };
 })();

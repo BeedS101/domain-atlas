@@ -6398,24 +6398,19 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
   }
   if (areaName === 'session' && changes.atlasUnlockedIdentity) {
     await refreshIdentityDisplay();
-    // Task #111 TODO round 1, item 1: the Messaging button/window are
-    // gated behind an unlocked wallet, stricter than in-world chat's own
-    // "readable while logged out" posture — see refreshMessagingLockGate()'s
-    // own comment. This listener is the single point EVERY local-mode
-    // lock/unlock path already funnels through (password unlock, lock,
-    // quick lock, auto-lock, identity creation, import — anything that
-    // touches chrome.storage.session.atlasUnlockedIdentity), so it's the
-    // one place this needs wiring rather than four separate button
-    // handlers.
+    // The Messaging button and window are gated behind an unlocked wallet (see
+    // refreshMessagingLockGate()). Every local-mode lock and unlock path changes
+    // chrome.storage.session.atlasUnlockedIdentity, so this listener is the one place to wire it.
     await refreshMessagingLockGate();
-    // Task #111 TODO round 2, item 1: fetch mail/chat immediately on
-    // login rather than waiting for the periodic loop's next tick —
-    // `changes.atlasUnlockedIdentity.newValue` is only present when this
-    // change is a LOGIN (unlock/create/import), not a lock (which clears
-    // the key, leaving newValue undefined), so this only ever fires once
-    // per actual login, not on every lock too.
+    // Fetch mail and chat at once on login rather than at the periodic loop's next tick.
+    // newValue is present only for a login (unlock, create, import), not for a lock.
     if (changes.atlasUnlockedIdentity.newValue) {
-      await AtlasWallet.checkAllMail();
+      // What is already stored is shown first, so the panel is usable at once even when a domain is
+      // slow to answer; the network check then refreshes it.
+      await refreshMailDisplay();
+      await refreshInventoryDisplay();
+      await refreshMessagingDisplay();
+      try { await AtlasWallet.checkAllMail(); } catch (err) { /* retried on the next periodic check */ }
       await refreshMailDisplay();
       await refreshInventoryDisplay();
       await refreshMessagingDisplay();

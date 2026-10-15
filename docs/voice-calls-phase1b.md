@@ -5,6 +5,9 @@ and not to be described as production-ready or banking-grade. It has run only in
 Chromium under Xvfb on one Linux machine, over loopback, with a synthetic capture
 device. No test has been run by a person on real hardware.
 
+Internet operation, the configuration-isolation fixes made after the first local Windows test, and the plan for
+PHP signalling, cross-domain admission and TURN: `docs/voice-calls-internet.md`.
+
 Design: `docs/voice-calls-architecture.md` (section 14 lists the Phase 1A amendments
 and the points settled during implementation), `-threat-model.md`,
 `-endpoints-and-state.md`, `-deployment.md`. Two-PC set-up for the owner:
@@ -73,6 +76,7 @@ unconfigured test).
 | `manual-call-mic.js` | microphone permission denied (caller, callee) | 12 passed, 0 failed |
 | `manual-call-adversary.js` | forged, replayed, tampered and substituted signaling and certificates, candidates, withheld confirmation, duplicates, forged end, cross-call injection | 35 passed, 0 failed (see the note below the table) |
 | `manual-call-bridge.js` | page access to the signing bridge and the calling window | 18 passed, 0 failed |
+| `manual-call-isolation.js` | added after the first local Windows test: hung domain, settings isolation, broken or missing calling data (see `docs/voice-calls-internet.md` section 3) | 24 passed, 0 failed |
 
 Total across the nine suites: 320 checks, all passing in the last full sequential run.
 

@@ -313,6 +313,7 @@ only means both confirmations passed through it.
 | silent media | 30 s warn, 60 s end | `network-lost` |
 | `listen` hold | 25 s | empty response, client re-polls |
 | listening session | at most 60 min | stop listening, tell the user |
+| listening, service unreachable | 10 min of continuous failure | availability turned off, tell the user |
 | CS ended-call retention | 60 s | delete |
 
 ## 5. Reason codes

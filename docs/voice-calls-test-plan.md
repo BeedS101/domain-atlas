@@ -186,3 +186,38 @@ hardware entry exists.
 | L1 to L8 | Not run | all require the owner on real hardware (`docs/voice-calls-phase1b.md` section 3.3, set-up in `docs/voice-calls-two-pc-setup.md`) |
 
 Items marked "Partial" or "Not run" are open; none was reported as passed.
+
+## 6. Configuration isolation (milestone 1 of internet calling)
+
+Evidence class: Automated, same conditions as section 5. `test/manual-call-isolation.js`.
+The "negative control" column records that the check fails against the extension files from the
+previous commit.
+
+| ID | Check | Status | Negative control |
+|---|---|---|---|
+| I1 | a domain that accepts connections and never answers does not stall the mail check; the next check skips it; identity and assets stay available | Automated | fails on previous code (still running after 60 s) |
+| I2 | a failed attempt to set the call service leaves the stored settings exactly as they were | Automated | not distinguishing |
+| I3 | saving an https service turns the private-test-network switch off even when ticked; a later failed local attempt does not turn it on | Automated | fails on previous code |
+| I4 | with an https service saved the wallet refuses to talk to a local plain-http address | Automated | fails on previous code |
+| I5 | reset removes the service, the switch and plain-http cards and permissions; contacts, identity and assets remain | Automated | function absent in previous code |
+| I6 | unreadable or wrong-shaped calling data does not stop a mail check | Automated | not run against the previous code |
+| I7 | an extension copy without `call-protocol.js` still starts the wallet worker, creates an identity and checks mail; calling reports unavailable | Automated | not run against the previous code |
+| I8 | a listening window gives up on a service that stays down and turns availability off | Automated | not run against the previous code (the behaviour did not exist) |
+| I9 | the same behaviour with the real Windows setup (a stopped local server, a left-over port forward, the owner's own wallet profile) | Not run: owner | |
+
+### 6.1 Existing suites run after the isolation change
+
+Run in the Linux sandbox with Chromium under Xvfb. The ten calling suites (344 checks) pass.
+Of 37 older suites, 26 pass with no failures. The following 11 fail with the same message both
+with the isolation change and on the previous commit (run in a separate checkout of that
+commit), so they are not caused by it and are not investigated here:
+
+- `manual-mail-encryption`, `manual-mail-gift`, `manual-wallet-import`, `manual-mail`:
+  "issuer key was not valid at issuedAt" (demo issuer key validity in this environment).
+- `manual-mail-management`, `manual-mailbox-housekeeping`, `manual-friend-request-recovery`,
+  `manual-wallet-server-delete`, `manual-multiplayer-presence`: waits that time out or find
+  no mail, request or player.
+- `manual-postoffice-handle`: "that handle is already taken" (state left by an earlier run).
+- `manual-asset-update-check`: "this key is not a registered domain admin".
+
+They need a separate look before they can be counted as passing on any machine.

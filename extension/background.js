@@ -39,7 +39,10 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => 
 // functions do), so it's safe to call from a service worker with no window.
 // This is extension-wide state, not a per-tab one, so a plain setIcon with
 // no tabId is all that's needed.
-importScripts('call-protocol.js', 'wallet.js');
+importScripts('wallet.js');
+// Calling is optional: if its module is missing or fails to load, the wallet worker still starts
+// and every other feature works (the call functions then report that calling is unavailable).
+try { importScripts('call-protocol.js'); } catch (err) { /* calling stays unavailable */ }
 
 const TOOLBAR_ICON_ACTIVE = {
   16: 'icons/icon-16.png', 32: 'icons/icon-32.png',

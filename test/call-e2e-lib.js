@@ -10,7 +10,7 @@ const path = require('path');
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || '/home/claude/.npm-global/lib/node_modules/playwright');
 const { createCallService } = require(path.join(__dirname, '..', 'call-server', 'server.js'));
 
-const EXT_PATH = path.resolve(__dirname, '..', 'extension');
+const EXT_PATH = process.env.ATLAS_TEST_EXT ? path.resolve(process.env.ATLAS_TEST_EXT) : path.resolve(__dirname, '..', 'extension');
 const MAIL_DOMAIN = 'localhost:8002';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let passes = 0, failures = 0;
@@ -55,7 +55,8 @@ async function startCallService(over, opts) {
 async function launchWallet(label, opts) {
   opts = opts || {};
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-call-' + label + '-'));
-  const args = ['--disable-extensions-except=' + EXT_PATH, '--load-extension=' + EXT_PATH, '--no-sandbox', '--use-fake-device-for-media-stream']
+  const extPath = opts.extPath || EXT_PATH;
+  const args = ['--disable-extensions-except=' + extPath, '--load-extension=' + extPath, '--no-sandbox', '--use-fake-device-for-media-stream']
     .concat(opts.denyMic ? ['--deny-permission-prompts'] : (opts.prompt ? [] : ['--use-fake-ui-for-media-stream']))
     .concat(opts.args || []);
   const context = await chromium.launchPersistentContext(dir, { headless: false, executablePath: '/opt/pw-browsers/chromium', args, viewport: null });

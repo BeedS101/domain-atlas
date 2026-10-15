@@ -23,6 +23,7 @@ amendment names the class it has reached:
 | `docs/voice-calls-endpoints-and-state.md` | Call Service endpoints, message formats, state machines, timers |
 | `docs/voice-calls-test-plan.md` | automated and manual tests, per phase |
 | `docs/voice-calls-deployment.md` | STUN/TURN, bandwidth, operator set-up, rollout, degradation |
+| `docs/voice-calls-internet.md` | operation over the internet: configuration isolation, https Node service, PHP signalling, cross-domain admission, coturn |
 
 ## 1. Goals and non-goals
 

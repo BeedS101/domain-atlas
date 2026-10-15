@@ -25,7 +25,7 @@
   const timers = {
     ringMs: 45000, inviteMs: 50000, acceptToOfferMs: 20000, offerToAnswerMs: 20000,
     iceMs: 30000, confirmMs: 10000, silentWarnMs: 30000, silentEndMs: 60000,
-    sessionMs: 3500000, retryMs: 2000, candidateBatchMs: 120, endSendMs: 2000, ringRateWindowMs: 60000
+    sessionMs: 3500000, retryMs: 2000, giveUpMs: 600000, candidateBatchMs: 120, endSendMs: 2000, ringRateWindowMs: 60000
   };
 
   const LEGAL_FROM_PEER = {
@@ -296,8 +296,18 @@
     render();
   }
 
+  // A call service that has been failing for a long time (stopped, moved, removed) is no longer
+  // waited on: availability is turned off and the person is told, instead of retrying for ever.
+  async function giveUpListening(token, failingSince) {
+    if (Date.now() - failingSince < timers.giveUpMs) return false;
+    if (st.listen !== token) return true;
+    await goDnd('service-unreachable');
+    notice('The call service could not be reached for a while, so you are no longer shown as available. Press Available once it is back.', 'warn');
+    return true;
+  }
+
   async function runListen(token) {
-    let failures = 0;
+    let failures = 0, failingSince = 0;
     while (st.listen === token) {
       if (Date.now() >= token.expiresAt) { await goDnd('session-ended'); notice('Your availability ended after an hour. Press Available to continue receiving calls.', 'warn'); return; }
       try {
@@ -305,7 +315,7 @@
         const res = await W.callPost(token.service, '/atlas/call/listen', { payload, proof: await signRaw(token.sk, payload), session: token.delegation }, { signal: token.abort.signal, timeoutMs: 40000 });
         if (st.listen !== token) return;
         if (res.status === 200 && res.json && Array.isArray(res.json.events)) {
-          failures = 0;
+          failures = 0; failingSince = 0;
           if (!$('notice').hidden && $('notice').dataset.listen) notice('');
           for (const ev of res.json.events) {
             token.pendingAck.push(ev.id);
@@ -318,11 +328,15 @@
         if (code === 'stale-request') { notice('Your computer’s clock is out of step with the call service. Check the date and time.', 'warn'); }
         else if (code === 'calls-not-configured') { await goDnd('service-not-configured'); notice('The call service is not configured.', 'bad'); return; }
         failures++;
+        if (!failingSince) failingSince = Date.now();
+        if (await giveUpListening(token, failingSince)) return;
         await sleep(res.status === 429 ? 5000 : Math.min(30000, timers.retryMs * failures));
       } catch (err) {
         if (st.listen !== token) return;
         failures++;
+        if (!failingSince) failingSince = Date.now();
         if (failures === 3) notice('Cannot reach the call service. Still trying…', 'warn');
+        if (await giveUpListening(token, failingSince)) return;
         await sleep(Math.min(30000, timers.retryMs * failures));
       }
     }
