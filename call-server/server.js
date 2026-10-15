@@ -19,6 +19,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const nodeCrypto = require('crypto');
 const dns = require('dns').promises;
 const P = require('./protocol');
 
@@ -43,6 +44,7 @@ const DEFAULT_TIMERS = {
 
 const DEFAULT_LIMITS = {
   maxLiveCalls: 200,
+  maxTurnCredentialsPerRole: 3,
   maxConnections: 3000,
   maxConnectionsPerSource: 100,
   maxInflightPerSource: 60,
@@ -67,6 +69,7 @@ const DEFAULT_LIMITS = {
 //   CALL_CONFIG_FILE  JSON file whose keys are the same names without the CALL_ prefix, camel-cased
 //   CALL_ORIGIN, CALL_DOMAIN, CALL_ISSUER_KEYS (comma separated), CALL_REVOCATIONS_URL,
 //   CALL_STATE_FILE, CALL_STUN_URLS (comma separated), CALL_BIND, CALL_PORT,
+//   CALL_TURN_URLS (comma separated), CALL_TURN_SECRET or CALL_TURN_SECRET_FILE, CALL_TURN_TTL_SECONDS,
 //   CALL_TRUST_PROXY=1, CALL_PROXY_ADDRS (comma separated, default loopback),
 //   CALL_INVITE_CORS_ORIGINS (comma separated exact origins, default none),
 //   CALL_LIMIT_<NAME> for each name in TUNABLE_LIMITS (for example CALL_LIMIT_MAX_WAITERS_PER_SOURCE),
@@ -74,6 +77,7 @@ const DEFAULT_LIMITS = {
 
 // Limits an operator may change, with the range each must stay inside.
 const TUNABLE_LIMITS = {
+  maxTurnCredentialsPerRole: [1, 20],
   maxConnections: [10, 100000],
   maxConnectionsPerSource: [1, 10000],
   maxInflightPerSource: [1, 10000],
@@ -86,29 +90,26 @@ const TUNABLE_LIMITS = {
 };
 const snakeName = (k) => k.replace(/[A-Z]/g, (c) => '_' + c).toUpperCase();
 
-// Public STUN services this project does not use. The check catches an accidental copy of a
-// well-known address into the settings; it is not a list of everything that exists.
-const THIRD_PARTY_STUN_SUFFIXES = [
+// Public STUN and TURN services this project does not use. The check catches an accidental copy
+// of a well-known address into the settings; it is not a list of everything that exists.
+const THIRD_PARTY_ICE_SUFFIXES = [
   'l.google.com', 'stun.services.mozilla.com', 'twilio.com', 'cloudflare.com', 'stunprotocol.org',
   'metered.ca', 'ekiga.net', 'sipgate.net', 'voipbuster.com', 'voiparound.com', 'stunserver.org',
-  'xten.com', 'schlund.de', 'ideasip.com', 'freeswitch.org', 'nextcloud.com', 'jitsi.org', 'jit.si'
+  'xten.com', 'schlund.de', 'ideasip.com', 'freeswitch.org', 'nextcloud.com', 'jitsi.org', 'jit.si',
+  'xirsys.com', 'viagenie.ca', 'bistri.com', 'backups.cz', 'vonage.com', 'telnyx.com', 'agora.io', 'daily.co', 'livekit.io'
 ];
-const HOST_LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
-// Returns null when `u` is an acceptable operator STUN URL, otherwise a short reason.
-function stunProblem(u) {
-  if (typeof u !== 'string') return 'not a string';
-  const m = /^(stuns?):(\[[0-9a-fA-F:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(?::(\d{1,5}))?$/.exec(u);
-  if (!m) return 'must look like stun:host or stun:host:port';
-  if (m[3] !== undefined && (Number(m[3]) < 1 || Number(m[3]) > 65535)) return 'port out of range';
-  const host = m[2].toLowerCase();
-  if (host.startsWith('[')) return net.isIPv6(host.slice(1, -1)) ? null : 'not an IPv6 address';
-  if (net.isIPv4(host)) return null;
-  if (/^[0-9.]+$/.test(host)) return 'not an IP address';
-  if (!host.split('.').every((l) => HOST_LABEL_RE.test(l))) return 'not a host name';
-  if (THIRD_PARTY_STUN_SUFFIXES.some((s) => host === s || host.endsWith('.' + s))) return 'is a public third-party STUN service; use a server you operate';
+// Returns null when `u` is an acceptable operator ICE server URL, otherwise a short reason.
+// kind is 'stun' or 'turn'; private addresses and unusual TURN ports need allowPrivate.
+function iceUrlProblem(u, kind, allowPrivate) {
+  if (typeof u !== 'string') return 'is not a string';
+  const why = P.iceUrlProblem(u, { kind, allowPrivate });
+  if (why) return why;
+  const host = P.parseIceUrl(u).host.toLowerCase();
+  if (THIRD_PARTY_ICE_SUFFIXES.some((x) => host === x || host.endsWith('.' + x))) return 'is a public third-party service; use a server you operate';
   return null;
 }
+const stunProblem = (u, allowPrivate) => iceUrlProblem(u, 'stun', allowPrivate);
 
 function loadConfig(env, readFile) {
   const read = readFile || ((p) => fs.readFileSync(p, 'utf8'));
@@ -128,6 +129,10 @@ function loadConfig(env, readFile) {
     revocationsUrl: pick('CALL_REVOCATIONS_URL', 'revocationsUrl') || null,
     stateFile: pick('CALL_STATE_FILE', 'stateFile') || null,
     stunUrls: list(pick('CALL_STUN_URLS', 'stunUrls')),
+    turnUrls: list(pick('CALL_TURN_URLS', 'turnUrls')),
+    turnSecret: pick('CALL_TURN_SECRET', 'turnSecret') || null,
+    turnSecretFile: pick('CALL_TURN_SECRET_FILE', 'turnSecretFile') || null,
+    turnTtlSeconds: Number(pick('CALL_TURN_TTL_SECONDS', 'turnTtlSeconds') || 3600),
     bind: pick('CALL_BIND', 'bind') || '127.0.0.1',
     port: Number(pick('CALL_PORT', 'port') || 8787),
     trustProxy: truthy(pick('CALL_TRUST_PROXY', 'trustProxy')),
@@ -160,10 +165,33 @@ function loadConfig(env, readFile) {
     try { r = new URL(cfg.revocationsUrl); } catch (e) { cfg.problem = 'CALL_REVOCATIONS_URL is not a URL'; return cfg; }
     if (r.protocol !== 'https:' && !(r.protocol === 'http:' && cfg.devAllowHttp)) { cfg.problem = 'CALL_REVOCATIONS_URL must be https'; return cfg; }
   }
-  if (cfg.stunUrls.length > 3) { cfg.problem = 'CALL_STUN_URLS may list at most 3 servers'; return cfg; }
+  if (cfg.stunUrls.length > P.ICE_LIMITS.stunUrls) { cfg.problem = 'CALL_STUN_URLS may list at most ' + P.ICE_LIMITS.stunUrls + ' servers'; return cfg; }
   for (const u of cfg.stunUrls) {
-    const why = stunProblem(u);
-    if (why) { cfg.problem = 'CALL_STUN_URLS: ' + u.slice(0, 80) + ' ' + why; return cfg; }
+    const why = stunProblem(u, cfg.devAllowHttp);
+    if (why) { cfg.problem = 'CALL_STUN_URLS: ' + String(u).slice(0, 80) + ' ' + why; return cfg; }
+  }
+  // TURN: a secret shared with the TURN server, and the URLs wallets are told to use. The secret
+  // is read from a file when one is named (it must not be readable by others) and never appears in
+  // any message, log line or answer.
+  if (cfg.turnSecretFile) {
+    if (cfg.turnSecret) { cfg.problem = 'CALL_TURN_SECRET and CALL_TURN_SECRET_FILE are both set; use one'; return cfg; }
+    try {
+      if (!readFile && (fs.statSync(cfg.turnSecretFile).mode & 0o077)) { cfg.problem = 'CALL_TURN_SECRET_FILE must not be readable by group or others (chmod 600)'; return cfg; }
+      cfg.turnSecret = String(read(cfg.turnSecretFile)).trim();
+    } catch (e) { cfg.problem = 'CALL_TURN_SECRET_FILE cannot be read'; return cfg; }
+  }
+  if (cfg.turnUrls.length || cfg.turnSecret) {
+    if (!cfg.turnUrls.length || !cfg.turnSecret) { cfg.problem = 'TURN needs both CALL_TURN_URLS and a secret (CALL_TURN_SECRET or CALL_TURN_SECRET_FILE)'; return cfg; }
+    if (cfg.turnUrls.length > P.ICE_LIMITS.turnUrls) { cfg.problem = 'CALL_TURN_URLS may list at most ' + P.ICE_LIMITS.turnUrls + ' URLs'; return cfg; }
+    for (const u of cfg.turnUrls) {
+      const why = iceUrlProblem(u, 'turn', cfg.devAllowHttp);
+      if (why) { cfg.problem = 'CALL_TURN_URLS: ' + String(u).slice(0, 80) + ' ' + why; return cfg; }
+    }
+    if (typeof cfg.turnSecret !== 'string' || cfg.turnSecret.length < 32 || cfg.turnSecret.length > 256 || !/^[\x21-\x7e]+$/.test(cfg.turnSecret) || new Set(cfg.turnSecret).size < 10) {
+      cfg.problem = 'the TURN secret must be 32 to 256 printable characters and not repetitive (for example the output of: openssl rand -hex 32)';
+      return cfg;
+    }
+    if (!Number.isInteger(cfg.turnTtlSeconds) || cfg.turnTtlSeconds < 60 || cfg.turnTtlSeconds > 86400) { cfg.problem = 'CALL_TURN_TTL_SECONDS must be a whole number from 60 to 86400'; return cfg; }
   }
   if (cfg.proxyAddrs.some((a) => !net.isIP(a))) { cfg.problem = 'CALL_PROXY_ADDRS must list IP addresses'; return cfg; }
   for (const o of cfg.corsOrigins) {
@@ -234,7 +262,7 @@ function createCallService(cfg, opts) {
   const quiet = !!opts.quiet;
   const log = (m) => { if (!quiet) console.log('[call-service] ' + m); };
 
-  const counters = { invites: 0, refusedInvites: 0, accepted: 0, ended: 0, rateLimited: 0, authFailures: 0, tagsCreated: 0, connectionRefused: 0, inflightRefused: 0, waiterRefused: 0, originRefused: 0, badContentType: 0, httpsRequired: 0, slowBodies: 0 };
+  const counters = { invites: 0, refusedInvites: 0, accepted: 0, ended: 0, rateLimited: 0, authFailures: 0, tagsCreated: 0, turnCredentialsIssued: 0, connectionRefused: 0, inflightRefused: 0, waiterRefused: 0, originRefused: 0, badContentType: 0, httpsRequired: 0, slowBodies: 0 };
 
   // ----- state -----
   const tags = new Map();          // tagHash -> { owner, bind, calleeKey, createdAt, expiresAt, maxCalls, used }
@@ -558,13 +586,15 @@ function createCallService(cfg, opts) {
 
   // ----- routes -----
 
+  const turnEnabled = !!(cfg.configured && cfg.turnUrls && cfg.turnUrls.length && cfg.turnSecret);
+
   function info() {
     return {
       service: 'atlas-call', v: 1, configured: !!cfg.configured, serverTime: new Date(now()).toISOString(),
       audience: cfg.configured ? cfg.origin : undefined,
       domain: cfg.configured ? cfg.domain : undefined,
       limits: { inviteTtlMs: P.LIMITS.inviteTtlMs, maxCallsPerTag: P.LIMITS.maxCallsPerTag, maxTagsPerWallet: P.LIMITS.maxTagsPerWallet, listenHoldMs: T.listenHoldMs },
-      ice: { stun: cfg.configured ? cfg.stunUrls : [], turn: false }
+      ice: Object.assign({ stun: cfg.configured ? cfg.stunUrls : [], turn: turnEnabled }, turnEnabled ? { turnUrls: cfg.turnUrls.slice() } : {})
     };
   }
 
@@ -678,7 +708,7 @@ function createCallService(cfg, opts) {
       keyA: p.callKey, keyB: null, invite: { payload: p, proof: body.invite.proof }, accept: null, th: null,
       state: 'RINGING', accepted: false, createdAt: t, inviteExpiresAt: Date.parse(p.expiresAt), deadline: 0,
       boxA: mailbox(), boxB: mailbox(), seqA: 0, seqB: 0, sentSdpA: false, sentSdpB: false,
-      candA: 0, candB: 0, confirmA: false, confirmB: false, messages: 0, lastSeenA: t, lastSeenB: t, endedAt: 0, endReason: null
+      candA: 0, candB: 0, confirmA: false, confirmB: false, iceIssued: { A: 0, B: 0 }, messages: 0, lastSeenA: t, lastSeenB: t, endedAt: 0, endReason: null
     };
     calls.set(p.callId, call);
     seenCallIds.set(p.callId, t + T.seenCallIdMs);
@@ -719,11 +749,40 @@ function createCallService(cfg, opts) {
     return { status: 200, body: { events: mb.events.slice(0, 20).map((e) => (e.type === 'signal' ? { n: e.id, type: 'signal', message: e.message } : { n: e.id, type: e.type, reason: e.reason })), serverTime: new Date(now()).toISOString() } };
   }
 
+  // TURN credentials follow coturn's REST scheme: the username carries the expiry time, the credential
+  // is the base64 HMAC-SHA1 of the username under the secret shared with the TURN server. The username
+  // holds no identity, call id or key. The lifetime never outlasts the call's own maximum.
+  function mintTurnCredential(call) {
+    const t = now();
+    const ttl = Math.min(Number.isInteger(cfg.turnTtlSeconds) ? cfg.turnTtlSeconds : 3600, Math.floor((call.createdAt + T.maxCallMs - t) / 1000));
+    if (!(ttl >= 30)) return null;
+    const expires = Math.floor(t / 1000) + ttl;
+    const username = expires + ':' + P.randomId(8);
+    const credential = nodeCrypto.createHmac('sha1', cfg.turnSecret).update(username).digest('base64');
+    return { username, credential, ttl, expiresAt: new Date(expires * 1000).toISOString() };
+  }
+
+  // Answered only to a holder of one of the call's two keys, and only once the callee has accepted
+  // (identity-signed), so ringing a wallet never yields a credential. Each side may fetch a few.
   async function routeIce(body) {
     const r = await callForKeyRoute(body, 'atlas.call.ice');
     if (r.error) return r.error;
-    if (r.call.state === 'RINGING' || r.call.state === 'ENDED') return UNAVAILABLE();
-    return { status: 200, body: { iceServers: cfg.stunUrls.length ? [{ urls: cfg.stunUrls.slice() }] : [], ttl: 600 } };
+    const { call, role } = r;
+    if (call.state === 'RINGING' || call.state === 'ENDED') return UNAVAILABLE();
+    const iceServers = cfg.stunUrls.length ? [{ urls: cfg.stunUrls.slice() }] : [];
+    const out = { iceServers, ttl: 600, serverTime: new Date(now()).toISOString() };
+    if (turnEnabled) {
+      if (call.iceIssued[role] >= L.maxTurnCredentialsPerRole) return fail(429, 'rate-limited', 'too many requests');
+      const c = mintTurnCredential(call);
+      if (c) {
+        call.iceIssued[role]++;
+        counters.turnCredentialsIssued++;
+        iceServers.push({ urls: cfg.turnUrls.slice(), username: c.username, credential: c.credential });
+        out.ttl = c.ttl;
+        out.credentialExpiresAt = c.expiresAt;
+      }
+    }
+    return { status: 200, body: out };
   }
 
   async function routeSignal(body, req) {
@@ -944,7 +1003,7 @@ function createCallService(cfg, opts) {
   };
 }
 
-module.exports = { createCallService, loadConfig, isPrivateAddress, normalizeIp, sourceKey, stunProblem, DEFAULT_TIMERS, DEFAULT_LIMITS, TUNABLE_LIMITS };
+module.exports = { createCallService, loadConfig, isPrivateAddress, normalizeIp, sourceKey, stunProblem, iceUrlProblem, DEFAULT_TIMERS, DEFAULT_LIMITS, TUNABLE_LIMITS };
 
 if (require.main === module) {
   const cfg = loadConfig(process.env);
@@ -957,6 +1016,7 @@ if (require.main === module) {
     if (cfg.trustProxy) console.log('[call-service] proxy mode: client addresses come from X-Forwarded-For sent by ' + cfg.proxyAddrs.join(', ') + (cfg.origin.startsWith('https:') ? '; requests must carry X-Forwarded-Proto: https' : ''));
     if (cfg.trustProxy && !['127.0.0.1', '::1', 'localhost'].includes(cfg.bind)) console.log('[call-service] WARNING: proxy mode with a non-loopback bind: make sure only the proxy can reach this port.');
     if (!cfg.trustProxy && cfg.origin.startsWith('https:')) console.log('[call-service] note: an https origin without CALL_TRUST_PROXY=1 means TLS is terminated elsewhere and every client looks like the proxy; set it when a reverse proxy is in front.');
+    console.log('[call-service] TURN: ' + (cfg.turnUrls.length ? cfg.turnUrls.join(', ') + ' (credentials valid ' + cfg.turnTtlSeconds + ' s)' : 'none'));
     console.log('[call-service] STUN: ' + (cfg.stunUrls.length ? cfg.stunUrls.join(', ') : 'none (direct connections only)') + '; cross-origin access: ' + (cfg.corsOrigins.length ? 'invite route for ' + cfg.corsOrigins.join(', ') : 'none'));
   }
   svc.listen().then((addr) => {

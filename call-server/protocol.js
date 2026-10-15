@@ -363,6 +363,122 @@
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.local$/i.test(addr);
   }
 
+  // ---------- ICE servers a service may hand to a wallet ----------
+
+  // The Call Service names the STUN and TURN servers a browser should use, and a wallet applies
+  // these rules before giving any of it to the browser. The same function checks an operator's own
+  // settings. A private, loopback or link-local address, or a TURN port outside the usual ones, is
+  // refused unless the person has switched on the private test network, so a service cannot point a
+  // browser at a machine on its own network or at an arbitrary service port. Names are not resolved
+  // here; a name that resolves to a private address cannot be told apart from any other.
+  const ICE_TURN_PORTS = [80, 443, 3478, 5349];
+  const ICE_LIMITS = { stunUrls: 3, turnUrls: 4, servers: 4, urlsPerServer: 16, minRemainingMs: 15000, maxRemainingMs: 25 * 3600 * 1000 };
+  const ICE_URL_RE = /^(stun|stuns|turn|turns):(\[[0-9a-fA-F:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(?::(\d{1,5}))?(?:\?transport=(udp|tcp))?$/;
+  const HOST_LABEL_RE = /^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+
+  function ipv4Parts(host) {
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (!m) return null;
+    const o = m.slice(1).map(Number);
+    return o.every((n) => n <= 255) ? o : false;
+  }
+  function privateIpv4(o) {
+    return o[0] === 0 || o[0] === 10 || o[0] === 127 || o[0] >= 224 || (o[0] === 100 && o[1] >= 64 && o[1] <= 127) ||
+      (o[0] === 169 && o[1] === 254) || (o[0] === 172 && o[1] >= 16 && o[1] <= 31) || (o[0] === 192 && o[1] === 168) ||
+      (o[0] === 192 && o[1] === 0 && o[2] === 0) || (o[0] === 198 && (o[1] === 18 || o[1] === 19));
+  }
+  // True for an address or name that only means something on a local network.
+  function privateHost(host) {
+    const h = String(host).toLowerCase().replace(/^\[|\]$/g, '');
+    const v4 = ipv4Parts(h);
+    if (v4) return privateIpv4(v4);
+    if (h.includes(':')) {
+      if (h === '::' || h === '::1' || /^f[cd]/.test(h) || /^fe/.test(h) || h.startsWith('ff')) return true;
+      const dotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(h);
+      if (dotted) { const o = ipv4Parts(dotted[1]); return !o || privateIpv4(o); }
+      const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+      if (hex) { const a = parseInt(hex[1], 16), b = parseInt(hex[2], 16); return privateIpv4([a >> 8, a & 255, b >> 8, b & 255]); }
+      return false;
+    }
+    return !h.includes('.') || /\.(localhost|local|internal|lan|home\.arpa|corp|intranet)$/.test(h);
+  }
+  // Splits an ICE server URL into its parts, or returns null when it is not of the accepted shape.
+  function parseIceUrl(u) {
+    if (typeof u !== 'string' || u.length > 300) return null;
+    const m = ICE_URL_RE.exec(u);
+    if (!m) return null;
+    const scheme = m[1], host = m[2], transport = m[4] || null;
+    const port = m[3] === undefined ? (scheme === 'stuns' || scheme === 'turns' ? 5349 : 3478) : Number(m[3]);
+    if (!(port >= 1 && port <= 65535)) return null;
+    if ((scheme === 'stun' || scheme === 'stuns') && transport) return null;
+    if (scheme === 'turns' && transport === 'udp') return null;
+    if (host.startsWith('[')) {
+      if (!host.includes(':')) return null;
+    } else if (/^[0-9.]+$/.test(host)) {
+      if (!ipv4Parts(host)) return null;
+    } else if (host.length > 253 || !host.split('.').every((l) => HOST_LABEL_RE.test(l))) return null;
+    // A name whose last label is a number (0x7f.0.0.1, 1.2.3.0x7f) is an address in a form some
+    // resolvers accept, not a hostname.
+    else if (/^(0x[0-9a-f]*|\d+)$/i.test(host.split('.').pop())) return null;
+    return { scheme, host, port, transport, turn: scheme === 'turn' || scheme === 'turns' };
+  }
+  // Why a URL cannot be used, or null. kind is 'stun' or 'turn'.
+  function iceUrlProblem(u, o) {
+    o = o || {};
+    const p = parseIceUrl(u);
+    if (!p) return 'is not of the form stun:host[:port] or turn:host[:port][?transport=udp|tcp] (turns: for TLS)';
+    if (o.kind === 'stun' && p.turn) return 'is a TURN URL where STUN is expected';
+    if (o.kind === 'turn' && !p.turn) return 'is a STUN URL where TURN is expected';
+    if (!o.allowPrivate) {
+      if (privateHost(p.host)) return 'names a private, loopback or local address';
+      if (p.turn && !ICE_TURN_PORTS.includes(p.port)) return 'uses a TURN port other than ' + ICE_TURN_PORTS.join(', ');
+    }
+    return null;
+  }
+  const ICE_CREDENTIAL_RE = /^[A-Za-z0-9+/_-]{20,128}={0,2}$/;
+  const ICE_USERNAME_RE = /^(\d{9,11})(?::[A-Za-z0-9_-]{1,64})?$/;
+
+  // Reduces a service's ice answer to what a browser may be given. STUN URLs are kept (at most
+  // three). TURN URLs are kept (at most four) only with a username and credential in the
+  // time-limited form coturn's REST scheme uses and only while at least ICE_LIMITS.minRemainingMs
+  // of the credential's life is left, measured against the service's own clock. Nothing is stored
+  // or logged by this function; `dropped` holds reasons only, never a URL's credential.
+  function iceServersFromAnswer(answer, o) {
+    o = o || {};
+    const out = { iceServers: [], turn: false, dropped: [], remainingMs: null };
+    if (!answer || typeof answer !== 'object' || !Array.isArray(answer.iceServers)) return out;
+    const stun = [];
+    let turn = null;
+    for (const s of answer.iceServers.slice(0, ICE_LIMITS.servers)) {
+      if (!s || typeof s !== 'object' || !Array.isArray(s.urls)) { out.dropped.push('malformed-server'); continue; }
+      for (const u of s.urls.slice(0, ICE_LIMITS.urlsPerServer)) {
+        const p = parseIceUrl(u);
+        if (!p) { out.dropped.push('malformed-url'); continue; }
+        const why = iceUrlProblem(u, { kind: p.turn ? 'turn' : 'stun', allowPrivate: o.allowPrivate });
+        if (why) { out.dropped.push(p.turn ? 'turn-refused' : 'stun-refused'); continue; }
+        if (!p.turn) { if (!stun.includes(u) && stun.length < ICE_LIMITS.stunUrls) stun.push(u); continue; }
+        if (turn && turn.source !== s) { out.dropped.push('second-turn-server'); continue; }
+        if (!turn) turn = { source: s, urls: [] };
+        if (!turn.urls.includes(u) && turn.urls.length < ICE_LIMITS.turnUrls) turn.urls.push(u);
+      }
+    }
+    if (stun.length) out.iceServers.push({ urls: stun });
+    if (!turn) return out;
+    const s = turn.source;
+    const serverMs = Date.parse(answer.serverTime), expiresMs = Date.parse(answer.credentialExpiresAt);
+    const un = typeof s.username === 'string' ? ICE_USERNAME_RE.exec(s.username) : null;
+    let why = null;
+    if (!un || typeof s.credential !== 'string' || !ICE_CREDENTIAL_RE.test(s.credential)) why = 'turn-credential-malformed';
+    else if (!Number.isFinite(serverMs) || !Number.isFinite(expiresMs)) why = 'turn-expiry-missing';
+    else if (expiresMs - serverMs < ICE_LIMITS.minRemainingMs || Number(un[1]) * 1000 - serverMs < ICE_LIMITS.minRemainingMs) why = 'turn-credential-expired';
+    else if (expiresMs - serverMs > ICE_LIMITS.maxRemainingMs || Number(un[1]) * 1000 - serverMs > ICE_LIMITS.maxRemainingMs) why = 'turn-credential-too-long';
+    if (why) { out.dropped.push(why); return out; }
+    out.iceServers.push({ urls: turn.urls, username: s.username, credential: s.credential });
+    out.turn = true;
+    out.remainingMs = Math.min(expiresMs, Number(un[1]) * 1000) - serverMs;
+    return out;
+  }
+
   // ---------- contact safety code ----------
 
   // SHA-256("atlas.call.safety/v1" || sorted identity keys) rendered as six groups of five
@@ -394,6 +510,7 @@
     validatePayload, validateEnvelope, validateCardPayload, verifyEnvelope, verifySigned, derToRawEcdsaSig,
     freshForService, inviteTimeOk,
     normalizeFingerprint, checkSdpAgainstFingerprints, remoteCertMatches, candidateAddressAllowed,
+    ICE_TURN_PORTS, ICE_LIMITS, parseIceUrl, iceUrlProblem, privateHost, iceServersFromAnswer,
     safetyCode
   };
 });

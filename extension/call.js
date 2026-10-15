@@ -775,18 +775,24 @@
     try {
       const payload = base('atlas.call.ice', call.service, { nonce: P.randomId(16), callId: call.id });
       const res = await W.callPost(call.service, '/atlas/call/ice', { payload, proof: await signRaw(call.ck, payload) }, { signal: call.abort.signal, timeoutMs: 8000 });
-      if (res.status === 200 && res.json && Array.isArray(res.json.iceServers)) {
-        // Only plain STUN URLs of a sane shape, at most three in all; no credentials are used.
-        const urls = [];
-        for (const s of res.json.iceServers) for (const u of (s && Array.isArray(s.urls) ? s.urls : [])) {
-          if (typeof u === 'string' && /^stuns?:(\[[0-9a-fA-F:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(:\d{1,5})?$/.test(u) && !urls.includes(u) && urls.length < 3) urls.push(u);
-        }
-        if (urls.length) iceServers = [{ urls }];
+      if (res.status === 200 && res.json) {
+        // STUN and TURN servers that pass the shared checks (address, port, shape, remaining life of
+        // a TURN credential). The credential goes to the browser and nowhere else: it is not kept on
+        // the call, written to storage or logged, and each call asks for its own.
+        const parsed = P.iceServersFromAnswer(res.json, { allowPrivate: !!st.config.devAllowHttp });
+        iceServers = parsed.iceServers;
+        log('ice-servers', { stun: iceServers.filter((x) => !x.credential).reduce((n, x) => n + x.urls.length, 0), turn: parsed.turn, dropped: parsed.dropped });
       }
     } catch (err) { /* host candidates only */ }
     if (!live(call)) return;
     const pc = new RTCPeerConnection({ certificates: [call.cert], iceServers });
+    iceServers = null;
     call.pc = pc;
+    // Why a TURN server refused or did not answer: the numeric code and the URL scheme only, so a
+    // failed relay can be told apart from a missing one without the log holding an address or credential.
+    pc.onicecandidateerror = (e) => {
+      if (e && typeof e.url === 'string' && /^turns?:/i.test(e.url)) log('turn-error', { code: e.errorCode, scheme: e.url.slice(0, e.url.indexOf(':')).toLowerCase() });
+    };
     pc.onicecandidate = (e) => {
       if (!e.candidate || !live(call)) { if (!e.candidate && live(call)) flushCandidates(call, true); return; }
       if (!P.candidateAddressAllowed(e.candidate.candidate)) { log('own-candidate-skipped'); return; }

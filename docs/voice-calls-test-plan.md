@@ -253,3 +253,63 @@ proxy 16, e2e 41, contacts 20, messaging 12, mic 12, adversary 35, bridge 18, is
 The first ten (344 checks) are the milestone 1 set and pass unchanged. The wider older regression
 suites listed in section 6.1 were not rerun: the only wallet file changed is `extension/call.js`
 (the STUN URL filter), and its call-level behaviour is covered by the suites above.
+
+## 8. Self-hosted TURN (milestone 3)
+
+Evidence classes are kept apart on purpose.
+
+- **Real code**: the Call Service, the shared validation module, the wallet, Chromium's own TURN
+  client and WebRTC stack, DTLS-SRTP, the signed-fingerprint check.
+- **Simulated TURN server**: `test/turn-fixture-lib.js`, written for these tests. It is not coturn.
+  Every row below marked "simulated" shows the wallets and the service behave correctly against a
+  server that enforces coturn-style credentials; none shows that coturn does.
+- **Real coturn**: never run for this project. `TURN_URL`/`TURN_SECRET` let the person running the
+  tests repeat one relayed call against their own server.
+
+Linux sandbox, Node 22, Chromium 141 under Xvfb, two browser profiles on one machine. The browsers
+were launched with `--no-proxy-server` because Chromium sends TCP and TLS connections to TURN
+through its proxy settings and this sandbox's environment sets one that cannot reach the test
+addresses.
+
+| ID | Check | Suite | Status |
+|---|---|---|---|
+| T1 | URL syntax: only `stun`, `stuns`, `turn`, `turns` of an exact shape; user info, paths, fragments, odd transports, bad ports, hosts written as numbers or in hexadecimal and over-long input are refused | `manual-call-ice-validation.js` | Automated, real code |
+| T2 | private, loopback, link-local, shared-address, multicast and local-name hosts (IPv4, IPv6, IPv4-mapped) are refused for TURN and STUN; TURN ports other than 80, 443, 3478, 5349 refused; both relaxed only on the private test network; third-party services refused in operator settings | same | Automated, real code |
+| T3 | the wallet's reduction of an answer: credential form, expiry judged by the service's clock (expired, about to expire, too long, missing), one TURN server only, at most four TURN and three STUN URLs, extra fields dropped, malformed answers, no URL or credential in the dropped reasons | same | Automated, real code |
+| T4 | settings: URLs and secret together; secret strength, length, characters, repetition; file form and its permissions; lifetime range; URL count; messages never repeat the secret | `manual-call-turn-service.js` | Automated, real code |
+| T5 | who gets a credential: not a ringing, declined or cancelled call; not a stranger's key, another wallet's identity key, or either party's identity key instead of its call key; not a changed, stale, replayed or wrongly addressed request; not malformed bodies; each side up to 3 times, then `429`, independently | same | Automated, real code |
+| T6 | the credential: username is an expiry and a random label holding no key, call id or domain; credential equals an independently computed HMAC-SHA1; the two sides differ; lifetime capped by the call's remaining life; none with under 30 s left; stated expiry equals the username's | same | Automated, real code |
+| T7 | secrecy: not in `info`, answers, counters, the state file, or the output and files of the real process, with the secret given by environment or by file; a weak secret leaves the service unconfigured | same | Automated, real code, real child process |
+| T8 | a service without TURN settings issues nothing and says so | same, and the existing `manual-call-unconfigured.js` | Automated, real code |
+| T9 | the probe passes a server that enforces the rules over UDP, TCP and TLS; fails a wrong secret, a server that relays to private peers, a skewed clock and a dead port; exit codes; never prints the secret | `manual-call-turn-probe.js` | Automated against the **simulated** server |
+| T10 | the example coturn, settings and unit files contain the safety settings the guide relies on, with the probe's forbidden peers covered by `denied-peer-ip` | `manual-call-turn-deploy.js` | Automated text checks. **coturn never started** |
+| T11 | a call completes with the browser limited to relay candidates; the selected pair is a relay on both sides; audio flows both ways; the relay carried only DTLS and SRTP records; no microphone track before both fingerprints are confirmed; the certificate check passes as without TURN | `manual-call-turn.js` | Automated, real Chromium and DTLS-SRTP, **simulated TURN** |
+| T12 | the same with the browser reaching TURN over TCP, and over TLS (`turns:`) | same | Automated, **simulated TURN**. TLS used a self-signed certificate with certificate errors ignored |
+| T13 | the browser is handed exactly the operator's TURN URL with a credential that the simulated server accepts; both wallets get different ones | same | Automated, **simulated TURN** |
+| T14 | with TURN offered and a direct path available, the call stays direct and nothing crosses the relay | same | Automated, **simulated TURN** |
+| T15 | TURN server unreachable: a direct-capable call still works and uses the direct path; with relay forced the call ends as not connected, no microphone track is attached, and the log holds an error code and scheme only | same | Automated, **simulated TURN** |
+| T16 | credentials the server considers expired: no relay, the server counts the refusals, nothing is relayed; the same call works directly when relay is not forced; works again once the server accepts the credentials | same | Automated, **simulated TURN** |
+| T17 | no username, credential or secret is left in either wallet's extension storage, page storage, page text, call log, history or snapshot after the calls | same | Automated, real wallet |
+| T18 | a relayed call outlives its credential: Chromium's Refresh is refused and the relay path ends at that point | `manual-call-turn-longcall.js` (about 2 minutes; not in the default run) | Automated, **simulated TURN**. Whether coturn refuses an expired credential on Refresh is unverified |
+| T19 | one relayed call against a real coturn | `manual-call-turn.js` with `TURN_URL`, `TURN_SECRET` | **Not run** |
+| T20 | the guide on a real host: coturn started with the example, the probe against it from outside, two wallets on two networks, relayed and direct calls, TLS with a real certificate, 443 | `docs/voice-calls-deploy-turn.md` | **Not run: owner** |
+| T21 | the older call suites unchanged (protocol, service, unconfigured, internet-security, proxy, e2e, contacts, messaging, mic, adversary, bridge, isolation, stun) | the same suites | Automated; the STUN suite exposed one regression during this work (the wallet looked at only 8 URLs per entry), fixed and covered by T3 |
+
+### 8.1 Whole call suite after milestone 3
+
+18 suites, 692 checks, 0 failures: protocol 59, ice-validation 48, service 108, unconfigured 15,
+internet-security 125, proxy 16, turn-service 73, turn-probe 17, turn-deploy 20, e2e 41, contacts 20,
+messaging 12, mic 12, adversary 35, bridge 18, isolation 24, stun 13, turn 36. The thirteen
+earlier suites (498 checks) pass unchanged. `manual-call-turn-longcall.js` (4 checks) was run
+separately and passes. Three older wallet suites that load the same extension
+(`manual-auto-backup`, `manual-page-wallet-bridge`, `manual-chat-e2ee`) pass; the eleven older
+suites listed in section 6.1 were not rerun, since the only wallet files changed are
+`extension/call.js` and `extension/call-protocol.js`.
+
+### 8.2 What found real problems
+
+Writing these tests found, and the changes fixed: the service threw (`500`) when the credential
+lifetime setting was absent; IPv6 site-local addresses and hosts written as numbers or in hexadecimal
+were not treated as private; the wallet's first filter looked at too few URLs per entry for the existing STUN suite. The
+simulated server and probe also showed that Chromium's TCP and TLS TURN connections follow the browser's proxy
+settings, and that a relayed call ends when its credential expires (guide section 3).

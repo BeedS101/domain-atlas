@@ -33,7 +33,7 @@ Proposed environment or file (names are placeholders for review):
 | `CALL_REVOCATIONS_URL` | where to read that domain's revocation list for membership checks |
 | `CALL_STATE_FILE` | tag store path |
 | `CALL_STUN_URLS` | STUN URLs to advertise (empty: LAN-only calls) |
-| `CALL_TURN_URLS`, `CALL_TURN_SECRET` | Phase 3 only |
+| `CALL_TURN_URLS`, `CALL_TURN_SECRET` or `CALL_TURN_SECRET_FILE`, `CALL_TURN_TTL_SECONDS` | TURN servers to advertise and the secret shared with coturn (`docs/voice-calls-deploy-turn.md`) |
 | limits | invite size, per-tag/callee/source rates, live-call cap, long-poll caps, tag quota |
 
 With none of it present the service answers `503 calls-not-configured` on every
@@ -118,8 +118,9 @@ measurement.
 ### TURN configuration guidance
 
 Short-lived per-call credentials from the shared-secret scheme that coturn
-supports (`use-auth-secret`): username `"<expiry>:<callId>"`, password the
-HMAC of the username with the secret, lifetime at most 10 minutes. (This is the
+supports (`use-auth-secret`): username `"<expiry>:<random label>"`, password the
+HMAC of the username with the secret, lifetime `CALL_TURN_TTL_SECONDS` (default one hour, capped
+by the call's remaining life; see `docs/voice-calls-deploy-turn.md` section 3 for why not shorter). (This is the
 TURN server's own credential format, not a protocol invented here; its HMAC
 choice is dictated by the server, and it protects relay allocation, not
 audio.) The Call Service issues them only to a call in state `ACCEPTED` or

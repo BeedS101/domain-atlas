@@ -11,7 +11,8 @@ security review.
 Goal of this stage: a Call Service reachable only over https at its own address, that two
 wallets on different networks can use to place an authenticated, encrypted call. Audio goes
 directly between the browsers (and through your own STUN server for address discovery if you
-add one). TURN, so that calls work through strict NATs, is the next stage.
+add one). TURN, so that calls also work through strict NATs, is a separate step with its own guide:
+`docs/voice-calls-deploy-turn.md`.
 
 ## 1. What you need
 
@@ -204,8 +205,9 @@ this project uses a third-party one.
 3. Repeat the tests of section 8 on the harder network pairs and record whether STUN made the
    difference.
 
-The wallet passes the browser at most three plain `stun:` URLs from the service and nothing
-else (no TURN, no credentials). Because a caller uses the callee's service, **the callee's
+The wallet passes the browser at most three plain `stun:` URLs from the service, plus the TURN
+entry described in `docs/voice-calls-deploy-turn.md` when you have set one up, and nothing
+else. Because a caller uses the callee's service, **the callee's
 operator decides which STUN server a caller's browser contacts**; the caller's address is
 visible to that server. That is the same trust the caller already places in the callee's
 service, and the reason it is your own server and not a third party's.
@@ -252,6 +254,7 @@ wallet waits and tries again. Each held connection needs a file descriptor; the 
 - Everything in sections 2 to 9 on a real server: the three example configuration files for the
   proxy and the unit were not started; coturn was not run.
 - A call across two real networks, with and without STUN, and the rate of direct connections.
+- Everything about TURN: see `docs/voice-calls-deploy-turn.md` section 11.
 - Behaviour behind a content-delivery network or load balancer in front of the proxy (not
   recommended for this stage; several proxies change which forwarded address is the real one).
 - Rate limiting under real load; the figures in section 10 are starting points.

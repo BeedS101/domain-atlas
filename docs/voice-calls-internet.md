@@ -81,7 +81,7 @@ extension reload, note whether an auto-lock time is set and what the wallet show
 |---|---|---|
 | 1 | Configuration isolation and online-readiness review (done, section 3) | The wallet must stay healthy whatever calling does; nothing else is safe to test on real networks until this holds |
 | 2 | Node Call Service ready for https on a test host (done as code, tests and a deployment guide, section 4); then wallet to wallet across two networks, **with** a self-hosted STUN (owner, on a real host) | Smallest real-network step: no change to the signed protocol, only safeguards and deployment; shows how often direct connections work |
-| 3 | TURN: coturn plus ephemeral credentials issued by the Call Service (Node first), wallet support for TURN credentials | Direct connections fail on many home and mobile networks; needed before any real demonstration |
+| 3 | TURN: coturn plus ephemeral credentials issued by the Call Service (Node first), wallet support for TURN credentials (done as code, simulated-server tests and a guide, section 7; **coturn itself not run**) | Direct connections fail on many home and mobile networks; needed before any real demonstration |
 | 4 | Multi-domain admission (section 6) | Small server and wallet change; needed before a second operator joins |
 | 5 | Native PHP Call Service with shared test vectors and a Node-wallet-to-PHP-service test | The largest piece; built against the now-stable protocol |
 | 6 | Cross-implementation matrix: PHP-issuer wallet and Node-issuer wallet, services both ways | The demonstration scenario |
@@ -161,7 +161,7 @@ own ports (section 7).
 
 | Gap | Status |
 |---|---|
-| ICE answer lists STUN only (`turn: false`) | milestone 3 (coturn and ephemeral credentials) |
+| ICE answer lists STUN only (`turn: false`) | done in milestone 3 when `CALL_TURN_URLS` and a secret are set (section 7); still STUN only otherwise |
 | `info` reports no admitted domains | milestone 4 |
 | No graceful drain on shutdown beyond closing connections | acceptable: callers see "not available" and retry |
 | The wallet takes the service address by hand | optional later: a reference-implementation manifest field naming the domain's call service, suggested to the person and confirmed by them, like the existing `presence` and `postOffice` fields (not part of `SPEC.md`) |
@@ -271,9 +271,17 @@ Open admission for any wallet key, or a shared central admission service, or tru
 because a request claims it. Each would either create an abuse surface without an operator
 decision or reintroduce a mandatory central party.
 
-## 7. Self-hosted STUN and TURN (Proposed)
+## 7. Self-hosted STUN and TURN
 
-Use coturn. (Milestone 2 uses it in `stun-only` mode, `call-server/deploy/coturn-stun-only.conf.example`, which needs no secret and relays nothing; the credentials below are milestone 3.) It is established, open source, supports STUN and TURN over UDP, TCP and TLS, and
+Status: milestone 3 implemented the credential scheme, the service and wallet changes and the
+tests; the operator guide is `docs/voice-calls-deploy-turn.md`. The text below was the proposal;
+where the build differs, the guide and `call-server/README.md` are authoritative (differences:
+the user name is `<expiry>:<random label>`, not `<expiry>:<callId>`, so TURN logs hold nothing
+about the call; the lifetime is `CALL_TURN_TTL_SECONDS`, default one hour, because the browser
+cannot take a new credential during a call; the wallet accepts only ports 80, 443, 3478 and 5349
+and refuses private addresses outside the private test network). coturn has not been run.
+
+Use coturn. (`call-server/deploy/coturn-stun-only.conf.example` runs it in `stun-only` mode with no secret and nothing relayed; `coturn-turn.conf.example` adds relaying with credentials.) It is established, open source, supports STUN and TURN over UDP, TCP and TLS, and
 has a built-in ephemeral-credential mode (TURN REST API) that needs no database.
 
 * **Where:** a small VPS with a public IPv4 address; it cannot run on shared PHP hosting. One
@@ -320,7 +328,9 @@ directory of wallets, calling optional and isolated (section 3). Domain Atlas Co
   a reverse proxy (the nginx and Caddy examples were never started), systemd, the deployment
   checker against the real address, a STUN server (coturn was never run), and two PCs on
   different internet connections with and without STUN.
-* Sections 5 to 7 beyond STUN: a VPS for TURN, and the PHP service once built.
+* Milestone 3 on a real host: a VPS running coturn with `coturn-turn.conf.example`, `turn-probe.js`
+  against it, and relayed calls between two real networks (`docs/voice-calls-deploy-turn.md`
+  section 11 lists what is unverified). The PHP service once built.
 * The checks listed in `docs/voice-calls-phase1b.md` section 3.3 that no automated test can
   make: the real microphone prompt, hidden or sleeping windows, the operating system's
   recording indicator, passkey identities, Firefox and branded Chrome.

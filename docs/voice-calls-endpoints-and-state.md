@@ -208,9 +208,24 @@ the call survives the listening session ending.
 
 ### 2.5 `ice`
 
-Returns `{ "iceServers": [ { "urls": ["stun:..."] } ], "ttl": 600 }`. TURN
-entries (Phase 3) carry `username`/`credential` valid for at most 10 minutes and
-are issued only to a call in state `ACCEPTED` or later, once per call side.
+Mode B (call key of either side). Refused (`404 unavailable`) for a call that is `RINGING` or
+`ENDED`, for any other key, and for a repeated nonce (`401 replayed-request`). Returns:
+
+```
+{ "iceServers": [ { "urls": ["stun:..."] },
+                  { "urls": ["turn:...", "turns:..."], "username": "<unix expiry>:<label>", "credential": "<base64>" } ],
+  "ttl": 3600, "serverTime": "<ISO time>", "credentialExpiresAt": "<ISO time>" }
+```
+
+The STUN entry is present when the operator set STUN URLs; the TURN entry only when the operator set
+TURN URLs and a secret, and only while the call has at least 30 s of its maximum length left
+(`credentialExpiresAt` and the TURN entry are then both absent). `username` is
+`<unix expiry>:<random 8-byte label>` and `credential` is `base64(HMAC-SHA1(secret, username))`, the
+form coturn's `use-auth-secret` expects. `ttl` is the credential's lifetime in seconds
+(`CALL_TURN_TTL_SECONDS`, default 3600, capped by the call's remaining life). Each side may fetch up
+to three times per call (`429 rate-limited` after). `serverTime` lets the wallet judge expiry by the
+service's clock. The wallet drops a TURN entry with a malformed username or credential, under 15 s
+or over 25 h of life, a private address or an unusual port (`P.iceServersFromAnswer`).
 
 ## 3. Phase 2 certificates
 

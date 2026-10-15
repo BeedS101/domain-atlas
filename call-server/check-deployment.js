@@ -81,7 +81,8 @@ async function main() {
   else { bad('the service is configured', 'it reports configured:false; read its console for the setting that is wrong'); return 1; }
   if (info.json.audience === origin) ok('the service names exactly this address as its origin', origin);
   else bad('the service names exactly this address as its origin', 'it says ' + info.json.audience + ' but you typed ' + origin + '; CALL_ORIGIN must match');
-  console.log('INFO domain admitted: ' + info.json.domain + '; STUN: ' + ((info.json.ice && info.json.ice.stun || []).join(', ') || 'none') + '; TURN: ' + (info.json.ice && info.json.ice.turn ? 'yes' : 'no'));
+  console.log('INFO domain admitted: ' + info.json.domain + '; STUN: ' + ((info.json.ice && info.json.ice.stun || []).join(', ') || 'none') + '; TURN: ' + (info.json.ice && info.json.ice.turn ? 'yes (' + (info.json.ice.turnUrls || []).join(', ') + ')' : 'no'));
+  if (info.json.ice && info.json.ice.turn) console.log('INFO this checker does not test the TURN server; run call-server/turn-probe.js against it (docs/voice-calls-deploy-turn.md section 6)');
   const skew = Math.abs(Date.parse(info.json.serverTime) - Date.now());
   if (skew > 25000) bad('clock agreement', 'this computer and the service differ by ' + Math.round(skew / 1000) + ' s; invitations allow 30 s');
   else if (skew > 5000) warn('clock agreement', 'differs by ' + Math.round(skew / 1000) + ' s');

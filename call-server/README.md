@@ -38,6 +38,9 @@ same names without `CALL_`, camel-cased (`issuerKeys`, `stateFile`, ...).
 | `CALL_REVOCATIONS_URL` | Optional. That domain's revocation list. If set and unreadable, tag creation fails closed. |
 | `CALL_STATE_FILE` | Optional. Path of the tag store (hashes of tags only, mode 0600, atomic writes). Without it tags are lost on restart. |
 | `CALL_STUN_URLS` | Optional, comma separated `stun:host[:port]` URLs of a STUN server **you operate**, at most three, handed to wallets after a call is accepted. Public third-party STUN servers (Google, Cloudflare, Twilio, Mozilla and similar) are refused. Empty: direct connections only. |
+| `CALL_TURN_URLS` | Optional, comma separated `turn:` / `turns:` URLs of a TURN server **you operate** (coturn), at most four, ports 80, 443, 3478 or 5349. Needs a secret. With both set, each side of an accepted call may fetch a short-lived credential for them. Unset: no TURN, no credential. Setting up coturn: `docs/voice-calls-deploy-turn.md`. |
+| `CALL_TURN_SECRET`, `CALL_TURN_SECRET_FILE` | The secret shared with coturn (`static-auth-secret`), 32 to 256 printable characters, for example `openssl rand -hex 32`. Prefer the file form (mode 600, for example a systemd credential); a file readable by group or others is refused. Never logged, never in `info`, never in any answer, never in the state file. |
+| `CALL_TURN_TTL_SECONDS` | Lifetime of a TURN credential, 60 to 86400, default 3600, never beyond the call's own maximum. A relayed call lasts about this long. |
 | `CALL_BIND`, `CALL_PORT` | Listen address (default `127.0.0.1`) and port (default `8787`). A non-loopback bind is your decision and needs your own firewall rule; the service opens nothing. |
 | `CALL_TRUST_PROXY=1` | A reverse proxy is in front. The client address is then the last `X-Forwarded-For` entry, honoured only when the connection comes from a `CALL_PROXY_ADDRS` address, and with an https origin every request must carry `X-Forwarded-Proto: https`. |
 | `CALL_PROXY_ADDRS` | Optional, comma separated addresses the proxy connects from. Default `127.0.0.1,::1`. |
@@ -51,8 +54,9 @@ unconfigured and says which setting on the console.
 
 Running it on the internet: `docs/voice-calls-deploy-node.md` is the step-by-step guide
 (settings, systemd, https reverse proxy, checking it, testing with two wallets, optional STUN),
+`docs/voice-calls-deploy-turn.md` adds your own TURN server,
 `call-server/deploy/` holds the examples (nginx, Caddy, systemd, settings file, STUN-only
-coturn), and `docs/voice-calls-internet.md` section 4 records the review behind them. The
+coturn, coturn with credentials), and `docs/voice-calls-internet.md` section 4 records the review behind them. The
 service has not been deployed anywhere.
 
 ## Checking a deployment
@@ -64,7 +68,19 @@ node call-server/check-deployment.js https://calls.example.org
 Run from another computer. It sends ordinary requests and one signed listen made with a
 throwaway key (no tag, no real identity), and reports whether the address matches, the proxy
 passes `X-Forwarded-Proto`, long polls survive the proxy, cross-origin access is closed and
-oversized or wrongly typed requests are refused. It does not test audio, STUN or TURN.
+oversized or wrongly typed requests are refused. It does not test audio, STUN or TURN; for a
+TURN server use `call-server/turn-probe.js` (below).
+
+## Checking a TURN server
+
+```
+CALL_TURN_SECRET=... node call-server/turn-probe.js turn:turn.example.org:3478
+```
+
+Talks to the TURN server like a browser would, with a credential made from the shared secret, and
+reports whether valid credentials work, expired, wrong-secret and TCP-relay requests are refused,
+loopback, private and link-local peers are refused, and relaying works. Exit 0 means no failed
+check. See `docs/voice-calls-deploy-turn.md` section 6 for what it does not cover.
 
 ## What it refuses on its own
 
@@ -85,6 +101,10 @@ node test/manual-call-service.js       # the service, in process
 node test/manual-call-unconfigured.js  # the service as a real child process
 node test/manual-call-internet-security.js  # limits, proxy handling, cross-origin rules, STUN settings
 node test/manual-call-proxy.js         # the deployment checker through a stand-in TLS proxy
+node test/manual-call-ice-validation.js  # the rules for STUN/TURN URLs and credentials, shared with the wallet
+node test/manual-call-turn-service.js  # TURN settings, who gets a credential and when, its form and lifetime
+node test/manual-call-turn-probe.js    # turn-probe.js against a SIMULATED TURN server
+node test/manual-call-turn-deploy.js   # the example files for coturn and the service
 ```
 
 The browser-level tests are listed in `docs/voice-calls-phase1b.md`.

@@ -25,6 +25,7 @@ amendment names the class it has reached:
 | `docs/voice-calls-deployment.md` | STUN/TURN, bandwidth, operator set-up, rollout, degradation |
 | `docs/voice-calls-internet.md` | operation over the internet: configuration isolation, https Node service, PHP signalling, cross-domain admission, coturn |
 | `docs/voice-calls-deploy-node.md` | step-by-step: deploy the Node Call Service behind https, check it, test it with two wallets, add your own STUN |
+| `docs/voice-calls-deploy-turn.md` | step-by-step: your own coturn server, short-lived credentials from the Call Service, checking it with the probe |
 
 ## 1. Goals and non-goals
 

@@ -3,7 +3,7 @@
 #   systemd-analyze security atlas-call      (review what is still open)
 #
 # Install the program somewhere only root can write, for example /opt/domain-atlas, and put
-# the settings (public keys only, no secret) in /etc/atlas-call/config.json.
+# the settings (public keys and addresses only, no secret) in /etc/atlas-call/config.json.
 
 [Unit]
 Description=Domain Atlas Call Service (signalling for wallet voice calls)
@@ -13,6 +13,11 @@ Wants=network-online.target
 [Service]
 ExecStart=/usr/bin/node /opt/domain-atlas/call-server/server.js
 Environment=CALL_CONFIG_FILE=/etc/atlas-call/config.json
+# Only when the settings list turnUrls (docs/voice-calls-deploy-turn.md): the secret shared with
+# the TURN server, kept in a file only root can read and handed to the service as a credential.
+# It is never put in config.json, the unit or the environment.
+#LoadCredential=turn-secret:/etc/atlas-call/turn-secret
+#Environment=CALL_TURN_SECRET_FILE=%d/turn-secret
 Restart=on-failure
 RestartSec=3
 

@@ -1,0 +1,114 @@
+# Example coturn configuration for relaying Domain Atlas calls. Written from coturn's
+# documentation; coturn was not available where this was written, so this file has not been run.
+# Check it with `turnserver -c <file>` on the host, read the log, then run
+# `node call-server/turn-probe.js` against it (docs/voice-calls-deploy-turn.md) before any wallet
+# is pointed at it.
+#
+# A TURN server forwards packets between two wallets that cannot reach each other directly. It
+# sees both wallets' network addresses and how much traffic passes. It cannot read audio: the
+# audio is DTLS-SRTP between the browsers and the DTLS fingerprints are signed by the wallets.
+#
+# Run it on a host that does nothing else, with a public IPv4 address. A relay can send UDP to
+# any address it is not told to refuse, including services on the same host's public address,
+# so keep other services off that address or bind them to loopback.
+#
+# Firewall (inbound):
+#   UDP and TCP 3478            plain TURN
+#   TCP 5349                    TURN over TLS (turns:)
+#   UDP min-port..max-port      relay ports, the range set below
+# Nothing else. The Call Service is told these addresses in CALL_TURN_URLS.
+
+# ---------- listening ----------
+listening-port=3478
+tls-listening-port=5349
+# The address coturn listens on. Leave out to listen on every address of the host.
+#listening-ip=203.0.113.10
+# Needed when the host's public address is not on one of its own interfaces (many cloud hosts):
+# external-ip=<public address>/<private address>
+#external-ip=203.0.113.10/10.0.0.5
+
+# Relay ports. The firewall opens exactly this range. About 2 ports per simultaneous relayed
+# call per side; 800 ports serve a few hundred calls.
+min-port=49200
+max-port=49999
+
+# ---------- credentials ----------
+# Time-limited credentials made by the Call Service (the REST scheme): the user name is
+# "<unix expiry>:<label>", the password is base64(HMAC-SHA1(secret, user name)). coturn checks the
+# expiry itself. No user database, no static users.
+use-auth-secret
+# The same value as the Call Service's CALL_TURN_SECRET or CALL_TURN_SECRET_FILE. Make one with:
+#   openssl rand -hex 32
+# This file must not be readable by anyone but root and the user coturn runs as (chmod 640, group
+# turnserver). coturn has no setting to read the secret from another file.
+static-auth-secret=REPLACE-WITH-THE-OUTPUT-OF-openssl-rand-hex-32
+# Any name, the same on this server always. Shown to clients in the authentication challenge.
+realm=turn.example.org
+# Reject nonces older than this many seconds, which forces clients to re-authenticate.
+stale-nonce=600
+# Every Refresh is authenticated again, so a client whose credential has expired cannot keep an
+# allocation alive past this limit. Calls longer than the credential lifetime end here at the latest.
+max-allocate-lifetime=3600
+
+# ---------- who and what may be relayed ----------
+# No relay to this host's own loopback or to private, link-local, shared-address, documentation,
+# benchmarking, multicast or reserved addresses, so the relay cannot be used to reach the
+# operator's internal network or a cloud metadata service.
+no-loopback-peers
+no-multicast-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=224.0.0.0-255.255.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+# If this host sits behind NAT and the probe's "data sent through one relay reaches the other"
+# check fails, add the host's own private address here, and nothing broader:
+#allowed-peer-ip=10.0.0.5
+# Audio needs UDP relays only.
+no-tcp-relay
+
+# ---------- limits ----------
+# Allocations per credential. A browser may allocate once per TURN URL it is given, so keep this
+# above the number of URLs in CALL_TURN_URLS.
+user-quota=8
+# Allocations on the whole server.
+total-quota=600
+# Bits per second per relayed session: Opus voice needs about 60 kbit/s each way.
+max-bps=400000
+# Bits per second for the whole server. Size it to the host's uplink, for example 80% of it.
+#bps-capacity=50000000
+
+# ---------- protocol hygiene ----------
+fingerprint
+no-cli
+no-dtls
+no-software-attribute
+no-tlsv1
+no-tlsv1_1
+# Answer STUN binding requests only to clients that authenticate. Leave this out if wallets also
+# use this server as a STUN server without credentials.
+#secure-stun
+
+# ---------- TLS (turns:) ----------
+# A certificate for the TURN host name, e.g. from certbot. coturn reads these at start.
+cert=/etc/letsencrypt/live/turn.example.org/fullchain.pem
+pkey=/etc/letsencrypt/live/turn.example.org/privkey.pem
+
+# ---------- logging ----------
+# Written with each allocation's user name and peer addresses; that is network metadata, so keep
+# the log short-lived (logrotate with a few days) or leave it at a lower verbosity.
+simple-log
+log-file=/var/log/turnserver/turn.log
+no-stdout-log
+
+# ---------- process ----------
+proc-user=turnserver
+proc-group=turnserver

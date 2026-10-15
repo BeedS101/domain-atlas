@@ -9,6 +9,8 @@
   "trustProxy": true,
   "proxyAddrs": ["127.0.0.1", "::1"],
   "stunUrls": [],
+  "turnUrls": [],
+  "turnTtlSeconds": 3600,
   "inviteCorsOrigins": [],
   "limits": {
     "maxConnections": 3000,
