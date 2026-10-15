@@ -26,6 +26,11 @@ const callCount = (w) => w.callPage.evaluate(() => window.__atlasCall.history.le
     const pb = await bob.openCallWindow();
     check('the calling window opens locked-in to the wallet with no call and no listener', (await alice.snap()).call === null && !(await alice.snap()).listening);
 
+    check('the activity log shows the newest entry first', await pa.evaluate(() => {
+      const t = document.getElementById('log').textContent.split('\n').filter(Boolean).map((l) => l.slice(0, 12));
+      return t.length > 0 && t.every((x, i) => i === 0 || t[i - 1] >= x);
+    }));
+
     // The callee's own limit on rings per caller is exercised separately below.
     await bob.setTimers({ ringRateWindowMs: 300 });
 

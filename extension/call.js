@@ -57,7 +57,8 @@
     hook.log.push({ t: Date.now(), name, data: data === undefined ? null : data });
     if (hook.log.length > 400) hook.log.shift();
     const el = $('log');
-    el.textContent = (el.textContent + line + '\n').split('\n').slice(-30).join('\n');
+    // Newest entry first, so the latest activity is visible without scrolling.
+    el.textContent = [line].concat(el.textContent.split('\n').filter(Boolean)).slice(0, 30).join('\n');
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // A service that holds a request until something happens needs no pause between requests. One
@@ -491,6 +492,7 @@
       }
       const code = res.json && res.json.code;
       log('invite-refused', code || String(res.status));
+      log('invite-refused-by', card.service + ' status ' + res.status);
       if (code === 'stale-request') return endCall(call, 'error', { text: 'Your computer’s clock is out of step with the call service. Check the date and time.' });
       if (code === 'rate-limited') return endCall(call, 'error', { text: 'Too many call attempts. Try again in a minute.' });
       endCall(call, code === 'unavailable' ? 'unavailable' : 'error');
