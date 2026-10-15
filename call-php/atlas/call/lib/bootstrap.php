@@ -72,6 +72,10 @@ final class CallConfig {
     return self::check($raw);
   }
 
+  static function isAbsolutePath($p) {
+    return is_string($p) && ($p !== '') && ($p[0] === '/' || preg_match('#^[A-Za-z]:[\\\\/]#', $p) === 1 || strpos($p, '\\\\') === 0);
+  }
+
   static function check($raw) {
     $bad = function ($why) { return ['configured' => false, 'problem' => $why]; };
     $known = ['origin', 'domain', 'issuerKeys', 'revocationsFile', 'revocationsUrl', 'stateDir', 'stunUrls', 'turnUrls', 'turnSecret', 'turnSecretFile', 'turnTtlSeconds',
@@ -129,6 +133,8 @@ final class CallConfig {
     foreach ($cfg['issuerKeys'] as $k) if (!preg_match('/^[A-Za-z0-9_-]{87}\z/', $k)) return $bad('issuerKeys must list 1 to 8 raw P-256 public keys');
     if ($cfg['revocationsFile'] && $cfg['revocationsUrl']) return $bad('revocationsFile and revocationsUrl are both set; use one');
     if ($cfg['revocationsFile'] && !is_string($cfg['revocationsFile'])) return $bad('revocationsFile must be a path');
+    if ($cfg['revocationsFile'] && preg_match('#^[A-Za-z][A-Za-z0-9+.-]*://#', $cfg['revocationsFile'])) return $bad('revocationsFile must be a file path on this server, not a URL; put a URL in revocationsUrl');
+    if ($cfg['revocationsFile'] && !self::isAbsolutePath($cfg['revocationsFile'])) return $bad('revocationsFile must be a full path starting with / (a relative path depends on which script is running)');
     if ($cfg['revocationsUrl']) {
       $u = is_string($cfg['revocationsUrl']) ? parse_url($cfg['revocationsUrl']) : false;
       if (!$u || empty($u['host']) || !isset($u['scheme'])) return $bad('revocationsUrl is not a URL');
@@ -159,6 +165,7 @@ final class CallConfig {
     $env = getenv('ATLAS_CALL_STATE_DIR');
     if ($env) $cfg['stateDir'] = $env;
     if (!is_string($cfg['stateDir'])) return $bad('stateDir must be a path');
+    if (!self::isAbsolutePath($cfg['stateDir'])) return $bad('stateDir must be a full path starting with / (a relative path would put the state in a different place for each script); leave it out to use lib/state');
     $cfg['configured'] = true;
     return $cfg;
   }

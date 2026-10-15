@@ -17,12 +17,13 @@ return [
     // 'PASTE-THE-ISSUER-PUBLIC-KEY-HERE',
   ],
 
-  // Where this domain's issuer publishes revoked credentials. On the same hosting account that
-  // is a file the service can read; membership checks fail closed if it cannot be read.
+  // Where this domain's issuer publishes revoked credentials: the full path of the file, starting
+  // with / (not a URL). On the same hosting account that is a file the service can read; membership checks fail closed if it cannot be read.
   'revocationsFile' => '/home/ACCOUNT/public_html/.well-known/atlas-revocations.json',
   // 'revocationsUrl' => 'https://example.com/.well-known/atlas-revocations.json',  // instead of the file
 
-  // Where the service keeps its state (small files, deleted by the service as they expire).
+  // Where the service keeps its state (small files, deleted by the service as they expire). A full
+  // path starting with /; a relative path is refused. Leave the line out to use lib/state.
   // Prefer a folder outside the web root, writable only by your hosting account.
   'stateDir' => '/home/ACCOUNT/atlas-call-state',
 
