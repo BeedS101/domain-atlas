@@ -75,7 +75,7 @@ final class CallConfig {
   static function check($raw) {
     $bad = function ($why) { return ['configured' => false, 'problem' => $why]; };
     $known = ['origin', 'domain', 'issuerKeys', 'revocationsFile', 'revocationsUrl', 'stateDir', 'stunUrls', 'turnUrls', 'turnSecret', 'turnSecretFile', 'turnTtlSeconds',
-      'trustProxy', 'proxyAddrs', 'inviteCorsOrigins', 'httpsCheck', 'limits', 'timers', 'poll', 'devAllowHttp', 'devAllowPrivateFetch'];
+      'trustProxy', 'proxyAddrs', 'inviteCorsOrigins', 'httpsCheck', 'limits', 'timers', 'poll', 'devAllowHttp', 'devAllowPrivateFetch', 'logRefusals'];
     foreach ($raw as $k => $_) if (!in_array($k, $known, true)) return $bad($k . ' is not a setting');
     $g = function ($k, $d = null) use ($raw) { return array_key_exists($k, $raw) ? $raw[$k] : $d; };
     $cfg = [
@@ -89,6 +89,7 @@ final class CallConfig {
       'trustProxy' => $g('trustProxy') === true, 'proxyAddrs' => self::strList($g('proxyAddrs')),
       'corsOrigins' => self::strList($g('inviteCorsOrigins')), 'httpsCheck' => $g('httpsCheck', true) !== false,
       'devAllowHttp' => $g('devAllowHttp') === true, 'devAllowPrivateFetch' => $g('devAllowPrivateFetch') === true,
+      'logRefusals' => $g('logRefusals') === true,
       'limits' => [], 'timers' => [], 'poll' => [],
     ];
     if (!$cfg['origin'] && !$cfg['domain'] && !$cfg['issuerKeys']) return $bad('no configuration present');

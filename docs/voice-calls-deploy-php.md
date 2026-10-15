@@ -92,6 +92,7 @@ so only your hosting account can read it (`chmod 600`). Until it exists, every r
 | `stunUrls`, `turnUrls`, `turnSecretFile` | Your own STUN and TURN servers, if any. Third-party public STUN and TURN services are refused. Leave empty for direct connections only. The TURN secret is better in a `chmod 600` file than in `config.php`. |
 | `trustProxy`, `proxyAddrs` | Only behind a reverse proxy or CDN you control. Without them the service uses the connecting address and checks that the request arrived over https. |
 | `inviteCorsOrigins` | Web pages (exact https origins) allowed to send invitations from a browser. Normally empty. |
+| `logRefusals` | Troubleshooting only. `true` writes the reason an invitation was refused to PHP's error log (section 5.1). Callers still get the same uniform reply. Turn it off again afterwards. |
 | `limits`, `timers`, `poll` | Optional tuning, validated on load. Out-of-range values leave the service unconfigured and name the setting in PHP's error log. |
 
 If `config.php` has a mistake, the service answers `calls-not-configured` and writes the first
@@ -147,6 +148,19 @@ because `lib/state/` and `config.php` must never be reachable.
 
 `https://example.com/atlas/call/info` in a browser shows `"configured": true` and `"ready": true`
 when the settings are accepted and the state folder is writable.
+
+### 5.1 When every call is refused as "unavailable"
+
+The service gives the same `404 unavailable` for every kind of refusal, so a caller cannot probe
+which tags or listeners exist. To find the reason on your own host, add `'logRefusals' => true` to
+`lib/config.php`, make one call attempt, and read PHP's error log (cPanel: Errors, or the
+`error_log` file next to the scripts). Each refused invitation writes one line such as
+`[atlas-call] invite refused: callee-not-listening (listener last seen 41000 ms ago, allowed 20000)`.
+The line never contains a tag, key or address. Reasons: `no-such-tag`,
+`tag-not-bound-to-this-caller`, `callee-key-differs-from-tag`, `tag-expired`, `tag-used-up`,
+`invite-already-expired`, `invite-issued-in-the-future` (clocks differ by more than 30 s),
+`call-id-already-seen`, `another-call-is-ringing-on-this-tag`, `callee-not-listening`,
+`service-at-live-call-limit`, `callee-rate-limited`. Set it back to off when you are done.
 
 ## 6. Two domains calling each other
 

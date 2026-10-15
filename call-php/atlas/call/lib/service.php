@@ -608,13 +608,36 @@ final class CallService {
       $index = $this->store->callIndex();
       $live = 0;
       foreach ($index as $e) if ((int)$e[1] === 0 || $t - (int)$e[1] < $this->T['endedRetainMs']) $live++;
-      $good = $tag && $p->tag === $body->tag && $tag['bind']['publicKey'] === $a['signer'] && $p->caller->publicKey === $a['signer'] &&
-        $p->callee->publicKey === $tag['calleeKey'] && CallProto::parseTime($tag['expiresAt']) > $t && $tag['used'] < $tag['maxCalls'] &&
-        CallProto::parseTime($p->expiresAt) > $t && CallProto::parseTime($p->issuedAt) <= $t + CallProto::LIMITS['walletSkewMs'] &&
-        !isset($index[$callName]) && !$ringing &&
-        $mb !== null && ($t - $mb['lastSeen'] <= $this->T['listenerFreshMs']) && $live < $this->L['maxLiveCalls'] &&
-        !$this->limited('inv-callee:' . $tag['owner'], $this->L['invitesPerCalleePerMin']);
-      if (!$good) return $this->unavailable();
+      $failed = [];
+      if (!$tag) {
+        $failed[] = 'no-such-tag';
+      } else {
+        $checks = [
+          'outer-tag-differs-from-signed-tag' => $p->tag === $body->tag,
+          'tag-not-bound-to-this-caller' => $tag['bind']['publicKey'] === $a['signer'] && $p->caller->publicKey === $a['signer'],
+          'callee-key-differs-from-tag' => $p->callee->publicKey === $tag['calleeKey'],
+          'tag-expired' => CallProto::parseTime($tag['expiresAt']) > $t,
+          'tag-used-up' => $tag['used'] < $tag['maxCalls'],
+          'invite-already-expired' => CallProto::parseTime($p->expiresAt) > $t,
+          'invite-issued-in-the-future' => CallProto::parseTime($p->issuedAt) <= $t + CallProto::LIMITS['walletSkewMs'],
+          'call-id-already-seen' => !isset($index[$callName]),
+          'another-call-is-ringing-on-this-tag' => !$ringing,
+          'callee-not-listening' => $mb !== null && ($t - $mb['lastSeen'] <= $this->T['listenerFreshMs']),
+          'service-at-live-call-limit' => $live < $this->L['maxLiveCalls'],
+        ];
+        foreach ($checks as $why => $ok) if (!$ok) $failed[] = $why;
+        // The callee's own rate is counted only for an invitation that passed everything else.
+        if (!$failed && $this->limited('inv-callee:' . $tag['owner'], $this->L['invitesPerCalleePerMin'])) $failed[] = 'callee-rate-limited';
+      }
+      if ($failed) {
+        // The reply is the same for every reason. With logRefusals on, the operator's error log
+        // gets the reason, never the caller, the tag or any key.
+        if (!empty($this->cfg['logRefusals'])) {
+          $age = ($tag && $mb !== null) ? (int)($t - $mb['lastSeen']) : null;
+          error_log('[atlas-call] invite refused: ' . implode(',', $failed) . ($age !== null ? ' (listener last seen ' . $age . ' ms ago, allowed ' . $this->T['listenerFreshMs'] . ')' : ''));
+        }
+        return $this->unavailable();
+      }
 
       $invite = json_encode(['payload' => $p, 'proof' => $body->invite->proof], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
       $call = [

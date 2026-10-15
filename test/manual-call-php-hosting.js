@@ -427,6 +427,46 @@ function checkConfig(cfg) {
     await sig.svc.close();
   }
 
+  // ---------- refusal reasons for the operator ----------
+  {
+    const run = async (logRefusals) => {
+      const ctx = await L.startPhpService(logRefusals ? { logRefusals: true } : {}, {});
+      const alice = await Wallet.create(ctx), bob = await Wallet.create(ctx), mallory = await Wallet.create(ctx);
+      const tag = (await bob.createTag(alice.pub)).json;
+      const replies = [];
+      replies.push(await alice.invite(await alice.buildInvite(tag.tag, bob.pub)));
+      await bob.listen([]);
+      replies.push(await mallory.invite(await mallory.buildInvite(tag.tag, bob.pub)));
+      replies.push(await alice.invite(await alice.buildInvite(P.randomId(16), bob.pub)));
+      replies.push(await alice.invite(await alice.buildInvite(tag.tag, mallory.pub)));
+      const ok = await alice.invite(await alice.buildInvite(tag.tag, bob.pub));
+      replies.push(await alice.invite(await alice.buildInvite(tag.tag, bob.pub)));
+      const log = ctx.svc.log();
+      const dump = JSON.stringify([tag.tag, alice.pub, bob.pub, mallory.pub]);
+      await ctx.svc.close();
+      return { replies, ok, log, ids: JSON.parse(dump) };
+    };
+    const on = await run(true), off = await run(false);
+    const reasons = (on.log.match(/invite refused: [a-z,-]+/g) || []).map((x) => x.replace('invite refused: ', ''));
+    check('with logRefusals on, each refused invitation logs its reason', JSON.stringify(reasons) === JSON.stringify(['callee-not-listening', 'tag-not-bound-to-this-caller', 'no-such-tag', 'callee-key-differs-from-tag', 'another-call-is-ringing-on-this-tag']), reasons);
+    {
+      const ctx = await L.startPhpService({ logRefusals: true }, { timers: { listenerFreshMs: 600 } });
+      const alice = await Wallet.create(ctx), bob = await Wallet.create(ctx);
+      const tag = (await bob.createTag(alice.pub)).json;
+      await bob.listen([]);
+      await sleep(1300);
+      await alice.invite(await alice.buildInvite(tag.tag, bob.pub));
+      const m = ctx.svc.log().match(/callee-not-listening \(listener last seen (\d+) ms ago, allowed 600\)/);
+      check('a listener that has gone quiet is reported with how long ago it was last seen', !!m && Number(m[1]) >= 1000 && Number(m[1]) < 5000, ctx.svc.log().slice(-200));
+      await ctx.svc.close();
+    }
+    check('the log holds no tag, no key and no caller address', on.ids.every((x) => !on.log.includes(x)));
+    check('the reply to a refused invitation is the same whatever the reason', new Set(on.replies.filter((r) => r.status === 404).map((r) => JSON.stringify(r))).size === 1 && on.replies.filter((r) => r.status === 404).length === 5, on.replies.map((r) => r.status));
+    check('the accepted invitation is unaffected', on.ok.status === 202 && off.ok.status === 202);
+    check('with logRefusals off nothing about refusals is logged and the replies are the same', !/invite refused/.test(off.log) && off.replies.map((r) => r.status).join() === on.replies.map((r) => r.status).join());
+    check('logRefusals is documented in the settings example', /logRefusals/.test(fs.readFileSync(path.join(ROOT, 'atlas', 'call', 'lib', 'config.example.php'), 'utf8')));
+  }
+
   // ---------- the wallet's re-ask delay ----------
   {
     const src = fs.readFileSync(path.join(__dirname, '..', 'extension', 'call.js'), 'utf8');
