@@ -1,0 +1,51 @@
+# Example systemd unit for the Call Service. Not run by the author: adapt the paths, then
+#   systemctl daemon-reload && systemctl enable --now atlas-call
+#   systemd-analyze security atlas-call      (review what is still open)
+#
+# Install the program somewhere only root can write, for example /opt/domain-atlas, and put
+# the settings (public keys only, no secret) in /etc/atlas-call/config.json.
+
+[Unit]
+Description=Domain Atlas Call Service (signalling for wallet voice calls)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/domain-atlas/call-server/server.js
+Environment=CALL_CONFIG_FILE=/etc/atlas-call/config.json
+Restart=on-failure
+RestartSec=3
+
+# A throw-away unprivileged user; /var/lib/atlas-call is created for it (mode 0700).
+DynamicUser=yes
+StateDirectory=atlas-call
+StateDirectoryMode=0700
+UMask=0077
+
+# Many held connections need many file descriptors.
+LimitNOFILE=8192
+
+# Nothing the service does needs more than loopback networking and its own state directory.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

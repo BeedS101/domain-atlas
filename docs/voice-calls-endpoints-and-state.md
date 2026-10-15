@@ -66,11 +66,21 @@ document: **Proposed**, **Automated**, **Real hardware**.
   endpoint except `GET /atlas/call/info` answers `503 calls-not-configured`, and
   `info` says `"configured": false`. The wallet then shows that calls are not
   available and nothing else changes.
-* CORS: `POST /atlas/call/invite` answers any origin (no credentials are ever
-  accepted, and the request is authenticated only by signatures), so that a
-  browser-based domain endpoint can call it. Every other route has no CORS
-  headers; the wallet calls them from extension pages. `Origin` and cookies are
-  never an authentication input.
+* CORS and request rules: no route answers a cross-origin request by default. A request
+  carrying a web page `Origin` (`http:`, `https:` or `null`) is refused with `403
+  origin-not-allowed`, and `Content-Type` must be `application/json` (`415` otherwise), so a
+  page cannot post to the service even without reading the answer. The wallet's own requests come
+  from an extension page and carry no web origin. An operator may name exact https origins in
+  `CALL_INVITE_CORS_ORIGINS`; only `POST /atlas/call/invite` then answers them, with that one
+  origin in `Access-Control-Allow-Origin` and `Vary: Origin`, never `*`. No credentials are ever
+  accepted and `Origin` and cookies are never an authentication input.
+* Resource refusals that depend on the sender, not on stored state, and so do not weaken the
+  uniform `404 unavailable`: `429 too-many-connections` (a source has too many requests in flight
+  or held, with `Retry-After`), `503 busy` (the service or the pool for wallets without a tag is
+  full, with `Retry-After`), `408 timeout` (a body that did not arrive within 10 s), `415`,
+  `403 origin-not-allowed`, and, behind a trusted proxy with an https origin, `400 https-required`.
+* Held requests (`listen`, `poll`) end at once when the client disconnects, and a wallet that
+  listens again replaces its own earlier held request.
 
 ## 2. Endpoints
 

@@ -1,0 +1,71 @@
+# Example nginx server block for a Domain Atlas Call Service. Not run by the author: copy it,
+# replace calls.example.org and the certificate paths, then check it with `nginx -t`.
+#
+# It assumes nginx is the only proxy in front of the service, the service listens on
+# 127.0.0.1:8787, and CALL_TRUST_PROXY is on (see atlas-call.config.json.example).
+#
+# Put these two lines in the http {} block (not inside server {}), once per server:
+#   limit_conn_zone $binary_remote_addr zone=atlas_call_conn:10m;
+#   limit_req_zone  $binary_remote_addr zone=atlas_call_req:10m rate=10r/s;
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name calls.example.org;
+
+    ssl_certificate     /etc/letsencrypt/live/calls.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/calls.example.org/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_tickets off;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    # The service logs nothing about people; do not let the proxy build that log instead.
+    access_log off;
+
+    # Slow clients: the service has its own timers, these protect nginx itself.
+    client_header_timeout 10s;
+    client_body_timeout   10s;
+    keepalive_timeout     30s;
+    send_timeout          30s;
+    client_max_body_size  20k;
+
+    # Everything on this host name except the call routes is not found.
+    location / { return 404; }
+
+    location /atlas/call/ {
+        # A source may hold this many connections open (a held listen is one), and send
+        # bursts of this size. The service applies its own per-source limits as well.
+        limit_conn atlas_call_conn 40;
+        limit_req  zone=atlas_call_req burst=40 nodelay;
+
+        proxy_pass         http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header   Connection "";
+
+        # The service holds a listen for 25 s. The read timeout must be longer.
+        proxy_read_timeout 70s;
+        proxy_send_timeout 15s;
+        proxy_connect_timeout 5s;
+        proxy_buffering    off;
+        proxy_request_buffering on;
+
+        # Client address and scheme. These OVERWRITE whatever the client sent. With a single
+        # proxy in front, $remote_addr is the only trustworthy value.
+        proxy_set_header   X-Forwarded-For   $remote_addr;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Host              $host;
+
+        # No redirects from the service's own address: wallets refuse them.
+        proxy_redirect     off;
+    }
+}
+
+# Port 80: do not serve the call routes in plain text. Closing the port altogether is also fine.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name calls.example.org;
+    location / { return 404; }
+}

@@ -221,3 +221,35 @@ commit), so they are not caused by it and are not investigated here:
 - `manual-asset-update-check`: "this key is not a registered domain admin".
 
 They need a separate look before they can be counted as passing on any machine.
+
+## 7. Internet safeguards of the Node Call Service (milestone 2)
+
+Evidence class: Automated, Linux sandbox, loopback, Chromium under Xvfb, Node 22. Nothing was run on
+a real server, behind nginx or Caddy, over a real network, or against coturn. "Probe" means the same
+request was sent to the previous commit's service, to show the behaviour changed.
+
+| ID | Check | Suite | Status |
+|---|---|---|---|
+| N1 | settings: STUN accepted only as `stun:host[:port]` for names and IP literals, at most three; third-party public STUN services, TURN URLs, paths, queries, user parts and bad ports refused; proxy addresses must be IPs; cross-origin entries must be exact https origins; limits must be whole numbers in range; unknown limit names refused | `manual-call-internet-security.js` | Automated |
+| N2 | address handling: IPv4-mapped IPv6, IPv6 /64 keying, zone suffix, junk | same | Automated |
+| N3 | proxy handling: the last forwarded address decides; client-written earlier entries, malformed headers, a missing header, a disabled proxy setting and a connection from an unlisted address all fall back to the connecting address | same, and through a stand-in TLS proxy in `manual-call-proxy.js` | Automated |
+| N4 | https behind a proxy: a request that is not from the proxy or not marked https is refused `400 https-required`; the last `X-Forwarded-Proto` entry decides; `info` is exempt | same | Automated |
+| N5 | cross-origin rules: web page origins refused on every route with no cross-origin headers; extension origin and no origin handled; preflight not approved; non-JSON content types `415`; an operator-named origin may use the invite route only, with its own origin echoed | same | Automated. Probe: previous code answered `Access-Control-Allow-Origin: *` |
+| N6 | long polls: per-source cap `429 too-many-connections` with `Retry-After`; a wallet's repeat listen replaces its own; another source unaffected; slots released at the end and on client disconnect; strangers' pool full `503 busy` while tag holders are still admitted; global cap `503 busy`; listener-table cap; the poll route obeys the same caps | same | Automated. Probe: previous code held all four listens from one source, and a disconnect left the waiter in place |
+| N7 | requests in flight per source; slow body `408` and slot released; oversize body `413`; oversize headers refused; service still answering afterwards | same | Automated |
+| N8 | sockets per source when exposed directly; not applied behind a proxy; global connection limit reaches the server | same | Automated |
+| N9 | operator STUN reaches the callee's `ice` answer exactly, with no credentials; `info` agrees; none configured gives an empty list | same | Automated |
+| N10 | the browser is given exactly the operator's STUN URL (both wallets), at most three URLs, nothing but plain STUN, none when none is configured; a call works in each case; the browser really queries a STUN server on loopback | `manual-call-stun.js` | Automated. Loopback only: it does not show that STUN helps across two NATs |
+| N11 | the deployment checker passes against a correct stand-in proxy; catches a missing `X-Forwarded-Proto`, a short read timeout, a wrong origin, an unconfigured service, an unreachable service; treats missing HSTS as a warning; refuses plain http and a path; creates no tag and no call | `manual-call-proxy.js` | Automated against a Node stand-in for the proxy, not nginx or Caddy |
+| N12 | the shipped example files: settings file inert until its placeholder key is replaced and valid afterwards, nginx/Caddy/systemd/coturn examples contain the settings the guide relies on (read-only check of their text) | `manual-call-internet-security.js` | Automated text checks. **The files were never started** |
+| N13 | defaults: unconfigured service answers `503 calls-not-configured` whatever the request; the real process refuses a third-party STUN and an out-of-range limit and says which setting | same, and `manual-call-unconfigured.js` | Automated |
+| N14 | the guide's steps on a real host: systemd unit, nginx or Caddy, certificate, firewall, deployment checker against the real name, two wallets on two networks, with and without a self-hosted STUN | `docs/voice-calls-deploy-node.md` | Not run: owner |
+| N15 | behaviour under real load, with a CDN or several proxies in front, and the limits' defaults for shared addresses | | Not run |
+
+### 7.1 Whole call suite after milestone 2
+
+13 suites, 498 checks, 0 failures: protocol 59, service 108, unconfigured 15, internet-security 125,
+proxy 16, e2e 41, contacts 20, messaging 12, mic 12, adversary 35, bridge 18, isolation 24, stun 13.
+The first ten (344 checks) are the milestone 1 set and pass unchanged. The wider older regression
+suites listed in section 6.1 were not rerun: the only wallet file changed is `extension/call.js`
+(the STUN URL filter), and its call-level behaviour is covered by the suites above.

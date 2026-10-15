@@ -6,7 +6,7 @@
 #     ATLAS_STATE_DIR=issuer-server/domain-b-state node issuer-server/server.js
 cd "$(dirname "$0")/.." || exit 2
 status=0
-for t in manual-call-protocol manual-call-service manual-call-unconfigured manual-call-e2e manual-call-contacts manual-call-messaging manual-call-mic manual-call-adversary manual-call-bridge manual-call-isolation; do
+for t in manual-call-protocol manual-call-service manual-call-unconfigured manual-call-internet-security manual-call-proxy manual-call-e2e manual-call-contacts manual-call-messaging manual-call-mic manual-call-adversary manual-call-bridge manual-call-isolation manual-call-stun; do
   out=$(node "test/$t.js" 2>&1)
   code=$?
   echo "$t: $(echo "$out" | grep -E ': [0-9]+ passed, [0-9]+ failed' | tail -1) (exit $code)"

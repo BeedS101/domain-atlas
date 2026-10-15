@@ -77,6 +77,9 @@ unconfigured test).
 | `manual-call-adversary.js` | forged, replayed, tampered and substituted signaling and certificates, candidates, withheld confirmation, duplicates, forged end, cross-call injection | 35 passed, 0 failed (see the note below the table) |
 | `manual-call-bridge.js` | page access to the signing bridge and the calling window | 18 passed, 0 failed |
 | `manual-call-isolation.js` | added after the first local Windows test: hung domain, settings isolation, broken or missing calling data (see `docs/voice-calls-internet.md` section 3) | 24 passed, 0 failed |
+| `manual-call-internet-security.js` | added for internet exposure: limits, proxy handling, cross-origin rules, STUN settings, shipped examples (see `docs/voice-calls-internet.md` section 4) | 125 passed, 0 failed |
+| `manual-call-proxy.js` | the deployment checker through a stand-in TLS proxy | 16 passed, 0 failed |
+| `manual-call-stun.js` | two real browsers, operator STUN URLs reach the browser and nothing else does | 13 passed, 0 failed |
 
 Total across the nine suites: 320 checks, all passing in the last full sequential run.
 

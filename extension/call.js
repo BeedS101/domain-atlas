@@ -776,8 +776,12 @@
       const payload = base('atlas.call.ice', call.service, { nonce: P.randomId(16), callId: call.id });
       const res = await W.callPost(call.service, '/atlas/call/ice', { payload, proof: await signRaw(call.ck, payload) }, { signal: call.abort.signal, timeoutMs: 8000 });
       if (res.status === 200 && res.json && Array.isArray(res.json.iceServers)) {
-        // Only STUN URLs the service advertises; no credentials are used in this phase.
-        iceServers = res.json.iceServers.map((s) => ({ urls: (Array.isArray(s.urls) ? s.urls : []).filter((u) => typeof u === 'string' && /^stuns?:/.test(u)) })).filter((s) => s.urls.length);
+        // Only plain STUN URLs of a sane shape, at most three in all; no credentials are used.
+        const urls = [];
+        for (const s of res.json.iceServers) for (const u of (s && Array.isArray(s.urls) ? s.urls : [])) {
+          if (typeof u === 'string' && /^stuns?:(\[[0-9a-fA-F:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(:\d{1,5})?$/.test(u) && !urls.includes(u) && urls.length < 3) urls.push(u);
+        }
+        if (urls.length) iceServers = [{ urls }];
       }
     } catch (err) { /* host candidates only */ }
     if (!live(call)) return;

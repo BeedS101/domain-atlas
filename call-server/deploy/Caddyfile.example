@@ -1,0 +1,36 @@
+# Example Caddy configuration for a Domain Atlas Call Service. Not run by the author: replace
+# calls.example.org, then check it with `caddy validate`. Caddy obtains and renews the
+# certificate itself and sets X-Forwarded-For and X-Forwarded-Proto on proxied requests.
+#
+# The service listens on 127.0.0.1:8787 with CALL_TRUST_PROXY on.
+
+calls.example.org {
+	log {
+		output discard
+	}
+
+	header Strict-Transport-Security "max-age=31536000"
+
+	@call path /atlas/call/*
+	handle @call {
+		request_body {
+			max_size 20KB
+		}
+		reverse_proxy 127.0.0.1:8787 {
+			# A held listen lasts 25 s; keep the upstream connection open well beyond that.
+			transport http {
+				response_header_timeout 70s
+				read_timeout 70s
+				dial_timeout 5s
+			}
+			flush_interval -1
+			# Only the address Caddy itself saw; ignore anything the client wrote.
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	handle {
+		respond 404
+	}
+}

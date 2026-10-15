@@ -1,0 +1,26 @@
+# Example coturn configuration that runs STUN only: no relaying, no credentials, no
+# database. Not run by the author (coturn was not available where this was written); check
+# it with `turnserver -c <file>` on the host and read the log.
+#
+# A STUN server tells a wallet which public address and port its connection appears to come
+# from. It never sees audio. Run it on a host with a public IPv4 address, not on shared web
+# hosting, and put its name in the Call Service's stunUrls as stun:stun.example.org:3478.
+#
+# Firewall: UDP 3478 inbound, nothing else. Consider rate-limiting that port (for example
+# with the hashlimit module in iptables) because STUN is an open UDP service.
+
+listening-port=3478
+# Replace with the public address of this host.
+listening-ip=203.0.113.10
+
+# Answer binding requests only; refuse every TURN allocation.
+stun-only
+no-tls
+no-dtls
+no-cli
+no-software-attribute
+fingerprint
+
+# Plain log file, without request details beyond what coturn writes by default.
+simple-log
+log-file=/var/log/turnserver/turn.log

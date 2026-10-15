@@ -1,8 +1,7 @@
 # Secure voice calls over the internet: findings, order of work and plan
 
-Status: milestone 1 is implemented and tested locally (section 3). Sections 4 to 8 are
-design and review notes for the milestones that follow; nothing in them has been built or
-run. Nothing is deployed, no production setting is touched, and nothing here may be called
+Status: milestones 1 and 2 are implemented and tested locally (sections 3 and 4). Sections 5
+to 8 are design notes for the milestones that follow; nothing in them has been built or run. Nothing is deployed, no production setting is touched, and nothing here may be called
 production-ready or banking-grade. Evidence classes are the ones used in
 `docs/voice-calls-phase1b.md`: **Proposed**, **Automated** (Chromium under Xvfb, loopback,
 synthetic microphone), **Real hardware** (owner; only the local Windows demo with a real
@@ -81,7 +80,7 @@ extension reload, note whether an auto-lock time is set and what the wallet show
 | # | Milestone | Why in this order |
 |---|---|---|
 | 1 | Configuration isolation and online-readiness review (done, section 3) | The wallet must stay healthy whatever calling does; nothing else is safe to test on real networks until this holds |
-| 2 | Node Call Service online over https on a test host, wallet to wallet across two networks, **with** a self-hosted STUN | Smallest real-network step: no new code in the protocol, only deployment; shows how often direct connections work |
+| 2 | Node Call Service ready for https on a test host (done as code, tests and a deployment guide, section 4); then wallet to wallet across two networks, **with** a self-hosted STUN (owner, on a real host) | Smallest real-network step: no change to the signed protocol, only safeguards and deployment; shows how often direct connections work |
 | 3 | TURN: coturn plus ephemeral credentials issued by the Call Service (Node first), wallet support for TURN credentials | Direct connections fail on many home and mobile networks; needed before any real demonstration |
 | 4 | Multi-domain admission (section 6) | Small server and wallet change; needed before a second operator joins |
 | 5 | Native PHP Call Service with shared test vectors and a Node-wallet-to-PHP-service test | The largest piece; built against the now-stable protocol |
@@ -115,9 +114,9 @@ copy of the extension with `call-protocol.js` deleted, and a dead service being 
 Run against the previous extension files as a negative control, five of its checks fail,
 including the hung-domain ones.
 
-## 4. Running the Node Call Service securely over https (Proposed; review of the existing code)
+## 4. Running the Node Call Service securely over https (milestone 2)
 
-### 4.1 What is already right
+### 4.1 What was already right (code review, milestone 1)
 
 * https is required for the service address in the wallet (`redirect: 'error'`, plain http only
   behind the test switch for private addresses) and in the service's own configuration.
@@ -125,55 +124,51 @@ including the hung-domain ones.
   rate-limited per source, per caller and per callee; state is bounded and swept.
 * The service answers `503` for everything until configured and creates no file unless a state
   file is named. Tags are stored only as SHA-256 hashes. Logging holds no identities.
-* With `CALL_TRUST_PROXY=1` the source address is the **last** `X-Forwarded-For` entry, which
-  is the one a single trusted proxy appended and cannot be forged by the client.
 
-### 4.2 What the operator must provide
+### 4.2 What changed in milestone 2 (Automated; code in `call-server/`, one small change in `extension/call.js`)
 
-* A host name and a certificate (Let's Encrypt via Caddy or certbot). The service itself speaks
-  plain http and should listen on loopback only, behind the reverse proxy.
-* Reverse proxy settings: https only; response buffering off for `/atlas/call/listen` and
-  `/atlas/call/poll`; upstream read timeout above 30 s (the service holds a listen for 25 s);
-  request body limit 20 KiB; do not log bodies; overwrite or append `X-Forwarded-For`; no
-  redirects on the service's own address (the wallet refuses redirects); `Strict-Transport-
-  Security` at the proxy.
-* Configuration (all variables listed in `call-server/README.md`): `CALL_ORIGIN` exactly the
-  public https origin; `CALL_DOMAIN`; `CALL_ISSUER_KEYS` copied by hand from the domain's
-  `/.well-known/atlas-key.json` (never fetched from a request); `CALL_REVOCATIONS_URL` set to
-  the domain's https revocation list so revoked memberships stop working; `CALL_STATE_FILE`
-  on a private path so tags survive restarts; `CALL_TRUST_PROXY=1`; `CALL_BIND=127.0.0.1`.
-* A process supervisor (systemd) with an unprivileged user, restart on failure and the state
-  file readable by that user only; Node 20 or newer; system clocks synchronized (invitations
-  allow 30 s of skew, requests 120 s).
-* Host firewall: 443 to the proxy only. The Call Service port is never exposed. A STUN/TURN
-  server needs its own ports (section 7).
+No change to the signed protocol (`protocol.js` and `extension/call-protocol.js` are untouched
+and still byte-identical), to authentication, replay protection, fingerprints, consent or audio.
 
-Example proxy fragment (not run; adapt):
+| Gap found in the review | Change | Evidence |
+|---|---|---|
+| Held connections capped globally only | per-source cap on held listens and polls (`maxWaitersPerSource`, 20), per-source cap on requests in flight (60), sockets per source when exposed directly (100), global connection cap (3000) | `manual-call-internet-security.js` |
+| Anonymous keys could fill the held-connection table: a listen needs only a self-made key | owners that hold no tag share a smaller pool (`maxStrangerWaiters`, 500) and cannot create mailboxes past `maxListeners`, so people who can receive calls are still served | same |
+| A full table answered `200` with no events, which made a wallet retry in a tight loop | refused with `503 busy` or `429 too-many-connections` and `Retry-After`; the wallet waits 5 s on `429` | same |
+| A held request was not released when the client disconnected (it waited out the 25 s hold) | released at once; a wallet that listens again replaces its own earlier request | same; probe against the previous code: waiters stayed at 5 after an abort |
+| Slow bodies and large headers | whole body within 10 s (`408`), header block 8 KiB | same |
+| CORS `*` on the invite route | none by default; web page `Origin` refused (`403`); `Content-Type: application/json` required (`415`) so a cross-site form post cannot reach the service; optional exact-origin allow-list for the invite route only | same; probe: previous code answered `Access-Control-Allow-Origin: *` |
+| `X-Forwarded-For` trusted from any connection when `CALL_TRUST_PROXY=1` | honoured only from `CALL_PROXY_ADDRS` (default loopback), last entry, must be an IP; IPv6 keyed on /64 | same, and through a stand-in TLS proxy in `manual-call-proxy.js` |
+| A proxy that forwards plain http, or is bypassed, went unnoticed | with an https origin behind a trusted proxy, requests must come from it and say `X-Forwarded-Proto: https` (`400 https-required`; `info` exempt) | same |
+| STUN setting only checked loosely | `stun:host[:port]` only, at most three, names or IP literals, public third-party STUN services refused; wallet passes the browser at most three plain STUN URLs and drops anything else | `manual-call-internet-security.js`, `manual-call-stun.js` (two real browsers; a local STUN responder confirms the browser queries the operator's server) |
+| Limits could only be changed in code | `limits` in the settings file or `CALL_LIMIT_<NAME>`, each with a range | same |
+| No way to check a deployment from outside | `call-server/check-deployment.js` | `manual-call-proxy.js` |
+| No deployment material | `call-server/deploy/` (nginx, Caddy, systemd, settings, STUN-only coturn) and `docs/voice-calls-deploy-node.md` | file contents checked by test; **not started on a real server** |
 
-```
-location /atlas/call/ {
-    proxy_pass         http://127.0.0.1:8787;
-    proxy_http_version 1.1;
-    proxy_buffering    off;
-    proxy_read_timeout 70s;
-    client_max_body_size 20k;
-    proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header   Host $host;
-}
-```
+Still inactive by default: with no settings the service answers `503 calls-not-configured` on
+every route but `info`, listens on loopback and creates no file; the new settings add nothing
+that starts on its own (`manual-call-unconfigured.js` and the security suite). The wallet side is
+unchanged except the STUN filter; calling stays optional and isolated as in milestone 1.
 
-### 4.3 Gaps to close before an internet deployment (Proposed)
+### 4.3 What the operator must provide
 
-| Gap | Proposed fix |
+See `docs/voice-calls-deploy-node.md`: host name and certificate, a reverse proxy in front of a
+loopback-only service, the domain's pinned public key(s) and revocation URL, a state file,
+systemd, synchronized clocks, and a firewall that exposes 443 only. A STUN/TURN server needs its
+own ports (section 7).
+
+### 4.4 Gaps that remain
+
+| Gap | Status |
 |---|---|
-| Held listen connections are capped globally (`maxWaiters`) but not per source, so one address can occupy them | per-source cap on waiters, tested |
-| CORS `*` is sent on the invite route; the extension needs no CORS because of its host permissions | remove it unless a use for it is documented |
-| ICE answer lists STUN only; `turn: false` | ephemeral TURN credentials (section 7) |
-| `info` reports no admitted domains | add an `admits` list (section 6) |
-| No health or version endpoint for monitoring | `GET /atlas/call/info` already answers cheaply; document it as the health check |
-| No graceful drain on shutdown beyond closing connections | acceptable for now; callers see "not available" and retry |
-| The wallet takes the service address by hand | optional later: a reference-implementation manifest field naming the domain's call service, suggested to the person and confirmed by them, following the same pattern as the existing `presence` and `postOffice` fields (not part of `SPEC.md`) |
-| Revocation and key lists are re-read only from the pinned address | add a documented refresh and rotation procedure for `CALL_ISSUER_KEYS` (the service already accepts up to 8 keys) |
+| ICE answer lists STUN only (`turn: false`) | milestone 3 (coturn and ephemeral credentials) |
+| `info` reports no admitted domains | milestone 4 |
+| No graceful drain on shutdown beyond closing connections | acceptable: callers see "not available" and retry |
+| The wallet takes the service address by hand | optional later: a reference-implementation manifest field naming the domain's call service, suggested to the person and confirmed by them, like the existing `presence` and `postOffice` fields (not part of `SPEC.md`) |
+| Pinned issuer keys have a documented rotation procedure but no automatic refresh | procedure in `docs/voice-calls-deploy-node.md` section 11; an optional timed refresh from the listed domain's own key document is milestone 4 |
+| Nothing has run on a real server, behind real nginx/Caddy, across real networks, or under real load; the limits are starting points | owner, with the guide |
+| Several people behind one shared address share one set of per-source limits | tunable; documented |
+| Many proxies or a CDN in front change which forwarded address is the real one | not supported at this stage; one proxy on the same host |
 
 ## 5. Native PHP signalling service (Proposed design)
 
@@ -278,7 +273,7 @@ decision or reintroduce a mandatory central party.
 
 ## 7. Self-hosted STUN and TURN (Proposed)
 
-Use coturn. It is established, open source, supports STUN and TURN over UDP, TCP and TLS, and
+Use coturn. (Milestone 2 uses it in `stun-only` mode, `call-server/deploy/coturn-stun-only.conf.example`, which needs no secret and relays nothing; the credentials below are milestone 3.) It is established, open source, supports STUN and TURN over UDP, TCP and TLS, and
 has a built-in ephemeral-credential mode (TURN REST API) that needs no database.
 
 * **Where:** a small VPS with a public IPv4 address; it cannot run on shared PHP hosting. One
@@ -318,10 +313,14 @@ directory of wallets, calling optional and isolated (section 3). Domain Atlas Co
 
 ## 9. Still requires the owner or a real host
 
-* Milestone 1 on the owner's actual wallet profile: the slow/frozen behaviour after a local
-  test, now expected to be gone; and what the "logging off" turns out to be if it recurs.
-* Everything in sections 4 to 7: a real host name, a certificate, a reverse proxy, a VPS for
-  coturn, two PCs on different internet connections, and the PHP service once built.
+* Milestone 1 on the owner's actual wallet profile: the owner reports normal online use
+  working with the local calling server off. What the "logging off" turned out to be, if it
+  recurs, is still unknown.
+* Milestone 2 on a real server (`docs/voice-calls-deploy-node.md`): a host name, a certificate,
+  a reverse proxy (the nginx and Caddy examples were never started), systemd, the deployment
+  checker against the real address, a STUN server (coturn was never run), and two PCs on
+  different internet connections with and without STUN.
+* Sections 5 to 7 beyond STUN: a VPS for TURN, and the PHP service once built.
 * The checks listed in `docs/voice-calls-phase1b.md` section 3.3 that no automated test can
   make: the real microphone prompt, hidden or sleeping windows, the operating system's
   recording indicator, passkey identities, Firefox and branded Chrome.

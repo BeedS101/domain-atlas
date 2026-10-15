@@ -37,12 +37,19 @@ const DEFAULT_TIMERS = {
   maxCallMs: 4 * 3600000,
   listenerFreshMs: 40000,
   revocationCacheMs: 60000,
-  fetchTimeoutMs: 5000
+  fetchTimeoutMs: 5000,
+  bodyReadMs: 10000
 };
 
 const DEFAULT_LIMITS = {
   maxLiveCalls: 200,
+  maxConnections: 3000,
+  maxConnectionsPerSource: 100,
+  maxInflightPerSource: 60,
   maxWaiters: 2000,
+  maxWaitersPerSource: 20,
+  maxStrangerWaiters: 500,
+  maxListeners: 5000,
   maxNonces: 100000,
   maxTagsTotal: 20000,
   maxSignalsPerCall: 300,
@@ -60,7 +67,49 @@ const DEFAULT_LIMITS = {
 //   CALL_CONFIG_FILE  JSON file whose keys are the same names without the CALL_ prefix, camel-cased
 //   CALL_ORIGIN, CALL_DOMAIN, CALL_ISSUER_KEYS (comma separated), CALL_REVOCATIONS_URL,
 //   CALL_STATE_FILE, CALL_STUN_URLS (comma separated), CALL_BIND, CALL_PORT,
-//   CALL_TRUST_PROXY=1, CALL_DEV_ALLOW_HTTP=1, CALL_DEV_ALLOW_PRIVATE_FETCH=1
+//   CALL_TRUST_PROXY=1, CALL_PROXY_ADDRS (comma separated, default loopback),
+//   CALL_INVITE_CORS_ORIGINS (comma separated exact origins, default none),
+//   CALL_LIMIT_<NAME> for each name in TUNABLE_LIMITS (for example CALL_LIMIT_MAX_WAITERS_PER_SOURCE),
+//   CALL_DEV_ALLOW_HTTP=1, CALL_DEV_ALLOW_PRIVATE_FETCH=1
+
+// Limits an operator may change, with the range each must stay inside.
+const TUNABLE_LIMITS = {
+  maxConnections: [10, 100000],
+  maxConnectionsPerSource: [1, 10000],
+  maxInflightPerSource: [1, 10000],
+  maxWaiters: [1, 100000],
+  maxWaitersPerSource: [1, 10000],
+  maxStrangerWaiters: [0, 100000],
+  maxListeners: [1, 1000000],
+  perSourcePerMin: [10, 100000],
+  invitesPerSourcePerMin: [1, 10000]
+};
+const snakeName = (k) => k.replace(/[A-Z]/g, (c) => '_' + c).toUpperCase();
+
+// Public STUN services this project does not use. The check catches an accidental copy of a
+// well-known address into the settings; it is not a list of everything that exists.
+const THIRD_PARTY_STUN_SUFFIXES = [
+  'l.google.com', 'stun.services.mozilla.com', 'twilio.com', 'cloudflare.com', 'stunprotocol.org',
+  'metered.ca', 'ekiga.net', 'sipgate.net', 'voipbuster.com', 'voiparound.com', 'stunserver.org',
+  'xten.com', 'schlund.de', 'ideasip.com', 'freeswitch.org', 'nextcloud.com', 'jitsi.org', 'jit.si'
+];
+const HOST_LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+// Returns null when `u` is an acceptable operator STUN URL, otherwise a short reason.
+function stunProblem(u) {
+  if (typeof u !== 'string') return 'not a string';
+  const m = /^(stuns?):(\[[0-9a-fA-F:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(?::(\d{1,5}))?$/.exec(u);
+  if (!m) return 'must look like stun:host or stun:host:port';
+  if (m[3] !== undefined && (Number(m[3]) < 1 || Number(m[3]) > 65535)) return 'port out of range';
+  const host = m[2].toLowerCase();
+  if (host.startsWith('[')) return net.isIPv6(host.slice(1, -1)) ? null : 'not an IPv6 address';
+  if (net.isIPv4(host)) return null;
+  if (/^[0-9.]+$/.test(host)) return 'not an IP address';
+  if (!host.split('.').every((l) => HOST_LABEL_RE.test(l))) return 'not a host name';
+  if (THIRD_PARTY_STUN_SUFFIXES.some((s) => host === s || host.endsWith('.' + s))) return 'is a public third-party STUN service; use a server you operate';
+  return null;
+}
+
 function loadConfig(env, readFile) {
   const read = readFile || ((p) => fs.readFileSync(p, 'utf8'));
   let file = {};
@@ -82,10 +131,23 @@ function loadConfig(env, readFile) {
     bind: pick('CALL_BIND', 'bind') || '127.0.0.1',
     port: Number(pick('CALL_PORT', 'port') || 8787),
     trustProxy: truthy(pick('CALL_TRUST_PROXY', 'trustProxy')),
+    proxyAddrs: list(pick('CALL_PROXY_ADDRS', 'proxyAddrs')),
+    corsOrigins: list(pick('CALL_INVITE_CORS_ORIGINS', 'inviteCorsOrigins')),
+    limits: {},
     devAllowHttp: truthy(pick('CALL_DEV_ALLOW_HTTP', 'devAllowHttp')),
     devAllowPrivateFetch: truthy(pick('CALL_DEV_ALLOW_PRIVATE_FETCH', 'devAllowPrivateFetch'))
   };
   cfg.configured = false;
+  if (!cfg.proxyAddrs.length) cfg.proxyAddrs = ['127.0.0.1', '::1'];
+  const fileLimits = file.limits && typeof file.limits === 'object' && !Array.isArray(file.limits) ? file.limits : {};
+  for (const k of Object.keys(fileLimits)) if (!TUNABLE_LIMITS[k]) { cfg.problem = 'limits.' + k + ' is not a setting'; return cfg; }
+  for (const [k, [lo, hi]] of Object.entries(TUNABLE_LIMITS)) {
+    const raw = env['CALL_LIMIT_' + snakeName(k)] !== undefined && env['CALL_LIMIT_' + snakeName(k)] !== '' ? env['CALL_LIMIT_' + snakeName(k)] : fileLimits[k];
+    if (raw === undefined) continue;
+    const n = typeof raw === 'number' ? raw : (/^\d{1,9}$/.test(String(raw)) ? Number(raw) : NaN);
+    if (!Number.isInteger(n) || n < lo || n > hi) { cfg.problem = 'limit ' + k + ' must be a whole number from ' + lo + ' to ' + hi; return cfg; }
+    cfg.limits[k] = n;
+  }
   if (!cfg.origin && !cfg.domain && !cfg.issuerKeys.length) { cfg.problem = 'no configuration present'; return cfg; }
   let url;
   try { url = new URL(String(cfg.origin)); } catch (e) { cfg.problem = 'CALL_ORIGIN is not a URL'; return cfg; }
@@ -98,7 +160,17 @@ function loadConfig(env, readFile) {
     try { r = new URL(cfg.revocationsUrl); } catch (e) { cfg.problem = 'CALL_REVOCATIONS_URL is not a URL'; return cfg; }
     if (r.protocol !== 'https:' && !(r.protocol === 'http:' && cfg.devAllowHttp)) { cfg.problem = 'CALL_REVOCATIONS_URL must be https'; return cfg; }
   }
-  if (cfg.stunUrls.some((u) => !/^stuns?:[A-Za-z0-9.:\[\]_-]{1,200}$/.test(u))) { cfg.problem = 'CALL_STUN_URLS contains a malformed URL'; return cfg; }
+  if (cfg.stunUrls.length > 3) { cfg.problem = 'CALL_STUN_URLS may list at most 3 servers'; return cfg; }
+  for (const u of cfg.stunUrls) {
+    const why = stunProblem(u);
+    if (why) { cfg.problem = 'CALL_STUN_URLS: ' + u.slice(0, 80) + ' ' + why; return cfg; }
+  }
+  if (cfg.proxyAddrs.some((a) => !net.isIP(a))) { cfg.problem = 'CALL_PROXY_ADDRS must list IP addresses'; return cfg; }
+  for (const o of cfg.corsOrigins) {
+    let ou;
+    try { ou = new URL(o); } catch (e) { cfg.problem = 'CALL_INVITE_CORS_ORIGINS has a malformed origin'; return cfg; }
+    if (ou.origin !== o || !/^[A-Za-z0-9.:\[\]-]+$/.test(ou.host) || (ou.protocol !== 'https:' && !(ou.protocol === 'http:' && cfg.devAllowHttp))) { cfg.problem = 'CALL_INVITE_CORS_ORIGINS must list exact https origins, no wildcard, no path'; return cfg; }
+  }
   if (!Number.isInteger(cfg.port) || cfg.port < 0 || cfg.port > 65535) { cfg.problem = 'CALL_PORT is not a port number'; return cfg; }
   cfg.configured = true;
   return cfg;
@@ -122,15 +194,47 @@ function isPrivateAddress(addr) {
   return true;
 }
 
+// Address handling for rate-limit keys: an IPv4-mapped IPv6 address is its IPv4 address, and an
+// IPv6 address is keyed on its /64 so a client cannot dodge a limit by changing the low bits.
+function normalizeIp(addr) {
+  let a = String(addr || '').trim().toLowerCase();
+  const z = a.indexOf('%');
+  if (z >= 0) a = a.slice(0, z);
+  const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(a);
+  return m ? m[1] : a;
+}
+function expandIpv6(a) {
+  let [head, tail] = a.split('::');
+  const toGroups = (part) => {
+    if (!part) return [];
+    const g = part.split(':');
+    const last = g[g.length - 1];
+    if (last.includes('.')) {
+      const o = last.split('.').map(Number);
+      g.splice(g.length - 1, 1, ((o[0] << 8) | o[1]).toString(16), ((o[2] << 8) | o[3]).toString(16));
+    }
+    return g;
+  };
+  const h = toGroups(head);
+  const t = tail === undefined ? [] : toGroups(tail);
+  const fill = tail === undefined ? [] : new Array(8 - h.length - t.length).fill('0');
+  return h.concat(fill, t).map((x) => x.padStart(4, '0'));
+}
+function sourceKey(addr) {
+  if (net.isIPv4(addr)) return addr;
+  if (net.isIPv6(addr)) return 'v6:' + expandIpv6(addr.toLowerCase()).slice(0, 4).join(':');
+  return '';
+}
+
 function createCallService(cfg, opts) {
   opts = opts || {};
   const T = Object.assign({}, DEFAULT_TIMERS, opts.timers || {});
-  const L = Object.assign({}, DEFAULT_LIMITS, opts.limits || {});
+  const L = Object.assign({}, DEFAULT_LIMITS, cfg.limits || {}, opts.limits || {});
   const now = opts.now || (() => Date.now());
   const quiet = !!opts.quiet;
   const log = (m) => { if (!quiet) console.log('[call-service] ' + m); };
 
-  const counters = { invites: 0, refusedInvites: 0, accepted: 0, ended: 0, rateLimited: 0, authFailures: 0, tagsCreated: 0 };
+  const counters = { invites: 0, refusedInvites: 0, accepted: 0, ended: 0, rateLimited: 0, authFailures: 0, tagsCreated: 0, connectionRefused: 0, inflightRefused: 0, waiterRefused: 0, originRefused: 0, badContentType: 0, httpsRequired: 0, slowBodies: 0 };
 
   // ----- state -----
   const tags = new Map();          // tagHash -> { owner, bind, calleeKey, createdAt, expiresAt, maxCalls, used }
@@ -141,6 +245,12 @@ function createCallService(cfg, opts) {
   const nonces = new Map();        // signer + '\n' + nonce -> forget-at
   const buckets = new Map();       // rate buckets: key -> [timestamps]
   let waiters = 0;
+  let strangerWaiters = 0;           // held requests from owners that hold no tag
+  const sourceWaiters = new Map();   // source -> held requests
+  const inflight = new Map();        // source -> requests being served
+  const connBySource = new Map();    // source -> open sockets (direct exposure only)
+  let tagOwners = new Set();         // owners that hold at least one tag
+  const trustedProxies = new Set((cfg.proxyAddrs || ['127.0.0.1', '::1']).map((a) => normalizeIp(a)));
   let revocations = { at: 0, ids: new Set(), ok: false };
 
   // ----- tag persistence (hashes only; atomic, 0600) -----
@@ -152,7 +262,7 @@ function createCallService(cfg, opts) {
         for (const [h, t] of Object.entries(doc.tags)) {
           const sane = /^[A-Za-z0-9_-]{43}$/.test(h) && t && typeof t.owner === 'string' && t.bind && typeof t.bind.publicKey === 'string' &&
             typeof t.calleeKey === 'string' && typeof t.expiresAt === 'string' && Number.isInteger(t.maxCalls) && Number.isInteger(t.used);
-          if (sane) tags.set(h, t);
+          if (sane) { tags.set(h, t); tagOwners.add(t.owner); }
         }
       }
     } catch (e) { log('tag store unreadable; starting empty'); }
@@ -203,27 +313,41 @@ function createCallService(cfg, opts) {
     mb.events = mb.events.filter((e) => !e.expiresAt || e.expiresAt > t);
   }
   // Holds the request until the mailbox changes, the hold time passes, the client
-  // goes away, or another request for the same mailbox replaces this one.
-  function hold(mb, req, ms) {
+  // goes away, or another request for the same mailbox replaces this one. Resolves null
+  // when the hold ran its course and 'source' or 'busy' when it was refused outright:
+  // a source may hold only so many requests, and owners that hold no tag share a smaller
+  // pool than owners that do, so anonymous holds cannot crowd out members.
+  function hold(mb, ms, o) {
     return new Promise((resolve) => {
-      if (waiters >= L.maxWaiters) return resolve();
+      if (mb.waiter) mb.waiter();
+      const src = o.source;
+      if ((sourceWaiters.get(src) || 0) >= L.maxWaitersPerSource) { counters.waiterRefused++; return resolve('source'); }
+      if (waiters >= L.maxWaiters || (o.stranger && strangerWaiters >= L.maxStrangerWaiters)) { counters.waiterRefused++; return resolve('busy'); }
       waiters++;
+      if (o.stranger) strangerWaiters++;
+      sourceWaiters.set(src, (sourceWaiters.get(src) || 0) + 1);
       let done = false;
       const finish = () => {
         if (done) return;
         done = true;
         waiters--;
+        if (o.stranger) strangerWaiters--;
+        const left = (sourceWaiters.get(src) || 1) - 1;
+        if (left > 0) sourceWaiters.set(src, left); else sourceWaiters.delete(src);
         clearTimeout(timer);
-        req.removeListener('close', finish);
+        o.res.removeListener('close', finish);
         if (mb.waiter === finish) mb.waiter = null;
-        resolve();
+        resolve(null);
       };
       const timer = setTimeout(finish, ms);
-      req.on('close', finish);
-      if (mb.waiter) mb.waiter();
+      // The response closes when the client goes away, which frees the slot at once.
+      o.res.once('close', finish);
       mb.waiter = finish;
     });
   }
+  const holdRefusal = (why) => (why === 'source'
+    ? { status: 429, body: { error: 'too many requests', code: 'too-many-connections' }, headers: { 'Retry-After': '5' } }
+    : { status: 503, body: { error: 'busy', code: 'busy' }, headers: { 'Retry-After': '10' } });
 
   // ----- responses -----
   function send(res, status, body, extraHeaders) {
@@ -232,6 +356,8 @@ function createCallService(cfg, opts) {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
+      'Referrer-Policy': 'no-referrer',
       'Content-Length': Buffer.byteLength(text)
     }, extraHeaders || {}));
     res.end(text);
@@ -239,17 +365,19 @@ function createCallService(cfg, opts) {
   const fail = (status, code, message, extra) => ({ status, body: Object.assign({ error: message || code, code }, extra || {}) });
   const UNAVAILABLE = () => fail(404, 'unavailable', 'unavailable');
 
+  // The whole body must arrive within bodyReadMs, so a client that trickles bytes cannot hold a slot.
   function readBody(req, max) {
     return new Promise((resolve, reject) => {
       let size = 0; const chunks = [];
       let over = false;
+      const timer = setTimeout(() => { counters.slowBodies++; reject(Object.assign(new Error('too slow'), { status: 408 })); }, T.bodyReadMs);
       req.on('data', (c) => {
         size += c.length;
         if (size > max) { over = true; chunks.length = 0; return; }
         chunks.push(c);
       });
-      req.on('end', () => (over ? reject(Object.assign(new Error('too large'), { status: 413 })) : resolve(Buffer.concat(chunks).toString('utf8'))));
-      req.on('error', reject);
+      req.on('end', () => { clearTimeout(timer); if (over) reject(Object.assign(new Error('too large'), { status: 413 })); else resolve(Buffer.concat(chunks).toString('utf8')); });
+      req.on('error', (e) => { clearTimeout(timer); reject(e); });
     });
   }
 
@@ -386,6 +514,8 @@ function createCallService(cfg, opts) {
       if (!arr.length) buckets.delete(k);
     }
     for (const [h, tag] of tags) if (Date.parse(tag.expiresAt) <= t) { tags.delete(h); }
+    tagOwners = new Set();
+    for (const tag of tags.values()) tagOwners.add(tag.owner);
     for (const [id, c] of calls) {
       if (c.state === 'ENDED') {
         if (t - c.endedAt >= T.endedRetainMs) { calls.delete(id); }
@@ -404,12 +534,26 @@ function createCallService(cfg, opts) {
   const sweepTimer = setInterval(sweep, T.sweepMs);
   if (sweepTimer.unref) sweepTimer.unref();
 
+  // The address rate limits are keyed on. Behind a proxy the service trusts the last
+  // X-Forwarded-For entry (the one the proxy itself appended) and only when the connection
+  // really comes from a configured proxy address; otherwise the connecting address is used,
+  // so a client that reaches the service directly cannot choose its own identity.
+  const peerOf = (req) => normalizeIp(req.socket.remoteAddress || '');
+  const fromTrustedProxy = (req) => cfg.trustProxy && trustedProxies.has(peerOf(req));
   const sourceOf = (req) => {
-    if (cfg.trustProxy) {
-      const xff = String(req.headers['x-forwarded-for'] || '').split(',').pop().trim();
-      if (xff) return xff;
+    if (fromTrustedProxy(req)) {
+      const parts = String(req.headers['x-forwarded-for'] || '').split(',');
+      const last = normalizeIp(parts[parts.length - 1].trim());
+      if (last && net.isIP(last)) return sourceKey(last);
     }
-    return req.socket.remoteAddress || 'unknown';
+    return sourceKey(peerOf(req)) || 'unknown';
+  };
+  // With an https origin behind a proxy, a request must arrive from that proxy and say it was https.
+  const proxyHttpsProblem = (req) => {
+    if (!cfg.trustProxy || !String(cfg.origin).startsWith('https:')) return false;
+    if (!fromTrustedProxy(req)) return true;
+    const parts = String(req.headers['x-forwarded-proto'] || '').split(',');
+    return parts[parts.length - 1].trim().toLowerCase() !== 'https';
   };
 
   // ----- routes -----
@@ -441,6 +585,7 @@ function createCallService(cfg, opts) {
     const h = await P.tagHash(tag);
     tags.set(h, { owner: a.owner, bind: p.bind, calleeKey: p.calleeKey, createdAt: new Date(now()).toISOString(), expiresAt: p.expiresAt, maxCalls: p.maxCalls, used: 0 });
     try { saveTags(); } catch (e) { tags.delete(h); return fail(503, 'busy', 'cannot store tag'); }
+    tagOwners.add(a.owner);
     counters.tagsCreated++;
     return { status: 200, body: { tag, expiresAt: p.expiresAt } };
   }
@@ -475,7 +620,7 @@ function createCallService(cfg, opts) {
     return { status: 200, body: { ok: true, revoked: doomed.length } };
   }
 
-  async function routeListen(body, req) {
+  async function routeListen(body, req, res) {
     const a = await authenticate(body, 'atlas.call.listen', { modes: 'C', session: true });
     if (a.error) return a.error;
     if (a.payload.stop === true) {
@@ -483,14 +628,24 @@ function createCallService(cfg, opts) {
       if (gone) { gone.events = []; gone.lastSeen = 0; wake(gone); listeners.delete(a.owner); }
       return { status: 200, body: { events: [], serverTime: new Date(now()).toISOString() } };
     }
+    const stranger = !tagOwners.has(a.owner);
     let mb = listeners.get(a.owner);
-    if (!mb) { mb = mailbox(); listeners.set(a.owner, mb); }
+    const fresh = !mb;
+    if (fresh) {
+      if (stranger && listeners.size >= L.maxListeners) { counters.waiterRefused++; return holdRefusal('busy'); }
+      mb = mailbox();
+      listeners.set(a.owner, mb);
+    }
     mb.lastSeen = now();
     const ack = new Set(a.payload.ack);
     mb.events = mb.events.filter((e) => !ack.has(e.id));
     prune(mb);
     if (!mb.events.length) {
-      await hold(mb, req, T.listenHoldMs);
+      const refused = await hold(mb, T.listenHoldMs, { source: sourceOf(req), stranger, res });
+      if (refused) {
+        if (fresh && !mb.events.length && !mb.waiter && listeners.get(a.owner) === mb) listeners.delete(a.owner);
+        return holdRefusal(refused);
+      }
       mb.lastSeen = now();
       prune(mb);
     }
@@ -547,7 +702,7 @@ function createCallService(cfg, opts) {
     return { a, call, role };
   }
 
-  async function routePoll(body, req) {
+  async function routePoll(body, req, res) {
     const r = await callForKeyRoute(body, 'atlas.call.poll');
     if (r.error) return r.error;
     const { call, role, a } = r;
@@ -556,7 +711,8 @@ function createCallService(cfg, opts) {
     const after = a.payload.after;
     mb.events = mb.events.filter((e) => e.id > after);
     if (!mb.events.length && call.state !== 'ENDED') {
-      await hold(mb, req, T.listenHoldMs);
+      const refused = await hold(mb, T.listenHoldMs, { source: sourceOf(req), stranger: false, res });
+      if (refused) return holdRefusal(refused);
       mb.events = mb.events.filter((e) => e.id > after);
     }
     if (role === 'A') call.lastSeenA = now(); else call.lastSeenB = now();
@@ -701,25 +857,51 @@ function createCallService(cfg, opts) {
     '/atlas/call/signal': { fn: routeSignal, max: P.LIMITS.bodyMax.signal },
     '/atlas/call/ice': { fn: routeIce, max: P.LIMITS.bodyMax.ice }
   };
-  const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Max-Age': '600' };
+  // No cross-origin access by default. Only the invite route can be opened to origins the
+  // operator names exactly; the answer then names that one origin, never a wildcard.
+  const corsAllowed = new Set(cfg.corsOrigins || []);
+  const corsHeaders = (origin) => ({ 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Max-Age': '600', Vary: 'Origin' });
+  const JSON_TYPE_RE = /^application\/json\s*(;.*)?$/i;
 
-  const server = http.createServer(async (req, res) => {
+  const server = http.createServer({ maxHeaderSize: 8192 }, async (req, res) => {
+    let release = null;
     try {
       const pathname = (req.url || '').split('?')[0];
       if (req.method === 'GET' && pathname === '/atlas/call/info') return send(res, 200, info());
       const route = ROUTES[pathname];
       if (!route) return send(res, 404, { error: 'not found', code: 'not-found' });
-      const hdr = route.cors ? CORS : {};
-      if (route.cors && req.method === 'OPTIONS') { res.writeHead(204, Object.assign({ 'Cache-Control': 'no-store' }, hdr)); return res.end(); }
+      const origin = req.headers.origin;
+      const originAllowed = origin !== undefined && route.cors && corsAllowed.has(origin);
+      const hdr = originAllowed ? corsHeaders(origin) : {};
+      if (route.cors && req.method === 'OPTIONS' && originAllowed) { res.writeHead(204, Object.assign({ 'Cache-Control': 'no-store' }, hdr)); return res.end(); }
       if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed', code: 'method-not-allowed' }, hdr);
       if (!cfg.configured) return send(res, 503, { error: 'calls are not configured on this service', code: 'calls-not-configured' }, hdr);
-      if (limited('src:' + sourceOf(req), L.perSourcePerMin)) { counters.rateLimited++; return send(res, 429, { error: 'too many requests', code: 'rate-limited' }, hdr); }
+      if (proxyHttpsProblem(req)) { counters.httpsRequired++; return send(res, 400, { error: 'https is required', code: 'https-required' }); }
+      // A web page's origin is not an input to authentication; a request from one that the
+      // operator did not name is refused. The wallet's own requests carry no web origin.
+      if (origin !== undefined && !originAllowed && /^(https?:|null$)/i.test(origin)) { counters.originRefused++; return send(res, 403, { error: 'origin not allowed', code: 'origin-not-allowed' }); }
+      if (!JSON_TYPE_RE.test(String(req.headers['content-type'] || ''))) { counters.badContentType++; return send(res, 415, { error: 'content type must be application/json', code: 'unsupported-media-type' }, hdr); }
+      const src = sourceOf(req);
+      const open = (inflight.get(src) || 0) + 1;
+      inflight.set(src, open);
+      release = () => {
+        const left = (inflight.get(src) || 1) - 1;
+        if (left > 0) inflight.set(src, left); else inflight.delete(src);
+      };
+      res.once('close', release);
+      if (open > L.maxInflightPerSource) { counters.inflightRefused++; return send(res, 429, { error: 'too many requests', code: 'too-many-connections' }, Object.assign({ 'Retry-After': '5' }, hdr)); }
+      if (limited('src:' + src, L.perSourcePerMin)) { counters.rateLimited++; return send(res, 429, { error: 'too many requests', code: 'rate-limited' }, hdr); }
       let text;
-      try { text = await readBody(req, route.max); } catch (e) { return send(res, e.status || 400, { error: e.status === 413 ? 'request too large' : 'bad request', code: e.status === 413 ? 'too-large' : 'bad-request' }, hdr); }
+      try { text = await readBody(req, route.max); } catch (e) {
+        const st = e.status || 400;
+        const out = send(res, st, { error: st === 413 ? 'request too large' : st === 408 ? 'request timed out' : 'bad request', code: st === 413 ? 'too-large' : st === 408 ? 'timeout' : 'bad-request' }, Object.assign({ Connection: 'close' }, hdr));
+        if (st === 408) res.once('finish', () => req.destroy());
+        return out;
+      }
       let body;
       try { body = JSON.parse(text); } catch (e) { return send(res, 400, { error: 'malformed request', code: 'bad-request' }, hdr); }
-      const out = await route.fn(body, req);
-      return send(res, out.status, out.body, hdr);
+      const out = await route.fn(body, req, res);
+      return send(res, out.status, out.body, Object.assign({}, out.headers || {}, hdr));
     } catch (e) {
       if (!res.headersSent) send(res, 500, { error: 'internal error', code: 'internal' });
       else res.end();
@@ -728,6 +910,19 @@ function createCallService(cfg, opts) {
   server.requestTimeout = 60000;
   server.headersTimeout = 15000;
   server.keepAliveTimeout = 5000;
+  server.maxConnections = L.maxConnections;
+  // Direct exposure only: behind a proxy every socket comes from the proxy, which limits clients itself.
+  server.on('connection', (socket) => {
+    if (cfg.trustProxy) return;
+    const k = sourceKey(normalizeIp(socket.remoteAddress || '')) || 'unknown';
+    const n = (connBySource.get(k) || 0) + 1;
+    connBySource.set(k, n);
+    socket.once('close', () => {
+      const left = (connBySource.get(k) || 1) - 1;
+      if (left > 0) connBySource.set(k, left); else connBySource.delete(k);
+    });
+    if (n > L.maxConnectionsPerSource) { counters.connectionRefused++; socket.destroy(); }
+  });
 
   loadTags();
 
@@ -743,13 +938,13 @@ function createCallService(cfg, opts) {
     sweep,
     counters,
     stats() {
-      return { tags: tags.size, calls: calls.size, liveCalls: [...calls.values()].filter((c) => c.state !== 'ENDED').length, seenCallIds: seenCallIds.size, nonces: nonces.size, listeners: listeners.size, waiters, buckets: buckets.size, tagRinging: tagRinging.size };
+      return { tags: tags.size, calls: calls.size, liveCalls: [...calls.values()].filter((c) => c.state !== 'ENDED').length, seenCallIds: seenCallIds.size, nonces: nonces.size, listeners: listeners.size, waiters, strangerWaiters, sources: sourceWaiters.size, inflightSources: inflight.size, buckets: buckets.size, tagRinging: tagRinging.size };
     },
     callState(id) { const c = calls.get(id); return c ? c.state : null; }
   };
 }
 
-module.exports = { createCallService, loadConfig, isPrivateAddress, DEFAULT_TIMERS, DEFAULT_LIMITS };
+module.exports = { createCallService, loadConfig, isPrivateAddress, normalizeIp, sourceKey, stunProblem, DEFAULT_TIMERS, DEFAULT_LIMITS, TUNABLE_LIMITS };
 
 if (require.main === module) {
   const cfg = loadConfig(process.env);
@@ -759,6 +954,10 @@ if (require.main === module) {
   } else {
     console.log('[call-service] configured for ' + cfg.origin + ' (domain ' + cfg.domain + ')' + (cfg.stateFile ? '' : '; tags are held in memory only (no CALL_STATE_FILE)'));
     if (cfg.origin.startsWith('http:')) console.log('[call-service] WARNING: plain http is allowed for a private test network only; use https for anything else.');
+    if (cfg.trustProxy) console.log('[call-service] proxy mode: client addresses come from X-Forwarded-For sent by ' + cfg.proxyAddrs.join(', ') + (cfg.origin.startsWith('https:') ? '; requests must carry X-Forwarded-Proto: https' : ''));
+    if (cfg.trustProxy && !['127.0.0.1', '::1', 'localhost'].includes(cfg.bind)) console.log('[call-service] WARNING: proxy mode with a non-loopback bind: make sure only the proxy can reach this port.');
+    if (!cfg.trustProxy && cfg.origin.startsWith('https:')) console.log('[call-service] note: an https origin without CALL_TRUST_PROXY=1 means TLS is terminated elsewhere and every client looks like the proxy; set it when a reverse proxy is in front.');
+    console.log('[call-service] STUN: ' + (cfg.stunUrls.length ? cfg.stunUrls.join(', ') : 'none (direct connections only)') + '; cross-origin access: ' + (cfg.corsOrigins.length ? 'invite route for ' + cfg.corsOrigins.join(', ') : 'none'));
   }
   svc.listen().then((addr) => {
     console.log('[call-service] listening on ' + addr.address + ':' + addr.port);

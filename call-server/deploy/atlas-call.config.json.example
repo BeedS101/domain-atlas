@@ -1,0 +1,22 @@
+{
+  "origin": "https://calls.example.org",
+  "domain": "example.org",
+  "issuerKeys": ["PASTE_THE_PUBLIC_KEY_FROM_https://example.org/.well-known/atlas-key.json"],
+  "revocationsUrl": "https://example.org/.well-known/atlas-revocations.json",
+  "stateFile": "/var/lib/atlas-call/tags.json",
+  "bind": "127.0.0.1",
+  "port": 8787,
+  "trustProxy": true,
+  "proxyAddrs": ["127.0.0.1", "::1"],
+  "stunUrls": [],
+  "inviteCorsOrigins": [],
+  "limits": {
+    "maxConnections": 3000,
+    "maxConnectionsPerSource": 100,
+    "maxInflightPerSource": 60,
+    "maxWaiters": 2000,
+    "maxWaitersPerSource": 20,
+    "maxStrangerWaiters": 500,
+    "maxListeners": 5000
+  }
+}

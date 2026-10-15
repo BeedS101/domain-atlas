@@ -24,6 +24,7 @@ amendment names the class it has reached:
 | `docs/voice-calls-test-plan.md` | automated and manual tests, per phase |
 | `docs/voice-calls-deployment.md` | STUN/TURN, bandwidth, operator set-up, rollout, degradation |
 | `docs/voice-calls-internet.md` | operation over the internet: configuration isolation, https Node service, PHP signalling, cross-domain admission, coturn |
+| `docs/voice-calls-deploy-node.md` | step-by-step: deploy the Node Call Service behind https, check it, test it with two wallets, add your own STUN |
 
 ## 1. Goals and non-goals
 
