@@ -8381,6 +8381,14 @@ const AtlasWallet = (() => {
     };
   }
 
+  // ---- the derived account ID ----
+  const LEDGER_LABS29_NETWORK_PREFIX = 'chainblock-labs29-';
+  async function ledgerDerivedAccountId(network, coin, ownerKey) {
+    const text = canonicalize({ coin, network, owner: ownerKey, purpose: 'atlas.ledger.account-id', v: 1 });
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+    return 'urn:atlas:ledger-account:' + Array.from(digest).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
   // ---- checking the issuer's signature ----
   //
   // The same trust anchor as an asset credential (the issuer's published key and revocation
@@ -8389,6 +8397,11 @@ const AtlasWallet = (() => {
     const core = ledgerCore();
     const shape = core.validateAccountCredential(credential);
     if (!shape.ok) return { valid: false, reason: shape.message, code: shape.reason };
+    // On the Labs 29 networks the ID is not an issuer's free choice: it is fixed by network, coin
+    // and owner, so the ledger and the issuer name the same account.
+    if (credential.ledger.network.startsWith(LEDGER_LABS29_NETWORK_PREFIX) && credential.id !== await ledgerDerivedAccountId(credential.ledger.network, credential.ledger.coin, credential.owner.publicKey)) {
+      return { valid: false, reason: 'the account id is not the one derived from the network, coin and owner', code: 'id-mismatch' };
+    }
     try {
       const base = baseUrl(credential.issuer.domain);
       const [keyDoc, revDoc] = await Promise.all([

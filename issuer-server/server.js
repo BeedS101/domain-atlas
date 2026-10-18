@@ -67,6 +67,7 @@ const { connectImap } = require('./lib-imap');
 const { parseMimeMessage } = require('./lib-mime-parse');
 const { evaluateTransferPolicy, evaluateDeliveryGate, evaluateMintForDelivery } = require('./lib-transfer-policy');
 const { createDeliveryEngine } = require('./lib-delivery');
+const { createLedgerIssuance } = require('./lib-ledger-issuance');
 
 // All three of these are overridable by environment variable so the same
 // code runs unchanged in local dev (defaults below) and behind cPanel's
@@ -183,6 +184,10 @@ const MAIL_NONCE_CAP = 20000;
 const MAIL_SESSION_MAX_MS = 15 * 60 * 1000;
 const MAIL_CHECK_MAX_CREDENTIALS = 200;
 const MAIL_NONCE_FILE = path.join(STATE_DIR, 'atlas-mail-nonces-store.json');
+// Experimental ledger-account reference issuance (lib-ledger-issuance.js). Off unless the config
+// file in the state folder says {"enabled": true}.
+const LEDGER_ISSUANCE_CONFIG_FILE = path.join(STATE_DIR, 'atlas-ledger-issuance-config.json');
+const LEDGER_ISSUANCE_STORE_FILE = path.join(STATE_DIR, 'atlas-ledger-issuance-store.json');
 // Email-delivered bearer credentials (SPEC.md §13) — outbound SMTP config
 // for the mailbox named by this domain's own manifest.emailTickets.
 // intakeAddress (§13.1). Deliberately read fresh from the environment
@@ -4219,6 +4224,13 @@ async function main() {
     return b64url(sig);
   }
 
+  // Signs with the key loaded above; the module never sees a key and creates none.
+  const ledgerIssuance = createLedgerIssuance({
+    configFile: LEDGER_ISSUANCE_CONFIG_FILE, storeFile: LEDGER_ISSUANCE_STORE_FILE,
+    keyDocFile: PUBLIC_KEY_FILE, revocationsFile: REVOCATIONS_FILE,
+    canonicalize, sign, publicKey: publicKeyB64url
+  });
+
   await preparePinnedManifest(sign, publicKeyB64url);
 
   // Verifies an asset credential this issuer itself signed — used before
@@ -5317,6 +5329,18 @@ async function main() {
     }
 
     try {
+      // --- experimental ledger-account reference issuance ---
+      if (req.url === '/atlas/ledger/account-credential') {
+        let rawBody = '';
+        if (req.method === 'POST') {
+          try { rawBody = (await readBody(req, 8192)) || ''; } catch (e) { return sendJson(res, e.statusCode || 400, { ok: false, code: 'too-large', error: 'request body too large' }); }
+        }
+        const secure = !!(req.socket && req.socket.encrypted) || (process.env.ATLAS_LEDGER_TRUST_FORWARDED_PROTO === '1' && req.headers['x-forwarded-proto'] === 'https');
+        const result = await ledgerIssuance.handle({ method: req.method, host: req.headers.host, secure, client: adminClientKey(req), rawBody });
+        if (result.headers) for (const [k, v] of Object.entries(result.headers)) res.setHeader(k, v);
+        return sendJson(res, result.status, result.body);
+      }
+
       // --- §5 asset credentials ---
       if (req.method === 'POST' && req.url === '/atlas/asset/issue') {
         const { ownerPublicKey, assetClass, quantity, existingBalances } = JSON.parse((await readBody(req)) || '{}');

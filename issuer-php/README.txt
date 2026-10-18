@@ -78,11 +78,12 @@ What's in this folder
     admin/class-patch.php    - POST /atlas/admin/class-patch   (admin-gated: set/clear a properties+tradeScope patch for a whole non-fungible class — see "Class-wide patches" below)
     admin/class-patches.php  - POST /atlas/admin/class-patches  (admin-gated: list every class patch currently active — see "Class-wide patches" below)
     admin/asset-classes.php  - POST /atlas/admin/asset-classes  (admin-gated: every non-fungible class, bound or not, for the class-patch form's dropdown — see "Class-wide patches" below)
+    ledger/account-credential.php - POST /atlas/ledger/account-credential (EXPERIMENTAL, OFF unless lib/atlas-ledger-issuance-config.json enables it — see "Ledger-account references" below)
     admin/send-ticket-to-email.php - POST /atlas/admin/send-ticket-to-email (admin-gated: mint a ticket and email it to an address; needs outbound email configured — see SPEC.md section 13.1)
     .htaccess                - makes the URLs above work without a .php
                                 extension, matching what the extension calls
   lib/
-    bootstrap.php, crypto.php, store.php  - shared code, not web routes
+    bootstrap.php, crypto.php, store.php, ledger-issuance.php  - shared code, not web routes
     .htaccess                - blocks direct web access to this folder
                                 (this is where the private key file lives
                                 once it's generated)
@@ -1291,3 +1292,40 @@ mechanism directly against this bundle's HTTP layer, including the real
 admin-gated /atlas/asset/mint and /atlas/asset/reissue endpoints the
 page itself never calls, and confirms a class that never opted in is
 never archived, however many times it changes hands.
+
+
+Ledger-account references (experimental, off by default)
+-----------------------------------------------------------
+POST /atlas/ledger/account-credential signs a domain-atlas-ledger-account/1.0
+credential: "this owner key has an account in this coin on this domain's
+Labs 29 ledger". It mirrors issuer-server/lib-ledger-issuance.js and is
+described in docs/ledger-accounts.md ("Issuing account references").
+
+It does nothing until you create lib/atlas-ledger-issuance-config.json:
+
+    { "enabled": true, "domain": "evtec.co.za" }
+
+`domain` must be evtec.co.za or domain-atlas.co.za (the two Labs 29 hosts)
+and the request's Host must match it. Optional limits: perClientPerMinute
+(default 20), perOwnerPerHour (10), globalPerHour (300). Delete the file to
+turn it off again. With no file, or "enabled" anything but true, the route
+answers 404 {"code":"disabled"} and touches nothing.
+
+What it needs:
+  - the issuer key you already have (lib/issuer-private-key.pem) and its
+    published .well-known/atlas-key.json entry. This route never creates a
+    key: unlike the routes above, with no key it refuses (503) instead of
+    generating one, and it refuses if the published key document does not
+    list the key as valid right now.
+  - the PHP curl extension, and the ability for this site to make an HTTPS
+    request to ITSELF (it asks https://<domain>/chain-labs/accounts31.php to
+    confirm the account exists). Some shared hosts block that; test it first.
+  - Core's chain-labs files (account30.php, accounts31.php) on the same
+    domain, already working.
+
+It writes lib/atlas-ledger-issuance-store.json (spent nonce hashes, owner
+hashes for the hourly limit, and a log of the last 500 issuances: time,
+account ID, coin). No key or signature is ever stored there. lib/ is already
+blocked from the web by lib/.htaccess.
+
+Deployment, test and rollback steps are in docs/ledger-accounts.md. tools/ledger-issuance-smoke.js is the one-shot check to run after enabling.

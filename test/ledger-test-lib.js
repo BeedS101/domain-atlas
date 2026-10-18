@@ -19,6 +19,11 @@ function canonicalize(value) {
   return '{' + Object.keys(value).sort().map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
 }
 
+// The account ID fixed by network, coin and owner on the Labs 29 networks.
+function derivedAccountId(network, coin, owner) {
+  return 'urn:atlas:ledger-account:' + require('crypto').createHash('sha256').update(canonicalize({ coin, network, owner, purpose: 'atlas.ledger.account-id', v: 1 })).digest('hex');
+}
+
 function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
@@ -53,7 +58,9 @@ async function startIssuer() {
       over = over || {};
       const credential = {
         credential: 'domain-atlas-ledger-account/1.0',
-        id: over.id || ('urn:atlas:ledger-account:' + Buffer.from(webcrypto.getRandomValues(new Uint8Array(12))).toString('hex')),
+        id: over.id || (ledger.network.startsWith('chainblock-labs29-')
+          ? derivedAccountId(ledger.network, ledger.coin, ownerPublicKey)
+          : 'urn:atlas:ledger-account:' + Buffer.from(webcrypto.getRandomValues(new Uint8Array(12))).toString('hex')),
         issuer: { domain: over.issuerDomain || ('localhost:' + port), publicKey },
         ledger: { network: ledger.network, coin: ledger.coin },
         owner: { publicKey: ownerPublicKey },
@@ -147,4 +154,4 @@ function installSimulatedAdapter(arg) {
   return AtlasWallet.registerLedgerAdapter(adapter) && true;
 }
 
-module.exports = { startIssuer, startLedger, installSimulatedAdapter, canonicalize, b64url };
+module.exports = { startIssuer, startLedger, installSimulatedAdapter, canonicalize, b64url, derivedAccountId };

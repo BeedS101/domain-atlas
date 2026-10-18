@@ -3,14 +3,17 @@
 Status: the wallet side of the Ledger tab is built and tested against local test doubles. An
 **experimental adapter for the Labs 29 prototype is built but switched off by default**, and no
 live testing has been approved. Nothing in this repository has read a real balance.
+The issuer in this repository can sign account references through an **experimental endpoint that
+is off unless the operator enables it** (see "Issuing account references"); nothing has issued one
+on a live site.
 
 This document keeps three things apart, and says which one each statement is about:
 
 - **Built**: what the wallet does today.
 - **Experimental**: the Chainblock Labs 29 prototype (`ledger29.php`, in the Core repository; this
   document was checked against Core commit `606390a`). It is a read-only prototype with no funded
-  accounts, no signed discovery, no signed balance receipts, no account issuance and no recovery
-  service. It is not the finished contract. The wallet reaches it only through the experimental
+  accounts, no signed discovery, no signed balance receipts and no recovery service. It is not the
+  finished contract. The wallet reaches it only through the experimental
   adapter described below, and only if that is turned on.
 - **Intended**: the contract agreed for the finished interface. It is written down here so the
   wallet, the issuer and the ledger can be built to it. Items marked *proposed* are suggested
@@ -76,9 +79,11 @@ id    = "urn:atlas:ledger-account:" + lowercase-hex(SHA-256(UTF-8(input)))
 account ID. The result is 64 hex characters and fits the wallet's existing ID rule. The ID names an
 account; it does not prove one exists. The ledger decides that.
 
-**Built:** the wallet accepts any ID that matches the ID rule and does not yet check the
-derivation. It will start to once the derivation is frozen. No real credentials exist, so the rule
-can be part of version 1.0.
+**Built:** on the Labs 29 networks (`chainblock-labs29-*`) the wallet requires exactly this derived
+ID and refuses any other before it contacts the issuer. Other networks are held to the general ID
+rule only, until the derivation is frozen. Core's Labs 30 and Labs 31 files use this derivation (the
+earlier text in `LABS30.md` and `LABS31.md` describes a different one and is out of date), and the
+issuance endpoint below derives it independently and requires the ledger to name the same ID.
 
 ## What the wallet stores (built)
 
@@ -263,7 +268,7 @@ trusting the connection alone. *Proposed* shape:
 `amount` is an integer string of minor units and `decimals` is the coin's own precision. The
 receipt names the request it answers and the ledger state it reads, so an old answer cannot be
 passed off as a new one. The key that signs it is either the issuer's or one the signed discovery
-document lists. Until receipts exist, the wallet labels every balance **Reported \u2014 Not Cryptographically
+document lists. Until receipts exist, the wallet labels every balance **Reported — Not Cryptographically
 Verified** (**built**). The wallet sets that label, not the adapter or the ledger, and there is no
 other level for an adapter to claim. The Ledger tab shows it beside every figure, with a sentence
 saying nothing signed backs it and that it is not a final or spendable balance, and calls the figure
@@ -345,12 +350,13 @@ words of the message are never parsed. Two exceptions need no code: a 429 means 
 
 Built: pin and fetch by exact operation address with a new `discover` result shape; owner keys in
 canonical form, including the passkey case; proof formats checked before any prompt; structured
-error codes with the new problem messages; the Reported \u2014 Not Cryptographically Verified label;
+error codes with the new problem messages; the Reported — Not Cryptographically Verified label;
 the experimental interface switch.
 
-Still to do: a helper that verifies the signed discovery document and another that checks the
-derived account ID (both wait for the contract to be frozen); re-checking revocation on each
-refresh; receipt verification.
+The derived account ID is checked for the Labs 29 networks (see "Account ID").
+
+Still to do: a helper that verifies the signed discovery document (waits for the contract to be
+frozen); re-checking revocation on each refresh; receipt verification.
 
 ## The experimental Labs 29 adapter
 
@@ -400,6 +406,130 @@ and unverified.
   time the server answered, no signed discovery or receipt, no account issuance, no listing.
 - `LABS29.md` still describes the earlier request shape and has not been updated for these changes.
 
+## Issuing account references (experimental)
+
+The wallet needs an issuer-signed `domain-atlas-ledger-account/1.0` credential before it will hold
+an account. The issuer in this repository (`issuer-php/` and `issuer-server/`) can now sign one,
+through an endpoint that is **off unless the operator turns it on**:
+
+`POST /atlas/ledger/account-credential`
+(`issuer-php/atlas/ledger/account-credential.php`, `issuer-php/lib/ledger-issuance.php`;
+`issuer-server/lib-ledger-issuance.js`, which answers identically)
+
+It signs one thing: *this owner key has an account in this coin on this domain's Labs 29 ledger*.
+It signs it only after two independent checks, and it signs with the established issuer key only.
+
+### Request
+
+```json
+{
+  "payload": {
+    "type": "atlas.ledger.account.issue", "v": 1,
+    "audience": "https://<domain>/atlas/ledger/account-credential",
+    "network": "chainblock-labs29-<domain>", "coin": "GOPH",
+    "nonce": "<32-64 lowercase hex>", "issuedAt": "<UTC ISO, within 120 s>",
+    "existenceNonce": "<the nonce of the listing request below>"
+  },
+  "proof": { "signerRole": "raw-ecdsa", "publicKey": "<canonical owner point>", "signature": "<raw 64-byte>" },
+  "existence": {
+    "payload": { "type": "atlas.ledger.accounts", "v": 1,
+                 "audience": "https://<domain>/chain-labs/accounts31.php?action=accounts",
+                 "network": "chainblock-labs29-<domain>", "nonce": "<32-64 lowercase hex>", "issuedAt": "<UTC ISO>" },
+    "proof": { "publicKey": "<the same owner point>", "signature": "<raw 64-byte>" }
+  }
+}
+```
+
+Both parts are signed by the owner with the same raw P-256 key, over canonical JSON. Passkey
+identities are answered `unsupported-proof`: the ledger's own check cannot take an assertion, so
+there would be nothing to confirm existence with.
+
+### What the issuer checks, in order
+
+1. The endpoint is enabled; the request is a POST over HTTPS to the configured domain (never taken
+   from the Host header alone); the per-client rate limit; the body is at most 8 KiB.
+2. Exact field sets and types; `audience` is the exact issuance address; `network` is this domain's;
+   `issuedAt` is within 120 seconds (`stale-request` carries `serverTime`).
+3. The owner key is the one canonical spelling and the signature verifies (`bad-signature`,
+   `unsupported-proof`).
+4. The listing request is for this network and the exact ledger address, is signed by the *same*
+   key, is the one the signed intent names (`existenceNonce`), is fresh, and verifies.
+5. The established issuer key exists on disk and the published `atlas-key.json` lists it as valid
+   now. The endpoint never generates a key (`issuer-key-unavailable`).
+6. The derived account ID is not on the revocation list (`account-revoked`).
+7. The request nonce is spent and the per-owner and global hourly limits are applied in one locked
+   step (`replayed-request`, `rate-limited`).
+8. The issuer itself sends the owner's listing request, unchanged, to
+   `https://<domain>/chain-labs/accounts31.php?action=accounts` (no redirects, 8 s, 64 KiB, TLS
+   verified). It issues only if the ledger answers `accounts-found` for this network and owner,
+   lists the coin exactly once, and names the account ID the issuer derived itself
+   (`account-not-found`, `ledger-mismatch`, `ledger-unavailable`, `existence-proof-rejected`).
+
+Nothing in the request is accepted as proof that the account exists. A claimed account list is
+refused as an unknown field. A request that failed at the ledger stays spent; the owner signs a
+new one.
+
+### The credential
+
+Exactly the seven fields above, `issuedAt` = the issuer's clock, signed over
+`{id, ledger, owner, issuedAt}` with the established issuer key through the existing signing
+function. No balance, supply or quantity. Core's offline verifier (`verify34.php`) accepts it.
+
+### Operating it
+
+Disabled with no file. To enable, create `lib/atlas-ledger-issuance-config.json` (PHP) or
+`<state folder>/atlas-ledger-issuance-config.json` (Node):
+
+```json
+{ "enabled": true, "domain": "evtec.co.za" }
+```
+
+`domain` must be one of the two Labs 29 hosts. Optional: `perClientPerMinute` (20),
+`perOwnerPerHour` (10), `globalPerHour` (300). `coreBase` exists for tests and accepts only a
+loopback `http://` address. Removing the file turns it off. The Node issuer also needs
+`ATLAS_LEDGER_TRUST_FORWARDED_PROTO=1` when it sits behind a TLS-terminating proxy.
+
+The issuer keeps `lib/atlas-ledger-issuance-store.json`: spent-nonce hashes, owner hashes for the
+hourly limit, and a log of the last 500 issuances (time, account ID, coin). It holds no key and no
+signature.
+
+### What it does not do
+
+The wallet does not request these references yet and has no screen for them. The wallet will not
+sign an `atlas.ledger.account.issue` payload either (it signs `atlas.ledger.*` only for an
+adapter's own scoped call), so the wallet-side half is still to be built. The issuer cannot revoke
+one account reference without revoking that account ID for good, because the ID is deterministic.
+There is no signed existence receipt from the ledger: the issuer trusts the ledger's answer over
+TLS to its own domain, the same trust a balance has today.
+
+### Deploying it (only once reviewed and approved)
+
+Nothing below has been done on a live site.
+
+1. **Before anything:** Core's Labs 30, 31 and 33 files work on the domain, and the domain's PHP issuer
+   is already installed with its key published: `https://<domain>/.well-known/atlas-key.json` lists
+   the key with a `validFrom` in the past and no `validUntil`.
+2. **Upload two new files only**, next to the existing ones, and nothing else:
+   `issuer-php/lib/ledger-issuance.php` to `lib/`, and
+   `issuer-php/atlas/ledger/account-credential.php` to a new `atlas/ledger/` folder. Do not touch
+   `issuer-private-key.pem`, `atlas-key.json` or any store. The endpoint is still off.
+3. **Confirm it is off:** `POST https://<domain>/atlas/ledger/account-credential` answers 404
+   `{"code":"disabled"}`, and the existing endpoints (`/atlas/revoke`, an asset check) behave as before.
+4. **Confirm the host can ask itself:** the issuer fetches `https://<domain>/chain-labs/accounts31.php`
+   from the server. From the host's terminal or a one-off cron job, a request to that address
+   (`curl -s -X POST -d '{}' 'https://<domain>/chain-labs/accounts31.php?action=accounts'`) should
+   come back as JSON `malformed-request`. If the host cannot reach itself, stop: see "Open".
+5. **Enable it** by creating `lib/atlas-ledger-issuance-config.json` with
+   `{"enabled": true, "domain": "<domain>"}` (leave the limits at their defaults).
+6. **Smoke test from your own computer:** `node tools/ledger-issuance-smoke.js <domain> <COIN>` expects
+   `account-not-found` and creates nothing. `... --open` additionally opens one empty account for a
+   throwaway key (permanent, no funds) and checks the credential it gets back.
+7. **Roll back** by deleting the config file (the endpoint is off at once) or the two uploaded files.
+   Credentials already issued stay valid unless their account ID is revoked.
+
+Open: whether the live hosts allow a server to request its own HTTPS address; the per-client rate
+limit sees one shared address behind some proxies; and a signed existence receipt from the ledger.
+
 ## Current experimental implementation versus the intended contract
 
 What the wallet cannot do with Labs 29 today, and where each gap belongs. "Core" is the Chainblock
@@ -416,7 +546,7 @@ Labs repository; "issuer" is the domain's PHP/Node issuer in this repository.
 | Replay | A repeated nonce is accepted within two minutes | Nonce store; repeated nonce refused | Core |
 | Errors | Codes on five failures; the clock, audience, network and shape failures carry none | A code on every failure, `stale-request` with `serverTime` | Core |
 | Balance response | `{amount, decimals, asOf}` over TLS only, `asOf` is server time | Signed receipt with request binding and state reference | Core, issuer |
-| Account credential | None issued | Issuer-signed, derived ID | Issuer, with Core deciding when an account exists |
+| Account credential | Issuer-signed, derived ID, through the experimental endpoint above (off by default; not yet requested by the wallet) | Same, plus signed discovery and receipts | Issuer, with Core deciding when an account exists |
 | Account creation | No account is created or funded; Labs 26 allocations are not credited | Ledger-authoritative; creation separate from allocation | Core |
 | Rediscovery | No listing operation | Signed `accounts` operation returning credentials | Core, issuer |
 
@@ -426,8 +556,11 @@ The amount format already agrees: an integer string of minor units with the coin
 
 Asset signing, Gold, Trading Station, Post Office, Collectibles, Documents, issuer compatibility,
 backup and restore, and the manifest permissions. Backups do not carry ledger references; the
-recovery paths are rediscovery and the copied credential. The one edit to existing logic is the
-extra refusal in `signWithSelf`.
+recovery paths are rediscovery and the copied credential. Edits to existing logic are the extra
+refusal in `signWithSelf`, the derived-ID check in `verifyLedgerCredential` (Labs 29 networks only),
+and, in `issuer-server/server.js`, one `require`, two file-path constants and one route that does
+nothing unless the issuance config file enables it. The PHP issuer gained new files only. No
+existing endpoint, key, credential or store is read or written differently.
 
 ## Remaining questions
 
@@ -439,7 +572,7 @@ extra refusal in `signWithSelf`.
    interact with key validity windows?
 6. What does the passkey verifier check beyond the signature (relying-party ID, user presence), and
    where does it live?
-7. Where does credential issuance run, and how does the issuer learn that an account exists?
+7. ~~Where does credential issuance run, and how does the issuer learn that an account exists?~~ For Labs 29: on the domain's own issuer, which asks the ledger with the owner's own signed listing request. Open: a signed existence receipt, and whether the issuer may read the ledger directly if the host blocks requests to itself.
 8. Should refresh re-check credential revocation every time, or on a schedule?
 9. Should backups carry ledger references, or stay as they are?
 10. What does "vault identity" mean in Core, and can it sign without a prompt?
@@ -460,11 +593,25 @@ extra refusal in `signWithSelf`.
 - `LABS29_PHP=/path/to/ledger29.php node test/manual-ledger-labs29-php.js`: the adapter and the
   wallet's signing against a copy of the real prototype file under PHP. It skips itself when the
   file is not given.
+- `node test/manual-ledger-issuance.js`: the issuance endpoint against the real Node and PHP
+  issuers, each in a temporary copy with its own key: off by default, valid issuance, missing
+  accounts, bad ownership proofs (changed, foreign, non-canonical, passkey-style, wrong audience,
+  wrong network, stale), replay (sequential and simultaneous), a ledger that lies or fails,
+  revocation, key problems, limits, and that no key or published document was touched. The ledger
+  is a stand-in; with `CORE_LABS_DIR=/path/to/labs/chainblock-web` it also runs against Core's real
+  `account30.php` and `accounts31.php` under PHP and checks each credential with Core's own
+  `verify34.php`.
+- `xvfb-run -a node test/manual-ledger-issuance-wallet.js`: the extension's `verifyLedgerCredential`
+  and `addLedgerAccount` on credentials the real issuers signed, fetched over HTTPS from the
+  issuer the way the wallet would from the live site (a throwaway certificate, local only):
+  valid, tampered, revoked, key-window, derived-ID mismatch.
 
 Apart from the real-file test above, the ledger in these tests is a **simulation**. Passing them
 shows the wallet's own rules work. They say nothing about the live sites or any funded account.
 The real-file test signs with Node's WebCrypto using a copy of the wallet's canonical-JSON rule,
-not with the loaded extension, so it checks the format agreement and not the extension's code.
+not with the loaded extension, so it checks the format agreement and not the extension's code. The
+issuance tests sign the owner's requests the same way, for the same reason: the wallet does not sign
+them yet.
 
 The stand-in service and the simulated passkey identity (a stored key with no authenticator, where
 any attempt to use it is counted) are test doubles. Nothing here has contacted the live sites.

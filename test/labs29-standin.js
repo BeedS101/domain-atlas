@@ -9,7 +9,7 @@ const { subtle } = webcrypto;
 const T = require('./ledger-test-lib');
 
 const unb64 = (s) => new Uint8Array(Buffer.from(String(s), 'base64url'));
-const COINS = { GOPH: 2, MWC: 3 };
+const COINS = { GOPH: 2, MWC: 3, PINX: 2, SCPX: 2 };
 
 function attachLabs29(issuer) {
   const host = issuer.domain;
