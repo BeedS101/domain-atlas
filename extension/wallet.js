@@ -1247,47 +1247,175 @@ const AtlasWallet = (() => {
     };
   }
 
+  // The sentence for a verdict that stops something the person asked for. An unavailable check is
+  // said to be unavailable: the credential was not found bad, it could not be checked.
+  function verdictBlockMessage(verdict, subject) {
+    if (verdict && verdict.status === 'unavailable') return 'The issuer\'s published keys or revocation list could not be read right now, so ' + subject + ' could not be checked. Nothing was added; try again later.';
+    return null;
+  }
+
+  // ---------- the documents an issuing domain publishes ----------
+  //
+  // Both the key document and the revocation list are read the same way everywhere (asset
+  // credentials, ledger-account references, signed ledger receipts): from the issuing domain's own
+  // origin, no redirects, no credentials, a fixed size limit per document, enforced while the body
+  // streams in, and nothing that cannot be read is ever turned into an empty list. A revocation list
+  // that is missing, unreachable, too large, not UTF-8 JSON, or not a list of objects with string ids
+  // is "revocation status unavailable" -- which is not the same as "not revoked".
+  const PUBLISHED_DOC_LIMITS = { 'atlas-key.json': 262144, 'atlas-revocations.json': 4194304 };
+  // The most revocation entries examined per lookup; keep equal to AtlasLedgerLabs38.MAX_REVOCATION_ENTRIES.
+  const REVOCATION_MAX_ENTRIES = 20000;
+
+  // The body as text, or null when it is longer than maxBytes. Stops reading as soon as the limit is
+  // passed; a body that is not valid UTF-8 throws. A response without a readable stream (only a
+  // test double) is read whole and measured.
+  async function readBoundedText(response, maxBytes) {
+    const declared = Number(response.headers && response.headers.get && response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxBytes) { try { if (response.body) await response.body.cancel(); } catch (err) { /* nothing to release */ } return null; }
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    if (!response.body || typeof response.body.getReader !== 'function') {
+      const whole = await response.text();
+      return new TextEncoder().encode(whole).length > maxBytes ? null : whole;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) { try { await reader.cancel(); } catch (err) { /* already closed */ } return null; }
+      chunks.push(value);
+    }
+    let text = '';
+    for (let i = 0; i < chunks.length; i++) text += decoder.decode(chunks[i], { stream: i < chunks.length - 1 });
+    return text;
+  }
+
+  // How long one published document may take, headers and body together. A domain that accepts the
+  // connection and then says nothing, or stops part-way through the body, is "unavailable" after this,
+  // not a verification that never finishes. (The ledger receipt check passes its own fetch, which
+  // carries the person's cancel button instead.)
+  const PUBLISHED_DOC_TIMEOUT_MS = 20000;
+
+  function publishedDocFetch(url, init) {
+    return fetch(String(url), Object.assign({}, init || {}, { redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' }));
+  }
+
+  // Reads /.well-known/<name> of `base`. Resolves one of:
+  //   { doc }                    a JSON object within the document's size limit
+  //   { doc: {revoked: []}, absent: true }   a 404 on a document where `opts.absentIsEmpty` says
+  //                              "the domain publishes none" (only the revocation list, and only
+  //                              for the classes that document that rule)
+  //   { doc: null, kind, why }   anything else; kind is 'unreachable', 'http', 'oversize' or 'malformed'
+  // `opts.fetchImpl` replaces the fetch (the ledger receipt check passes its scoped one).
+  async function readPublishedDoc(base, name, opts) {
+    const o = opts || {};
+    const doFetch = o.fetchImpl || publishedDocFetch;
+    const timer = o.fetchImpl ? null : { ctl: new AbortController(), fired: false };
+    const timeoutId = timer ? setTimeout(() => { timer.fired = true; timer.ctl.abort(); }, PUBLISHED_DOC_TIMEOUT_MS) : null;
+    try {
+      let response;
+      try { response = await doFetch(base + '/.well-known/' + name, Object.assign({ method: 'GET', headers: { Accept: 'application/json' } }, timer ? { signal: timer.ctl.signal } : {})); }
+      catch (err) {
+        if (timer && timer.fired) return { doc: null, kind: 'unreachable', why: 'did not answer in time' };
+        if (err && err.name === 'AbortError') throw err;
+        return { doc: null, kind: 'unreachable', why: 'could not be reached' };
+      }
+      if (response.status === 404 && o.absentIsEmpty) return { doc: { revoked: [] }, absent: true };
+      if (!response.ok) return { doc: null, kind: 'http', why: 'could not be read (HTTP ' + response.status + ')' };
+      try {
+        const text = await readBoundedText(response, PUBLISHED_DOC_LIMITS[name]);
+        if (text === null) return { doc: null, kind: 'oversize', why: 'is larger than the wallet will read' };
+        const doc = JSON.parse(text);
+        return doc && typeof doc === 'object' && !Array.isArray(doc) ? { doc } : { doc: null, kind: 'malformed', why: 'is not a JSON object' };
+      } catch (err) {
+        if (timer && timer.fired) return { doc: null, kind: 'unreachable', why: 'did not finish arriving in time' };
+        if (err && err.name === 'AbortError') throw err;
+        return { doc: null, kind: 'malformed', why: 'is not readable JSON text' };
+      }
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+
+  // The ids on a revocation list, or null when the list cannot be read as one: not a list, too long,
+  // or an entry that is not an object with a string id (it might be a revocation the wallet cannot
+  // interpret). One pass; the set answers any number of lookups.
+  function revocationIdsOf(doc) {
+    const list = doc && Array.isArray(doc.revoked) ? doc.revoked : null;
+    if (!list || list.length > REVOCATION_MAX_ENTRIES) return null;
+    const ids = new Set();
+    for (const r of list) {
+      if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.id !== 'string') return null;
+      ids.add(r.id);
+    }
+    return ids;
+  }
+
+  // The verdict of reading an issuing domain's revocation list for one credential id:
+  //   { revocation: 'revoked' | 'not-revoked' }          the list was read in full
+  //   { revocation: 'unavailable', why }                 it could not be, so nothing is known
+  // `notPublished: true` accompanies a 'not-revoked' that rests on a 404 the caller's class accepts.
+  function revocationVerdict(read, id) {
+    if (!read.doc) return { revocation: 'unavailable', why: 'the issuer\'s revocation list ' + read.why };
+    const ids = revocationIdsOf(read.doc);
+    if (!ids) return { revocation: 'unavailable', why: 'the issuer\'s revocation list is not in a form the wallet can read' };
+    if (ids.has(id)) return { revocation: 'revoked' };
+    return read.absent ? { revocation: 'not-revoked', notPublished: true } : { revocation: 'not-revoked' };
+  }
+
   // The four checks from SPEC.md §5, steps 1/2/4 — step 3 (fresh WebAuthn
   // assertion) is presentIdentity() below. One verification path for
-  // every asset now, replacing verifyCredential/verifyResourceCredential's
-  // former near-identical duplication.
+  // every asset.
+  //
+  // The result always says which of three things is true about revocation, apart from whether the
+  // credential as a whole is good: `revocation` is 'not-revoked', 'revoked' or 'unavailable'.
+  // `status` is 'verified' (only then is `valid` true), 'revoked', 'expired', 'invalid' (signature or
+  // key), or 'unavailable' (the issuer's published key document or revocation list could not be
+  // read, so nothing is claimed either way). An unavailable check is never a success and never a
+  // failure of the credential: callers that act on a verdict must not treat it as either.
+  //
+  // A missing revocation list (404) is NOT read as "nothing revoked" for an asset: SPEC.md §5.3 has
+  // the issuer publish one alongside its key, both reference issuers create it on first use, and
+  // every spend is "check, sign or mint, then revoke", so a spent credential is exactly what a
+  // missing list would let through.
   async function verifyCredential(credential) {
+    const unavailable = (why, revocation) => ({ valid: false, status: 'unavailable', revocation: revocation || 'unavailable', reason: 'not verified: ' + why });
     try {
       const base = baseUrl(credential.issuer.domain);
-      const [keyDoc, revDoc] = await Promise.all([
-        fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json()),
-        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
-      ]);
+      const [keyRead, revRead] = await Promise.all([readPublishedDoc(base, 'atlas-key.json'), readPublishedDoc(base, 'atlas-revocations.json')]);
+      if (!keyRead.doc) return unavailable('the issuer\'s published key ' + keyRead.why);
+      const keyDoc = keyRead.doc;
+      if (!Array.isArray(keyDoc.keys)) return unavailable('the issuer\'s published key document is not in a form the wallet can read');
       const issuedAt = new Date(credential.issuedAt).getTime();
-      const activeKey = (keyDoc.keys || []).find((k) => {
+      const activeKey = keyDoc.keys.find((k) => {
+        if (!k || typeof k !== 'object') return false;
         const from = new Date(k.validFrom).getTime();
         const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
         return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
       });
-      if (!activeKey) return { valid: false, reason: 'issuer key was not valid at issuedAt' };
+      if (!activeKey) return { valid: false, status: 'invalid', revocation: null, reason: 'issuer key was not valid at issuedAt' };
 
       const data = new TextEncoder().encode(canonicalize(assetPayloadOf(credential)));
       const publicKey = await crypto.subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
       const sigOk = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
-      if (!sigOk) return { valid: false, reason: 'signature does not match' };
+      if (!sigOk) return { valid: false, status: 'invalid', revocation: null, reason: 'signature does not match' };
 
-      const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
-      if (revoked) return { valid: false, reason: 'revoked by issuer' };
-      // SPEC.md §5.1's optional signed asset.expiresAt (the museum ticket
-      // stall's own worked example) — a second, orthogonal way a credential
-      // stops being valid, checked the same way issuer-server/server.js's
-      // own isExpired() is: pure arithmetic against the credential's own
-      // signed deadline, no extra fetch needed since it already traveled
-      // inside `credential.asset` as part of THIS verification's own
-      // signature check just above. Absent entirely for a class that never
-      // opted in, so this never fires for the vast majority of credentials.
+      const rev = revocationVerdict(revRead, credential.id);
+      if (rev.revocation === 'revoked') return { valid: false, status: 'revoked', revocation: 'revoked', reason: 'revoked by issuer' };
+      // SPEC.md §5.1's optional signed asset.expiresAt — a second, orthogonal way a credential
+      // stops being valid, checked the same way issuer-server/server.js's own isExpired() is: pure
+      // arithmetic against the credential's own signed deadline, no extra fetch. A credential that
+      // is definitely expired is reported as expired even when revocation could not be read.
       const expiresAt = credential.asset && credential.asset.expiresAt;
       if (typeof expiresAt === 'string' && Date.now() > new Date(expiresAt).getTime()) {
-        return { valid: false, reason: 'expired at ' + expiresAt };
+        return { valid: false, status: 'expired', revocation: rev.revocation, reason: 'expired at ' + expiresAt };
       }
-      return { valid: true, reason: 'signature verified against issuer key; not revoked' };
+      if (rev.revocation === 'unavailable') return unavailable('revocation status unavailable (' + rev.why + ')');
+      return { valid: true, status: 'verified', revocation: 'not-revoked', reason: 'signature verified against issuer key; not revoked' };
     } catch (err) {
-      return { valid: false, reason: 'verification error: ' + err.message };
+      return { valid: false, status: 'invalid', revocation: null, reason: 'verification error: ' + err.message };
     }
   }
 
@@ -3547,7 +3675,7 @@ const AtlasWallet = (() => {
         throw new Error('The issuer returned a file that does not match this export.');
       }
       const verdict = await verifyCredential(file);
-      if (!verdict.valid) throw new Error('The issuer returned a file that does not verify: ' + verdict.reason + '.');
+      if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'the file the issuer returned') || ('The issuer returned a file that does not verify: ' + verdict.reason + '.'));
       await finishExport(identity.publicKey, sourceId, file);
       return { outcome: 'recovered', file };
     }
@@ -3558,7 +3686,10 @@ const AtlasWallet = (() => {
         return { outcome: 'waiting', reason: 'The issuer has no record of this save yet. Checking again shortly.' };
       }
       const original = record.credential;
-      const verdict = original ? await verifyCredential(original) : { valid: false, reason: 'no copy of the original' };
+      const verdict = original ? await verifyCredential(original) : { valid: false, status: 'invalid', reason: 'no copy of the original' };
+      // Whether the original is still good could not be read: that is not an answer. Marking the item
+      // lost (or calling it safe) on a guess is exactly what an unavailable check must not do.
+      if (verdict.status === 'unavailable') return { outcome: 'waiting', reason: 'The issuer has no record of this save, and the original could not be checked right now. Checking again shortly.' };
       if (verdict.valid) {
         await dropExportRecord(identity.publicKey, sourceId);
         return { outcome: 'not-exported' };
@@ -3669,7 +3800,10 @@ const AtlasWallet = (() => {
     const verdict = await verifyCredential(credential);
     const domain = credential.issuer.domain;
     if (!verdict.valid) {
-      if (verdict.reason === 'revoked by issuer') {
+      if (verdict.status === 'unavailable') {
+        return out('unreachable', 'Could not check ' + domain + '\'s published keys and revocation list right now, so this file cannot be verified or claimed yet. Try again later.', { ...base, verdict });
+      }
+      if (verdict.status === 'revoked') {
         let state = 'revoked';
         try { state = (await fetchAssetFileStatus(domain, credential.id)).state; } catch (err) { /* keep 'revoked' */ }
         if (state === 'claimed') return out('already-claimed', 'Someone has already claimed this file.', { ...base, verdict });
@@ -3937,7 +4071,7 @@ const AtlasWallet = (() => {
     if (problem) throw new Error(problem);
     if (credential.owner.publicKey !== identity.publicKey) throw new Error('This copy belongs to a different key.');
     const verdict = await verifyCredential(credential);
-    if (!verdict.valid) throw new Error('This copy is no longer valid: ' + verdict.reason + '.');
+    if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this copy') || ('This copy is no longer valid: ' + verdict.reason + '.'));
     const wallet = await getWallet(identity.publicKey);
     if (wallet.some((e) => e.credential.id === credential.id)) throw new Error('This item is already in your wallet.');
     wallet.push({ credential, lastVerdict: verdict });
@@ -5167,7 +5301,7 @@ const AtlasWallet = (() => {
       throw new Error('this gift was not addressed to this identity');
     }
     const verdict = await verifyCredential(credential);
-    if (!verdict.valid) throw new Error('gift credential does not check out: ' + verdict.reason);
+    if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this gift') || ('gift credential does not check out: ' + verdict.reason));
 
     const wallet = await getWallet(ownerPublicKey);
     wallet.push({ credential, lastVerdict: verdict });
@@ -6667,7 +6801,7 @@ const AtlasWallet = (() => {
       throw new Error('this offer was not addressed to this identity');
     }
     const verdict = await verifyCredential(credential);
-    if (!verdict.valid) throw new Error('offer credential does not check out: ' + verdict.reason);
+    if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this offer') || ('offer credential does not check out: ' + verdict.reason));
 
     const wallet = await getWallet(ownerPublicKey);
     wallet.push({ credential, lastVerdict: verdict });
@@ -7239,7 +7373,7 @@ const AtlasWallet = (() => {
         ) continue; // never adopt anything that doesn't check out structurally, before even touching crypto
 
         const verdict = await verifyCredential(newCredential);
-        if (!verdict.valid) continue; // never adopt anything that doesn't verify
+        if (!verdict.valid) continue; // never adopt anything that doesn't verify, or that could not be checked: the held credential stays as it is
 
         const oldEntry = wallet[idx];
         wallet.splice(idx, 1, { credential: newCredential, lastVerdict: verdict, ...(oldEntry.hidden ? { hidden: true } : {}) });
@@ -8409,7 +8543,18 @@ const AtlasWallet = (() => {
   // ---- checking the issuer's signature ----
   //
   // The same trust anchor as an asset credential (the issuer's published key and revocation
-  // list), over the ledger-account payload. Contacts only the issuing domain.
+  // list), over the ledger-account payload, read the same bounded way (readPublishedDoc). Contacts
+  // only the issuing domain.
+  //
+  // The one deliberate difference from asset credentials: for the ledger classes (account
+  // references and signed balance receipts) a 404 on the revocation list means "this domain
+  // publishes none" and counts as an empty list, as the Labs 38 documentation has always said. That
+  // is kept because balances are only looked up at the Labs hosts, an account reference carries no
+  // value of its own (the ledger and the issuer both refuse a revoked account when it is used), and
+  // the rule is documented and tested. It is a result the verdict names ("publishes no revocation
+  // list"), and every other failure to read the list is "unavailable". Set this to false to treat a
+  // missing list as unavailable for the ledger classes too.
+  const LEDGER_ABSENT_REVOCATIONS_IS_EMPTY = true;
   async function verifyLedgerCredential(credential) {
     const core = ledgerCore();
     const shape = core.validateAccountCredential(credential);
@@ -8421,25 +8566,31 @@ const AtlasWallet = (() => {
     }
     try {
       const base = baseUrl(credential.issuer.domain);
-      const [keyDoc, revDoc] = await Promise.all([
-        fetch(base + '/.well-known/atlas-key.json', { cache: 'no-store', credentials: 'omit', redirect: 'error' }).then((r) => r.json()),
-        fetch(base + '/.well-known/atlas-revocations.json', { cache: 'no-store', credentials: 'omit', redirect: 'error' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
+      const [keyRead, revRead] = await Promise.all([
+        readPublishedDoc(base, 'atlas-key.json'),
+        readPublishedDoc(base, 'atlas-revocations.json', { absentIsEmpty: LEDGER_ABSENT_REVOCATIONS_IS_EMPTY })
       ]);
+      const unavailable = (why) => ({ valid: false, status: 'unavailable', revocation: 'unavailable', reason: 'not verified: ' + why, code: 'revocation-unavailable' });
+      if (!keyRead.doc) return unavailable('the issuer\'s published key ' + keyRead.why);
+      if (!Array.isArray(keyRead.doc.keys)) return unavailable('the issuer\'s published key document is not in a form the wallet can read');
       const issuedAt = new Date(credential.issuedAt).getTime();
-      const activeKey = (keyDoc.keys || []).find((k) => {
+      const activeKey = keyRead.doc.keys.find((k) => {
+        if (!k || typeof k !== 'object') return false;
         const from = new Date(k.validFrom).getTime();
         const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
         return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
       });
-      if (!activeKey) return { valid: false, reason: 'issuer key was not valid at issuedAt' };
+      if (!activeKey) return { valid: false, status: 'invalid', revocation: null, reason: 'issuer key was not valid at issuedAt' };
       const data = new TextEncoder().encode(canonicalize(core.signedPayloadOf(credential)));
       const publicKey = await crypto.subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
       const sigOk = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
-      if (!sigOk) return { valid: false, reason: 'signature does not match' };
-      if ((revDoc.revoked || []).some((r) => r.id === credential.id)) return { valid: false, reason: 'revoked by issuer' };
-      return { valid: true, reason: 'signature verified against issuer key; not revoked' };
+      if (!sigOk) return { valid: false, status: 'invalid', revocation: null, reason: 'signature does not match' };
+      const rev = revocationVerdict(revRead, credential.id);
+      if (rev.revocation === 'revoked') return { valid: false, status: 'revoked', revocation: 'revoked', reason: 'revoked by issuer' };
+      if (rev.revocation === 'unavailable') return unavailable('revocation status unavailable (' + rev.why + ')');
+      return { valid: true, status: 'verified', revocation: 'not-revoked', reason: rev.notPublished ? 'signature verified against issuer key; the issuer publishes no revocation list' : 'signature verified against issuer key; not revoked' };
     } catch (err) {
-      return { valid: false, reason: 'verification error: ' + err.message };
+      return { valid: false, status: 'invalid', revocation: null, reason: 'verification error: ' + err.message };
     }
   }
 
@@ -8459,7 +8610,12 @@ const AtlasWallet = (() => {
     if (current.unreadable) throw ledgerError('locked', 'The ledger accounts for this identity cannot be read right now, so nothing was changed.');
     if (current.list.some((r) => r.id === credential.id)) throw ledgerError('unknown', 'This account is already in your wallet.');
     const verdict = await verifyLedgerCredential(credential);
-    if (!verdict.valid) throw ledgerError('credential-invalid', 'The issuer\'s signature could not be confirmed (' + verdict.reason + ').');
+    if (!verdict.valid) {
+      // Nothing is stored either way. An unavailable check is not a finding about the account, so it is
+      // reported as such and can simply be tried again.
+      if (verdict.status === 'unavailable') throw ledgerError('revocation-unavailable', 'The issuer\'s published keys or revocation list could not be read (' + verdict.reason + '), so nothing was added.');
+      throw ledgerError('credential-invalid', 'The issuer\'s signature could not be confirmed (' + verdict.reason + ').');
+    }
     await updateLedgerList(ledgerOwnerKeyOf(identity), (list) => {
       if (list.some((r) => r.id === credential.id)) throw ledgerError('unknown', 'This account is already in your wallet.');
       if (list.length >= core.LIMITS.maxAccountsPerIdentity) throw ledgerError('unknown', 'This wallet already holds as many ledger accounts as it will keep.');
@@ -8571,39 +8727,6 @@ const AtlasWallet = (() => {
     } catch (err) { /* the identity changed or the reference was removed meanwhile; there is nothing to record */ }
   }
 
-  // The most the wallet reads of each document it fetches to check a signed receipt. The key
-  // document is small. The revocation list grows with every revocation the domain ever publishes
-  // (about 180 bytes an entry; thousands of entries already exceed 1 MiB), so it gets its own, larger
-  // ceiling; AtlasLedgerLabs38.MAX_REVOCATION_ENTRIES bounds the work done on what is read.
-  const LEDGER_KEY_DOC_LIMIT = { maxBytes: 262144 };
-  const LEDGER_REVOCATION_DOC_LIMIT = { maxBytes: 4194304 };
-
-  // The body as text, or null when it is longer than maxBytes. Stops reading as soon as the limit is
-  // passed; a body that is not valid UTF-8 throws. A response without a readable stream (only a
-  // test double) is read whole and measured.
-  async function readBoundedText(response, maxBytes) {
-    const declared = Number(response.headers && response.headers.get && response.headers.get('content-length'));
-    if (Number.isFinite(declared) && declared > maxBytes) { try { if (response.body) await response.body.cancel(); } catch (err) { /* nothing to release */ } return null; }
-    const decoder = new TextDecoder('utf-8', { fatal: true });
-    if (!response.body || typeof response.body.getReader !== 'function') {
-      const whole = await response.text();
-      return new TextEncoder().encode(whole).length > maxBytes ? null : whole;
-    }
-    const reader = response.body.getReader();
-    const chunks = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) { try { await reader.cancel(); } catch (err) { /* already closed */ } return null; }
-      chunks.push(value);
-    }
-    let text = '';
-    for (let i = 0; i < chunks.length; i++) text += decoder.decode(chunks[i], { stream: i < chunks.length - 1 });
-    return text;
-  }
-
   // The wallet's own check of a signed receipt. It fetches the issuing domain's published key
   // document and revocation list (the origin the person allowed, no redirects, no credentials) and
   // hands them, with the evidence the adapter returned, to AtlasLedgerLabs38.checkReceipt. A key
@@ -8613,23 +8736,13 @@ const AtlasWallet = (() => {
     if (typeof AtlasLedgerLabs38 === 'undefined') throw ledgerError('no-adapter');
     if (!raw || !raw.receipt || !raw.receipt.request || !raw.receipt.answer) return { ok: false, code: 'receipt-invalid', reason: 'no receipt came back' };
     const doFetch = ledgerScopedFetch({ origins: [issuerOrigin], urls: [] }, signal);
-    // Each document has its own size limit, counted in bytes after decoding and enforced while the
-    // body streams in, so an oversized or endless body is dropped without being held in memory.
-    // `limit` is { maxBytes }; a document that is larger, is not UTF-8 JSON, or is not an object is
-    // a failure ({ doc: null, why }).
-    const readDoc = async (name, limit, absentIsEmpty) => {
-      let response;
-      try { response = await doFetch(issuerOrigin + '/.well-known/' + name, { method: 'GET', headers: { Accept: 'application/json' } }); } catch (err) { if (err && err.name === 'AbortError') throw err; return { doc: null, why: 'could not be reached' }; }
-      if (response.status === 404 && absentIsEmpty) return { doc: { revoked: [] } };
-      if (!response.ok) return { doc: null, why: 'could not be read (' + response.status + ')' };
-      try {
-        const text = await readBoundedText(response, limit.maxBytes);
-        if (text === null) return { doc: null, why: 'is larger than the wallet will read' };
-        const doc = JSON.parse(text);
-        return doc && typeof doc === 'object' && !Array.isArray(doc) ? { doc } : { doc: null, why: 'is not a JSON object' };
-      } catch (err) { if (err && err.name === 'AbortError') throw err; return { doc: null, why: 'could not be read' }; }
-    };
-    const [keyRead, revRead] = await Promise.all([readDoc('atlas-key.json', LEDGER_KEY_DOC_LIMIT, false), readDoc('atlas-revocations.json', LEDGER_REVOCATION_DOC_LIMIT, true)]);
+    // The documents are read by the shared reader (readPublishedDoc): its limits, no redirects, no
+    // credentials. A revocation list the domain does not publish at all (404) counts as empty for
+    // signed ledger receipts, the documented rule for the ledger classes (LEDGER_ABSENT_REVOCATIONS_IS_EMPTY).
+    const [keyRead, revRead] = await Promise.all([
+      readPublishedDoc(issuerOrigin, 'atlas-key.json', { fetchImpl: doFetch }),
+      readPublishedDoc(issuerOrigin, 'atlas-revocations.json', { fetchImpl: doFetch, absentIsEmpty: LEDGER_ABSENT_REVOCATIONS_IS_EMPTY })
+    ]);
     if (!keyRead.doc) return { ok: false, code: 'signer-unknown', reason: 'the issuer\'s published keys ' + keyRead.why };
     if (!revRead.doc) return { ok: false, code: 'signer-unknown', reason: 'the issuer\'s revocation list ' + revRead.why };
     const keyDoc = keyRead.doc, revocations = revRead.doc;
@@ -8997,7 +9110,7 @@ const AtlasWallet = (() => {
           } catch (err) {
             // A reference stored by an earlier attempt that was cut short counts as collected.
             const alreadyThere = err && err.code === 'unknown' && /already in your wallet/.test(err.message);
-            if (!alreadyThere) fail = err && (err.code === 'credential-invalid' || err.code === 'locked') ? err.code : 'unknown';
+            if (!alreadyThere) fail = err && (err.code === 'credential-invalid' || err.code === 'locked' || err.code === 'revocation-unavailable') ? err.code : 'unknown';
           }
         }
       }

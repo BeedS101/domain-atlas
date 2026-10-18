@@ -51,7 +51,7 @@ const { check, until, sleep } = L;
     check('an account that belongs to a different identity is not added', !r.ok && r.code === 'wrong-identity', r);
     const foreignIssuer = await issuer.issue(w.pub, { network: NET, coin: 'GOPH' }, { issuerDomain: 'localhost:1' });
     r = await codeOf((c) => AtlasWallet.addLedgerAccount(c, { allowNetwork: true }), foreignIssuer);
-    check('a credential naming an issuer that cannot confirm it is not added', !r.ok && r.code === 'credential-invalid', r);
+    check('a credential naming an issuer that cannot be reached is not added, and is reported as unavailable (not as an invalid credential)', !r.ok && r.code === 'revocation-unavailable' && /nothing was added/.test(r.message), r);
     const revoked = await mk('REVD');
     issuer.state.revoked.push(revoked.id);
     r = await codeOf((c) => AtlasWallet.addLedgerAccount(c, { allowNetwork: true }), revoked);

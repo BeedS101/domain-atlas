@@ -758,8 +758,10 @@ downloads the whole list. Options, none built, in the order they would help:
    archive's existence declared in the live list. This is a policy decision for the issuer.
 
 Each of these is a change to what the issuer publishes and needs agreeing with Core before it is
-built. The other places in the wallet that read the same list (credential checks, **Check and add**)
-do not apply these limits or this fail-closed rule.
+built. The same reader and the same fail-closed rule now serve asset credentials and ledger-account
+references too (including **Check and add**), with a three-way verdict (`revoked`, `not-revoked`,
+`unavailable`); `docs/revocation-safety.md` describes that, and which credential classes accept a 404
+as "none published" (only the ledger classes do).
 
 ### Consent and switches
 
@@ -878,6 +880,9 @@ existing endpoint, key, credential or store is read or written differently.
   and simultaneous), expired/unlisted/unreadable signing keys, a revoked account, a missing or
   unreadable ledger, changed decimals, limits, and the signing surface. The ledger databases are Core's
   own (made by `account30.php`) when `CORE_LABS_DIR` is set, otherwise a schema stand-in; the output says which.
+- `xvfb-run -a node test/manual-revocation-safety.js`: the three revocation outcomes for asset credentials
+  and ledger-account references against local issuers, with the realistic 6,127-entry list, every way a
+  list can fail to be read, both size limits and the callers of the verdict (see `docs/revocation-safety.md`).
 - `node test/manual-ledger-verify38.js`: Core's `verify38.php` on genuine receipts from both issuers
   and on about fifty deliberately corrupted fixtures per issuer, each compared with an independent verifier; also
   that it answers 404 when served over HTTP. Needs `CORE_LABS_DIR`.

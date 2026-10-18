@@ -5453,7 +5453,9 @@ function renderAssetCard(entry, container, opts) {
     '<div class="name"><span>' + escapeHtml(asset.name) + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</span>' + menuHtml + '</div>' +
     '<div class="meta">' + escapeHtml(asset.class) + ' · issued by ' + escapeHtml(entry.credential.issuer.domain) + supersedesNote + '</div>' +
     renderPropertiesToggle(mergedAssetFields(entry)) +
-    '<div class="verdict ' + (v.valid ? 'valid' : 'invalid') + '">' + (v.valid ? '✓ ' : '✗ ') + escapeHtml(v.reason) + '</div>';
+    // Three outcomes, not two: a check that could not be completed (the issuer's key or revocation
+    // list could not be read) is neither a pass nor a finding against the credential.
+    '<div class="verdict ' + (v.valid ? 'valid' : v.status === 'unavailable' ? 'unavailable' : 'invalid') + '" data-status="' + escapeHtml(v.status || (v.valid ? 'verified' : 'invalid')) + '">' + (v.valid ? '✓ ' : v.status === 'unavailable' ? '⚠ ' : '✗ ') + escapeHtml(v.reason) + '</div>';
   el.innerHTML = html;
   container.appendChild(el);
 

@@ -238,6 +238,7 @@
     'unknown-coin': 'The ledger does not list this coin.',
     'rate-limited': 'The ledger asked this wallet to slow down. Try again later.',
     'credential-invalid': 'The issuer no longer vouches for this account reference.',
+    'revocation-unavailable': 'The issuing domain\'s published keys or revocation list could not be read right now, so this account reference was not added or confirmed. Nothing was changed; try again later.',
     'cancelled': 'The check was cancelled.',
     'busy': 'A check is already running for this account.',
     'experimental-off': 'Turn on the experimental ledger interface first. It is off by default.',
