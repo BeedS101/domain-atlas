@@ -8571,6 +8571,39 @@ const AtlasWallet = (() => {
     } catch (err) { /* the identity changed or the reference was removed meanwhile; there is nothing to record */ }
   }
 
+  // The most the wallet reads of each document it fetches to check a signed receipt. The key
+  // document is small. The revocation list grows with every revocation the domain ever publishes
+  // (about 180 bytes an entry; thousands of entries already exceed 1 MiB), so it gets its own, larger
+  // ceiling; AtlasLedgerLabs38.MAX_REVOCATION_ENTRIES bounds the work done on what is read.
+  const LEDGER_KEY_DOC_LIMIT = { maxBytes: 262144 };
+  const LEDGER_REVOCATION_DOC_LIMIT = { maxBytes: 4194304 };
+
+  // The body as text, or null when it is longer than maxBytes. Stops reading as soon as the limit is
+  // passed; a body that is not valid UTF-8 throws. A response without a readable stream (only a
+  // test double) is read whole and measured.
+  async function readBoundedText(response, maxBytes) {
+    const declared = Number(response.headers && response.headers.get && response.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > maxBytes) { try { if (response.body) await response.body.cancel(); } catch (err) { /* nothing to release */ } return null; }
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    if (!response.body || typeof response.body.getReader !== 'function') {
+      const whole = await response.text();
+      return new TextEncoder().encode(whole).length > maxBytes ? null : whole;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) { try { await reader.cancel(); } catch (err) { /* already closed */ } return null; }
+      chunks.push(value);
+    }
+    let text = '';
+    for (let i = 0; i < chunks.length; i++) text += decoder.decode(chunks[i], { stream: i < chunks.length - 1 });
+    return text;
+  }
+
   // The wallet's own check of a signed receipt. It fetches the issuing domain's published key
   // document and revocation list (the origin the person allowed, no redirects, no credentials) and
   // hands them, with the evidence the adapter returned, to AtlasLedgerLabs38.checkReceipt. A key
@@ -8580,21 +8613,26 @@ const AtlasWallet = (() => {
     if (typeof AtlasLedgerLabs38 === 'undefined') throw ledgerError('no-adapter');
     if (!raw || !raw.receipt || !raw.receipt.request || !raw.receipt.answer) return { ok: false, code: 'receipt-invalid', reason: 'no receipt came back' };
     const doFetch = ledgerScopedFetch({ origins: [issuerOrigin], urls: [] }, signal);
-    const readDoc = async (name, absentIsEmpty) => {
+    // Each document has its own size limit, counted in bytes after decoding and enforced while the
+    // body streams in, so an oversized or endless body is dropped without being held in memory.
+    // `limit` is { maxBytes }; a document that is larger, is not UTF-8 JSON, or is not an object is
+    // a failure ({ doc: null, why }).
+    const readDoc = async (name, limit, absentIsEmpty) => {
       let response;
-      try { response = await doFetch(issuerOrigin + '/.well-known/' + name, { method: 'GET', headers: { Accept: 'application/json' } }); } catch (err) { if (err && err.name === 'AbortError') throw err; return null; }
-      if (response.status === 404 && absentIsEmpty) return { revoked: [] };
-      if (!response.ok) return null;
+      try { response = await doFetch(issuerOrigin + '/.well-known/' + name, { method: 'GET', headers: { Accept: 'application/json' } }); } catch (err) { if (err && err.name === 'AbortError') throw err; return { doc: null, why: 'could not be reached' }; }
+      if (response.status === 404 && absentIsEmpty) return { doc: { revoked: [] } };
+      if (!response.ok) return { doc: null, why: 'could not be read (' + response.status + ')' };
       try {
-        const text = await response.text();
-        if (text.length > 262144) return null;
+        const text = await readBoundedText(response, limit.maxBytes);
+        if (text === null) return { doc: null, why: 'is larger than the wallet will read' };
         const doc = JSON.parse(text);
-        return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : null;
-      } catch (err) { return null; }
+        return doc && typeof doc === 'object' && !Array.isArray(doc) ? { doc } : { doc: null, why: 'is not a JSON object' };
+      } catch (err) { if (err && err.name === 'AbortError') throw err; return { doc: null, why: 'could not be read' }; }
     };
-    const [keyDoc, revocations] = await Promise.all([readDoc('atlas-key.json', false), readDoc('atlas-revocations.json', true)]);
-    if (!keyDoc) return { ok: false, code: 'signer-unknown', reason: 'the issuer\'s published keys could not be read' };
-    if (!revocations) return { ok: false, code: 'signer-unknown', reason: 'the issuer\'s revocation list could not be read' };
+    const [keyRead, revRead] = await Promise.all([readDoc('atlas-key.json', LEDGER_KEY_DOC_LIMIT, false), readDoc('atlas-revocations.json', LEDGER_REVOCATION_DOC_LIMIT, true)]);
+    if (!keyRead.doc) return { ok: false, code: 'signer-unknown', reason: 'the issuer\'s published keys ' + keyRead.why };
+    if (!revRead.doc) return { ok: false, code: 'signer-unknown', reason: 'the issuer\'s revocation list ' + revRead.why };
+    const keyDoc = keyRead.doc, revocations = revRead.doc;
     return AtlasLedgerLabs38.checkReceipt({ answer: raw.receipt.answer, request: raw.receipt.request, target, keyDoc, revocations, now: Date.now() });
   }
 

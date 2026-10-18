@@ -35,6 +35,9 @@
   const COIN_RE = /^[A-Z][A-Z0-9]{1,9}$/;
   const AMOUNT_RE = /^(0|[1-9][0-9]{0,39})$/;
   const MAX_BODY_CHARS = 8192;
+  // The most revocation entries the wallet will examine. With the byte limit the wallet applies to
+  // the document (wallet.js), this keeps the work per lookup bounded: a few thousand entries today.
+  const MAX_REVOCATION_ENTRIES = 20000;
   const WINDOW_S = 120;
   const MAX_AGE_S = 300;
 
@@ -181,9 +184,21 @@
       return from !== null && until !== null && observed >= from && observed < until && now >= from && now < until;
     });
     if (!listed) return fail('signer-unknown', 'the issuer does not list this key as valid at the statement time and now');
-    const revoked = revocations && Array.isArray(revocations.revoked) ? revocations.revoked : [];
-    if (revoked.some((r) => r && r.id === answer.signerKey)) return fail('signer-unknown', 'the issuer revoked this key');
-    if (revoked.some((r) => r && r.id === p.account)) return fail('account-revoked', 'the issuer revoked this account');
+    // The revocation list is read in full, in one bounded pass, and any shape the wallet cannot
+    // read is a refusal: a list that is missing, is not a list, is too long, or holds an entry
+    // without a string id might be hiding a revocation. (A domain that publishes no list at all is
+    // handled by the caller, which passes an empty list.)
+    const revoked = revocations && Array.isArray(revocations.revoked) ? revocations.revoked : null;
+    if (!revoked) return fail('signer-unknown', 'the issuer\'s revocation list is not a list');
+    if (revoked.length > MAX_REVOCATION_ENTRIES) return fail('signer-unknown', 'the issuer\'s revocation list is longer than the wallet will read');
+    let keyRevoked = false, accountRevoked = false;
+    for (const r of revoked) {
+      if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.id !== 'string') return fail('signer-unknown', 'the issuer\'s revocation list has an entry the wallet cannot read');
+      if (r.id === answer.signerKey) keyRevoked = true;
+      if (r.id === p.account) accountRevoked = true;
+    }
+    if (keyRevoked) return fail('signer-unknown', 'the issuer revoked this key');
+    if (accountRevoked) return fail('account-revoked', 'the issuer revoked this account');
 
     try {
       const key = await crypto.subtle.importKey('raw', fromB64url(listed.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
@@ -273,5 +288,5 @@
     };
   }
 
-  return { CONTRACT, LABEL, HOSTS, PROOF_FORMATS, RECEIPT_PATH, REQUEST_TYPE, RECEIPT_TYPE, CODE_TO_PROBLEM, createAdapter, checkReceipt, requestPayload, operationUrl, accountIdOf, canonical };
+  return { CONTRACT, LABEL, HOSTS, PROOF_FORMATS, RECEIPT_PATH, REQUEST_TYPE, RECEIPT_TYPE, CODE_TO_PROBLEM, MAX_REVOCATION_ENTRIES, createAdapter, checkReceipt, requestPayload, operationUrl, accountIdOf, canonical };
 });

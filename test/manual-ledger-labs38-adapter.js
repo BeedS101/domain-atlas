@@ -171,8 +171,29 @@ async function keypair() {
   check('a key the issuer lists as revoked refuses', refused(r, 'signer-unknown'), r);
   r = await verify({ answer: good, request: req, revocations: { revoked: [{ id: target.accountId }] } });
   check('an account the issuer lists as revoked refuses', refused(r, 'account-revoked'), r);
-  r = await verify({ answer: good, request: req, revocations: { revoked: [{ id: 'urn:atlas:ledger-account:' + 'ab'.repeat(32) }, null, 5] } });
-  check('revocations for other accounts, and junk entries, do not matter', r.ok === true, r);
+  r = await verify({ answer: good, request: req, revocations: { revoked: [{ id: 'urn:atlas:ledger-account:' + 'ab'.repeat(32) }, { id: 'other', revokedAt: 'x', reason: 'y' }] } });
+  check('revocations for other accounts do not matter', r.ok === true, r);
+  for (const [name, doc] of [['a revocation document with no list', {}], ['a list that is not a list', { revoked: 'none' }], ['a null list', { revoked: null }], ['no document at all', null],
+    ['a null entry', { revoked: [{ id: 'a' }, null] }], ['a number for an entry', { revoked: [5] }], ['an array for an entry', { revoked: [['id']] }], ['an entry without an id', { revoked: [{ reason: 'x' }] }], ['an entry whose id is not a string', { revoked: [{ id: 7 }] }]]) {
+    r = await verify({ answer: good, request: req, revocations: doc });
+    check(name + ' refuses: nothing is read as an empty list', refused(r, 'signer-unknown'), r);
+  }
+  const long = (n, extra) => ({ revoked: Array.from({ length: n }, (_, i) => ({ id: 'urn:atlas:asset:' + i, revokedAt: '2026-03-01T00:00:00Z', reason: 'redeemed' })).concat(extra || []) });
+  r = await verify({ answer: good, request: req, revocations: long(6127) });
+  check('a realistic list of 6,127 entries is accepted', r.ok === true, r);
+  r = await verify({ answer: good, request: req, revocations: long(6127, [{ id: target.accountId }]) });
+  check('...and the account on its last line is refused', refused(r, 'account-revoked'), r);
+  r = await verify({ answer: good, request: req, revocations: long(6127, [{ id: issuer.pub }]) });
+  check('...and the signing key on its last line is refused', refused(r, 'signer-unknown'), r);
+  r = await verify({ answer: good, request: req, revocations: long(6127, [null]) });
+  check('...and a malformed entry on its last line is refused', refused(r, 'signer-unknown'), r);
+  check('the entry limit is published as 20,000', A.MAX_REVOCATION_ENTRIES === 20000);
+  r = await verify({ answer: good, request: req, revocations: long(A.MAX_REVOCATION_ENTRIES) });
+  check('a list of exactly the entry limit is accepted', r.ok === true, r);
+  r = await verify({ answer: good, request: req, revocations: long(A.MAX_REVOCATION_ENTRIES + 1) });
+  check('a list one entry over the limit is refused', refused(r, 'signer-unknown'), r);
+  r = await verify({ answer: good, request: req, revocations: long(A.MAX_REVOCATION_ENTRIES + 1, [{ id: target.accountId }]) });
+  check('...even when it also names the account (still a refusal)', r.ok === false, r);
   check('a malformed signer key is refused', refused(await verify({ answer: await receipt(req, null, (a) => { a.signerKey = 'short'; }), request: req }), 'receipt-invalid'));
 
   console.log('--- the adapter ---');

@@ -205,6 +205,85 @@ async function run(kind, ledger, tls) {
       issuer.setKeyDoc(keep);
     }
 
+    console.log('--- ' + tag + 'a long revocation list: a realistic 6,127 entries, and the limits around it ---');
+    {
+      const crypto = require('crypto');
+      const REASONS = ['redeemed', 'clawback', 'revoked by issuer', 'refunded'];
+      const entry = (n) => { const h = crypto.createHash('sha256').update('revoked-' + n).digest('hex'); return { id: 'urn:atlas:asset:' + h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20, 32), revokedAt: R.iso(Date.parse('2026-03-01T00:00:00Z') + n * 7919000), reason: REASONS[n % REASONS.length] }; };
+      const listOf = (count, extra) => { const revoked = []; for (let n = 0; n < count; n++) revoked.push(entry(n)); for (const e of extra || []) revoked.push(e); return revoked; };
+      // The same layout the PHP issuer writes (JSON_PRETTY_PRINT), which is what makes the real file ~1.1 MB.
+      const pretty = (revoked) => JSON.stringify({ revoked }, null, 4);
+      const REAL = pretty(listOf(6127));
+      t('(set-up) the stand-in revocation list has 6,127 entries and is about the size of the live one', REAL.length > 1000000 && REAL.length < 1250000 && JSON.parse(REAL).revoked.length === 6127, REAL.length);
+      t('(set-up) it is over the key document\'s limit and well under the revocation limit', REAL.length > 262144 && REAL.length < 4194304);
+      const serveText = (text, over) => () => Object.assign({ status: 200, text }, over || {});
+      const slow = [];
+      const timed = async (name, re, fn, expectOk, code) => { const t0 = Date.now(); await attackDocs(name, re, fn, expectOk, code); slow.push(Date.now() - t0); };
+
+      await timed('the realistic 6,127-entry revocation list (about ' + Math.round(REAL.length / 1024) + ' KiB) lets a genuine receipt through', REVS, serveText(REAL), true);
+      await timed('...with an honest Content-Length as well', REVS, serveText(REAL, { withLength: true }), true);
+      t('a signed balance from that run really was recorded', (await acct()).balance && (await acct()).balance.verification.label === SIGNED_LABEL);
+      await timed('...and the account listed on the LAST line of the long list is refused as revoked', REVS, serveText(pretty(listOf(6127, [{ id, revokedAt: R.iso(Date.now()), reason: 'clawback' }]))), false, 'account-revoked');
+      await timed('...and the account listed in the MIDDLE of the long list is refused as revoked', REVS, () => { const l = listOf(6127); l.splice(3063, 0, { id, revokedAt: R.iso(Date.now()), reason: 'clawback' }); return { status: 200, text: pretty(l) }; }, false, 'account-revoked');
+      await timed('...and the account listed on the FIRST line of the long list is refused as revoked', REVS, () => { const l = listOf(6127); l.unshift({ id, revokedAt: R.iso(Date.now()), reason: 'clawback' }); return { status: 200, text: pretty(l) }; }, false, 'account-revoked');
+      await timed('...and the signing key listed in the long list is refused', REVS, serveText(pretty(listOf(6127, [{ id: issuer.publishedKey(), revokedAt: R.iso(Date.now()), reason: 'compromised' }]))), false, 'signer-unknown');
+      await timed('a long list with similar-looking but different ids does not revoke the account', REVS, serveText(pretty(listOf(6127, [{ id: id.slice(0, -1) + (id.endsWith('0') ? '1' : '0') }, { id: id + 'x' }, { id: id.toUpperCase() }]))), true);
+
+      // Limits: bytes after decoding, enforced while the body arrives.
+      const padTo = (text, bytes) => text + ' '.repeat(bytes - Buffer.byteLength(text));
+      const MAX = 4194304;
+      const small = pretty(listOf(10));
+      await timed('a list of exactly the byte limit is read', REVS, serveText(padTo(small, MAX)), true);
+      await timed('a list one byte over the byte limit is refused', REVS, serveText(padTo(small, MAX + 1)), false, 'signer-unknown');
+      await timed('...the same with an honest Content-Length (refused before the body is read)', REVS, serveText(padTo(small, MAX + 1), { withLength: true }), false, 'signer-unknown');
+      await timed('a list far over the byte limit (8 MiB) is refused', REVS, serveText(padTo(small, 2 * MAX)), false, 'signer-unknown');
+      const accented = JSON.stringify({ revoked: [{ id: 'x', reason: '\u00e9\u00e9' }] });
+      await timed('multi-byte text is counted in bytes: a document of exactly the byte limit is read', REVS, serveText(accented + ' '.repeat(MAX - 2 - accented.length)), true);
+      await timed('...and one byte more (fewer characters than the limit, more bytes) is refused', REVS, serveText(accented + ' '.repeat(MAX - 1 - accented.length)), false, 'signer-unknown');
+      const tiny = (count) => JSON.stringify({ revoked: Array.from({ length: count }, (_, n) => ({ id: 'u' + n })) });
+      await timed('exactly the entry limit (20,000) is read', REVS, serveText(tiny(20000)), true);
+      await timed('one entry over the entry limit is refused, though the document is small', REVS, serveText(tiny(20001)), false, 'signer-unknown');
+
+      // Shapes the wallet cannot read are refusals, never an empty list.
+      await timed('a list cut off part-way is refused', REVS, serveText(REAL.slice(0, Math.floor(REAL.length / 2))), false, 'signer-unknown');
+      await timed('a document with no "revoked" list is refused, not read as empty', REVS, serveText('{}'), false, 'signer-unknown');
+      await timed('"revoked" that is not a list is refused', REVS, serveText('{"revoked":"none"}'), false, 'signer-unknown');
+      await timed('"revoked": null is refused', REVS, serveText('{"revoked":null}'), false, 'signer-unknown');
+      await timed('a list that is the whole document (not an object) is refused', REVS, serveText('[]'), false, 'signer-unknown');
+      await timed('an entry that is null is refused', REVS, serveText(pretty(listOf(100, [null]))), false, 'signer-unknown');
+      await timed('an entry that is a number is refused', REVS, serveText(pretty(listOf(100, [5]))), false, 'signer-unknown');
+      await timed('an entry with no id is refused', REVS, serveText(pretty(listOf(100, [{ revokedAt: R.iso(Date.now()) }]))), false, 'signer-unknown');
+      await timed('an entry whose id is not a string is refused', REVS, serveText(pretty(listOf(100, [{ id: 42 }]))), false, 'signer-unknown');
+      await timed('a malformed entry at the end of a long list is refused', REVS, serveText(pretty(listOf(6127, [{ id: null }]))), false, 'signer-unknown');
+      await timed('a body that is not valid UTF-8 is refused', REVS, () => ({ status: 200, bytes: Buffer.concat([Buffer.from('{"revoked":[{"id":"'), Buffer.from([0xff, 0xfe, 0xc3]), Buffer.from('"}]}')]) }), false, 'signer-unknown');
+      await timed('a long list answered with an error status is refused', REVS, () => ({ status: 503, text: REAL }), false, 'signer-unknown');
+      await timed('a long list that is a redirect is refused', REVS, () => ({ status: 302, text: REAL }), false, 'signer-unknown');
+
+      // The key document keeps its own, smaller limit.
+      const goodKeys = issuer.keyDoc();
+      const keyText = JSON.stringify(goodKeys);
+      await timed('the key document is read at its own limit (256 KiB)', KEYS, serveText(padTo(keyText, 262144)), true);
+      await timed('a key document one byte over its limit is refused', KEYS, serveText(padTo(keyText, 262145)), false, 'signer-unknown');
+      await timed('a key document the size of the long revocation list is refused: its limit was not raised', KEYS, serveText(padTo(keyText, REAL.length)), false, 'signer-unknown');
+
+      // The refusals leave no balance behind and make no other attempt.
+      const kept2 = (await acct()).balance;
+      const l29b = labs29Hits().length;
+      clearMutators();
+      mutate(REVS, serveText(padTo(small, MAX + 1)));
+      const posts1 = receiptPosts().length;
+      r = await refresh(id);
+      t('a refused revocation list gives an error, keeps the earlier signed balance, and does not try Labs 29', r.ok === false && r.code === 'signer-unknown' && (await acct()).balance.signed.at === kept2.signed.at && labs29Hits().length === l29b && receiptPosts().length === posts1 + 1, r);
+      a = await acct();
+      t('...and the person is told the revocation list could not be used', a.problem && a.problem.code === 'signer-unknown', a.problem);
+      clearMutators();
+      r = await refresh(id);
+      t('once the list is readable again the lookup works', r.ok === true && r.balance.verification === 'signed', r);
+      const worst = Math.max.apply(null, slow);
+      console.log('     (' + tag + 'slowest lookup in this section, including fetching and parsing up to 4 MiB: ' + worst + ' ms)');
+      t('every lookup in this section finished well inside a lookup\'s time budget', worst < 20000, worst);
+    }
+
     console.log('--- ' + tag + 'the issuer\'s other answers become the wallet\'s problems, never a balance ---');
     clearMutators();
     for (const [code, status, want] of [['ledger-unavailable', 502, 'receipt-unavailable'], ['account-not-found', 404, 'not-found'], ['account-revoked', 409, 'account-revoked'], ['rate-limited', 429, 'rate-limited'], ['replayed-request', 409, 'busy'], ['stale-request', 401, 'clock'], ['issuer-key-unavailable', 503, 'receipt-unavailable']]) {

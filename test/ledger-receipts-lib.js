@@ -236,8 +236,11 @@ async function receiptFront(issuer, ledgerService, tls, hits, mutators) {
         r.on('end', () => {
           let json = null; try { json = JSON.parse(text); } catch (e) { json = null; }
           const out = mut.fn({ status: r.statusCode, text, json, req: { url: req.url, body: raw } }) || {};
-          const body = out.text !== undefined ? out.text : (out.json !== undefined ? JSON.stringify(out.json) : text);
+          // A mutator may answer with raw bytes, and may ask for an honest Content-Length (the default is a
+          // chunked body, which tells the reader nothing about its size in advance).
+          const body = out.bytes !== undefined ? out.bytes : out.text !== undefined ? out.text : (out.json !== undefined ? JSON.stringify(out.json) : text);
           const headers = Object.assign({}, r.headers); delete headers['content-length']; delete headers['transfer-encoding'];
+          if (out.withLength) headers['content-length'] = String(Buffer.byteLength(body));
           res.writeHead(out.status || (out.json !== undefined ? 200 : r.statusCode), headers); res.end(body);
         });
       });

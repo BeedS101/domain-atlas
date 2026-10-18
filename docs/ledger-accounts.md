@@ -708,7 +708,8 @@ credentials) and runs `checkReceipt`. Everything must pass:
   domain's published key document, valid at `observedAt` **and** not ended now; it must not be in the
   revocation list, nor may the account; the signature is checked with the published key. A key
   document that cannot be read fails closed, as does a revocation list that cannot be read (only a
-  404, "none published", counts as empty).
+  404, "none published", counts as empty). The limits and shapes the wallet accepts for both
+  documents are under *Size limits for the published documents*, below.
 
 Only then does the wallet record the figure with `verification: "signed"`, the signing domain, the key
 and the statement time, and show **Signed ledger report — Not final or spendable** with the signing
@@ -717,6 +718,48 @@ domain and statement time. Any failure records no balance, shows the reason (`re
 back** to an unsigned lookup. A Labs 29 answer is never relabelled: it stays **Reported — Not
 Cryptographically Verified**, and nothing in a response (`verifiedRequest`, `balanceProof`, `ok`, a
 matching TLS host) raises the level. The wallet, not the adapter, sets it.
+
+### Size limits for the published documents
+
+The wallet reads the issuing domain's two published documents under separate, fixed limits, counted
+in bytes after decoding and enforced while the body streams in (a body past its limit is dropped
+without being held in memory; an honest `Content-Length` over the limit is refused before reading):
+
+| Document | Limit | Why |
+|---|---|---|
+| `atlas-key.json` | 256 KiB | a handful of keys |
+| `atlas-revocations.json` | 4 MiB, and at most 20,000 entries | the list only grows: every revocation the domain ever published stays in it (about 180 bytes an entry as the PHP issuer writes it) |
+
+A live list of about 6,100 entries is over 1 MiB, which the key document's limit had refused (shown as
+`signer-unknown` before any signature was checked). 4 MiB leaves room for roughly three times today's
+list; 20,000 entries bounds the work done on what is read (one pass over the list per lookup; whole lookups with a
+6,127-entry list measured about 0.1 s in the browser tests). The key document's limit was not raised.
+
+Everything that cannot be read is a refusal (`signer-unknown`, with the reason in words), never an
+empty list: a network error, a non-200 status, a redirect, a body over the limit, a body that is not
+valid UTF-8 or not JSON, a document that is not an object, a missing or non-list `revoked`, a list over
+the entry limit, and any entry that is not an object with a string `id` (it could be a revocation the
+wallet cannot interpret). Only a 404 on the revocation list means "none published". A key or account
+that appears anywhere in a readable list is refused (`signer-unknown` for the key, `account-revoked`
+for the account).
+
+**When the list outgrows this.** Raising the limits again only postpones the problem, and every lookup
+downloads the whole list. Options, none built, in the order they would help:
+
+1. Conditional requests (`ETag` / `If-None-Match`) and a short in-memory cache in the wallet, so
+   an unchanged list costs one small request. This needs the issuer to send validators.
+2. A per-id lookup, such as `/.well-known/atlas-revocations/<id>`, so the wallet asks only about the
+   key and the account it is checking. A signed "no revocation for this id as of T" answer would have
+   to be defined so a missing file is not mistaken for "not revoked".
+3. A signed, dated index (a Merkle tree or a Bloom filter with an exact fallback) of revoked ids, so
+   a lookup needs the index head plus one proof.
+4. Pruning: an account's revocation only matters while its credential could still be presented, so an
+   issuer could move old entries into an archive document once they can no longer matter, with the
+   archive's existence declared in the live list. This is a policy decision for the issuer.
+
+Each of these is a change to what the issuer publishes and needs agreeing with Core before it is
+built. The other places in the wallet that read the same list (credential checks, **Check and add**)
+do not apply these limits or this fail-closed rule.
 
 ### Consent and switches
 
@@ -842,7 +885,9 @@ existing endpoint, key, credential or store is read or written differently.
   issuer and the Node mirror over a local HTTPS front that can alter answers: off by default, no
   fallback when receipts are off, a signed report only after the wallet's own check, the Ledger tab
   label, tampering, a replayed or someone else's genuine receipt, key-document and revocation attacks,
-  issuer error codes, background checks staying opt-in, a passkey making no request, and (with Core's
+  a realistic 6,127-entry revocation list (accepted; account or key listed first, in the middle or last refused),
+  the byte and entry limits at and one past their edges, malformed and truncated documents, the key
+  document's own smaller limit, issuer error codes, background checks staying opt-in, a passkey making no request, and (with Core's
   real `ledger29.php`) Labs 29 staying unsigned and each address needing its own approval.
 - `node test/manual-ledger-open-core.js`: the opening module alone: the target table, the exact
   messages against the services' field lists, the explanations, every answer shape and code, and
