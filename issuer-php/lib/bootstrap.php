@@ -630,7 +630,9 @@ function apply_class_patch_if_stale($privateKey, $publicKeyB64url, $credential) 
 // them is what guarantees they can never drift out of sync on the
 // payload shape the way independent inline arrays eventually would —
 // mirrors issuer-server/server.js's issueAsset().
-function issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes) {
+// `$deferHoldings` leaves the holdings-index record to the caller (the
+// transaction journal records it after its entry is written).
+function issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes, $deferHoldings = false) {
   $payload = [
     'id' => 'urn:atlas:asset:' . atlas_uuid(),
     'asset' => $asset,
@@ -640,7 +642,7 @@ function issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $qu
     'issuedAt' => iso_now(),
   ];
   $signature = atlas_sign($privateKey, $payload);
-  atlas_holdings_note_issued($ownerPublicKey, $asset, $payload['id'], $quantity);
+  if (!$deferHoldings) atlas_holdings_note_issued($ownerPublicKey, $asset, $payload['id'], $quantity);
   return array_merge(
     ['credential' => 'domain-atlas-asset/1.0'],
     $payload,
@@ -733,7 +735,7 @@ function oracle_attestation_payload_of($credential) {
 // patch already uses). Only atlas/asset/mint.php ever passes this; every
 // other call site omits it, which merges nothing and changes no existing
 // behavior at all. Mirrors issuer-server/server.js's mintAssetByClass().
-function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cls, $quantity, $supersedes, $initialProperties = null) {
+function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cls, $quantity, $supersedes, $initialProperties = null, $deferHoldings = false) {
   if (!isset(ATLAS_ASSET_CATALOG[$cls])) throw new Exception('unknown asset class: ' . $cls);
   $catalogEntry = ATLAS_ASSET_CATALOG[$cls];
 
@@ -794,7 +796,7 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
   if (isset($catalogEntry['expiresInMinutes'])) {
     $asset['expiresAt'] = gmdate('Y-m-d\TH:i:s\Z', time() + (int) round($catalogEntry['expiresInMinutes'] * 60));
   }
-  return issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes);
+  return issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes, $deferHoldings);
 }
 
 // Validates an asset credential presented back to us for a split,

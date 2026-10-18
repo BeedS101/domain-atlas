@@ -2673,57 +2673,74 @@ function is_expired($credential) {
 
 // Writes $text to $file so a reader sees the old content or the new, never a
 // partial one. Keeps the target's permissions (the public list must stay
-// readable by the web server). Throws when the write cannot complete.
+// readable by the web server). There is no fallback: when the temporary file
+// cannot be created next to the target, written in full, or renamed over it
+// (directory not writable, disk full), the target is left exactly as it was and
+// a 503 is thrown. The temporary file is created in the target's own
+// directory on purpose (never the system temp directory), so the rename is
+// one atomic step on one file system.
 function atlas_write_file_atomic($file, $text) {
   $dir = dirname($file);
-  $tmp = is_writable($dir) ? tempnam($dir, basename($file) . '.') : false;
-  if ($tmp === false) {
-    // The directory itself is not writable (only the file is): a rename is
-    // impossible, so rewrite the file in place. $text is already complete
-    // and valid here, so the only exposure is the usual brief window in which
-    // a reader can see a truncated file.
-    error_log('atlas: ' . $dir . ' is not writable, so ' . basename($file) . ' cannot be replaced atomically; writing in place');
-    $fh = fopen($file, 'c');
-    if ($fh === false) throw new Exception('could not write ' . basename($file), 503);
-    flock($fh, LOCK_EX);
-    ftruncate($fh, 0);
-    rewind($fh);
-    $written = fwrite($fh, $text);
-    fflush($fh);
-    flock($fh, LOCK_UN);
-    fclose($fh);
-    if ($written !== strlen($text)) throw new Exception('could not write ' . basename($file) . ' in full', 503);
-    return;
+  $name = basename($file);
+  if (!is_dir($dir) || !is_writable($dir)) {
+    throw new Exception('could not write ' . $name . ': its directory is not writable; the existing file was not changed', 503);
   }
   $perms = file_exists($file) ? (fileperms($file) & 0777) : 0644;
+  $tmp = $dir . '/' . $name . '.' . bin2hex(random_bytes(6)) . '.tmp';
   $ok = false;
   try {
-    $fh = fopen($tmp, 'wb');
-    if ($fh === false) throw new Exception('could not write a temporary file next to ' . basename($file), 503);
-    $written = fwrite($fh, $text);
-    $flushed = fflush($fh);
+    $fh = @fopen($tmp, 'xb');
+    if ($fh === false) throw new Exception('could not write a temporary file next to ' . $name . '; the existing file was not changed', 503);
+    $written = @fwrite($fh, $text);
+    $flushed = @fflush($fh);
     if (function_exists('fsync')) @fsync($fh);
     fclose($fh);
-    if ($written !== strlen($text) || !$flushed) throw new Exception('could not write ' . basename($file) . ' in full', 503);
+    if ($written !== strlen($text) || !$flushed) throw new Exception('could not write ' . $name . ' in full; the existing file was not changed', 503);
     @chmod($tmp, $perms);
-    if (!rename($tmp, $file)) throw new Exception('could not replace ' . basename($file), 503);
+    if ($file === atlas_revocations_file()) atlas_fault_point('txn:revoke-tmp-written');
+    if (!@rename($tmp, $file)) throw new Exception('could not replace ' . $name . '; the existing file was not changed', 503);
     $ok = true;
   } finally {
     if (!$ok && file_exists($tmp)) @unlink($tmp);
   }
 }
 
+// Test-only: ATLAS_TEST_CRASH_AT=<point> makes the request stop dead right
+// after that step, with no response, as if it had crashed there.
+function atlas_fault_point($name) {
+  if (getenv('ATLAS_TEST_CRASH_AT') === $name) exit(86);
+}
+
+// Temporary files left by a write that was interrupted. A live write
+// finishes in milliseconds, so anything older than five minutes is debris.
+function atlas_remove_stale_temp_files($dir) {
+  $removed = 0;
+  foreach ((array) @scandir($dir) as $name) {
+    if (substr($name, -4) !== '.tmp') continue;
+    $file = $dir . '/' . $name;
+    if (is_file($file) && time() - (int) @filemtime($file) > 300 && @unlink($file)) $removed++;
+  }
+  return $removed;
+}
+
 // Adds every id in one locked read-modify-write and one atomic replace, so a
 // request that spends several credentials revokes all of them or none.
-// Throws, and writes nothing, when the existing list cannot be read.
-function atlas_revoke_many($ids, $reason) {
-  $lock = fopen(atlas_revocations_lock_file(), 'c');
+// Throws, and writes nothing, when the existing list cannot be read or the
+// replacement cannot be completed. `$txn` (optional) tags each entry with the
+// transaction-journal id of the replacement that made it, which is how
+// recovery after a crash tells a spend that committed from one that did not.
+function atlas_revoke_many($ids, $reason, $txn = null) {
+  $lock = @fopen(atlas_revocations_lock_file(), 'c');
   if ($lock === false) throw new Exception('could not take the revocation lock', 503);
   flock($lock, LOCK_EX);
   try {
     $doc = read_revocations();
     $revokedAt = gmdate('Y-m-d\TH:i:s\Z');
-    foreach ($ids as $id) $doc['revoked'][] = ['id' => $id, 'revokedAt' => $revokedAt, 'reason' => $reason];
+    foreach ($ids as $id) {
+      $entry = ['id' => $id, 'revokedAt' => $revokedAt, 'reason' => $reason];
+      if ($txn !== null) $entry['txn'] = $txn;
+      $doc['revoked'][] = $entry;
+    }
     $text = json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     if ($text === false) throw new Exception('could not encode the revocation list', 503);
     atlas_write_file_atomic(atlas_revocations_file(), $text);

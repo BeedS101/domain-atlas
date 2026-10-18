@@ -77,10 +77,13 @@ function atlas_replay_store($requestId, $op, $predecessorIds, $params, $response
     if ($text === false) throw new Exception('could not encode the replay record');
     atlas_write_file_atomic(atlas_replay_file($requestId), $text);
     if (mt_rand(1, 50) === 1) atlas_replay_prune();
+    return true;
   } catch (Exception $e) {
     // The operation has already happened; a missing record only costs the
-    // ability to retry it.
+    // ability to retry it, which is why the transaction journal keeps its
+    // entry until this has been stored.
     error_log('atlas: could not store the replay record: ' . $e->getMessage());
+    return false;
   }
 }
 
@@ -128,6 +131,17 @@ function atlas_lease($kind, $key, $waitSeconds = 15) {
   }
   $registry[$name] = $fh;
   return null;
+}
+
+// Releases a lease early. Only for a lease this code took itself and the
+// request did not already hold (see atlas_txn_sweep).
+function atlas_lease_release($kind, $key) {
+  $registry = &atlas_lease_registry();
+  $name = atlas_lease_stripe_name($kind, $key);
+  if (!isset($registry[$name])) return;
+  flock($registry[$name], LOCK_UN);
+  fclose($registry[$name]);
+  unset($registry[$name]);
 }
 
 // Held for the rest of this request. Returns an error message when it could
@@ -283,6 +297,7 @@ function atlas_spend_problem_body($problem, $credential) {
 // stored result (after checking the presented balances are genuinely this
 // issuer's). Ends the request itself when it has an answer.
 function atlas_begin_replacement($publicKeyB64url, $requestId, $op, $presented, $params) {
+  atlas_txn_sweep();
   $ids = array_map(function ($c) { return is_array($c) ? ($c['id'] ?? null) : null; }, $presented);
   // Stripes in ascending order: two ids can share a lock file, so the order
   // that matters is the order of the files.
@@ -296,6 +311,7 @@ function atlas_begin_replacement($publicKeyB64url, $requestId, $op, $presented, 
   if ($requestId === null) return;
   $busy = atlas_request_lease($requestId);
   if ($busy !== null) send_json(503, ['error' => 'this request is already being processed - try again', 'code' => 'busy']);
+  atlas_txn_recover_key($requestId);
   $prior = atlas_replay_lookup($requestId, $op, $ids, $params);
   if ($prior === null) return;
   if (isset($prior['conflict'])) send_json(409, ['error' => 'requestId was already used for a different request', 'code' => 'request-id-conflict']);
@@ -312,16 +328,202 @@ function atlas_begin_replacement($publicKeyB64url, $requestId, $op, $presented, 
   exit;
 }
 
-// Sends a successful result and, when the request carried an id, stores the
-// exact text first so a retry returns the same bytes.
-function atlas_send_replaceable($requestId, $op, $predecessorIds, $params, $response) {
-  $json = json_encode($response, JSON_UNESCAPED_SLASHES);
-  if ($requestId !== null && $json !== false) atlas_replay_store($requestId, $op, $predecessorIds, $params, $json);
-  send_json(200, $response);
+// ---------- transaction journal (crash recovery for replacements) ----------
+// Mirrors the "transaction journal" section of issuer-server/server.js; read
+// its comment for the design. In short: a replacement (split, consolidate,
+// convert) or a fungible issue writes the whole decided result (the signed
+// successors, the predecessor ids and the exact response text) to a private
+// journal entry (lib/txn/) BEFORE anything is spent, in this order:
+//
+//   sign the successors (nothing recorded yet)        txn:minted
+//   write the journal entry (atomic file replace)     txn:journal-written
+//   record the successors in the holdings index       txn:holdings-registered
+//   revoke every predecessor in ONE atomic replace of
+//   the revocation list, entries tagged with the txn  txn:revoke-tmp-written, txn:revoked
+//   store the replay result, remove the journal       txn:replay-stored, txn:journal-removed
+//
+// The atomic replace is the commit point. Recovery (a retry naming the same
+// requestId, or the opportunistic sweep at the start of any replacement or
+// fungible issue) decides from the revocation list alone: every predecessor
+// tagged with this txn means the spend committed, so the holdings record and
+// the replay result are completed and a retry gets the same signed result;
+// none tagged means it did not commit, so the successors' holdings records are
+// dropped and the entry removed. A fungible issue has no predecessors and is
+// completed once its entry exists. A half-tagged set cannot come from one
+// atomic replace and is reported (503), not guessed at.
+//
+// PHP shared hosting has no start-up hook, so recovery piggybacks on requests;
+// an entry nobody asks about is finished by the next replacement or issue
+// request. The crash tests stop the request at each step with exit(); they do
+// not test power loss.
+
+function atlas_new_txn_id() { return substr(bin2hex(random_bytes(8)), 0, 16); }
+function atlas_txn_dir() { return __DIR__ . '/txn'; }
+function atlas_txn_file($key) { return atlas_txn_dir() . '/' . hash('sha256', $key) . '.json'; }
+
+function atlas_txn_write($rec) {
+  @mkdir(atlas_txn_dir(), 0755, true);
+  $text = json_encode($rec, JSON_UNESCAPED_SLASHES);
+  if ($text === false) throw new Exception('could not encode the transaction journal entry', 503);
+  atlas_write_file_atomic(atlas_txn_file($rec['key']), $text);
 }
 
-// Undoes the holdings records of successors that were signed but never
-// delivered because the replacement did not complete.
-function atlas_rollback_minted($minted) {
-  foreach ($minted as $m) atlas_holdings_unregister($m[0], [$m[1]]);
+function atlas_txn_remove($rec) {
+  $file = atlas_txn_file($rec['key']);
+  if (is_file($file) && !@unlink($file) && is_file($file)) throw new Exception('could not remove a finished transaction journal entry', 503);
+}
+
+// null when there is none; 503 when it exists and cannot be trusted.
+function atlas_txn_read($key) {
+  $file = atlas_txn_file($key);
+  if (!is_file($file)) return null;
+  $text = @file_get_contents($file);
+  if ($text === false) throw new Exception('a pending transaction could not be read', 503);
+  $rec = json_decode($text, true);
+  if (!is_array($rec) || !isset($rec['txn'], $rec['key'], $rec['predecessors'], $rec['successors'], $rec['responseJson'])) {
+    throw new Exception('a pending transaction is unreadable; it must be examined, not guessed at', 503);
+  }
+  return $rec;
+}
+
+function atlas_txn_state($rec) {
+  if (!$rec['predecessors']) return 'committed';
+  $tagged = [];
+  foreach (read_revocations()['revoked'] as $r) {
+    if (is_array($r) && isset($r['txn'], $r['id']) && $r['txn'] === $rec['txn']) $tagged[$r['id']] = true;
+  }
+  $n = 0;
+  foreach ($rec['predecessors'] as $id) if (isset($tagged[$id])) $n++;
+  if ($n === count($rec['predecessors'])) return 'committed';
+  return $n === 0 ? 'aborted' : 'inconsistent';
+}
+
+function atlas_txn_register($rec) {
+  foreach ($rec['successors'] as $s) {
+    atlas_holdings_note_issued($s['owner'], ['fungible' => true, 'class' => $s['cls']], $s['id'], $s['q']);
+  }
+}
+
+// Completes a committed transaction. Every step is safe to repeat. The journal
+// entry is removed only after the replay record is stored.
+function atlas_txn_finish($rec) {
+  atlas_txn_register($rec);
+  $stored = !empty($rec['requestId'])
+    ? atlas_replay_store($rec['requestId'], $rec['op'], $rec['predecessors'], $rec['params'], $rec['responseJson'])
+    : true;
+  atlas_fault_point('txn:replay-stored');
+  if (!$stored) throw new Exception('the replay record could not be stored; the journal entry is kept', 503);
+  atlas_txn_remove($rec);
+  atlas_fault_point('txn:journal-removed');
+}
+
+function atlas_txn_abort($rec) {
+  foreach ($rec['successors'] as $s) atlas_holdings_unregister($s['owner'], [$s['id']]);
+  atlas_txn_remove($rec);
+}
+
+// 'committed' or 'aborted'; throws for an inconsistent entry (left in place).
+function atlas_txn_recover($rec) {
+  $state = atlas_txn_state($rec);
+  if ($state === 'committed') { atlas_txn_finish($rec); return 'committed'; }
+  if ($state === 'aborted') { atlas_txn_abort($rec); return 'aborted'; }
+  throw new Exception('transaction ' . $rec['txn'] . ' is half-recorded in the revocation list; it must be examined, not guessed at', 503);
+}
+
+// For a request that holds the key's lease.
+function atlas_txn_recover_key($key) {
+  $rec = atlas_txn_read($key);
+  return $rec === null ? null : atlas_txn_recover($rec);
+}
+
+// Recovers every entry whose lease nobody holds. Never waits for a lease and
+// never fails the request that happens to run it.
+function atlas_txn_sweep() {
+  $resolved = 0;
+  foreach ((array) @scandir(atlas_txn_dir()) as $name) {
+    if (substr($name, -5) !== '.json') continue;
+    $rec = json_decode((string) @file_get_contents(atlas_txn_dir() . '/' . $name), true);
+    if (!is_array($rec) || !isset($rec['key']) || !is_string($rec['key'])) continue;
+    $already = atlas_lease_held('rid', $rec['key']);
+    if (!$already && atlas_lease('rid', $rec['key'], 0) !== null) continue;
+    try {
+      $again = atlas_txn_read($rec['key']);
+      if ($again !== null) { atlas_txn_recover($again); $resolved++; }
+    } catch (Exception $e) {
+      error_log('atlas: transaction recovery: ' . $e->getMessage());
+    } finally {
+      if (!$already) atlas_lease_release('rid', $rec['key']);
+    }
+  }
+  atlas_remove_stale_temp_files(dirname(atlas_revocations_file()));
+  atlas_remove_stale_temp_files(atlas_txn_dir());
+  atlas_remove_stale_temp_files(atlas_replay_dir());
+  atlas_remove_stale_temp_files(atlas_holdings_dir());
+  return $resolved;
+}
+
+// Runs the steps above for already-signed (not yet recorded) successors and
+// returns the response text. `$successors` are the signed credentials;
+// `$response` is what the client gets. The caller holds the lease for
+// `$requestId`, or passes null and gets a lease here. A caller that already
+// holds a lease on a transaction id of its own (taken before any owner lease,
+// to keep the lock order: spend locks, request/transaction lease, owner lease)
+// passes that id as `$txn`.
+function atlas_commit_replacement($requestId, $op, $predecessorIds, $reason, $params, $successors, $response, $txn = null) {
+  $ids = array_values($predecessorIds);
+  $sorted = $ids;
+  sort($sorted);
+  $responseJson = json_encode($response, JSON_UNESCAPED_SLASHES);
+  if ($responseJson === false) throw new Exception('could not encode the response', 503);
+  $leaseHeldByCaller = $txn !== null;
+  if ($txn === null) $txn = atlas_new_txn_id();
+  $rec = [
+    'txn' => $txn,
+    'key' => $requestId !== null ? $requestId : $txn,
+    'requestId' => $requestId,
+    'op' => $op,
+    'reason' => $reason,
+    'params' => $params,
+    'predecessors' => $sorted,
+    'successors' => array_map(function ($c) {
+      return ['owner' => $c['owner']['publicKey'], 'cls' => $c['asset']['class'], 'id' => $c['id'], 'q' => $c['quantity']];
+    }, $successors),
+    'responseJson' => $responseJson,
+    'createdAt' => gmdate('Y-m-d\TH:i:s\Z'),
+  ];
+  if ($requestId === null && !$leaseHeldByCaller) {
+    $busy = atlas_lease('rid', $rec['key']);
+    if ($busy !== null) throw new Exception($busy, 503);
+  }
+  atlas_fault_point('txn:minted');
+  atlas_txn_write($rec);
+  atlas_fault_point('txn:journal-written');
+  $committed = false;
+  try {
+    atlas_txn_register($rec);
+    atlas_fault_point('txn:holdings-registered');
+    if ($ids) atlas_revoke_many($ids, $reason, $txn);
+    $committed = true;
+    atlas_fault_point('txn:revoked');
+  } catch (Exception $e) {
+    if (!$committed) atlas_txn_abort($rec);
+    throw $e;
+  }
+  try {
+    atlas_txn_finish($rec);
+  } catch (Exception $e) {
+    // Committed; the entry stays and recovery finishes it. The client still gets its answer.
+    error_log('atlas: transaction ' . $txn . ' is committed but not finished: ' . $e->getMessage());
+  }
+  return $responseJson;
+}
+
+// Sends the response text produced by atlas_commit_replacement().
+function atlas_send_committed($responseJson) {
+  http_response_code(200);
+  header('Content-Type: application/json');
+  cors_headers();
+  no_store_headers();
+  echo $responseJson;
+  exit;
 }

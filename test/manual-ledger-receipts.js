@@ -220,6 +220,45 @@ async function suite(kind, ledger) {
   check('a revoked account gets no receipt', refused(x.res, 409, 'account-revoked'), x.res.text);
   check('...while others still do', (await fresh()).status === 200);
 
+  console.log('--- the revocation list is consulted or the request is refused ---');
+  {
+    const revRaw = fs.readFileSync(iss.revocationsPath);
+    const probe = await newFundedOwner(ledger, 5);
+    const states = {
+      'malformed JSON': () => fs.writeFileSync(iss.revocationsPath, '{broken'),
+      'an empty file': () => fs.writeFileSync(iss.revocationsPath, ''),
+      'a JSON list instead of a document': () => fs.writeFileSync(iss.revocationsPath, '[]'),
+      'a document with no "revoked" list': () => fs.writeFileSync(iss.revocationsPath, '{}'),
+      'a "revoked" value that is not a list': () => fs.writeFileSync(iss.revocationsPath, '{"revoked":"none"}'),
+      'a path that cannot be read as a file': () => { fs.unlinkSync(iss.revocationsPath); fs.mkdirSync(iss.revocationsPath); }
+    };
+    for (const [name, make] of Object.entries(states)) {
+      make();
+      const req = await R.buildReceiptRequest(probe, 'GOPH');
+      const logged = JSON.stringify(iss.store() && iss.store().log);
+      const bad = await iss.post(req);
+      check('revocation list is ' + name + ': refused, nothing signed', refused(bad, 503, 'revocations-unavailable'), bad.text);
+      check('...and the refused request is not logged', JSON.stringify(iss.store() && iss.store().log) === logged);
+      try { fs.rmSync(iss.revocationsPath, { recursive: true, force: true }); } catch (e) { /* none */ }
+      fs.writeFileSync(iss.revocationsPath, revRaw);
+      const again = await iss.post(req);
+      check('...the same signed request still works once the list is back (its nonce was not spent)', again.status === 200, again.text);
+    }
+    fs.unlinkSync(iss.revocationsPath);
+    check('a revocation list that does not exist yet is the one case read as empty', (await fresh()).status === 200);
+    fs.writeFileSync(iss.revocationsPath, revRaw);
+    x = await send(odd);
+    check('a restored list still refuses the revoked account', refused(x.res, 409, 'account-revoked'), x.res.text);
+    check('...and serves everyone else', (await fresh()).status === 200);
+    const big = JSON.parse(revRaw.toString('utf8'));
+    for (let i = 0; i < 3000; i++) big.revoked.push({ id: 'filler-' + i, revokedAt: new Date().toISOString(), reason: 'x', txn: 't' + i });
+    fs.writeFileSync(iss.revocationsPath, JSON.stringify(big));
+    check('a long list with journal-tagged entries is read in full', (await fresh()).status === 200);
+    x = await send(odd);
+    check('...and still finds the revoked account in it', refused(x.res, 409, 'account-revoked'), x.res.text);
+    fs.writeFileSync(iss.revocationsPath, revRaw);
+  }
+
   console.log('--- the ledger ---');
   const dec = await newFundedOwner(ledger, 100);
   check('a first receipt pins the coin\'s decimals', (await send(dec)).res.status === 200);

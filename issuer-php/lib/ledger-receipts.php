@@ -112,14 +112,29 @@ function atlas_receipt_load_signing_key($nowS) {
   return null;
 }
 
-function atlas_receipt_is_revoked($id) {
+// Reads the shared revocation list and reports one of: 'missing' (the file does not exist yet,
+// the only case treated as an empty list), 'unreadable', 'malformed' or 'ok'. Anything but
+// 'missing' and 'ok' means revocations cannot be consulted, and the caller must refuse to answer.
+function atlas_receipt_revocation_list() {
   $path = atlas_revocations_file();
-  if (!is_file($path)) return false;
-  $doc = json_decode((string) file_get_contents($path), true);
-  foreach (is_array($doc) && is_array($doc['revoked'] ?? null) ? $doc['revoked'] : [] as $r) {
-    if (is_array($r) && ($r['id'] ?? null) === $id) return true;
+  clearstatcache(true, $path);
+  if (!file_exists($path)) return ['state' => 'missing', 'ids' => []];
+  $data = @file_get_contents($path);
+  if ($data === false) return ['state' => 'unreadable', 'ids' => []];
+  $doc = json_decode($data, true);
+  if (!is_array($doc) || !isset($doc['revoked']) || !is_array($doc['revoked'])) return ['state' => 'malformed', 'ids' => []];
+  $ids = [];
+  foreach ($doc['revoked'] as $r) {
+    if (is_array($r) && isset($r['id']) && is_string($r['id'])) $ids[$r['id']] = true;
   }
-  return false;
+  return ['state' => 'ok', 'ids' => $ids];
+}
+
+// true / false when the list could be consulted, null when it could not (unreadable or malformed).
+function atlas_receipt_is_revoked($id) {
+  $list = atlas_receipt_revocation_list();
+  if ($list['state'] === 'unreadable' || $list['state'] === 'malformed') return null;
+  return isset($list['ids'][$id]);
 }
 
 // Spends the request nonce and applies the per-owner and global limits in one locked step.
@@ -306,7 +321,9 @@ function atlas_receipt_serve() {
 
   $coin = $p['coin'];
   $account = atlas_receipt_account_id($network, $coin, $owner);
-  if (atlas_receipt_is_revoked($account)) atlas_receipt_fail(409, 'account-revoked', 'This account reference has been revoked');
+  $revoked = atlas_receipt_is_revoked($account);
+  if ($revoked === null) atlas_receipt_fail(503, 'revocations-unavailable', 'The revocation list cannot be read right now');
+  if ($revoked) atlas_receipt_fail(409, 'account-revoked', 'This account reference has been revoked');
 
   $admit = atlas_receipt_admit($owner, $p['nonce'], $nowS, $cfg);
   if ($admit === 'replayed') atlas_receipt_fail(409, 'replayed-request', 'Signed request has already been used');

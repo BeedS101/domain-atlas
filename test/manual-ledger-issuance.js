@@ -219,6 +219,44 @@ async function suite(kind, core) {
     r = await issue(rv, 'GOPH');
     t('an account ID the issuer has revoked is not issued again', r.status === 409 && r.json.code === 'account-revoked' && !('credential' in r.json), r);
     t('...without asking the ledger', coreCalls() === before);
+    {
+      const revRaw = fs.readFileSync(issuer.revocationsPath);
+      const probe = await fresh('GOPH');
+      const states = {
+        'malformed JSON': () => fs.writeFileSync(issuer.revocationsPath, '{broken'),
+        'an empty file': () => fs.writeFileSync(issuer.revocationsPath, ''),
+        'a JSON list instead of a document': () => fs.writeFileSync(issuer.revocationsPath, '[]'),
+        'a document with no "revoked" list': () => fs.writeFileSync(issuer.revocationsPath, '{}'),
+        'a "revoked" value that is not a list': () => fs.writeFileSync(issuer.revocationsPath, '{"revoked":"none"}'),
+        'a path that cannot be read as a file': () => { fs.unlinkSync(issuer.revocationsPath); fs.mkdirSync(issuer.revocationsPath); }
+      };
+      for (const [name, make] of Object.entries(states)) {
+        make();
+        const req = await L.buildRequest(probe, 'GOPH');
+        before = coreCalls();
+        const bad = await issuer.post(req);
+        t('revocation list is ' + name + ': refused, nothing issued', bad.status === 503 && bad.json.code === 'revocations-unavailable' && !('credential' in bad.json), bad);
+        t('...without asking the ledger', coreCalls() === before);
+        try { fs.rmSync(issuer.revocationsPath, { recursive: true, force: true }); } catch (e) { /* none */ }
+        fs.writeFileSync(issuer.revocationsPath, revRaw);
+        const again = await issuer.post(req);
+        t('...the same signed request still works once the list is back (its nonce was not spent)', again.status === 200 && !!again.json.credential, again);
+      }
+      fs.unlinkSync(issuer.revocationsPath);
+      r = await issue(await fresh('GOPH'), 'GOPH');
+      t('a revocation list that does not exist yet is the one case read as empty', r.status === 200, r);
+      fs.writeFileSync(issuer.revocationsPath, revRaw);
+      r = await issue(rv, 'GOPH');
+      t('a restored list still refuses the revoked account', r.status === 409 && r.json.code === 'account-revoked', r);
+      const big = JSON.parse(revRaw.toString('utf8'));
+      for (let i = 0; i < 3000; i++) big.revoked.push({ id: 'filler-' + i, revokedAt: new Date().toISOString(), reason: 'x', txn: 't' + i });
+      fs.writeFileSync(issuer.revocationsPath, JSON.stringify(big));
+      r = await issue(await fresh('GOPH'), 'GOPH');
+      t('a long list with journal-tagged entries is read in full', r.status === 200, r);
+      r = await issue(rv, 'GOPH');
+      t('...and still finds the revoked account in it', r.status === 409 && r.json.code === 'account-revoked', r);
+      fs.writeFileSync(issuer.revocationsPath, revRaw);
+    }
     const ky = await fresh('GOPH');
     const goodDoc = issuer.keyDoc();
     const goodRaw = fs.readFileSync(issuer.keyDocPath);

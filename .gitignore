@@ -48,6 +48,7 @@ issuer-php/lib/atlas-*-lock-*.lock
 issuer-php/lib/atlas-revocations.lock
 issuer-php/lib/replay/
 issuer-php/lib/holdings/
+issuer-php/lib/txn/
 issuer-php/.well-known/atlas-key.json
 issuer-php/.well-known/atlas-revocations.json
 issuer-php/.well-known/atlas-suspensions.json
@@ -98,3 +99,4 @@ call-php/atlas/call/lib/state/
 # Node issuer: replay results and holdings index (runtime state, private).
 issuer-server/replay/
 issuer-server/holdings/
+issuer-server/txn/

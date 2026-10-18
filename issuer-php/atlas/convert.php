@@ -65,19 +65,14 @@ if ($resultQuantity < 1) {
 }
 
 $remainderQty = $credential['quantity'] - $spendAmount;
-$minted = [];
-try {
-  $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $toClass, $resultQuantity, $credential['id']);
-  $minted[] = [$expectedOwner, $received['id']];
-  $remainder = null;
-  if ($remainderQty > 0) {
-    $remainder = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $fromClass, $remainderQty, $credential['id']);
-    $minted[] = [$expectedOwner, $remainder['id']];
-  }
-  atlas_revoke_many([$credential['id']], 'superseded');
-} catch (Exception $e) {
-  atlas_rollback_minted($minted);
-  throw $e;
+$received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $toClass, $resultQuantity, $credential['id'], null, true);
+$remainder = null;
+if ($remainderQty > 0) {
+  $remainder = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $fromClass, $remainderQty, $credential['id'], null, true);
 }
+$responseJson = atlas_commit_replacement(
+  $requestId, 'convert', [$credential['id']], 'superseded', $convertParams,
+  array_values(array_filter([$received, $remainder])), ['received' => $received, 'remainder' => $remainder]
+);
 archive_if_audited($credential, 'superseded');
-atlas_send_replaceable($requestId, 'convert', [$credential['id']], $convertParams, ['received' => $received, 'remainder' => $remainder]);
+atlas_send_committed($responseJson);

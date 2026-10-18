@@ -148,9 +148,20 @@ function createLedgerIssuance(opts) {
       return from !== null && until !== null && nowS >= from && nowS <= until;
     });
   }
+  // true / false when the revocation list could be consulted, null when it could not. A file that
+  // does not exist yet is the only case read as an empty list; an unreadable or malformed one
+  // means revocations are unknown, and the caller must refuse to answer.
   function isRevoked(id) {
-    const doc = readJsonFile(opts.revocationsFile);
-    return !!doc && Array.isArray(doc.revoked) && doc.revoked.some((r) => r && r.id === id);
+    let text;
+    try {
+      text = fs.readFileSync(opts.revocationsFile, 'utf8');
+    } catch (e) {
+      return e && e.code === 'ENOENT' ? false : null;
+    }
+    let doc;
+    try { doc = JSON.parse(text); } catch (e) { return null; }
+    if (!doc || typeof doc !== 'object' || !Array.isArray(doc.revoked)) return null;
+    return doc.revoked.some((r) => r && r.id === id);
   }
 
   // Asks the ledger. The address is built from the configured domain; the request carries only the
@@ -245,7 +256,9 @@ function createLedgerIssuance(opts) {
 
     const coin = p.coin;
     const id = accountId(network, coin, owner);
-    if (isRevoked(id)) return fail(409, 'account-revoked', 'This account reference has been revoked');
+    const revoked = isRevoked(id);
+    if (revoked === null) return fail(503, 'revocations-unavailable', 'The revocation list cannot be read right now');
+    if (revoked) return fail(409, 'account-revoked', 'This account reference has been revoked');
 
     const admitted = admit(owner, p.nonce, nowS, cfg);
     if (admitted === 'replayed') return fail(409, 'replayed-request', 'Signed request has already been used');

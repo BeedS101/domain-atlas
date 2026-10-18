@@ -44,7 +44,13 @@ Only one consolidation per owner runs at a time across all extension pages.
   valid JSON, or has no `revoked` array is an error: spends, splits, consolidations and conversions answer
   **503** and nothing is written. PHP no longer reads such a file as empty and truncates it on the next revoke.
 - Writes go to a temporary file in the same directory, are flushed, and replace the file with a rename
-  (`writeFileAtomic` / `atlas_write_file_atomic`), keeping the file's mode.
+  (`writeFileAtomic` / `atlas_write_file_atomic`), keeping the file's mode. **There is no fallback.** If the
+  temporary file cannot be created, written or renamed (unwritable directory, full disk), the existing file is not
+  touched, the temporary file is removed, and the request answers a controlled **503**
+  (`could not write atlas-revocations.json (...); the existing file was not changed`). An earlier PHP version
+  wrote the live file in place in that case; that path is gone. A temporary file left by a process that stopped
+  mid-write is removed once it is older than five minutes (at Node start-up and every minute; in PHP on the next
+  replacement or fungible issue).
 - One read-modify-write per request for all predecessors (`revokeMany` / `atlas_revoke_many`), serialised by a
   lock (Node: in-process; PHP: `lib/atlas-revocations.lock`).
 
@@ -71,13 +77,57 @@ credentials and spends nothing again, including after an issuer restart and when
 arrive at once. The same id with different parameters is refused with 409 `request-id-conflict`. A replay
 re-verifies that the presented balances are genuinely this issuer's. If minting the successors fails part-way,
 the successors' holdings records are removed and any predecessors are left spendable. Requests without a
-`requestId` behave exactly as before. Spend locks are now taken in sorted order, so two consolidations of the
+`requestId` behave exactly as before, except that they are journalled too (1.6). Spend locks are now taken in sorted order, so two consolidations of the
 same balances in opposite order no longer wait on each other (15 s stall before, about 10 ms now).
 
-### 1.6 Compatibility and what is preserved
+### 1.6 Issuer: transaction journal for issue, split, consolidate and convert
 
-- Signed credentials, their format, `supersedes` chains, the revocation file format, domain keys and wallet
-  identities are unchanged. The preservation test signs, spends and restarts the issuer against a 6,127-entry list and
+Before, an issuer process that stopped after revoking the predecessors but before storing the replay result left
+successors that were signed but delivered to nobody. The decided result is now written to a private journal
+entry (`state/txn/` in Node, `lib/txn/` in PHP; one file per `requestId`, or per transaction id when there is no
+`requestId`) **before** anything is spent:
+
+1. sign the successors (nothing recorded yet);
+2. write the journal entry (the signed successors, predecessor ids, the response);
+3. record the successors in the holdings index (repeatable, never undercounts);
+4. revoke every predecessor in **one** atomic replace of the revocation list, each entry tagged with the
+   transaction id (`"txn"`); this replace is the commit point;
+5. store the replay result, then remove the journal entry.
+
+Recovery runs at Node start-up and every minute, on any PHP replacement or fungible issue, and when a request
+names a `requestId` that has an entry. It decides from the revocation list alone: every predecessor tagged with
+the entry's `txn` means the spend committed, so steps 3 and 5 are completed and a retry receives the **same
+signed result**; no predecessor tagged means it did not commit, so the entry and the successors' holdings records
+are dropped and the predecessors are still spendable. A fungible issue has no predecessors; once its entry exists
+the result is decided and recovery completes it. An entry that is damaged, a revocation list that cannot be read
+while an entry is pending, or a mix of tagged and untagged predecessors (which one atomic replace cannot produce)
+is answered **503** and left exactly as found; nothing is guessed. A live request's entry is never recovered
+under it: recovery takes the same per-request lease and skips entries whose lease is held.
+
+Revocation entries written by a journalled replacement carry an extra `"txn"` field. Readers that look only at
+`id` (the wallet, the audit tool, the Labs readers) are unaffected.
+
+What this does and does not establish: the crash tests (section 4) stop the issuer at each of seven points of
+each of the four operations, on both backends, and show that afterwards either the spend is recorded and a retry
+returns the journalled signed result, or it is not recorded, nothing extra is held and the same balances spend
+normally. The stops are process stops (exit at the point, locks and memory lost). They do not cover power loss
+or a file system that reorders flushed writes and renames. The commit is one file replace, which relies on
+`rename` being atomic on the host's file system; it is not a database transaction.
+
+### 1.7 Labs ledger readers fail closed
+
+`atlas_receipt_is_revoked` / `atlas_ledger_is_revoked` (PHP) and `isRevoked` in `lib-ledger-receipts.js` /
+`lib-ledger-issuance.js` (Node) no longer read an unreadable or malformed revocation document as an empty list.
+They distinguish: **missing** (the only case read as "nothing revoked", the same policy as the spend path: a fresh
+issuer), **unreadable** (cannot be read, including a path that is not a file), **malformed** (empty, not JSON,
+not an object, no `revoked` array), and **ok**. For the last two the balance-receipt and account-credential
+requests answer **503** `revocations-unavailable` before the request nonce is spent, so the same signed request
+works once the list is restored.
+
+### 1.8 Compatibility and what is preserved
+
+- Signed credentials, their format, `supersedes` chains, domain keys and wallet identities are unchanged. The
+  revocation file format is the same list; new entries from replacements gain an optional `txn` field. The preservation test signs, spends and restarts the issuer against a 6,127-entry list and
   checks every existing record is kept, unchanged and in order, with only new spends appended.
 - Non-fungible assets (memberships, trophies, tickets) mint and move exactly as before.
 - Old wallet with new issuer: works; no `requestId`, so no replay, and the cap is now enforced from the issuer's
@@ -90,12 +140,12 @@ same balances in opposite order no longer wait on each other (15 s stall before,
 |---|---|
 | 2.1 cap checks `held >= cap`, counts only presented balances | Fixed for what the issuer signed; see 3.1 and 3.2 |
 | 2.2 consolidation: 20 limit hit silently, one revoked balance poisons a group | Fixed (batches, spent handling, reporting) |
-| 2.3 lost response leaves successors nowhere | Fixed by `requestId` replay plus the wallet journal, within the TTL |
+| 2.3 lost response leaves successors nowhere | Fixed by `requestId` replay plus the wallet journal, within the TTL; the crash window between revoking and storing the result is closed by the issuer's transaction journal (1.6) |
 | 2.4 wallet read-modify-write race | Fixed |
 | 2.5 multi-wallet divergence | Follows from 2.4; three-wallet test passes |
 | 2.6 hand-deleted revocation records resurrect credentials | Not fixed (3.3) |
 | 2.7 revocation list growth and cost | Reduced per request (single read-modify-write); growth itself not fixed (3.6) |
-| PHP reads an unparseable file as empty | Fixed on the spend path |
+| PHP reads an unparseable file as empty | Fixed on the spend path and in the Labs readers (1.7) |
 | section 5 item 4 (append-only revocation log) | Not implemented |
 
 ## 3. What is not fixed
@@ -122,13 +172,24 @@ same balances in opposite order no longer wait on each other (15 s stall before,
 6. **Revocation growth and cost.** Every merge and spend still adds entries (about 98 per 500 g mined in 10 g
    clicks). 20,000 entries is the readers' limit. At 20,000 entries consolidate-20 takes about 0.4 s. The real fix
    is an indexed store or the ledger-authoritative design in the report's section 6.
-7. **Recovery window.** A retry recovers a lost answer only while the stored result exists (168 hours) and the
-   issuer is the new version. If the issuer process is killed between recording the revocations and storing the
-   result (a window of a few milliseconds), the successors are not recoverable by retry. Journal entries are
-   retried on the next operation or re-verify, not on a timer.
-8. **Labs ledger readers.** `lib/ledger-receipts.php` and `lib/ledger-issuance.php` still read the revocation
-   file and treat an unreadable one as empty. They were left alone (ledger scope); they only decide whether a
-   ledger account reference is revoked.
+   The transaction tag adds about 22% to each entry written by a replacement (measured: 20,000 tagged entries
+   are 3.55 MiB in Node's layout and 4.16 MiB in PHP's, against 2.92 and 3.42 MiB untagged). The wallet reads at
+   most 4 MiB of the document, so a PHP list made entirely of tagged entries reaches that byte limit at about
+   19,200 entries, before the 20,000-entry limit. The live list (about 6,000 entries, mostly untagged) has ample
+   room; this is one more reason the list needs the real fix above before it grows much further.
+7. **Recovery.** A retry recovers a lost answer only while the stored result exists (168 hours) and the issuer is
+   the new version. A request **without** a `requestId` is journalled and rolled forward or back consistently
+   after a stop, but nobody can ask for its answer again: if it committed, the successors are held in the
+   issuer's index and the replay record exists under its transaction id, yet the client has no handle to
+   retrieve them. Wallets always send a `requestId`; other clients should. Durability is that of the host file
+   system for flushed files and `rename`; power loss on a file system that reorders them is not covered and was
+   not tested. A PHP issuer has no timer, so an entry whose client never retries is settled by the next
+   replacement or fungible issue on that issuer (an idle issuer settles nothing until then, which is safe: the
+   entry only records what was decided).
+8. **Other readers of the revocation file.** The wallet, the audit tool (`tools/gen1-fungible-audit.js`) and
+   `tools/check-duplicate-handles.js` read the published document themselves and only use `id`, `reason` and
+   `revokedAt`; they were not changed. This change touched the issuer's spend path and the two Labs ledger
+   readers.
 9. **Existing damage is untouched.** Balances that are already displayed wrongly, stacks flagged invalid, and the
    hand-deleted records are neither repaired nor reconciled. Use `tools/gen1-fungible-audit.js` (section 4 of the
    report). The generation-based experimental economy reset is separate.
@@ -142,10 +203,12 @@ same balances in opposite order no longer wait on each other (15 s stall before,
 | `xvfb-run -a node test/manual-gen1-wallet-races.js` | the earlier race reproduction, now showing no loss |
 | `node test/manual-gen1-fungible-incident.js both` | the earlier issuer reproductions (still records, does not assert). Its wallet model is the pre-fix wallet, so its wallet-side lines (S2b, S3, S10a) are unchanged by design |
 | `node test/manual-currency-conversion.js` | updated: the cap holds without presented balances |
+| `node test/manual-gen1-transaction-recovery.js both` (add `--quick` to skip the second recovery variant) | Node and PHP: issue, split, consolidate and convert each stopped at `txn:minted`, `txn:journal-written`, `txn:holdings-registered`, `txn:revoke-tmp-written`, `txn:revoked`, `txn:replay-stored`, `txn:journal-removed` (injected `ATLAS_TEST_CRASH_AT`, exit 86); after each, recovery by retry and by start-up / next-request sweep: spend recorded or not as expected, same signed result when committed, holdings exact, no leftovers; no-`requestId` rollback; interrupted revocation write and stale temporary files; recovery that refuses to guess (unreadable list, half-recorded transaction, damaged entry); 42 concurrent operations plus racing duplicates and competing spends; and, with the issuer running as an unprivileged user, unwritable `.well-known/` (with the file itself writable, so an in-place write would succeed), unwritable journal directory, malformed lists |
+| `node test/manual-ledger-receipts.js`, `node test/manual-ledger-issuance.js` | extended: missing / malformed / empty / wrong-shape / unreadable revocation list, the same request working after restoration, a 3,000-entry list with tagged entries (Node mirror and PHP) |
 
 Results of the final run are in the delivery notes. The existing suites that exercise mint, split, consolidate,
 convert, trade, purchase, drops, file transfer, mail gifts, wallet import and the ledger wallets were run
-unchanged apart from the one updated test.
+unchanged apart from the updated tests above.
 
 ## 5. Deployment (before going live)
 
@@ -155,11 +218,13 @@ Nothing deploys automatically. In this order:
    state directory (Node) or `lib/` (PHP), and note the revocation entry count. Do not edit the live revocation
    file by hand afterwards.
 2. **Permissions (PHP).** The web user must be able to create files in `.well-known/` (the temporary file for the
-   atomic write) and in `lib/` (new `lib/replay/`, `lib/holdings/`, `lib/atlas-rid-lock-*.lock`,
-   `lib/atlas-holdings-lock-*.lock`, `lib/atlas-revocations.lock`). If `.well-known/` is not writable the write falls back to
-   writing the file in place and logs a line to the PHP error log; fix the permission rather than rely on it.
-   `lib/` is already denied by `lib/.htaccess`; keep it that way, the replay store holds bearer credentials.
-3. **Node.** New directories `replay/` and `holdings/` under the state directory are created on first use.
+   atomic write) and in `lib/` (new `lib/replay/`, `lib/holdings/`, `lib/txn/`, `lib/atlas-rid-lock-*.lock`,
+   `lib/atlas-holdings-lock-*.lock`, `lib/atlas-revocations.lock`). **If `.well-known/` is not writable, spends
+   (split, consolidate, convert) answer 503 and change nothing; there is no in-place fallback any more.** Check this
+   before going live: a deployment that only worked because of the old fallback will start refusing spends.
+   `lib/` is already denied by `lib/.htaccess`; keep it that way, the replay store and the journal hold bearer
+   credentials.
+3. **Node.** New directories `replay/`, `holdings/` and `txn/` under the state directory are created on first use.
    Optional `ATLAS_REPLAY_TTL_HOURS` (default 168).
 4. **Deploy the issuer first** (`issuer-server/server.js`, or `issuer-php/` including the new
    `lib/replacement.php`). Existing credentials keep working. Then check:
@@ -169,10 +234,13 @@ Nothing deploys automatically. In this order:
 5. **Then ship the extension** (`wallet.js`, `viewer.js`). Wallets keep their identities, assets and service
    credentials; the first fungible mint after the update adopts the wallet's existing balances into the
    issuer's index.
-6. **Watch** the revocation entry count (it should only grow by spends), the PHP error log for the in-place
-   fallback message, and 503 responses (a 503 on spend means the revocation file is unreadable: restore it from the
+6. **Watch** the revocation entry count (it should only grow by spends), the `txn/` directory (it should be
+   empty between requests; an entry that stays means a transaction awaiting a retry or an inspection, and the log
+   line `transaction recovery:` or `is committed but not finished` says why), and 503 responses (a 503 on spend means the revocation file is unreadable: restore it from the
    backup, do not recreate it).
 7. **Rollback.** Redeploy the previous issuer files; the new directories and lock files are inert and can stay.
+   First make sure `txn/` is empty (or recover it with the new issuer), because the previous version does not read
+   it; an entry left there is a decided but unfinished result.
    The revocation file format is unchanged. Wallets with pending journal entries simply stop retrying against an
    old issuer.
 

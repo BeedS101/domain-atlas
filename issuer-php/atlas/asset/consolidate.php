@@ -43,14 +43,7 @@ foreach ($credentials as $credential) {
 }
 
 $total = array_reduce($credentials, function ($sum, $c) { return $sum + $c['quantity']; }, 0);
-$minted = [];
-try {
-  $merged = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $owner, $cls, $total, $ids);
-  $minted[] = [$owner, $merged['id']];
-  atlas_revoke_many($ids, 'consolidated');
-} catch (Exception $e) {
-  atlas_rollback_minted($minted);
-  throw $e;
-}
+$merged = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $owner, $cls, $total, $ids, null, true);
+$responseJson = atlas_commit_replacement($requestId, 'consolidate', $ids, 'consolidated', [], [$merged], $merged);
 foreach ($credentials as $c) archive_if_audited($c, 'consolidated');
-atlas_send_replaceable($requestId, 'consolidate', $ids, [], $merged);
+atlas_send_committed($responseJson);

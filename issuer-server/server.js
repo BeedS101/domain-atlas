@@ -2761,24 +2761,45 @@ function readRevocations() {
 
 // Writes a file so a reader sees either the old content or the new, never a
 // partial one: the text goes to a temporary file in the same directory,
-// is flushed, and replaces the target in a single rename.
+// is flushed, and replaces the target in a single rename. There is no
+// fallback: when the temporary file cannot be created, written or renamed
+// (unwritable directory, full disk), the target is left exactly as it was and
+// a 503 is thrown.
 function writeFileAtomic(file, text) {
   let mode = 0o644;
   try { mode = fs.statSync(file).mode & 0o777; } catch (err) { /* new file */ }
   const tmp = file + '.' + process.pid + '.' + webcrypto.randomUUID().slice(0, 8) + '.tmp';
   let fd;
   try {
-    fd = fs.openSync(tmp, 'w', mode);
+    fd = fs.openSync(tmp, 'wx', mode);
+    fs.fchmodSync(fd, mode);
     fs.writeSync(fd, text);
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = undefined;
+    if (file === REVOCATIONS_FILE) faultPoint('txn:revoke-tmp-written');
     fs.renameSync(tmp, file);
   } catch (err) {
     if (fd !== undefined) { try { fs.closeSync(fd); } catch (e) { /* already closed */ } }
     try { fs.unlinkSync(tmp); } catch (e) { /* nothing to clean up */ }
-    throw err;
+    throw storeUnavailable('could not write ' + path.basename(file) + ' (' + (err.code || err.message) + '); the existing file was not changed');
   }
+}
+// Temporary files left by a write that was interrupted. A live write finishes
+// in milliseconds, so anything older than STALE_TMP_MS is debris.
+const STALE_TMP_MS = 5 * 60 * 1000;
+function removeStaleTempFiles(dir) {
+  let removed = 0;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith('.tmp')) continue;
+      const file = path.join(dir, name);
+      try {
+        if (Date.now() - fs.statSync(file).mtimeMs > STALE_TMP_MS) { fs.unlinkSync(file); removed++; }
+      } catch (err) { /* gone already */ }
+    }
+  } catch (err) { /* directory missing */ }
+  return removed;
 }
 function isRevoked(id) {
   return readRevocations().revoked.some((r) => r.id === id);
@@ -2843,10 +2864,13 @@ async function lockSpend(id) {
 // Adds every id in one read-modify-write and one atomic replace, so a
 // request that spends several credentials revokes all of them or none.
 // Throws, and writes nothing, when the existing list cannot be read.
-function revokeMany(ids, reason) {
+// `txn` (optional) tags each entry with the transaction-journal id of the
+// replacement that made it, which is how recovery after a crash tells a spend
+// that committed from one that did not.
+function revokeMany(ids, reason, txn) {
   const doc = readRevocations();
   const revokedAt = new Date().toISOString();
-  for (const id of ids) doc.revoked.push({ id, revokedAt, reason });
+  for (const id of ids) doc.revoked.push(txn ? { id, revokedAt, reason, txn } : { id, revokedAt, reason });
   writeFileAtomic(REVOCATIONS_FILE, JSON.stringify(doc, null, 2));
 }
 function revoke(id, reason) {
@@ -2917,10 +2941,13 @@ function replayStore(requestId, op, predecessorIds, params, response) {
       op, predecessors: [...predecessorIds].sort(), params, createdAt: new Date().toISOString(), response
     }));
     if (Math.random() < 0.02) replayPrune();
+    return true;
   } catch (err) {
     // The operation has already happened; a missing record only costs the
-    // ability to retry it.
+    // ability to retry it, which is why the transaction journal keeps its
+    // entry until this has been stored.
     console.error('could not store the replay record:', err.message);
+    return false;
   }
 }
 function replayPrune() {
@@ -2932,6 +2959,164 @@ function replayPrune() {
       if (Date.now() - fs.statSync(file).mtimeMs > REPLAY_TTL_MS) { fs.unlinkSync(file); removed++; }
     }
   } catch (err) { /* best effort */ }
+}
+
+// ---------- transaction journal (crash recovery for replacements) ----------
+// A replacement (split, consolidate, convert) or a fungible issue signs its
+// successors, then spends the predecessors, then answers. A process that dies
+// between those steps used to strand the successors: signed, the predecessors
+// already revoked, and nobody holding them. Each such operation now writes
+// the whole decided result (the signed successors, the predecessor ids and the
+// response) to a private journal entry BEFORE anything is spent:
+//
+//   1. sign the successors (nothing is recorded yet)       txn:minted
+//   2. write the journal entry (atomic file replace)        txn:journal-written
+//   3. record the successors in the holdings index          txn:holdings-registered
+//   4. revoke every predecessor in ONE atomic replace of the
+//      revocation list, each entry tagged with the txn id   txn:revoke-tmp-written, txn:revoked
+//   5. store the replay result, then remove the journal     txn:replay-stored, txn:journal-removed
+//
+// The atomic replace in step 4 is the commit point. Recovery (at start-up, on
+// a timer, and when a retry names the same requestId) reads an entry that is
+// still there and decides from the revocation list alone: if every
+// predecessor carries this entry's txn tag the spend committed, so steps 3
+// and 5 are completed and the same signed result is what a retry receives; if
+// none does, the spend did not commit, so the successors' holdings records are
+// dropped and the entry removed. A fungible issue has no predecessors: once the
+// entry exists the result is decided and recovery completes it. A mix of
+// tagged and untagged predecessors cannot be produced by one atomic replace and
+// is reported, not guessed at.
+//
+// This survives a process that stops at any of the steps above (tested by
+// stopping the process at each one). It is as durable as the file system's
+// handling of flushed files and renames; a power loss on a file system that
+// reorders those is not covered.
+const TXN_DIR = path.join(STATE_DIR, 'txn');
+function txnFile(key) {
+  return path.join(TXN_DIR, createHash('sha256').update(key).digest('hex') + '.json');
+}
+function txnWrite(rec) {
+  fs.mkdirSync(TXN_DIR, { recursive: true });
+  writeFileAtomic(txnFile(rec.key), JSON.stringify(rec));
+}
+function txnRemove(rec) {
+  try { fs.unlinkSync(txnFile(rec.key)); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+}
+function txnRead(key) {
+  let text;
+  try {
+    text = fs.readFileSync(txnFile(key), 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw storeUnavailable('a pending transaction could not be read (' + err.code + ')');
+  }
+  let rec;
+  try { rec = JSON.parse(text); } catch (err) { rec = null; }
+  if (!rec || typeof rec.txn !== 'string' || !Array.isArray(rec.predecessors) || !Array.isArray(rec.successors)) {
+    throw storeUnavailable('a pending transaction is unreadable; it must be examined, not guessed at');
+  }
+  return rec;
+}
+function txnState(rec) {
+  if (!rec.predecessors.length) return 'committed';
+  const tagged = new Set(readRevocations().revoked.filter((r) => r && r.txn === rec.txn).map((r) => r.id));
+  const n = rec.predecessors.filter((id) => tagged.has(id)).length;
+  if (n === rec.predecessors.length) return 'committed';
+  return n === 0 ? 'aborted' : 'inconsistent';
+}
+function txnRegister(rec) {
+  for (const s of rec.successors) holdingsNoteIssued(s.owner, { fungible: true, class: s.cls }, s.id, s.q);
+}
+// Completes a committed transaction. Every step is safe to repeat. The journal
+// entry is removed only after the replay record is stored.
+function txnFinish(rec) {
+  txnRegister(rec);
+  const stored = rec.requestId ? replayStore(rec.requestId, rec.op, rec.predecessors, rec.params, rec.response) : true;
+  faultPoint('txn:replay-stored');
+  if (!stored) throw new Error('the replay record could not be stored; the journal entry is kept');
+  txnRemove(rec);
+  faultPoint('txn:journal-removed');
+}
+function txnAbort(rec) {
+  for (const s of rec.successors) holdingsUnregister(s.owner, [s.id]);
+  txnRemove(rec);
+}
+// 'committed', 'aborted'; throws for an inconsistent entry (left in place).
+function txnRecover(rec) {
+  const state = txnState(rec);
+  if (state === 'committed') { txnFinish(rec); return 'committed'; }
+  if (state === 'aborted') { txnAbort(rec); return 'aborted'; }
+  throw storeUnavailable('transaction ' + rec.txn + ' is half-recorded in the revocation list; it must be examined, not guessed at');
+}
+// Called by a request that holds the key's lease.
+function txnRecoverKey(key) {
+  const rec = txnRead(key);
+  return rec ? txnRecover(rec) : null;
+}
+// Recovers every entry whose lease nobody holds. Returns how many it resolved.
+async function txnSweep() {
+  let names;
+  try { names = fs.readdirSync(TXN_DIR); } catch (err) { return 0; }
+  let resolved = 0;
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    let rec;
+    try { rec = JSON.parse(fs.readFileSync(path.join(TXN_DIR, name), 'utf8')); } catch (err) { continue; }
+    if (!rec || typeof rec.key !== 'string') continue;
+    const release = await acquireSpendLock('rid:' + rec.key, 50);
+    if (!release) continue;
+    try {
+      const again = txnRead(rec.key);
+      if (again) { txnRecover(again); resolved++; }
+    } catch (err) {
+      console.error('transaction recovery:', err.message);
+    } finally {
+      release();
+    }
+  }
+  removeStaleTempFiles(path.dirname(REVOCATIONS_FILE));
+  removeStaleTempFiles(TXN_DIR);
+  removeStaleTempFiles(REPLAY_DIR);
+  removeStaleTempFiles(HOLDINGS_DIR);
+  return resolved;
+}
+// Runs the five steps above for already-signed (not yet recorded) successors.
+// `successors` are the signed credentials; `response` is what the client gets.
+// The caller holds the lease for `requestId`, or passes none and gets one here.
+async function commitReplacement(res, { requestId, op, predecessorIds, reason, params, successors, response }) {
+  const rec = {
+    txn: webcrypto.randomUUID().replace(/-/g, '').slice(0, 16),
+    requestId: requestId || null,
+    op, reason, params,
+    predecessors: [...predecessorIds].sort(),
+    successors: successors.map((c) => ({ owner: c.owner.publicKey, cls: c.asset.class, id: c.id, q: c.quantity })),
+    response,
+    createdAt: new Date().toISOString()
+  };
+  rec.key = rec.requestId || rec.txn;
+  if (!rec.requestId && !(await holdLease(res, 'rid:' + rec.key))) {
+    throw storeUnavailable('could not take the transaction lock');
+  }
+  faultPoint('txn:minted');
+  txnWrite(rec);
+  faultPoint('txn:journal-written');
+  let committed = false;
+  try {
+    txnRegister(rec);
+    faultPoint('txn:holdings-registered');
+    if (rec.predecessors.length) revokeMany(predecessorIds, reason, rec.txn);
+    committed = true;
+    faultPoint('txn:revoked');
+  } catch (err) {
+    if (!committed) txnAbort(rec);
+    throw err;
+  }
+  try {
+    txnFinish(rec);
+  } catch (err) {
+    // Committed; the entry stays and recovery finishes it. The client still gets its answer.
+    console.error('transaction', rec.txn, 'is committed but not finished:', err.message);
+  }
 }
 
 // ---------- issuer-side holdings index (holdingCap) ----------
@@ -4465,7 +4650,9 @@ async function main() {
   // them is what guarantees they can never drift out of sync on the
   // payload shape the way independent inline object literals eventually
   // would.
-  async function issueAsset(ownerPublicKey, asset, quantity, supersedes) {
+  // `deferHoldings` leaves the holdings-index record to the caller (the
+  // transaction journal records it after the journal entry is written).
+  async function issueAsset(ownerPublicKey, asset, quantity, supersedes, deferHoldings) {
     const payload = {
       id: 'urn:atlas:asset:' + webcrypto.randomUUID(),
       asset,
@@ -4475,7 +4662,7 @@ async function main() {
       issuedAt: new Date().toISOString()
     };
     const signature = await sign(payload);
-    holdingsNoteIssued(ownerPublicKey, asset, payload.id, quantity);
+    if (!deferHoldings) holdingsNoteIssued(ownerPublicKey, asset, payload.id, quantity);
     return { credential: 'domain-atlas-asset/1.0', ...payload, issuer: { domain: DOMAIN, publicKey: publicKeyB64url }, signature };
   }
 
@@ -4625,7 +4812,7 @@ async function main() {
   // patch already uses). Only POST /atlas/asset/mint ever passes this;
   // every other call site leaves it undefined, which merges nothing and
   // changes no existing behavior at all.
-  async function mintAssetByClass(ownerPublicKey, cls, quantity, supersedes, initialProperties) {
+  async function mintAssetByClass(ownerPublicKey, cls, quantity, supersedes, initialProperties, deferHoldings) {
     const catalogEntry = ASSET_CATALOG[cls];
     if (!catalogEntry) throw new Error('unknown asset class: ' + cls);
 
@@ -4692,7 +4879,7 @@ async function main() {
         ? { expiresAt: new Date(Date.now() + catalogEntry.expiresInMinutes * 60000).toISOString() }
         : {})
     };
-    return issueAsset(ownerPublicKey, asset, quantity, supersedes);
+    return issueAsset(ownerPublicKey, asset, quantity, supersedes, deferHoldings);
   }
 
   // Start of a split, consolidate or convert: takes the spend locks for every
@@ -4711,6 +4898,7 @@ async function main() {
       sendJson(res, 503, { error: 'this request is already being processed - try again', code: 'busy' });
       return true;
     }
+    txnRecoverKey(requestId);
     const prior = replayLookup(requestId, op, ids, params);
     if (!prior) return false;
     if (prior.conflict) {
@@ -4726,12 +4914,6 @@ async function main() {
     sendJson(res, 200, prior.response);
     return true;
   }
-  // Undoes the holdings records of successors that were signed but never
-  // delivered because the replacement did not complete.
-  function rollbackMinted(minted) {
-    for (const [owner, id] of minted) holdingsUnregister(owner, [id]);
-  }
-
   // Validates an asset credential presented back to us for a split,
   // consolidate, or trade — all three of which only make sense for a
   // fungible class (SPEC.md §5.4: quantity is definitionally 1 on a
@@ -5636,6 +5818,7 @@ async function main() {
           if (!(await holdLease(res, 'rid:' + issueRequestId))) {
             return sendJson(res, 503, { error: 'this request is already being processed - try again', code: 'busy' });
           }
+          txnRecoverKey(issueRequestId);
           const prior = replayLookup(issueRequestId, 'issue', [], issueParams);
           if (prior && prior.conflict) return sendJson(res, 409, { error: 'requestId was already used for a different request', code: 'request-id-conflict' });
           if (prior) return sendJson(res, 200, prior.response);
@@ -5666,8 +5849,14 @@ async function main() {
         }
 
         // A first minting — never a reissue — so supersedes is always null here.
-        const credential = await mintAssetByClass(ownerPublicKey, assetClass, mintQuantity, null);
-        if (issueReplayable) replayStore(issueRequestId, 'issue', [], issueParams, credential);
+        const journalled = catalogEntry.fungible === true;
+        const credential = await mintAssetByClass(ownerPublicKey, assetClass, mintQuantity, null, undefined, journalled);
+        if (journalled) {
+          await commitReplacement(res, {
+            requestId: issueReplayable ? issueRequestId : null, op: 'issue', predecessorIds: [], reason: null,
+            params: issueParams, successors: [credential], response: credential
+          });
+        }
         console.log('Issued', mintQuantity, credential.asset.name, 'to', ownerPublicKey.slice(0, 16) + '...');
 
         // Subscribing IS requesting this specific asset class (see Mail
@@ -5689,7 +5878,7 @@ async function main() {
           console.log('Subscriber logged + welcome mail queued for', credential.id);
         }
 
-        // Post Office (task #75/#87): claiming this specific class IS
+        // Post Office: claiming this specific class IS
         // registering for Global Mail here, same "requesting the class is
         // the whole registration step" shape as atlas.membership above —
         // logged to its own roster (see isValidPostOfficeMember, the gate
@@ -7420,22 +7609,15 @@ async function main() {
         if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
 
         const remainderQty = credential.quantity - sendAmount;
-        const minted = [];
-        let sent, remainder;
-        try {
-          sent = await mintAssetByClass(toPublicKey, expectedClass, sendAmount, credential.id);
-          minted.push([toPublicKey, sent.id]);
-          remainder = remainderQty > 0 ? await mintAssetByClass(expectedOwner, expectedClass, remainderQty, credential.id) : null;
-          if (remainder) minted.push([expectedOwner, remainder.id]);
-          revokeMany([credential.id], 'superseded');
-        } catch (err) {
-          rollbackMinted(minted);
-          throw err;
-        }
+        const sent = await mintAssetByClass(toPublicKey, expectedClass, sendAmount, credential.id, undefined, true);
+        const remainder = remainderQty > 0 ? await mintAssetByClass(expectedOwner, expectedClass, remainderQty, credential.id, undefined, true) : null;
+        const splitResult = { sent, remainder };
+        await commitReplacement(res, {
+          requestId, op: 'split', predecessorIds: [credential.id], reason: 'superseded', params: { sendAmount, toPublicKey },
+          successors: [sent, remainder].filter(Boolean), response: splitResult
+        });
         archiveIfAudited(credential, 'superseded');
         console.log('Split', expectedClass, '- sent', sendAmount, 'kept', remainderQty);
-        const splitResult = { sent, remainder };
-        if (requestId) replayStore(requestId, 'split', [credential.id], { sendAmount, toPublicKey }, splitResult);
         return sendJson(res, 200, splitResult);
       }
 
@@ -7471,19 +7653,13 @@ async function main() {
           if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
         }
         const total = credentials.reduce((sum, c) => sum + c.quantity, 0);
-        const minted = [];
-        let merged;
-        try {
-          merged = await mintAssetByClass(owner, cls, total, ids);
-          minted.push([owner, merged.id]);
-          revokeMany(ids, 'consolidated');
-        } catch (err) {
-          rollbackMinted(minted);
-          throw err;
-        }
+        const merged = await mintAssetByClass(owner, cls, total, ids, undefined, true);
+        await commitReplacement(res, {
+          requestId, op: 'consolidate', predecessorIds: ids, reason: 'consolidated', params: {},
+          successors: [merged], response: merged
+        });
         credentials.forEach((c) => archiveIfAudited(c, 'consolidated'));
         console.log('Consolidated', credentials.length, cls, 'balances into', total, 'for', owner.slice(0, 16) + '...');
-        if (requestId) replayStore(requestId, 'consolidate', ids, {}, merged);
         return sendJson(res, 200, merged);
       }
 
@@ -7545,26 +7721,19 @@ async function main() {
         }
 
         const remainderQty = credential.quantity - spendAmount;
-        const minted = [];
-        let received, remainder;
-        try {
-          received = await mintAssetByClass(expectedOwner, toClass, resultQuantity, credential.id);
-          minted.push([expectedOwner, received.id]);
-          remainder = remainderQty > 0 ? await mintAssetByClass(expectedOwner, fromClass, remainderQty, credential.id) : null;
-          if (remainder) minted.push([expectedOwner, remainder.id]);
-          revokeMany([credential.id], 'superseded');
-        } catch (err) {
-          rollbackMinted(minted);
-          throw err;
-        }
+        const received = await mintAssetByClass(expectedOwner, toClass, resultQuantity, credential.id, undefined, true);
+        const remainder = remainderQty > 0 ? await mintAssetByClass(expectedOwner, fromClass, remainderQty, credential.id, undefined, true) : null;
+        const convertResult = { received, remainder };
+        await commitReplacement(res, {
+          requestId, op: 'convert', predecessorIds: [credential.id], reason: 'superseded', params: { spendAmount, toClass },
+          successors: [received, remainder].filter(Boolean), response: convertResult
+        });
         archiveIfAudited(credential, 'superseded');
         console.log('Converted', spendAmount, fromClass, '->', resultQuantity, toClass, 'for', expectedOwner.slice(0, 16) + '...');
-        const convertResult = { received, remainder };
-        if (requestId) replayStore(requestId, 'convert', [credential.id], { spendAmount, toClass }, convertResult);
         return sendJson(res, 200, convertResult);
       }
 
-      // Task #213 — asset-class lookup, for previewing a class the caller
+      // Asset-class lookup, for previewing a class the caller
       // does not (yet) hold a credential of at all: a scene's hoverable
       // stall/crate (demo-domain-a/spatial/lobby/scene.json's
       // `interactables`, keyed by `class`) names a class but carries none
@@ -9585,6 +9754,14 @@ async function main() {
   server.listen(PORT, () => {
     console.log(`Issuer + trading station (${DOMAIN}) — listening on port ${PORT}, docroot: ${DEMO_DOMAIN_A}`);
   });
+
+  // Transactions a stopped process left part-way are recovered at start-up and
+  // then on a timer (ATLAS_TXN_NO_SWEEP=1 turns that off so a test can look at
+  // the state a stop left behind first).
+  if (process.env.ATLAS_TXN_NO_SWEEP !== '1') {
+    txnSweep().catch((err) => console.error('Transaction sweep failed:', err.message));
+    setInterval(() => txnSweep().catch((err) => console.error('Transaction sweep failed:', err.message)), 60000).unref();
+  }
 
   // Deliveries a stopped process left part-way are finished at start-up and
   // then on a timer (only while any are unfinished).

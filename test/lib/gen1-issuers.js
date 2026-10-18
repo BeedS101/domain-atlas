@@ -17,7 +17,27 @@ async function waitFor(log, proc, text, ms, name) {
   });
 }
 
-async function startNode(port) {
+// Options: { env } extra environment for the issuer process; { user: 'nobody' } runs it as an
+// unprivileged account (the sandbox runs as root, which ignores file permissions), with the
+// temporary tree handed over to that account. be.start(env) restarts with a different environment.
+const NOBODY = ['setpriv', '--reuid=65534', '--regid=65534', '--clear-groups'];
+function chownTree(dir) {
+  require('child_process').execFileSync('chown', ['-R', '65534:65534', dir]);
+}
+function launch(cmd, args, opts, be) {
+  const wrapped = be.unprivileged ? NOBODY.concat([cmd], args) : [cmd].concat(args);
+  return spawn(wrapped[0], wrapped.slice(1), opts);
+}
+function waitExit(proc, ms) {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null) return resolve(proc.exitCode);
+    const timer = setTimeout(() => resolve(null), ms);
+    proc.once('exit', (c) => { clearTimeout(timer); resolve(c); });
+  });
+}
+
+async function startNode(port, options) {
+  options = options || {};
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gen1-node-'));
   const docroot = path.join(tmp, 'docroot');
   const state = path.join(tmp, 'state');
@@ -31,32 +51,37 @@ async function startNode(port) {
     dirsToWatch: [path.join(docroot, '.well-known'), state],
     replayDir: path.join(state, 'replay'), holdingsDir: path.join(state, 'holdings'),
     revLayout: (doc) => JSON.stringify(doc, null, 2),
-    proc: null, log: []
+    proc: null, log: [], unprivileged: options.user === 'nobody', txnDir: path.join(state, 'txn'),
+    env: Object.assign({}, options.env)
   };
-  be.start = async () => {
+  if (be.unprivileged) chownTree(tmp);
+  be.start = async (env) => {
     be.log = [];
-    be.proc = spawn('node', ['issuer-server/server.js'], {
+    if (env !== undefined) be.env = Object.assign({}, env);
+    be.proc = launch('node', ['issuer-server/server.js'], {
       cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PORT: String(port), ATLAS_DOMAIN: domain, ATLAS_DOCROOT: docroot, ATLAS_STATE_DIR: state }
-    });
+      env: { ...process.env, PORT: String(port), ATLAS_DOMAIN: domain, ATLAS_DOCROOT: docroot, ATLAS_STATE_DIR: state, ...be.env }
+    }, be);
     be.proc.stdout.on('data', (d) => be.log.push(d.toString()));
     be.proc.stderr.on('data', (d) => be.log.push(d.toString()));
     await waitFor(be.log, be.proc, 'listening', 15000, 'node issuer');
   };
-  be.restart = async () => { be.proc.removeAllListeners('exit'); be.proc.kill(); await new Promise((r) => setTimeout(r, 200)); await be.start(); };
+  be.restart = async (env) => { be.proc.removeAllListeners('exit'); be.proc.kill(); await waitExit(be.proc, 3000); await be.start(env); };
+  be.waitExit = (ms) => waitExit(be.proc, ms);
   be.stop = () => { if (be.proc) { be.proc.removeAllListeners('exit'); be.proc.kill(); } fs.rmSync(tmp, { recursive: true, force: true }); };
   await be.start();
   return be;
 }
 
-async function startPhp(port) {
+async function startPhp(port, options) {
+  options = options || {};
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gen1-php-'));
   const bundle = path.join(tmp, 'bundle');
   fs.cpSync(path.join(REPO, 'issuer-php'), bundle, { recursive: true });
   for (const f of fs.readdirSync(path.join(bundle, 'lib'))) {
     if (/\.(json|pem|lock)$/.test(f) && /store|key|lock|admin|revoc/.test(f)) fs.rmSync(path.join(bundle, 'lib', f), { force: true });
   }
-  for (const d of ['replay', 'holdings']) fs.rmSync(path.join(bundle, 'lib', d), { recursive: true, force: true });
+  for (const d of ['replay', 'holdings', 'txn']) fs.rmSync(path.join(bundle, 'lib', d), { recursive: true, force: true });
   fs.mkdirSync(path.join(bundle, '.well-known'), { recursive: true });
   const domain = 'localhost:' + port;
   const be = {
@@ -66,17 +91,22 @@ async function startPhp(port) {
     dirsToWatch: [path.join(bundle, '.well-known'), path.join(bundle, 'lib')],
     replayDir: path.join(bundle, 'lib', 'replay'), holdingsDir: path.join(bundle, 'lib', 'holdings'),
     revLayout: (doc) => JSON.stringify(doc, null, 4),
-    proc: null, log: []
+    proc: null, log: [], unprivileged: options.user === 'nobody', txnDir: path.join(bundle, 'lib', 'txn'),
+    env: Object.assign({}, options.env)
   };
-  be.start = async () => {
+  if (be.unprivileged) chownTree(tmp);
+  // A crash point ends one request's script (exit 86) without stopping the server, so
+  // crash tests run it without worker processes: one script at a time, state reread each request.
+  be.start = async (env) => {
     be.log = [];
-    be.proc = spawn('php', ['-S', '127.0.0.1:' + port, 'test-router.php'], {
-      cwd: bundle, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PHP_CLI_SERVER_WORKERS: '4' }
-    });
+    if (env !== undefined) be.env = Object.assign({}, env);
+    be.proc = launch('php', ['-S', '127.0.0.1:' + port, 'test-router.php'], {
+      cwd: bundle, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(options.workers === 0 ? {} : { PHP_CLI_SERVER_WORKERS: String(options.workers || 4) }), ...be.env }
+    }, be);
     be.proc.stderr.on('data', (d) => be.log.push(d.toString()));
     await waitFor(be.log, be.proc, 'started', 8000, 'php');
   };
-  be.restart = async () => { be.proc.removeAllListeners('exit'); be.proc.kill(); await new Promise((r) => setTimeout(r, 200)); await be.start(); };
+  be.restart = async (env) => { be.proc.removeAllListeners('exit'); be.proc.kill(); await waitExit(be.proc, 3000); await be.start(env); };
   be.stop = () => { if (be.proc) { be.proc.removeAllListeners('exit'); be.proc.kill(); } fs.rmSync(tmp, { recursive: true, force: true }); };
   await be.start();
   return be;
@@ -97,6 +127,7 @@ function api(be) {
     post: (p, b) => call('POST', p, b),
     get: (p) => call('GET', p),
     revocations: () => { try { return JSON.parse(fs.readFileSync(be.revFile, 'utf8')).revoked; } catch (e) { return null; } },
+    txnEntries: () => { try { return fs.readdirSync(be.txnDir).filter((f) => /\.json$/.test(f)); } catch (e) { return []; } },
     files: () => be.dirsToWatch.flatMap((d) => { try { return fs.readdirSync(d).map((f) => path.join(d, f)); } catch (e) { return []; } })
   };
 }

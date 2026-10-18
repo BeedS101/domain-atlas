@@ -49,8 +49,17 @@ if ($catalogEntry['fungible']) {
 $issueRequestId = atlas_parse_request_id($body);
 $issueReplayable = $issueRequestId !== null && $catalogEntry['fungible'];
 $issueParams = ['ownerPublicKey' => $ownerPublicKey, 'assetClass' => $assetClass, 'quantity' => $mintQuantity];
+if ($catalogEntry['fungible']) atlas_txn_sweep();
+$issueTxn = null;
+if ($catalogEntry['fungible'] && !$issueReplayable) {
+  // A mint without a request id still journals; its transaction lease is taken
+  // here, ahead of the owner lease below.
+  $issueTxn = atlas_new_txn_id();
+  if (atlas_lease('rid', $issueTxn) !== null) send_json(503, ['error' => 'this request is already being processed - try again', 'code' => 'busy']);
+}
 if ($issueReplayable) {
   if (atlas_request_lease($issueRequestId) !== null) send_json(503, ['error' => 'this request is already being processed - try again', 'code' => 'busy']);
+  atlas_txn_recover_key($issueRequestId);
   $prior = atlas_replay_lookup($issueRequestId, 'issue', [], $issueParams);
   if ($prior !== null && isset($prior['conflict'])) send_json(409, ['error' => 'requestId was already used for a different request', 'code' => 'request-id-conflict']);
   if ($prior !== null) {
@@ -89,10 +98,10 @@ if ($catalogEntry['fungible'] && isset($catalogEntry['holdingCap'])) {
 // A first minting — never a reissue — so supersedes is always null here.
 // See atlas/asset/reissue.php (SPEC.md §5.1.1) for the other caller of
 // issue_asset(), where supersedes names the id being replaced.
-$credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $mintQuantity, null);
-if ($issueReplayable) {
-  $credentialJson = json_encode($credential, JSON_UNESCAPED_SLASHES);
-  if ($credentialJson !== false) atlas_replay_store($issueRequestId, 'issue', [], $issueParams, $credentialJson);
+$journalled = (bool) $catalogEntry['fungible'];
+$credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $mintQuantity, null, null, $journalled);
+if ($journalled) {
+  atlas_commit_replacement($issueReplayable ? $issueRequestId : null, 'issue', [], null, $issueParams, [$credential], $credential, $issueTxn);
 }
 
 // Subscribing IS requesting this specific asset class (see the mail-system
