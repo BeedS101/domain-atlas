@@ -8159,13 +8159,15 @@ const AtlasWallet = (() => {
   // directly; a passkey identity answers with a hardware assertion, a different proof.
   function ledgerProofFormat(identity) { return identity && identity.mode === 'webauthn' ? 'webauthn-es256' : 'raw-ecdsa-p256'; }
 
-  // `allow.audiences` are the exact operation addresses a message may be for, and
+  // `allow.audiences` are the exact operation addresses a message may be for, `allow.types` (when
+  // given) the message types it may be, and
   // `allow.proofFormats` the proofs the adapter's ledger can check. A proof the ledger cannot check
   // is refused before anything is signed, so a passkey is never asked to approve a request that
   // cannot work.
   async function signLedgerPayload(payload, allow) {
     if (!payload || typeof payload !== 'object' || typeof payload.type !== 'string' || !payload.type.startsWith('atlas.ledger.')) throw ledgerError('unknown', 'That is not a ledger message.');
     if (typeof payload.audience !== 'string' || !allow.audiences.includes(payload.audience)) throw ledgerError('unknown', 'A ledger message must name the exact address it is for.');
+    if (allow.types && !allow.types.includes(payload.type)) throw ledgerError('unknown', 'That kind of ledger message is not one this step may sign.');
     const mode = await getIdentityMode();
     if (!allow.proofFormats.includes(ledgerProofFormat({ mode }))) throw ledgerError('proof-unsupported');
     return signWithSelfUnchecked(payload);
@@ -8705,6 +8707,279 @@ const AtlasWallet = (() => {
     return result;
   }
 
+  // ---- opening an account ----
+  //
+  // Two steps, each approved separately by the person, for one identity and one listed target
+  // (see ledger-open.js):
+  //   1. openLedgerAccount: asks the ledger to open an empty account. Opening is idempotent: the
+  //      ledger answers "exists" for an account it already has and never resets it. The wallet
+  //      notes that the account exists, so a later failure does not lose track of it.
+  //   2. requestLedgerCredential: asks the issuer for a signed reference, checks it against the
+  //      issuer's published key and revocation list, and only then stores it. It is stored the way
+  //      any added reference is: no balance, no permission to look one up, background checks off.
+  // A failure of step 2 leaves the account open and the note in place, and step 2 can simply be
+  // asked again. Nothing here looks up a balance. Every message is signed here, by the identity in
+  // use, for one exact address; nothing a web page can reach signs these.
+
+  const LEDGER_OPENINGS_KEY = 'atlasLedgerOpenings';
+  const LEDGER_OPEN_TIMEOUT_MS = 20000;
+  const ledgerOpenFlights = new Map(); // account id -> { step, controller }
+
+  function ledgerOpenModule() {
+    if (typeof AtlasLedgerOpen === 'undefined') throw new Error('The ledger opening module is not loaded in this page.');
+    return AtlasLedgerOpen;
+  }
+
+  function ledgerOpenFail(code, extra) { return Object.assign({ ok: false, code }, extra || {}); }
+
+  async function readLedgerOpenings(ownerPublicKey, identity) {
+    const got = await chrome.storage.local.get(LEDGER_OPENINGS_KEY);
+    const stored = (got[LEDGER_OPENINGS_KEY] || {})[ownerPublicKey];
+    if (stored === undefined) return { list: [], unreadable: false };
+    const out = await decryptAtRest(identity, 'ledger-openings', stored, LEDGER_UNREADABLE);
+    if (out === LEDGER_UNREADABLE) return { list: [], unreadable: true };
+    const O = ledgerOpenModule();
+    return { list: Array.isArray(out) ? out.filter((r) => r && typeof r.id === 'string' && O.ID_RE.test(r.id) && O.targetFor(r.domain, r.coin) && r.ownerPublicKey === ownerPublicKey) : [], unreadable: false };
+  }
+
+  async function updateLedgerOpenings(ownerPublicKey, mutate) {
+    const outcome = await withLedgerLock(async () => {
+      const identity = await getIdentity();
+      if (!identity) throw ledgerError('locked');
+      if (ledgerOwnerKeyOrNull(identity) !== ownerPublicKey) throw ledgerError('wrong-identity');
+      const { list, unreadable } = await readLedgerOpenings(ownerPublicKey, identity);
+      if (unreadable) throw ledgerError('locked', 'The pending ledger accounts for this identity cannot be read right now, so nothing was changed.');
+      const next = mutate(list);
+      const got = await chrome.storage.local.get(LEDGER_OPENINGS_KEY);
+      const all = got[LEDGER_OPENINGS_KEY] || {};
+      if (next.list.length) all[ownerPublicKey] = await encryptAtRest(identity, 'ledger-openings', next.list);
+      else delete all[ownerPublicKey];
+      await chrome.storage.local.set({ [LEDGER_OPENINGS_KEY]: all });
+      return next.result;
+    });
+    notifyLedgerChanged();
+    return outcome;
+  }
+
+  // Everything both steps need to know before anything is signed or sent, or the reason they
+  // cannot go ahead. The kind of proof is checked here, before a prompt or a request.
+  async function ledgerOpenPreflight(request, approved) {
+    const O = ledgerOpenModule();
+    if (approved !== true) return ledgerOpenFail('no-consent');
+    await ledgerExperimentalReady;
+    if (!ledgerExperimentalRegistered.labs29) return ledgerOpenFail('experimental-off');
+    const identity = await getIdentity();
+    if (!identity) return ledgerOpenFail('locked');
+    const owner = ledgerOwnerKeyOrNull(identity);
+    if (!owner) return ledgerOpenFail('wrong-identity');
+    if (!O.PROOF_FORMATS.includes(ledgerProofFormat(identity))) return ledgerOpenFail('proof-unsupported');
+    const target = request && O.targetFor(request.domain, request.coin);
+    if (!target) return ledgerOpenFail('unsupported-target');
+    return { ok: true, O, identity, owner, target, urls: O.urlsFor(target.domain), id: await ledgerDerivedAccountId(target.network, target.coin, owner) };
+  }
+
+  function ledgerOpenNonce() { return Array.from(crypto.getRandomValues(new Uint8Array(16))).map((b) => b.toString(16).padStart(2, '0')).join(''); }
+
+  // Marks one account as having a step under way, so a second press does nothing; the
+  // experimental switch can cancel it.
+  function ledgerOpenBegin(id, step) {
+    const flight = { step, controller: new AbortController(), contract: (ledgerExperimentalRegistered.labs29 || {}).contract };
+    ledgerOpenFlights.set(id, flight);
+    notifyLedgerChanged();
+    return flight;
+  }
+
+  function ledgerOpenEnd(id) { ledgerOpenFlights.delete(id); notifyLedgerChanged(); }
+
+  // One POST to one exact address: no redirects, no cookies, a time limit.
+  async function ledgerOpenPost(flight, url, body) {
+    const controller = flight.controller;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, LEDGER_OPEN_TIMEOUT_MS);
+    try {
+      const doFetch = ledgerScopedFetch({ origins: [], urls: [url] }, controller.signal);
+      const response = await doFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
+      const text = await response.text();
+      return { status: response.status, body: ledgerOpenModule().parseBody(text) };
+    } catch (err) {
+      if (timedOut) return { failed: 'timeout' };
+      return { failed: err && err.name === 'AbortError' ? 'cancelled' : 'network' };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function noteLedgerOpening(owner, id, patch) {
+    try {
+      await updateLedgerOpenings(owner, (list) => {
+        const rec = list.find((r) => r.id === id);
+        if (rec) patch(rec);
+        return { list, result: !!rec };
+      });
+    } catch (err) { /* the identity changed or the note was forgotten meanwhile; there is nothing to record */ }
+  }
+
+  // Step 1. `opts.approved` must be true: the person has been told where the request goes.
+  // Returns { ok: true, id, created } or { ok: false, code }.
+  async function openLedgerAccount(request, opts) {
+    const pre = await ledgerOpenPreflight(request, opts && opts.approved);
+    if (!pre.ok) return pre;
+    const { O, owner, target, urls, id } = pre;
+    if (ledgerOpenFlights.has(id)) return ledgerOpenFail('busy');
+    const flight = ledgerOpenBegin(id, 'open');
+    try {
+      const held = await readLedgerList(owner, pre.identity);
+      if (held.unreadable) return ledgerOpenFail('locked');
+      if (held.list.some((r) => r.id === id)) return ledgerOpenFail('already-held');
+      const payload = O.openPayload(target, ledgerOpenNonce(), O.isoSeconds(Date.now()));
+      const proof = await signLedgerPayload(payload, { audiences: [urls.open], proofFormats: O.PROOF_FORMATS, types: [O.TYPES.open] });
+      if (!proof || proof.publicKey !== owner || typeof proof.signature !== 'string') return ledgerOpenFail('wrong-identity');
+      const sent = await ledgerOpenPost(flight, urls.open, { payload, proof: { publicKey: proof.publicKey, signature: proof.signature } });
+      if (sent.failed) return ledgerOpenFail(sent.failed);
+      const read = O.readOpened(sent.status, sent.body, { network: target.network, coin: target.coin, owner });
+      if (!read.ok) return ledgerOpenFail(read.code);
+      if (read.accountId !== id) return ledgerOpenFail('bad-response');
+      const now = new Date().toISOString();
+      await updateLedgerOpenings(owner, (list) => {
+        const at = list.find((r) => r.id === id);
+        if (at) { at.lastProblem = null; at.lastAttemptAt = now; return { list, result: true }; }
+        list.push({ id, domain: target.domain, network: target.network, coin: target.coin, ownerPublicKey: owner, openedAt: now, existedBefore: !read.created, lastAttemptAt: null, lastProblem: null });
+        return { list, result: true };
+      });
+      await logActivity('ledger', (read.created ? 'Opened an empty ' : 'Found an existing ') + target.coin + ' ledger account at ' + target.domain + '; no credential collected yet');
+      return { ok: true, id, created: read.created };
+    } catch (err) {
+      return ledgerOpenFail(ledgerProblemCode(err));
+    } finally {
+      ledgerOpenEnd(id);
+    }
+  }
+
+  // Step 2, for an account step 1 noted. `opts.approved` must be true. Returns { ok: true, id } or
+  // { ok: false, code }. On a failure the note stays and the account is untouched, so asking again
+  // is always safe.
+  async function requestLedgerCredential(accountId, opts) {
+    const O = ledgerOpenModule();
+    await ledgerExperimentalReady;
+    const identity0 = await getIdentity();
+    const owner0 = identity0 && ledgerOwnerKeyOrNull(identity0);
+    if (!owner0) return ledgerOpenFail(identity0 ? 'wrong-identity' : 'locked');
+    const noted = (await readLedgerOpenings(owner0, identity0)).list.find((r) => r.id === accountId);
+    if (!noted) return ledgerOpenFail('unknown');
+    const pre = await ledgerOpenPreflight({ domain: noted.domain, coin: noted.coin }, opts && opts.approved);
+    if (!pre.ok) return pre;
+    const { owner, target, urls, id } = pre;
+    if (id !== accountId || noted.ownerPublicKey !== owner) return ledgerOpenFail('wrong-identity');
+    if (ledgerOpenFlights.has(id)) return ledgerOpenFail('busy');
+    const flight = ledgerOpenBegin(id, 'issue');
+
+    const record = (code) => noteLedgerOpening(owner, id, (r) => { r.lastProblem = code; r.lastAttemptAt = new Date().toISOString(); });
+    let fail;
+    try {
+      const held = await readLedgerList(owner, pre.identity);
+      if (held.unreadable) return ledgerOpenFail('locked');
+      if (held.list.some((r) => r.id === id)) {
+        await updateLedgerOpenings(owner, (list) => ({ list: list.filter((r) => r.id !== id), result: true }));
+        return { ok: true, id, alreadyHeld: true };
+      }
+      const nowMs = Date.now();
+      const listing = O.listingPayload(target, ledgerOpenNonce(), O.isoSeconds(nowMs));
+      const intent = O.issuePayload(target, ledgerOpenNonce(), O.isoSeconds(nowMs), listing.nonce);
+      const allow = { audiences: [urls.accounts, urls.issue], proofFormats: O.PROOF_FORMATS, types: [O.TYPES.accounts, O.TYPES.issue] };
+      const listingProof = await signLedgerPayload(listing, allow);
+      const intentProof = await signLedgerPayload(intent, allow);
+      if (!listingProof || !intentProof || listingProof.publicKey !== owner || intentProof.publicKey !== owner) return ledgerOpenFail('wrong-identity');
+      const body = {
+        payload: intent,
+        proof: { signerRole: 'raw-ecdsa', publicKey: intentProof.publicKey, signature: intentProof.signature },
+        existence: { payload: listing, proof: { publicKey: listingProof.publicKey, signature: listingProof.signature } }
+      };
+      const sent = await ledgerOpenPost(flight, urls.issue, body);
+      if (sent.failed) { fail = sent.failed; }
+      else {
+        const read = O.readIssued(sent.status, sent.body);
+        if (!read.ok) fail = read.code;
+        else if (!ledgerCore().validateAccountCredential(read.credential).ok || !O.credentialMatches(read.credential, { id, domain: target.domain, network: target.network, coin: target.coin, owner })) fail = 'credential-invalid';
+        else {
+          try {
+            // The issuer's key and revocation list are fetched and checked inside; nothing is stored unless they pass.
+            await addLedgerAccount(read.credential, { allowNetwork: true });
+          } catch (err) {
+            // A reference stored by an earlier attempt that was cut short counts as collected.
+            const alreadyThere = err && err.code === 'unknown' && /already in your wallet/.test(err.message);
+            if (!alreadyThere) fail = err && (err.code === 'credential-invalid' || err.code === 'locked') ? err.code : 'unknown';
+          }
+        }
+      }
+    } catch (err) {
+      fail = ledgerProblemCode(err);
+    } finally {
+      ledgerOpenEnd(id);
+    }
+    if (fail) {
+      if (fail !== 'cancelled') await record(fail);
+      return ledgerOpenFail(fail);
+    }
+    await updateLedgerOpenings(owner, (list) => ({ list: list.filter((r) => r.id !== id), result: true }));
+    await logActivity('ledger', 'Collected an issuer-signed ' + target.coin + ' account reference from ' + target.domain + '; no balance looked up');
+    return { ok: true, id };
+  }
+
+  // Forgets a note about an opened account. Nothing is sent: the ledger account stays open, and
+  // opening it again later finds it and notes it afresh.
+  async function forgetLedgerOpening(accountId) {
+    const identity = await activeLedgerOwner();
+    const flight = ledgerOpenFlights.get(accountId);
+    if (flight) flight.controller.abort();
+    await updateLedgerOpenings(ledgerOwnerKeyOf(identity), (list) => ({ list: list.filter((r) => r.id !== accountId), result: true }));
+    await logActivity('ledger', 'Forgot a pending ledger account note (the ledger account itself is unchanged)');
+    return { forgotten: true, ledgerTouched: false };
+  }
+
+  // What the opening panel shows: the identities, what can be opened, whether it can be done
+  // now and why not, the explanations to read before each step, and the accounts that are open
+  // but have no reference yet.
+  async function getLedgerOpening() {
+    const O = ledgerOpenModule();
+    const core = ledgerCore();
+    await ledgerExperimentalReady;
+    const mode = await getIdentityMode();
+    const identity = await getIdentity();
+    const local = await chrome.storage.local.get(['atlasIdentity', 'atlasWebAuthnIdentity']);
+    const choice = (kind, blob) => {
+      if (!blob) return null;
+      const key = core.canonicalOwnerKey(blob.publicKey);
+      const format = kind === 'webauthn' ? 'webauthn-es256' : 'raw-ecdsa-p256';
+      return { mode: kind, short: core.shortKey(key || blob.publicKey), active: mode === kind, proofFormat: format, supported: O.PROOF_FORMATS.includes(format), usableKey: !!key };
+    };
+    const identities = [choice('local', local.atlasIdentity), choice('webauthn', local.atlasWebAuthnIdentity)].filter(Boolean);
+    const experimental = !!ledgerExperimentalRegistered.labs29;
+    const owner = identity ? ledgerOwnerKeyOrNull(identity) : null;
+    let reason = null;
+    if (!experimental) reason = 'experimental-off';
+    else if (!identity) reason = mode ? 'locked' : 'no-identity';
+    else if (!owner) reason = 'wrong-identity';
+    else if (!O.PROOF_FORMATS.includes(ledgerProofFormat(identity))) reason = 'proof-unsupported';
+    let pending = [];
+    let unreadable = false;
+    if (identity && owner) {
+      const read = await readLedgerOpenings(owner, identity);
+      unreadable = read.unreadable;
+      pending = read.list.map((r) => {
+        const flight = ledgerOpenFlights.get(r.id) || null;
+        return {
+          id: r.id, domain: r.domain, coin: r.coin, network: r.network, openedAt: r.openedAt, existedBefore: !!r.existedBefore,
+          lastAttemptAt: r.lastAttemptAt, problem: r.lastProblem ? { code: r.lastProblem, text: core.problemText(r.lastProblem) } : null,
+          connecting: !!flight, step: flight ? flight.step : null, explainIssue: O.explainIssue(O.targetFor(r.domain, r.coin))
+        };
+      });
+    }
+    return {
+      available: reason === null, reason, reasonText: reason === 'no-identity' ? 'Set up your wallet first.' : (reason ? core.problemText(reason) : null),
+      identities, targets: O.targets().map((t) => Object.assign({}, t, { urls: O.urlsFor(t.domain), explainOpen: O.explainOpen(t) })), pending, unreadable
+    };
+  }
+
   // ---- experimental interfaces ----
   //
   // An adapter for a prototype ledger service is built in but stays off. It is registered only
@@ -8730,6 +9005,7 @@ const AtlasWallet = (() => {
         if (adapter) ledgerExperimentalRegistered[name] = { contract: adapter.contract, unregister: registerLedgerAdapter(adapter) };
       } else if (!on && have) {
         for (const flight of ledgerInFlight.values()) if (flight.contract === have.contract) flight.controller.abort();
+        for (const flight of ledgerOpenFlights.values()) if (flight.contract === have.contract) flight.controller.abort();
         have.unregister();
         delete ledgerExperimentalRegistered[name];
       }
@@ -8884,6 +9160,8 @@ const AtlasWallet = (() => {
     registerLedgerAdapter, clearLedgerAdapters, getLedgerAdapters, onLedgerChanged, getLedgerExperimental, setLedgerExperimental,
     getLedgerOverview, verifyLedgerCredential, addLedgerAccount, removeLedgerAccount,
     grantLedgerConsent, revokeLedgerConsent, approveLedgerEndpoint, setLedgerBackgroundSync,
-    refreshLedgerAccount, refreshLedgerAccountsOnOpen, runLedgerBackgroundSync, rediscoverLedgerAccounts
+    refreshLedgerAccount, refreshLedgerAccountsOnOpen, runLedgerBackgroundSync, rediscoverLedgerAccounts,
+    // Opening an account (see "opening an account"): two separately approved steps.
+    getLedgerOpening, openLedgerAccount, requestLedgerCredential, forgetLedgerOpening
   };
 })();

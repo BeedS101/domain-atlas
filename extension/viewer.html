@@ -480,6 +480,10 @@
   #ledgerSubscreen button:focus-visible, #ledgerSubscreen input:focus-visible, #ledgerSubscreen textarea:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
   #ledgerSubscreen label.check-row { color: #cfdadf; }
   #ledgerSubscreen .ledger-verify { display: inline-block; font-size: 11px; margin: 2px 0; padding: 1px 8px; border-radius: 10px; border: 1px dashed #e0b84c; color: #f0d58a; }
+  #ledgerSubscreen .ledger-open-fieldset { border: 1px solid #2c3c44; border-radius: 6px; margin: 8px 0; padding: 6px 10px; }
+  #ledgerSubscreen .ledger-open-fieldset legend { font-size: 12px; color: #a9b8bf; padding: 0 4px; }
+  #ledgerSubscreen .ledger-open-label { display: block; font-size: 12px; color: #a9b8bf; margin-top: 6px; }
+  #ledgerSubscreen .ledger-pending { border-style: dashed; margin-top: 8px; }
   #ledgerSubscreen .ledger-experimental { margin-top: 14px; }
   #ledgerSubscreen .ledger-experimental summary { cursor: pointer; font-size: 12px; color: #a9b8bf; }
   #ledgerSubscreen .ledger-experimental summary:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
@@ -2103,6 +2107,16 @@
             </div>
             <div class="subhead" id="ledgerAccountsHeading">Accounts</div>
             <div id="ledgerAccountsList" class="item-list" aria-labelledby="ledgerAccountsHeading"></div>
+            <div class="subhead" id="ledgerOpenHeading">Open a ledger account (experimental)</div>
+            <div id="ledgerOpenPanel" class="info-card" role="group" aria-labelledby="ledgerOpenHeading">
+              <p class="meta">Opens an empty account at a test ledger and collects an issuer-signed reference to it, in two steps that you approve one at a time. This is an experimental test service: nothing is minted, deposited or spent, and no balance is looked up unless you separately allow it afterwards. Needs the experimental interface below to be on.</p>
+              <fieldset id="ledgerOpenIdentities" class="ledger-open-fieldset"><legend>Identity to open the account for</legend></fieldset>
+              <label class="ledger-open-label" for="ledgerOpenTarget">Coin</label>
+              <select id="ledgerOpenTarget" aria-describedby="ledgerOpenWhy"></select>
+              <div id="ledgerOpenWhy" class="meta" role="status" aria-live="polite"></div>
+              <div class="btn-row" style="margin-top:8px;"><button id="ledgerOpenBtn" type="button">Open account…</button></div>
+              <div id="ledgerOpenPending" class="item-list" aria-label="Opened accounts waiting for a reference"></div>
+            </div>
             <div class="subhead">Add an account</div>
             <textarea id="ledgerCredentialInput" aria-label="Ledger account credential" placeholder="Paste a ledger-account credential (JSON) from the issuing domain…"></textarea>
             <div class="btn-row" style="margin-top:8px;"><button id="ledgerAddBtn" type="button">Check and add…</button></div>
@@ -2858,6 +2872,7 @@
   <script src="call-protocol.js"></script>
   <script src="ledger-core.js"></script>
   <script src="ledger-labs29.js"></script>
+  <script src="ledger-open.js"></script>
   <script src="wallet.js"></script>
   <script src="gltf-mini.js"></script>
   <script src="viewer.js"></script>

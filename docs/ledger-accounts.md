@@ -6,6 +6,9 @@ live testing has been approved. Nothing in this repository has read a real balan
 The issuer in this repository can sign account references through an **experimental endpoint that
 is off unless the operator enables it** (see "Issuing account references"); nothing has issued one
 on a live site.
+The Ledger tab can walk a person through opening an empty account and collecting that reference
+(see "Opening an account from the wallet"). It is part of the same experimental interface, so it is
+unavailable until the person turns that interface on, and it has not been run against a live site.
 
 This document keeps three things apart, and says which one each statement is about:
 
@@ -495,9 +498,8 @@ signature.
 
 ### What it does not do
 
-The wallet does not request these references yet and has no screen for them. The wallet will not
-sign an `atlas.ledger.account.issue` payload either (it signs `atlas.ledger.*` only for an
-adapter's own scoped call), so the wallet-side half is still to be built. The issuer cannot revoke
+The wallet asks for these references only through the opening workflow below, never in the
+background. The issuer cannot revoke
 one account reference without revoking that account ID for good, because the ID is deterministic.
 There is no signed existence receipt from the ledger: the issuer trusts the ledger's answer over
 TLS to its own domain, the same trust a balance has today.
@@ -530,6 +532,88 @@ Nothing below has been done on a live site.
 Open: whether the live hosts allow a server to request its own HTTPS address; the per-client rate
 limit sees one shared address behind some proxies; and a signed existence receipt from the ledger.
 
+## Opening an account from the wallet (experimental)
+
+The Ledger tab has an **Open a ledger account (experimental)** panel. It is the wallet half of the
+issuance endpoint above, and it never runs on its own. Code: `extension/ledger-open.js` (what may
+be asked of whom, the exact signed messages, how answers are read; no network, storage or
+signing), and the "opening an account" section of `extension/wallet.js`.
+
+### What the person sees and decides
+
+1. **Identity.** The panel lists the identities on the device (password and passkey) and marks the
+   one in use. Choosing the other one switches to it, exactly as the existing identity switch does.
+   A passkey identity is shown as unusable here, and nothing is asked of it: the test ledger and
+   issuer can check only a raw P-256 proof, so the wallet refuses before any prompt or request
+   (`proof-unsupported`).
+2. **Coin.** One target is listed today: GOPH on `evtec.co.za`. A coin or host that is not in the
+   table in `ledger-open.js` is refused before anything is signed.
+3. **Availability.** The panel is unavailable, with the reason in words, until the experimental
+   Labs 29 interface is turned on (it is off by default), and while the wallet is locked.
+4. **Step 1, open.** The person is told the destination domain and exact address, that the service
+   is experimental, what is sent (one signed request naming network, coin and public key), and what
+   is not (no minting, deposit or spend, no balance lookup, no credential yet). Only after
+   approving does the wallet send it.
+5. **Step 2, reference.** A separate question names the issuer address and the Labs 31 address the
+   issuer will relay to, says the issuing service may be switched off, and says the signature will
+   be checked. Only after approving does the wallet send it.
+6. **Balance.** Neither step looks up a balance. The collected reference is stored like any other
+   added reference: no permission to contact anything, no balance, background checks off. The
+   existing **Allow lookups** question, per account, is the only way a balance is fetched, and the
+   existing label *Reported — Not Cryptographically Verified* is the only way one is shown.
+
+### What is signed and sent
+
+All signing happens inside the wallet, by the identity in use, through the same internal function
+the Labs 29 adapter uses. That function checks the message's `audience` against an exact list, its
+`type` against the three types of this workflow (`atlas.ledger.account.open`,
+`atlas.ledger.accounts`, `atlas.ledger.account.issue`) and the kind of proof against what the
+service can check. It is not exported, and the generic signer that the website bridge reaches
+still refuses any payload containing `atlas.ledger.`.
+
+| Step | Request | Body |
+| --- | --- | --- |
+| 1 | `POST https://<domain>/chain-labs/account30.php?action=open` (Labs 30) | `{payload: {type, v, audience, network, coin, nonce, issuedAt}, proof: {publicKey, signature}}` |
+| 2 | `POST https://<domain>/atlas/ledger/account-credential` (the issuer) | `{payload: {…, existenceNonce}, proof: {signerRole: "raw-ecdsa", publicKey, signature}, existence: {payload: <Labs 31 listing request>, proof: {publicKey, signature}}}` |
+
+Each request goes through a fetch limited to its one exact address: no redirects, no cookies, no
+referrer, a 20 second limit. Nonces are 16 random bytes in hex, times are written in whole seconds,
+and every attempt makes new ones. The wallet does not call Labs 31 itself; the listing request it
+signs travels inside the issuance request and the issuer relays it. Switching the experimental
+interface off cancels a request in flight.
+
+### What is kept, and partial failure
+
+Step 1 is idempotent at the ledger: Core answers `account-opened` (201) or `account-exists` (200)
+and never changes an existing balance. The wallet checks that the answer is for this network, coin
+and owner and that the account ID is the derived one, ignores whatever quantity the answer carries,
+and writes a **note** that the account is open (`atlasLedgerOpenings`, per owner, encrypted at rest
+for password identities, never a balance).
+
+Step 2 verifies the credential before collecting it: its shape (no balance fields), that it is for
+the account asked for (id, domain, network, coin, owner), then the established issuer key and the
+revocation document of the issuing domain, through the same check as **Check and add**. Only then
+is it stored and the note removed. If anything fails the note stays with the reason, nothing is
+stored, and **Try again** repeats only step 2, with fresh nonces. It does not open the account
+again, so nothing at the ledger is recreated or reset. The cases that matter:
+
+- the issuer is off (`issuance-off`, 404 `disabled`): the account stays open;
+- the issuer or ledger is unavailable or refuses: the account stays open;
+- the issuer's answer fails verification, is for another key, or carries a balance
+  (`credential-invalid`): not stored;
+- the issuer has revoked the account ID (`account-revoked`): not stored, and it will not be signed again;
+- **Forget this note** removes only the note on this device. Opening again later finds the account
+  (`account-exists`) and notes it afresh.
+
+If the wallet already holds a reference to the account, opening is refused locally
+(`already-held`) before any request.
+
+### What it does not do
+
+No minting, deposit, payment or spending. It does not enable the issuer service, create a
+configuration file or contact any host other than the one in the table. It does not run in the
+background. It does not change what Core or Mobile do. Notes and references are not in backups.
+
 ## Current experimental implementation versus the intended contract
 
 What the wallet cannot do with Labs 29 today, and where each gap belongs. "Core" is the Chainblock
@@ -546,7 +630,7 @@ Labs repository; "issuer" is the domain's PHP/Node issuer in this repository.
 | Replay | A repeated nonce is accepted within two minutes | Nonce store; repeated nonce refused | Core |
 | Errors | Codes on five failures; the clock, audience, network and shape failures carry none | A code on every failure, `stale-request` with `serverTime` | Core |
 | Balance response | `{amount, decimals, asOf}` over TLS only, `asOf` is server time | Signed receipt with request binding and state reference | Core, issuer |
-| Account credential | Issuer-signed, derived ID, through the experimental endpoint above (off by default; not yet requested by the wallet) | Same, plus signed discovery and receipts | Issuer, with Core deciding when an account exists |
+| Account credential | Issuer-signed, derived ID, through the experimental endpoint above (off by default; requested by the wallet only through the opening workflow, after two approvals) | Same, plus signed discovery and receipts | Issuer, with Core deciding when an account exists |
 | Account creation | No account is created or funded; Labs 26 allocations are not credited | Ledger-authoritative; creation separate from allocation | Core |
 | Rediscovery | No listing operation | Signed `accounts` operation returning credentials | Core, issuer |
 
@@ -556,7 +640,9 @@ The amount format already agrees: an integer string of minor units with the coin
 
 Asset signing, Gold, Trading Station, Post Office, Collectibles, Documents, issuer compatibility,
 backup and restore, and the manifest permissions. Backups do not carry ledger references; the
-recovery paths are rediscovery and the copied credential. Edits to existing logic are the extra
+recovery paths are rediscovery and the copied credential. Opening an account added an optional
+`types` list to the internal ledger signer (the existing adapters do not pass one), a panel in the
+Ledger tab, and the new module. Edits to existing logic are the extra
 refusal in `signWithSelf`, the derived-ID check in `verifyLedgerCredential` (Labs 29 networks only),
 and, in `issuer-server/server.js`, one `require`, two file-path constants and one route that does
 nothing unless the issuance config file enables it. The PHP issuer gained new files only. No
@@ -606,12 +692,28 @@ existing endpoint, key, credential or store is read or written differently.
   issuer the way the wallet would from the live site (a throwaway certificate, local only):
   valid, tampered, revoked, key-window, derived-ID mismatch.
 
+- `node test/manual-ledger-open-core.js`: the opening module alone: the target table, the exact
+  messages against the services' field lists, the explanations, every answer shape and code, and
+  that the module has no network, storage or signing calls.
+- `xvfb-run -a node test/manual-ledger-open-wallet.js`: the workflow inside the extension, against
+  the real Node and PHP issuers over a local HTTPS front, with the stand-in ledger and, with
+  `CORE_LABS_DIR` set, Core's real `account30.php`, `accounts31.php` and `ledger29.php` under PHP:
+  gates (off by default, approval, unsupported targets), the bridge refusing to sign these types,
+  both steps and exactly what is sent and signed, re-opening leaving a seeded balance alone, the
+  issuer off then on (retry without re-opening), tampered, foreign and balance-carrying
+  credentials not stored, revocation, forgetting a note, a lying or absent ledger, a passkey
+  identity making no request and no authenticator call, and the separate balance permission.
+- `xvfb-run -a node test/manual-ledger-open-tab.js`: the panel through the real extension page:
+  identity and coin selection, both questions and their text, cancelling, the issuer-off failure
+  and retry, the collected card with no balance and background checks off, forgetting, and the
+  passkey identity.
+
 Apart from the real-file test above, the ledger in these tests is a **simulation**. Passing them
 shows the wallet's own rules work. They say nothing about the live sites or any funded account.
 The real-file test signs with Node's WebCrypto using a copy of the wallet's canonical-JSON rule,
 not with the loaded extension, so it checks the format agreement and not the extension's code. The
-issuance tests sign the owner's requests the same way, for the same reason: the wallet does not sign
-them yet.
+issuance tests sign the owner's requests the same way. The opening tests are the ones where the
+loaded extension signs, and the services verify what it sent.
 
 The stand-in service and the simulated passkey identity (a stored key with no authenticator, where
 any attempt to use it is counted) are test doubles. Nothing here has contacted the live sites.

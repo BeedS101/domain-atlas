@@ -7,10 +7,9 @@
 // certificate, accepted for this run only) that passes requests to the issuer under test. The ledger
 // is the stand-in unless CORE_LABS_DIR names Core's files, in which case the real ones run.
 //
-// What it does not do: the wallet cannot sign an issuance request yet (it refuses to sign
-// atlas.ledger payloads outside an adapter's scoped call, and collecting these references is not
-// built), so the owner in the issuer tests is a key held by the test. The add-to-wallet path is
-// therefore shown with the test issuer double, whose credentials are signed for the wallet's own key.
+// What it does not do: the owner in the issuer tests is a key held by the test, since signing for
+// the wallet's own key is exercised in manual-ledger-open-wallet.js. The add-to-wallet path here is
+// shown with the test issuer double, whose credentials are signed for the wallet's own key.
 //
 // Run: xvfb-run -a node test/manual-ledger-issuance-wallet.js
 'use strict';

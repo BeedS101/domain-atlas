@@ -8221,6 +8221,12 @@ const ledgerFindDomainInput = document.getElementById('ledgerFindDomainInput');
 const ledgerFindBtn = document.getElementById('ledgerFindBtn');
 const ledgerFindNoteEl = document.getElementById('ledgerFindNote');
 const ledgerExperimentalListEl = document.getElementById('ledgerExperimentalList');
+const ledgerOpenIdentitiesEl = document.getElementById('ledgerOpenIdentities');
+const ledgerOpenTargetSel = document.getElementById('ledgerOpenTarget');
+const ledgerOpenWhyEl = document.getElementById('ledgerOpenWhy');
+const ledgerOpenBtn = document.getElementById('ledgerOpenBtn');
+const ledgerOpenPendingEl = document.getElementById('ledgerOpenPending');
+let ledgerOpening = null; // the last getLedgerOpening() answer
 
 let ledgerPendingAction = null;
 let ledgerRenderSeq = 0;
@@ -8355,7 +8361,7 @@ async function renderLedger() {
 
   ledgerAccountsListEl.textContent = '';
   if (!ov.accounts.length) {
-    ledgerAccountsListEl.appendChild(lel('div', { className: 'empty-note', textContent: ov.identity ? 'No ledger accounts yet. Add one below, or find the ones you already have at an issuing domain.' : '' }));
+    ledgerAccountsListEl.appendChild(lel('div', { className: 'empty-note', textContent: ov.identity ? 'No ledger accounts yet. Open one above, add one below, or find the ones you already have at an issuing domain.' : '' }));
   } else {
     ov.accounts.forEach((a) => ledgerAccountsListEl.appendChild(ledgerCard(a)));
   }
@@ -8367,6 +8373,7 @@ async function renderLedger() {
   if (ledgerFindDomainInput) ledgerFindDomainInput.disabled = !ov.identity || cannotFind;
   if (ledgerFindNoteEl) ledgerFindNoteEl.textContent = noAdapter ? 'Not available yet: this wallet has no ledger service interface installed, so it cannot ask a ledger for balances or accounts.' : (!ov.canFind ? 'Not available yet: the interface installed can read a balance but has no service for finding accounts again.' : 'Asks the domain which accounts belong to the identity in use, proving it is yours by signing.');
   renderLedgerExperimental(ov.experimental || []);
+  await renderLedgerOpen(seq);
   if (focused) { const again = ledgerSubscreen.querySelector('[data-focus-key="' + focused + '"]'); if (again && !again.disabled) again.focus(); }
 }
 
@@ -8392,6 +8399,80 @@ function renderLedgerExperimental(list) {
   });
   if (focused) { const again = ledgerExperimentalListEl.querySelector('[data-focus-key="' + focused + '"]'); if (again && !again.disabled) again.focus(); }
 }
+
+// Opening a ledger account: pick the identity and coin, read what will be sent where, approve
+// the opening; then, separately, approve asking the issuer for the signed reference. Both
+// steps go through the wallet, which signs for the identity in use and for nothing else.
+function ledgerOpenReport(result, doneText) {
+  if (result && result.ok) { ledgerSay(doneText); return; }
+  ledgerSay(AtlasLedgerCore.problemText(result && result.code));
+}
+
+async function ledgerSwitchIdentity(mode) {
+  try {
+    await AtlasWallet.setIdentityMode(mode);
+    await routeWalletScreen();
+    showInventorySubtab('ledgerSubscreen');
+    await renderLedger();
+  } catch (err) { ledgerSay('Switch failed: ' + (err && err.message)); await renderLedger(); }
+}
+
+function ledgerPendingCard(p) {
+  const key = (suffix) => 'open-' + p.id + '-' + suffix;
+  const card = lel('div', { className: 'info-card ledger-pending', role: 'group', 'aria-label': p.coin + ' at ' + p.domain + ' waiting for a reference', 'data-pending-id': p.id });
+  card.appendChild(lel('div', { className: 'name', textContent: p.coin + ' at ' + p.domain + ': account open, no reference yet' }));
+  card.appendChild(lel('div', { className: 'meta', textContent: (p.existedBefore ? 'The ledger already had this account. ' : 'Opened empty on ' + ledgerTime(p.openedAt) + '. ') + 'Nothing is held here yet and no balance has been looked up.' }));
+  if (p.connecting) card.appendChild(lel('div', { className: 'ledger-detail', role: 'status', textContent: p.step === 'issue' ? 'Asking ' + p.domain + ' for the reference…' : 'Talking to ' + p.domain + '…' }));
+  if (p.problem) card.appendChild(lel('div', { className: 'ledger-problem', role: 'status', textContent: p.problem.text }));
+  const actions = lel('div', { className: 'item-actions' });
+  const request = lel('button', { type: 'button', textContent: p.problem ? 'Try again…' : 'Request reference…', 'data-focus-key': key('request'), disabled: p.connecting || !(ledgerOpening && ledgerOpening.available) });
+  request.addEventListener('click', () => ledgerAsk(p.explainIssue, 'Request reference', () => ledgerAct(async () => {
+    ledgerOpenReport(await AtlasWallet.requestLedgerCredential(p.id, { approved: true }), 'Reference collected. It holds no balance and nothing has been looked up. Use Allow lookups on it if you want to check the balance.');
+  })));
+  actions.appendChild(request);
+  const forget = lel('button', { type: 'button', textContent: 'Forget this note…', className: 'danger-btn', 'data-focus-key': key('forget') });
+  forget.addEventListener('click', () => ledgerAsk('Forget this note about your ' + p.coin + ' account at ' + p.domain + '? Only the note on this device is removed. The account stays open at the ledger and nothing is sent.', 'Forget', () => ledgerAct(() => AtlasWallet.forgetLedgerOpening(p.id), 'Note forgotten. The ledger account is unchanged.'), true));
+  actions.appendChild(forget);
+  card.appendChild(actions);
+  return card;
+}
+
+async function renderLedgerOpen(seq) {
+  if (!ledgerOpenIdentitiesEl) return;
+  let o;
+  try { o = await AtlasWallet.getLedgerOpening(); } catch (err) { if (ledgerOpenWhyEl) ledgerOpenWhyEl.textContent = 'This section could not be loaded: ' + (err && err.message); return; }
+  if (seq !== undefined && seq !== ledgerRenderSeq) return;
+  ledgerOpening = o;
+  const picked = ledgerOpenTargetSel.value;
+  ledgerOpenIdentitiesEl.querySelectorAll('div, label').forEach((n) => n.remove());
+  if (!o.identities.length) ledgerOpenIdentitiesEl.appendChild(lel('div', { className: 'meta', textContent: 'No wallet identity yet.' }));
+  o.identities.forEach((i) => {
+    const label = lel('label', { className: 'check-row' });
+    const radio = lel('input', { type: 'radio', id: 'ledger-open-id-' + i.mode, 'data-focus-key': 'open-id-' + i.mode, name: 'ledgerOpenIdentity', checked: i.active });
+    radio.addEventListener('change', () => { if (radio.checked && !i.active) ledgerSwitchIdentity(i.mode); });
+    label.appendChild(radio);
+    label.appendChild(lel('span', { textContent: (i.mode === 'webauthn' ? 'Passkey identity ' : 'Password identity ') + i.short + (i.active ? ' (in use)' : '') + (i.supported ? '' : ': the test ledger cannot check passkey proofs yet, so no request would be made') }));
+    ledgerOpenIdentitiesEl.appendChild(label);
+  });
+  ledgerOpenTargetSel.textContent = '';
+  o.targets.forEach((t) => ledgerOpenTargetSel.appendChild(lel('option', { value: t.domain + '|' + t.coin, textContent: t.label })));
+  if (picked) ledgerOpenTargetSel.value = picked;
+  ledgerOpenWhyEl.textContent = o.available ? 'Nothing is sent until you approve.' : (o.reasonText || '');
+  ledgerOpenBtn.disabled = !o.available;
+  ledgerOpenPendingEl.textContent = '';
+  if (o.unreadable) ledgerOpenPendingEl.appendChild(lel('div', { className: 'ledger-problem', textContent: 'The opened accounts waiting for a reference cannot be read right now. Nothing was changed.' }));
+  o.pending.forEach((p) => ledgerOpenPendingEl.appendChild(ledgerPendingCard(p)));
+}
+
+ledgerOpenBtn && ledgerOpenBtn.addEventListener('click', () => {
+  ledgerSay('');
+  const t = ledgerOpening && ledgerOpening.targets.find((x) => x.domain + '|' + x.coin === ledgerOpenTargetSel.value);
+  if (!t) { ledgerSay(AtlasLedgerCore.problemText('unsupported-target')); return; }
+  ledgerAsk(t.explainOpen, 'Open account', () => ledgerAct(async () => {
+    const r = await AtlasWallet.openLedgerAccount({ domain: t.domain, coin: t.coin }, { approved: true });
+    ledgerOpenReport(r, r.created ? 'Account opened, empty. Request its reference below when you are ready.' : 'The ledger already had this account. Request its reference below when you are ready.');
+  }));
+});
 
 // Opening the tab draws what is saved, then looks up only the accounts already allowed.
 async function openLedgerTab() {

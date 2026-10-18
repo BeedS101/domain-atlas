@@ -96,7 +96,41 @@ const freePort = () => new Promise((resolve) => { const s = http.createServer().
 // A STAND-IN for Core's listing operation (accounts31.php). Same envelope checks, same answer
 // shape; `state.mode` makes it lie, fail or stall.
 async function startCoreStandin() {
-  const state = { accounts: new Map(), calls: [], mode: 'ok' };
+  // `openMode` changes what the open operation answers; `balances` is what the ledger holds per
+  // account ID, which opening must never touch.
+  const state = { accounts: new Map(), calls: [], mode: 'ok', openMode: 'ok', balances: new Map(), nonces: new Set() };
+  // The documented Labs 30 behaviour: a signed request opens an empty account, or finds the one
+  // that is there and leaves it alone.
+  async function openAccountOperation(raw, send) {
+    if (state.openMode === 'down') return send(503, 'unavailable');
+    let r; try { r = JSON.parse(raw); } catch (e) { return send(400, 'malformed-request'); }
+    const p = r && r.payload, pr = r && r.proof;
+    const fields = ['type', 'v', 'audience', 'network', 'coin', 'nonce', 'issuedAt'];
+    if (!p || !pr || Object.keys(r).length !== 2 || Object.keys(pr).sort().join() !== 'publicKey,signature' || Object.keys(p).sort().join() !== fields.slice().sort().join()) return send(400, 'malformed-request');
+    if (p.type !== 'atlas.ledger.account.open' || p.v !== 1) return send(400, 'malformed-request');
+    if (p.audience !== OPEN_URL) return send(401, 'wrong-audience');
+    if (p.network !== NETWORK) return send(400, 'unknown-network');
+    if (!['GOPH', 'MWC', 'PINX', 'SCPX'].includes(p.coin)) return send(404, 'unknown-coin');
+    if (!/^[a-f0-9]{32,64}$/.test(p.nonce)) return send(400, 'malformed-request');
+    if (Math.abs(Date.now() - Date.parse(p.issuedAt)) > 120000) return send(401, 'stale-request');
+    try {
+      const pub = await subtle.importKey('raw', Buffer.from(pr.publicKey, 'base64url'), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+      if (!(await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, Buffer.from(pr.signature, 'base64url'), new TextEncoder().encode(canonicalize(p))))) return send(401, 'bad-signature');
+    } catch (e) { return send(401, 'unsupported-proof'); }
+    if (state.nonces.has(pr.publicKey + p.nonce)) return send(409, 'replayed-request');
+    state.nonces.add(pr.publicKey + p.nonce);
+    const mine = state.accounts.get(pr.publicKey) || new Set();
+    const created = !mine.has(p.coin);
+    mine.add(p.coin); state.accounts.set(pr.publicKey, mine);
+    const id = derivedId(NETWORK, p.coin, pr.publicKey);
+    const answer = { accountId: id, network: NETWORK, coin: p.coin, coinId: 'c-' + p.coin.toLowerCase(), ownerKey: pr.publicKey, created, amount: '0', decimals: 6 };
+    if (state.openMode === 'wrong-owner') answer.ownerKey = 'A'.repeat(87);
+    if (state.openMode === 'wrong-id') answer.accountId = 'urn:atlas:ledger-account:' + '0'.repeat(64);
+    if (state.openMode === 'wrong-network') answer.network = 'chainblock-labs29-domain-atlas.co.za';
+    if (state.openMode === 'wrong-coin') answer.coin = 'MWC';
+    return send(created ? 201 : 200, created ? 'account-opened' : 'account-exists', answer);
+  }
+
   const server = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => { raw += c; });
@@ -110,6 +144,7 @@ async function startCoreStandin() {
       if (state.mode === 'huge') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ ok: true, pad: 'x'.repeat(200000) })); }
       if (state.mode === 'refuse401') return send(401, 'bad-signature');
       if (state.mode === 'refuse400') return send(400, 'malformed-request');
+      if (req.method === 'POST' && req.url === '/chain-labs/account30.php?action=open') return openAccountOperation(raw, send);
       if (req.method !== 'POST' || req.url !== '/chain-labs/accounts31.php?action=accounts') return send(404, 'unknown-operation');
       if (req.headers.host !== DOMAIN) return send(400, 'unknown-host');
       let r; try { r = JSON.parse(raw); } catch (e) { return send(400, 'malformed-request'); }
@@ -139,6 +174,10 @@ async function startCoreStandin() {
   return {
     kind: 'standin', port, state, base: 'http://127.0.0.1:' + port,
     async openAccount(owner, coin) { const l = state.accounts.get(owner.key) || new Set(); l.add(coin); state.accounts.set(owner.key, l); return { created: true }; },
+    // Puts a figure on an account (the test's own doing, not a wallet's): opening again must leave it.
+    async seedBalance(ownerKey, coin, units) { state.balances.set(derivedId(NETWORK, coin, ownerKey), units); },
+    async balanceOf(ownerKey, coin) { return state.balances.has(derivedId(NETWORK, coin, ownerKey)) ? state.balances.get(derivedId(NETWORK, coin, ownerKey)) : 0; },
+    holds: (ownerKey, coin) => !!(state.accounts.get(ownerKey) && state.accounts.get(ownerKey).has(coin)),
     callCount: () => state.calls.length,
     close: () => new Promise((r) => server.close(() => r()))
   };
@@ -178,6 +217,19 @@ async function startCoreReal(dir) {
       const r = await call(port, 'POST', '/chain-labs/account30.php?action=open', { payload, proof: { publicKey: owner.key, signature: await owner.sign(payload) } });
       if (r.status !== 201 && r.status !== 200) throw new Error('could not open the account: ' + r.text);
       return { created: r.status === 201 };
+    },
+    // Puts a figure on an account in the test's own copy of the ledger database.
+    async seedBalance(ownerKey, coin, units) {
+      php('$d=new PDO("sqlite:' + priv + '/ledger29.sqlite");$d->prepare("UPDATE accounts SET amount_units=? WHERE owner_key=? AND coin_id=?")->execute([' + Number(units) + ',"' + ownerKey + '","c-' + coin.toLowerCase() + '"]);');
+    },
+    async balanceOf(ownerKey, coin) {
+      const out = php('$d=new PDO("sqlite:' + priv + '/ledger29.sqlite");$q=$d->prepare("SELECT amount_units FROM accounts WHERE owner_key=? AND coin_id=?");$q->execute(["' + ownerKey + '","c-' + coin.toLowerCase() + '"]);$v=$q->fetchColumn();echo $v===false?"none":$v;');
+      return out === 'none' ? null : Number(out);
+    },
+    holds(ownerKey, coin) { return this.balanceOfSync(ownerKey, coin) !== null; },
+    balanceOfSync(ownerKey, coin) {
+      const out = php('$d=new PDO("sqlite:' + priv + '/ledger29.sqlite");$q=$d->prepare("SELECT amount_units FROM accounts WHERE owner_key=? AND coin_id=?");$q->execute(["' + ownerKey + '","c-' + coin.toLowerCase() + '"]);$v=$q->fetchColumn();echo $v===false?"none":$v;');
+      return out === 'none' ? null : Number(out);
     },
     callCount: () => calls.length,
     close: () => { front.close(); child.kill(); fs.rmSync(tmp, { recursive: true, force: true }); }
@@ -222,6 +274,10 @@ async function startIssuer(kind, core) {
     child = spawn('php', ['-S', '127.0.0.1:' + port, '-t', copy, '-d', 'auto_prepend_file=' + path.join(tmp, 'prepend.php'), path.join(copy, 'test-router.php')], { stdio: 'ignore', env: Object.assign({}, process.env, { PHP_CLI_SERVER_WORKERS: '4' }) });
     await waitFor(port, '/.well-known/atlas-key.json');
   }
+  // The key's validFrom has millisecond precision and a credential's issuedAt whole seconds, so a
+  // credential signed in the first second of a brand-new key would pre-date it. Real issuers have
+  // keys that are long established; the test waits the second out.
+  await new Promise((r) => setTimeout(r, 1100));
   issuer.enable = (over) => fs.writeFileSync(issuer.configPath, JSON.stringify(Object.assign({ enabled: true, domain: DOMAIN, coreBase: core ? core.base : undefined }, over || {})));
   issuer.disable = () => { try { fs.unlinkSync(issuer.configPath); } catch (e) { /* none */ } };
   issuer.keyDoc = () => JSON.parse(fs.readFileSync(issuer.keyDocPath, 'utf8'));
@@ -244,4 +300,4 @@ async function credentialSignatureValid(credential, keyDoc) {
   return subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, Buffer.from(credential.signature, 'base64url'), new TextEncoder().encode(canonicalize(payload)));
 }
 
-module.exports = { DOMAIN, NETWORK, OPERATION, ACCOUNTS_URL, REPO, newOwner, buildRequest, derivedId, canonicalize, b64, hex, iso, call, startCoreStandin, startCoreReal, startIssuer, credentialSignatureValid, freePort, waitFor };
+module.exports = { DOMAIN, NETWORK, OPERATION, ACCOUNTS_URL, OPEN_URL, REPO, newOwner, buildRequest, derivedId, canonicalize, b64, hex, iso, call, startCoreStandin, startCoreReal, startIssuer, credentialSignatureValid, freePort, waitFor };

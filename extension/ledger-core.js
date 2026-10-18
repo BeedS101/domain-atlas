@@ -240,6 +240,13 @@
     'credential-invalid': 'The issuer no longer vouches for this account reference.',
     'cancelled': 'The check was cancelled.',
     'busy': 'A check is already running for this account.',
+    'experimental-off': 'Turn on the experimental ledger interface first. It is off by default.',
+    'unsupported-target': 'This wallet does not open accounts for that coin and domain.',
+    'already-held': 'This wallet already holds a reference to that account.',
+    'issuance-off': 'The issuing domain is not issuing account references right now. Your account stays open; try again when it is.',
+    'issuer-unavailable': 'The issuing domain could not issue the reference right now. Your account stays open; try again later.',
+    'account-missing': 'The ledger has no such account yet. Open it first.',
+    'account-revoked': 'The issuing domain has revoked this account reference and will not issue it again.',
     'unknown': 'The check did not finish.'
   };
 
