@@ -44,6 +44,7 @@ importScripts('wallet.js');
 // and every other feature works (the call functions then report that calling is unavailable).
 try { importScripts('call-protocol.js'); } catch (err) { /* calling stays unavailable */ }
 try { importScripts('ledger-core.js'); } catch (err) { /* ledger accounts stay unavailable */ }
+try { importScripts('ledger-labs29.js'); } catch (err) { /* the experimental ledger interface stays unavailable */ }
 
 const TOOLBAR_ICON_ACTIVE = {
   16: 'icons/icon-16.png', 32: 'icons/icon-32.png',

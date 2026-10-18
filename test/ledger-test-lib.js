@@ -36,9 +36,10 @@ async function startIssuer() {
   const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const publicKey = b64url(new Uint8Array(await subtle.exportKey('raw', kp.publicKey)));
   const state = { revoked: [], endpoint: null, requests: [], keyValidFrom: '2026-01-01T00:00:00Z' };
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     state.requests.push(req.method + ' ' + req.url);
     const send = (obj, code) => { res.writeHead(code || 200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    if (state.handler && await state.handler(req, res, send)) return; // a test can answer more paths on the issuer's host
     if (req.url === '/.well-known/atlas-key.json') return send({ keys: [{ publicKey, validFrom: state.keyValidFrom, validUntil: null }] });
     if (req.url === '/.well-known/atlas-revocations.json') return send({ revoked: state.revoked.map((id) => ({ id })) });
     if (req.url === '/.well-known/atlas-ledger.json') return send({ endpoint: state.endpoint });
@@ -87,7 +88,7 @@ async function startLedger() {
       const pub = await subtle.importKey('raw', unb64(body.proof.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
       valid = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, unb64(body.proof.signature), new TextEncoder().encode(canonicalize(p)));
     } catch (e) { valid = false; }
-    if (!valid || p.audience !== origin) return send({ error: 'unauthorized' }, 401);
+    if (!valid || p.audience !== origin + req.url) return send({ error: 'unauthorized' }, 401);
     const owner = body.proof.publicKey;
     if (state.mode === 'garbage') return send({ amount: 'lots', decimals: 2 });
     if (req.url === '/balance' && p.type === 'atlas.ledger.balance') {
@@ -120,23 +121,25 @@ function installSimulatedAdapter(arg) {
     async discover(target, ctx) {
       const r = await ctx.fetch('http://' + target.issuerDomain + '/.well-known/atlas-ledger.json');
       const j = await r.json();
-      return { endpoint: j.endpoint };
+      return { operations: { balance: j.endpoint + '/balance', accounts: j.endpoint + '/accounts' } };
     },
-    async fetchBalance(target, endpoint, ctx) {
+    async fetchBalance(target, found, ctx) {
+      const url = found.operations.balance;
       if (arg.leakTo) {
         try { await ctx.fetch(arg.leakTo + '/leak'); globalThis.__leak = 'reached'; } catch (e) { globalThis.__leak = 'blocked:' + e.code; }
       }
-      const payload = { type: 'atlas.ledger.balance', v: 1, audience: endpoint, network: target.network, coin: target.coin, nonce: crypto.randomUUID(), issuedAt: new Date().toISOString() };
+      const payload = { type: 'atlas.ledger.balance', v: 1, audience: url, network: target.network, coin: target.coin, nonce: crypto.randomUUID(), issuedAt: new Date().toISOString() };
       const proof = await ctx.sign(payload);
-      const r = await ctx.fetch(endpoint + '/balance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload, proof }) });
+      const r = await ctx.fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload, proof }) });
       if (r.status === 401) throw Object.assign(new Error('unauthorized'), { code: 'unauthorized' });
       if (r.status === 404) throw Object.assign(new Error('not found'), { code: 'not-found' });
       return r.json();
     },
-    async listAccounts(target, endpoint, ctx) {
-      const payload = { type: 'atlas.ledger.accounts', v: 1, audience: endpoint, nonce: crypto.randomUUID(), issuedAt: new Date().toISOString() };
+    async listAccounts(target, found, ctx) {
+      const url = found.operations.accounts;
+      const payload = { type: 'atlas.ledger.accounts', v: 1, audience: url, nonce: crypto.randomUUID(), issuedAt: new Date().toISOString() };
       const proof = await ctx.sign(payload);
-      const r = await ctx.fetch(endpoint + '/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload, proof }) });
+      const r = await ctx.fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payload, proof }) });
       if (r.status === 401) throw Object.assign(new Error('unauthorized'), { code: 'unauthorized' });
       return (await r.json()).accounts;
     }

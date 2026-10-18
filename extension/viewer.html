@@ -479,6 +479,10 @@
   #ledgerSubscreen .ledger-confirm { border-color: #e0b84c; margin: 8px 0; }
   #ledgerSubscreen button:focus-visible, #ledgerSubscreen input:focus-visible, #ledgerSubscreen textarea:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
   #ledgerSubscreen label.check-row { color: #cfdadf; }
+  #ledgerSubscreen .ledger-verify { display: inline-block; font-size: 11px; margin: 2px 0; padding: 1px 8px; border-radius: 10px; border: 1px dashed #e0b84c; color: #f0d58a; }
+  #ledgerSubscreen .ledger-experimental { margin-top: 14px; }
+  #ledgerSubscreen .ledger-experimental summary { cursor: pointer; font-size: 12px; color: #a9b8bf; }
+  #ledgerSubscreen .ledger-experimental summary:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
 
   .settings-category { border-bottom: 1px solid #2c3c44; margin-top: 4px; }
   .settings-category:first-child { margin-top: 0; }
@@ -2106,6 +2110,11 @@
             <input type="text" id="ledgerFindDomainInput" aria-label="Issuing domain" placeholder="Issuing domain, e.g. example.com" autocomplete="off">
             <div class="btn-row" style="margin-top:8px;"><button id="ledgerFindBtn" type="button">Find my accounts…</button></div>
             <div id="ledgerFindNote" class="meta" style="margin-top:6px;"></div>
+            <details id="ledgerExperimental" class="ledger-experimental">
+              <summary>Experimental interfaces (testing only)</summary>
+              <p class="meta">These read balances from prototype ledger services. Their answers are not signed and are not final or spendable. They are off, and each account still needs its own permission.</p>
+              <div id="ledgerExperimentalList"></div>
+            </details>
           </div>
         </div>
       </div>
@@ -2848,6 +2857,7 @@
   <script src="chess.js"></script>
   <script src="call-protocol.js"></script>
   <script src="ledger-core.js"></script>
+  <script src="ledger-labs29.js"></script>
   <script src="wallet.js"></script>
   <script src="gltf-mini.js"></script>
   <script src="viewer.js"></script>

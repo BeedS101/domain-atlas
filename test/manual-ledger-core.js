@@ -15,7 +15,10 @@ function check(name, ok, detail) {
 
 const b64 = (bytes) => Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const KEY = b64(webcrypto.getRandomValues(new Uint8Array(65)));
-const KEY2 = b64(webcrypto.getRandomValues(new Uint8Array(65)));
+const pointBytes = webcrypto.getRandomValues(new Uint8Array(65)); pointBytes[0] = 4;
+const KEY2 = b64(pointBytes);
+const SPKI_HEADER = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
+const SPKI = b64(Buffer.concat([SPKI_HEADER, Buffer.from(pointBytes)]));
 const SIG = b64(webcrypto.getRandomValues(new Uint8Array(64)));
 
 function good() {
@@ -61,9 +64,20 @@ const rejects = (mutate, reason) => {
   check('a coin id that is empty is refused', rejects((c) => { c.ledger.coin = ''; }, 'bad-coin') === true);
   check('a coin id that is too long is refused', rejects((c) => { c.ledger.coin = 'A'.repeat(65); }, 'bad-coin') === true);
   check('a short owner key is refused', rejects((c) => { c.owner.publicKey = 'abc'; }, 'bad-owner-key') === true);
+  check('an owner key that is not a 65-byte point starting 04 is refused', rejects((c) => { const b = Buffer.from(pointBytes); b[0] = 3; c.owner.publicKey = b64(b); }, 'bad-owner-key') === true);
+  check('a passkey-style encoded key is not accepted as the owner spelling', rejects((c) => { c.owner.publicKey = SPKI; }, 'bad-owner-key') === true);
+  check('a non-canonical spelling of the owner key is refused', rejects((c) => { const alph = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'; c.owner.publicKey = KEY2.slice(0, -1) + alph[alph.indexOf(KEY2.slice(-1)) ^ 1]; }, 'bad-owner-key') === true);
   check('a missing issue time is refused', rejects((c) => { delete c.issuedAt; }, 'bad-issued-at') === true);
   check('a non-ISO issue time is refused', rejects((c) => { c.issuedAt = 'yesterday'; }, 'bad-issued-at') === true);
   check('a short signature is refused', rejects((c) => { c.signature = 'abc'; }, 'bad-signature-shape') === true);
+
+  console.log('--- owner keys ---');
+  check('the altered spelling used above decodes to the same bytes (so only the spelling differs)', (() => { const alph = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'; const alt = KEY2.slice(0, -1) + alph[alph.indexOf(KEY2.slice(-1)) ^ 1]; return alt !== KEY2 && Buffer.from(alt, 'base64url').equals(Buffer.from(KEY2, 'base64url')); })());
+  check('a canonical point is its own canonical key', core.canonicalOwnerKey(KEY2) === KEY2 && core.isCanonicalPointKey(KEY2));
+  check('a passkey identity key is 122 characters', SPKI.length === 122);
+  check('the point is taken out of a passkey identity key', core.canonicalOwnerKey(SPKI) === KEY2);
+  check('a passkey-style key with another header is not accepted', (() => { const bad = Buffer.concat([SPKI_HEADER, Buffer.from(pointBytes)]); bad[10] ^= 1; return core.canonicalOwnerKey(b64(bad)) === null; })());
+  check('padding, wrong characters and odd lengths are not keys', [KEY2 + '=', KEY2.replace(/./, '+'), KEY2.slice(0, 86), '', null, 5].every((k) => core.canonicalOwnerKey(k) === null));
 
   console.log('--- what the issuer signs ---');
   const sp = core.signedPayloadOf(good());
@@ -119,11 +133,18 @@ const rejects = (mutate, reason) => {
     [lv({ adapterSupports: false }).lookup, lv({}).lookup, lv({ consent: true }).lookup, lv({ consent: true, inFlight: true }).lookup].forEach((i) => seen.add(i.glyph + '|' + i.word));
     return seen.size === 4;
   })());
+  check('an identity the ledger cannot check: lookup unavailable with that reason, background unavailable', lv({ proofUnsupported: true, consent: true }).lookup.level === 'unavailable' && /cannot check this kind of identity/.test(lv({ proofUnsupported: true }).lookup.detail) && lv({ proofUnsupported: true, consent: true }).background.level === 'unavailable');
   check('every indicator carries words, not only a glyph', [lv({}).lookup, lv({}).background].every((i) => i.word.length > 3 && i.detail.length > 10));
 
   console.log('--- problems ---');
   check('every problem code has words', Object.keys(core.PROBLEMS).every((k) => core.problemText(k).length > 5));
   check('an unknown code falls back to a generic line', core.problemText('nope') === core.PROBLEMS.unknown);
+
+  console.log('--- how far a balance is trusted ---');
+  check('every balance is labelled Reported \u2014 Not Cryptographically Verified', core.VERIFICATION.unsigned.label === 'Reported \u2014 Not Cryptographically Verified');
+  check('the explanation says it is not final or spendable and nothing signed backs it', /not a final or spendable balance/.test(core.VERIFICATION.unsigned.detail) && /Nothing signed/.test(core.VERIFICATION.unsigned.detail));
+  check('there is no verified level for an adapter to claim', Object.keys(core.VERIFICATION).join() === 'unsigned');
+  for (const k of ['proof-unsupported', 'clock', 'unknown-coin', 'rate-limited']) check('the "' + k + '" problem has its own words', core.PROBLEMS[k] && core.PROBLEMS[k] !== core.PROBLEMS.unknown);
 
   console.log('\n' + passes + ' passed, ' + failures + ' failed');
   if (failures) { console.log('Failed: ' + failed.join(' | ')); process.exit(1); }

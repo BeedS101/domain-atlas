@@ -1,14 +1,17 @@
 # Ledger accounts in the Gen 1 wallet
 
-Status: the wallet side of the Ledger tab is built and tested against local test doubles. **No
-adapter ships and nothing in this repository reads a real balance.**
+Status: the wallet side of the Ledger tab is built and tested against local test doubles. An
+**experimental adapter for the Labs 29 prototype is built but switched off by default**, and no
+live testing has been approved. Nothing in this repository has read a real balance.
 
 This document keeps three things apart, and says which one each statement is about:
 
 - **Built**: what the wallet does today.
-- **Experimental**: the Chainblock Labs 29 prototype (`ledger29.php`, in the Core repository). It is
-  a read-only prototype with no funded accounts, no finality and no signed balance receipts. It is
-  not the finished contract and the wallet does not talk to it.
+- **Experimental**: the Chainblock Labs 29 prototype (`ledger29.php`, in the Core repository; this
+  document was checked against Core commit `606390a`). It is a read-only prototype with no funded
+  accounts, no signed discovery, no signed balance receipts, no account issuance and no recovery
+  service. It is not the finished contract. The wallet reaches it only through the experimental
+  adapter described below, and only if that is turned on.
 - **Intended**: the contract agreed for the finished interface. It is written down here so the
   wallet, the issuer and the ledger can be built to it. Items marked *proposed* are suggested
   encodings that still need to be frozen.
@@ -46,7 +49,7 @@ value, supply, decimals, units and similar) is refused at any depth. A credentia
 balance, so there is nothing for a wallet to mistake for one. Labs 26 treasury allocations are not
 wallet balances and are not read by anything here.
 
-### Canonical forms (intended)
+### Canonical forms
 
 Three values feed account identity, so each has exactly one accepted spelling. A ledger or wallet
 that receives any other spelling **rejects it; it does not normalize it**.
@@ -55,7 +58,7 @@ that receives any other spelling **rejects it; it does not normalize it**.
 | --- | --- |
 | Network ID | The string the ledger's signed discovery document publishes, compared byte for byte. |
 | Coin ID | The ledger registry's symbol exactly as registered. For the Labs registry that is upper-case letters and digits, 2 to 10 characters, starting with a letter. |
-| Owner public key | Unpadded base64url of the 65-byte uncompressed P-256 point (87 characters). Whatever format an identity uses to sign, its owner key in a credential and in a request is this form. |
+| Owner public key | Unpadded base64url of the 65-byte uncompressed P-256 point (87 characters). Whatever format an identity uses to sign, its owner key in a credential and in a request is this form. **Built:** the credential check refuses any other spelling, and the wallet files and compares accounts under this form. |
 
 ### Account ID (intended, *proposed* encoding)
 
@@ -103,21 +106,22 @@ wallet. Decimals are defined by the coin, not by the wallet or the credential.
 - Looking up a balance needs **per-account permission** that names the issuer and says the wallet
   will follow the ledger address the issuer publishes. Until then the wallet sends nothing for
   that account.
-- The ledger's **origin** is pinned at the first lookup. If the issuer later publishes a different
-  address the wallet stops and asks again ("Allow new address…").
-- Requests are limited to the issuer origin and the pinned ledger origin, with no redirects and no
-  cookies. Only `https` is accepted, plus `http` on loopback for testing.
+- The ledger's **exact operation addresses** are pinned at the first lookup. If the issuer later
+  names a different address, even on the same host and differing only in path or query, the wallet
+  stops, sends nothing there, and asks again ("Allow new address…"). Moving back to an old address
+  is a change too.
+- While discovering, requests are limited to the issuing domain. While looking up a balance they are
+  limited to the one pinned address, and a message may be signed only if it names exactly that
+  address. No redirects, no cookies. Only `https` is accepted, plus `http` on loopback for testing.
 - Opening the tab looks up only accounts that have permission, and not again within 30 seconds.
 - **Background checks** are a separate, per-account switch, **off by default and opt-in**. They run
   only while a wallet page is open (a 60-second tick, one tab at a time through a Web Lock), at
   most every 10 minutes per account and never faster than 5. There is no service-worker polling.
   They are refused for identities that cannot sign without a prompt.
 
-**Intended change:** the pin becomes the set of exact **per-operation HTTPS URLs** from the signed
-discovery document (below), not an origin. An origin pin is too loose: it would follow any path on
-the host. The wallet's current origin-only rule also **refuses any endpoint that has a path**, so
-it cannot use the Labs 29 address as published. Changing the pin is part of the adapter work and
-has not been done.
+**Still to come:** the addresses the wallet pins will come from the signed discovery document below.
+Today an adapter supplies them from whatever discovery its service offers; for Labs 29 that is
+unsigned.
 
 ## Signed discovery (intended)
 
@@ -187,19 +191,19 @@ before keeping it. Recovered accounts come back with no permission and no balanc
 ## Passkey identities
 
 - **Built:** a passkey identity can only sign through a hardware prompt, so background checks are
-  unavailable for it. The Ledger tab does not yet check whether the ledger can verify a passkey
-  proof before it asks for the prompt.
-- **Intended:** a passkey identity **must not attempt authentication a ledger cannot verify**. The
-  wallet checks the proof formats the discovery document lists against the identity's own format
-  and, when they do not overlap, shows lookups as unavailable with the reason and starts no
-  prompt. Manual lookups with a passkey become possible once the ledger has a compatible assertion
-  verifier. Delegated sessions, so a passkey could authorize a short run of background checks, can
-  be designed later; the issuer's existing mail session is the precedent.
-- **Known gap (built):** a passkey identity's public key is a 91-byte encoded key that is 122
-  base64url characters, but the credential validator accepts owner keys of at most 120. A
-  passkey-owned credential would be refused today. The canonical owner form above fixes this: the
-  credential carries the 65-byte point, and the wallet extracts the same point from the passkey's
-  key to compare.
+  unavailable for it. It **never attempts a proof its ledger cannot check**: each adapter lists the
+  proof formats it accepts (`raw-ecdsa-p256` for a password identity; a passkey is
+  `webauthn-es256`), and when the identity's format is not listed the wallet makes no request,
+  shows lookups as unavailable with the reason, refuses to turn background checks on, and never
+  starts the passkey prompt. There is a second guard at the signing step itself. Labs 29 accepts
+  only the first format, so a passkey identity cannot be used with it.
+- **Built:** the key-format problem is fixed. A passkey identity's stored key is a 91-byte encoded
+  key, 122 characters, which the old credential rule (at most 120) would have refused. The
+  credential now carries the 65-byte point, and the wallet takes the same point out of the passkey's
+  key to compare and to file accounts, so a passkey-owned credential can be added.
+- **Intended:** manual lookups with a passkey become possible once a ledger has a compatible
+  assertion verifier. Delegated sessions, so a passkey could authorize a short run of background
+  checks, can be designed later; the issuer's existing mail session is the precedent.
 
 ## Indicators (built)
 
@@ -259,42 +263,49 @@ trusting the connection alone. *Proposed* shape:
 `amount` is an integer string of minor units and `decimals` is the coin's own precision. The
 receipt names the request it answers and the ledger state it reads, so an old answer cannot be
 passed off as a new one. The key that signs it is either the issuer's or one the signed discovery
-document lists. Until receipts exist, the wallet should label a balance **reported, not signed**
-rather than present it as verified.
+document lists. Until receipts exist, the wallet labels every balance **Reported \u2014 Not Cryptographically
+Verified** (**built**). The wallet sets that label, not the adapter or the ledger, and there is no
+other level for an adapter to claim. The Ledger tab shows it beside every figure, with a sentence
+saying nothing signed backs it and that it is not a final or spendable balance, and calls the figure
+a "reported balance", never funds. A balance from an experimental interface also names that interface.
 
 ## Adapter interface
 
-**Built:** the wallet has the slot and no adapter. An adapter is how the wallet talks to one kind
-of ledger:
+**Built:** an adapter is how the wallet talks to one kind of ledger:
 
 ```
 contract                                a string naming the interface it implements
+label, experimental                     optional: how the tab names it, and whether it is a prototype
+proofFormats                            the identity proofs its ledger can check (default raw-ecdsa-p256)
 supports({issuerDomain, network, coin}) true if it can serve that target
-discover(target, ctx)                   -> { endpoint }          the ledger's current origin
-fetchBalance(target, endpoint, ctx)     -> { amount, decimals, asOf }
-listAccounts(target, endpoint, ctx)     -> [ credential, ... ]   optional
+discover(target, ctx)                   -> { operations: { balance, accounts? } }   exact https addresses
+fetchBalance(target, found, ctx)        -> { amount, decimals, asOf }
+listAccounts(target, found, ctx)        -> [ credential, ... ]   optional
 ```
 
-`ctx.fetch` is limited to the issuer origin and the pinned ledger origin, `ctx.sign(payload)` signs
-only `atlas.ledger.*` payloads whose `audience` is an allowed origin, and `ctx.signal` aborts on
-removal or when permission is withdrawn. Until an adapter registers, the tab shows lookups as
-unavailable and says why.
+`target` is `{issuerDomain, network, coin, ownerPublicKey}`. While discovering, `ctx.fetch` reaches
+only the issuing domain. While looking up a balance it reaches only the pinned operation address,
+`ctx.sign(payload)` signs only `atlas.ledger.*` payloads whose `audience` is exactly that address
+and only for a proof format the adapter lists, and `ctx.signal` aborts on removal or when permission
+is withdrawn. Until an adapter registers, the tab shows lookups as unavailable and says why. The
+wallet registers none by itself except the experimental one, when it has been turned on.
 
-### Adapter design for the intended contract (not built)
+### Adapter design for the intended contract (built for Labs 29 only where noted)
 
 The adapter is the only place that knows a ledger's wire format. The wallet decides who may be
 contacted and what a figure may be; the adapter cannot widen either.
 
-1. **Discover.** Fetch `/.well-known/atlas-ledger.json` from the issuer origin and
+1. **Discover.** *(Intended; the Labs 29 adapter reads that prototype's own unsigned discovery
+   instead, as described below.)* Fetch `/.well-known/atlas-ledger.json` from the issuer origin and
    `/.well-known/atlas-key.json`. Verify the signature, the issuer, the network, the contract, the
    proof formats and the expiry as above. Return `{ operations, proofFormats, expiresAt }`. The
    wallet pins the operation URLs, and a different set later asks the person again.
-2. **Supports.** Return false, with a reason, when the identity's proof format is not in
-   `proofFormats`. The wallet then shows lookups as unavailable and starts no prompt.
+2. **Supports.** *(Built.)* The wallet compares the identity's proof format with the adapter's
+   `proofFormats`. When it is not listed, lookups show as unavailable and no prompt starts.
 3. **Fetch a balance.** Build the request payload, sign it through `ctx.sign` with `audience` set
    to the balance operation URL, and post to exactly that URL. Nothing else is contacted.
-4. **Check every response.** An answer is used only if all of these hold, and any failure is a
-   `bad-response` that stores nothing:
+4. **Check every response.** *(Built for Labs 29, except the receipt items.)* An answer is used only
+   if all of these hold, and any failure is a `bad-response` that stores nothing:
    - `network` equals the credential's network;
    - `coin` equals the credential's coin;
    - the owner key equals the credential's owner key in canonical form;
@@ -309,12 +320,13 @@ contacted and what a figure may be; the adapter cannot widen either.
 
 The ledger answers failures with a JSON body `{ "ok": false, "code": "<code>", "message": "…" }`.
 The status code is secondary, because a wrong path and a missing account must not look alike.
-*Proposed* codes and what the wallet shows:
+Codes and what the wallet shows (**built**, in the Labs 29 adapter; the Labs 29 prototype returns
+only some of them, see below):
 
 | Code | Meaning | Wallet problem |
 | --- | --- | --- |
 | `malformed-request` | Request is not in the agreed shape. | bad response |
-| `unsupported-proof` | The proof format is not one the ledger verifies. | not supported |
+| `unsupported-proof` | The proof format is not one the ledger verifies. | this kind of identity is not supported (new) |
 | `bad-signature` | The signature or key does not verify. | unauthorized |
 | `stale-request` | `issuedAt` is outside the window. Body also carries `serverTime`. | device clock is off (new) |
 | `replayed-request` | The nonce was already used. | busy; try again |
@@ -325,37 +337,85 @@ The status code is secondary, because a wrong path and a missing account must no
 | `rate-limited` | Too many requests. | try later (new) |
 | `unavailable` | The ledger cannot answer now. | network |
 
-A body without a `code` is treated as `bad-response`, whatever the status.
+A body without a `code`, or with one the wallet does not know, is treated as a bad answer. The
+words of the message are never parsed. Two exceptions need no code: a 429 means slow down and a
+5xx means a network problem.
 
-### Wallet changes this needs (not yet made)
+### Wallet changes
 
-- Pin and fetch by exact operation URL, and a new `discover` result shape.
-- A helper that verifies the signed discovery document, and another that checks the derived account ID.
-- Compare owner keys in canonical form, and relax the owner-key length rule for the passkey case.
-- Check proof formats before any prompt.
-- Map structured error codes, and add the three new problem messages.
-- A response check shared by every adapter (items in step 4).
-- Re-check revocation on each refresh, which is not done today.
-- Label unsigned balances as reported, not verified.
-- If an adapter for the experimental service is ever installed for testing, it stays off by default
-  and is labelled experimental.
+Built: pin and fetch by exact operation address with a new `discover` result shape; owner keys in
+canonical form, including the passkey case; proof formats checked before any prompt; structured
+error codes with the new problem messages; the Reported \u2014 Not Cryptographically Verified label;
+the experimental interface switch.
+
+Still to do: a helper that verifies the signed discovery document and another that checks the
+derived account ID (both wait for the contract to be frozen); re-checking revocation on each
+refresh; receipt verification.
+
+## The experimental Labs 29 adapter
+
+`extension/ledger-labs29.js`, contract name `chainblock-ledger29/experimental`. It is built in but
+**off by default**: nothing is registered, and nothing can contact the prototype, until the person
+turns on "Allow the Chainblock Labs 29 test interface" under "Experimental interfaces (testing
+only)" on the Ledger tab, and confirms. The choice is stored and followed by every wallet page and
+the background worker. Turning it off unregisters the adapter, cancels requests it has in flight
+and turns off background checks for accounts left with no interface. Each account still needs its
+own permission, its address is still pinned, and background checks are still a separate switch that
+starts off.
+
+What it does:
+
+- Serves only `evtec.co.za` and `domain-atlas.co.za`, each with its own network
+  (`chainblock-labs29-<host>`), and only coin IDs the prototype could list.
+- Reads discovery from `https://<host>/chain-labs/ledger29.php?action=discovery`. It accepts the
+  answer only if the contract, issuer and network match, and the balance address the answer names
+  is exactly `https://<host>/chain-labs/ledger29.php?action=balance`. Any other address, on any
+  host, is refused before anything is signed. Discovery is not signed, so the adapter treats it as
+  unverified and the exact-address rule is what limits it.
+- Sends `{type, v, audience, network, coin, nonce, issuedAt}` with the exact balance address as
+  `audience`, signed by a password identity, and a proof of only `{publicKey, signature}`. It first
+  checks that the signing key is the account's owner.
+- Accepts an answer only if its network, coin and owner key equal the credential's, the amount is
+  1 to 40 digits, decimals are 0 to 18, and the time is not more than ten minutes ahead. It ignores
+  the prototype's own `verifiedRequest` and `balanceProof` fields: they are not proof.
+- Offers no account listing, because the prototype has no recovery service.
+
+What it will not do: sign for a passkey identity, follow any address other than the one above,
+treat a Labs 26 allocation or a credential as a balance, or show a balance as anything but reported
+and unverified.
+
+### What Core's prototype does today (checked against `606390a`)
+
+- **Fixed since the review:** payload keys in any order; `audience` must be the exact balance
+  address; non-canonical key spellings are refused; discovery names the balance address under
+  `operations`.
+- **Structured codes it returns:** `malformed-request`, `bad-signature`, `unsupported-proof`,
+  `unknown-coin`, `no-account`.
+- **Failures with no code:** a request with a wrong audience, network, type, nonce, or a time more
+  than two minutes off all answer 401 "Invalid balance challenge"; a wrong operation answers 404 "Unknown operation".
+  The adapter shows these as a bad answer. They cannot be told apart, so a device clock that is
+  off by a few minutes looks the same as a wrong address. `stale-request` with a `serverTime`,
+  and `wrong-audience`, would fix that.
+- **Unchanged:** no nonce store (a repeated request is accepted within two minutes), `asOf` is the
+  time the server answered, no signed discovery or receipt, no account issuance, no listing.
+- `LABS29.md` still describes the earlier request shape and has not been updated for these changes.
 
 ## Current experimental implementation versus the intended contract
 
 What the wallet cannot do with Labs 29 today, and where each gap belongs. "Core" is the Chainblock
 Labs repository; "issuer" is the domain's PHP/Node issuer in this repository.
 
-| Area | Labs 29 today | Intended | Owner |
+| Area | Labs 29 today (`606390a`) | Intended | Owner |
 | --- | --- | --- | --- |
-| Discovery | Unsigned `GET …/ledger29.php?action=discovery`; one endpoint URL with a path | Signed `/.well-known/atlas-ledger.json` with per-operation URLs | Issuer (signing, well-known), Core (content) |
-| Endpoint pin | Wallet pins an origin and refuses a path | Wallet pins exact operation URLs | Wallet |
-| Request shape | `{type, v, audience, network, coin, nonce, issuedAt}` plus proof; keys must arrive in a fixed order | Same fields, order-independent; `audience` the operation URL (proposed) | Core |
-| Signature | Raw P-256 over canonical JSON; matches the wallet's local identities | Same | none |
-| Owner key | Accepts the 65-byte point only, compares the string as sent | Canonical spelling only, re-encoded and checked | Core |
-| Passkeys | Rejected as malformed | Declined by the wallet; verifier to come | Wallet, Core |
+| Discovery | Unsigned `GET …/ledger29.php?action=discovery`, now naming `operations.balance` | Signed `/.well-known/atlas-ledger.json` with per-operation URLs | Issuer (signing, well-known), Core (content) |
+| Endpoint pin | Wallet pins the exact operation address (built) | Same | none |
+| Request shape | `{type, v, audience, network, coin, nonce, issuedAt}` plus proof, any key order; `audience` is the exact balance address | Same | none |
+| Signature | Raw P-256 over canonical JSON; matches the wallet's local identities (checked by running both) | Same | none |
+| Owner key | Canonical 65-byte point only; other spellings refused | Same | none |
+| Passkeys | Rejected as `unsupported-proof`; the wallet never sends one | Verifier to come | Core, then wallet |
 | Replay | A repeated nonce is accepted within two minutes | Nonce store; repeated nonce refused | Core |
-| Errors | Free text; 404 for several different causes | Structured `code` field | Core, then wallet |
-| Balance response | `{amount, decimals, asOf}` over TLS only | Signed receipt with request binding and state reference | Core, issuer |
+| Errors | Codes on five failures; the clock, audience, network and shape failures carry none | A code on every failure, `stale-request` with `serverTime` | Core |
+| Balance response | `{amount, decimals, asOf}` over TLS only, `asOf` is server time | Signed receipt with request binding and state reference | Core, issuer |
 | Account credential | None issued | Issuer-signed, derived ID | Issuer, with Core deciding when an account exists |
 | Account creation | No account is created or funded; Labs 26 allocations are not credited | Ledger-authoritative; creation separate from allocation | Core |
 | Rediscovery | No listing operation | Signed `accounts` operation returning credentials | Core, issuer |
@@ -371,7 +431,7 @@ extra refusal in `signWithSelf`.
 
 ## Remaining questions
 
-1. Is `audience` the exact operation URL (proposed) or the origin?
+1. ~~Is `audience` the exact operation URL or the origin?~~ Settled for Labs 29: the exact operation address. Open only for the finished contract.
 2. Which key signs balance receipts: the issuer's own, or a ledger key the signed discovery lists?
 3. What is the receipt's state reference: a sequence number, a hash, or both?
 4. How long may a discovery document live, and how stale a cached one may the wallet use?
@@ -389,12 +449,22 @@ extra refusal in `signWithSelf`.
 - `node test/manual-ledger-core.js`: credential shape, balance handling, indicator levels.
 - `node test/manual-ledger-wallet.js`: storage, consent, scoping, background rules, removal,
   rediscovery, signing refusal, against local doubles in the extension's service worker.
-- `xvfb-run -a node test/manual-ledger-tab.js`: the tab through the real extension page.
+- `xvfb-run -a node test/manual-ledger-tab.js`: the tab through the real extension page, including
+  the verification label and the experimental switch.
+- `node test/manual-ledger-labs29-adapter.js`: the adapter alone, with canned answers: discovery
+  rules, the request it sends, every refused answer, and the error-code table.
+- `xvfb-run -a node test/manual-ledger-labs29-wallet.js`: the adapter inside the extension against
+  a stand-in service (`test/labs29-standin.js`): off by default, the switch, consent, exact-address
+  pinning, scoped fetch and signing, mismatched answers, altered endpoints, structured errors, a
+  simulated passkey identity, and background checks staying opt-in.
+- `LABS29_PHP=/path/to/ledger29.php node test/manual-ledger-labs29-php.js`: the adapter and the
+  wallet's signing against a copy of the real prototype file under PHP. It skips itself when the
+  file is not given.
 
-The ledger in these tests is a **simulation with an invented request shape**. Passing them shows
-the wallet's own rules work. They say nothing about any real ledger.
+Apart from the real-file test above, the ledger in these tests is a **simulation**. Passing them
+shows the wallet's own rules work. They say nothing about the live sites or any funded account.
+The real-file test signs with Node's WebCrypto using a copy of the wallet's canonical-JSON rule,
+not with the loaded extension, so it checks the format agreement and not the extension's code.
 
-A separate check, run outside the repository and not part of the suite, signed requests the way the
-wallet's local identity does and sent them to `ledger29.php` running under PHP. The signature,
-key format and canonical JSON agreed. The same run showed the replay, request-order and key-spelling
-issues listed in the table above.
+The stand-in service and the simulated passkey identity (a stored key with no authenticator, where
+any attempt to use it is counted) are test doubles. Nothing here has contacted the live sites.

@@ -49,6 +49,49 @@
 
   function isPlainObject(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
 
+  // ---------- owner keys ----------
+  //
+  // An owner is named by one spelling only: the unpadded base64url of the 65-byte uncompressed
+  // P-256 point. A password identity already uses it. A passkey identity's key is stored as a
+  // 91-byte SubjectPublicKeyInfo (122 characters), which is the same point behind a fixed
+  // header, so the point is taken out of it. Any other spelling of a key is refused rather than
+  // converted, so one key can never be filed or looked up under two names.
+
+  const SPKI_P256_HEADER = '3059301306072a8648ce3d020106082a8648ce3d030107034200';
+
+  function fromB64url(s) {
+    if (typeof s !== 'string' || !/^[A-Za-z0-9_-]+$/.test(s) || s.length % 4 === 1) return null;
+    try {
+      const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4));
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    } catch (err) { return null; }
+  }
+
+  function toB64url(bytes) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function isCanonicalPointKey(s) {
+    const bytes = fromB64url(s);
+    return !!bytes && bytes.length === 65 && bytes[0] === 4 && toB64url(bytes) === s;
+  }
+
+  // The canonical key for a wallet identity's public key as the wallet stores it, or null when it
+  // is neither a canonical point nor a P-256 SubjectPublicKeyInfo.
+  function canonicalOwnerKey(publicKey) {
+    if (isCanonicalPointKey(publicKey)) return publicKey;
+    const bytes = fromB64url(publicKey);
+    if (!bytes || bytes.length !== 91) return null;
+    const header = Array.from(bytes.slice(0, 26)).map((b) => b.toString(16).padStart(2, '0')).join('');
+    if (header !== SPKI_P256_HEADER) return null;
+    const point = toB64url(bytes.slice(26));
+    return isCanonicalPointKey(point) ? point : null;
+  }
+
   function validTime(s) { return typeof s === 'string' && TIME_RE.test(s) && !Number.isNaN(Date.parse(s)); }
 
   // A bare host (with an optional port), as a credential's issuer.domain is written everywhere else.
@@ -91,7 +134,7 @@
     if (typeof c.ledger.network !== 'string' || !TOKEN_RE.test(c.ledger.network)) return bad('bad-network', 'The network identifier is not valid.');
     if (typeof c.ledger.coin !== 'string' || !TOKEN_RE.test(c.ledger.coin)) return bad('bad-coin', 'The coin identifier is not valid.');
     if (!isPlainObject(c.owner) || !noExtraKeys(c.owner, ALLOWED_KEYS.owner)) return bad('bad-owner', 'The owner is not valid.');
-    if (typeof c.owner.publicKey !== 'string' || !KEY_RE.test(c.owner.publicKey)) return bad('bad-owner-key', 'The owner key is not valid.');
+    if (!isCanonicalPointKey(c.owner.publicKey)) return bad('bad-owner-key', 'The owner key is not in the one accepted form (the 65-byte point, base64url).');
     if (!validTime(c.issuedAt)) return bad('bad-issued-at', 'The issue time is not valid.');
     if (typeof c.signature !== 'string' || !SIG_RE.test(c.signature)) return bad('bad-signature-shape', 'The signature is not valid.');
     return { ok: true };
@@ -158,6 +201,7 @@
     const lookup = (() => {
       if (!s.ownerIsActive) return levelOf('unavailable', 'Switch to the identity that owns this account to check it.');
       if (s.identityLocked) return levelOf('unavailable', 'Unlock your wallet to check this account.');
+      if (s.proofUnsupported) return levelOf('unavailable', 'This ledger cannot check this kind of identity yet, so the wallet makes no request.');
       if (!s.adapterSupports) return levelOf('unavailable', 'This wallet has no way to reach this ledger yet.');
       if (s.inFlight) return levelOf('connecting', 'Talking to ' + s.domain + ' now.');
       if (s.endpointChanged) return levelOf('available', s.domain + ' now names a different ledger address. Allow it again to continue.');
@@ -189,6 +233,10 @@
     'unauthorized': 'The ledger did not accept this identity for the account.',
     'not-found': 'The ledger has no such account.',
     'bad-response': 'The ledger sent an answer this wallet could not use.',
+    'proof-unsupported': 'This ledger cannot check this kind of identity yet (for example a passkey), so no request was made.',
+    'clock': 'The ledger says this device\'s clock is too far from its own. Check the date and time on this device.',
+    'unknown-coin': 'The ledger does not list this coin.',
+    'rate-limited': 'The ledger asked this wallet to slow down. Try again later.',
     'credential-invalid': 'The issuer no longer vouches for this account reference.',
     'cancelled': 'The check was cancelled.',
     'busy': 'A check is already running for this account.',
@@ -197,10 +245,18 @@
 
   function problemText(code) { return PROBLEMS[code] || PROBLEMS.unknown; }
 
+  // How far a balance can be trusted. The wallet has no way to check a signed receipt yet, so every
+  // balance it shows is unsigned, whatever the ledger says about itself. An adapter cannot raise
+  // this: the wallet sets it, not the answer.
+  const VERIFICATION = {
+    unsigned: { level: 'unsigned', label: 'Reported \u2014 Not Cryptographically Verified', detail: 'The ledger said so over a secure connection. Nothing signed by the ledger backs it, and it is not a final or spendable balance.' }
+  };
+
   return {
     CREDENTIAL_TYPE, LIMITS, ALLOWED_KEYS, PROBLEMS,
     validateAccountCredential, signedPayloadOf, validDomain, validTime,
     normalizeBalance, formatAmount, isStale, shortKey,
-    indicatorsFor, problemText
+    indicatorsFor, problemText, VERIFICATION,
+    isCanonicalPointKey, canonicalOwnerKey
   };
 });

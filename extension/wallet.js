@@ -8155,9 +8155,19 @@ const AtlasWallet = (() => {
     try { return JSON.stringify(payload).includes('"atlas.ledger.'); } catch (err) { return true; }
   }
 
-  async function signLedgerPayload(payload, allowedOrigins) {
+  // The kind of proof the active identity produces. A password identity signs the canonical text
+  // directly; a passkey identity answers with a hardware assertion, a different proof.
+  function ledgerProofFormat(identity) { return identity && identity.mode === 'webauthn' ? 'webauthn-es256' : 'raw-ecdsa-p256'; }
+
+  // `allow.audiences` are the exact operation addresses a message may be for, and
+  // `allow.proofFormats` the proofs the adapter's ledger can check. A proof the ledger cannot check
+  // is refused before anything is signed, so a passkey is never asked to approve a request that
+  // cannot work.
+  async function signLedgerPayload(payload, allow) {
     if (!payload || typeof payload !== 'object' || typeof payload.type !== 'string' || !payload.type.startsWith('atlas.ledger.')) throw ledgerError('unknown', 'That is not a ledger message.');
-    if (typeof payload.audience !== 'string' || !allowedOrigins.includes(payload.audience)) throw ledgerError('unknown', 'A ledger message must name the address it is for.');
+    if (typeof payload.audience !== 'string' || !allow.audiences.includes(payload.audience)) throw ledgerError('unknown', 'A ledger message must name the exact address it is for.');
+    const mode = await getIdentityMode();
+    if (!allow.proofFormats.includes(ledgerProofFormat({ mode }))) throw ledgerError('proof-unsupported');
     return signWithSelfUnchecked(payload);
   }
 
@@ -8167,12 +8177,15 @@ const AtlasWallet = (() => {
   //   contract                         a string naming the agreed interface it implements
   //   supports(target)                 true if it can serve {issuerDomain, network, coin}; network and
   //                                    coin are null when the wallet is looking for accounts in general
-  //   discover(target, ctx)            resolves to {endpoint}: the origin of the ledger's current address
-  //   fetchBalance(target, endpoint, ctx)   resolves to {amount, decimals, asOf}
-  //   listAccounts(target, endpoint, ctx)   resolves to an array of ledger-account credentials (optional)
-  // ctx gives an adapter only what it may use: ctx.fetch (limited to the issuing domain and the
-  // ledger address the person allowed, no redirects, no cookies), ctx.sign(payload) (the owner
-  // identity signs a message whose audience is one of those origins), and ctx.signal.
+  //   proofFormats                     the identity proofs its ledger can check (default: raw-ecdsa-p256)
+  //   discover(target, ctx)            resolves to {operations: {balance, accounts?}}: exact https
+  //                                    addresses, one per operation the ledger offers
+  //   fetchBalance(target, found, ctx)   resolves to {amount, decimals, asOf}
+  //   listAccounts(target, found, ctx)   resolves to an array of ledger-account credentials (optional)
+  // `target` is {issuerDomain, network, coin, ownerPublicKey}. ctx gives an adapter only what it
+  // may use: ctx.fetch (limited to the issuing domain while discovering, then to the exact
+  // operation addresses the person allowed; no redirects, no cookies), ctx.sign(payload) (the owner
+  // identity signs a message whose audience is exactly one of those addresses) and ctx.signal.
 
   function registerLedgerAdapter(adapter) {
     const ok = adapter && typeof adapter.contract === 'string' && ['supports', 'discover', 'fetchBalance'].every((k) => typeof adapter[k] === 'function');
@@ -8192,29 +8205,73 @@ const AtlasWallet = (() => {
     return null;
   }
 
+  function adapterProofFormats(adapter) { return Array.isArray(adapter.proofFormats) && adapter.proofFormats.length ? adapter.proofFormats : ['raw-ecdsa-p256']; }
+
+  // The adapter for a target, and whether the identity's proof is one its ledger can check. When it
+  // is not, the wallet makes no request and asks for no approval.
+  function ledgerSupportFor(target, identity) {
+    const adapter = pickLedgerAdapter(target);
+    if (!adapter) return { adapter: null, proofUnsupported: false };
+    return { adapter, proofUnsupported: !adapterProofFormats(adapter).includes(ledgerProofFormat(identity)) };
+  }
+
   // ---- addresses ----
 
-  function ledgerOriginOf(value) {
+  // An operation address as a ledger publishes it: https (http only on loopback, for tests), no
+  // credentials or fragment, and already in the form the URL parser would write it, so the same
+  // address always has the same spelling and can be compared as text.
+  function ledgerOperationUrlOf(value) {
+    if (typeof value !== 'string' || value.length > 2048) return null;
     let u;
-    try { u = new URL(String(value)); } catch (err) { return null; }
-    if (u.username || u.password || u.search || u.hash || (u.pathname && u.pathname !== '/')) return null;
+    try { u = new URL(value); } catch (err) { return null; }
+    if (u.href !== value || u.username || u.password || u.hash) return null;
     const loopback = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname);
     if (u.protocol !== 'https:' && !(u.protocol === 'http:' && loopback)) return null;
-    return u.origin;
+    return value;
+  }
+
+  // The operations a discovery answer names, each checked; only the ones this wallet uses are kept.
+  function ledgerOperationsOf(found) {
+    const ops = found && found.operations;
+    if (!ops || typeof ops !== 'object' || Array.isArray(ops)) return null;
+    const out = {};
+    for (const name of ['balance', 'accounts']) {
+      if (ops[name] === undefined) continue;
+      const url = ledgerOperationUrlOf(ops[name]);
+      if (!url) return null;
+      out[name] = url;
+    }
+    return out;
   }
 
   function issuerOriginOf(domain) {
     try { return new URL(baseUrl(domain)).origin; } catch (err) { return null; }
   }
 
-  // A fetch that works only for the origins the person has allowed for this action.
-  function ledgerScopedFetch(allowedOrigins, signal) {
+  // A fetch that works only for what this step may contact: whole origins (the issuing domain,
+  // while discovering) and exact addresses (the ledger's operations, once they are known).
+  function ledgerScopedFetch(allow, signal) {
     return async (url, init) => {
       let origin = null;
       try { origin = new URL(String(url)).origin; } catch (err) { /* refused below */ }
-      if (!origin || !allowedOrigins.includes(origin)) throw ledgerError('network', 'That address is not one you allowed this check to contact.');
+      if (!origin || !(allow.origins.includes(origin) || allow.urls.includes(String(url)))) throw ledgerError('network', 'That address is not one you allowed this check to contact.');
       return fetch(String(url), Object.assign({}, init || {}, { redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer', signal }));
     };
+  }
+
+  // ---- owner keys ----
+  //
+  // Accounts are filed, and compared, under the owner's canonical key (see ledger-core.js): the
+  // 65-byte point. A password identity's key already is that; a passkey identity's key is the same
+  // point inside a longer encoding. An identity whose key is neither has no accounts here.
+  function ledgerOwnerKeyOf(identity) {
+    const key = identity && ledgerCore().canonicalOwnerKey(identity.publicKey);
+    if (!key) throw ledgerError('wrong-identity', 'This identity\'s key is in a form the Ledger tab cannot use.');
+    return key;
+  }
+
+  function ledgerOwnerKeyOrNull(identity) {
+    try { return ledgerOwnerKeyOf(identity); } catch (err) { return null; }
   }
 
   // ---- storage ----
@@ -8247,7 +8304,7 @@ const AtlasWallet = (() => {
     const outcome = await withLedgerLock(async () => {
       const identity = await getIdentity();
       if (!identity) throw ledgerError('locked');
-      if (identity.publicKey !== ownerPublicKey) throw ledgerError('wrong-identity');
+      if (ledgerOwnerKeyOrNull(identity) !== ownerPublicKey) throw ledgerError('wrong-identity');
       const { list, unreadable } = await readLedgerList(ownerPublicKey, identity);
       if (unreadable) throw ledgerError('locked', 'The ledger accounts for this identity cannot be read right now, so nothing was changed.');
       const next = mutate(list);
@@ -8266,12 +8323,12 @@ const AtlasWallet = (() => {
   function newLedgerRecord(credential) {
     return {
       id: credential.id, credential, addedAt: new Date().toISOString(),
-      consent: null, backgroundSync: false, cache: null, lastAttemptAt: null, lastProblem: null, pendingEndpointOrigin: null
+      consent: null, backgroundSync: false, cache: null, lastAttemptAt: null, lastProblem: null, pendingEndpointOrigin: null, pendingOperations: null
     };
   }
 
   function ledgerTargetOf(credential) {
-    return { issuerDomain: credential.issuer.domain, network: credential.ledger.network, coin: credential.ledger.coin };
+    return { issuerDomain: credential.issuer.domain, network: credential.ledger.network, coin: credential.ledger.coin, ownerPublicKey: credential.owner.publicKey };
   }
 
   // ---- the view the Ledger tab renders ----
@@ -8280,10 +8337,11 @@ const AtlasWallet = (() => {
     const core = ledgerCore();
     const target = ledgerTargetOf(rec.credential);
     const flight = ledgerInFlight.get(rec.id) || null;
-    const ownerIsActive = !!identity && identity.publicKey === rec.credential.owner.publicKey;
+    const ownerIsActive = !!identity && ledgerOwnerKeyOrNull(identity) === rec.credential.owner.publicKey;
+    const support = ledgerSupportFor(target, identity);
     const canSignSilently = ledgerCanSignSilently(identity);
     const indicators = core.indicatorsFor({
-      ownerIsActive, identityLocked: !identity, adapterSupports: !!pickLedgerAdapter(target), consent: !!rec.consent,
+      ownerIsActive, identityLocked: !identity, adapterSupports: !!support.adapter, proofUnsupported: support.proofUnsupported, consent: !!rec.consent,
       backgroundSync: !!rec.backgroundSync, inFlight: !!flight, inFlightReason: flight && flight.reason, canSignSilently,
       endpointChanged: !!rec.pendingEndpointOrigin, domain: target.issuerDomain, intervalMs: core.LIMITS.syncDefaultIntervalMs
     });
@@ -8293,8 +8351,10 @@ const AtlasWallet = (() => {
       issuerDomain: target.issuerDomain, network: target.network, coin: target.coin,
       ownerPublicKey: rec.credential.owner.publicKey, ownerShort: core.shortKey(rec.credential.owner.publicKey),
       consent: rec.consent, backgroundSync: !!rec.backgroundSync,
-      pendingEndpointOrigin: rec.pendingEndpointOrigin || null,
-      balance: cache ? { amount: cache.amount, decimals: cache.decimals, text: core.formatAmount(cache.amount, cache.decimals), asOf: cache.asOf, fetchedAt: cache.fetchedAt, stale: core.isStale(cache.asOf, Date.now()), endpointOrigin: cache.endpointOrigin } : null,
+      pendingEndpointOrigin: rec.pendingEndpointOrigin || null, pendingEndpoint: (rec.pendingOperations && rec.pendingOperations.balance) || null,
+      pinnedEndpoint: (rec.consent && rec.consent.operations && rec.consent.operations.balance) || null,
+      interface: support.adapter ? { contract: support.adapter.contract, label: support.adapter.label || support.adapter.contract, experimental: !!support.adapter.experimental } : null,
+      balance: cache ? { amount: cache.amount, decimals: cache.decimals, text: core.formatAmount(cache.amount, cache.decimals), asOf: cache.asOf, fetchedAt: cache.fetchedAt, stale: core.isStale(cache.asOf, Date.now()), endpointOrigin: cache.endpointOrigin, verification: core.VERIFICATION.unsigned, interface: cache.contract ? { contract: cache.contract, label: cache.label || cache.contract, experimental: !!cache.experimental } : null } : null,
       lastAttemptAt: rec.lastAttemptAt, problem: rec.lastProblem ? { code: rec.lastProblem, text: core.problemText(rec.lastProblem) } : null,
       connecting: !!flight, indicators
     };
@@ -8305,16 +8365,19 @@ const AtlasWallet = (() => {
   // until their identity is the one in use.
   async function getLedgerOverview() {
     const core = ledgerCore();
+    await ledgerExperimentalReady;
     const identity = await getIdentity();
     const got = await chrome.storage.local.get(LEDGER_STORE_KEY);
     const stores = got[LEDGER_STORE_KEY] || {};
-    const otherIdentities = Object.keys(stores).filter((k) => !identity || k !== identity.publicKey).length;
-    if (!identity) return { identity: null, hasIdentity: await hasIdentity(), accounts: [], otherIdentities, adapters: getLedgerAdapters(), unreadable: false, limits: core.LIMITS };
-    const { list, unreadable } = await readLedgerList(identity.publicKey, identity);
+    const ownKey = identity ? ledgerOwnerKeyOrNull(identity) : null;
+    const otherIdentities = Object.keys(stores).filter((k) => !identity || k !== ownKey).length;
+    if (!identity) return { identity: null, hasIdentity: await hasIdentity(), accounts: [], otherIdentities, adapters: getLedgerAdapters(), experimental: ledgerExperimentalView(), canFind: ledgerAdapters.some((a) => typeof a.listAccounts === 'function'), unreadable: false, limits: core.LIMITS };
+    if (!ownKey) return { identity: { publicKey: identity.publicKey, short: core.shortKey(identity.publicKey), mode: identity.mode, canSignSilently: false, proofFormat: ledgerProofFormat(identity), unusableKey: true }, hasIdentity: true, accounts: [], otherIdentities, adapters: getLedgerAdapters(), experimental: ledgerExperimentalView(), canFind: ledgerAdapters.some((a) => typeof a.listAccounts === 'function'), unreadable: false, limits: core.LIMITS };
+    const { list, unreadable } = await readLedgerList(ownKey, identity);
     return {
-      identity: { publicKey: identity.publicKey, short: core.shortKey(identity.publicKey), mode: identity.mode, canSignSilently: ledgerCanSignSilently(identity) },
+      identity: { publicKey: ownKey, short: core.shortKey(ownKey), mode: identity.mode, canSignSilently: ledgerCanSignSilently(identity), proofFormat: ledgerProofFormat(identity) },
       hasIdentity: true, accounts: list.map((r) => ledgerViewOf(r, identity)), otherIdentities,
-      adapters: getLedgerAdapters(), unreadable, limits: core.LIMITS
+      adapters: getLedgerAdapters(), experimental: ledgerExperimentalView(), canFind: ledgerAdapters.some((a) => typeof a.listAccounts === 'function'), unreadable, limits: core.LIMITS
     };
   }
 
@@ -8361,13 +8424,13 @@ const AtlasWallet = (() => {
     if (!shape.ok) throw ledgerError('credential-invalid', shape.message);
     const identity = await getIdentity();
     if (!identity) throw ledgerError('locked');
-    if (credential.owner.publicKey !== identity.publicKey) throw ledgerError('wrong-identity', 'This account belongs to a different identity. Switch to that identity to add it.');
-    const current = await readLedgerList(identity.publicKey, identity);
+    if (credential.owner.publicKey !== ledgerOwnerKeyOf(identity)) throw ledgerError('wrong-identity', 'This account belongs to a different identity. Switch to that identity to add it.');
+    const current = await readLedgerList(ledgerOwnerKeyOf(identity), identity);
     if (current.unreadable) throw ledgerError('locked', 'The ledger accounts for this identity cannot be read right now, so nothing was changed.');
     if (current.list.some((r) => r.id === credential.id)) throw ledgerError('unknown', 'This account is already in your wallet.');
     const verdict = await verifyLedgerCredential(credential);
     if (!verdict.valid) throw ledgerError('credential-invalid', 'The issuer\'s signature could not be confirmed (' + verdict.reason + ').');
-    await updateLedgerList(identity.publicKey, (list) => {
+    await updateLedgerList(ledgerOwnerKeyOf(identity), (list) => {
       if (list.some((r) => r.id === credential.id)) throw ledgerError('unknown', 'This account is already in your wallet.');
       if (list.length >= core.LIMITS.maxAccountsPerIdentity) throw ledgerError('unknown', 'This wallet already holds as many ledger accounts as it will keep.');
       list.push(newLedgerRecord(credential));
@@ -8385,7 +8448,7 @@ const AtlasWallet = (() => {
 
   async function changeLedgerRecord(accountId, change) {
     const identity = await activeLedgerOwner();
-    return updateLedgerList(identity.publicKey, (list) => {
+    return updateLedgerList(ledgerOwnerKeyOf(identity), (list) => {
       const rec = list.find((r) => r.id === accountId);
       if (!rec) throw ledgerError('unknown', 'That account is no longer in this wallet.');
       change(rec, identity);
@@ -8397,8 +8460,8 @@ const AtlasWallet = (() => {
   // one account. It turns nothing else on: periodic refresh stays off.
   async function grantLedgerConsent(accountId) {
     await changeLedgerRecord(accountId, (rec) => {
-      rec.consent = { grantedAt: new Date().toISOString(), issuerOrigin: issuerOriginOf(rec.credential.issuer.domain), endpointOrigin: null };
-      rec.pendingEndpointOrigin = null;
+      rec.consent = { grantedAt: new Date().toISOString(), issuerOrigin: issuerOriginOf(rec.credential.issuer.domain), endpointOrigin: null, operations: null };
+      rec.pendingEndpointOrigin = null; rec.pendingOperations = null;
       rec.lastProblem = null;
     });
     await logActivity('ledger', 'Allowed lookups for a ledger account');
@@ -8408,22 +8471,24 @@ const AtlasWallet = (() => {
   async function revokeLedgerConsent(accountId) {
     const flight = ledgerInFlight.get(accountId);
     if (flight) flight.controller.abort();
-    await changeLedgerRecord(accountId, (rec) => { rec.consent = null; rec.backgroundSync = false; rec.pendingEndpointOrigin = null; });
+    await changeLedgerRecord(accountId, (rec) => { rec.consent = null; rec.backgroundSync = false; rec.pendingEndpointOrigin = null; rec.pendingOperations = null; });
     await logActivity('ledger', 'Stopped lookups for a ledger account');
   }
 
-  // The issuing domain named a ledger address different from the one the person first allowed.
-  // Nothing was contacted at the new address; this accepts it.
+  // The issuing domain named operation addresses different from the ones the person first
+  // allowed. Nothing was contacted at the new addresses; this accepts them.
   async function approveLedgerEndpoint(accountId) {
     await changeLedgerRecord(accountId, (rec) => {
       if (!rec.consent || !rec.pendingEndpointOrigin) throw ledgerError('unknown', 'There is no new address waiting for approval.');
       rec.consent.endpointOrigin = rec.pendingEndpointOrigin;
-      rec.pendingEndpointOrigin = null;
+      rec.consent.operations = rec.pendingOperations;
+      rec.pendingEndpointOrigin = null; rec.pendingOperations = null;
       rec.lastProblem = null;
     });
   }
 
   async function setLedgerBackgroundSync(accountId, on) {
+    await ledgerExperimentalReady;
     const identity = await activeLedgerOwner();
     if (on) {
       if (!ledgerCanSignSilently(identity)) throw ledgerError('unknown', 'This identity needs your confirmation for every request, so checks stay manual.');
@@ -8431,7 +8496,9 @@ const AtlasWallet = (() => {
     await changeLedgerRecord(accountId, (rec) => {
       if (on) {
         if (!rec.consent || rec.pendingEndpointOrigin) throw ledgerError('no-consent');
-        if (!pickLedgerAdapter(ledgerTargetOf(rec.credential))) throw ledgerError('no-adapter');
+        const support = ledgerSupportFor(ledgerTargetOf(rec.credential), identity);
+        if (!support.adapter) throw ledgerError('no-adapter');
+        if (support.proofUnsupported) throw ledgerError('proof-unsupported');
       }
       rec.backgroundSync = !!on;
     });
@@ -8443,7 +8510,7 @@ const AtlasWallet = (() => {
     const identity = await activeLedgerOwner();
     const flight = ledgerInFlight.get(accountId);
     if (flight) flight.controller.abort();
-    const gone = await updateLedgerList(identity.publicKey, (list) => {
+    const gone = await updateLedgerList(ledgerOwnerKeyOf(identity), (list) => {
       const at = list.findIndex((r) => r.id === accountId);
       if (at < 0) return { list, result: null };
       const [rec] = list.splice(at, 1);
@@ -8479,41 +8546,48 @@ const AtlasWallet = (() => {
   async function refreshLedgerAccount(accountId, opts) {
     const core = ledgerCore();
     const reason = (opts && opts.reason) || 'manual';
+    await ledgerExperimentalReady;
     const identity = await getIdentity();
     if (!identity) return { ok: false, code: 'locked' };
-    const { list, unreadable } = await readLedgerList(identity.publicKey, identity);
+    if (!ledgerOwnerKeyOrNull(identity)) return { ok: false, code: 'wrong-identity' };
+    const { list, unreadable } = await readLedgerList(ledgerOwnerKeyOf(identity), identity);
     if (unreadable) return { ok: false, code: 'locked' };
     const rec = list.find((r) => r.id === accountId);
     if (!rec) return { ok: false, code: 'unknown' };
-    if (rec.credential.owner.publicKey !== identity.publicKey) return { ok: false, code: 'wrong-identity' };
+    if (rec.credential.owner.publicKey !== ledgerOwnerKeyOf(identity)) return { ok: false, code: 'wrong-identity' };
     if (!rec.consent) return { ok: false, code: 'no-consent' };
     if (rec.pendingEndpointOrigin) return { ok: false, code: 'endpoint-changed' };
     if (reason === 'background' && (!rec.backgroundSync || !ledgerCanSignSilently(identity))) return { ok: false, code: 'no-consent' };
     if (ledgerInFlight.has(accountId)) return { ok: false, code: 'busy' };
     const target = ledgerTargetOf(rec.credential);
-    const adapter = pickLedgerAdapter(target);
+    const { adapter, proofUnsupported } = ledgerSupportFor(target, identity);
     if (!adapter) return { ok: false, code: 'no-adapter' };
+    if (proofUnsupported) return { ok: false, code: 'proof-unsupported' };
+    const formats = adapterProofFormats(adapter);
 
     const controller = new AbortController();
-    ledgerInFlight.set(accountId, { reason, controller });
+    ledgerInFlight.set(accountId, { reason, controller, contract: adapter.contract });
     notifyLedgerChanged();
-    const owner = identity.publicKey;
+    const owner = ledgerOwnerKeyOf(identity);
     const issuerOrigin = rec.consent.issuerOrigin || issuerOriginOf(target.issuerDomain);
     let outcome;
     try {
-      const baseCtx = (origins) => ({
-        fetch: ledgerScopedFetch(origins, controller.signal),
-        sign: (payload) => signLedgerPayload(payload, origins),
+      const ctxFor = (allow) => ({
+        fetch: ledgerScopedFetch({ origins: allow.origins || [], urls: allow.urls || [] }, controller.signal),
+        sign: (payload) => signLedgerPayload(payload, { audiences: allow.audiences || [], proofFormats: formats }),
         signal: controller.signal
       });
-      const found = await adapter.discover(target, baseCtx([issuerOrigin]));
-      const endpointOrigin = found && ledgerOriginOf(found.endpoint);
-      if (!endpointOrigin) throw ledgerError('bad-response');
-      if (rec.consent.endpointOrigin && rec.consent.endpointOrigin !== endpointOrigin) {
-        await recordLedgerOutcome(owner, accountId, (r) => { r.pendingEndpointOrigin = endpointOrigin; r.lastProblem = 'endpoint-changed'; r.lastAttemptAt = new Date().toISOString(); });
+      const found = await adapter.discover(target, ctxFor({ origins: [issuerOrigin] }));
+      const named = ledgerOperationsOf(found);
+      if (!named || !named.balance) throw ledgerError('bad-response');
+      const operations = { balance: named.balance };
+      const origin = new URL(operations.balance).origin;
+      const pinned = rec.consent.operations;
+      if (pinned && canonicalize(pinned) !== canonicalize(operations)) {
+        await recordLedgerOutcome(owner, accountId, (r) => { r.pendingEndpointOrigin = origin; r.pendingOperations = operations; r.lastProblem = 'endpoint-changed'; r.lastAttemptAt = new Date().toISOString(); });
         outcome = { ok: false, code: 'endpoint-changed' };
       } else {
-        const raw = await adapter.fetchBalance(target, endpointOrigin, baseCtx([issuerOrigin, endpointOrigin]));
+        const raw = await adapter.fetchBalance(target, { operations }, ctxFor({ urls: [operations.balance], audiences: [operations.balance] }));
         const balance = core.normalizeBalance(raw);
         if (!balance) throw ledgerError('bad-response');
         const stillThere = ledgerInFlight.get(accountId);
@@ -8521,11 +8595,12 @@ const AtlasWallet = (() => {
         const now = new Date().toISOString();
         await recordLedgerOutcome(owner, accountId, (r) => {
           if (!r.consent) return; // permission was taken back while the request was out
-          r.consent.endpointOrigin = endpointOrigin;
-          r.cache = { amount: balance.amount, decimals: balance.decimals, asOf: balance.asOf, fetchedAt: now, endpointOrigin };
+          r.consent.endpointOrigin = origin;
+          r.consent.operations = operations;
+          r.cache = { amount: balance.amount, decimals: balance.decimals, asOf: balance.asOf, fetchedAt: now, endpointOrigin: origin, verification: 'unsigned', contract: adapter.contract, label: adapter.label || adapter.contract, experimental: !!adapter.experimental };
           r.lastProblem = null; r.lastAttemptAt = now;
         });
-        outcome = { ok: true, balance: { amount: balance.amount, decimals: balance.decimals, asOf: balance.asOf, text: core.formatAmount(balance.amount, balance.decimals) } };
+        outcome = { ok: true, balance: { amount: balance.amount, decimals: balance.decimals, asOf: balance.asOf, text: core.formatAmount(balance.amount, balance.decimals), verification: 'unsigned' } };
       }
     } catch (err) {
       const code = ledgerProblemCode(err);
@@ -8541,9 +8616,10 @@ const AtlasWallet = (() => {
   // Run when the Ledger tab opens: accounts the person has allowed are looked up once, unless
   // they were looked up a moment ago. Accounts without permission are not touched.
   async function refreshLedgerAccountsOnOpen() {
+    await ledgerExperimentalReady;
     const identity = await getIdentity();
-    if (!identity) return [];
-    const { list } = await readLedgerList(identity.publicKey, identity);
+    if (!identity || !ledgerOwnerKeyOrNull(identity)) return [];
+    const { list } = await readLedgerList(ledgerOwnerKeyOf(identity), identity);
     const now = Date.now();
     const due = list.filter((r) => r.consent && !r.pendingEndpointOrigin && !(r.cache && now - Date.parse(r.cache.fetchedAt) < 30000));
     return Promise.all(due.map((r) => refreshLedgerAccount(r.id, { reason: 'open' }).then((res) => Object.assign({ id: r.id }, res))));
@@ -8553,9 +8629,10 @@ const AtlasWallet = (() => {
   // person turned on, for an identity that signs without asking, and only when they are due.
   async function runLedgerBackgroundSync(opts) {
     const core = ledgerCore();
+    await ledgerExperimentalReady;
     const identity = await getIdentity();
-    if (!identity || !ledgerCanSignSilently(identity)) return { ran: 0 };
-    const { list } = await readLedgerList(identity.publicKey, identity);
+    if (!identity || !ledgerCanSignSilently(identity) || !ledgerOwnerKeyOrNull(identity)) return { ran: 0 };
+    const { list } = await readLedgerList(ledgerOwnerKeyOf(identity), identity);
     const now = opts && Number.isFinite(opts.now) ? opts.now : Date.now(); // `now` lets a test move the clock
     const due = list.filter((r) => r.backgroundSync && r.consent && !r.pendingEndpointOrigin
       && (!r.lastAttemptAt || now - Date.parse(r.lastAttemptAt) >= core.LIMITS.syncDefaultIntervalMs)
@@ -8577,20 +8654,28 @@ const AtlasWallet = (() => {
     const core = ledgerCore();
     if (!opts || opts.allowNetwork !== true) throw ledgerError('no-consent', 'Looking for your accounts needs your permission to contact this domain.');
     if (!core.validDomain(issuerDomain)) throw ledgerError('credential-invalid', 'Enter the issuing domain as a plain host name.');
+    await ledgerExperimentalReady;
     const identity = await getIdentity();
     if (!identity) throw ledgerError('locked');
-    const target = { issuerDomain, network: null, coin: null };
-    const adapter = pickLedgerAdapter(target);
+    const ownerKey = ledgerOwnerKeyOf(identity);
+    const target = { issuerDomain, network: null, coin: null, ownerPublicKey: ownerKey };
+    const { adapter, proofUnsupported } = ledgerSupportFor(target, identity);
     if (!adapter || typeof adapter.listAccounts !== 'function') throw ledgerError('no-adapter');
+    if (proofUnsupported) throw ledgerError('proof-unsupported');
+    const formats = adapterProofFormats(adapter);
     const controller = new AbortController();
     const issuerOrigin = issuerOriginOf(issuerDomain);
-    const ctxFor = (origins) => ({ fetch: ledgerScopedFetch(origins, controller.signal), sign: (payload) => signLedgerPayload(payload, origins), signal: controller.signal });
+    const ctxFor = (allow) => ({
+      fetch: ledgerScopedFetch({ origins: allow.origins || [], urls: allow.urls || [] }, controller.signal),
+      sign: (payload) => signLedgerPayload(payload, { audiences: allow.audiences || [], proofFormats: formats }),
+      signal: controller.signal
+    });
     let credentials;
     try {
-      const found = await adapter.discover(target, ctxFor([issuerOrigin]));
-      const endpointOrigin = found && ledgerOriginOf(found.endpoint);
-      if (!endpointOrigin) throw ledgerError('bad-response');
-      credentials = await adapter.listAccounts(target, endpointOrigin, ctxFor([issuerOrigin, endpointOrigin]));
+      const found = await adapter.discover(target, ctxFor({ origins: [issuerOrigin] }));
+      const named = ledgerOperationsOf(found);
+      if (!named || !named.accounts) throw ledgerError('bad-response');
+      credentials = await adapter.listAccounts(target, { operations: { accounts: named.accounts } }, ctxFor({ urls: [named.accounts], audiences: [named.accounts] }));
     } catch (err) {
       throw ledgerError(ledgerProblemCode(err));
     }
@@ -8599,13 +8684,91 @@ const AtlasWallet = (() => {
     for (const credential of credentials.slice(0, core.LIMITS.maxAccountsPerIdentity)) {
       const id = credential && credential.id;
       if (!core.validateAccountCredential(credential).ok) { result.skipped.push({ id, code: 'credential-invalid' }); continue; }
-      if (credential.owner.publicKey !== identity.publicKey) { result.skipped.push({ id, code: 'wrong-identity' }); continue; }
+      if (credential.owner.publicKey !== ledgerOwnerKeyOf(identity)) { result.skipped.push({ id, code: 'wrong-identity' }); continue; }
       if (credential.issuer.domain !== issuerDomain) { result.skipped.push({ id, code: 'credential-invalid' }); continue; }
       try { await addLedgerAccount(credential, { allowNetwork: true }); result.added.push(id); } catch (err) { result.skipped.push({ id, code: err && err.code ? err.code : 'unknown' }); }
     }
     await logActivity('ledger', 'Looked for ledger accounts at ' + issuerDomain + ': ' + result.added.length + ' added');
     return result;
   }
+
+  // ---- experimental interfaces ----
+  //
+  // An adapter for a prototype ledger service is built in but stays off. It is registered only
+  // while the person has switched its interface on, in every wallet page and the service worker
+  // alike (the choice is kept in storage and followed when it changes). Switching it off
+  // unregisters it, cancels any request it has in flight and turns off background checks for
+  // this identity's accounts that it served.
+
+  const LEDGER_EXPERIMENTAL_KEY = 'atlasLedgerExperimental';
+  const ledgerExperimentalDefs = {
+    labs29: { label: 'Chainblock Labs 29 test interface', make: () => (typeof AtlasLedgerLabs29 !== 'undefined' ? AtlasLedgerLabs29.createAdapter() : null) }
+  };
+  const ledgerExperimentalRegistered = {}; // name -> { contract, unregister }
+  let ledgerExperimentalReady = Promise.resolve();
+
+  function applyLedgerExperimental(settings) {
+    const wanted = settings && typeof settings === 'object' ? settings : {};
+    for (const name of Object.keys(ledgerExperimentalDefs)) {
+      const on = wanted[name] === true;
+      const have = ledgerExperimentalRegistered[name];
+      if (on && !have) {
+        const adapter = ledgerExperimentalDefs[name].make();
+        if (adapter) ledgerExperimentalRegistered[name] = { contract: adapter.contract, unregister: registerLedgerAdapter(adapter) };
+      } else if (!on && have) {
+        for (const flight of ledgerInFlight.values()) if (flight.contract === have.contract) flight.controller.abort();
+        have.unregister();
+        delete ledgerExperimentalRegistered[name];
+      }
+    }
+  }
+
+  function ledgerExperimentalView() {
+    return Object.keys(ledgerExperimentalDefs).map((name) => ({ name, label: ledgerExperimentalDefs[name].label, available: !!ledgerExperimentalDefs[name].make(), enabled: !!ledgerExperimentalRegistered[name] }));
+  }
+
+  async function getLedgerExperimental() {
+    await ledgerExperimentalReady;
+    return ledgerExperimentalView();
+  }
+
+  async function setLedgerExperimental(name, on) {
+    if (!Object.prototype.hasOwnProperty.call(ledgerExperimentalDefs, name)) throw ledgerError('unknown', 'There is no such experimental interface.');
+    await ledgerExperimentalReady;
+    const got = await chrome.storage.local.get(LEDGER_EXPERIMENTAL_KEY);
+    const next = Object.assign({}, got[LEDGER_EXPERIMENTAL_KEY] || {}, { [name]: on === true });
+    await chrome.storage.local.set({ [LEDGER_EXPERIMENTAL_KEY]: next });
+    const contract = (ledgerExperimentalRegistered[name] || {}).contract;
+    applyLedgerExperimental(next);
+    if (on !== true && contract) {
+      // Background checks for accounts left with no interface are turned off, so they do not start again
+      // by themselves if the interface is switched back on later.
+      try {
+        const identity = await getIdentity();
+        if (identity && ledgerOwnerKeyOrNull(identity)) {
+          await updateLedgerList(ledgerOwnerKeyOf(identity), (list) => {
+            let changed = false;
+            for (const r of list) {
+              if (r.backgroundSync && !pickLedgerAdapter(ledgerTargetOf(r.credential))) { r.backgroundSync = false; changed = true; }
+            }
+            return { list, result: changed };
+          });
+        }
+      } catch (err) { /* a locked or unreadable list is left alone; nothing runs for it without the interface */ }
+    }
+    await logActivity('ledger', (on === true ? 'Turned on' : 'Turned off') + ' the experimental ledger interface ' + name);
+    notifyLedgerChanged();
+    return ledgerExperimentalView();
+  }
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      ledgerExperimentalReady = chrome.storage.local.get(LEDGER_EXPERIMENTAL_KEY).then((got) => { applyLedgerExperimental(got[LEDGER_EXPERIMENTAL_KEY]); }).catch(() => {});
+      if (chrome.storage.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local' && changes[LEDGER_EXPERIMENTAL_KEY]) { applyLedgerExperimental(changes[LEDGER_EXPERIMENTAL_KEY].newValue); notifyLedgerChanged(); }
+      });
+    }
+  } catch (err) { /* the interface simply stays off */ }
 
   return {
     hasIdentity, isUnlocked, getIdentity, createIdentity, unlockIdentity, lockIdentity, changePassword,
@@ -8705,7 +8868,7 @@ const AtlasWallet = (() => {
     // Ledger accounts (see the "ledger accounts" section): references to accounts kept by a
     // remote ledger, with per-account consent. Nothing here contacts a ledger unless an adapter
     // has been registered and the person has allowed that account.
-    registerLedgerAdapter, clearLedgerAdapters, getLedgerAdapters, onLedgerChanged,
+    registerLedgerAdapter, clearLedgerAdapters, getLedgerAdapters, onLedgerChanged, getLedgerExperimental, setLedgerExperimental,
     getLedgerOverview, verifyLedgerCredential, addLedgerAccount, removeLedgerAccount,
     grantLedgerConsent, revokeLedgerConsent, approveLedgerEndpoint, setLedgerBackgroundSync,
     refreshLedgerAccount, refreshLedgerAccountsOnOpen, runLedgerBackgroundSync, rediscoverLedgerAccounts

@@ -8220,6 +8220,7 @@ const ledgerAddBtn = document.getElementById('ledgerAddBtn');
 const ledgerFindDomainInput = document.getElementById('ledgerFindDomainInput');
 const ledgerFindBtn = document.getElementById('ledgerFindBtn');
 const ledgerFindNoteEl = document.getElementById('ledgerFindNote');
+const ledgerExperimentalListEl = document.getElementById('ledgerExperimentalList');
 
 let ledgerPendingAction = null;
 let ledgerRenderSeq = 0;
@@ -8277,14 +8278,20 @@ function ledgerCard(a) {
 
   const bal = lel('div', { className: 'ledger-balance' });
   if (a.balance) {
-    bal.appendChild(document.createTextNode('Balance: ' + a.balance.text + ' '));
+    bal.appendChild(document.createTextNode('Reported balance: ' + a.balance.text + ' '));
     bal.appendChild(lel('span', { className: 'meta', textContent: 'as the ledger reported at ' + ledgerTime(a.balance.asOf) + (a.balance.stale ? ' (out of date)' : '') }));
   } else {
     bal.appendChild(document.createTextNode('Balance not loaded'));
   }
   card.appendChild(bal);
+  if (a.balance) {
+    const v = a.balance.verification;
+    card.appendChild(lel('div', { className: 'ledger-verify', id: key('verify'), textContent: v.label }));
+    card.appendChild(lel('div', { className: 'ledger-detail', 'data-role': 'verification', textContent: v.detail }));
+    if (a.balance.interface && a.balance.interface.experimental) card.appendChild(lel('div', { className: 'ledger-detail', 'data-role': 'experimental', textContent: 'Experimental interface: ' + a.balance.interface.label + '. Not final, not a spendable balance.' }));
+  }
   if (a.problem) card.appendChild(lel('div', { className: 'ledger-problem', role: 'status', textContent: a.problem.text }));
-  if (a.pendingEndpointOrigin) card.appendChild(lel('div', { className: 'ledger-problem', textContent: 'The issuing domain now names ' + a.pendingEndpointOrigin + '. Nothing was sent there.' }));
+  if (a.pendingEndpointOrigin) card.appendChild(lel('div', { className: 'ledger-problem', textContent: 'The issuing domain now names ' + (a.pendingEndpoint || a.pendingEndpointOrigin) + '. Nothing was sent there.' }));
 
   const inds = lel('div', { className: 'ledger-inds' });
   inds.appendChild(ledgerIndicator('Lookup', a.indicators.lookup));
@@ -8311,9 +8318,9 @@ function ledgerCard(a) {
   const lookupLevel = a.indicators.lookup.level;
   if (lookupLevel !== 'unavailable') {
     if (a.pendingEndpointOrigin) {
-      button('Allow new address…', 'approve', () => ledgerAsk('Let this wallet use ' + a.pendingEndpointOrigin + ' as the ledger for ' + a.coin + ' at ' + a.issuerDomain + '? It was named by ' + a.issuerDomain + ' and has not been contacted.', 'Allow', () => ledgerAct(() => AtlasWallet.approveLedgerEndpoint(a.id), 'New address allowed.')));
+      button('Allow new address…', 'approve', () => ledgerAsk('Let this wallet use ' + (a.pendingEndpoint || a.pendingEndpointOrigin) + ' as the ledger for ' + a.coin + ' at ' + a.issuerDomain + '? It was named by ' + a.issuerDomain + ' and has not been contacted.', 'Allow', () => ledgerAct(() => AtlasWallet.approveLedgerEndpoint(a.id), 'New address allowed.')));
     } else if (!a.consent) {
-      button('Allow lookups…', 'allow', () => ledgerAsk('Allow this wallet to contact ' + a.issuerDomain + ', and the ledger address it names, to look up your ' + a.coin + ' balance? It asks again if that address changes. Background checks stay off unless you turn them on.', 'Allow', () => ledgerAct(async () => { await AtlasWallet.grantLedgerConsent(a.id); await AtlasWallet.refreshLedgerAccount(a.id, { reason: 'manual' }); })));
+      button('Allow lookups…', 'allow', () => ledgerAsk('Allow this wallet to contact ' + a.issuerDomain + ', and the ledger address it names, to look up your ' + a.coin + ' balance? The wallet keeps the exact address it first uses and asks again if that changes. Background checks stay off unless you turn them on.', 'Allow', () => ledgerAct(async () => { await AtlasWallet.grantLedgerConsent(a.id); await AtlasWallet.refreshLedgerAccount(a.id, { reason: 'manual' }); })));
     } else {
       button('Check now', 'check', () => ledgerAct(async () => { const r = await AtlasWallet.refreshLedgerAccount(a.id, { reason: 'manual' }); if (!r.ok) ledgerSay(AtlasLedgerCore.problemText(r.code)); }), { disabled: a.connecting });
       button('Stop lookups', 'stop', () => ledgerAct(() => AtlasWallet.revokeLedgerConsent(a.id), 'Lookups and background checks stopped for ' + a.coin + '.'));
@@ -8354,11 +8361,36 @@ async function renderLedger() {
   }
 
   const noAdapter = !ov.adapters.length;
+  const cannotFind = noAdapter || !ov.canFind;
   if (ledgerAddBtn) ledgerAddBtn.disabled = !ov.identity;
-  if (ledgerFindBtn) ledgerFindBtn.disabled = !ov.identity || noAdapter;
-  if (ledgerFindDomainInput) ledgerFindDomainInput.disabled = !ov.identity || noAdapter;
-  if (ledgerFindNoteEl) ledgerFindNoteEl.textContent = noAdapter ? 'Not available yet: this wallet has no ledger service interface installed, so it cannot ask a ledger for balances or accounts.' : 'Asks the domain which accounts belong to the identity in use, proving it is yours by signing.';
+  if (ledgerFindBtn) ledgerFindBtn.disabled = !ov.identity || cannotFind;
+  if (ledgerFindDomainInput) ledgerFindDomainInput.disabled = !ov.identity || cannotFind;
+  if (ledgerFindNoteEl) ledgerFindNoteEl.textContent = noAdapter ? 'Not available yet: this wallet has no ledger service interface installed, so it cannot ask a ledger for balances or accounts.' : (!ov.canFind ? 'Not available yet: the interface installed can read a balance but has no service for finding accounts again.' : 'Asks the domain which accounts belong to the identity in use, proving it is yours by signing.');
+  renderLedgerExperimental(ov.experimental || []);
   if (focused) { const again = ledgerSubscreen.querySelector('[data-focus-key="' + focused + '"]'); if (again && !again.disabled) again.focus(); }
+}
+
+// Prototype ledger interfaces: each is off until the person turns it on here.
+function renderLedgerExperimental(list) {
+  if (!ledgerExperimentalListEl) return;
+  const focused = document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute('data-focus-key');
+  ledgerExperimentalListEl.textContent = '';
+  list.forEach((x) => {
+    const row = lel('label', { className: 'check-row' });
+    const box = lel('input', { type: 'checkbox', id: 'exp-' + x.name, 'data-focus-key': 'exp-' + x.name, checked: x.enabled, disabled: !x.available });
+    box.addEventListener('change', () => {
+      if (box.checked) {
+        box.checked = false;
+        ledgerAsk('Turn on the ' + x.label + '? It can then read balances from its prototype service for accounts you allow one by one. Its answers are not signed and are not final or spendable. Background checks stay off.', 'Turn on', () => ledgerAct(() => AtlasWallet.setLedgerExperimental(x.name, true), x.label + ' is on.'));
+      } else {
+        ledgerAct(() => AtlasWallet.setLedgerExperimental(x.name, false), x.label + ' is off. Checks that depended on it were turned off.');
+      }
+    });
+    row.appendChild(box);
+    row.appendChild(lel('span', { textContent: 'Allow the ' + x.label + (x.available ? '' : ' (not installed)') }));
+    ledgerExperimentalListEl.appendChild(row);
+  });
+  if (focused) { const again = ledgerExperimentalListEl.querySelector('[data-focus-key="' + focused + '"]'); if (again && !again.disabled) again.focus(); }
 }
 
 // Opening the tab draws what is saved, then looks up only the accounts already allowed.
