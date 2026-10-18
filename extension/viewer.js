@@ -3760,9 +3760,11 @@ function showMailBoxSubtab(id) {
 // Documents, same show-one-hide-the-rest idea as showSocialSubtab() right
 // above, just scoped to Inventory's two .subscreen elements.
 function showInventorySubtab(id) {
-  [collectiblesSubscreen, documentsSubscreen].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
+  [collectiblesSubscreen, documentsSubscreen, document.getElementById('ledgerSubscreen')].forEach((el) => el && el.classList.toggle('active', el && el.id === id));
   if (collectiblesSubtabBtn) collectiblesSubtabBtn.classList.toggle('active-subtab', id === 'collectiblesSubscreen');
   if (documentsSubtabBtn) documentsSubtabBtn.classList.toggle('active-subtab', id === 'documentsSubscreen');
+  const ledgerBtn = document.getElementById('ledgerSubtabBtn');
+  if (ledgerBtn) ledgerBtn.classList.toggle('active-subtab', id === 'ledgerSubscreen');
 }
 
 // Trading station category's own In-person / Buy / Sell / Listings split
@@ -8197,6 +8199,208 @@ mailBoxComposeSubtabBtn && mailBoxComposeSubtabBtn.addEventListener('click', asy
 // visibility toggle — no extra fetch needed.
 collectiblesSubtabBtn && collectiblesSubtabBtn.addEventListener('click', () => showInventorySubtab('collectiblesSubscreen'));
 documentsSubtabBtn && documentsSubtabBtn.addEventListener('click', () => showInventorySubtab('documentsSubscreen'));
+
+// ---------- Ledger tab (third sub-tab of Inventory) ----------
+//
+// References to accounts kept by a remote ledger, drawn from AtlasWallet.getLedgerOverview().
+// Nothing here is an asset and nothing is spendable. The page never reaches a ledger itself:
+// every request goes through the wallet's ledger functions, which ask for permission per
+// account first. All text from a credential or a ledger is set with textContent.
+const ledgerSubtabBtn = document.getElementById('ledgerSubtabBtn');
+const ledgerSubscreen = document.getElementById('ledgerSubscreen');
+const ledgerIdentityBannerEl = document.getElementById('ledgerIdentityBanner');
+const ledgerStatusEl = document.getElementById('ledgerStatus');
+const ledgerConfirmEl = document.getElementById('ledgerConfirm');
+const ledgerConfirmTextEl = document.getElementById('ledgerConfirmText');
+const ledgerConfirmOkBtn = document.getElementById('ledgerConfirmOk');
+const ledgerConfirmCancelBtn = document.getElementById('ledgerConfirmCancel');
+const ledgerAccountsListEl = document.getElementById('ledgerAccountsList');
+const ledgerCredentialInput = document.getElementById('ledgerCredentialInput');
+const ledgerAddBtn = document.getElementById('ledgerAddBtn');
+const ledgerFindDomainInput = document.getElementById('ledgerFindDomainInput');
+const ledgerFindBtn = document.getElementById('ledgerFindBtn');
+const ledgerFindNoteEl = document.getElementById('ledgerFindNote');
+
+let ledgerPendingAction = null;
+let ledgerRenderSeq = 0;
+
+function lel(tag, props, kids) {
+  const node = document.createElement(tag);
+  Object.keys(props || {}).forEach((k) => {
+    if (k === 'className' || k === 'textContent' || k === 'id' || k === 'type' || k === 'disabled' || k === 'checked' || k === 'hidden') node[k] = props[k];
+    else node.setAttribute(k, props[k]);
+  });
+  (kids || []).forEach((c) => node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+  return node;
+}
+
+function ledgerSay(text) { if (ledgerStatusEl) ledgerStatusEl.textContent = text || ''; }
+
+function ledgerAsk(text, okLabel, run, danger) {
+  ledgerPendingAction = run;
+  ledgerConfirmTextEl.textContent = text;
+  ledgerConfirmOkBtn.textContent = okLabel;
+  ledgerConfirmOkBtn.classList.toggle('danger-btn', !!danger);
+  ledgerConfirmEl.hidden = false;
+  ledgerConfirmCancelBtn.focus();
+}
+
+function ledgerAskClose() {
+  ledgerPendingAction = null;
+  ledgerConfirmEl.hidden = true;
+}
+
+// Runs one wallet action, reports its outcome in the status line and redraws the tab.
+async function ledgerAct(fn, doneText) {
+  ledgerSay('');
+  try { await fn(); if (doneText) ledgerSay(doneText); } catch (err) { ledgerSay(err && err.message ? err.message : 'That did not work.'); }
+  await renderLedger();
+}
+
+function ledgerIndicator(label, ind) {
+  const span = lel('span', { className: 'ledger-ind lvl-' + ind.level, title: ind.detail });
+  span.appendChild(lel('span', { className: 'ledger-glyph', 'aria-hidden': 'true', textContent: ind.glyph }));
+  span.appendChild(document.createTextNode(label + ': ' + ind.word));
+  return span;
+}
+
+function ledgerTime(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
+}
+
+function ledgerCard(a) {
+  const key = (suffix) => 'acct-' + a.id + '-' + suffix;
+  const card = lel('div', { className: 'info-card ledger-account', role: 'group', 'aria-label': a.coin + ' at ' + a.issuerDomain, 'data-account-id': a.id });
+  card.appendChild(lel('div', { className: 'name', textContent: a.coin }));
+  card.appendChild(lel('div', { className: 'meta', textContent: 'Network ' + a.network + ' · issued by ' + a.issuerDomain + ' · owner ' + a.ownerShort }));
+
+  const bal = lel('div', { className: 'ledger-balance' });
+  if (a.balance) {
+    bal.appendChild(document.createTextNode('Balance: ' + a.balance.text + ' '));
+    bal.appendChild(lel('span', { className: 'meta', textContent: 'as the ledger reported at ' + ledgerTime(a.balance.asOf) + (a.balance.stale ? ' (out of date)' : '') }));
+  } else {
+    bal.appendChild(document.createTextNode('Balance not loaded'));
+  }
+  card.appendChild(bal);
+  if (a.problem) card.appendChild(lel('div', { className: 'ledger-problem', role: 'status', textContent: a.problem.text }));
+  if (a.pendingEndpointOrigin) card.appendChild(lel('div', { className: 'ledger-problem', textContent: 'The issuing domain now names ' + a.pendingEndpointOrigin + '. Nothing was sent there.' }));
+
+  const inds = lel('div', { className: 'ledger-inds' });
+  inds.appendChild(ledgerIndicator('Lookup', a.indicators.lookup));
+  inds.appendChild(ledgerIndicator('Background check', a.indicators.background));
+  card.appendChild(inds);
+  card.appendChild(lel('div', { className: 'ledger-detail', id: key('lookup-detail'), textContent: 'Lookup: ' + a.indicators.lookup.detail }));
+  card.appendChild(lel('div', { className: 'ledger-detail', id: key('bg-detail'), textContent: 'Background check: ' + a.indicators.background.detail }));
+
+  const bgInd = a.indicators.background;
+  const sync = lel('label', { className: 'check-row' });
+  const box = lel('input', { type: 'checkbox', id: key('bg'), 'aria-describedby': key('bg-detail'), 'data-focus-key': key('bg'), disabled: bgInd.level === 'unavailable' || a.connecting, checked: !!a.backgroundSync });
+  box.addEventListener('change', () => ledgerAct(() => AtlasWallet.setLedgerBackgroundSync(a.id, box.checked)));
+  sync.appendChild(box);
+  sync.appendChild(lel('span', { textContent: 'Keep this balance up to date while the wallet is open' }));
+  card.appendChild(sync);
+
+  const actions = lel('div', { className: 'item-actions' });
+  const button = (text, focusSuffix, onClick, extra) => {
+    const b = lel('button', Object.assign({ type: 'button', textContent: text, 'data-focus-key': key(focusSuffix) }, extra || {}));
+    b.addEventListener('click', onClick);
+    actions.appendChild(b);
+    return b;
+  };
+  const lookupLevel = a.indicators.lookup.level;
+  if (lookupLevel !== 'unavailable') {
+    if (a.pendingEndpointOrigin) {
+      button('Allow new address…', 'approve', () => ledgerAsk('Let this wallet use ' + a.pendingEndpointOrigin + ' as the ledger for ' + a.coin + ' at ' + a.issuerDomain + '? It was named by ' + a.issuerDomain + ' and has not been contacted.', 'Allow', () => ledgerAct(() => AtlasWallet.approveLedgerEndpoint(a.id), 'New address allowed.')));
+    } else if (!a.consent) {
+      button('Allow lookups…', 'allow', () => ledgerAsk('Allow this wallet to contact ' + a.issuerDomain + ', and the ledger address it names, to look up your ' + a.coin + ' balance? It asks again if that address changes. Background checks stay off unless you turn them on.', 'Allow', () => ledgerAct(async () => { await AtlasWallet.grantLedgerConsent(a.id); await AtlasWallet.refreshLedgerAccount(a.id, { reason: 'manual' }); })));
+    } else {
+      button('Check now', 'check', () => ledgerAct(async () => { const r = await AtlasWallet.refreshLedgerAccount(a.id, { reason: 'manual' }); if (!r.ok) ledgerSay(AtlasLedgerCore.problemText(r.code)); }), { disabled: a.connecting });
+      button('Stop lookups', 'stop', () => ledgerAct(() => AtlasWallet.revokeLedgerConsent(a.id), 'Lookups and background checks stopped for ' + a.coin + '.'));
+    }
+  }
+  button('Copy credential', 'copy', async () => {
+    try { await navigator.clipboard.writeText(JSON.stringify(a.credential)); ledgerSay('Credential copied. It holds no balance.'); } catch (err) { ledgerSay('Copying is not available here.'); }
+  });
+  button('Remove from wallet…', 'remove', () => ledgerAsk('Remove ' + a.coin + ' at ' + a.issuerDomain + ' from this wallet? This only forgets the reference on this device and stops any checks for it. The ledger account and its balance are not changed, and ' + a.issuerDomain + ' can show it to this identity again.', 'Remove', () => ledgerAct(() => AtlasWallet.removeLedgerAccount(a.id), 'Reference removed. The ledger account is unchanged.'), true), { className: 'danger-btn' });
+  card.appendChild(actions);
+  return card;
+}
+
+async function renderLedger() {
+  if (!ledgerSubscreen) return;
+  const seq = ++ledgerRenderSeq;
+  let ov;
+  try { ov = await AtlasWallet.getLedgerOverview(); } catch (err) { ledgerSay('The ledger tab could not be loaded: ' + (err && err.message)); return; }
+  if (seq !== ledgerRenderSeq) return;
+  const focused = document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute('data-focus-key');
+
+  ledgerIdentityBannerEl.textContent = '';
+  if (!ov.identity) {
+    ledgerIdentityBannerEl.textContent = ov.hasIdentity ? 'Unlock your wallet to see ledger accounts.' : 'Set up your wallet to hold ledger accounts.';
+  } else {
+    const modeLabel = ov.identity.mode === 'webauthn' ? 'Passkey identity' : 'Password identity';
+    ledgerIdentityBannerEl.appendChild(lel('div', { className: 'name', textContent: 'Accounts for ' + modeLabel + ' ' + ov.identity.short }));
+    ledgerIdentityBannerEl.appendChild(lel('div', { className: 'meta', textContent: ov.identity.canSignSilently ? 'This identity can sign without asking, so background checks can be turned on per account.' : 'This identity asks for your confirmation on every request, so checks stay manual.' }));
+    if (ov.otherIdentities > 0) ledgerIdentityBannerEl.appendChild(lel('div', { className: 'meta', textContent: ov.otherIdentities + ' other identit' + (ov.otherIdentities === 1 ? 'y' : 'ies') + ' on this device saved ledger accounts. Switch to that identity to see or check them.' }));
+    if (ov.unreadable) ledgerIdentityBannerEl.appendChild(lel('div', { className: 'ledger-problem', textContent: 'This identity\'s ledger accounts cannot be read right now. Nothing was changed.' }));
+  }
+
+  ledgerAccountsListEl.textContent = '';
+  if (!ov.accounts.length) {
+    ledgerAccountsListEl.appendChild(lel('div', { className: 'empty-note', textContent: ov.identity ? 'No ledger accounts yet. Add one below, or find the ones you already have at an issuing domain.' : '' }));
+  } else {
+    ov.accounts.forEach((a) => ledgerAccountsListEl.appendChild(ledgerCard(a)));
+  }
+
+  const noAdapter = !ov.adapters.length;
+  if (ledgerAddBtn) ledgerAddBtn.disabled = !ov.identity;
+  if (ledgerFindBtn) ledgerFindBtn.disabled = !ov.identity || noAdapter;
+  if (ledgerFindDomainInput) ledgerFindDomainInput.disabled = !ov.identity || noAdapter;
+  if (ledgerFindNoteEl) ledgerFindNoteEl.textContent = noAdapter ? 'Not available yet: this wallet has no ledger service interface installed, so it cannot ask a ledger for balances or accounts.' : 'Asks the domain which accounts belong to the identity in use, proving it is yours by signing.';
+  if (focused) { const again = ledgerSubscreen.querySelector('[data-focus-key="' + focused + '"]'); if (again && !again.disabled) again.focus(); }
+}
+
+// Opening the tab draws what is saved, then looks up only the accounts already allowed.
+async function openLedgerTab() {
+  await renderLedger();
+  try { await AtlasWallet.refreshLedgerAccountsOnOpen(); } catch (err) { /* each account reports its own problem */ }
+  await renderLedger();
+}
+
+ledgerConfirmOkBtn && ledgerConfirmOkBtn.addEventListener('click', () => { const run = ledgerPendingAction; ledgerAskClose(); if (run) run(); });
+ledgerConfirmCancelBtn && ledgerConfirmCancelBtn.addEventListener('click', ledgerAskClose);
+
+ledgerAddBtn && ledgerAddBtn.addEventListener('click', () => {
+  ledgerSay('');
+  let credential;
+  try { credential = JSON.parse(ledgerCredentialInput.value); } catch (err) { ledgerSay('That is not valid JSON.'); return; }
+  const shape = AtlasLedgerCore.validateAccountCredential(credential);
+  if (!shape.ok) { ledgerSay(shape.message); return; }
+  ledgerAsk('Check the issuer\'s signature on this ' + credential.ledger.coin + ' account? This contacts ' + credential.issuer.domain + ' to read its public keys and revocation list. Nothing else is sent.', 'Check and add', () => ledgerAct(async () => { await AtlasWallet.addLedgerAccount(credential, { allowNetwork: true }); ledgerCredentialInput.value = ''; }, 'Added. Nothing has been looked up yet.'));
+});
+
+ledgerFindBtn && ledgerFindBtn.addEventListener('click', () => {
+  ledgerSay('');
+  const domain = ledgerFindDomainInput.value.trim().toLowerCase();
+  if (!AtlasLedgerCore.validDomain(domain)) { ledgerSay('Enter the issuing domain as a plain host name, like example.com.'); return; }
+  ledgerAsk('Ask ' + domain + ' which ledger accounts belong to this identity? This contacts ' + domain + ' and the ledger address it names, and signs a request with your identity to prove the accounts are yours.', 'Ask ' + domain, () => ledgerAct(async () => {
+    const r = await AtlasWallet.rediscoverLedgerAccounts(domain, { allowNetwork: true });
+    ledgerSay(r.added.length + ' account' + (r.added.length === 1 ? '' : 's') + ' added' + (r.skipped.length ? ', ' + r.skipped.length + ' skipped.' : '.'));
+  }));
+});
+
+ledgerSubtabBtn && ledgerSubtabBtn.addEventListener('click', () => { showInventorySubtab('ledgerSubscreen'); openLedgerTab(); });
+
+AtlasWallet.onLedgerChanged(() => { if (ledgerSubscreen && ledgerSubscreen.classList.contains('active')) renderLedger(); });
+
+// Periodic checks run only while a wallet page is open, only for accounts whose switch is on, and
+// in one open page at a time.
+setInterval(() => {
+  const run = async () => { try { await AtlasWallet.runLedgerBackgroundSync(); } catch (err) { /* each account reports its own problem */ } };
+  if (navigator.locks && navigator.locks.request) navigator.locks.request('atlas-ledger-sync', { ifAvailable: true }, async (lock) => { if (lock) await run(); });
+  else run();
+}, 60000);
 tradingBuySubtabBtn && tradingBuySubtabBtn.addEventListener('click', () => showTradingSubtab('tradingBuySubscreen'));
 tradingSellSubtabBtn && tradingSellSubtabBtn.addEventListener('click', () => showTradingSubtab('tradingSellSubscreen'));
 tradingListingsSubtabBtn && tradingListingsSubtabBtn.addEventListener('click', () => showTradingSubtab('tradingListingsSubscreen'));

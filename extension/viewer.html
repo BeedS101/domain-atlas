@@ -460,6 +460,26 @@
 
   .subhead { font-size: 11px; color: #a9b8bf; text-transform: uppercase; letter-spacing: 0.04em; margin: 14px 0 6px; }
 
+  /* Ledger tab. A capability's level is carried by its glyph and its words as well as its
+     border, so it reads without colour: unavailable = crossed dashed, available = hollow,
+     enabled = solid, connecting = half-filled and animated (still, with reduced motion). */
+  #ledgerSubscreen .ledger-balance { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
+  #ledgerSubscreen .ledger-balance .meta { font-weight: 400; }
+  #ledgerSubscreen .ledger-problem { font-size: 11px; color: #e08a4c; margin-top: 4px; }
+  #ledgerSubscreen .ledger-inds { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  #ledgerSubscreen .ledger-ind { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid #2c3c44; color: #cfdadf; }
+  #ledgerSubscreen .ledger-ind.lvl-unavailable { border-style: dashed; color: #8fa1a9; }
+  #ledgerSubscreen .ledger-ind.lvl-available { border-color: #6f838c; }
+  #ledgerSubscreen .ledger-ind.lvl-enabled { border-color: #57a593; border-width: 2px; color: #e6eef1; }
+  #ledgerSubscreen .ledger-ind.lvl-connecting { border-color: #6fa8dc; border-width: 2px; color: #e6eef1; }
+  #ledgerSubscreen .ledger-ind.lvl-connecting .ledger-glyph { display: inline-block; animation: ledger-pulse 1s ease-in-out infinite; }
+  @keyframes ledger-pulse { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { #ledgerSubscreen .ledger-ind.lvl-connecting .ledger-glyph { animation: none; } }
+  #ledgerSubscreen .ledger-detail { font-size: 11px; color: #a9b8bf; margin-top: 4px; }
+  #ledgerSubscreen .ledger-confirm { border-color: #e0b84c; margin: 8px 0; }
+  #ledgerSubscreen button:focus-visible, #ledgerSubscreen input:focus-visible, #ledgerSubscreen textarea:focus-visible { outline: 2px solid #8fbfe8; outline-offset: 2px; }
+  #ledgerSubscreen label.check-row { color: #cfdadf; }
+
   .settings-category { border-bottom: 1px solid #2c3c44; margin-top: 4px; }
   .settings-category:first-child { margin-top: 0; }
   .settings-category-toggle {
@@ -2005,6 +2025,7 @@
           <div id="inventorySubtabBar" class="subtab-bar">
             <button id="collectiblesSubtabBtn" type="button">Collectibles</button>
             <button id="documentsSubtabBtn" type="button">Documents</button>
+            <button id="ledgerSubtabBtn" type="button">Ledger</button>
           </div>
 
           <!-- Sub-screen: Collectibles — every asset with
@@ -2060,6 +2081,31 @@
             <div id="selfDocumentsList" class="item-list"></div>
             <div class="subhead">Counterparty's</div>
             <div id="counterpartyDocumentsList" class="item-list"></div>
+          </div>
+
+          <!-- Sub-screen: Ledger — references to accounts whose balances are kept by a
+               remote ledger, not by this wallet. Nothing here is an asset and nothing is
+               spendable from here. Cards are built in viewer.js (renderLedger). -->
+          <div id="ledgerSubscreen" class="subscreen">
+            <div id="ledgerIdentityBanner" class="info-card"></div>
+            <p class="meta" id="ledgerExplainer">A ledger account is kept by the ledger that issued it. This wallet holds only a reference to it and shows the balance the ledger last reported. Removing a reference here never changes the account.</p>
+            <div id="ledgerStatus" class="empty-note" role="status" aria-live="polite"></div>
+            <div id="ledgerConfirm" class="info-card ledger-confirm" role="group" aria-labelledby="ledgerConfirmText" hidden>
+              <div id="ledgerConfirmText"></div>
+              <div class="item-actions">
+                <button id="ledgerConfirmOk" type="button"></button>
+                <button id="ledgerConfirmCancel" type="button">Cancel</button>
+              </div>
+            </div>
+            <div class="subhead" id="ledgerAccountsHeading">Accounts</div>
+            <div id="ledgerAccountsList" class="item-list" aria-labelledby="ledgerAccountsHeading"></div>
+            <div class="subhead">Add an account</div>
+            <textarea id="ledgerCredentialInput" aria-label="Ledger account credential" placeholder="Paste a ledger-account credential (JSON) from the issuing domain…"></textarea>
+            <div class="btn-row" style="margin-top:8px;"><button id="ledgerAddBtn" type="button">Check and add…</button></div>
+            <div class="subhead">Find my accounts</div>
+            <input type="text" id="ledgerFindDomainInput" aria-label="Issuing domain" placeholder="Issuing domain, e.g. example.com" autocomplete="off">
+            <div class="btn-row" style="margin-top:8px;"><button id="ledgerFindBtn" type="button">Find my accounts…</button></div>
+            <div id="ledgerFindNote" class="meta" style="margin-top:6px;"></div>
           </div>
         </div>
       </div>
@@ -2801,6 +2847,7 @@
 
   <script src="chess.js"></script>
   <script src="call-protocol.js"></script>
+  <script src="ledger-core.js"></script>
   <script src="wallet.js"></script>
   <script src="gltf-mini.js"></script>
   <script src="viewer.js"></script>
