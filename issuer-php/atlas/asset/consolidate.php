@@ -24,7 +24,7 @@ if (!is_array($credentials) || count($credentials) < 2) {
   send_json(400, ['error' => 'credentials must be an array of at least two balances']);
 }
 if (count($credentials) > 20) {
-  send_json(400, ['error' => 'too many balances in one consolidation (max 20 at a time)']);
+  send_json(400, ['error' => 'too many balances in one consolidation (max 20 at a time)', 'code' => 'too-many', 'max' => 20]);
 }
 
 $ids = array_map(function ($c) { return is_array($c) ? ($c['id'] ?? null) : null; }, $credentials);
@@ -32,17 +32,25 @@ if (count(array_unique($ids)) !== count($ids)) {
   send_json(400, ['error' => 'duplicate balance in consolidation request']);
 }
 
+$requestId = atlas_parse_request_id($body);
+atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'consolidate', $credentials, []);
+
 $owner = $credentials[0]['owner']['publicKey'] ?? null;
 $cls = $credentials[0]['asset']['class'] ?? null;
 foreach ($credentials as $credential) {
   $problem = check_presented_asset($kp['publicKeyB64url'], $credential, $owner, $cls, 1);
-  if ($problem) send_json(400, ['error' => $problem]);
+  if ($problem) send_json(400, atlas_spend_problem_body($problem, $credential));
 }
 
 $total = array_reduce($credentials, function ($sum, $c) { return $sum + $c['quantity']; }, 0);
-$merged = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $owner, $cls, $total, $ids);
-foreach ($credentials as $c) {
-  atlas_revoke($c['id'], 'consolidated');
-  archive_if_audited($c, 'consolidated');
+$minted = [];
+try {
+  $merged = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $owner, $cls, $total, $ids);
+  $minted[] = [$owner, $merged['id']];
+  atlas_revoke_many($ids, 'consolidated');
+} catch (Exception $e) {
+  atlas_rollback_minted($minted);
+  throw $e;
 }
-send_json(200, $merged);
+foreach ($credentials as $c) archive_if_audited($c, 'consolidated');
+atlas_send_replaceable($requestId, 'consolidate', $ids, [], $merged);

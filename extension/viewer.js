@@ -12343,15 +12343,12 @@ droppedItemsListEl.addEventListener('click', (e) => {
 
 // Dispatch for a clicked in-scene interactable (see the "interactables"
 // note in enterWorld). Four actions exist today: "mint" (calls
-// AtlasWallet.mintAsset() directly — task #211 removed the old dev-only
-// "Mine 20 iron (self)"/"Mine 10 gold (counterparty)" Settings buttons
-// that used to call the same thing, since every world's own mining
-// stalls are the real, in-scene way to reach it now), "issue" (see just
-// below), "purchase" (the museum ticket stall's own worked example — spend
-// a fungible balance to acquire a fresh asset via AtlasWallet.purchaseAsset(),
-// the first time a scene-declared stall reaches for the owner-signed intent
-// envelope every other action here never needed), and "open-chess"
-// (task #195 — opens the chess modal; see that section further down). The busy
+// AtlasWallet.mintAsset() directly), "issue" (see just below), "purchase"
+// (the museum ticket stall's worked example: spend a fungible balance to
+// acquire a fresh asset via AtlasWallet.purchaseAsset(), the first time a
+// scene-declared stall reaches for the owner-signed intent envelope every
+// other action here never needed), and "open-chess" (opens the chess modal;
+// see that section further down). The busy
 // guard exists because — unlike a portal (leaves the scene) or a dropped
 // item (removes its own marker once picked up) — a stall stays put and
 // stays clickable, so nothing else stops a fast double-click from firing
@@ -12368,7 +12365,7 @@ async function handleInteractable(marker) {
     // identityRequired gate just below rather than making a visitor
     // create or unlock an identity just to play a local minigame.
     if (marker.action === 'open-chess') { openChessModal(); return; }
-    // Task #63, scoped: inside a world that requires identity, a locked
+    // Inside a world that requires identity, a locked
     // wallet shouldn't just fail this click with an error message the way
     // it would in any ordinary world (see the 'issue' branch's own
     // pre-existing "Create an identity first." throw below) — open the
@@ -12381,13 +12378,13 @@ async function handleInteractable(marker) {
     }
     if (marker.action === 'mint') {
       statusEl.textContent = 'Mining ' + marker.class + '…';
-      await AtlasWallet.mintAsset(marker.role || 'self', manifestDomainOf(currentManifest), marker.class, marker.quantity);
+      const mined = await AtlasWallet.mintAsset(marker.role || 'self', manifestDomainOf(currentManifest), marker.class, marker.quantity);
       await refreshInventoryDisplay();
-      // Task #206: 'of', not '×' — once the number itself already carries a
+      // 'of', not '×': once the number itself already carries a
       // unit ("20 g"), "Collected 20 g × atlas.element.iron." read like a
       // stray multiplication; "of" reads correctly with a unit already in
       // the number.
-      statusEl.textContent = 'Collected ' + formatMass(marker.quantity) + ' of ' + marker.class + '.';
+      statusEl.textContent = 'Collected ' + formatMass(marker.quantity) + ' of ' + marker.class + '.' + consolidationNote(mined && mined.consolidation);
     } else if (marker.action === 'issue') {
       // Unlike a resource balance, an item credential isn't quantity-based
       // — every "collect" issues a brand-new unique credential, and the
@@ -12415,14 +12412,14 @@ async function handleInteractable(marker) {
       await AtlasWallet.mintAsset('self', manifestDomainOf(currentManifest), marker.class);
       await refreshInventoryDisplay();
       statusEl.textContent = 'Collected ' + (marker.label || marker.class) + '.';
-      // Task #227 — this class just became "already owned" for
+      // This class just became "already owned" for
       // isOncePerUserClassOwned()'s purposes; refresh right away rather
       // than waiting for the next world entry, so the Previewer/3D
       // proximity list drops it immediately (and, in 3D, so the very next
       // E press targets the NEXT nearest still-available marker instead of
       // re-targeting this one).
       if (marker.oncePerUser) await refreshOwnedOncePerUserClassKeys();
-      // Task #227 — the plaza's own "Subscribe" desk and the wallet
+      // The plaza's own "Subscribe" desk and the wallet
       // panel's "Subscribe" button (#subscribeSection) both mint the same
       // atlas.membership credential; refreshSubscribeButton() only runs on
       // enterWorld() or the button's own click otherwise, so without this
@@ -12456,6 +12453,16 @@ async function handleInteractable(marker) {
   } finally {
     interactableBusyMarkers.delete(marker);
   }
+}
+
+// One short sentence for the status line when automatic consolidation could
+// not merge some balances. The balances are still valid and are retried on the
+// next change; the details are in the activity log.
+function consolidationNote(report) {
+  if (!report || !report.failed || !report.failed.length) return '';
+  const stacks = report.failed.reduce((n, f) => n + f.stacks, 0);
+  const waiting = report.failed.every((f) => f.pending);
+  return ' ' + stacks + ' balances could not be merged' + (waiting ? ' (the issuer did not answer; will retry)' : '') + ' - they stay valid. See the activity log.';
 }
 
 // Enter-to-submit on the password fields that each drive exactly one

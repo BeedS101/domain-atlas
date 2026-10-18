@@ -1114,6 +1114,241 @@ const AtlasWallet = (() => {
     notifyWalletChanged(ownerPublicKey);
   }
 
+  // Changes a wallet list that may be changing elsewhere (another tab, a
+  // background check): reads the CURRENT list inside the wallet lock, lets
+  // `fn` change it (no network, no other lock inside `fn`), and saves. Use
+  // this instead of getWallet() ... await something ... saveWallet() whenever
+  // the write follows a network call.
+  async function mutateWallet(ownerPublicKey, fn) {
+    return withWalletLock(async () => {
+      const list = await getWallet(ownerPublicKey);
+      const next = (await fn(list)) || list;
+      await saveWallet(ownerPublicKey, next);
+      return next;
+    });
+  }
+
+  // An entry the issuer has said is spent, or that a check found revoked. Kept
+  // in the list (it is the only record of what the balance was) but never
+  // presented, merged or counted again.
+  function isKnownSpent(entry) {
+    return !!(entry && (entry.spent || (entry.lastVerdict && entry.lastVerdict.status === 'revoked')));
+  }
+
+  // ---------- issuer operations that replace balances (safe retry) ----------
+  // A mint, split, consolidate or convert asks the issuer to sign successor
+  // credentials and, for the last three, to revoke the predecessors. The signed
+  // successors exist only in the issuer's answer. So each such request:
+  //   1. gets a fresh requestId and is written to a pending-operations journal
+  //      (encrypted at rest, per owner) BEFORE it is sent;
+  //   2. is sent with no wallet lock held;
+  //   3. on an answer, has its result applied to the CURRENT wallet list and its
+  //      journal entry removed in ONE storage write, under the wallet lock, and
+  //      only if the entry is still in the journal (so two pages applying the
+  //      same answer apply it once);
+  //   4. if no answer arrives (network failure, timeout, a 5xx, "busy"), stays in
+  //      the journal and is sent again with the same requestId, which the issuer
+  //      answers with the stored result rather than doing the work twice. Entries
+  //      are retried before the next operation for that owner, on re-verify, and
+  //      on demand (recoverPendingOperations).
+  // A definite refusal (any other 4xx) removes the entry: nothing happened.
+  const OPERATION_TIMEOUT_MS = 60000;
+  const MAX_CONSOLIDATE_BATCH = 20;
+
+  function newRequestId() {
+    return b64urlEncode(crypto.getRandomValues(new Uint8Array(18)).buffer);
+  }
+
+  async function readPendingOps(ownerPublicKey) {
+    const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
+    const identity = await getIdentity();
+    const list = await decryptAtRest(identity, 'pendingOps', (atlasPendingOps || {})[ownerPublicKey], []);
+    return Array.isArray(list) ? list : [];
+  }
+
+  async function journalAdd(ownerPublicKey, entry) {
+    await withWalletLock(async () => {
+      const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
+      const all = atlasPendingOps || {};
+      const identity = await getIdentity();
+      const list = await decryptAtRest(identity, 'pendingOps', all[ownerPublicKey], []);
+      list.push(entry);
+      all[ownerPublicKey] = await encryptAtRest(identity, 'pendingOps', list);
+      await chrome.storage.local.set({ atlasPendingOps: all });
+    });
+  }
+
+  async function journalPatch(ownerPublicKey, requestId, patch) {
+    await withWalletLock(async () => {
+      const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
+      const all = atlasPendingOps || {};
+      const identity = await getIdentity();
+      const list = await decryptAtRest(identity, 'pendingOps', all[ownerPublicKey], []);
+      const entry = list.find((e) => e.requestId === requestId);
+      if (!entry) return;
+      if (patch === null) list.splice(list.indexOf(entry), 1);
+      else Object.assign(entry, patch);
+      all[ownerPublicKey] = await encryptAtRest(identity, 'pendingOps', list);
+      await chrome.storage.local.set({ atlasPendingOps: all });
+    });
+  }
+
+  // Applies `changes` ([{ owner, remove: [ids], add: [{credential, lastVerdict}] }])
+  // to the current wallet lists and removes the journal entry, in one storage
+  // write. Returns false (and changes nothing) when the entry is already gone,
+  // meaning another page applied this answer first. With no journal entry
+  // (requestId null) it just applies the changes.
+  async function commitOperation(journalOwner, requestId, changes) {
+    return withWalletLock(async () => {
+      const identity = await getIdentity();
+      const next = new Map();
+      for (const change of changes) {
+        const base = next.get(change.owner) || await getWallet(change.owner);
+        const drop = new Set(change.remove || []);
+        const list = base.filter((e) => !drop.has(e.credential.id));
+        for (const add of change.add || []) {
+          if (!list.some((e) => e.credential.id === add.credential.id)) list.push(add);
+        }
+        next.set(change.owner, list);
+      }
+      const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
+      const pendingAll = stored.atlasPendingOps || {};
+      if (requestId) {
+        const pending = await decryptAtRest(identity, 'pendingOps', pendingAll[journalOwner], []);
+        const index = pending.findIndex((e) => e.requestId === requestId);
+        if (index < 0) return false;
+        pending.splice(index, 1);
+        pendingAll[journalOwner] = await encryptAtRest(identity, 'pendingOps', pending);
+      }
+      const wallets = stored.atlasWallets || {};
+      for (const [owner, list] of next) wallets[owner] = await encryptAtRest(identity, 'wallet', list);
+      await chrome.storage.local.set(requestId ? { atlasWallets: wallets, atlasPendingOps: pendingAll } : { atlasWallets: wallets });
+      for (const owner of next.keys()) notifyWalletChanged(owner);
+      return true;
+    });
+  }
+
+  function operationError(label, status, text, data, extra) {
+    const err = new Error(label + ' failed: ' + text);
+    err.status = status;
+    err.code = data && data.code ? data.code : undefined;
+    err.credentialId = data && data.credentialId ? data.credentialId : undefined;
+    return Object.assign(err, extra || {});
+  }
+
+  // What an answer changes in the wallet(s). Pure: the same answer always gives
+  // the same changes, which is what lets a retried answer be applied once.
+  function changesForAnswer(entry, data) {
+    const entryOf = (credential) => ({ credential });
+    if (entry.kind === 'mint') return [{ owner: entry.owner, add: [entryOf(data)] }];
+    if (entry.kind === 'split') {
+      return [
+        { owner: entry.owner, remove: entry.predecessors, add: data.remainder ? [entryOf(data.remainder)] : [] },
+        { owner: entry.toOwner || entry.owner, add: [entryOf(data.sent)] }
+      ];
+    }
+    if (entry.kind === 'consolidate') return [{ owner: entry.owner, remove: entry.predecessors, add: [entryOf(data)] }];
+    if (entry.kind === 'convert') {
+      return [{ owner: entry.owner, remove: entry.predecessors, add: [data.remainder, data.received].filter(Boolean).map(entryOf) }];
+    }
+    throw new Error('unknown operation kind: ' + entry.kind);
+  }
+
+  // Sends one journalled entry and, on an answer, applies it. Throws an error
+  // with .pending = true when the entry stays in the journal to be retried.
+  async function sendOperation(entry) {
+    let res, text;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OPERATION_TIMEOUT_MS);
+    try {
+      res = await fetch(baseUrl(entry.domain) + entry.path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(entry.body),
+        signal: controller.signal
+      });
+      text = await res.text();
+    } catch (err) {
+      clearTimeout(timer);
+      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: String(err && err.message || err).slice(0, 200), lastAttemptAt: new Date().toISOString() });
+      throw operationError(entry.label, 0, 'no answer from ' + entry.domain + '; the request is saved and will be retried', null, { pending: true, requestId: entry.requestId });
+    }
+    clearTimeout(timer);
+    let data = null;
+    try { data = JSON.parse(text); } catch (err) { /* not JSON */ }
+    if (res.ok && data && typeof data === 'object') {
+      const changes = changesForAnswer(entry, data);
+      for (const change of changes) {
+        for (const add of change.add || []) add.lastVerdict = await verifyCredential(add.credential);
+      }
+      const applied = await commitOperation(entry.owner, entry.requestId, changes);
+      return { data, applied, changes };
+    }
+    const unsettled = res.status >= 500 || (data && data.code === 'busy');
+    if (unsettled) {
+      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: ('HTTP ' + res.status + ' ' + text).slice(0, 200), lastAttemptAt: new Date().toISOString() });
+      throw operationError(entry.label, res.status, text, data, { pending: true, requestId: entry.requestId });
+    }
+    await journalPatch(entry.owner, entry.requestId, null);
+    throw operationError(entry.label, res.status, text, data, { requestId: entry.requestId });
+  }
+
+  // Journals, sends and applies one replacement request.
+  //   spec: { owner, toOwner?, kind, label, domain, path, body, predecessors }
+  async function runIssuerOperation(spec) {
+    await recoverPendingOperations(spec.owner);
+    const requestId = newRequestId();
+    const entry = {
+      requestId, kind: spec.kind, label: spec.label, owner: spec.owner, toOwner: spec.toOwner || null,
+      domain: spec.domain, path: spec.path, predecessors: spec.predecessors || [],
+      body: Object.assign({}, spec.body, { requestId }),
+      createdAt: new Date().toISOString(), attempts: 0
+    };
+    await journalAdd(spec.owner, entry);
+    return sendOperation(entry);
+  }
+
+  // A request that does not repeat safely (a non-fungible mint: the issuer
+  // would make a second item): no journal and no request id. The answer is
+  // still applied to the current list.
+  async function runPlainOperation(spec) {
+    const res = await fetch(baseUrl(spec.domain) + spec.path, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(spec.body)
+    });
+    if (!res.ok) throw new Error(spec.label + ' failed: ' + (await res.text()));
+    return res.json();
+  }
+
+  const recoveringOwners = new Set();
+  // Sends again every journalled request for this owner. Returns
+  // [{ requestId, kind, status: 'completed' | 'pending' | 'failed', error? }].
+  async function recoverPendingOperations(ownerPublicKey) {
+    if (recoveringOwners.has(ownerPublicKey)) return [];
+    recoveringOwners.add(ownerPublicKey);
+    const outcomes = [];
+    try {
+      for (const entry of await readPendingOps(ownerPublicKey)) {
+        try {
+          const done = await sendOperation(entry);
+          outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'completed', applied: done.applied });
+          if (done.applied) await logActivity('asset', 'Recovered an interrupted ' + entry.kind + ' (' + entry.domain + '): the issuer had already completed it');
+        } catch (err) {
+          outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: err.pending ? 'pending' : 'failed', error: err.message });
+          if (!err.pending) await logActivity('asset', 'An interrupted ' + entry.kind + ' at ' + entry.domain + ' could not be completed: ' + err.message.slice(0, 160));
+        }
+      }
+    } finally {
+      recoveringOwners.delete(ownerPublicKey);
+    }
+    return outcomes;
+  }
+
+  async function getPendingOperations(ownerPublicKey) {
+    return (await readPendingOps(ownerPublicKey)).map((e) => ({
+      requestId: e.requestId, kind: e.kind, domain: e.domain, createdAt: e.createdAt, attempts: e.attempts || 0, lastError: e.lastError || null
+    }));
+  }
+
   // The one issuance entry point for every asset class this build can
   // mint (SPEC.md §5) — `role` picks which local identity receives it
   // ('self' or 'counterparty', same as every other role-taking function
@@ -1125,38 +1360,39 @@ const AtlasWallet = (() => {
   async function mintAsset(role, issuerDomain, assetClass, quantity) {
     const owner = await identityOf(role);
     const wallet = await getWallet(owner.publicKey);
-    // Task #203 — attached for EVERY fungible mint (cheap, and the server
-    // decides whether it actually needs to look at it), so a class the
-    // issuer later gives a `holdingCap` doesn't need this wallet build
-    // updated again to start cooperating with it. Scoped to credentials
-    // this SAME issuer domain actually signed — anything else would just
-    // fail verification server-side and be silently ignored anyway (see
-    // /atlas/asset/issue's own currentHeldQuantity), so there's no reason
-    // to send it. A non-fungible mint never carries this — holdingCap is
-    // only ever meaningful for a quantity-based class.
+    // Attached for every fungible mint (cheap, and the issuer decides whether
+    // it needs it): the issuer counts holdings from its own records and uses
+    // these only to recognise balances it signed before it kept them. Spent
+    // balances are left out.
     const existingBalances = quantity !== undefined
-      ? wallet.filter((e) => e.credential.asset.class === assetClass && e.credential.issuer.domain === issuerDomain).map((e) => e.credential)
+      ? wallet.filter((e) => !isKnownSpent(e) && e.credential.asset.class === assetClass && e.credential.issuer.domain === issuerDomain).map((e) => e.credential)
       : undefined;
-    const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/issue', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ownerPublicKey: owner.publicKey, assetClass,
-        ...(quantity !== undefined ? { quantity } : {}),
-        ...(existingBalances && existingBalances.length ? { existingBalances } : {})
-      })
-    });
-    if (!res.ok) throw new Error('Mint failed: ' + (await res.text()));
-    const credential = await res.json();
-    const verdict = await verifyCredential(credential);
-    wallet.push({ credential, lastVerdict: verdict });
-    await saveWallet(owner.publicKey, wallet);
-    await autoConsolidateAssetWallet(owner.publicKey);
+    const body = {
+      ownerPublicKey: owner.publicKey, assetClass,
+      ...(quantity !== undefined ? { quantity } : {}),
+      ...(existingBalances && existingBalances.length ? { existingBalances } : {})
+    };
+    let credential, verdict;
+    if (quantity !== undefined) {
+      // A quantity-based mint repeats safely (the issuer returns the credential
+      // already issued for the same requestId), so it is journalled.
+      const done = await runIssuerOperation({ owner: owner.publicKey, kind: 'mint', label: 'Mint', domain: issuerDomain, path: '/atlas/asset/issue', body });
+      credential = done.data;
+      verdict = done.changes[0].add[0].lastVerdict;
+    } else {
+      credential = await runPlainOperation({ label: 'Mint', domain: issuerDomain, path: '/atlas/asset/issue', body });
+      verdict = await verifyCredential(credential);
+      await mutateWallet(owner.publicKey, (list) => {
+        if (!list.some((e) => e.credential.id === credential.id)) list.push({ credential, lastVerdict: verdict });
+        return list;
+      });
+    }
+    const consolidation = await autoConsolidateAssetWallet(owner.publicKey);
     await logActivity('asset', 'Minted ' + (quantity !== undefined ? quantity + ' ' : '') + assetClass + ' from ' + issuerDomain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
-    return { credential, verdict };
+    return { credential, verdict, consolidation };
   }
 
-  // Task #203 (SPEC.md §7's "Currency conversion") — converts part or all
+  // SPEC.md §7's "Currency conversion": converts part or all
   // of a held fungible balance into a DIFFERENT fungible class at the
   // issuing domain's own declared rate (POST /atlas/convert). Mirrors
   // splitAsset()'s own shape below almost exactly — present the balance,
@@ -1169,18 +1405,12 @@ const AtlasWallet = (() => {
   // settlement, with no mail round-trip needed for either.
   async function convertAsset(role, credential, spendAmount, toClass) {
     const owner = await identityOf(role);
-    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/convert', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ credential, spendAmount, toClass })
+    const done = await runIssuerOperation({
+      owner: owner.publicKey, kind: 'convert', label: 'Convert', domain: credential.issuer.domain, path: '/atlas/convert',
+      body: { credential, spendAmount, toClass }, predecessors: [credential.id]
     });
-    if (!res.ok) throw new Error('Convert failed: ' + (await res.text()));
-    const result = await res.json();
-    let wallet = (await getWallet(owner.publicKey)).filter((e) => e.credential.id !== credential.id);
-    if (result.remainder) wallet.push({ credential: result.remainder, lastVerdict: await verifyCredential(result.remainder) });
-    wallet.push({ credential: result.received, lastVerdict: await verifyCredential(result.received) });
-    await saveWallet(owner.publicKey, wallet);
-    await autoConsolidateAssetWallet(owner.publicKey);
+    const result = Object.assign({}, done.data);
+    result.consolidation = await autoConsolidateAssetWallet(owner.publicKey);
     await logActivity('asset', 'Converted ' + spendAmount + ' ' + credential.asset.class + ' into ' + toClass + ' at ' + credential.issuer.domain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
     return result;
   }
@@ -1224,10 +1454,9 @@ const AtlasWallet = (() => {
     });
     if (!res.ok) throw new Error('Purchase failed: ' + (await res.text()));
     const result = await res.json();
-    const newWallet = wallet.filter((e) => e.credential.id !== balanceCredential.id);
-    if (result.balance) newWallet.push({ credential: result.balance, lastVerdict: await verifyCredential(result.balance) });
-    newWallet.push({ credential: result.purchased, lastVerdict: await verifyCredential(result.purchased) });
-    await saveWallet(owner.publicKey, newWallet);
+    const balanceEntry = result.balance ? { credential: result.balance, lastVerdict: await verifyCredential(result.balance) } : null;
+    const purchasedEntry = { credential: result.purchased, lastVerdict: await verifyCredential(result.purchased) };
+    await commitOperation(owner.publicKey, null, [{ owner: owner.publicKey, remove: [balanceCredential.id], add: [balanceEntry, purchasedEntry].filter(Boolean) }]);
     await autoConsolidateAssetWallet(owner.publicKey);
     await logActivity('asset', 'Purchased ' + qty + ' ' + purchasedClass + ' from ' + issuerDomain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
     return result;
@@ -1462,8 +1691,7 @@ const AtlasWallet = (() => {
       const holder = await getIdentity();
       if (holder && holder.publicKey === ownerPublicKey) await leavePostOffice(deleted.credential.issuer.domain, credentialId);
     }
-    const wallet = before.filter((e) => e.credential.id !== credentialId);
-    await saveWallet(ownerPublicKey, wallet);
+    await mutateWallet(ownerPublicKey, (list) => list.filter((e) => e.credential.id !== credentialId));
     await unloadItem(credentialId);
     if (deleted) {
       const identity = await getIdentity();
@@ -1481,20 +1709,22 @@ const AtlasWallet = (() => {
   // as delete: a hidden asset shouldn't stay "loaded into this world"
   // where it's no longer visible.
   async function hideAsset(ownerPublicKey, credentialId) {
-    const wallet = await getWallet(ownerPublicKey);
-    const entry = wallet.find((e) => e.credential.id === credentialId);
-    if (!entry) return;
-    entry.hidden = true;
-    await saveWallet(ownerPublicKey, wallet);
+    let found = false;
+    await mutateWallet(ownerPublicKey, (list) => {
+      const entry = list.find((e) => e.credential.id === credentialId);
+      if (entry) { entry.hidden = true; found = true; }
+      return list;
+    });
+    if (!found) return;
     await unloadItem(credentialId);
   }
 
   async function unhideAsset(ownerPublicKey, credentialId) {
-    const wallet = await getWallet(ownerPublicKey);
-    const entry = wallet.find((e) => e.credential.id === credentialId);
-    if (!entry) return;
-    delete entry.hidden;
-    await saveWallet(ownerPublicKey, wallet);
+    await mutateWallet(ownerPublicKey, (list) => {
+      const entry = list.find((e) => e.credential.id === credentialId);
+      if (entry) delete entry.hidden;
+      return list;
+    });
   }
 
   // ---------- splitting and consolidating fungible balances (§5.4) ----------
@@ -1508,22 +1738,13 @@ const AtlasWallet = (() => {
   async function splitAsset(role, credential, sendAmount, toRole) {
     const fromOwner = await identityOf(role);
     const toOwner = await identityOf(toRole);
-    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/split', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ credential, sendAmount, toPublicKey: toOwner.publicKey })
+    const done = await runIssuerOperation({
+      owner: fromOwner.publicKey, toOwner: toOwner.publicKey, kind: 'split', label: 'Split',
+      domain: credential.issuer.domain, path: '/atlas/asset/split',
+      body: { credential, sendAmount, toPublicKey: toOwner.publicKey }, predecessors: [credential.id]
     });
-    if (!res.ok) throw new Error('Split failed: ' + (await res.text()));
-    const { sent, remainder } = await res.json();
-
-    let fromWallet = (await getWallet(fromOwner.publicKey)).filter((e) => e.credential.id !== credential.id);
-    if (remainder) fromWallet.push({ credential: remainder, lastVerdict: await verifyCredential(remainder) });
-    await saveWallet(fromOwner.publicKey, fromWallet);
+    const { sent, remainder } = done.data;
     if (remainder) await autoConsolidateAssetWallet(fromOwner.publicKey);
-
-    const toWallet = await getWallet(toOwner.publicKey);
-    toWallet.push({ credential: sent, lastVerdict: await verifyCredential(sent) });
-    await saveWallet(toOwner.publicKey, toWallet);
     await autoConsolidateAssetWallet(toOwner.publicKey);
 
     let splitLogText;
@@ -1540,35 +1761,39 @@ const AtlasWallet = (() => {
     return { sent, remainder };
   }
 
-  // Merges several balances of the same class AND issuer into one — the
-  // inverse of splitAsset. Unlike deleteAsset above, this genuinely
-  // changes what's owned (N credentials become 1 with the summed
-  // quantity), so it has to go through the issuer: only the issuer's
-  // signature can vouch for the new total, the same reason splitAsset's
-  // remainder does. See /atlas/asset/consolidate in issuer-server and
-  // issuer-php for the other half. This is the low-level primitive both
-  // the manual "Consolidate" button (consolidateAsset) and automatic
-  // consolidation (autoConsolidateAssetWallet, below) build on.
+  // Merges up to 20 balances of the same class AND issuer into one - the
+  // inverse of splitAsset. Unlike deleteAsset above, this genuinely changes
+  // what's owned (N credentials become 1 with the summed quantity), so it has
+  // to go through the issuer: only the issuer's signature can vouch for the new
+  // total, the same reason splitAsset's remainder does. See
+  // /atlas/asset/consolidate in issuer-server and issuer-php for the other
+  // half. The issuer accepts at most 20 balances per request; consolidateAsset
+  // and autoConsolidateAssetWallet below split larger groups into batches.
   async function mergeAssetGroup(ownerPublicKey, credentials) {
     if (!credentials || credentials.length < 2) return null;
-    const issuerDomain = credentials[0].issuer.domain;
-    const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/consolidate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ credentials })
+    if (credentials.length > MAX_CONSOLIDATE_BATCH) throw new Error('Merge at most ' + MAX_CONSOLIDATE_BATCH + ' balances in one request.');
+    const done = await runIssuerOperation({
+      owner: ownerPublicKey, kind: 'consolidate', label: 'Consolidate', domain: credentials[0].issuer.domain,
+      path: '/atlas/asset/consolidate', body: { credentials }, predecessors: credentials.map((c) => c.id)
     });
-    if (!res.ok) throw new Error('Consolidate failed: ' + (await res.text()));
-    const merged = await res.json();
+    return done.data;
+  }
 
-    const mergedIds = new Set(credentials.map((c) => c.id));
-    let wallet = (await getWallet(ownerPublicKey)).filter((e) => !mergedIds.has(e.credential.id));
-    wallet.push({ credential: merged, lastVerdict: await verifyCredential(merged) });
-    await saveWallet(ownerPublicKey, wallet);
+  // Merges any number of balances by batches of 20: each batch becomes one
+  // balance, which joins the next batch, until one is left. Throws on the first
+  // refusal, so the caller sees it.
+  async function mergeInBatches(ownerPublicKey, credentials) {
+    let group = credentials.slice().sort((a, b) => b.quantity - a.quantity);
+    let merged = null;
+    while (group.length > 1) {
+      merged = await mergeAssetGroup(ownerPublicKey, group.slice(0, MAX_CONSOLIDATE_BATCH));
+      group = [merged].concat(group.slice(MAX_CONSOLIDATE_BATCH));
+    }
     return merged;
   }
 
-  // Manual entry point — the "Consolidate" button in the UI. Logged here,
-  // not inside mergeAssetGroup() above — that shared primitive is also
+  // Manual entry point - the "Consolidate" button in the UI. Logged here,
+  // not inside mergeAssetGroup() above - that shared primitive is also
   // called silently by autoConsolidateAssetWallet's own housekeeping after
   // nearly every asset-gaining action, and that path deliberately stays
   // out of the activity log (see its own comment: "genuinely just
@@ -1579,45 +1804,115 @@ const AtlasWallet = (() => {
       throw new Error('Pick at least two balances of the same class and issuer to consolidate.');
     }
     const owner = await identityOf(role);
-    const merged = await mergeAssetGroup(owner.publicKey, credentials);
+    const merged = await mergeInBatches(owner.publicKey, credentials);
     await logActivity('asset', 'Consolidated ' + credentials.length + ' balances of ' + credentials[0].asset.class + ' into one' + (role === 'counterparty' ? ' (counterparty test identity)' : ''));
     return merged;
   }
 
-  // Automatic entry point — called after anything that can leave a wallet
+  async function markSpent(ownerPublicKey, credentialId, reason) {
+    await mutateWallet(ownerPublicKey, (list) => {
+      const entry = list.find((e) => e.credential.id === credentialId);
+      if (entry) {
+        entry.spent = { at: new Date().toISOString(), by: 'issuer', reason: reason || 'revoked' };
+        entry.lastVerdict = { valid: false, status: 'revoked', revocation: 'revoked', reason: 'revoked by issuer' };
+      }
+      return list;
+    });
+  }
+
+  // Runs one consolidation at a time per owner across every page of the
+  // extension; a second request while one is running returns at once.
+  const consolidatingOwners = new Set();
+  async function withConsolidationSlot(ownerPublicKey, fn, busyValue) {
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      return navigator.locks.request('atlas-wallet-consolidate:' + ownerPublicKey, { ifAvailable: true }, (lock) => (lock ? fn() : busyValue));
+    }
+    if (consolidatingOwners.has(ownerPublicKey)) return busyValue;
+    consolidatingOwners.add(ownerPublicKey);
+    try { return await fn(); } finally { consolidatingOwners.delete(ownerPublicKey); }
+  }
+
+  async function getConsolidationStatus(ownerPublicKey) {
+    const { atlasConsolidationStatus } = await chrome.storage.local.get('atlasConsolidationStatus');
+    return (atlasConsolidationStatus || {})[ownerPublicKey] || { at: null, failed: [] };
+  }
+
+  async function saveConsolidationStatus(ownerPublicKey, status) {
+    const { atlasConsolidationStatus } = await chrome.storage.local.get('atlasConsolidationStatus');
+    const all = atlasConsolidationStatus || {};
+    all[ownerPublicKey] = status;
+    await chrome.storage.local.set({ atlasConsolidationStatus: all });
+  }
+
+  // Automatic entry point - called after anything that can leave a wallet
   // holding two or more balances of the same class from the same issuer
   // (minting, a split's remainder/received side, a trade's received side,
   // importing a wallet file), so balances get folded into one as they
   // arise instead of the user having to notice and merge them by hand.
   // Scans the WHOLE wallet, but only ever groups entries whose
-  // asset.fungible is true — a non-fungible asset is one-of-a-kind by
+  // asset.fungible is true - a non-fungible asset is one-of-a-kind by
   // definition (SPEC.md §5), so grouping two credentials of the same class
   // would silently destroy the very thing that makes each one unique.
   // Within that fungible subset, class + issuer domain is still what has
-  // to match for balances to be mergeable, same as before this merge. A
-  // failed merge here is swallowed rather than thrown: it would otherwise
-  // turn "the mint/split/trade itself succeeded" into a visible error over
-  // what's genuinely just housekeeping on top of it; the balances are left
-  // separate and still individually valid, and the manual "Consolidate"
-  // button remains available to retry.
+  // to match for balances to be mergeable.
+  //
+  // Each group is merged in batches of at most 20 (the issuer's limit). A
+  // balance the issuer reports as already spent is marked as spent (kept for
+  // the record, no longer presented or merged) and the batch is tried again
+  // without it. A failure never fails the mint/split/trade that triggered it,
+  // but it is no longer hidden: it is returned as
+  // { merged, failed: [{ class, domain, stacks, error, code, pending }], spent },
+  // kept for getConsolidationStatus(), and written to the activity log when it
+  // differs from what was last reported. The balances stay separate, each still
+  // individually valid, and the next call tries again.
   async function autoConsolidateAssetWallet(ownerPublicKey) {
-    const wallet = await getWallet(ownerPublicKey);
-    const groups = new Map();
-    for (const entry of wallet) {
-      if (!entry.credential.asset.fungible) continue;
-      const key = entry.credential.asset.class + '::' + entry.credential.issuer.domain;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(entry.credential);
-    }
-    for (const group of groups.values()) {
-      if (group.length > 1) {
-        try {
-          await mergeAssetGroup(ownerPublicKey, group);
-        } catch (err) {
-          // Leave this group as separate, individually-valid balances.
+    const report = { merged: 0, failed: [], spent: 0, skipped: false };
+    const ran = await withConsolidationSlot(ownerPublicKey, async () => {
+      const groups = new Map();
+      for (const entry of await getWallet(ownerPublicKey)) {
+        if (!entry.credential.asset.fungible || isKnownSpent(entry)) continue;
+        const key = entry.credential.asset.class + '::' + entry.credential.issuer.domain;
+        if (!groups.has(key)) groups.set(key, { cls: entry.credential.asset.class, domain: entry.credential.issuer.domain });
+      }
+      for (const { cls, domain } of groups.values()) {
+        for (let round = 0; round < 60; round++) {
+          const group = (await getWallet(ownerPublicKey))
+            .filter((e) => e.credential.asset.fungible && !isKnownSpent(e) && e.credential.asset.class === cls && e.credential.issuer.domain === domain)
+            .map((e) => e.credential)
+            .sort((a, b) => b.quantity - a.quantity);
+          if (group.length < 2) break;
+          try {
+            await mergeAssetGroup(ownerPublicKey, group.slice(0, MAX_CONSOLIDATE_BATCH));
+            report.merged++;
+          } catch (err) {
+            if (err.code === 'revoked' && err.credentialId && group.some((c) => c.id === err.credentialId)) {
+              await markSpent(ownerPublicKey, err.credentialId, 'refused by issuer as already revoked');
+              report.spent++;
+              continue;
+            }
+            report.failed.push({ class: cls, domain, stacks: group.length, error: String(err.message).slice(0, 300), code: err.code || null, pending: !!err.pending });
+            break;
+          }
         }
       }
-    }
+    }, 'busy');
+    if (ran === 'busy') report.skipped = true;
+    else await reportConsolidation(ownerPublicKey, report);
+    return report;
+  }
+
+  async function reportConsolidation(ownerPublicKey, report) {
+    try {
+      const before = await getConsolidationStatus(ownerPublicKey);
+      const keyOf = (f) => f.class + '::' + f.domain + '::' + f.error;
+      const known = new Set((before.failed || []).map(keyOf));
+      await saveConsolidationStatus(ownerPublicKey, { at: new Date().toISOString(), failed: report.failed });
+      for (const f of report.failed) {
+        if (!known.has(keyOf(f))) {
+          await logActivity('asset', 'Could not merge ' + f.stacks + ' ' + f.class + ' balances from ' + f.domain + (f.pending ? ' (the issuer did not answer; will retry)' : '') + ': ' + f.error);
+        }
+      }
+    } catch (err) { /* reporting is best-effort */ }
   }
 
   // ---------- loadout (§5.2) ----------
@@ -1863,33 +2158,20 @@ const AtlasWallet = (() => {
   // re-sign its own credential to a new owner. See SPEC.md §5.5.
 
   // Carves exactly `amount` off a fungible balance into its own fresh
-  // credential, for viewer.js to hand straight to dropItem() below — NOT
-  // the same call as the existing splitAsset(), and deliberately so: a
-  // drop is always a self-to-self split (the wallet owner keeps the
-  // remainder, the SAME owner is also the nominal "recipient" of the
-  // carved-off piece, right up until it's dropped a moment later), and
-  // splitAsset()'s own autoConsolidateAssetWallet(toOwner) call would see
-  // both halves sitting in that one wallet and immediately merge them back
-  // into a single credential — quietly undoing the split before dropItem
-  // ever got to use it. So this helper only ever saves the REMAINDER back
-  // into the wallet; the carved-off piece is returned straight to the
-  // caller and never touches local storage at all (dropItem() would just
-  // have to strip it back out again anyway, same as it does for a whole,
-  // unsplit credential).
+  // credential, for viewer.js to hand straight to dropItem() below. A drop is
+  // a self-to-self split, run as a journalled replacement like splitAsset(),
+  // but it does not auto-consolidate afterwards: that would merge the
+  // carved-off piece straight back into the remainder before dropItem() could
+  // use it. The piece stays in the wallet until dropItem() removes it, so an
+  // interrupted drop never loses it.
   async function splitForDrop(credential, amount) {
     const identity = await getIdentity();
-    const res = await fetch(baseUrl(credential.issuer.domain) + '/atlas/asset/split', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ credential, sendAmount: amount, toPublicKey: identity.publicKey })
+    const done = await runIssuerOperation({
+      owner: identity.publicKey, toOwner: identity.publicKey, kind: 'split', label: 'Split',
+      domain: credential.issuer.domain, path: '/atlas/asset/split',
+      body: { credential, sendAmount: amount, toPublicKey: identity.publicKey }, predecessors: [credential.id]
     });
-    if (!res.ok) throw new Error('Split failed: ' + (await res.text()));
-    const { sent, remainder } = await res.json();
-    let wallet = (await getWallet(identity.publicKey)).filter((e) => e.credential.id !== credential.id);
-    if (remainder) wallet.push({ credential: remainder, lastVerdict: await verifyCredential(remainder) });
-    await saveWallet(identity.publicKey, wallet);
-    if (remainder) await autoConsolidateAssetWallet(identity.publicKey);
-    return sent;
+    return done.data.sent;
   }
 
   // `credential` is the FULL signed credential being dropped (server needs
@@ -1912,8 +2194,7 @@ const AtlasWallet = (() => {
     const result = await res.json(); // { status, dropId }
 
     const identity = await getIdentity();
-    const wallet = (await getWallet(identity.publicKey)).filter((e) => e.credential.id !== credential.id);
-    await saveWallet(identity.publicKey, wallet);
+    await mutateWallet(identity.publicKey, (list) => list.filter((e) => e.credential.id !== credential.id));
     // Visually it's no longer "carried" once it's sitting in the scene —
     // keep the loadout list honest, same as hiding an item already does.
     await unloadItem(credential.id);
@@ -1950,9 +2231,8 @@ const AtlasWallet = (() => {
     const { credential } = await res.json();
 
     const identity = await getIdentity();
-    const wallet = await getWallet(identity.publicKey);
-    wallet.push({ credential, lastVerdict: await verifyCredential(credential) });
-    await saveWallet(identity.publicKey, wallet);
+    const lastVerdict = await verifyCredential(credential);
+    await commitOperation(identity.publicKey, null, [{ owner: identity.publicKey, add: [{ credential, lastVerdict }] }]);
     await autoConsolidateAssetWallet(identity.publicKey);
     await logActivity('asset', 'Picked up ' + credential.asset.class + ' in ' + worldDomain);
     return credential;
@@ -1985,15 +2265,12 @@ const AtlasWallet = (() => {
     const ok = await verifySignedPayload(payload, proof);
     if (!ok) throw new Error('Transfer signature failed its own check — not applying it.');
 
-    let selfWallet = await getWallet(identity.publicKey);
-    const entry = selfWallet.find((e) => e.credential.id === itemCredential.id);
+    const entry = (await getWallet(identity.publicKey)).find((e) => e.credential.id === itemCredential.id);
     if (!entry) throw new Error('Item not found in self wallet.');
-    selfWallet = selfWallet.filter((e) => e.credential.id !== itemCredential.id);
-    await saveWallet(identity.publicKey, selfWallet);
-
-    const cpWallet = await getWallet(counterparty.publicKey);
-    cpWallet.push({ credential: entry.credential, lastVerdict: entry.lastVerdict, receivedVia: transfer });
-    await saveWallet(counterparty.publicKey, cpWallet);
+    await commitOperation(identity.publicKey, null, [
+      { owner: identity.publicKey, remove: [itemCredential.id] },
+      { owner: counterparty.publicKey, add: [{ credential: entry.credential, lastVerdict: entry.lastVerdict, receivedVia: transfer }] }
+    ]);
 
     await unloadItem(itemCredential.id);
     await logActivity('asset', 'Lost ' + itemCredential.asset.class + ' to the counterparty test identity (PvP demo)');
@@ -2022,7 +2299,7 @@ const AtlasWallet = (() => {
     return { payload, proof };
   }
 
-  // Task #144 Phase 1 / v1.14 open listings (SPEC.md §7) — posts this
+  // Open listings (SPEC.md §7): posts this
   // signer's own half of a trade to the station as an open listing, naming
   // no counterparty at all. Mirrors mintAsset()'s "one HTTP call plus local
   // bookkeeping" role, not a second copy of the station's own logic. Always
@@ -2182,9 +2459,8 @@ const AtlasWallet = (() => {
       // discovers already revoked, with nothing in its place.
       if (errBody.refund) {
         const owner = await getIdentity();
-        const wallet = (await getWallet(owner.publicKey)).filter((e) => e.credential.id !== balance.id);
-        wallet.push({ credential: errBody.refund, lastVerdict: await verifyCredential(errBody.refund) });
-        await saveWallet(owner.publicKey, wallet);
+        const refundVerdict = await verifyCredential(errBody.refund);
+        await commitOperation(owner.publicKey, null, [{ owner: owner.publicKey, remove: [balance.id], add: [{ credential: errBody.refund, lastVerdict: refundVerdict }] }]);
         await autoConsolidateAssetWallet(owner.publicKey);
         await logActivity('trade', 'Trade at ' + issuerDomain + ' failed partway through and was refunded: kept ' + listing.want.quantity + ' ' + listing.want.class);
       }
@@ -2193,10 +2469,10 @@ const AtlasWallet = (() => {
     const result = await res.json();
     const owner = await getIdentity();
 
-    let wallet = (await getWallet(owner.publicKey)).filter((e) => e.credential.id !== balance.id);
-    if (result.remainder) wallet.push({ credential: result.remainder, lastVerdict: await verifyCredential(result.remainder) });
-    wallet.push({ credential: result.received, lastVerdict: await verifyCredential(result.received) });
-    await saveWallet(owner.publicKey, wallet);
+    const adds = [];
+    if (result.remainder) adds.push({ credential: result.remainder, lastVerdict: await verifyCredential(result.remainder) });
+    adds.push({ credential: result.received, lastVerdict: await verifyCredential(result.received) });
+    await commitOperation(owner.publicKey, null, [{ owner: owner.publicKey, remove: [balance.id], add: adds }]);
     await autoConsolidateAssetWallet(owner.publicKey);
     await logActivity('trade', 'Claimed a trade at ' + issuerDomain + ': received ' + listing.offer.quantity + ' ' + listing.offer.class + ' for ' + listing.want.quantity + ' ' + listing.want.class);
     return result;
@@ -3317,6 +3593,7 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     const counterparty = await getCounterparty();
     for (const who of [identity, counterparty].filter(Boolean)) {
+      await recoverPendingOperations(who.publicKey);
       const verdicts = new Map();
       for (const entry of await getWallet(who.publicKey)) verdicts.set(entry.credential.id, await verifyCredential(entry.credential));
       await withWalletLock(async () => {
@@ -3358,17 +3635,20 @@ const AtlasWallet = (() => {
     const assets = credentials.filter((c) => c && c.credential === 'domain-atlas-asset/1.0');
 
     let assetsAdded = 0, assetsSkippedDuplicate = 0, assetsSkippedNotOwned = 0;
-    const wallet = await getWallet(identity.publicKey);
+    const candidates = [];
     for (const credential of assets) {
       if (credential.owner && credential.owner.publicKey !== identity.publicKey) { assetsSkippedNotOwned++; continue; }
-      if (wallet.some((e) => e.credential.id === credential.id)) { assetsSkippedDuplicate++; continue; }
-      wallet.push({ credential, lastVerdict: await verifyCredential(credential) });
-      assetsAdded++;
+      candidates.push({ credential, lastVerdict: await verifyCredential(credential) });
     }
-    if (assetsAdded > 0) {
-      await saveWallet(identity.publicKey, wallet);
-      await autoConsolidateAssetWallet(identity.publicKey);
-    }
+    await mutateWallet(identity.publicKey, (list) => {
+      for (const candidate of candidates) {
+        if (list.some((e) => e.credential.id === candidate.credential.id)) { assetsSkippedDuplicate++; continue; }
+        list.push(candidate);
+        assetsAdded++;
+      }
+      return list;
+    });
+    if (assetsAdded > 0) await autoConsolidateAssetWallet(identity.publicKey);
 
     return { assetsAdded, assetsSkippedDuplicate, assetsSkippedNotOwned };
   }
@@ -3601,9 +3881,7 @@ const AtlasWallet = (() => {
   }
 
   async function removeFromWalletList(ownerPublicKey, credentialId) {
-    await withWalletLock(async () => {
-      await saveWallet(ownerPublicKey, (await getWallet(ownerPublicKey)).filter((e) => e.credential.id !== credentialId));
-    });
+    await mutateWallet(ownerPublicKey, (list) => list.filter((e) => e.credential.id !== credentialId));
     await unloadItem(credentialId);
   }
 
@@ -3842,12 +4120,9 @@ const AtlasWallet = (() => {
   // another one already has): the item and the ledger entry are added once.
   async function addClaimedToWallet(identity, minted, fileCredential) {
     const lastVerdict = await verifyCredential(minted);
-    await withWalletLock(async () => {
-      const wallet = await getWallet(identity.publicKey);
-      if (!wallet.some((e) => e.credential.id === minted.id)) {
-        wallet.push({ credential: minted, lastVerdict });
-        await saveWallet(identity.publicKey, wallet);
-      }
+    await mutateWallet(identity.publicKey, (list) => {
+      if (!list.some((e) => e.credential.id === minted.id)) list.push({ credential: minted, lastVerdict });
+      return list;
     });
     const ledger = await getAssetFiles(identity.publicKey);
     if (!ledger.some((r) => r.direction === 'claimed' && r.fileId === fileCredential.id)) {
@@ -4072,10 +4347,13 @@ const AtlasWallet = (() => {
     if (credential.owner.publicKey !== identity.publicKey) throw new Error('This copy belongs to a different key.');
     const verdict = await verifyCredential(credential);
     if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this copy') || ('This copy is no longer valid: ' + verdict.reason + '.'));
-    const wallet = await getWallet(identity.publicKey);
-    if (wallet.some((e) => e.credential.id === credential.id)) throw new Error('This item is already in your wallet.');
-    wallet.push({ credential, lastVerdict: verdict });
-    await saveWallet(identity.publicKey, wallet);
+    let alreadyHeld = false;
+    await mutateWallet(identity.publicKey, (list) => {
+      if (list.some((e) => e.credential.id === credential.id)) alreadyHeld = true;
+      else list.push({ credential, lastVerdict: verdict });
+      return list;
+    });
+    if (alreadyHeld) throw new Error('This item is already in your wallet.');
     await logActivity('asset', 'Restored ' + credential.asset.name + ' from a saved copy', { id: credential.id });
     return credential;
   }
@@ -5303,9 +5581,7 @@ const AtlasWallet = (() => {
     const verdict = await verifyCredential(credential);
     if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this gift') || ('gift credential does not check out: ' + verdict.reason));
 
-    const wallet = await getWallet(ownerPublicKey);
-    wallet.push({ credential, lastVerdict: verdict });
-    await saveWallet(ownerPublicKey, wallet);
+    await commitOperation(ownerPublicKey, null, [{ owner: ownerPublicKey, add: [{ credential, lastVerdict: verdict }] }]);
     await autoConsolidateAssetWallet(ownerPublicKey);
 
     await withMessageLock(async () => {
@@ -6803,9 +7079,7 @@ const AtlasWallet = (() => {
     const verdict = await verifyCredential(credential);
     if (!verdict.valid) throw new Error(verdictBlockMessage(verdict, 'this offer') || ('offer credential does not check out: ' + verdict.reason));
 
-    const wallet = await getWallet(ownerPublicKey);
-    wallet.push({ credential, lastVerdict: verdict });
-    await saveWallet(ownerPublicKey, wallet);
+    await commitOperation(ownerPublicKey, null, [{ owner: ownerPublicKey, add: [{ credential, lastVerdict: verdict }] }]);
     await autoConsolidateAssetWallet(ownerPublicKey);
 
     entry.claimed = true;
@@ -9299,6 +9573,7 @@ const AtlasWallet = (() => {
     getActivityLog, clearActivityLog,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
+    autoConsolidateAssetWallet, recoverPendingOperations, getPendingOperations, getConsolidationStatus,
     getLoadout, loadItem, unloadItem, loseItemToCounterparty,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,

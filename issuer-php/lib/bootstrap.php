@@ -8,6 +8,7 @@
 
 require_once __DIR__ . '/crypto.php';
 require_once __DIR__ . '/store.php';
+require_once __DIR__ . '/replacement.php';
 require_once __DIR__ . '/transfer-policy.php';
 
 function cors_headers() {
@@ -38,7 +39,7 @@ function no_store_headers() {
 // "Issuer refused: " with nothing after the colon — impossible to diagnose
 // from the browser side. With this, the real reason comes back instead.
 set_exception_handler(function ($e) {
-  // Task #42: an exception thrown with a specific HTTP status in mind
+  // An exception thrown with a specific HTTP status in mind
   // (e.g. mint_asset_by_class()'s 400 "sold out" case) carries it via the
   // Exception's own $code — getCode() is 0 when nothing set one
   // explicitly, so that falls back to 500 same as before. Mirrors
@@ -639,6 +640,7 @@ function issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $qu
     'issuedAt' => iso_now(),
   ];
   $signature = atlas_sign($privateKey, $payload);
+  atlas_holdings_note_issued($ownerPublicKey, $asset, $payload['id'], $quantity);
   return array_merge(
     ['credential' => 'domain-atlas-asset/1.0'],
     $payload,
@@ -735,7 +737,7 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
   if (!isset(ATLAS_ASSET_CATALOG[$cls])) throw new Exception('unknown asset class: ' . $cls);
   $catalogEntry = ATLAS_ASSET_CATALOG[$cls];
 
-  // Task #42: cap/serial tracking only applies to genuinely NEW supply
+  // Cap/serial tracking only applies to genuinely NEW supply
   // ($supersedes === null — see reserve_supply()'s comment in store.php),
   // and only when this class opted in via 'serialized' and/or 'maxSupply'.
   // A split/consolidate/trade re-mint always passes a non-null
@@ -758,7 +760,7 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
   $asset = atlas_asset_catalog_entry($cls);
   if ($asset === null) throw new Exception('unknown asset class: ' . $cls);
 
-  // Task #250 fourth follow-up: a catalog entry's own 'randomizeProperties'
+  // A catalog entry's own 'randomizeProperties'
   // callable (see atlas.wearable.ring in store.php, and random_ring_
   // properties()'s own comment there for the full reasoning) gets one
   // chance to override the class's static 'properties', same "genuinely
@@ -803,8 +805,8 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
 // asset.fungible field, not re-derived from ATLAS_ASSET_CATALOG, so this
 // holds even for a credential minted under a since-changed catalog entry.
 // Mirrors issuer-server/server.js's checkPresentedAsset().
-function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass, $minQuantity) {
-  $busy = atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null);
+function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $expectedClass, $minQuantity, $lock = true) {
+  $busy = $lock ? atlas_spend_lock(is_array($credential) ? ($credential['id'] ?? null) : null) : null;
   if ($busy !== null) return $busy;
   if (!is_array($credential) || !isset($credential['credential']) || $credential['credential'] !== 'domain-atlas-asset/1.0') {
     return 'not an asset credential';
@@ -815,7 +817,7 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   if (!isset($credential['asset']['class']) || $credential['asset']['class'] !== $expectedClass) {
     return 'asset is the wrong class';
   }
-  // Task #160: checked ahead of the fungible rejection below so a bound
+  // Checked ahead of the fungible rejection below so a bound
   // credential gets its own, clearer message rather than the generic
   // "not fungible" one — true for every bound class today anyway (they're
   // all fungible: false), but this is the real, deliberate reason they're
@@ -824,7 +826,7 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   if (isset($credential['asset']['tradeScope']) && $credential['asset']['tradeScope'] === 'bound') {
     return 'asset is bound to its owner and cannot be split, consolidated, or traded';
   }
-  // Task #250 fourth follow-up: "or trade" dropped from this message — a
+  // "or trade" is not in this message — a
   // non-fungible asset CAN now be traded at the Trading Station, just not
   // through THIS check (see check_presented_unique_asset() below, used by
   // atlas/trade/submit.php and atlas/trade/claim.php instead whenever the
@@ -857,7 +859,7 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   return null;
 }
 
-// Task #250 fourth follow-up (Bruno's own request) — check_presented_asset's
+// check_presented_asset's
 // mirror for the OTHER half of SPEC.md §5.1's fungible/non-fungible split:
 // same ownership/class/tradeScope/revocation/signature checks, but requires
 // fungible === false instead of true, and there is no minQuantity to check
@@ -1331,18 +1333,3 @@ function refund_failed_second_leg($kp, $aReceived, $offerB, $claimantPublicKey) 
     : mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $claimantPublicKey, $offerB['class'], $offerB['quantity'], $aReceived['id']);
 }
 
-// Task #203: sums an owner's VERIFIED current holdings of one class, off
-// whatever balance credentials the wallet chose to present alongside a
-// mint request — used only by the 'holdingCap' check in
-// atlas/asset/issue.php. Mirrors issuer-server/server.js's
-// currentHeldQuantity() exactly, including its "nothing presented is
-// trusted as 0 held" reasoning — see that function's own comment for the
-// full explanation.
-function current_held_quantity($publicKeyB64url, $ownerPublicKey, $cls, $presentedBalances) {
-  $total = 0;
-  foreach ((is_array($presentedBalances) ? $presentedBalances : []) as $cred) {
-    $problem = check_presented_asset($publicKeyB64url, $cred, $ownerPublicKey, $cls, 1);
-    if ($problem === null) $total += $cred['quantity'];
-  }
-  return $total;
-}

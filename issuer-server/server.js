@@ -60,7 +60,7 @@ const http = require('http');
 const { AsyncLocalStorage } = require('async_hooks');
 const fs = require('fs');
 const path = require('path');
-const { webcrypto, timingSafeEqual } = require('crypto');
+const { webcrypto, timingSafeEqual, createHash } = require('crypto');
 const { subtle } = webcrypto;
 const { sendMail } = require('./lib-smtp');
 const { connectImap } = require('./lib-imap');
@@ -2729,8 +2729,56 @@ async function preparePinnedManifest(sign, publicKeyB64url) {
   console.log('Domain identity pinning enabled — serving a signed .well-known/spatial.json (SPEC.md §3.7)');
 }
 
+// An unreadable, unparseable or wrongly shaped revocation list is an error,
+// never an empty list: treating it as empty would let every spent
+// credential be spent again, and the next write would replace the history
+// with a single entry. A file that does not exist yet (before the first
+// start has written it) is the only empty case.
+function storeUnavailable(message) {
+  const err = new Error(message);
+  err.statusCode = 503;
+  return err;
+}
 function readRevocations() {
-  return JSON.parse(fs.readFileSync(REVOCATIONS_FILE, 'utf8'));
+  let text;
+  try {
+    text = fs.readFileSync(REVOCATIONS_FILE, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return { revoked: [] };
+    throw storeUnavailable('the revocation list could not be read (' + err.code + '); refusing to treat it as empty');
+  }
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw storeUnavailable('the revocation list is not valid JSON; refusing to treat it as empty - restore it from a backup');
+  }
+  if (!doc || typeof doc !== 'object' || !Array.isArray(doc.revoked)) {
+    throw storeUnavailable('the revocation list has no "revoked" list; refusing to treat it as empty - restore it from a backup');
+  }
+  return doc;
+}
+
+// Writes a file so a reader sees either the old content or the new, never a
+// partial one: the text goes to a temporary file in the same directory,
+// is flushed, and replaces the target in a single rename.
+function writeFileAtomic(file, text) {
+  let mode = 0o644;
+  try { mode = fs.statSync(file).mode & 0o777; } catch (err) { /* new file */ }
+  const tmp = file + '.' + process.pid + '.' + webcrypto.randomUUID().slice(0, 8) + '.tmp';
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'w', mode);
+    fs.writeSync(fd, text);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch (e) { /* already closed */ } }
+    try { fs.unlinkSync(tmp); } catch (e) { /* nothing to clean up */ }
+    throw err;
+  }
 }
 function isRevoked(id) {
   return readRevocations().revoked.some((r) => r.id === id);
@@ -2792,10 +2840,164 @@ async function lockSpend(id) {
   return null;
 }
 
-function revoke(id, reason) {
+// Adds every id in one read-modify-write and one atomic replace, so a
+// request that spends several credentials revokes all of them or none.
+// Throws, and writes nothing, when the existing list cannot be read.
+function revokeMany(ids, reason) {
   const doc = readRevocations();
-  doc.revoked.push({ id, revokedAt: new Date().toISOString(), reason });
-  fs.writeFileSync(REVOCATIONS_FILE, JSON.stringify(doc, null, 2));
+  const revokedAt = new Date().toISOString();
+  for (const id of ids) doc.revoked.push({ id, revokedAt, reason });
+  writeFileAtomic(REVOCATIONS_FILE, JSON.stringify(doc, null, 2));
+}
+function revoke(id, reason) {
+  revokeMany([id], reason);
+}
+
+// Takes a named lock for the rest of this request (released when the
+// response finishes or closes, or after SPEND_LOCK_HOLD_MS). False when it
+// could not be had in SPEND_LOCK_WAIT_MS.
+async function holdLease(res, key) {
+  const release = await acquireSpendLock(key, SPEND_LOCK_WAIT_MS);
+  if (!release) return false;
+  const timer = setTimeout(release, SPEND_LOCK_HOLD_MS);
+  const done = () => { clearTimeout(timer); release(); };
+  res.once('finish', done);
+  res.once('close', done);
+  return true;
+}
+
+
+// ---------- replacement results (safe retry) ----------
+// A split, consolidate, convert or fungible issue is "check, sign the
+// successors, revoke the predecessors, respond". If the response is lost the
+// wallet is left with predecessors that are now revoked and successors that
+// exist nowhere. A request that carries a client-chosen `requestId` has its
+// finished result stored here (private state directory, keyed by a hash of
+// the id, kept REPLAY_TTL_MS), so repeating the identical request returns the
+// same signed credentials instead of "asset already revoked". The same id
+// with a different request is refused (409). The stored credentials are
+// bearer credentials, so a replay also needs the matching predecessors.
+const REPLAY_DIR = path.join(STATE_DIR, 'replay');
+const REPLAY_TTL_MS = (parseFloat(process.env.ATLAS_REPLAY_TTL_HOURS) || 168) * 3600 * 1000;
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,80}$/;
+
+// null when absent; throws a 400 for a malformed id.
+function parseRequestId(body) {
+  const id = body && body.requestId;
+  if (id === undefined || id === null) return null;
+  if (typeof id !== 'string' || !REQUEST_ID_PATTERN.test(id)) {
+    const err = new Error('requestId must be 16 to 80 characters of letters, digits, - and _');
+    err.statusCode = 400;
+    throw err;
+  }
+  return id;
+}
+function replayFile(requestId) {
+  return path.join(REPLAY_DIR, createHash('sha256').update(requestId).digest('hex') + '.json');
+}
+// { response } for a stored identical request, { conflict: true } when the
+// id was used for a different one, null when there is nothing stored.
+function replayLookup(requestId, op, predecessorIds, params) {
+  let rec;
+  try {
+    rec = JSON.parse(fs.readFileSync(replayFile(requestId), 'utf8'));
+  } catch (err) {
+    return null;
+  }
+  if (!rec || typeof rec.createdAt !== 'string' || Date.now() - Date.parse(rec.createdAt) > REPLAY_TTL_MS) return null;
+  const same = rec.op === op &&
+    JSON.stringify(rec.predecessors) === JSON.stringify([...predecessorIds].sort()) &&
+    JSON.stringify(rec.params) === JSON.stringify(params);
+  return same ? { response: rec.response } : { conflict: true };
+}
+function replayStore(requestId, op, predecessorIds, params, response) {
+  try {
+    fs.mkdirSync(REPLAY_DIR, { recursive: true });
+    writeFileAtomic(replayFile(requestId), JSON.stringify({
+      op, predecessors: [...predecessorIds].sort(), params, createdAt: new Date().toISOString(), response
+    }));
+    if (Math.random() < 0.02) replayPrune();
+  } catch (err) {
+    // The operation has already happened; a missing record only costs the
+    // ability to retry it.
+    console.error('could not store the replay record:', err.message);
+  }
+}
+function replayPrune() {
+  try {
+    let removed = 0;
+    for (const name of fs.readdirSync(REPLAY_DIR)) {
+      if (!name.endsWith('.json') || removed >= 500) continue;
+      const file = path.join(REPLAY_DIR, name);
+      if (Date.now() - fs.statSync(file).mtimeMs > REPLAY_TTL_MS) { fs.unlinkSync(file); removed++; }
+    }
+  } catch (err) { /* best effort */ }
+}
+
+// ---------- issuer-side holdings index (holdingCap) ----------
+// For every class that carries a `holdingCap`, the credentials this issuer
+// signs are recorded per owner key as they are signed (issueAsset), and the
+// holdings used for the cap are those records that are not revoked. The cap
+// therefore no longer depends on which balances a wallet chooses to present.
+// It is an index over credentials the issuer signed, not a ledger: the
+// signed credentials and the revocation list stay the source of truth, and a
+// credential signed before this index existed is counted only once a wallet
+// presents it. The limit is per owner key; keys are free to create, so it
+// bounds one key, not one person.
+const HOLDINGS_DIR = path.join(STATE_DIR, 'holdings');
+const HOLDINGS_PRUNE_AT = 100;
+function holdingsFile(owner) {
+  return path.join(HOLDINGS_DIR, createHash('sha256').update(String(owner)).digest('hex').slice(0, 40) + '.json');
+}
+function holdingsRead(owner) {
+  let text;
+  try {
+    text = fs.readFileSync(holdingsFile(owner), 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return { held: {} };
+    throw storeUnavailable('the holdings index could not be read (' + err.code + ')');
+  }
+  let doc;
+  try { doc = JSON.parse(text); } catch (err) { doc = null; }
+  if (!doc || typeof doc.held !== 'object' || doc.held === null || Array.isArray(doc.held)) {
+    throw storeUnavailable('the holdings index for this owner is unreadable; refusing to guess a balance');
+  }
+  return doc;
+}
+function holdingsWrite(owner, doc) {
+  fs.mkdirSync(HOLDINGS_DIR, { recursive: true });
+  writeFileAtomic(holdingsFile(owner), JSON.stringify({ owner, held: doc.held }));
+}
+function revokedIdSet() {
+  return new Set(readRevocations().revoked.map((r) => r && r.id));
+}
+function holdingsRegister(owner, cls, entries) {
+  const doc = holdingsRead(owner);
+  let list = doc.held[cls] = Array.isArray(doc.held[cls]) ? doc.held[cls] : [];
+  const have = new Set(list.map((h) => h.id));
+  for (const e of entries) if (!have.has(e.id)) { list.push({ id: e.id, q: e.q }); have.add(e.id); }
+  if (list.length > HOLDINGS_PRUNE_AT) {
+    const revoked = revokedIdSet();
+    doc.held[cls] = list.filter((h) => !revoked.has(h.id));
+  }
+  holdingsWrite(owner, doc);
+}
+function holdingsUnregister(owner, ids) {
+  try {
+    const doc = holdingsRead(owner);
+    const drop = new Set(ids);
+    for (const cls of Object.keys(doc.held)) doc.held[cls] = doc.held[cls].filter((h) => !drop.has(h.id));
+    holdingsWrite(owner, doc);
+  } catch (err) {
+    console.error('could not roll back holdings records:', err.message);
+  }
+}
+// Records a freshly signed credential when its class is capped.
+function holdingsNoteIssued(owner, asset, id, quantity) {
+  if (asset && asset.fungible === true) {
+    const entry = ASSET_CATALOG[asset.class];
+    if (entry && typeof entry.holdingCap === 'number') holdingsRegister(owner, asset.class, [{ id, q: quantity }]);
+  }
 }
 
 // See SUSPENSIONS_FILE's own comment above. findSuspension() is the one
@@ -4273,6 +4475,7 @@ async function main() {
       issuedAt: new Date().toISOString()
     };
     const signature = await sign(payload);
+    holdingsNoteIssued(ownerPublicKey, asset, payload.id, quantity);
     return { credential: 'domain-atlas-asset/1.0', ...payload, issuer: { domain: DOMAIN, publicKey: publicKeyB64url }, signature };
   }
 
@@ -4426,7 +4629,7 @@ async function main() {
     const catalogEntry = ASSET_CATALOG[cls];
     if (!catalogEntry) throw new Error('unknown asset class: ' + cls);
 
-    // Task #42: cap/serial tracking only applies to genuinely NEW supply
+    // Cap/serial tracking only applies to genuinely NEW supply
     // (supersedes === null — see reserveSupply()'s comment above), and
     // only when this class opted in via `serialized` and/or `maxSupply`.
     // A split/consolidate/trade re-mint skips this entirely, whatever
@@ -4444,7 +4647,7 @@ async function main() {
       serial = reservation.serial;
     }
 
-    // Task #250 fourth follow-up: a catalog entry's own `randomizeProperties`
+    // A catalog entry's own `randomizeProperties`
     // (see atlas.wearable.ring above, and its comment near RING_RARITY_TIERS
     // for the full reasoning) gets one chance to override the class's static
     // `properties`, same "genuinely new supply only" gate as the serial/cap
@@ -4466,7 +4669,7 @@ async function main() {
       ...(catalogEntry.thumbnail ? { thumbnail: catalogEntry.thumbnail } : {}),
       fungible: catalogEntry.fungible,
       presentation: catalogEntry.presentation,
-      // Task #160: the third asset-level flag, always present (never
+      // The third asset-level flag, always present (never
       // conditionally omitted the way `properties` is) — same discipline
       // fungible/presentation already get, since this is meant to be
       // checked by exact name the same way they are. 'local' is the
@@ -4492,6 +4695,43 @@ async function main() {
     return issueAsset(ownerPublicKey, asset, quantity, supersedes);
   }
 
+  // Start of a split, consolidate or convert: takes the spend locks for every
+  // predecessor in one fixed (sorted) order, so two requests naming the same
+  // balances cannot wait on each other, then answers a repeated request id from
+  // the stored result (after checking the presented balances are genuinely this
+  // issuer's). True when a response has already been sent.
+  async function beginReplacement(res, requestId, op, presented, params) {
+    const ids = presented.map((c) => c && c.id);
+    for (const id of [...ids].filter(Boolean).sort()) {
+      const busy = await lockSpend(id);
+      if (busy) { sendJson(res, 400, { error: busy, code: 'busy', credentialId: id }); return true; }
+    }
+    if (!requestId) return false;
+    if (!(await holdLease(res, 'rid:' + requestId))) {
+      sendJson(res, 503, { error: 'this request is already being processed - try again', code: 'busy' });
+      return true;
+    }
+    const prior = replayLookup(requestId, op, ids, params);
+    if (!prior) return false;
+    if (prior.conflict) {
+      sendJson(res, 409, { error: 'requestId was already used for a different request', code: 'request-id-conflict' });
+      return true;
+    }
+    for (const c of presented) {
+      if (!c || c.credential !== 'domain-atlas-asset/1.0' || !(await verifyOwnCredentialSignature(c, assetPayloadOf(c)))) {
+        sendJson(res, 400, spendProblemBody('asset signature does not check out', c));
+        return true;
+      }
+    }
+    sendJson(res, 200, prior.response);
+    return true;
+  }
+  // Undoes the holdings records of successors that were signed but never
+  // delivered because the replacement did not complete.
+  function rollbackMinted(minted) {
+    for (const [owner, id] of minted) holdingsUnregister(owner, [id]);
+  }
+
   // Validates an asset credential presented back to us for a split,
   // consolidate, or trade — all three of which only make sense for a
   // fungible class (SPEC.md §5.4: quantity is definitionally 1 on a
@@ -4499,19 +4739,19 @@ async function main() {
   // do to it). Checked directly against the credential's own SIGNED
   // asset.fungible field, not re-derived from ASSET_CATALOG, so this holds
   // even for a credential minted under a since-changed catalog entry.
-  async function checkPresentedAsset(credential, expectedOwner, expectedClass, minQuantity) {
-    const busy = credential && credential.id ? await lockSpend(credential.id) : null;
+  async function checkPresentedAsset(credential, expectedOwner, expectedClass, minQuantity, options) {
+    const busy = credential && credential.id && !(options && options.lock === false) ? await lockSpend(credential.id) : null;
     if (busy) return busy;
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return 'not an asset credential';
     if (!credential.owner || credential.owner.publicKey !== expectedOwner) return 'asset does not belong to this signer';
     if (!credential.asset || credential.asset.class !== expectedClass) return 'asset is the wrong class';
-    // Task #160: checked ahead of the fungible rejection below so a bound
+    // Checked ahead of the fungible rejection below so a bound
     // credential gets its own, clearer message rather than the generic
     // "not fungible" one — true for every bound class today anyway (they're
     // all fungible: false), but this is the real, deliberate reason
     // they're excluded, not a side effect of that other check.
     if (credential.asset.tradeScope === 'bound') return 'asset is bound to its owner and cannot be split, consolidated, or traded';
-    // Task #250 fourth follow-up: "or trade" dropped from this message — a
+    // "or trade" is not in this message — a
     // non-fungible asset CAN now be traded at the Trading Station, just not
     // through THIS check (see checkPresentedUniqueAsset below, used by
     // /atlas/trade/submit and /atlas/trade/claim instead whenever the
@@ -5026,30 +5266,41 @@ async function main() {
     }
   }
 
-  // Task #203: sums an owner's VERIFIED current holdings of one class, off
-  // whatever balance credentials the wallet chose to present alongside a
-  // mint request — used only by the `holdingCap` check in POST
-  // /atlas/asset/issue below. Deliberately forgiving of anything that
-  // fails validation (wrong owner, wrong class, already revoked, bad
-  // signature) rather than rejecting the whole mint over it: an unverified
-  // presented credential just doesn't count towards the total, the same
-  // "only what checks out counts" posture as everywhere else, and a wallet
-  // presenting nothing at all is trusted as genuinely holding zero — there
-  // is no credential a fresh wallet with none yet COULD present to prove a
-  // negative, so treating "nothing presented" as "0 held" is the only
-  // reading that doesn't lock a brand-new wallet out of ever mining a
-  // capped class at all. A wallet that owns some and simply doesn't
-  // mention it is undercounted, never overcounted — this cap is a
-  // cooperative-client convenience for the reference wallet, not an
-  // adversarial-abuse defense (nothing here protects value that could be
-  // taken from someone ELSE, only how much a wallet can mint for itself).
-  async function currentHeldQuantity(ownerPublicKey, cls, presentedBalances) {
-    let total = 0;
-    for (const cred of (Array.isArray(presentedBalances) ? presentedBalances : [])) {
-      const problem = await checkPresentedAsset(cred, ownerPublicKey, cls, 1);
-      if (!problem) total += cred.quantity;
+  // Holdings used for a `holdingCap` check on a fresh mint: the issuer's own
+  // index of the credentials it signed for this owner and class that are not
+  // revoked (holdingsRead above), plus any presented credential that checks
+  // out and is not in the index yet (one signed before the index existed).
+  // Presented credentials can only add to the total, never lower it, and are
+  // verified without taking the spend lock, so a credential that is busy or
+  // that the wallet leaves out cannot make the count smaller. Credentials
+  // from another domain never count.
+  async function assessHoldings(ownerPublicKey, cls, presentedBalances) {
+    const revoked = revokedIdSet();
+    const doc = holdingsRead(ownerPublicKey);
+    const live = (Array.isArray(doc.held[cls]) ? doc.held[cls] : []).filter((h) => !revoked.has(h.id));
+    let held = live.reduce((sum, h) => sum + h.q, 0);
+    const known = new Set(live.map((h) => h.id));
+    const adopt = [];
+    const presented = Array.isArray(presentedBalances) ? presentedBalances.slice(0, 1000) : [];
+    for (const cred of presented) {
+      if (!cred || typeof cred.id !== 'string' || known.has(cred.id)) continue;
+      if (!cred.issuer || cred.issuer.domain !== DOMAIN) continue;
+      const problem = await checkPresentedAsset(cred, ownerPublicKey, cls, 1, { lock: false });
+      if (problem) continue;
+      known.add(cred.id);
+      held += cred.quantity;
+      adopt.push({ id: cred.id, q: cred.quantity });
     }
-    return total;
+    return { held, adopt };
+  }
+
+  // The 400 body for a presented credential that failed a check: `code` and
+  // `credentialId` let a wallet drop one spent balance and retry the rest.
+  function spendProblemBody(problem, credential) {
+    const code = problem === 'asset already revoked' ? 'revoked'
+      : /being used by another request/.test(problem) ? 'busy'
+        : 'invalid';
+    return { error: problem, code, credentialId: credential && credential.id ? credential.id : null };
   }
 
   // Delivery engine (lib-delivery.js) wired to this issuer's own revocation
@@ -5343,11 +5594,12 @@ async function main() {
 
       // --- §5 asset credentials ---
       if (req.method === 'POST' && req.url === '/atlas/asset/issue') {
-        const { ownerPublicKey, assetClass, quantity, existingBalances } = JSON.parse((await readBody(req)) || '{}');
+        const issueBody = JSON.parse((await readBody(req)) || '{}');
+        const { ownerPublicKey, assetClass, quantity, existingBalances } = issueBody;
         if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
-          // Task #204: this list used to enumerate every known class by
+          // This list used to enumerate every known class by
           // name, which was fine at ~10 classes but stopped being useful
           // once the periodic-table expansion pushed the catalog past 125
           // — pointing at the actual catalog is more useful than a wall of
@@ -5376,31 +5628,46 @@ async function main() {
           mintQuantity = 1;
         }
 
-        // Task #203: a fresh mint of a class carrying `holdingCap`
-        // (ASSET_CATALOG — today, every one of the three freely-mineable
-        // fungible elements) is refused once the requesting owner already
-        // holds that much or more, verified against whatever balance
-        // credentials the wallet presents alongside the request
-        // (currentHeldQuantity above), not merely trusted from the
-        // request. This applies uniformly to every path that reaches this
-        // one shared endpoint — a market mining stall AND a chess-win gold
-        // reward alike — since the point is capping how much of a class
-        // can be freely CREATED, not gating one specific UI button. It
-        // does NOT apply to mintAssetByClass's other call sites
-        // (split/consolidate/convert/trade re-mints all pass a non-null
-        // `supersedes`) — receiving a large balance through a legitimate
-        // transfer of EXISTING value was never the thing worth capping.
+        // A repeated request id returns the credential already issued for it.
+        const issueRequestId = parseRequestId(issueBody);
+        const issueReplayable = issueRequestId !== null && catalogEntry.fungible === true;
+        const issueParams = { ownerPublicKey, assetClass, quantity: mintQuantity };
+        if (issueReplayable) {
+          if (!(await holdLease(res, 'rid:' + issueRequestId))) {
+            return sendJson(res, 503, { error: 'this request is already being processed - try again', code: 'busy' });
+          }
+          const prior = replayLookup(issueRequestId, 'issue', [], issueParams);
+          if (prior && prior.conflict) return sendJson(res, 409, { error: 'requestId was already used for a different request', code: 'request-id-conflict' });
+          if (prior) return sendJson(res, 200, prior.response);
+        }
+
+        // A fresh mint of a class with a `holdingCap` is refused when the
+        // owner's holdings plus the quantity requested would pass the cap.
+        // Holdings come from the issuer's own index of what it signed for
+        // this owner (assessHoldings), not from what the wallet presents.
+        // The owner is held for the whole check-and-mint so two concurrent
+        // mints cannot both pass on the same count. Applies to every caller
+        // of this endpoint (a mining stall and a game reward alike); split,
+        // convert and trade re-mints move existing value and are not capped.
         if (catalogEntry.fungible && typeof catalogEntry.holdingCap === 'number') {
-          const currentHeld = await currentHeldQuantity(ownerPublicKey, assetClass, existingBalances);
-          if (currentHeld >= catalogEntry.holdingCap) {
+          if (!(await holdLease(res, 'holdings:' + ownerPublicKey))) {
+            return sendJson(res, 503, { error: 'this owner is being updated by another request - try again', code: 'busy' });
+          }
+          const { held, adopt } = await assessHoldings(ownerPublicKey, assetClass, existingBalances);
+          if (adopt.length) holdingsRegister(ownerPublicKey, assetClass, adopt);
+          if (held + mintQuantity > catalogEntry.holdingCap) {
             return sendJson(res, 400, {
-              error: `already holding ${currentHeld} ${catalogEntry.name} (cap: ${catalogEntry.holdingCap}) — convert some to another element (POST /atlas/convert) or spend it before mining more`
+              error: held >= catalogEntry.holdingCap
+                ? `already holding ${held} ${catalogEntry.name} (cap: ${catalogEntry.holdingCap}) — convert some to another element (POST /atlas/convert) or spend it before mining more`
+                : `holding ${held} ${catalogEntry.name}; ${mintQuantity} more would pass the cap (cap: ${catalogEntry.holdingCap}) — at most ${catalogEntry.holdingCap - held} more can be mined`,
+              code: 'cap', held, cap: catalogEntry.holdingCap
             });
           }
         }
 
         // A first minting — never a reissue — so supersedes is always null here.
         const credential = await mintAssetByClass(ownerPublicKey, assetClass, mintQuantity, null);
+        if (issueReplayable) replayStore(issueRequestId, 'issue', [], issueParams, credential);
         console.log('Issued', mintQuantity, credential.asset.name, 'to', ownerPublicKey.slice(0, 16) + '...');
 
         // Subscribing IS requesting this specific asset class (see Mail
@@ -7140,22 +7407,36 @@ async function main() {
 
       // --- §5.4 splitting and consolidating fungible balances ---
       if (req.method === 'POST' && req.url === '/atlas/asset/split') {
-        const { credential, sendAmount, toPublicKey } = JSON.parse((await readBody(req)) || '{}');
+        const splitBody = JSON.parse((await readBody(req)) || '{}');
+        const { credential, sendAmount, toPublicKey } = splitBody;
         if (!credential || !toPublicKey || !Number.isInteger(sendAmount) || sendAmount <= 0) {
           return sendJson(res, 400, { error: 'credential, sendAmount, and toPublicKey are required' });
         }
+        const requestId = parseRequestId(splitBody);
+        if (await beginReplacement(res, requestId, 'split', [credential], { sendAmount, toPublicKey })) return;
         const expectedOwner = credential.owner && credential.owner.publicKey;
         const expectedClass = credential.asset && credential.asset.class;
         const problem = await checkPresentedAsset(credential, expectedOwner, expectedClass, sendAmount);
-        if (problem) return sendJson(res, 400, { error: problem });
+        if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
 
         const remainderQty = credential.quantity - sendAmount;
-        const sent = await mintAssetByClass(toPublicKey, expectedClass, sendAmount, credential.id);
-        const remainder = remainderQty > 0 ? await mintAssetByClass(expectedOwner, expectedClass, remainderQty, credential.id) : null;
-        revoke(credential.id, 'superseded');
+        const minted = [];
+        let sent, remainder;
+        try {
+          sent = await mintAssetByClass(toPublicKey, expectedClass, sendAmount, credential.id);
+          minted.push([toPublicKey, sent.id]);
+          remainder = remainderQty > 0 ? await mintAssetByClass(expectedOwner, expectedClass, remainderQty, credential.id) : null;
+          if (remainder) minted.push([expectedOwner, remainder.id]);
+          revokeMany([credential.id], 'superseded');
+        } catch (err) {
+          rollbackMinted(minted);
+          throw err;
+        }
         archiveIfAudited(credential, 'superseded');
         console.log('Split', expectedClass, '- sent', sendAmount, 'kept', remainderQty);
-        return sendJson(res, 200, { sent, remainder });
+        const splitResult = { sent, remainder };
+        if (requestId) replayStore(requestId, 'split', [credential.id], { sendAmount, toPublicKey }, splitResult);
+        return sendJson(res, 200, splitResult);
       }
 
       // Merges several balances of the SAME class, from THIS issuer, owned
@@ -7169,31 +7450,44 @@ async function main() {
       // of just one. checkPresentedAsset (below) rejects any credential
       // here that isn't fungible, same gate splitting and trading share.
       if (req.method === 'POST' && req.url === '/atlas/asset/consolidate') {
-        const { credentials } = JSON.parse((await readBody(req)) || '{}');
+        const consolidateBody = JSON.parse((await readBody(req)) || '{}');
+        const { credentials } = consolidateBody;
         if (!Array.isArray(credentials) || credentials.length < 2) {
           return sendJson(res, 400, { error: 'credentials must be an array of at least two balances' });
         }
         if (credentials.length > 20) {
-          return sendJson(res, 400, { error: 'too many balances in one consolidation (max 20 at a time)' });
+          return sendJson(res, 400, { error: 'too many balances in one consolidation (max 20 at a time)', code: 'too-many', max: 20 });
         }
         const ids = credentials.map((c) => c && c.id);
         if (new Set(ids).size !== ids.length) {
           return sendJson(res, 400, { error: 'duplicate balance in consolidation request' });
         }
+        const requestId = parseRequestId(consolidateBody);
+        if (await beginReplacement(res, requestId, 'consolidate', credentials, {})) return;
         const owner = credentials[0] && credentials[0].owner && credentials[0].owner.publicKey;
         const cls = credentials[0] && credentials[0].asset && credentials[0].asset.class;
         for (const credential of credentials) {
           const problem = await checkPresentedAsset(credential, owner, cls, 1);
-          if (problem) return sendJson(res, 400, { error: problem });
+          if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
         }
         const total = credentials.reduce((sum, c) => sum + c.quantity, 0);
-        const merged = await mintAssetByClass(owner, cls, total, ids);
-        credentials.forEach((c) => { revoke(c.id, 'consolidated'); archiveIfAudited(c, 'consolidated'); });
+        const minted = [];
+        let merged;
+        try {
+          merged = await mintAssetByClass(owner, cls, total, ids);
+          minted.push([owner, merged.id]);
+          revokeMany(ids, 'consolidated');
+        } catch (err) {
+          rollbackMinted(minted);
+          throw err;
+        }
+        credentials.forEach((c) => archiveIfAudited(c, 'consolidated'));
         console.log('Consolidated', credentials.length, cls, 'balances into', total, 'for', owner.slice(0, 16) + '...');
+        if (requestId) replayStore(requestId, 'consolidate', ids, {}, merged);
         return sendJson(res, 200, merged);
       }
 
-      // Task #203 (SPEC.md §7's new "Currency conversion" paragraph) —
+      // SPEC.md §7's "Currency conversion" paragraph:
       // convert one presented fungible balance into another fungible class,
       // via each class's own `exchangeRate` (ASSET_CATALOG, catalog-only
       // config — see that comment for the full reasoning). Deliberately
@@ -7212,14 +7506,17 @@ async function main() {
       // convert directly — iron -> silver works exactly the same way
       // gold -> silver does, not just base-currency pairs.
       if (req.method === 'POST' && req.url === '/atlas/convert') {
-        const { credential, spendAmount, toClass } = JSON.parse((await readBody(req)) || '{}');
+        const convertBody = JSON.parse((await readBody(req)) || '{}');
+        const { credential, spendAmount, toClass } = convertBody;
         if (!credential || !toClass || !Number.isInteger(spendAmount) || spendAmount <= 0) {
           return sendJson(res, 400, { error: 'credential, spendAmount, and toClass are required' });
         }
+        const requestId = parseRequestId(convertBody);
+        if (await beginReplacement(res, requestId, 'convert', [credential], { spendAmount, toClass })) return;
         const expectedOwner = credential.owner && credential.owner.publicKey;
         const fromClass = credential.asset && credential.asset.class;
         const problem = await checkPresentedAsset(credential, expectedOwner, fromClass, spendAmount);
-        if (problem) return sendJson(res, 400, { error: problem });
+        if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
 
         if (toClass === fromClass) return sendJson(res, 400, { error: 'cannot convert a class into itself' });
         const toEntry = ASSET_CATALOG[toClass];
@@ -7248,14 +7545,23 @@ async function main() {
         }
 
         const remainderQty = credential.quantity - spendAmount;
-        const [received, remainder] = await Promise.all([
-          mintAssetByClass(expectedOwner, toClass, resultQuantity, credential.id),
-          remainderQty > 0 ? mintAssetByClass(expectedOwner, fromClass, remainderQty, credential.id) : Promise.resolve(null)
-        ]);
-        revoke(credential.id, 'superseded');
+        const minted = [];
+        let received, remainder;
+        try {
+          received = await mintAssetByClass(expectedOwner, toClass, resultQuantity, credential.id);
+          minted.push([expectedOwner, received.id]);
+          remainder = remainderQty > 0 ? await mintAssetByClass(expectedOwner, fromClass, remainderQty, credential.id) : null;
+          if (remainder) minted.push([expectedOwner, remainder.id]);
+          revokeMany([credential.id], 'superseded');
+        } catch (err) {
+          rollbackMinted(minted);
+          throw err;
+        }
         archiveIfAudited(credential, 'superseded');
         console.log('Converted', spendAmount, fromClass, '->', resultQuantity, toClass, 'for', expectedOwner.slice(0, 16) + '...');
-        return sendJson(res, 200, { received, remainder });
+        const convertResult = { received, remainder };
+        if (requestId) replayStore(requestId, 'convert', [credential.id], { spendAmount, toClass }, convertResult);
+        return sendJson(res, 200, convertResult);
       }
 
       // Task #213 — asset-class lookup, for previewing a class the caller

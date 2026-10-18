@@ -1,6 +1,11 @@
 # Gen1 Gold / Platinum balance incident: investigation report
 
-Status: read-only investigation. No issuer data, wallet, key or revocation record was changed, and nothing
+Update: the minimal Gen1 repairs proposed in section 5 (items 1, 2, 3, 5, 6 and 7) are implemented; see
+`docs/gen1-fungible-safety-fixes.md` for what changed, what is still open and how to deploy. The findings below
+describe the code as it was when investigated; the scripts in the table record that earlier behaviour for the
+issuer and the wallet model they simulate.
+
+Status of the investigation itself: read-only investigation. No issuer data, wallet, key or revocation record was changed, and nothing
 was deployed. Every reproduction ran against throw-away copies of the Node and PHP issuers (own key,
 own state, private ports) and, for the wallet, a real Chromium with the extension against such an issuer.
 
@@ -208,7 +213,7 @@ The audit tool does not contact an issuer, change a wallet, or write to any file
 report. Its limits are stated in its output: a missing record proves nothing, and a credential that exists only
 in a lost response cannot be found.
 
-## 5. Minimal Gen1 patches (proposed, not applied)
+## 5. Minimal Gen1 patches (proposed; items 1, 2, 3, 5, 6 and 7 since applied)
 
 In order of value. None is a migration; all keep portable assets and Node/PHP parity.
 

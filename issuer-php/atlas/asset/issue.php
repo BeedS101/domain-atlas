@@ -21,7 +21,7 @@ $quantity = $body['quantity'] ?? null;
 $existingBalances = $body['existingBalances'] ?? null;
 if (!$ownerPublicKey) send_json(400, ['error' => 'ownerPublicKey is required']);
 if (!isset(ATLAS_ASSET_CATALOG[$assetClass])) {
-  // Task #204: this used to enumerate every known class by name, which
+  // This used to enumerate every known class by name, which
   // stopped being useful once the periodic-table expansion pushed the
   // catalog past 125 classes — pointing at the catalog itself instead.
   send_json(400, ['error' => 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ATLAS_ASSET_CATALOG_BASE in issuer-php/lib/store.php (plus issuer-php/lib/elements-catalog.php) for the full list.']);
@@ -45,17 +45,44 @@ if ($catalogEntry['fungible']) {
   $mintQuantity = 1;
 }
 
-// Task #203: mirrors issuer-server/server.js's same check in its
-// /atlas/asset/issue handler verbatim — see that comment for the full
-// reasoning. Applies uniformly to every path through this one shared
-// endpoint (a market mining stall or a chess-win gold reward alike), and
-// only to a genuinely fresh mint here — split/consolidate/convert/trade
-// re-mints all call mint_asset_by_class() directly with a non-null
-// $supersedes, never through this file.
+// A repeated request id returns the credential already issued for it.
+$issueRequestId = atlas_parse_request_id($body);
+$issueReplayable = $issueRequestId !== null && $catalogEntry['fungible'];
+$issueParams = ['ownerPublicKey' => $ownerPublicKey, 'assetClass' => $assetClass, 'quantity' => $mintQuantity];
+if ($issueReplayable) {
+  if (atlas_request_lease($issueRequestId) !== null) send_json(503, ['error' => 'this request is already being processed - try again', 'code' => 'busy']);
+  $prior = atlas_replay_lookup($issueRequestId, 'issue', [], $issueParams);
+  if ($prior !== null && isset($prior['conflict'])) send_json(409, ['error' => 'requestId was already used for a different request', 'code' => 'request-id-conflict']);
+  if ($prior !== null) {
+    http_response_code(200);
+    header('Content-Type: application/json');
+    cors_headers();
+    no_store_headers();
+    echo $prior['responseJson'];
+    exit;
+  }
+}
+
+// Mirrors issuer-server/server.js's same check verbatim: a fresh mint of a
+// class with a 'holdingCap' is refused when the owner's holdings plus the
+// quantity requested would pass the cap. Holdings come from the issuer's own
+// index of what it signed for this owner (atlas_assess_holdings), not from
+// what the wallet presents; the owner is held for the whole check-and-mint so
+// two concurrent mints cannot both pass on the same count. Applies to every
+// caller of this endpoint; split, convert and trade re-mints move existing
+// value and call mint_asset_by_class() directly.
 if ($catalogEntry['fungible'] && isset($catalogEntry['holdingCap'])) {
-  $currentHeld = current_held_quantity($kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $existingBalances);
-  if ($currentHeld >= $catalogEntry['holdingCap']) {
-    send_json(400, ['error' => 'already holding ' . $currentHeld . ' ' . $catalogEntry['name'] . ' (cap: ' . $catalogEntry['holdingCap'] . ') — convert some to another element (POST /atlas/convert) or spend it before mining more']);
+  if (atlas_owner_lease($ownerPublicKey) !== null) send_json(503, ['error' => 'this owner is being updated by another request - try again', 'code' => 'busy']);
+  list($held, $adopt) = atlas_assess_holdings($kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $existingBalances);
+  $cap = $catalogEntry['holdingCap'];
+  if ($adopt) atlas_holdings_register($ownerPublicKey, $assetClass, $adopt);
+  if ($held + $mintQuantity > $cap) {
+    send_json(400, [
+      'error' => $held >= $cap
+        ? 'already holding ' . $held . ' ' . $catalogEntry['name'] . ' (cap: ' . $cap . ') — convert some to another element (POST /atlas/convert) or spend it before mining more'
+        : 'holding ' . $held . ' ' . $catalogEntry['name'] . '; ' . $mintQuantity . ' more would pass the cap (cap: ' . $cap . ') — at most ' . ($cap - $held) . ' more can be mined',
+      'code' => 'cap', 'held' => $held, 'cap' => $cap,
+    ]);
   }
 }
 
@@ -63,6 +90,10 @@ if ($catalogEntry['fungible'] && isset($catalogEntry['holdingCap'])) {
 // See atlas/asset/reissue.php (SPEC.md §5.1.1) for the other caller of
 // issue_asset(), where supersedes names the id being replaced.
 $credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $mintQuantity, null);
+if ($issueReplayable) {
+  $credentialJson = json_encode($credential, JSON_UNESCAPED_SLASHES);
+  if ($credentialJson !== false) atlas_replay_store($issueRequestId, 'issue', [], $issueParams, $credentialJson);
+}
 
 // Subscribing IS requesting this specific asset class (see the mail-system
 // notes in README.txt) — log the subscriber and auto-send a welcome
@@ -82,7 +113,7 @@ if ($assetClass === 'atlas.membership') {
   append_mail(array_merge($welcomePayload, ['signature' => $welcomeSignature]));
 }
 
-// Post Office (task #75/#87, SPEC.md §11.3): claiming this specific class
+// Post Office (SPEC.md §11.3): claiming this specific class
 // IS registering for Global Mail here, same "requesting the class is the
 // whole registration step" shape as atlas.membership above — logged to
 // its own roster (see is_valid_postoffice_member(), the gate
@@ -104,7 +135,7 @@ if ($assetClass === 'atlas.postoffice.membership') {
   append_mail(array_merge($welcomePayload, ['signature' => $welcomeSignature]));
 }
 
-// Trading Station (task #144 Phase 1) — same shape as Post Office just
+// Trading Station: same shape as Post Office just
 // above: claiming this class IS joining, logged to its own roster, welcome
 // mail addressed by this credential's own id so it arrives through the
 // ordinary mail/check.php loop. Mirrors issuer-server/server.js's same

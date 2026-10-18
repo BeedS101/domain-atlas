@@ -2618,18 +2618,37 @@ function ensure_reviewer_well_known_file($publicKeyB64url) {
   // no collision risk with an asset id).
 }
 
-// ---------- revocations (flock-guarded — unlike the single-threaded Node
-// demo, PHP requests can genuinely run concurrently on a real host) ----------
+// ---------- revocations ----------
+// The published list is replaced atomically (a temporary file in the same
+// directory, renamed over it) under an exclusive lock on a private lock
+// file, so a reader - this code or a verifier fetching the public file -
+// sees the old list or the new one, never a partial write. Readers need no
+// lock for that reason.
+//
+// A list that cannot be read, is not valid JSON or has no "revoked" array is
+// an error (503), never an empty list: treating it as empty would let every
+// spent credential be spent again, and the next write would replace the
+// history with one entry. A missing file (before first use created it) is the
+// only empty case.
+
+function atlas_revocations_unavailable($reason) {
+  return new Exception('the revocation list ' . $reason . '; refusing to treat it as empty - restore it from a backup', 503);
+}
+
+function atlas_revocations_lock_file() {
+  return __DIR__ . '/atlas-revocations.lock';
+}
 
 function read_revocations() {
-  $fh = fopen(atlas_revocations_file(), 'r');
-  if ($fh === false) return ['revoked' => []];
-  flock($fh, LOCK_SH);
-  $data = stream_get_contents($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
+  $file = atlas_revocations_file();
+  clearstatcache(true, $file);
+  if (!file_exists($file)) return ['revoked' => []];
+  $data = @file_get_contents($file);
+  if ($data === false) throw atlas_revocations_unavailable('could not be read');
   $doc = json_decode($data, true);
-  return is_array($doc) ? $doc : ['revoked' => []];
+  if (!is_array($doc)) throw atlas_revocations_unavailable('is not valid JSON');
+  if (!isset($doc['revoked']) || !is_array($doc['revoked'])) throw atlas_revocations_unavailable('has no "revoked" list');
+  return $doc;
 }
 
 function is_revoked($id) {
@@ -2652,20 +2671,70 @@ function is_expired($credential) {
   return time() > strtotime($expiresAt);
 }
 
+// Writes $text to $file so a reader sees the old content or the new, never a
+// partial one. Keeps the target's permissions (the public list must stay
+// readable by the web server). Throws when the write cannot complete.
+function atlas_write_file_atomic($file, $text) {
+  $dir = dirname($file);
+  $tmp = is_writable($dir) ? tempnam($dir, basename($file) . '.') : false;
+  if ($tmp === false) {
+    // The directory itself is not writable (only the file is): a rename is
+    // impossible, so rewrite the file in place. $text is already complete
+    // and valid here, so the only exposure is the usual brief window in which
+    // a reader can see a truncated file.
+    error_log('atlas: ' . $dir . ' is not writable, so ' . basename($file) . ' cannot be replaced atomically; writing in place');
+    $fh = fopen($file, 'c');
+    if ($fh === false) throw new Exception('could not write ' . basename($file), 503);
+    flock($fh, LOCK_EX);
+    ftruncate($fh, 0);
+    rewind($fh);
+    $written = fwrite($fh, $text);
+    fflush($fh);
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    if ($written !== strlen($text)) throw new Exception('could not write ' . basename($file) . ' in full', 503);
+    return;
+  }
+  $perms = file_exists($file) ? (fileperms($file) & 0777) : 0644;
+  $ok = false;
+  try {
+    $fh = fopen($tmp, 'wb');
+    if ($fh === false) throw new Exception('could not write a temporary file next to ' . basename($file), 503);
+    $written = fwrite($fh, $text);
+    $flushed = fflush($fh);
+    if (function_exists('fsync')) @fsync($fh);
+    fclose($fh);
+    if ($written !== strlen($text) || !$flushed) throw new Exception('could not write ' . basename($file) . ' in full', 503);
+    @chmod($tmp, $perms);
+    if (!rename($tmp, $file)) throw new Exception('could not replace ' . basename($file), 503);
+    $ok = true;
+  } finally {
+    if (!$ok && file_exists($tmp)) @unlink($tmp);
+  }
+}
+
+// Adds every id in one locked read-modify-write and one atomic replace, so a
+// request that spends several credentials revokes all of them or none.
+// Throws, and writes nothing, when the existing list cannot be read.
+function atlas_revoke_many($ids, $reason) {
+  $lock = fopen(atlas_revocations_lock_file(), 'c');
+  if ($lock === false) throw new Exception('could not take the revocation lock', 503);
+  flock($lock, LOCK_EX);
+  try {
+    $doc = read_revocations();
+    $revokedAt = gmdate('Y-m-d\TH:i:s\Z');
+    foreach ($ids as $id) $doc['revoked'][] = ['id' => $id, 'revokedAt' => $revokedAt, 'reason' => $reason];
+    $text = json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if ($text === false) throw new Exception('could not encode the revocation list', 503);
+    atlas_write_file_atomic(atlas_revocations_file(), $text);
+  } finally {
+    flock($lock, LOCK_UN);
+    fclose($lock);
+  }
+}
+
 function atlas_revoke($id, $reason) {
-  $file = atlas_revocations_file();
-  $fh = fopen($file, 'c+');
-  flock($fh, LOCK_EX);
-  $data = stream_get_contents($fh);
-  $doc = json_decode($data, true);
-  if (!is_array($doc)) $doc = ['revoked' => []];
-  $doc['revoked'][] = ['id' => $id, 'revokedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason];
-  ftruncate($fh, 0);
-  rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-  fflush($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
+  atlas_revoke_many([$id], $reason);
 }
 
 // ---------- suspensions (same flock-guarded shape as revocations above)

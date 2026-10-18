@@ -1,4 +1,4 @@
-// Manual check for task #203 (SPEC.md §7's new "Currency conversion"
+// Manual check for SPEC.md §7's "Currency conversion"
 // paragraph): POST /atlas/convert — swap part or all of a held fungible
 // balance for a DIFFERENT fungible class at the issuing domain's own
 // declared `exchangeRate`, no counterparty, no listing, no Trading Station
@@ -45,11 +45,10 @@
 //   9. The `holdingCap` (500) on iron blocks a further mint once an owner
 //      already holds that much, verified against a presented balance —
 //      and is entirely independent per class (gold mining is unaffected).
-//  10. Presenting NO existingBalances is trusted as holding 0 and always
-//      allowed through, even for an owner who actually holds far more —
-//      a deliberate, documented trust boundary (this cap is a cooperative-
-//      client convenience for the reference wallet, not adversarial-abuse
-//      protection), not an oversight.
+//  10. Presenting NO existingBalances does not lift the cap: holdings are
+//      counted from the issuer's own record of what it signed for the owner
+//      (a request that would take the owner past the cap is refused, whether
+//      or not the wallet presents its balances).
 //  11. The cap does NOT block receiving a large amount of a capped class
 //      through a legitimate conversion (mintAssetByClass's split/convert
 //      call sites never go through the capped /atlas/asset/issue check at
@@ -181,16 +180,16 @@ async function issue(base, ownerPublicKey, assetClass, quantity, existingBalance
     if (goldStillWorks.status !== 200) throw new Error('Expected gold minting to be completely unaffected by the iron cap, got: ' + JSON.stringify(goldStillWorks.body));
     console.log('PASS: gold minting for the same owner is unaffected — the cap is scoped per class, not per owner globally');
 
-    console.log('STEP 10 (Node): presenting NO existingBalances is trusted as 0 held and always allowed, even though this owner actually holds 500 iron already — a deliberate trust boundary, not an oversight');
-    const bypassesWithoutProof = await post(NODE_BASE, '/atlas/asset/issue', { ownerPublicKey: capOwner, assetClass: 'atlas.element.iron', quantity: 1 });
-    if (bypassesWithoutProof.status !== 200) throw new Error('Expected minting without presented proof to succeed regardless of actual holdings, got: ' + JSON.stringify(bypassesWithoutProof.body));
-    console.log('PASS: minted without presenting existingBalances — documents that this cap is a cooperative-client convenience, not an adversarial-abuse defense');
+    console.log('STEP 10 (Node): presenting NO existingBalances does not lift the cap — the issuer counts what it signed for this owner');
+    const withoutProof = await post(NODE_BASE, '/atlas/asset/issue', { ownerPublicKey: capOwner, assetClass: 'atlas.element.iron', quantity: 1 });
+    if (withoutProof.status !== 400 || withoutProof.body.code !== 'cap' || withoutProof.body.held !== 500) throw new Error('Expected the cap to hold without presented balances, got: ' + JSON.stringify(withoutProof.body));
+    console.log('PASS: refused without presented balances ->', withoutProof.body.error);
 
     console.log('STEP 11 (Node): the cap does not block RECEIVING a large amount of a capped class through a legitimate conversion');
-    const gold600 = await issue(NODE_BASE, capOwner, 'atlas.element.gold', 600); // 600 gold -> 12000 iron at 20:1, far past the 500 cap
-    const bigConvert = await post(NODE_BASE, '/atlas/convert', { credential: gold600, spendAmount: 600, toClass: 'atlas.element.iron' });
-    if (bigConvert.status !== 200 || bigConvert.body.received.quantity !== 12000) throw new Error('Expected conversion to freely exceed the mining cap, got: ' + JSON.stringify(bigConvert.body));
-    console.log('PASS: converted into 12000 iron — the holdingCap only ever gates fresh /atlas/asset/issue mints, never split/convert/trade re-mints');
+    const gold500 = await issue(NODE_BASE, capOwner, 'atlas.element.gold', 450); // 50 held + 450 = 500 gold -> 10000 iron at 20:1, far past the 500 cap
+    const bigConvert = await post(NODE_BASE, '/atlas/convert', { credential: gold500, spendAmount: 450, toClass: 'atlas.element.iron' });
+    if (bigConvert.status !== 200 || bigConvert.body.received.quantity !== 9000) throw new Error('Expected conversion to freely exceed the mining cap, got: ' + JSON.stringify(bigConvert.body));
+    console.log('PASS: converted into 9000 iron — the holdingCap only ever gates fresh /atlas/asset/issue mints, never split/convert/trade re-mints');
 
     // ---------- PHP parity ----------
     const PHP_OWNER = 'test-owner-currency-conversion-php-demo';
@@ -223,17 +222,17 @@ async function issue(base, ownerPublicKey, assetClass, quantity, existingBalance
     if (phpTooSmall.status !== 400 || !phpTooSmall.body.error.includes('rounds down to 0')) throw new Error('Expected a "rounds down to 0" rejection, got: ' + JSON.stringify(phpTooSmall.body));
     console.log('PASS: rejected ->', phpTooSmall.body.error);
 
-    console.log('STEP 16 (PHP): the 500 holdingCap on iron blocks a further mint, and presenting no proof is trusted as 0 held');
+    console.log('STEP 16 (PHP): the 500 holdingCap on iron blocks a further mint, with or without presented balances');
     const phpCapOwner = 'test-owner-holding-cap-php-demo';
     const phpIron500 = await issue(PHP_BASE, phpCapOwner, 'atlas.element.iron', 500);
     const phpOverCap = await post(PHP_BASE, '/atlas/asset/issue', { ownerPublicKey: phpCapOwner, assetClass: 'atlas.element.iron', quantity: 1, existingBalances: [phpIron500] });
     if (phpOverCap.status !== 400 || !phpOverCap.body.error.includes('cap: 500')) throw new Error('Expected the cap to block a further mint, got: ' + JSON.stringify(phpOverCap.body));
     console.log('PASS: further iron mint blocked ->', phpOverCap.body.error);
-    const phpBypassesWithoutProof = await post(PHP_BASE, '/atlas/asset/issue', { ownerPublicKey: phpCapOwner, assetClass: 'atlas.element.iron', quantity: 1 });
-    if (phpBypassesWithoutProof.status !== 200) throw new Error('Expected minting without presented proof to succeed, got: ' + JSON.stringify(phpBypassesWithoutProof.body));
-    console.log('PASS: minted without presenting existingBalances, same trust boundary as the Node backend');
+    const phpWithoutProof = await post(PHP_BASE, '/atlas/asset/issue', { ownerPublicKey: phpCapOwner, assetClass: 'atlas.element.iron', quantity: 1 });
+    if (phpWithoutProof.status !== 400 || phpWithoutProof.body.code !== 'cap' || phpWithoutProof.body.held !== 500) throw new Error('Expected the cap to hold without presented balances, got: ' + JSON.stringify(phpWithoutProof.body));
+    console.log('PASS: refused without presented balances, same as the Node backend');
 
-    console.log('\nALL CURRENCY CONVERSION + MINING CAP (TASK #203) CHECKS PASSED');
+    console.log('\nALL CURRENCY CONVERSION + MINING CAP CHECKS PASSED');
   } catch (err) {
     console.error('FAILURE:', err);
     process.exitCode = 1;

@@ -44,6 +44,10 @@ issuer-php/lib/issuer-private-key.pem
 issuer-php/lib/atlas-*.json
 issuer-php/lib/atlas-*.json.lock
 issuer-php/lib/atlas-spend-lock-*.lock
+issuer-php/lib/atlas-*-lock-*.lock
+issuer-php/lib/atlas-revocations.lock
+issuer-php/lib/replay/
+issuer-php/lib/holdings/
 issuer-php/.well-known/atlas-key.json
 issuer-php/.well-known/atlas-revocations.json
 issuer-php/.well-known/atlas-suspensions.json
@@ -90,3 +94,7 @@ call-server/*.tmp
 # Native PHP Call Service: deployed settings and runtime state must never be committed.
 call-php/atlas/call/lib/config.php
 call-php/atlas/call/lib/state/
+
+# Node issuer: replay results and holdings index (runtime state, private).
+issuer-server/replay/
+issuer-server/holdings/

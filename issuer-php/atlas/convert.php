@@ -1,5 +1,5 @@
 <?php
-// POST /atlas/convert — Task #203 (SPEC.md §7's new "Currency conversion"
+// POST /atlas/convert (SPEC.md §7's "Currency conversion"
 // paragraph). Mirrors issuer-server/server.js's same route; see that
 // handler's own comment for the full reasoning. Shaped like
 // atlas/asset/split.php rather than anything trading-station related:
@@ -32,10 +32,14 @@ if (!$credential || !$toClass || !atlas_is_positive_int($spendAmount)) {
 }
 $spendAmount = (int) $spendAmount;
 
+$requestId = atlas_parse_request_id($body);
+$convertParams = ['spendAmount' => $spendAmount, 'toClass' => $toClass];
+atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'convert', [$credential], $convertParams);
+
 $expectedOwner = $credential['owner']['publicKey'] ?? null;
 $fromClass = $credential['asset']['class'] ?? null;
 $problem = check_presented_asset($kp['publicKeyB64url'], $credential, $expectedOwner, $fromClass, $spendAmount);
-if ($problem) send_json(400, ['error' => $problem]);
+if ($problem) send_json(400, atlas_spend_problem_body($problem, $credential));
 
 if ($toClass === $fromClass) send_json(400, ['error' => 'cannot convert a class into itself']);
 $toEntry = isset(ATLAS_ASSET_CATALOG[$toClass]) ? ATLAS_ASSET_CATALOG[$toClass] : null;
@@ -61,10 +65,19 @@ if ($resultQuantity < 1) {
 }
 
 $remainderQty = $credential['quantity'] - $spendAmount;
-$received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $toClass, $resultQuantity, $credential['id']);
-$remainder = $remainderQty > 0
-  ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $fromClass, $remainderQty, $credential['id'])
-  : null;
-atlas_revoke($credential['id'], 'superseded');
+$minted = [];
+try {
+  $received = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $toClass, $resultQuantity, $credential['id']);
+  $minted[] = [$expectedOwner, $received['id']];
+  $remainder = null;
+  if ($remainderQty > 0) {
+    $remainder = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $expectedOwner, $fromClass, $remainderQty, $credential['id']);
+    $minted[] = [$expectedOwner, $remainder['id']];
+  }
+  atlas_revoke_many([$credential['id']], 'superseded');
+} catch (Exception $e) {
+  atlas_rollback_minted($minted);
+  throw $e;
+}
 archive_if_audited($credential, 'superseded');
-send_json(200, ['received' => $received, 'remainder' => $remainder]);
+atlas_send_replaceable($requestId, 'convert', [$credential['id']], $convertParams, ['received' => $received, 'remainder' => $remainder]);

@@ -9,6 +9,8 @@
 // extension/wallet.js mintAsset(), mergeAssetGroup(), autoConsolidateAssetWallet()
 // and convertAsset().
 //
+// SimWallet models the wallet as it was before the safety fixes, so its wallet-side findings
+// (S2b, S3, S10a) do not change; the fixed wallet is covered by manual-gen1-wallet-fixes.js.
 // The script records what the issuers actually do; it does not assert that the
 // behaviour is correct. Each check prints "FINDING <id>: <observed>" and the run
 // ends with a table. A fix should flip the observed value, not break the script.
