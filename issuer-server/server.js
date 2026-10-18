@@ -2786,13 +2786,15 @@ function writeFileAtomic(file, text) {
   }
 }
 // Temporary files left by a write that was interrupted. A live write finishes
-// in milliseconds, so anything older than STALE_TMP_MS is debris.
+// in milliseconds, so anything older than STALE_TMP_MS is debris. Only names
+// writeFileAtomic gives its own temporary files are touched: the directory may
+// be the public .well-known folder, where other files must be left alone.
 const STALE_TMP_MS = 5 * 60 * 1000;
 function removeStaleTempFiles(dir) {
   let removed = 0;
   try {
     for (const name of fs.readdirSync(dir)) {
-      if (!name.endsWith('.tmp')) continue;
+      if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*\.json\.\d+\.[0-9a-f]{8}\.tmp$/.test(name)) continue;
       const file = path.join(dir, name);
       try {
         if (Date.now() - fs.statSync(file).mtimeMs > STALE_TMP_MS) { fs.unlinkSync(file); removed++; }
@@ -3055,8 +3057,8 @@ function txnRecoverKey(key) {
 }
 // Recovers every entry whose lease nobody holds. Returns how many it resolved.
 async function txnSweep() {
-  let names;
-  try { names = fs.readdirSync(TXN_DIR); } catch (err) { return 0; }
+  let names = [];
+  try { names = fs.readdirSync(TXN_DIR); } catch (err) { /* no journal directory yet */ }
   let resolved = 0;
   for (const name of names) {
     if (!name.endsWith('.json')) continue;

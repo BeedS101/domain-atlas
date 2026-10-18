@@ -44,7 +44,89 @@ function atlas_parse_request_id($body) {
   return $id;
 }
 
-function atlas_replay_dir() { return __DIR__ . '/replay'; }
+// ---------- where replay records, holdings and the journal live ----------
+// They hold signed bearer credentials (the replay store and the journal) and a
+// record of what each owner holds, so they are private. By default they sit in
+// lib/ next to the issuer key, behind lib/.htaccess. A host that serves lib/
+// without honouring .htaccess would expose them, so two further protections
+// apply: each directory gets its own deny-all .htaccess when this code creates
+// it (written by PHP, so it cannot be skipped by an upload tool that leaves
+// dot-files out), and the three directories can be moved outside the document
+// root altogether by putting an absolute path in lib/atlas-private-dir.txt (or
+// the ATLAS_PRIVATE_DIR environment variable). Directories are created 0700
+// and the files in them 0600. A configured path that is relative, missing or
+// not writable is an error (503); the code never falls back to lib/, because
+// that would split one store across two places. Choose the location before
+// first use and do not change it afterwards.
+
+const ATLAS_PRIVATE_DENY = "# Private state: never served over HTTP.\n<IfModule mod_authz_core.c>\n  Require all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n  Order deny,allow\n  Deny from all\n</IfModule>\n";
+
+// lib/ holds the issuer key and every state file, and is protected by its own
+// .htaccess. An upload tool that leaves dot-files out would leave it unprotected,
+// so the first request after such an upload writes the file back. This does not
+// help on a server that ignores .htaccess; tools/gen1-php-smoke.js checks that
+// over HTTP.
+function atlas_ensure_lib_guard() {
+  $guard = __DIR__ . '/.htaccess';
+  if (!is_file($guard) && @file_put_contents($guard, ATLAS_PRIVATE_DENY) === false) {
+    error_log('atlas: lib/.htaccess is missing and could not be written; lib/ may be served');
+  }
+}
+
+function atlas_private_base() {
+  static $base = null;
+  if ($base !== null) return $base;
+  $configured = getenv('ATLAS_PRIVATE_DIR');
+  if (!is_string($configured) || $configured === '') {
+    $file = __DIR__ . '/atlas-private-dir.txt';
+    $configured = is_file($file) ? trim((string) @file_get_contents($file)) : '';
+  }
+  $base = rtrim($configured, '/\\');
+  return $base;
+}
+
+function atlas_private_subdir($name) {
+  $base = atlas_private_base();
+  return ($base === '' ? __DIR__ : $base) . '/' . $name;
+}
+
+// True when $dir resolves to somewhere under the web root.
+function atlas_path_in_docroot($dir) {
+  $real = realpath($dir);
+  $root = realpath(atlas_docroot());
+  if ($real === false || $root === false) return true;
+  return strpos($real . DIRECTORY_SEPARATOR, $root . DIRECTORY_SEPARATOR) === 0;
+}
+
+// Creates (if needed) and checks one private directory. Throws a 503 when it
+// cannot be used.
+function atlas_private_subdir_ensure($name) {
+  $base = atlas_private_base();
+  if ($base !== '') {
+    if (!preg_match('#^(/|[A-Za-z]:[\\\\/])#', $base)) {
+      throw new Exception('the private state directory in atlas-private-dir.txt must be an absolute path', 503);
+    }
+    if (!is_dir($base) || !is_writable($base)) {
+      throw new Exception('the private state directory in atlas-private-dir.txt does not exist or is not writable', 503);
+    }
+  }
+  $dir = atlas_private_subdir($name);
+  if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+    throw new Exception('could not create the private ' . $name . ' directory', 503);
+  }
+  if (!is_writable($dir)) {
+    throw new Exception('the private ' . $name . ' directory is not writable', 503);
+  }
+  if (atlas_path_in_docroot($dir)) {
+    $guard = $dir . '/.htaccess';
+    if (!is_file($guard) && @file_put_contents($guard, ATLAS_PRIVATE_DENY) === false) {
+      error_log('atlas: could not write ' . $guard . '; this directory relies on lib/.htaccess alone');
+    }
+  }
+  return $dir;
+}
+
+function atlas_replay_dir() { return atlas_private_subdir('replay'); }
 function atlas_replay_file($requestId) { return atlas_replay_dir() . '/' . hash('sha256', $requestId) . '.json'; }
 
 // ['responseJson' => string] for a stored identical request, ['conflict' => true]
@@ -67,7 +149,7 @@ function atlas_replay_lookup($requestId, $op, $predecessorIds, $params) {
 // byte-identical to the original answer.
 function atlas_replay_store($requestId, $op, $predecessorIds, $params, $responseJson) {
   try {
-    @mkdir(atlas_replay_dir(), 0755, true);
+    atlas_private_subdir_ensure('replay');
     $ids = array_values($predecessorIds);
     sort($ids);
     $text = json_encode([
@@ -75,7 +157,7 @@ function atlas_replay_store($requestId, $op, $predecessorIds, $params, $response
       'createdAt' => gmdate('Y-m-d\TH:i:s\Z'), 'responseJson' => $responseJson,
     ], JSON_UNESCAPED_SLASHES);
     if ($text === false) throw new Exception('could not encode the replay record');
-    atlas_write_file_atomic(atlas_replay_file($requestId), $text);
+    atlas_write_file_atomic(atlas_replay_file($requestId), $text, 0600);
     if (mt_rand(1, 50) === 1) atlas_replay_prune();
     return true;
   } catch (Exception $e) {
@@ -158,7 +240,7 @@ function atlas_owner_lease($ownerPublicKey) {
 
 // ---------- holdings index ----------
 
-function atlas_holdings_dir() { return __DIR__ . '/holdings'; }
+function atlas_holdings_dir() { return atlas_private_subdir('holdings'); }
 function atlas_holdings_file($owner) {
   return atlas_holdings_dir() . '/' . substr(hash('sha256', (string) $owner), 0, 40) . '.json';
 }
@@ -178,12 +260,12 @@ function atlas_holdings_read($owner) {
 }
 
 function atlas_holdings_write($owner, $doc) {
-  @mkdir(atlas_holdings_dir(), 0755, true);
+  atlas_private_subdir_ensure('holdings');
   $held = [];
   foreach ($doc['held'] as $cls => $list) $held[$cls] = array_values($list);
   $text = json_encode(['owner' => $owner, 'held' => (object) $held], JSON_UNESCAPED_SLASHES);
   if ($text === false) throw new Exception('could not encode the holdings index', 503);
-  atlas_write_file_atomic(atlas_holdings_file($owner), $text);
+  atlas_write_file_atomic(atlas_holdings_file($owner), $text, 0600);
 }
 
 // Runs a short read-modify-write on one owner's holdings, under that owner's
@@ -251,6 +333,17 @@ function atlas_holdings_note_issued($owner, $asset, $id, $quantity) {
   $cls = $asset['class'] ?? null;
   if (!is_string($cls) || !isset(ATLAS_ASSET_CATALOG[$cls]) || !isset(ATLAS_ASSET_CATALOG[$cls]['holdingCap'])) return;
   atlas_holdings_register($owner, $cls, [['id' => $id, 'q' => $quantity]]);
+}
+
+// Kept for issue.php files from before the holdings index. A partly uploaded
+// bundle (new lib/, old endpoint) keeps minting; the current issue.php does not
+// call it. Sums only the presented credentials that verify, as it always did.
+function current_held_quantity($publicKeyB64url, $ownerPublicKey, $cls, $presentedBalances) {
+  $total = 0;
+  foreach ((is_array($presentedBalances) ? $presentedBalances : []) as $cred) {
+    if (check_presented_asset($publicKeyB64url, $cred, $ownerPublicKey, $cls, 1) === null) $total += $cred['quantity'];
+  }
+  return $total;
 }
 
 // Holdings used for a `holdingCap` check on a fresh mint: the issuer's own
@@ -358,14 +451,14 @@ function atlas_begin_replacement($publicKeyB64url, $requestId, $op, $presented, 
 // not test power loss.
 
 function atlas_new_txn_id() { return substr(bin2hex(random_bytes(8)), 0, 16); }
-function atlas_txn_dir() { return __DIR__ . '/txn'; }
+function atlas_txn_dir() { return atlas_private_subdir('txn'); }
 function atlas_txn_file($key) { return atlas_txn_dir() . '/' . hash('sha256', $key) . '.json'; }
 
 function atlas_txn_write($rec) {
-  @mkdir(atlas_txn_dir(), 0755, true);
+  atlas_private_subdir_ensure('txn');
   $text = json_encode($rec, JSON_UNESCAPED_SLASHES);
   if ($text === false) throw new Exception('could not encode the transaction journal entry', 503);
-  atlas_write_file_atomic(atlas_txn_file($rec['key']), $text);
+  atlas_write_file_atomic(atlas_txn_file($rec['key']), $text, 0600);
 }
 
 function atlas_txn_remove($rec) {

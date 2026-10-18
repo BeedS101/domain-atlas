@@ -2503,6 +2503,22 @@ function atlas_asset_catalog_entry($assetClass) {
 
 // ---------- keypair ----------
 
+// A missing private key file is the normal state of a brand-new domain. It is
+// not normal for a domain whose public key is already published: generating a
+// fresh key then would silently replace that identity (and, below, rewrite the
+// published key document), leaving every credential signed so far unverifiable.
+// That happens when lib/ is replaced or uploaded to the wrong place, so it is
+// refused with a 503 instead. A deliberate key change means removing the
+// published key document by hand as well.
+function atlas_refuse_new_identity($publishedKeyFile, $role) {
+  if (!file_exists($publishedKeyFile)) return;
+  $doc = json_decode((string) @file_get_contents($publishedKeyFile), true);
+  $published = is_array($doc) && isset($doc['keys']) && is_array($doc['keys']) && count($doc['keys']) > 0;
+  if ($published || !is_array($doc)) {
+    throw new Exception('the ' . $role . ' private key file is missing but a public key is already published (' . basename($publishedKeyFile) . '); refusing to create a different identity - restore the private key file from a backup', 503);
+  }
+}
+
 function load_or_create_keypair() {
   $keyFile = atlas_key_file();
   if (file_exists($keyFile)) {
@@ -2510,6 +2526,7 @@ function load_or_create_keypair() {
     $priv = openssl_pkey_get_private($pem);
     if ($priv === false) throw new Exception('could not load issuer private key: ' . openssl_error_string());
   } else {
+    atlas_refuse_new_identity(atlas_public_key_file(), 'issuer');
     $priv = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
     if ($priv === false) throw new Exception('could not generate issuer keypair: ' . openssl_error_string());
     openssl_pkey_export($priv, $pem);
@@ -2526,6 +2543,16 @@ function load_or_create_keypair() {
   return ['privateKey' => $priv, 'publicKeyB64url' => b64url_encode($rawPoint)];
 }
 
+// True when a published key document lists this public key anywhere in its
+// `keys` (a document maintained by hand may list earlier keys first).
+function atlas_key_doc_lists($doc, $publicKeyB64url) {
+  if (!is_array($doc) || !isset($doc['keys']) || !is_array($doc['keys'])) return false;
+  foreach ($doc['keys'] as $k) {
+    if (is_array($k) && ($k['publicKey'] ?? null) === $publicKeyB64url) return true;
+  }
+  return false;
+}
+
 function ensure_well_known_files($publicKeyB64url) {
   @mkdir(atlas_docroot() . '/.well-known', 0755, true);
   $keyFile = atlas_public_key_file();
@@ -2536,9 +2563,7 @@ function ensure_well_known_files($publicKeyB64url) {
   $needsWrite = true;
   if (file_exists($keyFile)) {
     $existing = json_decode(file_get_contents($keyFile), true);
-    if (is_array($existing) && isset($existing['keys'][0]['publicKey']) && $existing['keys'][0]['publicKey'] === $publicKeyB64url) {
-      $needsWrite = false;
-    }
+    if (atlas_key_doc_lists($existing, $publicKeyB64url)) $needsWrite = false;
   }
   if ($needsWrite) {
     file_put_contents($keyFile, json_encode($keyDoc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX);
@@ -2583,6 +2608,7 @@ function load_or_create_reviewer_keypair() {
     $priv = openssl_pkey_get_private($pem);
     if ($priv === false) throw new Exception('could not load reviewer private key: ' . openssl_error_string());
   } else {
+    atlas_refuse_new_identity(atlas_reviewer_public_key_file(), 'reviewer');
     $priv = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
     if ($priv === false) throw new Exception('could not generate reviewer keypair: ' . openssl_error_string());
     openssl_pkey_export($priv, $pem);
@@ -2606,9 +2632,7 @@ function ensure_reviewer_well_known_file($publicKeyB64url) {
   $needsWrite = true;
   if (file_exists($keyFile)) {
     $existing = json_decode(file_get_contents($keyFile), true);
-    if (is_array($existing) && isset($existing['keys'][0]['publicKey']) && $existing['keys'][0]['publicKey'] === $publicKeyB64url) {
-      $needsWrite = false;
-    }
+    if (atlas_key_doc_lists($existing, $publicKeyB64url)) $needsWrite = false;
   }
   if ($needsWrite) {
     file_put_contents($keyFile, json_encode($keyDoc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX);
@@ -2673,19 +2697,19 @@ function is_expired($credential) {
 
 // Writes $text to $file so a reader sees the old content or the new, never a
 // partial one. Keeps the target's permissions (the public list must stay
-// readable by the web server). There is no fallback: when the temporary file
+// readable by the web server; a new file gets $newMode). There is no fallback: when the temporary file
 // cannot be created next to the target, written in full, or renamed over it
 // (directory not writable, disk full), the target is left exactly as it was and
 // a 503 is thrown. The temporary file is created in the target's own
 // directory on purpose (never the system temp directory), so the rename is
 // one atomic step on one file system.
-function atlas_write_file_atomic($file, $text) {
+function atlas_write_file_atomic($file, $text, $newMode = 0644) {
   $dir = dirname($file);
   $name = basename($file);
   if (!is_dir($dir) || !is_writable($dir)) {
     throw new Exception('could not write ' . $name . ': its directory is not writable; the existing file was not changed', 503);
   }
-  $perms = file_exists($file) ? (fileperms($file) & 0777) : 0644;
+  $perms = file_exists($file) ? (fileperms($file) & 0777) : $newMode;
   $tmp = $dir . '/' . $name . '.' . bin2hex(random_bytes(6)) . '.tmp';
   $ok = false;
   try {
@@ -2713,10 +2737,13 @@ function atlas_fault_point($name) {
 
 // Temporary files left by a write that was interrupted. A live write
 // finishes in milliseconds, so anything older than five minutes is debris.
+// Only names this code gives its own temporary files (<name>.json.<12 hex>.tmp)
+// are touched: the directory may be the public .well-known folder, where other
+// files must be left alone.
 function atlas_remove_stale_temp_files($dir) {
   $removed = 0;
   foreach ((array) @scandir($dir) as $name) {
-    if (substr($name, -4) !== '.tmp') continue;
+    if (!preg_match('/^[A-Za-z0-9_-][A-Za-z0-9._-]*\.json\.[0-9a-f]{12}\.tmp$/', $name)) continue;
     $file = $dir . '/' . $name;
     if (is_file($file) && time() - (int) @filemtime($file) > 300 && @unlink($file)) $removed++;
   }

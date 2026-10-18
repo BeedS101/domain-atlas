@@ -154,6 +154,7 @@ function read_admin_json_body($limit = null) {
 // the way the Node version does — but parsing a small EC PEM key costs
 // microseconds, so this is not worth avoiding at demo/small-site scale.
 function atlas_load_keys() {
+  atlas_ensure_lib_guard();
   $kp = load_or_create_keypair();
   ensure_well_known_files($kp['publicKeyB64url']);
   return $kp;

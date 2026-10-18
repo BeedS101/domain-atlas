@@ -205,6 +205,7 @@ works once the list is restored.
 | `node test/manual-currency-conversion.js` | updated: the cap holds without presented balances |
 | `node test/manual-gen1-transaction-recovery.js both` (add `--quick` to skip the second recovery variant) | Node and PHP: issue, split, consolidate and convert each stopped at `txn:minted`, `txn:journal-written`, `txn:holdings-registered`, `txn:revoke-tmp-written`, `txn:revoked`, `txn:replay-stored`, `txn:journal-removed` (injected `ATLAS_TEST_CRASH_AT`, exit 86); after each, recovery by retry and by start-up / next-request sweep: spend recorded or not as expected, same signed result when committed, holdings exact, no leftovers; no-`requestId` rollback; interrupted revocation write and stale temporary files; recovery that refuses to guess (unreadable list, half-recorded transaction, damaged entry); 42 concurrent operations plus racing duplicates and competing spends; and, with the issuer running as an unprivileged user, unwritable `.well-known/` (with the file itself writable, so an in-place write would succeed), unwritable journal directory, malformed lists |
 | `node test/manual-ledger-receipts.js`, `node test/manual-ledger-issuance.js` | extended: missing / malformed / empty / wrong-shape / unreadable revocation list, the same request working after restoration, a 3,000-entry list with tagged entries (Node mirror and PHP) |
+| `node test/manual-gen1-php-deployment.js` (sections `permissions`, `private`, `identity`, `processes`, `upgrade`, `mixed`) | PHP deployment readiness: the issuer running as an unprivileged user with restrictive permissions (unwritable `.well-known/`, `lib/`, each private folder, lock files; mode kept on replacement); private folders created 0700 / 0600 with their own deny-all `.htaccess`, relocation outside the web root, a bad path failing closed; the key and published identity never silently replaced; stale temporary files; `lib/atlas-cli.php` and `tools/gen1-php-smoke.js`; many PHP processes at once and a killed server; upgrade of a domain with existing state from the two earlier versions (keys, 6,000+ revocation entries, Gold, Platinum, memberships, Post Office, ledger configuration) and staged uploads |
 
 Results of the final run are in the delivery notes. The existing suites that exercise mint, split, consolidate,
 convert, trade, purchase, drops, file transfer, mail gifts, wallet import and the ledger wallets were run
@@ -212,37 +213,34 @@ unchanged apart from the updated tests above.
 
 ## 5. Deployment (before going live)
 
-Nothing deploys automatically. In this order:
+Nothing deploys automatically. The step-by-step procedure for the PHP domains (what to back up and upload, the
+directories and permissions, how to verify that private folders are not served, how to confirm revocation counts,
+smoke tests, rollback and journal recovery) is in `docs/gen1-php-deployment-checklist.md`. In short:
 
-1. **Back up** `.well-known/atlas-revocations.json`, `.well-known/atlas-key.json` and the private key file, the
-   state directory (Node) or `lib/` (PHP), and note the revocation entry count. Do not edit the live revocation
-   file by hand afterwards.
-2. **Permissions (PHP).** The web user must be able to create files in `.well-known/` (the temporary file for the
-   atomic write) and in `lib/` (new `lib/replay/`, `lib/holdings/`, `lib/txn/`, `lib/atlas-rid-lock-*.lock`,
-   `lib/atlas-holdings-lock-*.lock`, `lib/atlas-revocations.lock`). **If `.well-known/` is not writable, spends
-   (split, consolidate, convert) answer 503 and change nothing; there is no in-place fallback any more.** Check this
-   before going live: a deployment that only worked because of the old fallback will start refusing spends.
-   `lib/` is already denied by `lib/.htaccess`; keep it that way, the replay store and the journal hold bearer
-   credentials.
+1. **Back up** `.well-known/` (key document, revocation list, suspensions), the whole `lib/` (PHP) or state
+   directory (Node), and the issuer key, and record the revocation entry count and hash
+   (`php lib/atlas-cli.php counts`, `node tools/gen1-php-smoke.js <url> --save-baseline`).
+2. **PHP permissions.** `.well-known/` must be writable by the PHP account: the revocation list is replaced by a
+   temporary file in that directory plus a rename. **If it is not writable, spends answer 503 and change nothing;
+   there is no in-place fallback.** `lib/` must be writable for the new state and lock files. The replay, holdings and
+   journal folders are created 0700 with 0600 files and a deny-all `.htaccess` of their own; they can be moved
+   outside the web root with `lib/atlas-private-dir.txt`. They hold bearer credentials: verify over HTTP that none
+   is served (`tools/gen1-php-smoke.js`).
 3. **Node.** New directories `replay/`, `holdings/` and `txn/` under the state directory are created on first use.
    Optional `ATLAS_REPLAY_TTL_HOURS` (default 168).
-4. **Deploy the issuer first** (`issuer-server/server.js`, or `issuer-php/` including the new
-   `lib/replacement.php`). Existing credentials keep working. Then check:
-   - `GET /.well-known/atlas-revocations.json` still has the same entry count;
-   - one split and one consolidate on a test key succeed and add only the expected entries;
-   - a mint above the cap is refused with `code: "cap"`.
+4. **Deploy the issuer first** (`issuer-server/server.js`, or `issuer-php/`: all of `lib/`, then `atlas/`; never
+   overwrite the key, `atlas-*-store.json`, `.well-known/*.json` or lock files). Run
+   `php lib/atlas-cli.php preflight`, then `node tools/gen1-php-smoke.js <url> --baseline <file>`. Existing
+   credentials keep working and no revocation entry changes.
 5. **Then ship the extension** (`wallet.js`, `viewer.js`). Wallets keep their identities, assets and service
    credentials; the first fungible mint after the update adopts the wallet's existing balances into the
    issuer's index.
-6. **Watch** the revocation entry count (it should only grow by spends), the `txn/` directory (it should be
-   empty between requests; an entry that stays means a transaction awaiting a retry or an inspection, and the log
-   line `transaction recovery:` or `is committed but not finished` says why), and 503 responses (a 503 on spend means the revocation file is unreadable: restore it from the
-   backup, do not recreate it).
+6. **Watch** the revocation entry count (it should only grow by spends), the `txn/` directory (empty between
+   requests; `php lib/atlas-cli.php txn-list` shows what stays), and 503 responses (a 503 on spend means the
+   revocation list is unreadable or `.well-known/` is not writable: restore from backup, do not recreate).
 7. **Rollback.** Redeploy the previous issuer files; the new directories and lock files are inert and can stay.
-   First make sure `txn/` is empty (or recover it with the new issuer), because the previous version does not read
-   it; an entry left there is a decided but unfinished result.
-   The revocation file format is unchanged. Wallets with pending journal entries simply stop retrying against an
-   old issuer.
+   First make sure `txn/` is empty (or recover it with `txn-recover`), because the previous version does not read
+   it. The revocation file format is unchanged, and an old copy of the list must never replace a newer one.
 
 Do not, as part of this deployment: reset or reconcile live Gold or Platinum, delete or rebuild revocation
 records, rotate domain keys, or move assets to another chain.

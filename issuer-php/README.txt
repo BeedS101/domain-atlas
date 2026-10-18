@@ -42,6 +42,17 @@ Requirements
 - Apache with mod_rewrite and AllowOverride enabled for your account
   (also virtually always the default on cPanel).
 - No composer, no Node, no build step. Just upload the files.
+- .well-known/ must be writable by the PHP account: the revocation list is
+  replaced by writing a temporary file in that folder and renaming it. If it is
+  not writable, spends answer 503 and change nothing.
+- lib/ must be writable too (state, lock files, and the replay/, holdings/ and
+  txn/ folders, which hold signed credentials and are created private). They
+  can be moved outside the web root by putting an absolute path in
+  lib/atlas-private-dir.txt before first use.
+- Never overwrite lib/issuer-private-key.pem, lib/atlas-*-store.json or
+  .well-known/*.json on an existing domain when uploading a new release.
+- `php lib/atlas-cli.php preflight` checks all of this from the command line, and
+  docs/gen1-php-deployment-checklist.md has the step-by-step procedure.
 
 
 What's in this folder

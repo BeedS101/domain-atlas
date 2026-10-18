@@ -77,12 +77,16 @@ async function startPhp(port, options) {
   options = options || {};
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gen1-php-'));
   const bundle = path.join(tmp, 'bundle');
-  fs.cpSync(path.join(REPO, 'issuer-php'), bundle, { recursive: true });
-  for (const f of fs.readdirSync(path.join(bundle, 'lib'))) {
-    if (/\.(json|pem|lock)$/.test(f) && /store|key|lock|admin|revoc/.test(f)) fs.rmSync(path.join(bundle, 'lib', f), { force: true });
-  }
-  for (const d of ['replay', 'holdings', 'txn']) fs.rmSync(path.join(bundle, 'lib', d), { recursive: true, force: true });
+  // Source files only: runtime state that a developer's working copy may hold (keys, published
+  // documents, stores, locks, replay / holdings / journal directories) is never copied, so a new
+  // bundle is a fresh domain unless the caller seeds it.
+  const isState = (src) => {
+    const rel = path.relative(options.source || path.join(REPO, 'issuer-php'), src).split(path.sep).join('/');
+    return /^lib\/(replay|holdings|txn)(\/|$)/.test(rel) || /^lib\/[^/]+\.(pem|lock)$/.test(rel) || /^lib\/atlas-[^/]*\.json(\.lock)?$/.test(rel) || /^\.well-known\/atlas-[^/]*\.json$/.test(rel);
+  };
+  fs.cpSync(options.source || path.join(REPO, 'issuer-php'), bundle, { recursive: true, filter: (src) => options.keepState || !isState(src) });
   fs.mkdirSync(path.join(bundle, '.well-known'), { recursive: true });
+  if (options.prepare) options.prepare(bundle);
   const domain = 'localhost:' + port;
   const be = {
     kind: 'php', base: 'http://127.0.0.1:' + port, domain: '127.0.0.1:' + port, tmp, bundle,
@@ -100,7 +104,7 @@ async function startPhp(port, options) {
   be.start = async (env) => {
     be.log = [];
     if (env !== undefined) be.env = Object.assign({}, env);
-    be.proc = launch('php', ['-S', '127.0.0.1:' + port, 'test-router.php'], {
+    be.proc = launch('php', ['-S', '127.0.0.1:' + port, options.router || 'test-router.php'], {
       cwd: bundle, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(options.workers === 0 ? {} : { PHP_CLI_SERVER_WORKERS: String(options.workers || 4) }), ...be.env }
     }, be);
     be.proc.stderr.on('data', (d) => be.log.push(d.toString()));
@@ -108,7 +112,7 @@ async function startPhp(port, options) {
   };
   be.restart = async (env) => { be.proc.removeAllListeners('exit'); be.proc.kill(); await waitExit(be.proc, 3000); await be.start(env); };
   be.stop = () => { if (be.proc) { be.proc.removeAllListeners('exit'); be.proc.kill(); } fs.rmSync(tmp, { recursive: true, force: true }); };
-  await be.start();
+  if (options.autostart !== false) await be.start();
   return be;
 }
 
