@@ -210,7 +210,7 @@ async function startCoreReal(dir) {
   });
   const frontPort = await new Promise((r) => front.listen(0, '127.0.0.1', () => r(front.address().port)));
   return {
-    kind: 'real', port, calls, base: 'http://127.0.0.1:' + frontPort,
+    kind: 'real', port, calls, priv, base: 'http://127.0.0.1:' + frontPort,
     // Opens the account the way Labs 33 does: a signed Labs 30 request.
     async openAccount(owner, coin) {
       const payload = { type: 'atlas.ledger.account.open', v: 1, audience: OPEN_URL, network: NETWORK, coin, nonce: hex(16), issuedAt: iso(Date.now()) };

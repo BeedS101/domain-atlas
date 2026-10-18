@@ -89,6 +89,11 @@
         return true;
       },
 
+      // Whether an operation address is the one this adapter sends balance requests to.
+      ownsOperation(url) {
+        return typeof url === 'string' && hosts.some((h) => url === urlFor(h, BALANCE_PATH));
+      },
+
       // Reads the service's description of itself and accepts it only if it agrees with the
       // credential and names the one address this adapter would use anyway.
       async discover(target, ctx) {

@@ -10,6 +10,13 @@ The Ledger tab can walk a person through opening an empty account and collecting
 (see "Opening an account from the wallet"). It is part of the same experimental interface, so it is
 unavailable until the person turns that interface on, and it has not been run against a live site.
 
+Signed balance receipts (Labs 38) are built as a second experimental interface with its own switch:
+the PHP issuer can sign a statement of what the Labs 29 ledger held, the wallet checks it against the
+issuer's published key and, only then, labels the figure **Signed ledger report — Not final or
+spendable** (see "Signed balance receipts"). Both the receipt endpoint and the wallet interface are
+off by default, nothing has been deployed or enabled on a live site, and no live receipt has been
+requested.
+
 This document keeps three things apart, and says which one each statement is about:
 
 - **Built**: what the wallet does today.
@@ -614,6 +621,131 @@ No minting, deposit, payment or spending. It does not enable the issuer service,
 configuration file or contact any host other than the one in the table. It does not run in the
 background. It does not change what Core or Mobile do. Notes and references are not in backups.
 
+## Signed balance receipts (experimental, Labs 38)
+
+The frozen contract is `LABS38.md` in the Core repository (agreed 2026-10-18). A receipt makes a
+*reported* balance cryptographically authenticated: its signature says who stated it and when. It is
+not proof of consensus, completeness, solvency, finality or spendability, and the wallet says so.
+
+### Where the signing happens
+
+In the original PHP issuer, with its established issuer key: `POST /atlas/ledger/balance-receipt`
+(`issuer-php/atlas/ledger/balance-receipt.php`, logic in `issuer-php/lib/ledger-receipts.php`). The
+key is not copied anywhere and the endpoint signs one fixed statement it builds itself; it never signs
+a submitted amount or arbitrary JSON. The type literal `atlas.ledger.balance-receipt` exists in no other
+signer, and a test checks that.
+
+The issuer reads the ledger itself, read-only: `dirname(DOCUMENT_ROOT)/chainblock-labs-private/`
+(the folder the Labs 29 service uses, required to be outside the document root), `coin26.sqlite` for
+`coins(domain, symbol)` → `id, decimals`, then `ledger29.sqlite` for `accounts(coin_id, owner_key)` →
+`amount_units`. Both are opened `mode=ro` with `PRAGMA query_only=ON`, are never created, and a missing
+or unreadable database answers `ledger-unavailable` and signs nothing. There is no unsigned relay to
+fall back to. Each database is read inside its own read transaction; the two are separate SQLite files,
+so this is not one atomic snapshot of both. A coin's `decimals` are remembered on first use and a later
+change refuses to sign (`ledger-mismatch`); losing `lib/atlas-ledger-receipts-store.json` re-pins.
+
+### Off by default, and independent of issuance
+
+`lib/atlas-ledger-receipts-config.json` (`{"enabled": true, "domain": "evtec.co.za"}`, optional
+`perClientPerMinute` 30, `perOwnerPerHour` 60, `globalPerHour` 600) is never created automatically. With
+no file the route answers 404 `disabled` to GET and POST and touches nothing. It has its own store
+(`lib/atlas-ledger-receipts-store.json`: spent nonce hashes kept 600 s, hourly counters, the pinned
+decimals, a log of the last 500 receipts with time, account ID and coin — never an amount) and its own
+rate-limit bucket. It does not read the credential-issuance flag, so switching issuance off does not
+stop receipts, and enabling one never enables the other.
+
+`GET /atlas/ledger/balance-receipt` (when enabled) returns a status document: contract, the operation
+address, network, request and receipt types, `state: "no-state-version"`, `signedDiscovery: false` and
+`ledgerStorage: "readable" | "unavailable"` (whether the two databases can be opened, so an operator
+can check a host before relying on it; no path is named). It is unsigned and appoints no key.
+
+### The request
+
+`{payload, proof}` with exactly these payload fields, signed by the owner (raw P-256 over the
+sorted-key canonical JSON):
+
+`{type: "atlas.ledger.balance-receipt.request", v: 1, audience: "https://<domain>/atlas/ledger/balance-receipt", network: "chainblock-labs29-<domain>", coin, nonce (32–64 lowercase hex), issuedAt (±120 s)}`
+
+and `proof` exactly `{publicKey, signature}` (canonical 87-character point, 64-byte signature). The
+type and audience differ from Labs 29's, so neither endpoint accepts the other's signature. Any extra
+field (a balance, a credential, a signer, an endpoint) is refused. Maximum body 4096 bytes. The nonce
+is spent persistently before the ledger is read (simultaneous copies yield one receipt). Order of
+checks: configuration, HTTPS, host, client rate limit, shape, audience, network, coin, nonce, time,
+proof, issuer key valid now, revoked account, replay and per-owner/global limits, ledger read.
+
+### The receipt
+
+`{ok: true, contract: "chainblock-ledger38/signed-receipt-experimental", payload, signerKey, signature}`
+with `payload` exactly
+
+`{type: "atlas.ledger.balance-receipt", v: 1, request: {nonce, hash}, network, coin, account, owner, amount, decimals, observedAt, state: {status: "no-state-version"}}`
+
+`hash` is the lowercase hex SHA-256 of the canonical request *payload* (not the envelope), `account` the
+derived `urn:atlas:ledger-account:…`, `amount` an integer string of minor units, `observedAt` the
+issuer's own clock in whole seconds. The signature covers only the canonical payload. The ledger has no
+state version, so there is no `sequence` and no `asOf`: `observedAt` is when the issuer looked, not a
+committed ledger state. A real version column and a `v: 2` receipt are separate future work.
+
+### What the wallet checks
+
+`extension/ledger-labs38.js` (contract `chainblock-ledger38/signed-receipt-experimental`). The adapter
+reaches only the address derived from the issuing host, reads the status document (which can only say
+the service is on), sends the owner-signed request and hands the answer back as *evidence*. The
+**wallet** then fetches the issuing domain's `/.well-known/atlas-key.json` and
+`/.well-known/atlas-revocations.json` itself (the origin the person allowed; no redirects, no
+credentials) and runs `checkReceipt`. Everything must pass:
+
+- exact envelope, payload, `request` and `state` key sets; the contract, type, version and
+  `no-state-version`;
+- the request nonce and the SHA-256 of the canonical request just sent; the request type and exact
+  audience;
+- owner, network, coin and account equal the wallet's credential, and the account equals the
+  independently derived ID; an integer-string amount (no signs, fractions, exponents or leading zeros)
+  and 0–18 decimals;
+- `observedAt` in whole seconds, within ±120 s of the request, not in this device's future and not
+  more than five minutes old;
+- the signer: the response's `signerKey` is only a selector. The key must be listed in the issuing
+  domain's published key document, valid at `observedAt` **and** not ended now; it must not be in the
+  revocation list, nor may the account; the signature is checked with the published key. A key
+  document that cannot be read fails closed, as does a revocation list that cannot be read (only a
+  404, "none published", counts as empty).
+
+Only then does the wallet record the figure with `verification: "signed"`, the signing domain, the key
+and the statement time, and show **Signed ledger report — Not final or spendable** with the signing
+domain and statement time. Any failure records no balance, shows the reason (`receipts-off`,
+`receipt-unavailable`, `receipt-invalid`, `signer-unknown`, `account-revoked` …) and **does not fall
+back** to an unsigned lookup. A Labs 29 answer is never relabelled: it stays **Reported — Not
+Cryptographically Verified**, and nothing in a response (`verifiedRequest`, `balanceProof`, `ok`, a
+matching TLS host) raises the level. The wallet, not the adapter, sets it.
+
+### Consent and switches
+
+"Allow the Chainblock Labs 38 signed-report interface" is its own switch, off by default, separate
+from Labs 29. Each account keeps its own permission and pins the exact operation address it first used.
+An account pinned to the Labs 29 address stays with Labs 29 even if both interfaces are on; with only
+Labs 38 on, the receipt address is a *new* address, so the wallet sends nothing there until the person
+approves it (`endpoint-changed`). An account pinned to the receipt address never falls to Labs 29 when
+receipts fail. To move an account to signed reports without that prompt, stop and re-allow lookups.
+Background checks stay a separate, off-by-default switch and use whichever interface the account is
+pinned to. Passkey identities make no request (the interface accepts raw P-256 proofs only).
+
+### Tools
+
+`labs/chainblock-web/verify38.php` in the Core repository is an independent, CLI-only verifier
+(`php verify38.php <atlas-key.json> <request.json> < receipt.json`). It does not check live
+revocation, database contents, current freshness, finality or spendability. Do not upload it to a site.
+The wallet is stricter than the offline verifier in two ways: it requires the key to be unrevoked and
+still current, and it applies the freshness rules above.
+
+### Before any live use
+
+Not done and not approved: deploying the endpoint, creating the configuration file on a host, or
+requesting a receipt from a live site. On each host, first confirm the issuer's PHP can open the two
+databases (`GET /atlas/ledger/balance-receipt` once enabled reports `ledgerStorage`; `open_basedir`
+or permissions may forbid it, in which case stop and rethink rather than relay unsigned data), then
+test disabled-by-default, replay, an unauthorized signer, tampering and a wrong account. Roll back by
+deleting `lib/atlas-ledger-receipts-config.json`.
+
 ## Current experimental implementation versus the intended contract
 
 What the wallet cannot do with Labs 29 today, and where each gap belongs. "Core" is the Chainblock
@@ -651,8 +783,8 @@ existing endpoint, key, credential or store is read or written differently.
 ## Remaining questions
 
 1. ~~Is `audience` the exact operation URL or the origin?~~ Settled for Labs 29: the exact operation address. Open only for the finished contract.
-2. Which key signs balance receipts: the issuer's own, or a ledger key the signed discovery lists?
-3. What is the receipt's state reference: a sequence number, a hash, or both?
+2. ~~Which key signs balance receipts?~~ For the Labs 38 pilot: the issuer's own established key, in the original issuer. A delegated ledger key would need an authorization chain pinned to the issuer.
+3. What is the receipt's state reference: a sequence number, a hash, or both? Labs 38 v1 has none (`no-state-version`); a version column with atomic increment and a `v: 2` receipt are open.
 4. How long may a discovery document live, and how stale a cached one may the wallet use?
 5. When the issuer re-issues a credential for rediscovery, does `issuedAt` change, and how does that
    interact with key validity windows?
@@ -692,6 +824,26 @@ existing endpoint, key, credential or store is read or written differently.
   issuer the way the wallet would from the live site (a throwaway certificate, local only):
   valid, tampered, revoked, key-window, derived-ID mismatch.
 
+- `node test/manual-ledger-labs38-adapter.js`: the Labs 38 adapter and `checkReceipt` on their own,
+  with receipts made by a throwaway key: every tampered field, receipts for another request, owner,
+  coin, host or account, time limits, the signer rules (unlisted, expired, not yet valid, revoked),
+  and the adapter's request and error table.
+- `node test/manual-ledger-receipts.js`: the receipt endpoint against the real PHP issuer and the Node
+  test mirror, each with its own key: off by default and independent of issuance, valid receipts
+  checked by an independent verifier, a strict request (extra fields, Labs 29 type/audience, stale,
+  foreign or malformed proofs), identity and account separation, tampered receipts, replay (sequential
+  and simultaneous), expired/unlisted/unreadable signing keys, a revoked account, a missing or
+  unreadable ledger, changed decimals, limits, and the signing surface. The ledger databases are Core's
+  own (made by `account30.php`) when `CORE_LABS_DIR` is set, otherwise a schema stand-in; the output says which.
+- `node test/manual-ledger-verify38.js`: Core's `verify38.php` on genuine receipts from both issuers
+  and on about fifty deliberately corrupted fixtures per issuer, each compared with an independent verifier; also
+  that it answers 404 when served over HTTP. Needs `CORE_LABS_DIR`.
+- `xvfb-run -a node test/manual-ledger-labs38-wallet.js`: the wallet in Chromium against the real PHP
+  issuer and the Node mirror over a local HTTPS front that can alter answers: off by default, no
+  fallback when receipts are off, a signed report only after the wallet's own check, the Ledger tab
+  label, tampering, a replayed or someone else's genuine receipt, key-document and revocation attacks,
+  issuer error codes, background checks staying opt-in, a passkey making no request, and (with Core's
+  real `ledger29.php`) Labs 29 staying unsigned and each address needing its own approval.
 - `node test/manual-ledger-open-core.js`: the opening module alone: the target table, the exact
   messages against the services' field lists, the explanations, every answer shape and code, and
   that the module has no network, storage or signing calls.

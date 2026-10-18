@@ -79,11 +79,12 @@ What's in this folder
     admin/class-patches.php  - POST /atlas/admin/class-patches  (admin-gated: list every class patch currently active — see "Class-wide patches" below)
     admin/asset-classes.php  - POST /atlas/admin/asset-classes  (admin-gated: every non-fungible class, bound or not, for the class-patch form's dropdown — see "Class-wide patches" below)
     ledger/account-credential.php - POST /atlas/ledger/account-credential (EXPERIMENTAL, OFF unless lib/atlas-ledger-issuance-config.json enables it — see "Ledger-account references" below)
+    ledger/balance-receipt.php - GET/POST /atlas/ledger/balance-receipt (EXPERIMENTAL, OFF unless lib/atlas-ledger-receipts-config.json enables it — see "Signed balance receipts" below)
     admin/send-ticket-to-email.php - POST /atlas/admin/send-ticket-to-email (admin-gated: mint a ticket and email it to an address; needs outbound email configured — see SPEC.md section 13.1)
     .htaccess                - makes the URLs above work without a .php
                                 extension, matching what the extension calls
   lib/
-    bootstrap.php, crypto.php, store.php, ledger-issuance.php  - shared code, not web routes
+    bootstrap.php, crypto.php, store.php, ledger-issuance.php, ledger-receipts.php  - shared code, not web routes
     .htaccess                - blocks direct web access to this folder
                                 (this is where the private key file lives
                                 once it's generated)
@@ -1329,3 +1330,39 @@ account ID, coin). No key or signature is ever stored there. lib/ is already
 blocked from the web by lib/.htaccess.
 
 Deployment, test and rollback steps are in docs/ledger-accounts.md. tools/ledger-issuance-smoke.js is the one-shot check to run after enabling.
+
+
+Signed balance receipts (experimental, off by default)
+-----------------------------------------------------------
+POST /atlas/ledger/balance-receipt answers an owner-signed request with a
+statement signed by THIS issuer's key: "at observedAt the Labs 29 ledger held
+N minor units of this coin for this owner". It builds that statement itself;
+it never signs a submitted amount. Described in docs/ledger-accounts.md
+("Signed balance receipts") and frozen in Core's LABS38.md.
+
+It does nothing until you create lib/atlas-ledger-receipts-config.json:
+
+    { "enabled": true, "domain": "evtec.co.za" }
+
+Optional limits: perClientPerMinute (default 30), perOwnerPerHour (60),
+globalPerHour (600). Delete the file to turn it off. With no file the route
+answers 404 {"code":"disabled"} and touches nothing. It is independent of the
+credential-issuance switch above: neither enables, or depends on, the other.
+
+What it needs:
+  - the same established issuer key and published .well-known/atlas-key.json
+    entry as above (it never creates a key, and refuses unless the published
+    key document lists the key as valid right now).
+  - READ access, from this PHP, to the Labs 29 databases in
+    <parent of the document root>/chainblock-labs-private/ (coin26.sqlite and
+    ledger29.sqlite, outside the document root). It opens them read-only and
+    never creates them. Check this FIRST: once enabled, GET
+    /atlas/ledger/balance-receipt reports "ledgerStorage":"readable" or
+    "unavailable". If open_basedir or permissions block it, stop; do not
+    substitute an unsigned relay.
+  - the PDO SQLite extension.
+
+It writes lib/atlas-ledger-receipts-store.json (spent nonce hashes, hourly
+counters, the first-seen decimals of each coin, and a log of the last 500
+receipts: time, account ID, coin; never an amount or a key). lib/ is already
+blocked from the web by lib/.htaccess.

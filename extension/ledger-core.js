@@ -247,16 +247,22 @@
     'issuer-unavailable': 'The issuing domain could not issue the reference right now. Your account stays open; try again later.',
     'account-missing': 'The ledger has no such account yet. Open it first.',
     'account-revoked': 'The issuing domain has revoked this account reference and will not issue it again.',
+    'receipts-off': 'The issuing domain is not signing balance reports right now. No balance was recorded, and the wallet did not fall back to an unsigned lookup.',
+    'receipt-unavailable': 'The issuing domain could not provide a signed balance report right now. No balance was recorded; try again later.',
+    'receipt-invalid': 'The signed balance report did not check out, so it was not used. No balance was recorded.',
+    'signer-unknown': 'The wallet could not confirm that the issuing domain\'s published key signed this report, so it was not used. No balance was recorded.',
     'unknown': 'The check did not finish.'
   };
 
   function problemText(code) { return PROBLEMS[code] || PROBLEMS.unknown; }
 
-  // How far a balance can be trusted. The wallet has no way to check a signed receipt yet, so every
-  // balance it shows is unsigned, whatever the ledger says about itself. An adapter cannot raise
-  // this: the wallet sets it, not the answer.
+  // How far a balance can be trusted. A balance is unsigned unless the wallet itself checked a signed
+  // receipt (ledger-labs38.js) against the issuing domain's published key. An adapter or the ledger's
+  // own answer cannot raise this: the wallet sets it, not the answer. A signed report authenticates
+  // who said it and when; it is never a final or spendable balance.
   const VERIFICATION = {
-    unsigned: { level: 'unsigned', label: 'Reported \u2014 Not Cryptographically Verified', detail: 'The ledger said so over a secure connection. Nothing signed by the ledger backs it, and it is not a final or spendable balance.' }
+    unsigned: { level: 'unsigned', label: 'Reported \u2014 Not Cryptographically Verified', detail: 'The ledger said so over a secure connection. Nothing signed by the ledger backs it, and it is not a final or spendable balance.' },
+    signed: { level: 'signed', label: 'Signed ledger report \u2014 Not final or spendable', detail: 'The issuing domain signed this statement and the wallet checked the signature against the key that domain publishes. It says what the ledger showed at the time given, not a final or spendable balance.' }
   };
 
   return {

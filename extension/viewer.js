@@ -8283,7 +8283,10 @@ function ledgerCard(a) {
   card.appendChild(lel('div', { className: 'meta', textContent: 'Network ' + a.network + ' · issued by ' + a.issuerDomain + ' · owner ' + a.ownerShort }));
 
   const bal = lel('div', { className: 'ledger-balance' });
-  if (a.balance) {
+  if (a.balance && a.balance.signed) {
+    bal.appendChild(document.createTextNode('Signed balance: ' + a.balance.text + ' '));
+    bal.appendChild(lel('span', { className: 'meta', textContent: 'as ' + a.balance.signed.by + ' stated at ' + ledgerTime(a.balance.signed.at) + (a.balance.stale ? ' (out of date)' : '') }));
+  } else if (a.balance) {
     bal.appendChild(document.createTextNode('Reported balance: ' + a.balance.text + ' '));
     bal.appendChild(lel('span', { className: 'meta', textContent: 'as the ledger reported at ' + ledgerTime(a.balance.asOf) + (a.balance.stale ? ' (out of date)' : '') }));
   } else {
@@ -8294,6 +8297,7 @@ function ledgerCard(a) {
     const v = a.balance.verification;
     card.appendChild(lel('div', { className: 'ledger-verify', id: key('verify'), textContent: v.label }));
     card.appendChild(lel('div', { className: 'ledger-detail', 'data-role': 'verification', textContent: v.detail }));
+    if (a.balance.signed) card.appendChild(lel('div', { className: 'ledger-detail', 'data-role': 'signature', textContent: 'Signed by ' + a.balance.signed.by + ' (key ' + a.balance.signed.signerShort + ') \u00b7 statement time ' + ledgerTime(a.balance.signed.at) + ' \u00b7 checked against the key that domain publishes' }));
     if (a.balance.interface && a.balance.interface.experimental) card.appendChild(lel('div', { className: 'ledger-detail', 'data-role': 'experimental', textContent: 'Experimental interface: ' + a.balance.interface.label + '. Not final, not a spendable balance.' }));
   }
   if (a.problem) card.appendChild(lel('div', { className: 'ledger-problem', role: 'status', textContent: a.problem.text }));
@@ -8388,7 +8392,10 @@ function renderLedgerExperimental(list) {
     box.addEventListener('change', () => {
       if (box.checked) {
         box.checked = false;
-        ledgerAsk('Turn on the ' + x.label + '? It can then read balances from its prototype service for accounts you allow one by one. Its answers are not signed and are not final or spendable. Background checks stay off.', 'Turn on', () => ledgerAct(() => AtlasWallet.setLedgerExperimental(x.name, true), x.label + ' is on.'));
+        const askText = x.signed
+          ? 'Turn on the ' + x.label + '? It can then ask the issuing domain for a signed balance report for accounts you allow one by one, at its own address, which you approve separately from any other interface. The wallet checks the signature against the key that domain publishes and shows the report as signed only if everything checks out; if it does not, nothing is recorded and no unsigned lookup is tried instead. A signed report is not a final or spendable balance. Background checks stay off.'
+          : 'Turn on the ' + x.label + '? It can then read balances from its prototype service for accounts you allow one by one. Its answers are not signed and are not final or spendable. Background checks stay off.';
+        ledgerAsk(askText, 'Turn on', () => ledgerAct(() => AtlasWallet.setLedgerExperimental(x.name, true), x.label + ' is on.'));
       } else {
         ledgerAct(() => AtlasWallet.setLedgerExperimental(x.name, false), x.label + ' is off. Checks that depended on it were turned off.');
       }

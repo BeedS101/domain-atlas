@@ -45,6 +45,7 @@ importScripts('wallet.js');
 try { importScripts('call-protocol.js'); } catch (err) { /* calling stays unavailable */ }
 try { importScripts('ledger-core.js'); } catch (err) { /* ledger accounts stay unavailable */ }
 try { importScripts('ledger-labs29.js'); } catch (err) { /* the experimental ledger interface stays unavailable */ }
+try { importScripts('ledger-labs38.js'); } catch (err) { /* the signed-report interface stays unavailable */ }
 try { importScripts('ledger-open.js'); } catch (err) { /* opening ledger accounts stays unavailable */ }
 
 const TOOLBAR_ICON_ACTIVE = {

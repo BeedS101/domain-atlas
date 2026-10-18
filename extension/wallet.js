@@ -8202,17 +8202,28 @@ const AtlasWallet = (() => {
   function clearLedgerAdapters() { ledgerAdapters.length = 0; notifyLedgerChanged(); }
   function getLedgerAdapters() { return ledgerAdapters.map((a) => a.contract); }
 
-  function pickLedgerAdapter(target) {
-    for (const a of ledgerAdapters) { try { if (a.supports(target)) return a; } catch (err) { /* an adapter that throws does not support it */ } }
-    return null;
+  // The adapter for a target. An account already pinned to an operation address stays with the
+  // adapter that owns that address, so turning on a second interface never moves it, and a failure
+  // never hands it to another interface. With nothing pinned the signed interface is asked first.
+  // `pinned` is the account's {balance} operations, when it has any.
+  function pickLedgerAdapter(target, pinned) {
+    const usable = [];
+    for (const a of ledgerAdapters) { try { if (a.supports(target)) usable.push(a); } catch (err) { /* an adapter that throws does not support it */ } }
+    if (!usable.length) return null;
+    const url = pinned && typeof pinned.balance === 'string' ? pinned.balance : null;
+    if (url) {
+      const owner = usable.find((a) => { try { return typeof a.ownsOperation === 'function' && a.ownsOperation(url) === true; } catch (err) { return false; } });
+      if (owner) return owner;
+    }
+    return usable.find((a) => a.signed === true) || usable[0];
   }
 
   function adapterProofFormats(adapter) { return Array.isArray(adapter.proofFormats) && adapter.proofFormats.length ? adapter.proofFormats : ['raw-ecdsa-p256']; }
 
   // The adapter for a target, and whether the identity's proof is one its ledger can check. When it
   // is not, the wallet makes no request and asks for no approval.
-  function ledgerSupportFor(target, identity) {
-    const adapter = pickLedgerAdapter(target);
+  function ledgerSupportFor(target, identity, pinned) {
+    const adapter = pickLedgerAdapter(target, pinned);
     if (!adapter) return { adapter: null, proofUnsupported: false };
     return { adapter, proofUnsupported: !adapterProofFormats(adapter).includes(ledgerProofFormat(identity)) };
   }
@@ -8330,7 +8341,7 @@ const AtlasWallet = (() => {
   }
 
   function ledgerTargetOf(credential) {
-    return { issuerDomain: credential.issuer.domain, network: credential.ledger.network, coin: credential.ledger.coin, ownerPublicKey: credential.owner.publicKey };
+    return { issuerDomain: credential.issuer.domain, network: credential.ledger.network, coin: credential.ledger.coin, ownerPublicKey: credential.owner.publicKey, accountId: credential.id };
   }
 
   // ---- the view the Ledger tab renders ----
@@ -8340,7 +8351,8 @@ const AtlasWallet = (() => {
     const target = ledgerTargetOf(rec.credential);
     const flight = ledgerInFlight.get(rec.id) || null;
     const ownerIsActive = !!identity && ledgerOwnerKeyOrNull(identity) === rec.credential.owner.publicKey;
-    const support = ledgerSupportFor(target, identity);
+    const pinnedOps = rec.consent && rec.consent.operations;
+    const support = ledgerSupportFor(target, identity, pinnedOps);
     const canSignSilently = ledgerCanSignSilently(identity);
     const indicators = core.indicatorsFor({
       ownerIsActive, identityLocked: !identity, adapterSupports: !!support.adapter, proofUnsupported: support.proofUnsupported, consent: !!rec.consent,
@@ -8348,6 +8360,9 @@ const AtlasWallet = (() => {
       endpointChanged: !!rec.pendingEndpointOrigin, domain: target.issuerDomain, intervalMs: core.LIMITS.syncDefaultIntervalMs
     });
     const cache = rec.cache;
+    // Signed only when the wallet recorded having checked a receipt; anything else, including a
+    // cache from before receipts existed, is unsigned.
+    const signed = !!cache && cache.verification === 'signed' && typeof cache.signedBy === 'string' && core.validTime(cache.statementAt) && typeof cache.signerKey === 'string';
     return {
       id: rec.id, credential: rec.credential, addedAt: rec.addedAt,
       issuerDomain: target.issuerDomain, network: target.network, coin: target.coin,
@@ -8356,7 +8371,7 @@ const AtlasWallet = (() => {
       pendingEndpointOrigin: rec.pendingEndpointOrigin || null, pendingEndpoint: (rec.pendingOperations && rec.pendingOperations.balance) || null,
       pinnedEndpoint: (rec.consent && rec.consent.operations && rec.consent.operations.balance) || null,
       interface: support.adapter ? { contract: support.adapter.contract, label: support.adapter.label || support.adapter.contract, experimental: !!support.adapter.experimental } : null,
-      balance: cache ? { amount: cache.amount, decimals: cache.decimals, text: core.formatAmount(cache.amount, cache.decimals), asOf: cache.asOf, fetchedAt: cache.fetchedAt, stale: core.isStale(cache.asOf, Date.now()), endpointOrigin: cache.endpointOrigin, verification: core.VERIFICATION.unsigned, interface: cache.contract ? { contract: cache.contract, label: cache.label || cache.contract, experimental: !!cache.experimental } : null } : null,
+      balance: cache ? { amount: cache.amount, decimals: cache.decimals, text: core.formatAmount(cache.amount, cache.decimals), asOf: cache.asOf, fetchedAt: cache.fetchedAt, stale: core.isStale(cache.asOf, Date.now()), endpointOrigin: cache.endpointOrigin, verification: signed ? core.VERIFICATION.signed : core.VERIFICATION.unsigned, signed: signed ? { by: cache.signedBy, at: cache.statementAt, signerKey: cache.signerKey, signerShort: core.shortKey(cache.signerKey) } : null, interface: cache.contract ? { contract: cache.contract, label: cache.label || cache.contract, experimental: !!cache.experimental } : null } : null,
       lastAttemptAt: rec.lastAttemptAt, problem: rec.lastProblem ? { code: rec.lastProblem, text: core.problemText(rec.lastProblem) } : null,
       connecting: !!flight, indicators
     };
@@ -8511,7 +8526,7 @@ const AtlasWallet = (() => {
     await changeLedgerRecord(accountId, (rec) => {
       if (on) {
         if (!rec.consent || rec.pendingEndpointOrigin) throw ledgerError('no-consent');
-        const support = ledgerSupportFor(ledgerTargetOf(rec.credential), identity);
+        const support = ledgerSupportFor(ledgerTargetOf(rec.credential), identity, rec.consent && rec.consent.operations);
         if (!support.adapter) throw ledgerError('no-adapter');
         if (support.proofUnsupported) throw ledgerError('proof-unsupported');
       }
@@ -8556,6 +8571,33 @@ const AtlasWallet = (() => {
     } catch (err) { /* the identity changed or the reference was removed meanwhile; there is nothing to record */ }
   }
 
+  // The wallet's own check of a signed receipt. It fetches the issuing domain's published key
+  // document and revocation list (the origin the person allowed, no redirects, no credentials) and
+  // hands them, with the evidence the adapter returned, to AtlasLedgerLabs38.checkReceipt. A key
+  // document that cannot be had, or a revocation list that cannot be read, is a failure; only a
+  // revocation list the domain does not publish at all (404) counts as empty.
+  async function checkLedgerReceipt(target, raw, issuerOrigin, signal) {
+    if (typeof AtlasLedgerLabs38 === 'undefined') throw ledgerError('no-adapter');
+    if (!raw || !raw.receipt || !raw.receipt.request || !raw.receipt.answer) return { ok: false, code: 'receipt-invalid', reason: 'no receipt came back' };
+    const doFetch = ledgerScopedFetch({ origins: [issuerOrigin], urls: [] }, signal);
+    const readDoc = async (name, absentIsEmpty) => {
+      let response;
+      try { response = await doFetch(issuerOrigin + '/.well-known/' + name, { method: 'GET', headers: { Accept: 'application/json' } }); } catch (err) { if (err && err.name === 'AbortError') throw err; return null; }
+      if (response.status === 404 && absentIsEmpty) return { revoked: [] };
+      if (!response.ok) return null;
+      try {
+        const text = await response.text();
+        if (text.length > 262144) return null;
+        const doc = JSON.parse(text);
+        return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : null;
+      } catch (err) { return null; }
+    };
+    const [keyDoc, revocations] = await Promise.all([readDoc('atlas-key.json', false), readDoc('atlas-revocations.json', true)]);
+    if (!keyDoc) return { ok: false, code: 'signer-unknown', reason: 'the issuer\'s published keys could not be read' };
+    if (!revocations) return { ok: false, code: 'signer-unknown', reason: 'the issuer\'s revocation list could not be read' };
+    return AtlasLedgerLabs38.checkReceipt({ answer: raw.receipt.answer, request: raw.receipt.request, target, keyDoc, revocations, now: Date.now() });
+  }
+
   // One lookup for one account. `opts.reason` is 'manual', 'open' or 'background'. Returns
   // { ok: true, balance } or { ok: false, code }; it does not throw for ordinary failures.
   async function refreshLedgerAccount(accountId, opts) {
@@ -8575,10 +8617,11 @@ const AtlasWallet = (() => {
     if (reason === 'background' && (!rec.backgroundSync || !ledgerCanSignSilently(identity))) return { ok: false, code: 'no-consent' };
     if (ledgerInFlight.has(accountId)) return { ok: false, code: 'busy' };
     const target = ledgerTargetOf(rec.credential);
-    const { adapter, proofUnsupported } = ledgerSupportFor(target, identity);
+    const { adapter, proofUnsupported } = ledgerSupportFor(target, identity, rec.consent.operations);
     if (!adapter) return { ok: false, code: 'no-adapter' };
     if (proofUnsupported) return { ok: false, code: 'proof-unsupported' };
     const formats = adapterProofFormats(adapter);
+    const requestTypes = Array.isArray(adapter.requestTypes) && adapter.requestTypes.length ? adapter.requestTypes.slice() : null;
 
     const controller = new AbortController();
     ledgerInFlight.set(accountId, { reason, controller, contract: adapter.contract });
@@ -8589,7 +8632,7 @@ const AtlasWallet = (() => {
     try {
       const ctxFor = (allow) => ({
         fetch: ledgerScopedFetch({ origins: allow.origins || [], urls: allow.urls || [] }, controller.signal),
-        sign: (payload) => signLedgerPayload(payload, { audiences: allow.audiences || [], proofFormats: formats }),
+        sign: (payload) => signLedgerPayload(payload, Object.assign({ audiences: allow.audiences || [], proofFormats: formats }, requestTypes ? { types: requestTypes } : {})),
         signal: controller.signal
       });
       const found = await adapter.discover(target, ctxFor({ origins: [issuerOrigin] }));
@@ -8603,7 +8646,15 @@ const AtlasWallet = (() => {
         outcome = { ok: false, code: 'endpoint-changed' };
       } else {
         const raw = await adapter.fetchBalance(target, { operations }, ctxFor({ urls: [operations.balance], audiences: [operations.balance] }));
-        const balance = core.normalizeBalance(raw);
+        // A signed interface's figures count only once the wallet has checked the receipt itself,
+        // against the issuing domain's published key. A failure is a failure: nothing is recorded and
+        // no other interface is tried.
+        let signed = null;
+        if (adapter.signed === true) {
+          signed = await checkLedgerReceipt(target, raw, issuerOrigin, controller.signal);
+          if (!signed.ok) throw ledgerError(signed.code, signed.reason);
+        }
+        const balance = core.normalizeBalance(signed ? { amount: signed.amount, decimals: signed.decimals, asOf: signed.observedAt } : raw);
         if (!balance) throw ledgerError('bad-response');
         const stillThere = ledgerInFlight.get(accountId);
         if (!stillThere || stillThere.controller.signal.aborted) throw ledgerError('cancelled');
@@ -8612,10 +8663,11 @@ const AtlasWallet = (() => {
           if (!r.consent) return; // permission was taken back while the request was out
           r.consent.endpointOrigin = origin;
           r.consent.operations = operations;
-          r.cache = { amount: balance.amount, decimals: balance.decimals, asOf: balance.asOf, fetchedAt: now, endpointOrigin: origin, verification: 'unsigned', contract: adapter.contract, label: adapter.label || adapter.contract, experimental: !!adapter.experimental };
+          r.cache = { amount: balance.amount, decimals: balance.decimals, asOf: balance.asOf, fetchedAt: now, endpointOrigin: origin, verification: signed ? 'signed' : 'unsigned', contract: adapter.contract, label: adapter.label || adapter.contract, experimental: !!adapter.experimental };
+          if (signed) Object.assign(r.cache, { signedBy: target.issuerDomain, signerKey: signed.signerKey, statementAt: signed.observedAt, receipt: { payload: raw.receipt.answer.payload, signerKey: raw.receipt.answer.signerKey, signature: raw.receipt.answer.signature } });
           r.lastProblem = null; r.lastAttemptAt = now;
         });
-        outcome = { ok: true, balance: { amount: balance.amount, decimals: balance.decimals, asOf: balance.asOf, text: core.formatAmount(balance.amount, balance.decimals), verification: 'unsigned' } };
+        outcome = { ok: true, balance: { amount: balance.amount, decimals: balance.decimals, asOf: balance.asOf, text: core.formatAmount(balance.amount, balance.decimals), verification: signed ? 'signed' : 'unsigned' } };
       }
     } catch (err) {
       const code = ledgerProblemCode(err);
@@ -8990,7 +9042,9 @@ const AtlasWallet = (() => {
 
   const LEDGER_EXPERIMENTAL_KEY = 'atlasLedgerExperimental';
   const ledgerExperimentalDefs = {
-    labs29: { label: 'Chainblock Labs 29 test interface', make: () => (typeof AtlasLedgerLabs29 !== 'undefined' ? AtlasLedgerLabs29.createAdapter() : null) }
+    labs29: { label: 'Chainblock Labs 29 test interface', make: () => (typeof AtlasLedgerLabs29 !== 'undefined' ? AtlasLedgerLabs29.createAdapter() : null) },
+    // Separate from labs29: its own switch, and its own approval of its own endpoint address per account.
+    labs38: { label: 'Chainblock Labs 38 signed-report interface', signed: true, make: () => (typeof AtlasLedgerLabs38 !== 'undefined' ? AtlasLedgerLabs38.createAdapter() : null) }
   };
   const ledgerExperimentalRegistered = {}; // name -> { contract, unregister }
   let ledgerExperimentalReady = Promise.resolve();
@@ -9013,7 +9067,7 @@ const AtlasWallet = (() => {
   }
 
   function ledgerExperimentalView() {
-    return Object.keys(ledgerExperimentalDefs).map((name) => ({ name, label: ledgerExperimentalDefs[name].label, available: !!ledgerExperimentalDefs[name].make(), enabled: !!ledgerExperimentalRegistered[name] }));
+    return Object.keys(ledgerExperimentalDefs).map((name) => ({ name, label: ledgerExperimentalDefs[name].label, available: !!ledgerExperimentalDefs[name].make(), enabled: !!ledgerExperimentalRegistered[name], signed: ledgerExperimentalDefs[name].signed === true }));
   }
 
   async function getLedgerExperimental() {
@@ -9038,7 +9092,7 @@ const AtlasWallet = (() => {
           await updateLedgerList(ledgerOwnerKeyOf(identity), (list) => {
             let changed = false;
             for (const r of list) {
-              if (r.backgroundSync && !pickLedgerAdapter(ledgerTargetOf(r.credential))) { r.backgroundSync = false; changed = true; }
+              if (r.backgroundSync && !pickLedgerAdapter(ledgerTargetOf(r.credential), r.consent && r.consent.operations)) { r.backgroundSync = false; changed = true; }
             }
             return { list, result: changed };
           });

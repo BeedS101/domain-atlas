@@ -143,7 +143,8 @@ const rejects = (mutate, reason) => {
   console.log('--- how far a balance is trusted ---');
   check('every balance is labelled Reported \u2014 Not Cryptographically Verified', core.VERIFICATION.unsigned.label === 'Reported \u2014 Not Cryptographically Verified');
   check('the explanation says it is not final or spendable and nothing signed backs it', /not a final or spendable balance/.test(core.VERIFICATION.unsigned.detail) && /Nothing signed/.test(core.VERIFICATION.unsigned.detail));
-  check('there is no verified level for an adapter to claim', Object.keys(core.VERIFICATION).join() === 'unsigned');
+  check('there is no "verified" level; the only upgrade is a signed report the wallet checked itself', Object.keys(core.VERIFICATION).join() === 'unsigned,signed');
+  check('the signed level says it is not final or spendable', core.VERIFICATION.signed.label === 'Signed ledger report \u2014 Not final or spendable' && /not a final or spendable balance/.test(core.VERIFICATION.signed.detail));
   for (const k of ['proof-unsupported', 'clock', 'unknown-coin', 'rate-limited']) check('the "' + k + '" problem has its own words', core.PROBLEMS[k] && core.PROBLEMS[k] !== core.PROBLEMS.unknown);
 
   console.log('\n' + passes + ' passed, ' + failures + ' failed');

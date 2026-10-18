@@ -39,11 +39,11 @@ const UNSIGNED = 'Reported — Not Cryptographically Verified';
 
     console.log('--- off by default ---');
     let exp = await W(() => AtlasWallet.getLedgerExperimental());
-    check('the experimental interface is available but off in a fresh wallet', exp.length === 1 && exp[0].name === 'labs29' && exp[0].available === true && exp[0].enabled === false, exp);
+    check('the experimental interfaces are available but off in a fresh wallet (Labs 29 first, Labs 38 beside it as its own switch)', exp.length === 2 && exp[0].name === 'labs29' && exp[0].available === true && exp[0].enabled === false && exp[1].name === 'labs38' && exp[1].enabled === false, exp);
     check('no adapter is registered in a fresh wallet', (await overview()).adapters.length === 0);
     check('nothing is stored about it until the person chooses', JSON.stringify(await W(() => chrome.storage.local.get('atlasLedgerExperimental'))) === '{}');
     let ov = await overview();
-    check('the overview reports the switch, off', ov.experimental.length === 1 && ov.experimental[0].enabled === false);
+    check('the overview reports the switches, off', ov.experimental.length === 2 && ov.experimental.every((x) => x.enabled === false));
 
     console.log('--- the wallet\'s own switch ---');
     exp = await W(() => AtlasWallet.setLedgerExperimental('labs29', true));
