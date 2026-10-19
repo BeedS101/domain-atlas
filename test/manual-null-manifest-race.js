@@ -1,23 +1,12 @@
-// Regression check for a null-pointer race the drop/pick-up feature
-// introduced: refreshInventoryDisplay() runs once, unawaited, as soon as
-// viewer.js parses (bottom of the file) — BEFORE loadManifest()'s fetch
-// has resolved and set currentManifest/currentWorld (both start out
-// `null`, see their declarations near the top of viewer.js). For a
-// brand-new identity that's harmless (identity is falsy, so the
-// dropped-items lookup is skipped entirely) but for a RETURNING identity —
-// already sitting in chrome.storage.local from a previous page load — it
-// reaches manifestDomainOf(currentManifest)/currentWorld.id while both are
-// still null, throwing "Cannot read properties of null (reading 'domain')"
-// as an uncaught promise rejection. This is exactly the error a real user
-// hit; whether it fires in practice is a timing race between two sets of
-// async chrome.storage.local calls and one network fetch, so instead of
-// hoping to win that race under Playwright/localhost's much faster and
-// more consistent timing, this forces the exact moment directly: create an
-// identity, then reset currentManifest/currentWorld to null (simulating
-// "the manifest fetch hasn't resolved yet") and call refreshInventoryDisplay()
-// straight from the page, the same way the bottom of viewer.js does. Not
-// part of the permanent suite, same reasoning as the other manual-*.js
-// scripts.
+// Regression check: refreshInventoryDisplay() runs once, unawaited, as soon as
+// viewer.js parses — before loadManifest() has resolved and set
+// currentManifest/currentWorld (both start out null). For a returning
+// identity already in chrome.storage.local, the refresh must tolerate both
+// being null instead of throwing an uncaught rejection. Whether the real race
+// fires depends on timing, so this forces the state directly: create an
+// identity, reset currentManifest/currentWorld to null and call
+// refreshInventoryDisplay() from the page. Not part of the permanent suite,
+// same reasoning as the other manual-*.js scripts.
 
 const { chromium } = require('playwright');
 const path = require('path');

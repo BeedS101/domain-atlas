@@ -1864,8 +1864,6 @@ const documentsSubscreen = document.getElementById('documentsSubscreen');
 const collectiblesSearchInput = document.getElementById('collectiblesSearchInput');
 const collectiblesCompatOnlyCheckbox = document.getElementById('collectiblesCompatOnlyCheckbox');
 const selfCollectiblesListEl = document.getElementById('selfCollectiblesList');
-const droppedItemsSectionEl = document.getElementById('droppedItemsSection');
-const droppedItemsListEl = document.getElementById('droppedItemsList');
 const documentsSearchInput = document.getElementById('documentsSearchInput');
 const documentsCompatOnlyCheckbox = document.getElementById('documentsCompatOnlyCheckbox');
 const selfDocumentsListEl = document.getElementById('selfDocumentsList');
@@ -2439,11 +2437,9 @@ async function enterWorld(worldId, anchorId) {
       const sceneUrl = currentOrigin + world.entry.scene;
       const sceneRes = await fetch(sceneUrl, { cache: 'no-store' });
       const sceneData = await sceneRes.json();
-      // itemMarkers isn't populated for the 3D renderer yet (see the
-      // "Dropping items" note in wallet.js) — kept in the shape for
-      // consistency, just always empty here for now. Dropping still fully
-      // works in a gltf-mini world; there's just no in-scene marker to
-      // walk up to, only the "Dropped in this world" list's Pick up button.
+      // The 3D renderer tracks dropped items itself (refreshSceneItemMarkers()
+      // feeds active3D.setItemDrops()); itemMarkers stays empty and exists
+      // only to keep the 2D scene shape.
       window.__atlasScene = { floor: sceneData.floor || { size: [10, 10], color: '#1b2830' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
 
       // SPEC.md §3.5 — a named anchor overrides this scene's own default
@@ -5483,107 +5479,33 @@ function renderAssetList(entries, container, opts) {
   unique.forEach((entry) => renderAssetCard(entry, container, opts));
 }
 
-// The "Dropped in this world" management row — same info-card shape as
-// Hidden assets / Recent worlds, and the same reasoning: a click on the
-// asset's marker in the scene itself is the primary way to pick it back
-// up, but this list is the always-works fallback that doesn't depend on
-// finding the marker, being in exactly the right spot, or (for the 2D
-// renderer) clicking precisely on a small icon.
-// Task #250 — `drop` is a raw entry from AtlasWallet.getWorldDrops(), i.e.
-// {dropId, world, position, credential, droppedBy, droppedAt}, the SAME
-// shape for every visitor currently standing in this world (this list is
-// shared, not self-only anymore). `isMine` (droppedBy === this identity's
-// own public key) only changes the label — anyone present can pick up
-// anyone's drop; the server enforces nothing about who's "allowed" to,
-// same as walking up to it in the scene and clicking it.
-function renderDroppedItemCard(drop, container, isMine) {
-  const el = document.createElement('div');
-  el.className = 'info-card';
-  const qty = drop.credential.quantity > 1 ? drop.credential.quantity + ' × ' : '';
-  el.innerHTML =
-    '<div class="name">' + qty + drop.credential.asset.name + '</div>' +
-    '<div class="meta">' + drop.credential.asset.class + ' · ' + (isMine ? 'you left this here' : 'dropped by another visitor') + '</div>' +
-    '<div class="item-actions">' +
-    '<button data-action="pick-up" data-drop-id="' + drop.dropId + '">Pick up</button>' +
-    '</div>';
-  container.appendChild(el);
-}
-
-// Every call site below needs "what's dropped in this world right now",
-// but that's a request to some OTHER server (the world's own host, which
-// may not even be this domain — see dropItem()'s own comment on
-// worldDomain vs. credential.issuer.domain) that has nothing to do with
-// whether this wallet can show YOUR OWN assets. A drops-fetch failure —
-// that server being unreachable, mid-restart, or simply not yet running
-// the World Drops endpoints at all — must never take the rest of the
-// inventory display down with it; the very first bug report against this
-// feature was exactly that (an unrelated/unavailable drops endpoint
-// throwing inside refreshInventoryDisplay(), before it ever got to
-// rendering the owner's own Collectibles/Documents lists, so the whole
-// wallet appeared empty). Every caller of AtlasWallet.getWorldDrops() goes
-// through here instead of calling it directly, precisely so that one
-// broken dependency degrades to "no dropped-items list" rather than "no
-// wallet at all".
+// "What's dropped in this world right now" comes from the world's own host,
+// which may not even be this domain (see dropItem()'s comment on worldDomain
+// vs. credential.issuer.domain) and has nothing to do with whether this
+// wallet can show its own assets. A drops-fetch failure (host unreachable,
+// mid-restart, or not running the World Drops endpoints) must not break the
+// scene or the inventory, so every caller of AtlasWallet.getWorldDrops()
+// goes through here and degrades to "no drops visible".
 async function getWorldDropsSafely(worldDomain, world) {
   try {
     return await AtlasWallet.getWorldDrops(worldDomain, world);
   } catch (err) {
-    // Silent to the user (see the comment above — this must never surface
-    // as a broken wallet), but NOT silent to the console: swallowing an
-    // error without a trace anywhere makes a genuine, ongoing failure here
-    // indistinguishable from "nothing's dropped right now", which is
-    // exactly what made task #250's first real bug report (a drop that
-    // succeeded but was never visible anywhere afterward) hard to diagnose
-    // from the outside. console.warn (not .error) since this is an
-    // expected, handled condition, not an uncaught fault.
+    // Not shown to the user, but logged: otherwise an ongoing failure is
+    // indistinguishable from "nothing is dropped right now". console.warn
+    // because this is an expected, handled condition.
     console.warn('getWorldDropsSafely: could not fetch drops for ' + worldDomain + ' / ' + world + ' — showing none.', err);
     return [];
   }
 }
 
-// Shared by refreshInventoryDisplay() (full re-render, every wallet change)
-// and the lighter live-poll below (task #250 — other visitors' drops need
-// to show up without leaving/re-entering the world, but re-running the
-// WHOLE inventory refresh every few seconds just to catch that would be
-// wasteful and would fight any list-filter text the owner is mid-typing in
-// the Collectibles/Documents search boxes).
-function renderDroppedItemsList(droppedHere, identity) {
-  droppedItemsListEl.innerHTML = '';
-  droppedItemsSectionEl.hidden = droppedHere.length === 0;
-  if (droppedHere.length > 0) {
-    droppedHere.forEach((d) => renderDroppedItemCard(d, droppedItemsListEl, !!identity && d.droppedBy === identity.publicKey));
-  }
-}
-
-// The "Dropped in this world" list's own lightweight refresh — same data
-// source as refreshSceneItemMarkers() (getWorldDrops), just rendered as the
-// list rather than in-scene markers. Both are called together by the poll
-// loop below; refreshInventoryDisplay() (a much heavier full rebuild) calls
-// through renderDroppedItemsList() directly instead of this, since it
-// already has droppedHere/identity in hand from its own work.
-async function refreshDroppedItemsDisplay() {
-  if (!currentManifest || !currentWorld) return;
-  const identity = await AtlasWallet.getIdentity();
-  const droppedHere = identity ? await getWorldDropsSafely(manifestDomainOf(currentManifest), currentWorld.id) : [];
-  renderDroppedItemsList(droppedHere, identity);
-}
-
-// Task #250 — keeps shared world-drops current for a visitor who never
-// leaves/re-enters the world: without this, another player's drop (or
-// pickup) would only ever show up here on this visitor's own next
-// enterWorld() call, the exact "only updates when you leave and come back"
-// staleness Bruno's drop request was explicitly trying to avoid for a
-// SHARED list. Same "just poll while relevant" shape as
-// restartMailCheckLoop()/checkItemUpdatesForDomain() below, just scoped to
-// "currently standing in a world" instead of "this tab is open at all",
-// and on a much shorter interval since a fresh visitor showing up and
-// dropping something is the kind of thing another visitor would notice
-// immediately if they were physically there.
+// Keeps the shared world drops current for a visitor who stays in the world:
+// without it another visitor's drop or pick-up would only show on this
+// visitor's next enterWorld() call. Polled on a short interval because a
+// visitor standing in the same world would notice a stale marker immediately.
 const WORLD_DROPS_POLL_MS = 4000;
 setInterval(async () => {
   if (!currentManifest || !currentWorld) return;
   await refreshSceneItemMarkers();
-  await refreshDroppedItemsDisplay();
 }, WORLD_DROPS_POLL_MS);
 
 // Task #209 — a short two-note "ding" whenever refreshInventoryDisplay()
@@ -5670,20 +5592,6 @@ async function refreshInventoryDisplay() {
   const equippedAvatarHatAssetId = await AtlasWallet.getAvatarHatAssetId();
   const equippedAvatarShoesAssetId = await AtlasWallet.getAvatarShoesAssetId();
   const risky = combatOf(currentWorld) !== 'none';
-  // refreshInventoryDisplay() runs once, unawaited, at the bottom of this
-  // file as soon as the script parses — well before enterWorld() has
-  // resolved the manifest fetch and set currentManifest/currentWorld. An
-  // identity can already exist at that point (a returning user), so this
-  // needs its own guard rather than relying on identity alone, the way
-  // combatOf() above already guards on currentWorld being possibly null.
-  // Task #250 — shared, not self-only: every visitor's drops in this world,
-  // straight from the world's own server (the credential is embedded right
-  // in each record, so no wallet lookup is needed/possible for someone
-  // else's drop — see renderDroppedItemCard()).
-  const droppedHere = (identity && currentManifest && currentWorld)
-    ? await getWorldDropsSafely(manifestDomainOf(currentManifest), currentWorld.id)
-    : [];
-
   const selfWalletAll = identity ? await AtlasWallet.getWallet(identity.publicKey) : [];
 
   // Task #209: the wallet-gain chime — see playWalletGainChime()/
@@ -5726,8 +5634,6 @@ async function refreshInventoryDisplay() {
   } else {
     renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
   }
-
-  renderDroppedItemsList(droppedHere, identity);
 
   // --- Documents ---
   const selfDocuments = selfVisible.filter((e) => e.credential.asset.presentation === 'document');
@@ -12238,12 +12144,6 @@ function assetActionHandler(listEl) {
 }
 assetActionHandler(selfCollectiblesListEl);
 assetActionHandler(selfDocumentsListEl);
-
-droppedItemsListEl.addEventListener('click', (e) => {
-  const btn = e.target.closest('button');
-  if (!btn || btn.dataset.action !== 'pick-up') return;
-  pickUpDroppedItem(manifestDomainOf(currentManifest), btn.dataset.dropId);
-});
 
 // Dispatch for a clicked in-scene interactable (see the "interactables"
 // note in enterWorld). Four actions exist today: "mint" (calls

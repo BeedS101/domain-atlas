@@ -29,22 +29,22 @@
 //      longer be dropped at all; the Trophy is still an ordinary
 //      non-fungible, non-bound, uncapped collectible, so it exercises
 //      exactly the same whole-item drop/pickup path the Compass used to);
-//      it leaves A's normal list and A's own "Dropped in this world" row
-//      labels it "you left this here". Visitor B — a completely different
-//      identity, standing in the same world — sees a live scene marker for
-//      it (world-drops poll loop, not a leave/re-enter), and picking it up
-//      by clicking that marker mints B a fresh Trophy; the marker and A's
-//      own "Dropped" row both disappear once claimed.
+//      it leaves A's normal list and A's own scene marker is flagged as
+//      A's. Visitor B — a completely different identity, standing in the
+//      same world — sees a live scene marker for it (world-drops poll loop,
+//      not a leave/re-enter), and picking it up by clicking that marker
+//      mints B a fresh Trophy; the marker disappears for both visitors once
+//      claimed.
 //   3. A fungible balance's card offers a quantity input next to its own
 //      "Drop…" button (not a bare "Drop here"); an out-of-range quantity
 //      is rejected with a clear status message rather than silently
 //      dropping the whole stack or nothing. Dropping a PARTIAL amount
 //      splits it off first (AtlasWallet.splitForDrop) — A's own remaining
-//      balance shrinks by exactly that much, and the dropped marker/list
-//      row shows exactly the split-off quantity, not the original stack.
-//   4. Visitor B picks up that partial drop via the wallet panel's own
-//      "Pick up" button (not the scene marker this time) and receives
-//      exactly the dropped quantity, not A's original full balance.
+//      balance shrinks by exactly that much, and the dropped marker
+//      carries exactly the split-off quantity, not the original stack.
+//   4. Visitor B picks up that partial drop by clicking its scene marker
+//      and receives exactly the dropped quantity, not A's original full
+//      balance.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -166,17 +166,17 @@ async function projectItemMarkers(frame) {
     if (stillThereAfterCancel !== 1) throw new Error('Escape should have left the item exactly where it was, still carried');
     console.log('PASS: Escape backed out of placement, nothing dropped');
 
-    console.log('STEP 2: A drops the trophy; it leaves A\'s carried list and shows under "Dropped in this world" as A\'s own; B sees a live marker (shared poll, no re-entry needed) and picks it up by clicking it');
+    console.log('STEP 2: A drops the trophy; it leaves A\'s carried list and A\'s marker is flagged as A\'s own; B sees a live marker (shared poll, no re-entry needed) and picks it up by clicking it');
     await clickCardMenuAction(a.frame.locator('#selfCollectiblesList .wallet-item button[data-action="drop"]'));
     await a.frame.waitForFunction(() => document.getElementById('status').textContent.includes('Click where you want to drop it'), null, { timeout: 5000 });
     await a.frame.locator('#scene').click({ position: { x: 90, y: 90 } });
     await a.frame.waitForFunction(() => document.getElementById('status').textContent.startsWith('Dropped.'), null, { timeout: 5000 });
     await a.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0, null, { timeout: 5000 });
-    const aDroppedRowText = await a.frame.locator('#droppedItemsList .info-card').filter({ hasText: 'Chess Champion Trophy' }).textContent();
-    if (!aDroppedRowText.includes('Chess Champion Trophy') || !aDroppedRowText.includes('you left this here')) {
-      throw new Error('Expected A\'s own "Dropped" row to name the item and say A left it there: ' + aDroppedRowText);
+    const [markerAtA] = await projectItemMarkers(a.frame);
+    if (markerAtA.name !== 'Chess Champion Trophy' || !markerAtA.isMine) {
+      throw new Error('Expected A\'s own scene marker to name the trophy and be flagged as A\'s: ' + JSON.stringify(markerAtA));
     }
-    console.log('PASS: A\'s trophy left the carried list and shows under "Dropped in this world" as A\'s own');
+    console.log('PASS: A\'s trophy left the carried list and is a scene marker flagged as A\'s own');
 
     // B never left/re-entered the world — this is the live poll
     // (WORLD_DROPS_POLL_MS) picking up A's drop, the entire point of this
@@ -184,8 +184,6 @@ async function projectItemMarkers(frame) {
     await b.frame.waitForFunction(() => (window.__atlasScene.itemMarkers || []).length === 1, null, { timeout: POLL_MARGIN_MS });
     const [markerAtB] = await projectItemMarkers(b.frame);
     if (markerAtB.isMine) throw new Error('Expected B\'s marker to be flagged as NOT B\'s own drop');
-    const bDroppedRowText = await b.frame.locator('#droppedItemsList .info-card').filter({ hasText: 'Chess Champion Trophy' }).textContent();
-    if (!bDroppedRowText.includes('dropped by another visitor')) throw new Error('Expected B\'s own "Dropped" list to label this as someone else\'s drop: ' + bDroppedRowText);
     await b.frame.locator('#scene').click({ position: { x: markerAtB.sx, y: markerAtB.sy } });
     await b.frame.waitForFunction(() => document.getElementById('status').textContent === 'Picked it up.', null, { timeout: 5000 });
     await b.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 1, null, { timeout: 5000 });
@@ -195,8 +193,8 @@ async function projectItemMarkers(frame) {
 
     // A's own view of the world catches up on its next poll tick too, with
     // no action from A at all.
-    await a.frame.waitForFunction(() => document.getElementById('droppedItemsSection').hidden === true, null, { timeout: POLL_MARGIN_MS });
-    console.log('PASS: A\'s own "Dropped in this world" section clears once B claims it, with no action from A');
+    await a.frame.waitForFunction(() => (window.__atlasScene.itemMarkers || []).length === 0, null, { timeout: POLL_MARGIN_MS });
+    console.log('PASS: A\'s scene marker clears once B claims it, with no action from A');
 
     console.log('STEP 3: A mints 20 iron (fungible) and drops only PART of the stack — the quantity prompt + split-then-drop path');
     // mintAsset() alone only touches wallet storage — bypassing the actual
@@ -239,21 +237,19 @@ async function projectItemMarkers(frame) {
     if (aRemainingIron !== 15) throw new Error('Expected splitForDrop to leave exactly 15 iron behind in A\'s wallet, got ' + aRemainingIron);
     console.log('PASS: dropping 5 of 20 split off exactly that much — A\'s own wallet now holds 15');
 
-    console.log('STEP 4: B picks up the partial iron drop via the wallet panel\'s own "Pick up" button (not the scene marker this time), receiving exactly 5, not A\'s original 20');
-    await b.frame.waitForFunction(() => document.querySelectorAll('#droppedItemsList .info-card').length === 1, null, { timeout: POLL_MARGIN_MS });
-    await b.frame.locator('#walletBtn').click(); // B's panel closed itself after STEP 2's scene-marker pickup — reopen it to reach the list's own "Pick up" button
-    await b.frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
-    const ironRow = b.frame.locator('#droppedItemsList .info-card').filter({ hasText: 'Iron' });
-    const bIronRowText = await ironRow.textContent();
-    if (!bIronRowText.includes('5') || !bIronRowText.toLowerCase().includes('iron')) throw new Error('Expected B\'s "Dropped" list to show exactly 5 iron: ' + bIronRowText);
-    await ironRow.locator('button[data-action="pick-up"]').click();
+    console.log('STEP 4: B picks up the partial iron drop by clicking its scene marker, receiving exactly 5, not A\'s original 20');
+    await b.frame.waitForFunction(() => (window.__atlasScene.itemMarkers || []).length === 1, null, { timeout: POLL_MARGIN_MS });
+    const [ironMarker] = await projectItemMarkers(b.frame);
+    const markerQuantity = await b.frame.evaluate(() => window.__atlasScene.itemMarkers[0].entry.credential.quantity);
+    if (ironMarker.name.toLowerCase().indexOf('iron') < 0 || markerQuantity !== 5) throw new Error('Expected B\'s marker to show exactly 5 iron: ' + JSON.stringify({ ironMarker, markerQuantity }));
+    await b.frame.locator('#scene').click({ position: { x: ironMarker.sx, y: ironMarker.sy } });
     await b.frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, null, { timeout: 5000 });
     const bIronQuantity = await b.frame.evaluate(() => AtlasWallet.getIdentity().then(async (id) => {
       const entry = (await AtlasWallet.getWallet(id.publicKey)).find((e) => e.credential.asset.class === 'atlas.element.iron');
       return entry ? entry.credential.quantity : 0;
     }));
     if (bIronQuantity !== 5) throw new Error('Expected B to receive exactly the 5 that were dropped, got ' + bIronQuantity);
-    console.log('PASS: B used the wallet panel\'s own "Pick up" button and received exactly the split-off amount (5), not A\'s original stack');
+    console.log('PASS: B clicked the scene marker and received exactly the split-off amount (5), not A\'s original stack');
 
     console.log('STEP 5: a tradeScope:"bound" asset (Plaza Visitor Badge) never shows a Drop control at all, since the server would reject it anyway');
     await a.frame.evaluate(() => AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.badge', 1).then(() => refreshInventoryDisplay()));

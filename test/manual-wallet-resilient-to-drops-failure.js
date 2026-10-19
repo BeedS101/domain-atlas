@@ -33,9 +33,9 @@
 //      refreshInventoryDisplay() is called again directly: the Bronze
 //      Compass must STILL be visible in Collectibles — the drops-fetch
 //      failure must not blank the wallet.
-//   3. The "Dropped in this world" section is simply absent/empty in that
-//      degraded state (not required to invent stale contents), rather than
-//      throwing or leaving the panel in some broken half-rendered state.
+//   3. refreshSceneItemMarkers() resolves without throwing in that degraded
+//      state and leaves the scene with no item markers (not required to
+//      invent stale contents).
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -111,10 +111,13 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-wallet-resilien
     }
     console.log('PASS: Collectibles still shows the Bronze Compass despite the simulated drops-fetch failure');
 
-    console.log('STEP 3: the "Dropped in this world" section degrades to empty/hidden rather than breaking anything else');
-    const droppedSectionHidden = await frame.evaluate(() => document.getElementById('droppedItemsSection').hidden);
-    if (!droppedSectionHidden) throw new Error('Expected the "Dropped in this world" section to be hidden when its own data source is unreachable');
-    console.log('PASS: "Dropped in this world" section is simply empty, nothing else broke');
+    console.log('STEP 3: the scene\'s item markers degrade to empty rather than throwing');
+    const markers = await frame.evaluate(async () => {
+      await refreshSceneItemMarkers();
+      return (window.__atlasScene && window.__atlasScene.itemMarkers || []).length;
+    });
+    if (markers !== 0) throw new Error('Expected no item markers when the drops endpoint is unreachable, got ' + markers);
+    console.log('PASS: item markers are simply empty, nothing else broke');
 
     console.log('\nALL WALLET-RESILIENT-TO-DROPS-FAILURE CHECKS PASSED');
   } catch (err) {
