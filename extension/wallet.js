@@ -959,6 +959,133 @@ const AtlasWallet = (() => {
     return who;
   }
 
+  // ---------- legacy counterparty audit (read-only) ----------
+  //
+  // Reports whether the old counterparty identity, or any other owner key that is not a main identity of
+  // this profile, still has anything stored. It only reads: no migration, no clean-up, nothing is written,
+  // and no key material is returned (public keys, counts and asset classes only).
+
+  const AUDIT_STORE_NAMES = {
+    atlasWallets: 'wallet', atlasPendingOps: 'pendingOps', atlasAssetFiles: 'assetFiles', atlasMail: 'mail',
+    atlasSentMail: 'sentMail', atlasSubmittedTrades: 'submittedTrades', atlasAssetUpdateNotices: 'assetUpdateNotices',
+    atlasLoadout: 'loadout', atlasAvatarLook: 'avatarLook', atlasAvatarHat: 'avatarHat', atlasAvatarShoes: 'avatarShoes',
+    atlasAliases: 'aliases', atlasFriends: 'friends', atlasContactGroups: 'contactGroups', atlasFriendRequests: 'friendRequests',
+    atlasMutedChatUsers: 'mutedChatUsers', atlasBlockedChatUsers: 'blockedChatUsers', atlasRecentWorlds: 'recentWorlds',
+    atlasFavoriteDomains: 'favoriteDomains', atlasCalendarEvents: 'calendarEvents', atlasActivityLog: 'activityLog',
+    atlasBridgeOffers: 'bridgeOffers', atlasTrustedBridgeDomains: 'trustedBridgeDomains', atlasCallState: 'callState'
+  };
+  const AUDIT_ASSET_STORES = new Set(['wallet', 'pendingOps', 'assetFiles']);
+
+  // Like decryptAtRest, but says why a value could not be read and never writes.
+  async function peekStored(identity, storeName, stored) {
+    if (stored === undefined || stored === null) return { state: 'absent' };
+    if (typeof stored !== 'object' || !stored.__atlasEncrypted) return { state: 'plain', value: stored };
+    if (!identity) return { state: 'locked' };
+    if (identity.mode !== 'local' || !identity.privateKeyJwk) return { state: 'unreadable' };
+    try {
+      const key = await deriveAtRestKey(identity.privateKeyJwk, storeName);
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlDecode(stored.iv) }, key, b64urlDecode(stored.ciphertext));
+      return { state: 'ok', value: JSON.parse(new TextDecoder().decode(plaintext)) };
+    } catch (err) {
+      return { state: 'unreadable' };
+    }
+  }
+
+  function auditSummarise(value) {
+    if (Array.isArray(value)) {
+      const byClass = {};
+      const kinds = {};
+      let hidden = 0, withAttachedAsset = 0;
+      for (const e of value) {
+        const c = e && e.credential;
+        if (c && c.asset) {
+          const cls = c.asset.class || 'unknown';
+          byClass[cls] = (byClass[cls] || 0) + (c.asset.fungible ? Number(c.quantity) || 0 : 1);
+        }
+        if (e && e.kind) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
+        if (e && e.hidden) hidden++;
+        if (e && e.message && e.message.attachedAsset) withAttachedAsset++;
+      }
+      return { entries: value.length, hidden, byClass, kinds, withAttachedAsset };
+    }
+    if (value && typeof value === 'object') return { entries: Object.keys(value).length };
+    return { entries: value ? 1 : 0 };
+  }
+
+  async function auditLegacyCounterparty() {
+    const identity = await getIdentity();
+    const all = await chrome.storage.local.get(null);
+    const has = (obj, key) => !!obj && typeof obj === 'object' && !Array.isArray(obj) && Object.prototype.hasOwnProperty.call(obj, key);
+    const short = (k) => String(k).slice(0, 12) + '…';
+
+    const mainKeys = new Set();
+    if (all.atlasIdentity && all.atlasIdentity.publicKey) mainKeys.add(all.atlasIdentity.publicKey);
+    if (all.atlasWebAuthnIdentity && all.atlasWebAuthnIdentity.publicKey) mainKeys.add(all.atlasWebAuthnIdentity.publicKey);
+    if (identity && identity.publicKey) mainKeys.add(identity.publicKey);
+
+    const cp = await peekStored(identity, 'counterparty', all.atlasCounterparty);
+    const counterparty = { stored: cp.state !== 'absent', state: cp.state };
+    let counterpartyKey = null;
+    if ((cp.state === 'ok' || cp.state === 'plain')) {
+      if (cp.value && typeof cp.value === 'object') {
+        counterpartyKey = cp.value.publicKey || null;
+        counterparty.publicKey = counterpartyKey;
+        counterparty.createdAt = cp.value.createdAt || null;
+        counterparty.holdsPrivateKey = !!cp.value.privateKeyJwk;
+      } else {
+        counterparty.state = 'cleared';
+      }
+    }
+
+    const ownerKeys = new Set();
+    for (const storageKey of ['atlasWallets', 'atlasPendingOps', 'atlasAssetFiles']) {
+      if (all[storageKey] && typeof all[storageKey] === 'object' && !Array.isArray(all[storageKey])) {
+        for (const k of Object.keys(all[storageKey])) ownerKeys.add(k);
+      }
+    }
+    if (counterpartyKey) ownerKeys.add(counterpartyKey);
+    for (const k of mainKeys) ownerKeys.delete(k);
+
+    const owners = [];
+    for (const key of ownerKeys) {
+      const stores = {};
+      for (const [storageKey, storeName] of Object.entries(AUDIT_STORE_NAMES)) {
+        if (!has(all[storageKey], key)) continue;
+        const p = await peekStored(identity, storeName, all[storageKey][key]);
+        stores[storeName] = (p.state === 'ok' || p.state === 'plain') ? { state: p.state, ...auditSummarise(p.value) } : { state: p.state };
+      }
+      owners.push({ publicKey: key, role: key === counterpartyKey ? 'counterparty' : 'unrecognised', stores });
+    }
+
+    const blockers = [], unknown = [], notes = [];
+    if (counterparty.stored && counterparty.state !== 'cleared' && counterparty.state !== 'ok' && counterparty.state !== 'plain') {
+      unknown.push('The counterparty record is stored but cannot be read (' + counterparty.state + ').');
+    }
+    for (const o of owners) {
+      for (const [store, s] of Object.entries(o.stores)) {
+        const where = o.role + ' ' + short(o.publicKey) + ' / ' + store;
+        if (s.state !== 'ok' && s.state !== 'plain') { unknown.push(where + ' is stored but cannot be read (' + s.state + ').'); continue; }
+        if (!s.entries) continue;
+        if (AUDIT_ASSET_STORES.has(store)) blockers.push(where + ' holds ' + s.entries + ' ' + (store === 'wallet' ? 'credential entries' : 'entries') + '.');
+        else if (store === 'mail' && s.withAttachedAsset) blockers.push(where + ' has ' + s.withAttachedAsset + ' unclaimed attached asset(s).');
+        else notes.push(where + ': ' + s.entries + ' entries (no assets).');
+      }
+    }
+
+    return {
+      readOnly: true,
+      scope: 'this browser profile only',
+      checkedAt: new Date().toISOString(),
+      walletUnlocked: !!identity,
+      identityMode: await getIdentityMode(),
+      counterparty,
+      owners,
+      verdict: blockers.length ? 'not-empty' : unknown.length ? 'cannot-confirm' : 'empty-confirmed',
+      blockers, unknown, notes,
+      limits: 'Covers what this profile stores. Whatever an issuer counts for these keys is not visible from here.'
+    };
+  }
+
   // ---------- signing envelopes ----------
   // signWithSelf() lives above, in the identity section — it's the same
   // "self" role, just backed by the merged password-protected identity now.
@@ -9650,7 +9777,7 @@ const AtlasWallet = (() => {
     isAdminForDomain, adminRoleForDomain, adminLoginForDomain, adminLogoutForDomain,
     getIdentityMode, setIdentityMode, hasLocalIdentity, hasWebAuthnIdentity,
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
-    getCounterparty, createCounterparty,
+    getCounterparty, createCounterparty, auditLegacyCounterparty,
     getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     // SPEC.md §13.5 single-asset transfer files.
     getFileTransferSupport, assetFileExportProblem, exportAssetToFile, getAssetFiles, saveAssetFiles, getInterruptedExports, recoverInterruptedExport, recoverInterruptedExports, dismissLostExport, EXPORT_RECOVERY_GRACE_MS, inspectAssetFile, claimAssetFile, getInterruptedClaims, recoverInterruptedClaim, recoverInterruptedClaims, dismissClaimRecord, restoreAssetCopy,
