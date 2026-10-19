@@ -82,7 +82,8 @@ An upgraded wallet must not repeat one of these requests against an issuer that 
 would issue a second item, or be refused after the first one was committed.
 
 - The issuer advertises `GET /atlas/capabilities`: `{requestIds: {version: 1, operations: [...], retentionHours}}`.
-  `issue-unique`, `purchase` and `trade-claim` are listed only by an issuer that implements them. An older issuer has
+  `issue-unique`, `purchase` and `trade-claim` are listed only by an issuer that implements them; `trade-claim-remainder`
+  marks a station whose incomplete-claim answer carries the claimant's change (`docs/gen1-claim-remainder.md`). An older issuer has
   no such route.
 - **Fresh request, issuer without the capability (or without the operation): the single request the wallet always
   sent**, no `requestId`, no journal. The old behavior and its gap remain for that issuer, and nothing worse.
@@ -117,10 +118,9 @@ would issue a second item, or be refused after the first one was committed.
 2. **Claim crash between legs.** A station process killed after the first leg and before the second leaves the first
    leg committed with no stored outcome. The wallet's repeat is answered by a refusal (the balance is revoked) and the
    entry ends `needs-attention`. A durable claim journal on the station would close it; that is a separate design.
-3. **Leftover from the claimant's balance on a failed second leg.** When the claimant offered less than the balance and
-   the second leg fails, the first leg also minted a remainder to the claimant. The `claim-incomplete` response
-   carries the `refund` but not that remainder, so the wallet never receives it. This is existing behavior; changing
-   it is a refund-rule decision and was not done.
+3. **Leftover from the claimant's balance on a failed second leg. Fixed afterwards**: the `claim-incomplete` answer now
+   carries the change the first leg minted, and the wallet applies it with the refund. See
+   `docs/gen1-claim-remainder.md`. A station on the previous version still omits it; the wallet flags that.
 4. **No dismiss action** for `needs-attention` entries (unchanged).
 5. **Serial gap**: a crash between reserving a serial and writing the transaction journal consumes a serial with no
    credential (unchanged for fungible; now also for unique mint, where it is visible as a gap in serials).
@@ -158,7 +158,7 @@ Chromium profiles with the real extension; stored-result retention is shortened 
 | stored result expired | M9 | P9 | C9 |
 | HTML, truncated and wrongly owned answers | M10 | P10 | C10 |
 | membership roster written once; refusals before any entry | M11 | P11 | |
-| second leg fails after the first, answer lost | | | C11 (cross-domain, patched peer) |
+| second leg fails after the first, answer lost | | | C11, C13 (cross-domain, patched peer; the change is covered by `docs/gen1-claim-remainder.md`) |
 | first leg unknown | | | C12 (cross-domain, patched peer) |
 | capability endpoint, unsupported / unreachable / partial issuer, fresh request at an old issuer | K1-K6 | K4 | |
 | negative controls (previous wallet and issuer from git history): the original failure, and old/new in both directions | N1 | N2 | N3, N4, N5 |
@@ -171,8 +171,9 @@ Run on isolated issuers and disposable Chromium profiles (Playwright, `xvfb-run 
 
 | Suite | Result |
 |---|---|
-| `manual-gen1-unique-recovery.js both` | 345 passed, 0 failed (Node 172, PHP 173), 10 INFO lines (the cases that stay open, and the revision the negative controls ran) |
-| `manual-gen1-wallet-crash-recovery.js both` | 322 passed, 0 failed, 4 gap probes (the expiry gaps of the fungible operations). The probes for unique mint and purchase became checks. A first full run had four failures in B4 (two pages recovering at once, Node, fungible consolidation, credentials shown `unavailable`); it did not repeat in three isolated runs of B4 or in a second full run, and the cause was not found |
+| `manual-gen1-unique-recovery.js both` | 346 passed, 0 failed (Node 172, PHP 174), 10 INFO lines (the cases that stay open, and the revision the negative controls ran) |
+| `manual-gen1-claim-remainder.js both` | 108 passed, 0 failed (Node 54, PHP 54) |
+| `manual-gen1-wallet-crash-recovery.js both` | 322 passed, 0 failed, 4 gap probes (the expiry gaps of the fungible operations). The probes for unique mint and purchase became checks. B4 had failed once (two pages recovering at once, credentials shown `unavailable`); the cause was the test reading the wallet before the atomic commit and the journal after it, and B4 now waits for the journal to empty first |
 | `manual-gen1-replay-expiry.js both` | 152 passed, 0 failed |
 | `manual-gen1-backup-journal.js both` | 356 passed, 0 failed |
 | `manual-gen1-auto-recovery.js both` | 238 passed, 0 failed |

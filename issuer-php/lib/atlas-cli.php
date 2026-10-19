@@ -161,6 +161,9 @@ function cli_preflight($probe) {
     $text = is_file($path) ? (string) @file_get_contents($path) : '';
     cli_line(strpos($text, $needle) !== false ? 'PASS' : 'FAIL', 'atlas/' . $e . (strpos($text, $needle) !== false ? ' answers a repeated request id' : ' is missing or still the old version (upload lib/ first, then these)'));
   }
+  $claimText = is_file($docroot . '/atlas/trade/claim.php') ? (string) @file_get_contents($docroot . '/atlas/trade/claim.php') : '';
+  $claimReturnsRemainder = strpos($claimText, "'remainder' => \$bRemainder, 'code' => 'claim-incomplete'") !== false;
+  cli_line($claimReturnsRemainder ? 'PASS' : 'FAIL', 'atlas/trade/claim.php' . ($claimReturnsRemainder ? ' returns the claimant\'s change with an incomplete claim' : ' is missing or does not return the claimant\'s change with an incomplete claim (upload this version)'));
   foreach (['ledger/account-credential.php' => 'lib/ledger-issuance.php', 'ledger/balance-receipt.php' => 'lib/ledger-receipts.php'] as $endpoint => $libFile) {
     $text = is_file($lib . '/' . basename($libFile)) ? (string) @file_get_contents($lib . '/' . basename($libFile)) : '';
     if (is_file($docroot . '/atlas/' . $endpoint)) {

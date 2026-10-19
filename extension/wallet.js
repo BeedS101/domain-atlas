@@ -1350,8 +1350,9 @@ const AtlasWallet = (() => {
   // to the current wallet lists and removes the journal entry, in one storage
   // write. Returns false (and changes nothing) when the entry is already gone,
   // meaning another page applied this answer first. With no journal entry
-  // (requestId null) it just applies the changes.
-  async function commitOperation(journalOwner, requestId, changes) {
+  // (requestId null) it just applies the changes. With `patch` the entry is
+  // kept and updated in the same write instead of removed.
+  async function commitOperation(journalOwner, requestId, changes, patch) {
     return withWalletLock(async () => {
       const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
       const wallets = stored.atlasWallets || {};
@@ -1376,7 +1377,8 @@ const AtlasWallet = (() => {
         const pending = (await readStoredListForWrite('pendingOps', pendingAll[journalOwner])).list;
         const index = pending.findIndex((e) => e && e.requestId === requestId);
         if (index < 0) return false;
-        pending.splice(index, 1);
+        if (patch) Object.assign(pending[index], patch);
+        else pending.splice(index, 1);
         pendingAll[journalOwner] = await encryptAtRest(identity, 'pendingOps', pending);
       }
       for (const [owner, list] of next) wallets[owner] = await encryptAtRest(identity, 'wallet', list);
@@ -1583,22 +1585,77 @@ const AtlasWallet = (() => {
     return attentionError;
   }
 
-  // A trade claim that the station started and could not finish. With a refund the station minted back the
-  // claimant's own side, which is applied like any answer; otherwise the outcome is unknown and stays held.
+  // What the claimant paid and what change the first leg owes back, from the request as journalled.
+  function claimPaymentOf(entry) {
+    const body = entry.body || {};
+    const balance = body.balance;
+    const offer = body.intent && body.intent.payload && body.intent.payload.offer;
+    if (!balance || !balance.asset || !offer || typeof offer.class !== 'string' || !Number.isInteger(offer.quantity)) return null;
+    const fungible = balance.asset.fungible === true;
+    if (fungible && (!Number.isInteger(balance.quantity) || balance.quantity < offer.quantity)) return null;
+    return { cls: offer.class, paid: offer.quantity, fungible, leftover: fungible ? balance.quantity - offer.quantity : 0, balanceIssuer: balance.issuer && balance.issuer.domain };
+  }
+
+  // A trade claim that the station started and could not finish. The first leg has spent the claimant's
+  // balance and minted the change (`remainder`); the refund of what was paid exists only when the spend was
+  // local. Both are credentials the station signed for the claimant and are applied together, in one write,
+  // only when every one checks out. Anything else is held for attention with nothing applied.
   async function stopClaim(entry, status, text, data) {
-    if (data.code === 'claim-incomplete' && isUsableCredential(data.refund, entry.owner)) {
-      const verdict = await verifyCredential(data.refund);
-      try {
-        await commitOperation(entry.owner, entry.requestId, [{ owner: entry.owner, remove: entry.predecessors, add: [{ credential: data.refund, lastVerdict: verdict }] }]);
-      } catch (err) {
-        if (!err || !err.walletStorage) throw err;
-        throw operationError(entry.label, 0, err.message + ' The station has refunded this trade; it will be applied when the wallet is unlocked.', null, { pending: true, requestId: entry.requestId, code: err.code });
+    const hold = (message) => holdForAttention(entry, status, text, data, [], entry.label + ' needs attention: ' + message
+      + ' The trade may have been settled at one issuer and not the other; the balance used is kept and held back, and nothing is sent again unless you ask.');
+    if (data.code !== 'claim-incomplete') throw await hold(String(data.error || text).slice(0, 160));
+
+    const pay = claimPaymentOf(entry);
+    const refund = data.refund || null, remainder = data.remainder || null;
+    const reportsRemainder = Object.prototype.hasOwnProperty.call(data, 'remainder');
+    if (!pay) throw await hold(String(data.error || text).slice(0, 160));
+    if (entry.attention && entry.attention.applied) throw await hold('the change from this trade was already applied; ' + String(data.error || text).slice(0, 120));
+    const sameClass = (c) => c.asset.class === pay.cls && c.asset.fungible === pay.fungible;
+    const refundOk = !refund || (isUsableCredential(refund, entry.owner) && sameClass(refund) && refund.issuer.domain === entry.domain
+      && (!pay.fungible || refund.quantity === pay.paid));
+    const remainderOk = !remainder || (pay.leftover > 0 && isUsableCredential(remainder, entry.owner) && sameClass(remainder)
+      && remainder.quantity === pay.leftover && remainder.issuer.domain === pay.balanceIssuer);
+    if (!refundOk || !remainderOk) throw await hold('the station returned a ' + (!refundOk ? 'refund' : 'change credential') + ' that does not match what was paid, so nothing was applied.');
+    if (reportsRemainder && pay.leftover > 0 && !remainder) throw await hold('the station did not return the ' + pay.leftover + ' ' + pay.cls + ' of change from the balance it spent, so nothing was applied.');
+    const returned = [refund, remainder].filter(Boolean);
+    if (!returned.length) throw await hold(String(data.error || text).slice(0, 160));
+
+    const added = [];
+    for (const credential of returned) {
+      const verdict = await verifyCredential(credential);
+      if (verdict.status === 'unavailable') {
+        await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: 'could not verify the credentials the station returned', lastAttemptAt: new Date().toISOString() }).catch(() => {});
+        throw operationError(entry.label, 0, 'could not verify the credentials the station returned; nothing was applied and it is saved to be asked about later', null, { pending: true, requestId: entry.requestId });
       }
+      if (!verdict.valid) throw await hold('a credential the station returned did not verify (' + verdict.status + '), so nothing was applied.');
+      added.push({ credential, lastVerdict: verdict });
+    }
+    // An older station returns the refund and never the change: the refund is applied and the missing change is
+    // kept visible. A spend without a refund (a foreign first leg) keeps only the change that came back.
+    const changeLost = !reportsRemainder && pay.leftover > 0;
+    const complete = !!refund && !changeLost;
+    const attention = complete ? null : {
+      at: new Date().toISOString(), status, code: changeLost ? 'remainder-not-returned' : 'claim-incomplete', applied: true,
+      message: (changeLost ? 'this station did not return the ' + pay.leftover + ' ' + pay.cls + ' of change from the balance it spent' : 'the trade failed after the balance was spent and was not refunded').slice(0, 200),
+      revokedPredecessors: []
+    };
+    let done;
+    try {
+      done = await commitOperation(entry.owner, entry.requestId, [{ owner: entry.owner, remove: entry.predecessors, add: added }],
+        complete ? undefined : { state: 'needs-attention', attention, attempts: (entry.attempts || 0) + 1, lastError: attention.message, lastAttemptAt: attention.at });
+    } catch (err) {
+      if (!err || !err.walletStorage) throw err;
+      throw operationError(entry.label, 0, err.message + ' The station has returned the credentials for this trade; they will be applied when the wallet is unlocked.', null, { pending: true, requestId: entry.requestId, code: err.code });
+    }
+    if (!done) throw operationError(entry.label, status, 'this request was settled by another page', null, { settledElsewhere: true, requestId: entry.requestId });
+    if (complete) {
       await logActivity('trade', 'Trade at ' + entry.domain + ' failed partway through and was refunded');
       throw operationError(entry.label, status, typeof data.error === 'string' ? data.error : text, data, { refunded: true, requestId: entry.requestId });
     }
-    throw await holdForAttention(entry, status, text, data, [], entry.label + ' needs attention: ' + String(data.error || text).slice(0, 160)
-      + ' The trade may have been settled at one issuer and not the other; the balance used is kept and held back, and nothing is sent again unless you ask.');
+    await logActivity('trade', 'Trade at ' + entry.domain + ' failed partway through; ' + (changeLost ? 'the refund was applied, the change was not returned' : 'the change was applied, the payment was not refunded'));
+    const error = operationError(entry.label, status, '', null, { needsAttention: true, code: 'needs-attention', refusalCode: data.code, requestId: entry.requestId });
+    error.message = entry.label + ' needs attention: ' + attention.message + '. The credentials the station returned were applied; contact the domain operator about the rest.';
+    throw error;
   }
 
   // Journals, sends and applies one replacement request.

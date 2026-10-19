@@ -7703,7 +7703,7 @@ async function main() {
         return sendJson(res, 200, {
           requestIds: {
             version: 1,
-            operations: ['issue', 'issue-unique', 'split', 'consolidate', 'convert', 'purchase', 'trade-claim'],
+            operations: ['issue', 'issue-unique', 'split', 'consolidate', 'convert', 'purchase', 'trade-claim', 'trade-claim-remainder'],
             retentionHours: REPLAY_TTL_MS / 3600000
           }
         });
@@ -8628,7 +8628,9 @@ async function main() {
           } else {
             refundNote = ' — your balance was spent at ' + issuerBDomain + ' and cannot be automatically refunded from here; contact the domain operator.';
           }
-          return answerClaim(502, { error: "could not settle the poster's balance at " + issuerADomain + ': ' + err.message + refundNote, refund, code: 'claim-incomplete' });
+          // remainder: the change the first leg already minted for the claimant (null when the balance was spent exactly).
+          // It is the same credential, so the stored outcome returns it again on a repeated request.
+          return answerClaim(502, { error: "could not settle the poster's balance at " + issuerADomain + ': ' + err.message + refundNote, refund, remainder: bRemainder || null, code: 'claim-incomplete' });
         }
         const bReceived = aSide.received;
 

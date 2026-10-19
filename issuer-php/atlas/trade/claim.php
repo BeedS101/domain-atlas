@@ -219,7 +219,7 @@ try {
   } else {
     $refundNote = ' — your balance was spent at ' . $issuerBDomain . ' and cannot be automatically refunded from here; contact the domain operator.';
   }
-  atlas_answer_claim($claimRequestId, $balance['id'] ?? null, $claimParams, 502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ': ' . $e->getMessage() . $refundNote, 'refund' => $refund, 'code' => 'claim-incomplete']);
+  atlas_answer_claim($claimRequestId, $balance['id'] ?? null, $claimParams, 502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ': ' . $e->getMessage() . $refundNote, 'refund' => $refund, 'remainder' => $bRemainder, 'code' => 'claim-incomplete']);
 }
 $bReceived = $aSide['received'];
 

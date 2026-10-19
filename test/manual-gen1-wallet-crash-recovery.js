@@ -280,6 +280,8 @@ async function main() {
       // The page also recovers by itself when it opens on an unlocked wallet, so the explicit calls may find nothing left to
       // apply; the checks below fix the end state to exactly one successor.
       check('the answer is applied at most once across both pages', applied <= 1, results);
+      // A recovery that another page started is still running when these calls return empty; wait for its end.
+      for (let i = 0; i < 150 && (await w.pending()).length > 0; i++) await sleep(100);
       await successorOk(w, iss, r.preds, 'after the race', r.revBefore);
       await page.close();
     });

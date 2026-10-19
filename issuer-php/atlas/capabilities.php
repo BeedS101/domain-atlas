@@ -22,6 +22,7 @@ if ($has('asset/consolidate.php', 'atlas_commit_replacement')) $operations[] = '
 if ($has('convert.php', 'atlas_commit_replacement')) $operations[] = 'convert';
 if ($has('asset/purchase.php', "'purchase', [\$credential]")) $operations[] = 'purchase';
 if ($has('trade/claim.php', 'atlas_store_claim_outcome')) $operations[] = 'trade-claim';
+if ($has('trade/claim.php', "'remainder' => \$bRemainder, 'code' => 'claim-incomplete'")) $operations[] = 'trade-claim-remainder';
 
 send_json(200, [
   'requestIds' => [

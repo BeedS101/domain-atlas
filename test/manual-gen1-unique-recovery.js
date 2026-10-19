@@ -165,6 +165,28 @@ function previousRevision() {
   return null;
 }
 
+// The newest revision whose `file` lacks `marker`, with its wallet and issuers unpacked (cached per revision).
+const revisionCache = new Map();
+function revisionLacking(file, marker) {
+  const revs = spawnSync('git', ['log', '--format=%H', '--', file], { cwd: REPO }).stdout.toString().trim().split('\n').filter(Boolean);
+  for (const rev of revs) {
+    const src = spawnSync('git', ['show', rev + ':' + file], { cwd: REPO, maxBuffer: 1 << 28 });
+    if (src.status !== 0 || src.stdout.includes(marker)) continue;
+    if (revisionCache.has(rev)) return revisionCache.get(rev);
+    const extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-rev-ext-'));
+    fs.cpSync(EXT_PATH, extDir, { recursive: true });
+    const wallet = spawnSync('git', ['show', rev + ':extension/wallet.js'], { cwd: REPO, maxBuffer: 1 << 28 });
+    fs.writeFileSync(path.join(extDir, 'wallet.js'), wallet.stdout);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-rev-issuer-'));
+    const tar = spawnSync('sh', ['-c', 'git archive ' + rev + ' issuer-server issuer-php | tar -x -C ' + root], { cwd: REPO });
+    if (tar.status !== 0) return null;
+    const found = { rev, extDir, root, phpSource: path.join(root, 'issuer-php') };
+    revisionCache.set(rev, found);
+    return found;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------- scenarios
 async function mintScenarios(kind) {
   await scenario(kind, 'M1 a unique mint whose answer is lost after the issuer committed it', async (w, iss) => {
@@ -861,17 +883,16 @@ async function claimScenarios(kind) {
     check('the listing is still open for the poster (its iron untouched)', !foreign.revoked().has(listing.iron.id));
   }, { workers: 4 });
 
-  await scenario(kind, 'C13 second leg fails when the claimant paid from a larger balance (leftover)', async (w, iss, ctx) => {
+  await scenario(kind, 'C13 second leg fails when the claimant paid from a larger balance: the change arrives with the refund', async (w, iss, ctx) => {
     const foreign = await ctx.issuer(kind, Object.assign({ workers: 4 }, failingSettleOpts(kind)));
     trustPeers(iss, [foreign.domain]); trustPeers(foreign, [iss.domain]);
     await postListing(iss, foreign);
     for (const [cls, q] of [[MEMBER, undefined], [GOLD, 10]]) { const r = await mint(w, iss, cls, q); if (r !== 'ok') throw new Error('setup mint failed: ' + JSON.stringify(r)); }
     const out = await walletClaim(w, iss);
     const st = await state(w);
-    check('the refund of the 5 gold paid is adopted; no iron arrives; the entry is closed', st.gold === 5 && st.iron === 0 && (await w.pending()).length === 0, { out, st });
     const probe = await iss.api.post('/atlas/asset/issue', { ownerPublicKey: w.pub, assetClass: GOLD, quantity: 501, requestId: newRid() });
     const heldAtStation = probe.status === 400 && probe.body && probe.body.code === 'cap' ? probe.body.held : null;
-    info('leftover of the first leg: the wallet holds ' + st.gold + ' gold, the station counts ' + heldAtStation + ' for this owner; the claim-incomplete answer carries the refund but not the leftover credential (existing behavior, see docs/gen1-unique-recovery.md section 6)');
+    check('the 5 gold refund and the 5 gold change are both held; the station counts the same 10; no iron; the entry is closed', st.gold === 10 && st.iron === 0 && heldAtStation === 10 && (await w.pending()).length === 0, { out, st, heldAtStation });
   }, { workers: 4 });
 
   await scenario(kind, 'C12 first leg fails with an unknown outcome: the claim stays visible and is not resent', async (w, iss, ctx) => {
@@ -918,7 +939,7 @@ async function compatScenarios(kind) {
   await scenario(kind, 'K1 what the issuer advertises', async (w, iss) => {
     const r = await iss.api.get('/atlas/capabilities');
     const ops = r.body && r.body.requestIds && r.body.requestIds.operations;
-    check('GET /atlas/capabilities lists unique mint, purchase and trade claim as repeatable', r.status === 200 && ['issue', 'issue-unique', 'purchase', 'trade-claim'].every((o) => (ops || []).includes(o)), r);
+    check('GET /atlas/capabilities lists unique mint, purchase, trade claim and its change field', r.status === 200 && ['issue', 'issue-unique', 'purchase', 'trade-claim', 'trade-claim-remainder'].every((o) => (ops || []).includes(o)), r);
     check('and says how long a stored result is kept', typeof r.body.requestIds.retentionHours === 'number' && Math.abs(r.body.requestIds.retentionHours - 0.0006) < 1e-9, r.body);
   }, { env: TTL_ENV });
 
@@ -964,6 +985,16 @@ async function compatScenarios(kind) {
     check('the ring arrives', out === 'ok' && (await shown(w, RING)).length === 1, out);
     check('one request, no journal entry left', sent.length === 1 && (await w.pending()).length === 0, sent);
   });
+
+  if (kind === 'php') {
+    await scenario(kind, 'K7 a claim handler that stores outcomes but does not return the change is not advertised as doing so', async (w, iss) => {
+      const ops = (await iss.api.get('/atlas/capabilities')).body.requestIds.operations;
+      check('trade-claim is listed, trade-claim-remainder is not', ops.includes('trade-claim') && !ops.includes('trade-claim-remainder'), ops);
+    }, { prepare: (bundle) => {
+      const f = path.join(bundle, 'atlas', 'trade', 'claim.php');
+      fs.writeFileSync(f, fs.readFileSync(f, 'utf8').split("'remainder' => $bRemainder, 'code' => 'claim-incomplete'").join("'code' => 'claim-incomplete'"));
+    } });
+  }
 
   if (kind === 'php') {
     await scenario(kind, 'K6 a bundle uploaded in part does not advertise the handler that is still old', async (w, iss) => {
@@ -1048,4 +1079,11 @@ async function main() {
   console.log(`\nunique recovery: ${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 }
-main().catch((e) => { console.error(e); process.exit(2); });
+if (require.main === module) main().catch((e) => { console.error(e); process.exit(2); });
+
+// Shared with test/manual-gen1-claim-remainder.js.
+module.exports = {
+  check, info, scenario, startIssuer, counts: () => ({ passes, failures }), which, ONLY, TTL_ENV, REPO, mint, buy, shown, live, sum, retry, waitFor, sleep,
+  exportBackup, importBackup, lockWallet, post, rawIdentity, rawIssue, newRid, postListing, walletClaim, trustPeers, failingSettleOpts, listingCount,
+  claimMails, previousRevision, revisionLacking, constants: { IRON, GOLD, MEMBER }
+};
