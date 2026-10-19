@@ -41,6 +41,19 @@ $envelopeOk = verify_envelope($payload, $intent['proof']);
 if (!$envelopeOk) send_json(400, ['error' => 'intent signature does not check out']);
 $buyerPub = $intent['proof']['publicKey'];
 
+// A request id must be the one the buyer signed, so only the buyer's key can ask for this purchase's
+// stored result, and the result is only ever for these exact parameters.
+try {
+  $requestId = atlas_parse_request_id($body);
+} catch (Exception $e) {
+  send_json(400, ['error' => $e->getMessage()]);
+}
+if ($requestId !== null && ($payload['requestId'] ?? null) !== $requestId) {
+  send_json(400, ['error' => 'intent does not authorize this requestId']);
+}
+$purchaseParams = ['purchasedClass' => $purchasedClass, 'quantity' => $quantity, 'buyerPublicKey' => $buyerPub];
+atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'purchase', [$credential], $purchaseParams);
+
 $catalogEntry = isset(ATLAS_ASSET_CATALOG[$purchasedClass]) ? ATLAS_ASSET_CATALOG[$purchasedClass] : null;
 if (!$catalogEntry || empty($catalogEntry['purchase'])) send_json(400, ['error' => 'this class is not for sale']);
 if ((!isset($catalogEntry['fungible']) || $catalogEntry['fungible'] !== true) && $quantity !== 1) {
@@ -52,11 +65,14 @@ $totalPrice = $catalogEntry['purchase']['priceAmount'] * $quantity;
 $problem = check_presented_spendable_asset($kp['publicKeyB64url'], $credential, $buyerPub, $priceClass, $totalPrice);
 if ($problem) send_json(400, ['error' => $problem]);
 
-$purchased = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $buyerPub, $purchasedClass, $quantity, null);
+$purchased = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $buyerPub, $purchasedClass, $quantity, null, null, true);
 $remainderQty = $credential['quantity'] - $totalPrice;
 $balance = $remainderQty > 0
-  ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $buyerPub, $priceClass, $remainderQty, $credential['id'])
+  ? mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $buyerPub, $priceClass, $remainderQty, $credential['id'], null, true)
   : null;
-atlas_revoke($credential['id'], 'superseded');
+$responseJson = atlas_commit_replacement(
+  $requestId, 'purchase', [$credential['id']], 'superseded', $purchaseParams,
+  array_values(array_filter([$purchased, $balance])), ['balance' => $balance, 'purchased' => $purchased]
+);
 archive_if_audited($credential, 'superseded');
-send_json(200, ['balance' => $balance, 'purchased' => $purchased]);
+atlas_send_committed($responseJson);

@@ -352,27 +352,32 @@ async function main() {
       check('convert: the issuer counts what the wallet holds', (await heldAtIssuer(iss, w.pub, GOLD)) === 60);
     });
 
-    // ---- 10. requests that are not journalled ----
+    // ---- 10. non-fungible mint and purchase: journalled like the fungible operations ----
     await scenario(kind, 'C2 a non-fungible mint whose answer is lost', async (w, iss) => {
       await w.inject('dropAnswer', '/atlas/asset/issue');
       const out = await w.W((a) => AtlasWallet.mintAsset('self', a.d, 'atlas.wearable').then(() => 'ok', (e) => ({ message: e.message, pending: !!e.pending })), { d: iss.domain });
       const hits = (await w.faultInfo()).hits;
+      await w.clearFault();
+      check('reported as saved, and the journal holds the request', out !== 'ok' && out.pending === true && hits === 1 && (await w.pending()).length === 1, { out, hits });
       await w.restart(true);
+      const rec = await w.recover();
       const held = await w.rows('atlas.wearable');
-      gap('a non-fungible mint whose answer is lost is not journalled: the issuer signed it, the wallet has nothing and keeps no record to retry', hits === 1 && held.length === 0 && (await w.pending()).length === 0, { out, hits, held: held.length });
+      check('recovery brings the credential the issuer signed, once', rec.length === 1 && rec[0].status === 'completed' && held.length === 1 && (await w.pending()).length === 0, { rec, held: held.length });
     });
 
-    await scenario(kind, 'C5 a purchase whose answer is lost (not journalled)', async (w, iss) => {
+    await scenario(kind, 'C5 a purchase whose answer is lost', async (w, iss) => {
       const first = await mint(w, iss, 'atlas.credit.balance', 10);
       if (first !== 'ok') { console.log('SKIP purchase probe: could not mint the credit class here: ' + JSON.stringify(first)); return; }
       const balance = (await w.rows('atlas.credit.balance'))[0];
       await w.inject('dropAnswer', '/atlas/asset/purchase');
       const out = await w.W((a) => AtlasWallet.purchaseAsset('self', a.d, 'atlas.demo.cafeteria.sandwich', 1).then(() => 'ok', (e) => ({ message: String(e.message).slice(0, 80), pending: !!e.pending })), { d: iss.domain });
       const hits = (await w.faultInfo()).hits;
+      await w.clearFault();
+      check('the issuer spent the balance and the wallet reports the purchase as saved', hits === 1 && iss.revoked().has(balance.id) && out !== 'ok' && out.pending === true && (await w.pending()).length === 1, { out, hits });
       await w.restart(true);
-      const sandwich = await w.rows('atlas.demo.cafeteria.sandwich');
-      const credits = (await w.live('atlas.credit.balance'));
-      gap('a purchase whose answer is lost is not journalled: the issuer spent the balance (revoked: ' + iss.revoked().has(balance.id) + ') and the wallet has ' + sandwich.length + ' purchased item(s), no pending entry, no way to retry', hits === 1 && iss.revoked().has(balance.id) && sandwich.length === 0 && (await w.pending()).length === 0, { out, hits, credits });
+      const rec = await w.recover();
+      const sandwich = await w.live('atlas.demo.cafeteria.sandwich');
+      check('recovery brings the purchased item and the 5 credits left, once', rec.length === 1 && rec[0].status === 'completed' && sandwich.length === 1 && sum(await w.live('atlas.credit.balance')) === 5, { rec });
     });
 
     // ---- 11. the lock fires while a request is in flight ----

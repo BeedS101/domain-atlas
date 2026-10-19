@@ -5441,6 +5441,37 @@ async function main() {
     }
   }
 
+  // Roster rows and the welcome mail of a membership class, written after an issue has committed.
+  // A row already carrying the credential id means this was done, so a retry that finds the
+  // issue committed (replayed) completes whatever a crash cut short and never writes it twice.
+  async function recordIssuance(assetClass, credential, ownerPublicKey) {
+    const welcome = async (subject, body) => {
+      const payload = { id: 'urn:atlas:mail:' + webcrypto.randomUUID(), credentialId: credential.id, subject, body, sentAt: new Date().toISOString() };
+      appendMail({ ...payload, signature: await sign(payload) });
+    };
+    const recorded = (rows) => rows.some((r) => r && r.credentialId === credential.id);
+    if (assetClass === 'atlas.membership') {
+      if (recorded(readSubscribers().subscribers)) return;
+      appendSubscriber({ credentialId: credential.id, ownerPublicKey, subscribedAt: credential.issuedAt });
+      await welcome('Welcome to ' + DOMAIN, "Thanks for subscribing — you'll hear from us here whenever there's something worth sharing.");
+      console.log('Subscriber logged + welcome mail queued for', credential.id);
+    } else if (assetClass === 'atlas.postoffice.membership') {
+      if (recorded(readPostOfficeMembers().members)) return;
+      appendPostOfficeMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
+      await welcome('Your address is live', 'Anyone who has your public key can now reach you through ' + DOMAIN + "'s Global Mail — share it the way you'd share an email address.");
+      console.log('Post Office member logged + welcome mail queued for', credential.id);
+    } else if (assetClass === 'atlas.tradingstation.membership') {
+      if (recorded(readTradingStationMembers().members)) return;
+      appendTradingStationMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
+      await welcome('Trading Station membership active', 'You can now submit a remote trade intent to ' + DOMAIN + "'s Trading Station without standing at the stall — it'll hold your offer until a matching counterparty intent arrives.");
+      console.log('Trading Station member logged + welcome mail queued for', credential.id);
+    } else if (assetClass === 'atlas.demo.governance.membership') {
+      if (recorded(readGovernanceMembers().members)) return;
+      appendGovernanceMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
+      console.log('Governance member logged for', credential.id);
+    }
+  }
+
   // Holdings used for a `holdingCap` check on a fresh mint: the issuer's own
   // index of the credentials it signed for this owner and class that are not
   // revoked (holdingsRead above), plus any presented credential that checks
@@ -5805,7 +5836,7 @@ async function main() {
 
         // A repeated request id returns the credential already issued for it.
         const issueRequestId = parseRequestId(issueBody);
-        const issueReplayable = issueRequestId !== null && catalogEntry.fungible === true;
+        const issueReplayable = issueRequestId !== null;
         const issueParams = { ownerPublicKey, assetClass, quantity: mintQuantity };
         if (issueReplayable) {
           if (!(await holdLease(res, 'rid:' + issueRequestId))) {
@@ -5814,7 +5845,11 @@ async function main() {
           txnRecoverKey(issueRequestId);
           const prior = replayLookup(issueRequestId, 'issue', [], issueParams);
           if (prior && prior.conflict) return sendJson(res, 409, { error: 'requestId was already used for a different request', code: 'request-id-conflict' });
-          if (prior) return sendJson(res, 200, prior.response);
+          if (prior) {
+            // The roster rows below are written after the journal commits; a retry completes them if that was cut short.
+            await recordIssuance(assetClass, prior.response, ownerPublicKey);
+            return sendJson(res, 200, prior.response);
+          }
         }
 
         // A fresh mint of a class with a `holdingCap` is refused when the
@@ -5842,7 +5877,7 @@ async function main() {
         }
 
         // A first minting — never a reissue — so supersedes is always null here.
-        const journalled = catalogEntry.fungible === true;
+        const journalled = catalogEntry.fungible === true || issueReplayable;
         const credential = await mintAssetByClass(ownerPublicKey, assetClass, mintQuantity, null, undefined, journalled);
         if (journalled) {
           await commitReplacement(res, {
@@ -5852,73 +5887,7 @@ async function main() {
         }
         console.log('Issued', mintQuantity, credential.asset.name, 'to', ownerPublicKey.slice(0, 16) + '...');
 
-        // Subscribing IS requesting this specific asset class (see Mail
-        // system notes) — log the subscriber and auto-send a welcome
-        // message the same way any other domain-to-subscriber mail works,
-        // so the very first thing a new subscriber's wallet picks up on
-        // its next mail check is confirmation the subscription worked.
-        if (assetClass === 'atlas.membership') {
-          appendSubscriber({ credentialId: credential.id, ownerPublicKey, subscribedAt: credential.issuedAt });
-          const welcomePayload = {
-            id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
-            credentialId: credential.id,
-            subject: 'Welcome to ' + DOMAIN,
-            body: "Thanks for subscribing — you'll hear from us here whenever there's something worth sharing.",
-            sentAt: new Date().toISOString()
-          };
-          const welcomeSignature = await sign(welcomePayload);
-          appendMail({ ...welcomePayload, signature: welcomeSignature });
-          console.log('Subscriber logged + welcome mail queued for', credential.id);
-        }
-
-        // Post Office: claiming this specific class IS
-        // registering for Global Mail here, same "requesting the class is
-        // the whole registration step" shape as atlas.membership above —
-        // logged to its own roster (see isValidPostOfficeMember, the gate
-        // POST /atlas/postoffice/send checks every send against) plus the
-        // same welcome-mail courtesy, addressed by THIS credential's id so
-        // it arrives through the ordinary /atlas/mail/check loop like
-        // anything else this wallet already holds a credential for.
-        if (assetClass === 'atlas.postoffice.membership') {
-          appendPostOfficeMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
-          const welcomePayload = {
-            id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
-            credentialId: credential.id,
-            subject: 'Your address is live',
-            body: 'Anyone who has your public key can now reach you through ' + DOMAIN + "'s Global Mail — share it the way you'd share an email address.",
-            sentAt: new Date().toISOString()
-          };
-          const welcomeSignature = await sign(welcomePayload);
-          appendMail({ ...welcomePayload, signature: welcomeSignature });
-          console.log('Post Office member logged + welcome mail queued for', credential.id);
-        }
-
-        // Trading Station (task #144 Phase 1) — same shape as Post Office
-        // just above: claiming this class IS joining, logged to its own
-        // roster, welcome mail addressed by this credential's own id so it
-        // arrives through the ordinary mail-check loop.
-        if (assetClass === 'atlas.tradingstation.membership') {
-          appendTradingStationMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
-          const welcomePayload = {
-            id: 'urn:atlas:mail:' + webcrypto.randomUUID(),
-            credentialId: credential.id,
-            subject: 'Trading Station membership active',
-            body: 'You can now submit a remote trade intent to ' + DOMAIN + "'s Trading Station without standing at the stall — it'll hold your offer until a matching counterparty intent arrives.",
-            sentAt: new Date().toISOString()
-          };
-          const welcomeSignature = await sign(welcomePayload);
-          appendMail({ ...welcomePayload, signature: welcomeSignature });
-          console.log('Trading Station member logged + welcome mail queued for', credential.id);
-        }
-
-        // Governance/voting demo — same shape as Post Office/Trading
-        // Station just above: claiming this class IS joining the
-        // assembly, logged to its own roster (isValidGovernanceMember,
-        // the gate propose/vote below check every request against).
-        if (assetClass === 'atlas.demo.governance.membership') {
-          appendGovernanceMember({ credentialId: credential.id, ownerPublicKey, joinedAt: credential.issuedAt });
-          console.log('Governance member logged for', credential.id);
-        }
+        await recordIssuance(assetClass, credential, ownerPublicKey);
 
         return sendJson(res, 200, credential);
       }
@@ -7726,6 +7695,20 @@ async function main() {
         return sendJson(res, 200, convertResult);
       }
 
+      // GET /atlas/capabilities - which operations this issuer answers a repeated requestId for. A wallet
+      // that finds an operation here may send it again with the same requestId after a lost answer; an
+      // issuer that does not list it (or has no such route) creates a second result for a repeat, so the
+      // wallet does not repeat the request.
+      if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/capabilities') {
+        return sendJson(res, 200, {
+          requestIds: {
+            version: 1,
+            operations: ['issue', 'issue-unique', 'split', 'consolidate', 'convert', 'purchase', 'trade-claim'],
+            retentionHours: REPLAY_TTL_MS / 3600000
+          }
+        });
+      }
+
       // Asset-class lookup, for previewing a class the caller
       // does not (yet) hold a credential of at all: a scene's hoverable
       // stall/crate (demo-domain-a/spatial/lobby/scene.json's
@@ -8222,7 +8205,8 @@ async function main() {
       // caller (the try/catch wrapping the whole request) before the
       // buyer's balance is debited by even one unit.
       if (req.method === 'POST' && req.url === '/atlas/asset/purchase') {
-        const { credential, purchasedClass, quantity, intent } = JSON.parse((await readBody(req)) || '{}');
+        const purchaseBody = JSON.parse((await readBody(req)) || '{}');
+        const { credential, purchasedClass, quantity, intent } = purchaseBody;
         const qty = quantity === undefined ? 1 : quantity;
         if (!credential || !purchasedClass || !intent) {
           return sendJson(res, 400, { error: 'credential, purchasedClass, and intent are all required' });
@@ -8238,6 +8222,15 @@ async function main() {
         if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
         const buyerPub = intent.proof.publicKey;
 
+        // A request id must be the one the buyer signed, so only the buyer's key can ask for this
+        // purchase's stored result, and the result is only ever for these exact parameters.
+        const purchaseRequestId = parseRequestId(purchaseBody);
+        if (purchaseRequestId !== null && intent.payload.requestId !== purchaseRequestId) {
+          return sendJson(res, 400, { error: 'intent does not authorize this requestId' });
+        }
+        const purchaseParams = { purchasedClass, quantity: qty, buyerPublicKey: buyerPub };
+        if (await beginReplacement(res, purchaseRequestId, 'purchase', [credential], purchaseParams)) return;
+
         const catalogEntry = ASSET_CATALOG[purchasedClass];
         if (!catalogEntry || !catalogEntry.purchase) return sendJson(res, 400, { error: 'this class is not for sale' });
         if (catalogEntry.fungible !== true && qty !== 1) {
@@ -8248,15 +8241,19 @@ async function main() {
         const problem = await checkPresentedSpendableAsset(credential, buyerPub, catalogEntry.purchase.priceClass, totalPrice);
         if (problem) return sendJson(res, 400, { error: problem });
 
-        const purchased = await mintAssetByClass(buyerPub, purchasedClass, qty, null);
+        const purchased = await mintAssetByClass(buyerPub, purchasedClass, qty, null, undefined, true);
         const remainderQty = credential.quantity - totalPrice;
         const balance = remainderQty > 0
-          ? await mintAssetByClass(buyerPub, catalogEntry.purchase.priceClass, remainderQty, credential.id)
+          ? await mintAssetByClass(buyerPub, catalogEntry.purchase.priceClass, remainderQty, credential.id, undefined, true)
           : null;
-        revoke(credential.id, 'superseded');
+        const purchaseResult = { balance, purchased };
+        await commitReplacement(res, {
+          requestId: purchaseRequestId, op: 'purchase', predecessorIds: [credential.id], reason: 'superseded', params: purchaseParams,
+          successors: [purchased, balance].filter(Boolean), response: purchaseResult
+        });
         archiveIfAudited(credential, 'superseded');
         console.log('Purchased', qty, purchasedClass, 'for', totalPrice, catalogEntry.purchase.priceClass, '-', buyerPub.slice(0, 16) + '...');
-        return sendJson(res, 200, { balance, purchased });
+        return sendJson(res, 200, purchaseResult);
       }
 
       // POST /atlas/asset/fulfill (SPEC.md §5.9) — an operator confirming a
@@ -8476,13 +8473,41 @@ async function main() {
       // is by definition live for this call, so their own side applies
       // directly in the response — no mail round-trip needed for them.
       if (req.method === 'POST' && req.url === '/atlas/trade/claim') {
-        const { pendingId, membership, intent, balance } = JSON.parse((await readBody(req)) || '{}');
+        const claimBody = JSON.parse((await readBody(req)) || '{}');
+        const { pendingId, membership, intent, balance } = claimBody;
         if (!pendingId || !membership || !intent || !balance) return sendJson(res, 400, { error: 'pendingId, membership, intent, and balance are all required' });
         if (!intent.payload || !intent.proof) return sendJson(res, 400, { error: 'intent must carry payload and proof' });
 
         const envelopeOk = await verifyEnvelope(intent.payload, intent.proof);
         if (!envelopeOk) return sendJson(res, 400, { error: 'intent signature does not check out' });
         const claimantPub = intent.proof.publicKey;
+
+        // A claim that carries a request id has its final outcome stored once the settlement has run, so a
+        // claimant whose answer was lost can ask again. The id must be the one the claimant signed, and the
+        // stored outcome is only returned for the same listing, balance and offer/want. This is checked
+        // before the intent's expiry: an outcome that already exists stays retrievable after it.
+        const claimRequestId = parseRequestId(claimBody);
+        const claimParams = claimRequestId === null ? null : {
+          pendingId, claimantPublicKey: claimantPub, balanceId: balance.id, offer: intent.payload.offer, want: intent.payload.want
+        };
+        if (claimRequestId !== null) {
+          if (intent.payload.requestId !== claimRequestId) return sendJson(res, 400, { error: 'intent does not authorize this requestId' });
+          if (typeof balance.id !== 'string') return sendJson(res, 400, { error: 'balance: not an asset credential' });
+          if (!(await holdLease(res, 'claim:' + claimRequestId))) {
+            return sendJson(res, 503, { error: 'this request is already being processed - try again', code: 'busy' });
+          }
+          const prior = replayLookup(claimRequestId, 'claim', [balance.id], claimParams);
+          if (prior && prior.conflict) return sendJson(res, 409, { error: 'requestId was already used for a different request', code: 'request-id-conflict' });
+          if (prior) {
+            console.log('Trade claim REPLAYED (idempotent retry) for', claimantPub.slice(0, 16) + '...');
+            return sendJson(res, prior.response.status, prior.response.body);
+          }
+        }
+        // Stores the outcome of a claim that mutated state, then answers with it.
+        const answerClaim = (status, body) => {
+          if (claimRequestId !== null) replayStore(claimRequestId, 'claim', [balance.id], claimParams, { status, body });
+          return sendJson(res, status, body);
+        };
 
         const membershipProblem = await checkPresentedMembership(membership, claimantPub, 'atlas.tradingstation.membership');
         if (membershipProblem) return sendJson(res, 400, { error: 'membership: ' + membershipProblem });
@@ -8556,7 +8581,7 @@ async function main() {
           if (issuerBDomain !== DOMAIN) await relayTradeLock(issuerBDomain, tradeId, balanceB, lockExpiresAt);
           if (issuerADomain !== DOMAIN) await relayTradeLock(issuerADomain, tradeId, balanceA, lockExpiresAt);
         } catch (err) {
-          return sendJson(res, 502, { error: 'could not lock both sides of this trade: ' + err.message });
+          return sendJson(res, 502, { error: 'could not lock both sides of this trade: ' + err.message, code: 'not-settled' });
         }
 
         // B's side settles FIRST — it produces aReceived, what the absent
@@ -8571,7 +8596,7 @@ async function main() {
             ? await fulfillTradeSideSettlement(balanceB, offerB.quantity, posterPub, null)
             : await relayTradeSettle(issuerBDomain, tradeId, balanceB, offerB.quantity, posterPub, null);
         } catch (err) {
-          return sendJson(res, 502, { error: "could not settle the claimant's balance at " + issuerBDomain + ': ' + err.message });
+          return sendJson(res, 502, { error: "could not settle the claimant's balance at " + issuerBDomain + ': ' + err.message, code: 'claim-unresolved' });
         }
         const aReceived = bSide.received, bRemainder = bSide.remainder;
 
@@ -8603,14 +8628,16 @@ async function main() {
           } else {
             refundNote = ' — your balance was spent at ' + issuerBDomain + ' and cannot be automatically refunded from here; contact the domain operator.';
           }
-          return sendJson(res, 502, { error: "could not settle the poster's balance at " + issuerADomain + ': ' + err.message + refundNote, refund });
+          return answerClaim(502, { error: "could not settle the poster's balance at " + issuerADomain + ': ' + err.message + refundNote, refund, code: 'claim-incomplete' });
         }
         const bReceived = aSide.received;
 
+        const settledResult = { status: 'settled', remainder: bRemainder, received: bReceived };
+        if (claimRequestId !== null) replayStore(claimRequestId, 'claim', [balance.id], claimParams, { status: 200, body: settledResult });
         removePendingTrade(posted.id);
 
         console.log('Listing claimed:', offerA.quantity, offerA.class, '<->', offerB.quantity, offerB.class, '(poster notified by mail)');
-        return sendJson(res, 200, { status: 'settled', remainder: bRemainder, received: bReceived });
+        return sendJson(res, 200, settledResult);
       }
 
       // POST /atlas/trade/relay-lock (SPEC.md §7, v1.29) — the LOCK half

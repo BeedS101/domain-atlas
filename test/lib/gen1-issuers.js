@@ -17,7 +17,8 @@ async function waitFor(log, proc, text, ms, name) {
   });
 }
 
-// Options: { env } extra environment for the issuer process; { user: 'nobody' } runs it as an
+// Options: { root } a directory holding another copy of issuer-server/ to run instead of this one (an earlier
+// revision, for negative controls); { env } extra environment for the issuer process; { user: 'nobody' } runs it as an
 // unprivileged account (the sandbox runs as root, which ignores file permissions), with the
 // temporary tree handed over to that account. be.start(env) restarts with a different environment.
 const NOBODY = ['setpriv', '--reuid=65534', '--regid=65534', '--clear-groups'];
@@ -59,7 +60,7 @@ async function startNode(port, options) {
     be.log = [];
     if (env !== undefined) be.env = Object.assign({}, env);
     be.proc = launch('node', ['issuer-server/server.js'], {
-      cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: options.root || REPO, stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PORT: String(port), ATLAS_DOMAIN: domain, ATLAS_DOCROOT: docroot, ATLAS_STATE_DIR: state, ...be.env }
     }, be);
     be.proc.stdout.on('data', (d) => be.log.push(d.toString()));

@@ -42,6 +42,52 @@ $envelopeOk = verify_envelope($intent['payload'], $intent['proof']);
 if (!$envelopeOk) send_json(400, ['error' => 'intent signature does not check out']);
 $claimantPub = $intent['proof']['publicKey'];
 
+// A claim that carries a request id has its final outcome stored once the settlement has run, so a
+// claimant whose answer was lost can ask again. The id must be the one the claimant signed, and the
+// stored outcome is only returned for the same listing, balance and offer/want. This is checked
+// before the intent's expiry: an outcome that already exists stays retrievable after it.
+try {
+  $claimRequestId = atlas_parse_request_id($body);
+} catch (Exception $e) {
+  send_json(400, ['error' => $e->getMessage()]);
+}
+$claimParams = null;
+if ($claimRequestId !== null) {
+  if (($intent['payload']['requestId'] ?? null) !== $claimRequestId) send_json(400, ['error' => 'intent does not authorize this requestId']);
+  if (!is_string($balance['id'] ?? null)) send_json(400, ['error' => 'balance: not an asset credential']);
+  $claimParams = [
+    'pendingId' => $pendingId, 'claimantPublicKey' => $claimantPub, 'balanceId' => $balance['id'],
+    'offer' => $intent['payload']['offer'] ?? null, 'want' => $intent['payload']['want'] ?? null,
+  ];
+  if (atlas_lease('claim', $claimRequestId) !== null) send_json(503, ['error' => 'this request is already being processed - try again', 'code' => 'busy']);
+  $prior = atlas_replay_lookup($claimRequestId, 'claim', [$balance['id']], $claimParams);
+  if ($prior !== null && isset($prior['conflict'])) send_json(409, ['error' => 'requestId was already used for a different request', 'code' => 'request-id-conflict']);
+  if ($prior !== null) {
+    $stored = json_decode($prior['responseJson'], true);
+    atlas_send_claim_text((int) $stored['status'], $stored['bodyJson']);
+  }
+}
+// The outcome is kept as the exact text that was sent, so a replay is byte-identical and the signed
+// credentials in it are not re-encoded.
+function atlas_send_claim_text($status, $text) {
+  http_response_code($status);
+  header('Content-Type: application/json');
+  cors_headers();
+  no_store_headers();
+  echo $text;
+  exit;
+}
+function atlas_store_claim_outcome($requestId, $balanceId, $params, $status, $bodyText) {
+  if ($requestId === null) return;
+  atlas_replay_store($requestId, 'claim', [$balanceId], $params, json_encode(['status' => $status, 'bodyJson' => $bodyText], JSON_UNESCAPED_SLASHES));
+}
+// Stores the outcome of a claim that mutated state, then answers with it.
+function atlas_answer_claim($requestId, $balanceId, $params, $status, $body) {
+  $text = json_encode($body, JSON_UNESCAPED_SLASHES);
+  atlas_store_claim_outcome($requestId, $balanceId, $params, $status, $text);
+  atlas_send_claim_text($status, $text);
+}
+
 $membershipProblem = check_presented_membership($kp['publicKeyB64url'], $membership, $claimantPub, 'atlas.tradingstation.membership');
 if ($membershipProblem) send_json(400, ['error' => 'membership: ' . $membershipProblem]);
 
@@ -118,14 +164,14 @@ if ($issuerBDomain !== atlas_domain()) {
   try {
     atlas_relay_trade_lock($kp, $issuerBDomain, $tradeId, $balanceB, $lockExpiresAt);
   } catch (Exception $e) {
-    send_json(502, ['error' => "could not lock the claimant's balance at " . $issuerBDomain . ': ' . $e->getMessage()]);
+    send_json(502, ['error' => "could not lock the claimant's balance at " . $issuerBDomain . ': ' . $e->getMessage(), 'code' => 'not-settled']);
   }
 }
 if ($issuerADomain !== atlas_domain()) {
   try {
     atlas_relay_trade_lock($kp, $issuerADomain, $tradeId, $balanceA, $lockExpiresAt);
   } catch (Exception $e) {
-    send_json(502, ['error' => "could not lock the poster's balance at " . $issuerADomain . ': ' . $e->getMessage()]);
+    send_json(502, ['error' => "could not lock the poster's balance at " . $issuerADomain . ': ' . $e->getMessage(), 'code' => 'not-settled']);
   }
 }
 
@@ -140,7 +186,7 @@ if ($issuerBDomain === atlas_domain()) {
   try {
     $bSide = atlas_relay_trade_settle($kp, $issuerBDomain, $tradeId, $balanceB, $offerB['quantity'], $posterPub, null);
   } catch (Exception $e) {
-    send_json(502, ['error' => "could not settle the claimant's balance at " . $issuerBDomain . ': ' . $e->getMessage()]);
+    send_json(502, ['error' => "could not settle the claimant's balance at " . $issuerBDomain . ': ' . $e->getMessage(), 'code' => 'claim-unresolved']);
   }
 }
 $aReceived = $bSide['received'];
@@ -173,10 +219,12 @@ try {
   } else {
     $refundNote = ' — your balance was spent at ' . $issuerBDomain . ' and cannot be automatically refunded from here; contact the domain operator.';
   }
-  send_json(502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ': ' . $e->getMessage() . $refundNote, 'refund' => $refund]);
+  atlas_answer_claim($claimRequestId, $balance['id'] ?? null, $claimParams, 502, ['error' => "could not settle the poster's balance at " . $issuerADomain . ': ' . $e->getMessage() . $refundNote, 'refund' => $refund, 'code' => 'claim-incomplete']);
 }
 $bReceived = $aSide['received'];
 
+$settledText = json_encode(['status' => 'settled', 'remainder' => $bRemainder, 'received' => $bReceived], JSON_UNESCAPED_SLASHES);
+atlas_store_claim_outcome($claimRequestId, $balance['id'] ?? null, $claimParams, 200, $settledText);
 remove_pending_trade($posted['id']);
 
-send_json(200, ['status' => 'settled', 'remainder' => $bRemainder, 'received' => $bReceived]);
+atlas_send_claim_text(200, $settledText);

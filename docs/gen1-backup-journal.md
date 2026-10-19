@@ -150,7 +150,8 @@ and unchanged byte for byte (tested), but cannot be opened on that profile until
 - Backups of WebAuthn identities are not possible (the private key never leaves the authenticator); unchanged.
 - The automatic backup's file-picker and permission flow is not driven by these tests; the payload and the restore are.
 - Multiple wallet instances sharing one profile are not addressed.
-- Operations that are not journalled (non-fungible mint, purchase, trade claim) have nothing to back up.
+- Unique mint, purchase and trade claim entries are carried like any other entry (kind `mint`, `purchase`, `claim`);
+  see `docs/gen1-unique-recovery.md`. Admin mints and the asset-file flows are not journalled.
 
 ## Tests
 

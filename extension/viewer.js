@@ -5608,7 +5608,7 @@ function walletGainedSomething(prevSnapshot, nextSnapshot) {
 //   Recovering       a page is asking the issuer about it right now
 //   Needs attention  the wallet could not safely tell what happened; it is only sent again when asked
 //   Completed        the issuer's answer was applied to this wallet (listed for a few days from the activity log)
-const OPERATION_KIND_WORDS = { mint: 'Mint', split: 'Send', consolidate: 'Merge balances', convert: 'Convert' };
+const OPERATION_KIND_WORDS = { mint: 'Mint', split: 'Send', consolidate: 'Merge balances', convert: 'Convert', purchase: 'Purchase', claim: 'Trade claim' };
 const OPERATION_STATUS_TEXT = {
   pending: { label: 'Pending', mark: '⏳', detail: 'The issuer has not confirmed this transaction yet. The balances it uses are held until it does.' },
   recovering: { label: 'Recovering', mark: '🔄', detail: 'Checking with the issuer now.' },

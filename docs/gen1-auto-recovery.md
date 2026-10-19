@@ -48,6 +48,11 @@ Then it runs `recoverPendingOperations(owner, { minGapMs })`.
 - It stops sending as soon as the wallet is locked or the active identity is not the journal's owner: each entry
   re-checks `getIdentity()` before its request. An answer that arrives after a lock or an identity change cannot be
   stored (the storage layer cannot read the old identity's records with the new key) and the entry stays pending.
+- Two extra gates apply to the unique-mint, purchase and claim entries (`docs/gen1-unique-recovery.md`): the issuer must
+  still advertise that operation at `GET /atlas/capabilities` (unreachable: the entry stays `pending`; not advertised:
+  `needs-attention`, code `repeat-unsupported`), and an unfinished unique mint older than 0.9 times the issuer's
+  retention is not resent automatically (`result-may-have-expired`), because a repeat after expiry would issue a
+  second item.
 - An attempt's evidence is kept: `attempts`, `lastError` and `lastAttemptAt` are updated by `sendOperation` as before; a
   failure (unreachable issuer, 5xx, `busy`, an answer that is not a usable result) never removes the entry or changes its
   request body.

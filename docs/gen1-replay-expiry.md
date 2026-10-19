@@ -96,7 +96,8 @@ the revocation list, and no ownership is inferred from it.
 - **A journal that cannot be decrypted cannot mark the display**: sends and spends are refused, but the predecessors
   are listed unmarked. (The journal is now carried in manual and automatic backups, see `docs/gen1-backup-journal.md`;
   a restored entry keeps its state, so an expired request restores as `needs-attention`.)
-- **Operations that are not journalled** (non-fungible mint, purchase, trade claim) are unchanged.
+- **Unique mint, purchase and trade claim** are journalled and replayable now (`docs/gen1-unique-recovery.md`); the limits
+  above apply to them too, with the unique-mint retention guard described there.
 
 ## Tests
 

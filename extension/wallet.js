@@ -1202,6 +1202,48 @@ const AtlasWallet = (() => {
     return b64urlEncode(crypto.getRandomValues(new Uint8Array(18)).buffer);
   }
 
+  // Whether an issuer answers a repeated request id for an operation, from its GET /atlas/capabilities.
+  //   'yes'          listed: the same request may be sent again with the same requestId
+  //   'no'           route missing or operation not listed (an older issuer): a repeat would create a
+  //                  second result, so it is never sent again
+  //   'unreachable'  no usable answer (network failure, timeout, 5xx): nothing is known, nothing is sent
+  const CAPABILITY_TIMEOUT_MS = 10000;
+  // { support, retentionHours }: how long the issuer keeps a result it can answer a repeat from.
+  async function issuerCapability(domain, operation) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CAPABILITY_TIMEOUT_MS);
+    try {
+      const res = await fetch(baseUrl(domain) + '/atlas/capabilities', { cache: 'no-store', signal: controller.signal });
+      if (res.status >= 500 || res.status === 429) return { support: 'unreachable', retentionHours: null };
+      if (!res.ok) return { support: 'no', retentionHours: null };
+      let data = null;
+      try { data = JSON.parse(await res.text()); } catch (err) { return { support: 'no', retentionHours: null }; }
+      const ids = data && data.requestIds;
+      const listed = !!ids && Number(ids.version) >= 1 && Array.isArray(ids.operations) && ids.operations.includes(operation);
+      return { support: listed ? 'yes' : 'no', retentionHours: listed && Number(ids.retentionHours) > 0 ? Number(ids.retentionHours) : null };
+    } catch (err) {
+      return { support: 'unreachable', retentionHours: null };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  async function issuerRepeatSupport(domain, operation) {
+    return (await issuerCapability(domain, operation)).support;
+  }
+
+  // The capability an issuer must list before this entry may be sent again, or null for operations whose
+  // repeat was already safe when they were journalled (split, consolidate, convert, fungible mint).
+  function repeatOperationOf(entry) {
+    if (entry.kind === 'purchase') return 'purchase';
+    if (entry.kind === 'claim') return 'trade-claim';
+    if (entry.kind === 'mint' && entry.body && entry.body.quantity === undefined) return 'issue-unique';
+    return null;
+  }
+
+  function repeatSupportError(label, domain) {
+    return operationError(label, 0, 'could not confirm that ' + domain + ' can safely repeat this request, so nothing was sent; try again later', null, {});
+  }
+
   async function readPendingOps(ownerPublicKey) {
     const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
     const identity = await getIdentity();
@@ -1218,7 +1260,7 @@ const AtlasWallet = (() => {
   // The credentials a journalled request presented, as sent.
   function presentedCredentialsOf(entry) {
     const body = entry.body || {};
-    const list = Array.isArray(body.credentials) ? body.credentials : (body.credential ? [body.credential] : []);
+    const list = Array.isArray(body.credentials) ? body.credentials : (body.credential ? [body.credential] : (body.balance ? [body.balance] : []));
     return list.filter((c) => c && typeof c === 'object');
   }
 
@@ -1364,8 +1406,11 @@ const AtlasWallet = (() => {
       ];
     }
     if (entry.kind === 'consolidate') return [{ owner: entry.owner, remove: entry.predecessors, add: [entryOf(data)] }];
-    if (entry.kind === 'convert') {
+    if (entry.kind === 'convert' || entry.kind === 'claim') {
       return [{ owner: entry.owner, remove: entry.predecessors, add: [data.remainder, data.received].filter(Boolean).map(entryOf) }];
+    }
+    if (entry.kind === 'purchase') {
+      return [{ owner: entry.owner, remove: entry.predecessors, add: [data.balance, data.purchased].filter(Boolean).map(entryOf) }];
     }
     throw new Error('unknown operation kind: ' + entry.kind);
   }
@@ -1373,14 +1418,28 @@ const AtlasWallet = (() => {
   // Whether an answer carries what this kind of operation must return, for the right owners. An
   // answer that does not (a proxy page, a truncated body, the wrong credential) is never applied and
   // never ends the entry: the request may have completed, so it is sent again.
-  function answerIsUsable(entry, data) {
-    const good = (c, owner) => !!(c && typeof c === 'object' && c.credential === 'domain-atlas-asset/1.0' && typeof c.id === 'string'
+  function isUsableCredential(c, owner) {
+    return !!(c && typeof c === 'object' && c.credential === 'domain-atlas-asset/1.0' && typeof c.id === 'string'
       && c.owner && c.owner.publicKey === owner && c.issuer && typeof c.issuer.domain === 'string'
       && c.asset && typeof c.asset === 'object' && typeof c.signature === 'string');
+  }
+
+  function answerIsUsable(entry, data) {
+    const good = isUsableCredential;
     if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
-    if (entry.kind === 'mint' || entry.kind === 'consolidate') return good(data, entry.owner);
+    const body = entry.body || {};
+    if (entry.kind === 'mint') return good(data, entry.owner) && (typeof body.assetClass !== 'string' || data.asset.class === body.assetClass);
+    if (entry.kind === 'consolidate') return good(data, entry.owner);
     if (entry.kind === 'split') return good(data.sent, entry.toOwner || entry.owner) && (!data.remainder || good(data.remainder, entry.owner));
     if (entry.kind === 'convert') return good(data.received, entry.owner) && (!data.remainder || good(data.remainder, entry.owner));
+    if (entry.kind === 'purchase') {
+      return good(data.purchased, entry.owner) && data.purchased.asset.class === body.purchasedClass && (!data.balance || good(data.balance, entry.owner));
+    }
+    if (entry.kind === 'claim') {
+      const wanted = body.intent && body.intent.payload && body.intent.payload.want && body.intent.payload.want.class;
+      return data.status === 'settled' && good(data.received, entry.owner) && (typeof wanted !== 'string' || data.received.asset.class === wanted)
+        && (!data.remainder || good(data.remainder, entry.owner));
+    }
     return false;
   }
 
@@ -1416,6 +1475,29 @@ const AtlasWallet = (() => {
     const retryLater = async (why) => {
       await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: String(why).slice(0, 200), lastAttemptAt: new Date().toISOString() }).catch(() => {});
     };
+    // A request that would create a second result if the issuer does not answer a repeat is only sent again
+    // when the issuer lists that operation right now.
+    const repeatOperation = fresh ? null : repeatOperationOf(entry);
+    if (repeatOperation) {
+      const { support, retentionHours } = await issuerCapability(entry.domain, repeatOperation);
+      if (support === 'unreachable') {
+        await retryLater('could not confirm that ' + entry.domain + ' answers a repeated request; nothing was sent');
+        throw operationError(entry.label, 0, 'could not confirm that ' + entry.domain + ' can safely repeat this request; nothing was sent and it is saved to be asked about later', null, { pending: true, requestId: entry.requestId });
+      }
+      if (support === 'no') {
+        throw await holdForAttention(entry, 0, 'repeat not supported', { code: 'repeat-unsupported' }, [],
+          entry.label + ' needs attention: ' + entry.domain + ' no longer lists this operation as safe to repeat, so the request was not sent again (it could create a second result).'
+          + ' The balances it uses stay held.');
+      }
+      // A mint has no predecessor to show whether it already happened. Once the issuer may have dropped its
+      // stored result, only the person asking again (opts.manual) can accept that this could issue a second item.
+      if (repeatOperation === 'issue-unique' && !(opts && opts.manual) && retentionHours
+        && Date.now() - Date.parse(entry.createdAt) > retentionHours * 3600 * 1000 * 0.9) {
+        throw await holdForAttention(entry, 0, 'stored result may have expired', { code: 'result-may-have-expired' }, [],
+          entry.label + ' needs attention: ' + entry.domain + ' keeps the result of a request for ' + retentionHours + ' hours and this one is older, so asking again could issue a second item.'
+          + ' It was not sent. Ask the issuer again only if you accept that.');
+      }
+    }
     let res, text;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), OPERATION_TIMEOUT_MS);
@@ -1455,7 +1537,11 @@ const AtlasWallet = (() => {
       }
       return { data, applied, changes };
     }
-    const unsettled = res.status >= 500 || (data && data.code === 'busy');
+    if (entry.kind === 'claim' && data && (data.code === 'claim-incomplete' || data.code === 'claim-unresolved')) {
+      return stopClaim(entry, res.status, text, data);
+    }
+    // 'not-settled': the station refused before it changed anything; that is a refusal, not an unavailable issuer.
+    const unsettled = (res.status >= 500 && !(data && data.code === 'not-settled')) || (data && data.code === 'busy');
     if (unsettled) {
       await retryLater('HTTP ' + res.status + ' ' + text);
       throw operationError(entry.label, res.status, text, data, { pending: true, requestId: entry.requestId });
@@ -1465,29 +1551,54 @@ const AtlasWallet = (() => {
     const check = fresh ? { proven: true, revoked: [] } : await predecessorsProvablyUnrevoked(entry);
     if (check.proven) {
       await journalPatch(entry.owner, entry.requestId, null).catch(() => {});
-      throw operationError(entry.label, res.status, text, data, { requestId: entry.requestId });
+      const shown = entry.kind === 'claim' && data && typeof data.error === 'string' ? data.error : text;
+      throw operationError(entry.label, res.status, shown, data, { requestId: entry.requestId });
     }
+    throw await holdForAttention(entry, res.status, text, data, check.revoked, null);
+  }
+
+  // Keeps an entry in the journal as 'needs-attention' and returns the error to throw. `message` replaces the
+  // default wording, which describes a refused replacement.
+  async function holdForAttention(entry, status, text, data, revoked, message) {
     const marked = await journalPatch(entry.owner, entry.requestId, {
       state: 'needs-attention',
       attempts: (entry.attempts || 0) + 1,
-      lastError: ('HTTP ' + res.status + ' ' + text).slice(0, 200),
+      lastError: ('HTTP ' + status + ' ' + text).slice(0, 200),
       lastAttemptAt: new Date().toISOString(),
       attention: {
         at: new Date().toISOString(),
-        status: res.status,
+        status,
         code: data && typeof data.code === 'string' ? data.code : null,
         message: String(text).slice(0, 200),
-        revokedPredecessors: check.revoked
+        revokedPredecessors: revoked
       }
     });
     if (!marked) {
       // Another page settled this entry while this one was waiting.
-      throw operationError(entry.label, res.status, 'this request was settled by another page', null, { settledElsewhere: true, requestId: entry.requestId });
+      return operationError(entry.label, status, 'this request was settled by another page', null, { settledElsewhere: true, requestId: entry.requestId });
     }
-    const attentionError = operationError(entry.label, res.status, '', null, { needsAttention: true, code: 'needs-attention', refusalCode: data && data.code, requestId: entry.requestId });
-    attentionError.message = entry.label + ' needs attention: the issuer refused a request it may already have completed (' + String(text).slice(0, 120)
-      + '). The replacement could not be recovered; the original balances are kept and held back, and the request is saved as needing attention.';
-    throw attentionError;
+    const attentionError = operationError(entry.label, status, '', null, { needsAttention: true, code: 'needs-attention', refusalCode: data && data.code, requestId: entry.requestId });
+    attentionError.message = message || (entry.label + ' needs attention: the issuer refused a request it may already have completed (' + String(text).slice(0, 120)
+      + '). The replacement could not be recovered; the original balances are kept and held back, and the request is saved as needing attention.');
+    return attentionError;
+  }
+
+  // A trade claim that the station started and could not finish. With a refund the station minted back the
+  // claimant's own side, which is applied like any answer; otherwise the outcome is unknown and stays held.
+  async function stopClaim(entry, status, text, data) {
+    if (data.code === 'claim-incomplete' && isUsableCredential(data.refund, entry.owner)) {
+      const verdict = await verifyCredential(data.refund);
+      try {
+        await commitOperation(entry.owner, entry.requestId, [{ owner: entry.owner, remove: entry.predecessors, add: [{ credential: data.refund, lastVerdict: verdict }] }]);
+      } catch (err) {
+        if (!err || !err.walletStorage) throw err;
+        throw operationError(entry.label, 0, err.message + ' The station has refunded this trade; it will be applied when the wallet is unlocked.', null, { pending: true, requestId: entry.requestId, code: err.code });
+      }
+      await logActivity('trade', 'Trade at ' + entry.domain + ' failed partway through and was refunded');
+      throw operationError(entry.label, status, typeof data.error === 'string' ? data.error : text, data, { refunded: true, requestId: entry.requestId });
+    }
+    throw await holdForAttention(entry, status, text, data, [], entry.label + ' needs attention: ' + String(data.error || text).slice(0, 160)
+      + ' The trade may have been settled at one issuer and not the other; the balance used is kept and held back, and nothing is sent again unless you ask.');
   }
 
   // Journals, sends and applies one replacement request.
@@ -1502,7 +1613,7 @@ const AtlasWallet = (() => {
     const entry = {
       requestId, kind: spec.kind, label: spec.label, owner: spec.owner, toOwner: spec.toOwner || null,
       domain: spec.domain, path: spec.path, predecessors: spec.predecessors || [],
-      body: Object.assign({}, spec.body, { requestId }),
+      body: Object.assign({}, typeof spec.body === 'function' ? await spec.body(requestId) : spec.body, { requestId }),
       createdAt: new Date().toISOString(), attempts: 0
     };
     // The slot is held from the moment the entry exists until its first send has ended, so a recovery
@@ -1513,8 +1624,8 @@ const AtlasWallet = (() => {
     }, null, true);
   }
 
-  // A request that does not repeat safely (a non-fungible mint: the issuer
-  // would make a second item): no journal and no request id. The answer is
+  // A request that does not repeat safely (a non-fungible mint at an issuer that does not list
+  // 'issue-unique': it would make a second item): no journal and no request id. The answer is
   // still applied to the current list.
   async function runPlainOperation(spec) {
     const res = await fetch(baseUrl(spec.domain) + spec.path, {
@@ -1568,7 +1679,7 @@ const AtlasWallet = (() => {
   async function noteRecovered(entry, done) {
     if (!done || !done.applied) return;
     const verified = done.changes.every((c) => (c.add || []).every((a) => a.lastVerdict && a.lastVerdict.valid));
-    await logActivity('asset', 'Recovered an interrupted ' + entry.kind + ' (' + entry.domain + '): the issuer had already completed it' + (verified ? ' (signature and revocation status checked)' : ' (could not be fully verified yet)'),
+    await logActivity('asset', 'Recovered an interrupted ' + (entry.kind === 'claim' ? 'trade claim' : entry.kind) + ' (' + entry.domain + '): the issuer had already completed it' + (verified ? ' (signature and revocation status checked)' : ' (could not be fully verified yet)'),
       { recovered: true, kind: entry.kind, domain: entry.domain, verified });
   }
 
@@ -1629,7 +1740,7 @@ const AtlasWallet = (() => {
     const entry = (await readPendingOps(ownerPublicKey)).find((e) => e && e.requestId === requestId);
     if (!usablePendingEntry(entry)) throw new Error('No such pending request.');
     try {
-      const done = await withSlot(OPERATION_SLOT + requestId, () => sendOperation(entry), null, true);
+      const done = await withSlot(OPERATION_SLOT + requestId, () => sendOperation(entry, { manual: true }), null, true);
       await noteRecovered(entry, done);
       return { requestId, kind: entry.kind, status: 'completed', applied: done.applied };
     } catch (err) {
@@ -1695,7 +1806,10 @@ const AtlasWallet = (() => {
   // A backup made before this field existed has no `pendingOps` at all: that is "no journal was
   // carried" and changes nothing. A field that is present but not in this shape is quarantined.
   const PENDING_OPS_BACKUP_FORMAT = 'atlas-pending-ops/1.0';
-  const JOURNAL_PATHS = { mint: '/atlas/asset/issue', split: '/atlas/asset/split', consolidate: '/atlas/asset/consolidate', convert: '/atlas/convert' };
+  const JOURNAL_PATHS = {
+    mint: '/atlas/asset/issue', split: '/atlas/asset/split', consolidate: '/atlas/asset/consolidate', convert: '/atlas/convert',
+    purchase: '/atlas/asset/purchase', claim: '/atlas/trade/claim'
+  };
 
   // The wallet list and the journal for one owner, from ONE storage read, so they describe the same
   // instant: every write that changes both (applying an answer) is a single storage write. Reads
@@ -1722,9 +1836,12 @@ const AtlasWallet = (() => {
     if (entry.body.requestId !== entry.requestId) return 'malformed';
     if (entry.body.ownerPublicKey !== undefined && entry.body.ownerPublicKey !== owner) return 'wrong-owner';
     const carried = presentedCredentialsOf(entry).concat(Array.isArray(entry.body.existingBalances) ? entry.body.existingBalances : []);
+    if (entry.body.membership && typeof entry.body.membership === 'object') carried.push(entry.body.membership);
     for (const credential of carried) {
       if (credential && credential.owner && credential.owner.publicKey !== owner) return 'wrong-owner';
     }
+    const signer = entry.body.intent && entry.body.intent.proof && entry.body.intent.proof.publicKey;
+    if (signer !== undefined && signer !== owner) return 'wrong-owner';
     return null;
   }
 
@@ -1873,9 +1990,16 @@ const AtlasWallet = (() => {
       ...(existingBalances && existingBalances.length ? { existingBalances } : {})
     };
     let credential, verdict;
-    if (quantity !== undefined) {
-      // A quantity-based mint repeats safely (the issuer returns the credential
-      // already issued for the same requestId), so it is journalled.
+    // A fungible mint repeats safely (the issuer returns the credential already issued for the same
+    // requestId). A unique one does only on an issuer that lists 'issue-unique'; any other would make a
+    // second item for a repeat, so it gets the single, unjournalled request it always had.
+    let journalled = quantity !== undefined;
+    if (!journalled) {
+      const support = await issuerRepeatSupport(issuerDomain, 'issue-unique');
+      if (support === 'unreachable') throw repeatSupportError('Mint', issuerDomain);
+      journalled = support === 'yes';
+    }
+    if (journalled) {
       const done = await runIssuerOperation({ owner: owner.publicKey, kind: 'mint', label: 'Mint', domain: issuerDomain, path: '/atlas/asset/issue', body });
       credential = done.data;
       verdict = done.changes[0].add[0].lastVerdict;
@@ -1955,6 +2079,23 @@ const AtlasWallet = (() => {
       throw new Error('Not enough ' + info.purchase.priceClass + ' — need ' + totalPrice + ', have ' + (balanceCredential ? balanceCredential.quantity : 0) + '.');
     }
     await assertSettled(owner.publicKey, [balanceCredential.id]);
+    // The signed intent carries the request id, so the issuer's stored result can only be asked for by the
+    // buyer's key. An issuer that does not list 'purchase' gets the single request it always had.
+    const support = await issuerRepeatSupport(issuerDomain, 'purchase');
+    if (support === 'unreachable') throw repeatSupportError('Purchase', issuerDomain);
+    if (support === 'yes') {
+      const done = await runIssuerOperation({
+        owner: owner.publicKey, kind: 'purchase', label: 'Purchase', domain: issuerDomain, path: '/atlas/asset/purchase',
+        predecessors: [balanceCredential.id],
+        body: async (requestId) => {
+          const intentPayload = { credentialId: balanceCredential.id, purchasedClass, quantity: qty, action: 'purchase', requestId };
+          return { credential: balanceCredential, purchasedClass, quantity: qty, intent: { payload: intentPayload, proof: await signAs(role, intentPayload) } };
+        }
+      });
+      await autoConsolidateAssetWallet(owner.publicKey);
+      await logActivity('asset', 'Purchased ' + qty + ' ' + purchasedClass + ' from ' + issuerDomain);
+      return done.data;
+    }
     const payload = { credentialId: balanceCredential.id, purchasedClass, quantity: qty, action: 'purchase' };
     const proof = await signAs(role, payload);
     const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/purchase', {
@@ -2758,11 +2899,12 @@ const AtlasWallet = (() => {
   // ... }` would get signed as if the key were present, then arrive at the
   // server without it, and fail verify_envelope's own canonicalize() check
   // the moment it's re-signed server-side against what actually arrived.
-  async function proposeIntent(role, offer, want, counterpartyPublicKey, expiresMinutes) {
+  async function proposeIntent(role, offer, want, counterpartyPublicKey, expiresMinutes, extra) {
     const payload = {
       offer, want,
       ...(counterpartyPublicKey !== undefined ? { counterparty: counterpartyPublicKey } : {}),
-      expiresAt: new Date(Date.now() + (expiresMinutes || 10) * 60000).toISOString()
+      expiresAt: new Date(Date.now() + (expiresMinutes || 10) * 60000).toISOString(),
+      ...(extra || {})
     };
     const proof = await signAs(role, payload);
     return { payload, proof };
@@ -2915,6 +3057,23 @@ const AtlasWallet = (() => {
     const claimer = (await identityOf('self')).publicKey;
     await assertWalletWritable(claimer);
     if (balance && balance.id) await assertSettled(claimer, [balance.id]);
+    // The claimant signs the request id into the intent. The station then keeps the final outcome of a claim
+    // it has run, so a lost answer can be asked for again; a station that does not list 'trade-claim' gets the
+    // single request it always had.
+    const support = balance && typeof balance.id === 'string' ? await issuerRepeatSupport(issuerDomain, 'trade-claim') : 'no';
+    if (support === 'unreachable') throw repeatSupportError('Claim', issuerDomain);
+    if (support === 'yes') {
+      const done = await runIssuerOperation({
+        owner: claimer, kind: 'claim', label: 'Claim', domain: issuerDomain, path: '/atlas/trade/claim', predecessors: [balance.id],
+        body: async (requestId) => ({
+          pendingId: listing.pendingId, membership, balance,
+          intent: await proposeIntent('self', listing.want, listing.offer, listing.posterPublicKey, expiresMinutes, { requestId })
+        })
+      });
+      await autoConsolidateAssetWallet(claimer);
+      await logActivity('trade', 'Claimed a trade at ' + issuerDomain + ': received ' + listing.offer.quantity + ' ' + listing.offer.class + ' for ' + listing.want.quantity + ' ' + listing.want.class);
+      return done.data;
+    }
     const intent = await proposeIntent('self', listing.want, listing.offer, listing.posterPublicKey, expiresMinutes);
     const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/claim', {
       method: 'POST',

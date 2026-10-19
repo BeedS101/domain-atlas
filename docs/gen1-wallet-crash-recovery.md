@@ -69,10 +69,12 @@ Ordered by consequence.
    while locked, never for `needs-attention`, with single flight across pages and a two-minute gap per request; the
    wallet page lists the unfinished transactions with their status. See `docs/gen1-auto-recovery.md`. The earlier
    paths (next operation, Re-verify, explicit retry) are unchanged.
-5. **Operations that are not journalled at all** (no `requestId`, no replay on the issuer): non-fungible mint,
-   `/atlas/asset/purchase` (museum stall) and `/atlas/trade/claim`. A lost answer after the issuer commits means the
-   balance is spent and nothing arrives. Confirmed for non-fungible mint and purchase; trade claim by code reading.
-   (Transfer-to-file and claim-from-file have their own ledger and are out of scope here.)
+5. **Operations that were not journalled at all** (no `requestId`, no replay on the issuer): non-fungible mint,
+   `/atlas/asset/purchase` (museum stall) and `/atlas/trade/claim`. A lost answer after the issuer commits meant the
+   balance was spent and nothing arrived. **Fixed** against an issuer that advertises the capability; the wallet
+   journals the request first and the issuer returns the stored outcome for a repeated `requestId`. See
+   `docs/gen1-unique-recovery.md` for the guarantees and the cases that stay open. (Transfer-to-file and
+   claim-from-file have their own ledger and are out of scope.)
 
 ## Possible fixes, smallest first
 
@@ -86,6 +88,7 @@ Ordered by consequence.
 - Issuer, for recovery without a journal or after expiry: an owner-signed endpoint that returns the unrevoked
   credentials the issuer has signed for that owner (the holdings index today keeps only ids and quantities, so it
   would also have to keep the signed credentials). This is the one change that makes a lost journal recoverable.
-- Add `requestId` and issuer-side replay to non-fungible mint, purchase and trade claim, then journal them.
+- Add `requestId` and issuer-side replay to non-fungible mint, purchase and trade claim, then journal them (done, see
+  `docs/gen1-unique-recovery.md`).
 
 None of these touch mining reward amounts, existing balances or the live economy.

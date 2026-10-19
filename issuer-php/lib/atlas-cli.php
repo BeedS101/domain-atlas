@@ -150,11 +150,16 @@ function cli_preflight($probe) {
     cli_line(is_file($lib . '/' . $f) ? 'PASS' : 'FAIL', 'lib/' . $f . (is_file($lib . '/' . $f) ? '' : ' is missing'));
   }
   cli_line(function_exists('atlas_commit_replacement') && function_exists('atlas_txn_sweep') && function_exists('atlas_private_subdir_ensure') ? 'PASS' : 'FAIL', 'lib/replacement.php is the transaction-journal version');
-  $endpoints = ['asset/split.php', 'asset/consolidate.php', 'asset/issue.php', 'convert.php'];
+  $endpoints = ['asset/split.php', 'asset/consolidate.php', 'asset/issue.php', 'convert.php', 'asset/purchase.php'];
   foreach ($endpoints as $e) {
     $path = $docroot . '/atlas/' . $e;
     $text = is_file($path) ? (string) @file_get_contents($path) : '';
     cli_line(strpos($text, 'atlas_commit_replacement') !== false ? 'PASS' : 'FAIL', 'atlas/' . $e . (strpos($text, 'atlas_commit_replacement') !== false ? ' uses the journal' : ' is missing or still the old version (upload lib/ first, then these)'));
+  }
+  foreach (['asset/issue.php' => 'atlas_record_issuance', 'trade/claim.php' => 'atlas_store_claim_outcome', 'capabilities.php' => 'issue-unique'] as $e => $needle) {
+    $path = $docroot . '/atlas/' . $e;
+    $text = is_file($path) ? (string) @file_get_contents($path) : '';
+    cli_line(strpos($text, $needle) !== false ? 'PASS' : 'FAIL', 'atlas/' . $e . (strpos($text, $needle) !== false ? ' answers a repeated request id' : ' is missing or still the old version (upload lib/ first, then these)'));
   }
   foreach (['ledger/account-credential.php' => 'lib/ledger-issuance.php', 'ledger/balance-receipt.php' => 'lib/ledger-receipts.php'] as $endpoint => $libFile) {
     $text = is_file($lib . '/' . basename($libFile)) ? (string) @file_get_contents($lib . '/' . basename($libFile)) : '';

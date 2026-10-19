@@ -15,6 +15,36 @@ try {
   send_json(400, ['error' => 'invalid JSON body']);
 }
 
+// Roster rows and the welcome mail of a membership class, written after an issue has committed. A row
+// already carrying the credential id means this was done, so a retry that finds the issue committed
+// (replayed) completes whatever a crash cut short and never writes it twice.
+function atlas_record_issuance($kp, $assetClass, $credential, $ownerPublicKey) {
+  $recorded = function ($rows) use ($credential) {
+    foreach ((array) $rows as $r) if (is_array($r) && ($r['credentialId'] ?? null) === $credential['id']) return true;
+    return false;
+  };
+  $welcome = function ($subject, $text) use ($kp, $credential) {
+    $payload = ['id' => 'urn:atlas:mail:' . atlas_uuid(), 'credentialId' => $credential['id'], 'subject' => $subject, 'body' => $text, 'sentAt' => iso_now()];
+    append_mail(array_merge($payload, ['signature' => atlas_sign($kp['privateKey'], $payload)]));
+  };
+  if ($assetClass === 'atlas.membership') {
+    if ($recorded(read_subscribers()['subscribers'] ?? [])) return;
+    append_subscriber(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'subscribedAt' => $credential['issuedAt']]);
+    $welcome('Welcome to ' . atlas_domain(), "Thanks for subscribing — you'll hear from us here whenever there's something worth sharing.");
+  } elseif ($assetClass === 'atlas.postoffice.membership') {
+    if ($recorded(read_postoffice_members()['members'] ?? [])) return;
+    append_postoffice_member(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'joinedAt' => $credential['issuedAt']]);
+    $welcome('Your address is live', 'Anyone who has your public key can now reach you through ' . atlas_domain() . "'s Global Mail — share it the way you'd share an email address.");
+  } elseif ($assetClass === 'atlas.tradingstation.membership') {
+    if ($recorded(read_tradingstation_members()['members'] ?? [])) return;
+    append_tradingstation_member(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'joinedAt' => $credential['issuedAt']]);
+    $welcome('Trading Station membership active', 'You can now submit a remote trade intent to ' . atlas_domain() . "'s Trading Station without standing at the stall — it'll hold your offer until a matching counterparty intent arrives.");
+  } elseif ($assetClass === 'atlas.demo.governance.membership') {
+    if ($recorded(read_governance_members()['members'] ?? [])) return;
+    append_governance_member(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'joinedAt' => $credential['issuedAt']]);
+  }
+}
+
 $ownerPublicKey = $body['ownerPublicKey'] ?? null;
 $assetClass = $body['assetClass'] ?? null;
 $quantity = $body['quantity'] ?? null;
@@ -47,9 +77,9 @@ if ($catalogEntry['fungible']) {
 
 // A repeated request id returns the credential already issued for it.
 $issueRequestId = atlas_parse_request_id($body);
-$issueReplayable = $issueRequestId !== null && $catalogEntry['fungible'];
+$issueReplayable = $issueRequestId !== null;
 $issueParams = ['ownerPublicKey' => $ownerPublicKey, 'assetClass' => $assetClass, 'quantity' => $mintQuantity];
-if ($catalogEntry['fungible']) atlas_txn_sweep();
+if ($catalogEntry['fungible'] || $issueReplayable) atlas_txn_sweep();
 $issueTxn = null;
 if ($catalogEntry['fungible'] && !$issueReplayable) {
   // A mint without a request id still journals; its transaction lease is taken
@@ -63,6 +93,7 @@ if ($issueReplayable) {
   $prior = atlas_replay_lookup($issueRequestId, 'issue', [], $issueParams);
   if ($prior !== null && isset($prior['conflict'])) send_json(409, ['error' => 'requestId was already used for a different request', 'code' => 'request-id-conflict']);
   if ($prior !== null) {
+    atlas_record_issuance($kp, $assetClass, json_decode($prior['responseJson'], true), $ownerPublicKey);
     http_response_code(200);
     header('Content-Type: application/json');
     cors_headers();
@@ -98,77 +129,12 @@ if ($catalogEntry['fungible'] && isset($catalogEntry['holdingCap'])) {
 // A first minting — never a reissue — so supersedes is always null here.
 // See atlas/asset/reissue.php (SPEC.md §5.1.1) for the other caller of
 // issue_asset(), where supersedes names the id being replaced.
-$journalled = (bool) $catalogEntry['fungible'];
+$journalled = (bool) $catalogEntry['fungible'] || $issueReplayable;
 $credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $mintQuantity, null, null, $journalled);
 if ($journalled) {
   atlas_commit_replacement($issueReplayable ? $issueRequestId : null, 'issue', [], null, $issueParams, [$credential], $credential, $issueTxn);
 }
 
-// Subscribing IS requesting this specific asset class (see the mail-system
-// notes in README.txt) — log the subscriber and auto-send a welcome
-// message the same way any other domain-to-subscriber mail works, so the
-// very first thing a new subscriber's wallet picks up on its next mail
-// check is confirmation the subscription worked.
-if ($assetClass === 'atlas.membership') {
-  append_subscriber(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'subscribedAt' => $credential['issuedAt']]);
-  $welcomePayload = [
-    'id' => 'urn:atlas:mail:' . atlas_uuid(),
-    'credentialId' => $credential['id'],
-    'subject' => 'Welcome to ' . atlas_domain(),
-    'body' => "Thanks for subscribing — you'll hear from us here whenever there's something worth sharing.",
-    'sentAt' => iso_now(),
-  ];
-  $welcomeSignature = atlas_sign($kp['privateKey'], $welcomePayload);
-  append_mail(array_merge($welcomePayload, ['signature' => $welcomeSignature]));
-}
-
-// Post Office (SPEC.md §11.3): claiming this specific class
-// IS registering for Global Mail here, same "requesting the class is the
-// whole registration step" shape as atlas.membership above — logged to
-// its own roster (see is_valid_postoffice_member(), the gate
-// atlas/postoffice/send.php checks every send against) plus the same
-// welcome-mail courtesy, addressed by THIS credential's id so it arrives
-// through the ordinary mail/check.php loop like anything else this wallet
-// already holds a credential for. Mirrors issuer-server/server.js's same
-// branch in its /atlas/asset/issue handler.
-if ($assetClass === 'atlas.postoffice.membership') {
-  append_postoffice_member(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'joinedAt' => $credential['issuedAt']]);
-  $welcomePayload = [
-    'id' => 'urn:atlas:mail:' . atlas_uuid(),
-    'credentialId' => $credential['id'],
-    'subject' => 'Your address is live',
-    'body' => 'Anyone who has your public key can now reach you through ' . atlas_domain() . "'s Global Mail — share it the way you'd share an email address.",
-    'sentAt' => iso_now(),
-  ];
-  $welcomeSignature = atlas_sign($kp['privateKey'], $welcomePayload);
-  append_mail(array_merge($welcomePayload, ['signature' => $welcomeSignature]));
-}
-
-// Trading Station: same shape as Post Office just
-// above: claiming this class IS joining, logged to its own roster, welcome
-// mail addressed by this credential's own id so it arrives through the
-// ordinary mail/check.php loop. Mirrors issuer-server/server.js's same
-// branch in its /atlas/asset/issue handler.
-if ($assetClass === 'atlas.tradingstation.membership') {
-  append_tradingstation_member(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'joinedAt' => $credential['issuedAt']]);
-  $welcomePayload = [
-    'id' => 'urn:atlas:mail:' . atlas_uuid(),
-    'credentialId' => $credential['id'],
-    'subject' => 'Trading Station membership active',
-    'body' => 'You can now submit a remote trade intent to ' . atlas_domain() . "'s Trading Station without standing at the stall — it'll hold your offer until a matching counterparty intent arrives.",
-    'sentAt' => iso_now(),
-  ];
-  $welcomeSignature = atlas_sign($kp['privateKey'], $welcomePayload);
-  append_mail(array_merge($welcomePayload, ['signature' => $welcomeSignature]));
-}
-
-// Governance/voting demo — same shape as Post Office/Trading Station
-// just above: claiming this class IS joining the assembly, logged to its
-// own roster (is_valid_governance_member(), the gate propose/vote below
-// check every request against). Mirrors issuer-server/server.js's same
-// branch in its /atlas/asset/issue handler.
-if ($assetClass === 'atlas.demo.governance.membership') {
-  append_governance_member(['credentialId' => $credential['id'], 'ownerPublicKey' => $ownerPublicKey, 'joinedAt' => $credential['issuedAt']]);
-}
+atlas_record_issuance($kp, $assetClass, $credential, $ownerPublicKey);
 
 send_json(200, $credential);
