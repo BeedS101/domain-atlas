@@ -21,7 +21,7 @@ successors without it. There is no half-applied state.
 ## Results
 
 Run: `xvfb-run -a node test/manual-gen1-wallet-crash-recovery.js both` (add `--quick` for fewer random kills).
-Current result: 304 checks pass, 0 fail; 18 gap probes (9 per issuer).
+Current result: 308 checks pass, 0 fail; 16 gap probes (8 per issuer).
 
 | Interruption (SIGKILL of the browser, restart on the same profile, unlock) | Result |
 |---|---|
@@ -35,6 +35,7 @@ Current result: 304 checks pass, 0 fail; 18 gap probes (9 per issuer).
 | issuer unreachable during recovery, wallet restarted again | entry kept with the same `requestId`, attempts counted, completes later |
 | mint, split and convert answers lost, browser killed | each completes once; amounts and the issuer's held count match |
 | wallet locked after the restart | recover, re-verify, consolidate, import, mint, convert while locked change nothing in storage |
+| lock fires while a non-fungible mint is in flight | refused as locked; the encrypted wallet is untouched |
 | lock fires while a consolidation is in flight | the arriving answer writes nothing; journal kept; completes after unlock |
 | old 20 g credentials re-imported from a file made before the consolidation | flagged spent, not counted |
 | the lost request re-sent with the same `requestId` | same signed credential, no extra revocation |
@@ -57,11 +58,9 @@ Ordered by consequence.
 2. **The journal is not in the backup** (`buildBackupPayload`; manual and automatic backups). A backup taken in the
    window, restored on a fresh profile, has the revoked predecessors and no journal: the wallet ends with 0 g of
    40 g (and, until a manual re-verify, one revoked 20 g credential still shown as live).
-3. **A lock during a non-fungible mint can erase the wallet.** `runPlainOperation` then `mutateWallet` reads the
-   wallet while locked (decrypt fails and returns `[]`) and writes back a plaintext list holding only the new item.
-   In the test the 40 g Iron balance disappeared from the wallet store (still valid at the issuer; recoverable only
-   from a backup). Fungible operations are safe because their commit refuses when the journal entry cannot be read.
-   The general hazard is any `mutateWallet` / `saveWallet` that runs while the wallet is locked.
+3. **A lock during a non-fungible mint can erase the wallet. Fixed.** Wallet, journal and file-ledger writes now
+   refuse when the stored value exists but cannot be read; see `docs/wallet-storage-safety.md` for the root cause,
+   the change and the remaining unsafe paths.
 4. **Nothing recovers the journal automatically after a restart and unlock.** It runs before the next operation
    for that owner, and in `reverifyAll` (the Re-verify button). Until then the wallet lists revoked predecessors as
    live and verified, and a spend of one of them is refused.
@@ -77,8 +76,6 @@ Ordered by consequence.
   behind the guarded folder).
 - Wallet: never delete a journal entry on a `revoked` refusal; keep it as "needs attention", show it, and keep it in
   the backup. Include `atlasPendingOps` in the backup payload and restore it.
-- Wallet: refuse `saveWallet`, `mutateWallet` and `journalAdd` when a stored blob is encrypted and no key is
-  available (the same rule the fungible commit already follows). Make the non-fungible mint refuse in that state.
 - Wallet: run `recoverPendingOperations` once after unlock and on a timer, and mark predecessors of a pending
   consolidation as "being replaced" in the display.
 - Issuer, for recovery without a journal or after expiry: an owner-signed endpoint that returns the unrevoked

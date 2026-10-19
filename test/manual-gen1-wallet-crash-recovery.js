@@ -16,12 +16,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { chromium } = require(process.env.PLAYWRIGHT_PATH || '/home/claude/.npm-global/lib/node_modules/playwright');
+const { Wallet, PASSWORD, sleep } = require('./lib/wallet-profile');
 const issuers = require('./lib/gen1-issuers');
 
-const EXT_PATH = path.resolve(__dirname, '..', 'extension');
 const IRON = 'atlas.element.iron', GOLD = 'atlas.element.gold';
-const PASSWORD = 'crash-recovery-pw';
 const args = process.argv.slice(2);
 const which = args.find((a) => /^(node|php|both)$/.test(a)) || 'node';
 const QUICK = args.includes('--quick');
@@ -31,116 +29,8 @@ let passes = 0, failures = 0;
 const gaps = [];
 const check = (name, ok, detail) => { if (ok) { passes++; console.log('PASS ' + name); } else { failures++; console.log('FAIL ' + name + (detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 600) : '')); } };
 const gap = (name, hit, detail) => { if (hit) { gaps.push(name); console.log('GAP  ' + name + (detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 600) : '')); } else console.log('OK   ' + name); };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rid = () => crypto.randomBytes(18).toString('base64url');
 
-// ---------------------------------------------------------------- browser
-class Wallet {
-  constructor(label) { this.label = label; this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-crash-' + label + '-')); this.context = null; this.sw = null; this.pub = null; }
-  async launch() {
-    for (const f of fs.readdirSync(this.dir)) if (/^Singleton/.test(f)) fs.rmSync(path.join(this.dir, f), { force: true });
-    const a = ['--disable-extensions-except=' + EXT_PATH, '--load-extension=' + EXT_PATH, '--no-sandbox'];
-    this.context = await chromium.launchPersistentContext(this.dir, { headless: false, executablePath: '/opt/pw-browsers/chromium', args: a, viewport: null });
-    await this.resolveSw();
-    return this;
-  }
-  // The extension's background worker, once the wallet library has loaded in it.
-  async resolveSw() {
-    const end = Date.now() + 25000;
-    while (Date.now() < end) {
-      let workers = this.context.serviceWorkers();
-      if (!workers.length) { try { await this.context.waitForEvent('serviceworker', { timeout: 2000 }); } catch (e) { /* retry */ } workers = this.context.serviceWorkers(); }
-      for (const sw of workers) {
-        if (!/^chrome-extension:/.test(sw.url())) continue;
-        try { if (await sw.evaluate(() => typeof AtlasWallet !== 'undefined')) { this.sw = sw; return sw; } } catch (e) { /* worker is going away */ }
-      }
-      await sleep(250);
-    }
-    throw new Error('the extension background worker did not come up');
-  }
-  // runs code with AtlasWallet in the extension's background context
-  async W(fn, arg) {
-    try { return await this.sw.evaluate(fn, arg); } catch (e) {
-      // The background worker may have been stopped and restarted by the browser between two calls.
-      if (!/AtlasWallet is not defined|Target (page|closed)|Execution context was destroyed|Session closed/.test(String(e && e.message))) throw e;
-      await this.resolveSw();
-      return this.sw.evaluate(fn, arg);
-    }
-  }
-  async create() { const r = await this.W((pw) => AtlasWallet.createIdentity(pw), PASSWORD); this.pub = r.publicKey; this.seed = r.seedPhrase; return this; }
-  async unlock() { return this.W((pw) => AtlasWallet.unlockIdentity(pw), PASSWORD); }
-  // SIGKILL every process of this profile, then wait until none is left.
-  async kill() {
-    spawnSync('pkill', ['-9', '-f', '--', '--user-data-dir=' + this.dir]);
-    try { await Promise.race([this.context.close(), sleep(1500)]); } catch (e) { /* already gone */ }
-    for (let i = 0; i < 40; i++) { if (spawnSync('pgrep', ['-f', '--', '--user-data-dir=' + this.dir]).status !== 0) break; await sleep(100); }
-    this.context = null; this.sw = null;
-  }
-  async restart(unlock) { await this.kill(); await this.launch(); if (unlock !== false) await this.unlock(); return this; }
-  async dispose() { try { if (this.context) await this.context.close(); } catch (e) { /* ignore */ } spawnSync('pkill', ['-9', '-f', '--', '--user-data-dir=' + this.dir]); fs.rmSync(this.dir, { recursive: true, force: true }); }
-
-  // ---- views
-  async rows(cls) {
-    return this.W(([k, c]) => AtlasWallet.getWallet(k).then((w) => w.filter((e) => e.credential.asset.class === c).map((e) => ({ id: e.credential.id, q: e.credential.quantity, spent: !!e.spent || !!(e.lastVerdict && e.lastVerdict.status === 'revoked'), verdict: e.lastVerdict && e.lastVerdict.status }))), [this.pub, cls]);
-  }
-  async live(cls) { return (await this.rows(cls)).filter((r) => !r.spent); }
-  async pending() { return this.W((k) => AtlasWallet.getPendingOperations(k), this.pub); }
-  async recover() { return this.W((k) => AtlasWallet.recoverPendingOperations(k), this.pub); }
-  async rawStores() { return this.W(() => chrome.storage.local.get(['atlasWallets', 'atlasPendingOps'])); }
-  async log() { return this.W(() => AtlasWallet.getActivityLog()); }
-  // Test-only fault injection inside the extension background context. The first four act on
-  // requests whose URL matches `source`; the last three act on the storage write that applies an
-  // answer and clears its journal entry in one step.
-  //   dropAnswer     the issuer receives and finishes the request, then the fetch fails (answer lost)
-  //   failFetch      the request is never sent (issuer unreachable)
-  //   hangFetch      the request is never sent and the code stalls (crash before sending)
-  //   delayAnswer    the answer is held back until release() (lets a test act in the middle)
-  //   hangCommit     the commit write never happens (crash after the answer, before it is stored)
-  //   failCommit     the commit write is rejected (storage error)
-  //   stallAfterCommit  the commit write happens, then the code stalls (crash right after it)
-  async inject(kind, source) {
-    await this.W(([k, src]) => {
-      const realFetch = globalThis.__realFetch || (globalThis.__realFetch = globalThis.fetch.bind(globalThis));
-      const realSet = globalThis.__realSet || (globalThis.__realSet = chrome.storage.local.set.bind(chrome.storage.local));
-      const re = new RegExp(src);
-      globalThis.__fault = { kind: k, hits: 0, bodies: [], committed: false, gate: null, release: null, armed: false };
-      const never = () => new Promise(() => {});
-      globalThis.fetch = async (url, opts) => {
-        const f = globalThis.__fault;
-        if (f && ['dropAnswer', 'failFetch', 'hangFetch', 'delayAnswer'].includes(f.kind) && re.test(String(url))) {
-          f.hits++; if (opts && opts.body) f.bodies.push(String(opts.body));
-          if (f.kind === 'hangFetch') return never();
-          if (f.kind === 'failFetch') throw new TypeError('Failed to fetch (issuer unreachable in test)');
-          const res = await realFetch(url, opts);
-          if (f.kind === 'dropAnswer') { await res.text(); throw new TypeError('Failed to fetch (answer lost in test)'); }
-          f.gate = new Promise((r) => { f.release = r; });
-          await f.gate;
-          return res;
-        }
-        if (f && ['hangCommit', 'failCommit', 'stallAfterCommit'].includes(f.kind) && re.test(String(url))) {
-          if (opts && opts.body) f.bodies.push(String(opts.body));
-          const res = await realFetch(url, opts);
-          f.armed = true;
-          return res;
-        }
-        return realFetch(url, opts);
-      };
-      chrome.storage.local.set = (items, cb) => {
-        const f = globalThis.__fault;
-        const isCommit = f && f.armed && items && typeof items === 'object' && 'atlasWallets' in items && 'atlasPendingOps' in items;
-        if (isCommit && f.kind === 'hangCommit') { f.hits++; return never(); }
-        if (isCommit && f.kind === 'failCommit') { f.hits++; return Promise.reject(new Error('QUOTA_BYTES quota exceeded (test)')); }
-        if (isCommit && f.kind === 'stallAfterCommit') { f.hits++; return realSet(items).then(() => { f.committed = true; return never(); }); }
-        return realSet(items, cb);
-      };
-    }, [kind, source || '^$']);
-  }
-  async clearFault() { await this.W(() => { const f = globalThis.__fault; if (f && f.release) f.release(); globalThis.__fault = null; }); }
-  async faultInfo() { return this.W(() => { const f = globalThis.__fault; return f ? { hits: f.hits, committed: f.committed, bodies: f.bodies } : { hits: 0, committed: false, bodies: [] }; }); }
-  async release() { await this.W(() => { const f = globalThis.__fault; if (f && f.release) f.release(); }); }
-  async waitHits(n, ms) { const end = Date.now() + (ms || 15000); while (Date.now() < end) { if ((await this.faultInfo()).hits >= n) return true; await sleep(100); } return false; }
-  async waitCommitted(ms) { const end = Date.now() + (ms || 15000); while (Date.now() < end) { if ((await this.faultInfo()).committed) return true; await sleep(100); } return false; }
-}
 
 // ---------------------------------------------------------------- issuer
 let nextPort = 20000 + (process.pid % 500) * 20;
@@ -514,7 +404,8 @@ async function main() {
       await w.unlock();
       const iron = await w.live(IRON);
       const wear = await w.rows('atlas.wearable');
-      gap('a lock that fires while a non-fungible mint is in flight can overwrite the encrypted wallet (Iron held: ' + sum(iron) + ' g of 40; wearable stored: ' + wear.length + ')', sum(iron) !== 40, { out, iron, wear });
+      check('a lock that fires while a non-fungible mint is in flight leaves the encrypted wallet intact (Iron held: ' + sum(iron) + ' g of 40)', sum(iron) === 40, { out, iron, wear });
+      check('the refused mint reports the wallet as locked', /locked/i.test(String(out)), { out });
     });
 
     // ---- 12. the backup does not carry the journal ----

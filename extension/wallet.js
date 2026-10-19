@@ -1044,6 +1044,57 @@ const AtlasWallet = (() => {
     return !!(entry && entry.credential && entry.credential.credential === 'domain-atlas-asset/1.0');
   }
 
+  // ---------- never overwrite what cannot be read ----------
+  // getWallet() and the other display reads turn a wallet that is locked, undecryptable or corrupted
+  // into an empty list, which is right for showing it and wrong for changing it: a write built on
+  // that list would replace the real contents. Every change to the wallet list, the pending-operations
+  // journal and the exported-files ledger therefore starts from readStoredListForWrite(), which tells
+  // an empty store (nothing ever written) apart from one that exists but cannot be read, and throws
+  // instead of returning an empty list for the second. Nothing is written when it throws.
+  //   code 'wallet-locked'      a local identity exists and is not unlocked
+  //   code 'wallet-unreadable'  the stored value is corrupted, fails to decrypt, or needs a key this
+  //                             identity does not have
+  function storageError(code, message) {
+    const err = new Error(message);
+    err.code = code;
+    err.walletStorage = true;
+    return err;
+  }
+  const WALLET_LOCKED_MESSAGE = 'The wallet is locked. Unlock it to make changes; nothing was changed.';
+  const WALLET_UNREADABLE_MESSAGE = 'The stored wallet data could not be read or decrypted, so nothing was changed and the stored data was left as it is.';
+
+  async function readStoredListForWrite(storeName, stored) {
+    const identity = await getIdentity();
+    if (!identity && (await getIdentityMode()) !== null) throw storageError('wallet-locked', WALLET_LOCKED_MESSAGE);
+    if (stored === undefined || stored === null) return { identity, list: [] };
+    if (Array.isArray(stored)) return { identity, list: stored };
+    if (typeof stored !== 'object' || !stored.__atlasEncrypted) throw storageError('wallet-unreadable', WALLET_UNREADABLE_MESSAGE);
+    if (!identity) throw storageError('wallet-locked', WALLET_LOCKED_MESSAGE);
+    if (identity.mode !== 'local' || !identity.privateKeyJwk) throw storageError('wallet-unreadable', WALLET_UNREADABLE_MESSAGE);
+    let value;
+    try {
+      const key = await deriveAtRestKey(identity.privateKeyJwk, storeName);
+      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlDecode(stored.iv) }, key, b64urlDecode(stored.ciphertext));
+      value = JSON.parse(new TextDecoder().decode(plaintext));
+    } catch (err) {
+      throw storageError('wallet-unreadable', WALLET_UNREADABLE_MESSAGE);
+    }
+    if (!Array.isArray(value)) throw storageError('wallet-unreadable', WALLET_UNREADABLE_MESSAGE);
+    return { identity, list: value };
+  }
+
+  // The wallet list for a change that will be written back (see above); throws instead of returning [].
+  async function getWalletStrict(ownerPublicKey) {
+    const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
+    const { list } = await readStoredListForWrite('wallet', (atlasWallets || {})[ownerPublicKey]);
+    return list.filter(isPostMergeAssetCredential);
+  }
+
+  // Checked before anything is sent to an issuer that would have to be stored afterwards.
+  async function assertWalletWritable(ownerPublicKey) {
+    await getWalletStrict(ownerPublicKey);
+  }
+
   // Encrypted at rest (2026-09-14, second round) — the actual credentials/
   // currency held here are arguably the single most sensitive thing this
   // wallet stores locally besides the private key itself, so this is a
@@ -1060,10 +1111,14 @@ const AtlasWallet = (() => {
     const { atlasWallets, atlasResourceWallets } = await chrome.storage.local.get(['atlasWallets', 'atlasResourceWallets']);
     const wallets = atlasWallets || {};
     const identity = await getIdentity();
+    const stored = wallets[ownerPublicKey];
+    // A stored value that is neither a list nor an encrypted envelope is shown as empty and left exactly as it is.
+    if (stored !== undefined && stored !== null && !Array.isArray(stored) && !(typeof stored === 'object' && stored.__atlasEncrypted)) return [];
     const entries = await decryptAtRestAndMigrate(identity, 'wallet', wallets[ownerPublicKey], [], async (v) => {
       wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', v);
       await chrome.storage.local.set({ atlasWallets: wallets });
     });
+    if (!Array.isArray(entries)) return [];
     const cleaned = entries.filter(isPostMergeAssetCredential);
     if (cleaned.length !== entries.length) {
       wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', cleaned);
@@ -1105,10 +1160,23 @@ const AtlasWallet = (() => {
     return run;
   }
 
-  async function saveWallet(ownerPublicKey, entries) {
+  // Replaces the stored list. Refuses when what is stored now cannot be read (locked, corrupted,
+  // undecryptable). `replaceUnreadable` is for restoring a backup only: the unreadable value is
+  // first copied to atlasWalletQuarantine so it is not destroyed.
+  async function saveWallet(ownerPublicKey, entries, opts) {
     const { atlasWallets } = await chrome.storage.local.get('atlasWallets');
     const wallets = atlasWallets || {};
-    const identity = await getIdentity();
+    let identity;
+    try {
+      ({ identity } = await readStoredListForWrite('wallet', wallets[ownerPublicKey]));
+    } catch (err) {
+      if (!(opts && opts.replaceUnreadable) || err.code !== 'wallet-unreadable') throw err;
+      identity = await getIdentity();
+      const { atlasWalletQuarantine } = await chrome.storage.local.get('atlasWalletQuarantine');
+      const quarantine = atlasWalletQuarantine || {};
+      quarantine[ownerPublicKey] = (quarantine[ownerPublicKey] || []).concat([{ savedAt: new Date().toISOString(), store: 'wallet', blob: wallets[ownerPublicKey] }]).slice(-3);
+      await chrome.storage.local.set({ atlasWalletQuarantine: quarantine });
+    }
     wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', entries);
     await chrome.storage.local.set({ atlasWallets: wallets });
     notifyWalletChanged(ownerPublicKey);
@@ -1121,7 +1189,7 @@ const AtlasWallet = (() => {
   // the write follows a network call.
   async function mutateWallet(ownerPublicKey, fn) {
     return withWalletLock(async () => {
-      const list = await getWallet(ownerPublicKey);
+      const list = await getWalletStrict(ownerPublicKey);
       const next = (await fn(list)) || list;
       await saveWallet(ownerPublicKey, next);
       return next;
@@ -1170,8 +1238,7 @@ const AtlasWallet = (() => {
     await withWalletLock(async () => {
       const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
       const all = atlasPendingOps || {};
-      const identity = await getIdentity();
-      const list = await decryptAtRest(identity, 'pendingOps', all[ownerPublicKey], []);
+      const { identity, list } = await readStoredListForWrite('pendingOps', all[ownerPublicKey]);
       list.push(entry);
       all[ownerPublicKey] = await encryptAtRest(identity, 'pendingOps', list);
       await chrome.storage.local.set({ atlasPendingOps: all });
@@ -1182,8 +1249,7 @@ const AtlasWallet = (() => {
     await withWalletLock(async () => {
       const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
       const all = atlasPendingOps || {};
-      const identity = await getIdentity();
-      const list = await decryptAtRest(identity, 'pendingOps', all[ownerPublicKey], []);
+      const { identity, list } = await readStoredListForWrite('pendingOps', all[ownerPublicKey]);
       const entry = list.find((e) => e.requestId === requestId);
       if (!entry) return;
       if (patch === null) list.splice(list.indexOf(entry), 1);
@@ -1200,10 +1266,17 @@ const AtlasWallet = (() => {
   // (requestId null) it just applies the changes.
   async function commitOperation(journalOwner, requestId, changes) {
     return withWalletLock(async () => {
-      const identity = await getIdentity();
+      const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
+      const wallets = stored.atlasWallets || {};
+      let identity = null;
       const next = new Map();
       for (const change of changes) {
-        const base = next.get(change.owner) || await getWallet(change.owner);
+        let base = next.get(change.owner);
+        if (!base) {
+          const read = await readStoredListForWrite('wallet', wallets[change.owner]);
+          identity = read.identity;
+          base = read.list.filter(isPostMergeAssetCredential);
+        }
         const drop = new Set(change.remove || []);
         const list = base.filter((e) => !drop.has(e.credential.id));
         for (const add of change.add || []) {
@@ -1211,16 +1284,14 @@ const AtlasWallet = (() => {
         }
         next.set(change.owner, list);
       }
-      const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
       const pendingAll = stored.atlasPendingOps || {};
       if (requestId) {
-        const pending = await decryptAtRest(identity, 'pendingOps', pendingAll[journalOwner], []);
+        const pending = (await readStoredListForWrite('pendingOps', pendingAll[journalOwner])).list;
         const index = pending.findIndex((e) => e.requestId === requestId);
         if (index < 0) return false;
         pending.splice(index, 1);
         pendingAll[journalOwner] = await encryptAtRest(identity, 'pendingOps', pending);
       }
-      const wallets = stored.atlasWallets || {};
       for (const [owner, list] of next) wallets[owner] = await encryptAtRest(identity, 'wallet', list);
       await chrome.storage.local.set(requestId ? { atlasWallets: wallets, atlasPendingOps: pendingAll } : { atlasWallets: wallets });
       for (const owner of next.keys()) notifyWalletChanged(owner);
@@ -1270,7 +1341,7 @@ const AtlasWallet = (() => {
       text = await res.text();
     } catch (err) {
       clearTimeout(timer);
-      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: String(err && err.message || err).slice(0, 200), lastAttemptAt: new Date().toISOString() });
+      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: String(err && err.message || err).slice(0, 200), lastAttemptAt: new Date().toISOString() }).catch(() => {});
       throw operationError(entry.label, 0, 'no answer from ' + entry.domain + '; the request is saved and will be retried', null, { pending: true, requestId: entry.requestId });
     }
     clearTimeout(timer);
@@ -1281,21 +1352,32 @@ const AtlasWallet = (() => {
       for (const change of changes) {
         for (const add of change.add || []) add.lastVerdict = await verifyCredential(add.credential);
       }
-      const applied = await commitOperation(entry.owner, entry.requestId, changes);
+      let applied;
+      try {
+        applied = await commitOperation(entry.owner, entry.requestId, changes);
+      } catch (err) {
+        if (!err || !err.walletStorage) throw err;
+        // The issuer has finished this request and keeps its answer; the entry stays in the journal and
+        // is applied by the next recovery once the wallet can be read and written again.
+        throw operationError(entry.label, 0, err.message + ' The issuer has completed it; it will be applied when the wallet is unlocked.', null, { pending: true, requestId: entry.requestId, code: err.code });
+      }
       return { data, applied, changes };
     }
     const unsettled = res.status >= 500 || (data && data.code === 'busy');
     if (unsettled) {
-      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: ('HTTP ' + res.status + ' ' + text).slice(0, 200), lastAttemptAt: new Date().toISOString() });
+      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: ('HTTP ' + res.status + ' ' + text).slice(0, 200), lastAttemptAt: new Date().toISOString() }).catch(() => {});
       throw operationError(entry.label, res.status, text, data, { pending: true, requestId: entry.requestId });
     }
-    await journalPatch(entry.owner, entry.requestId, null);
+    await journalPatch(entry.owner, entry.requestId, null).catch(() => {});
     throw operationError(entry.label, res.status, text, data, { requestId: entry.requestId });
   }
 
   // Journals, sends and applies one replacement request.
   //   spec: { owner, toOwner?, kind, label, domain, path, body, predecessors }
   async function runIssuerOperation(spec) {
+    // Nothing is sent unless the result can be stored: the wallet list and the journal must be readable.
+    await assertWalletWritable(spec.owner);
+    if (spec.toOwner && spec.toOwner !== spec.owner) await assertWalletWritable(spec.toOwner);
     await recoverPendingOperations(spec.owner);
     const requestId = newRequestId();
     const entry = {
@@ -1359,6 +1441,7 @@ const AtlasWallet = (() => {
   // and local bookkeeping, not a second copy of that rule.
   async function mintAsset(role, issuerDomain, assetClass, quantity) {
     const owner = await identityOf(role);
+    await assertWalletWritable(owner.publicKey);
     const wallet = await getWallet(owner.publicKey);
     // Attached for every fungible mint (cheap, and the issuer decides whether
     // it needs it): the issuer counts holdings from its own records and uses
@@ -1382,10 +1465,17 @@ const AtlasWallet = (() => {
     } else {
       credential = await runPlainOperation({ label: 'Mint', domain: issuerDomain, path: '/atlas/asset/issue', body });
       verdict = await verifyCredential(credential);
-      await mutateWallet(owner.publicKey, (list) => {
-        if (!list.some((e) => e.credential.id === credential.id)) list.push({ credential, lastVerdict: verdict });
-        return list;
-      });
+      try {
+        await mutateWallet(owner.publicKey, (list) => {
+          if (!list.some((e) => e.credential.id === credential.id)) list.push({ credential, lastVerdict: verdict });
+          return list;
+        });
+      } catch (err) {
+        // The issuer has signed it but it cannot be stored (the wallet was locked or became unreadable while
+        // the request was in flight). Nothing stored is touched; the credential is handed to the caller.
+        if (err && err.walletStorage) err.issuedCredential = credential;
+        throw err;
+      }
     }
     const consolidation = await autoConsolidateAssetWallet(owner.publicKey);
     await logActivity('asset', 'Minted ' + (quantity !== undefined ? quantity + ' ' : '') + assetClass + ' from ' + issuerDomain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
@@ -1429,6 +1519,7 @@ const AtlasWallet = (() => {
   // handleInteractable()) never has to hardcode a price of its own either.
   async function purchaseAsset(role, issuerDomain, purchasedClass, quantity) {
     const owner = await identityOf(role);
+    await assertWalletWritable(owner.publicKey);
     const info = await fetchAssetClassInfo(issuerDomain, purchasedClass);
     if (!info || !info.purchase) throw new Error('This class is not for sale.');
     const qty = quantity === undefined ? 1 : quantity;
@@ -2183,6 +2274,7 @@ const AtlasWallet = (() => {
   // (a clicked ground point for the 2D renderer, or a placeholder for 3D —
   // see viewer.js's beginDropPlacement).
   async function dropItem(credential, worldDomain, world, position) {
+    await assertWalletWritable((await identityOf('self')).publicKey);
     const payload = { action: 'drop', credentialId: credential.id, world, droppedAt: new Date().toISOString() };
     const proof = await signWithSelf(payload);
     const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drop', {
@@ -2442,6 +2534,7 @@ const AtlasWallet = (() => {
   // this call, so their own remainder/received apply directly, right here,
   // the moment the claim succeeds.
   async function claimTradeListing(issuerDomain, membership, listing, balance, expiresMinutes) {
+    await assertWalletWritable((await identityOf('self')).publicKey);
     const intent = await proposeIntent('self', listing.want, listing.offer, listing.posterPublicKey, expiresMinutes);
     const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/claim', {
       method: 'POST',
@@ -3597,7 +3690,7 @@ const AtlasWallet = (() => {
       const verdicts = new Map();
       for (const entry of await getWallet(who.publicKey)) verdicts.set(entry.credential.id, await verifyCredential(entry.credential));
       await withWalletLock(async () => {
-        const wallet = await getWallet(who.publicKey);
+        const wallet = await getWalletStrict(who.publicKey);
         for (const entry of wallet) if (verdicts.has(entry.credential.id)) entry.lastVerdict = verdicts.get(entry.credential.id);
         await saveWallet(who.publicKey, wallet);
       });
@@ -3690,7 +3783,7 @@ const AtlasWallet = (() => {
   async function saveAssetFiles(ownerPublicKey, records) {
     const { atlasAssetFiles } = await chrome.storage.local.get('atlasAssetFiles');
     const all = atlasAssetFiles || {};
-    const identity = await getIdentity();
+    const { identity } = await readStoredListForWrite('assetFiles', all[ownerPublicKey]);
     all[ownerPublicKey] = await encryptAtRest(identity, 'assetFiles', records.slice(0, ASSET_FILE_LEDGER_MAX));
     await chrome.storage.local.set({ atlasAssetFiles: all });
   }
@@ -4595,7 +4688,7 @@ const AtlasWallet = (() => {
     const owner = publicKey;
     const d = payload.data || {};
     await Promise.all([
-      withWalletLock(() => saveWallet(owner, d.wallet || [])),
+      withWalletLock(() => saveWallet(owner, d.wallet || [], { replaceUnreadable: true })),
       withMessageLock(() => saveMail(owner, d.mail || [])),
       saveSentMail(owner, d.sentMail || []),
       saveSubmittedTrades(owner, d.submittedTrades || []),
