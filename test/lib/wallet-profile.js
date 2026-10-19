@@ -14,7 +14,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------- browser
 class Wallet {
-  constructor(label, opts) { this.label = label; this.extPath = (opts && opts.extPath) || EXT_PATH; this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-crash-' + label + '-')); this.context = null; this.sw = null; this.pub = null; }
+  constructor(label, opts) { this.label = label; this.extPath = (opts && opts.extPath) || EXT_PATH; this.autoRecovery = !!(opts && opts.autoRecovery); this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-crash-' + label + '-')); this.context = null; this.sw = null; this.pub = null; }
   async launch() {
     for (const f of fs.readdirSync(this.dir)) if (/^Singleton/.test(f)) fs.rmSync(path.join(this.dir, f), { force: true });
     const a = ['--disable-extensions-except=' + this.extPath, '--load-extension=' + this.extPath, '--no-sandbox'];
@@ -46,7 +46,17 @@ class Wallet {
     }
   }
   async create() { const r = await this.W((pw) => AtlasWallet.createIdentity(pw), PASSWORD); this.pub = r.publicKey; this.seed = r.seedPhrase; return this; }
-  async unlock() { return this.W((pw) => AtlasWallet.unlockIdentity(pw), PASSWORD); }
+  // Unlocks the wallet. The extension recovers pending operations by itself right after an unlock
+  // (queued with setTimeout 0 in unlockIdentity); suites that test the manual recovery paths keep that
+  // inert by default, and the automatic recovery suite sets `autoRecovery = true`.
+  async unlock() {
+    if (this.autoRecovery) return this.W((pw) => AtlasWallet.unlockIdentity(pw), PASSWORD);
+    return this.W((pw) => {
+      const real = globalThis.setTimeout;
+      globalThis.setTimeout = (fn, ms, ...rest) => ((typeof fn === 'function' && ms === 0 && /recoverAfterUnlock/.test(String(fn))) ? 0 : real(fn, ms, ...rest));
+      return AtlasWallet.unlockIdentity(pw).finally(() => { globalThis.setTimeout = real; });
+    }, PASSWORD);
+  }
   // SIGKILL every process of this profile, then wait until none is left.
   async kill() {
     spawnSync('pkill', ['-9', '-f', '--', '--user-data-dir=' + this.dir]);

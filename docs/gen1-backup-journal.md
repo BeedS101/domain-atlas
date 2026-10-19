@@ -34,7 +34,8 @@ returns the 40 g credential for that request id.
   (`saveWallet(..., { extraWrites })`). A failed or interrupted restore therefore leaves either the old pair or the new
   pair, never a restored wallet without its journal.
 - **Nothing is retried because a backup was restored.** The restore sends no request. A restored `pending` entry is
-  recovered by the ordinary paths (the next operation of that owner, Re-verify, or an explicit retry); a restored
+  recovered by the ordinary paths (the next operation of that owner, Re-verify, an explicit retry) or by the automatic
+  recovery that follows the next unlock, or the end of a restore in the wallet page (`docs/gen1-auto-recovery.md`); a restored
   `needs-attention` entry stays `needs-attention` and is only sent again by `retryPendingOperation`.
 
 ## Restore rules

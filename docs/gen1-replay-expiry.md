@@ -51,7 +51,8 @@ While an entry is `pending` or `needs-attention`:
 - consolidate, split, convert, drop, trade submit, trade claim, purchase and delete of one of them are refused with
   `code: 'unresolved-operation'` before anything is sent or written. The check reads the journal strictly, so an
   unreadable journal refuses as well (`wallet-unreadable`);
-- recovery does not send a `needs-attention` entry again. `retryPendingOperation(owner, requestId)` does, when the
+- recovery, including the automatic recovery after unlock (`docs/gen1-auto-recovery.md`), does not send a
+  `needs-attention` entry again. `retryPendingOperation(owner, requestId)` does, when the
   person asks. It can still apply a late answer (once), and it ends the entry if the refusal can now be shown to be
   pre-commit.
 

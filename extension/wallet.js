@@ -509,6 +509,7 @@ const AtlasWallet = (() => {
     // just above is silent for the same reason: it's a transparent
     // security upgrade to an existing identity, not a new event the person
     // did anything about.
+    queueRecoveryAfterUnlock();
     return { publicKey };
   }
 
@@ -1504,8 +1505,12 @@ const AtlasWallet = (() => {
       body: Object.assign({}, spec.body, { requestId }),
       createdAt: new Date().toISOString(), attempts: 0
     };
-    await journalAdd(spec.owner, entry);
-    return sendOperation(entry, { fresh: true });
+    // The slot is held from the moment the entry exists until its first send has ended, so a recovery
+    // running in another page does not send the same request at the same time.
+    return withSlot(OPERATION_SLOT + requestId, async () => {
+      await journalAdd(spec.owner, entry);
+      return sendOperation(entry, { fresh: true });
+    }, null, true);
   }
 
   // A request that does not repeat safely (a non-fungible mint: the issuer
@@ -1519,15 +1524,64 @@ const AtlasWallet = (() => {
     return res.json();
   }
 
-  const recoveringOwners = new Set();
+  // Single-flight coordination. Every extension page and the background worker share one origin, so a
+  // Web Lock taken in one is seen by all of them. `wait` queues behind the holder instead of giving up.
+  const slotsHeld = new Set();
+  const OPERATION_SLOT = 'atlas-op:';
+  const RECOVERY_SLOT = 'atlas-recovery:';
+  async function withSlot(name, fn, busyValue, wait) {
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      return wait ? navigator.locks.request(name, fn) : navigator.locks.request(name, { ifAvailable: true }, (lock) => (lock ? fn() : busyValue));
+    }
+    if (!wait && slotsHeld.has(name)) return busyValue;
+    slotsHeld.add(name);
+    try { return await fn(); } finally { slotsHeld.delete(name); }
+  }
+  async function slotNamesHeld(prefix) {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.query) {
+        return new Set(((await navigator.locks.query()).held || []).map((l) => l.name).filter((n) => n.startsWith(prefix)));
+      }
+    } catch (err) { /* fall through */ }
+    return new Set([...slotsHeld].filter((n) => n.startsWith(prefix)));
+  }
+
+  // Automatic recovery does not send an entry again within this long after its last automatic attempt.
+  // The attempt times are kept in session storage: shared by every page, and gone when the browser
+  // closes, so the first unlock of a browser session always tries once.
+  const AUTO_RECOVERY_MIN_GAP_MS = 2 * 60 * 1000;
+  const IN_FLIGHT = { inFlight: true };
+  async function autoAttemptTimes() {
+    try { return (await chrome.storage.session.get('atlasAutoRecovery')).atlasAutoRecovery || {}; } catch (err) { return {}; }
+  }
+  async function markAutoAttempt(requestId) {
+    try {
+      const times = await autoAttemptTimes();
+      const now = Date.now();
+      for (const id of Object.keys(times)) if (now - times[id] > 10 * AUTO_RECOVERY_MIN_GAP_MS) delete times[id];
+      times[requestId] = now;
+      await chrome.storage.session.set({ atlasAutoRecovery: times });
+    } catch (err) { /* best effort: the worst case is one more attempt */ }
+  }
+
+  // A short note in the activity log for a recovered operation, and what was checked on the result.
+  async function noteRecovered(entry, done) {
+    if (!done || !done.applied) return;
+    const verified = done.changes.every((c) => (c.add || []).every((a) => a.lastVerdict && a.lastVerdict.valid));
+    await logActivity('asset', 'Recovered an interrupted ' + entry.kind + ' (' + entry.domain + '): the issuer had already completed it' + (verified ? ' (signature and revocation status checked)' : ' (could not be fully verified yet)'),
+      { recovered: true, kind: entry.kind, domain: entry.domain, verified });
+  }
+
   // Sends again every journalled request for this owner that is still waiting for an answer.
   // Entries that need attention are not sent again here (see retryPendingOperation). Returns
   // [{ requestId, kind, status: 'completed' | 'pending' | 'failed' | 'needs-attention', error? }].
-  async function recoverPendingOperations(ownerPublicKey) {
-    if (recoveringOwners.has(ownerPublicKey)) return [];
-    recoveringOwners.add(ownerPublicKey);
-    const outcomes = [];
-    try {
+  //   opts.minGapMs  automatic mode: leave alone an entry that an automatic attempt asked about more recently than this
+  // An entry already being sent by a page (or by another recovery) is left to it. Nothing is sent
+  // once the wallet is locked or its active identity is no longer this owner.
+  async function recoverPendingOperations(ownerPublicKey, opts) {
+    const minGap = opts && opts.minGapMs ? opts.minGapMs : 0;
+    return withSlot(RECOVERY_SLOT + ownerPublicKey, async () => {
+      const outcomes = [];
       for (const entry of await readPendingOps(ownerPublicKey)) {
         if (!usablePendingEntry(entry)) {
           outcomes.push({ requestId: entry && entry.requestId || null, kind: entry && entry.kind || null, status: 'needs-attention', error: 'unreadable journal entry, left as it is' });
@@ -1537,10 +1591,26 @@ const AtlasWallet = (() => {
           outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'needs-attention' });
           continue;
         }
+        if (minGap) {
+          const last = (await autoAttemptTimes())[entry.requestId];
+          if (last && Date.now() - last < minGap) {
+            outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'pending', skipped: 'recent-attempt' });
+            continue;
+          }
+        }
+        const active = await getIdentity();
+        if (!active || active.publicKey !== ownerPublicKey) {
+          outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'pending', skipped: 'wallet-not-active' });
+          continue;
+        }
         try {
-          const done = await sendOperation(entry);
+          const done = await withSlot(OPERATION_SLOT + entry.requestId, async () => {
+            if (minGap) await markAutoAttempt(entry.requestId);
+            return sendOperation(entry);
+          }, IN_FLIGHT);
+          if (done === IN_FLIGHT) { outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'pending', skipped: 'in-flight' }); continue; }
           outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'completed', applied: done.applied });
-          if (done.applied) await logActivity('asset', 'Recovered an interrupted ' + entry.kind + ' (' + entry.domain + '): the issuer had already completed it');
+          await noteRecovered(entry, done);
         } catch (err) {
           if (err.settledElsewhere) { outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'completed', applied: false }); continue; }
           outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: err.needsAttention ? 'needs-attention' : (err.pending ? 'pending' : 'failed'), error: err.message });
@@ -1548,19 +1618,19 @@ const AtlasWallet = (() => {
           else if (!err.pending) await logActivity('asset', 'An interrupted ' + entry.kind + ' at ' + entry.domain + ' could not be completed: ' + err.message.slice(0, 160));
         }
       }
-    } finally {
-      recoveringOwners.delete(ownerPublicKey);
-    }
-    return outcomes;
+      return outcomes;
+    }, []);
   }
 
   // Asks the issuer once more for one journalled request, including one that needs attention. Used
-  // when the person chooses to; applied at most once, like any recovery.
+  // when the person chooses to; applied at most once, like any recovery. Waits behind a send of the
+  // same request that is already running.
   async function retryPendingOperation(ownerPublicKey, requestId) {
     const entry = (await readPendingOps(ownerPublicKey)).find((e) => e && e.requestId === requestId);
     if (!usablePendingEntry(entry)) throw new Error('No such pending request.');
     try {
-      const done = await sendOperation(entry);
+      const done = await withSlot(OPERATION_SLOT + requestId, () => sendOperation(entry), null, true);
+      await noteRecovered(entry, done);
       return { requestId, kind: entry.kind, status: 'completed', applied: done.applied };
     } catch (err) {
       if (err.settledElsewhere) return { requestId, kind: entry.kind, status: 'completed', applied: false };
@@ -1568,14 +1638,53 @@ const AtlasWallet = (() => {
     }
   }
 
+  // The lifecycle entry point: called when the wallet has just been unlocked, and when a wallet page
+  // opens while it is already unlocked. Sends nothing unless the wallet is unlocked, the wallet list
+  // and the journal can both be read, and some entry is waiting for an answer. An entry that needs
+  // attention is never sent from here, and one already asked about by an automatic attempt within
+  // AUTO_RECOVERY_MIN_GAP_MS is left for later, so a failing issuer is not asked again by every page
+  // that opens or by every unlock.
+  async function recoverAfterUnlock() {
+    const identity = await getIdentity();
+    if (!identity) return { ran: false, reason: 'locked', outcomes: [] };
+    const owner = identity.publicKey;
+    let journal;
+    try {
+      await getWalletStrict(owner);
+      const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
+      journal = (await readStoredListForWrite('pendingOps', (atlasPendingOps || {})[owner])).list;
+    } catch (err) {
+      return { ran: false, reason: err && err.code === 'wallet-locked' ? 'locked' : 'unreadable', outcomes: [] };
+    }
+    if (!journal.some((e) => usablePendingEntry(e) && e.state !== 'needs-attention')) return { ran: false, reason: 'nothing-to-recover', outcomes: [] };
+    const outcomes = await recoverPendingOperations(owner, { minGapMs: AUTO_RECOVERY_MIN_GAP_MS });
+    return { ran: true, reason: null, outcomes };
+  }
+
+  function queueRecoveryAfterUnlock() {
+    setTimeout(() => { recoverAfterUnlock().catch(() => { /* retried at the next unlock or wallet page */ }); }, 0);
+  }
+
+  // What the wallet can say about its unfinished operations, for display.
+  //   state      'pending' (outcome not confirmed), 'needs-attention' or 'unreadable' (stored element that cannot be used)
+  //   recovering true while some page is sending this request now
   async function getPendingOperations(ownerPublicKey) {
+    const sending = await slotNamesHeld(OPERATION_SLOT);
     return (await readPendingOps(ownerPublicKey)).filter((e) => e && typeof e === 'object').map((e) => ({
       requestId: typeof e.requestId === 'string' ? e.requestId : null, kind: e.kind || null, domain: e.domain || null,
-      createdAt: e.createdAt || null, attempts: e.attempts || 0, lastError: e.lastError || null,
+      createdAt: e.createdAt || null, attempts: e.attempts || 0, lastError: e.lastError || null, lastAttemptAt: e.lastAttemptAt || null,
       state: !usablePendingEntry(e) ? 'unreadable' : (e.state === 'needs-attention' ? 'needs-attention' : 'pending'),
+      recovering: typeof e.requestId === 'string' && sending.has(OPERATION_SLOT + e.requestId),
       predecessors: Array.isArray(e.predecessors) ? e.predecessors.slice() : [],
       attention: e.attention || null
     }));
+  }
+
+  // Recently recovered operations, from the activity log: [{ at, kind, domain, verified }].
+  async function getRecoveredOperations(sinceMs) {
+    const since = Date.now() - (sinceMs || 7 * 24 * 3600 * 1000);
+    return (await getActivityLog()).filter((e) => e && e.meta && e.meta.recovered === true && Date.parse(e.at) >= since)
+      .slice(0, 5).map((e) => ({ at: e.at, kind: e.meta.kind, domain: e.meta.domain, verified: !!e.meta.verified }));
   }
 
   // ---------- the pending journal in backups ----------
@@ -9930,7 +10039,7 @@ const AtlasWallet = (() => {
     getActivityLog, clearActivityLog,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
-    autoConsolidateAssetWallet, recoverPendingOperations, retryPendingOperation, getPendingOperations, getPendingOpsQuarantine, getConsolidationStatus,
+    autoConsolidateAssetWallet, recoverPendingOperations, retryPendingOperation, recoverAfterUnlock, getPendingOperations, getRecoveredOperations, getPendingOpsQuarantine, getConsolidationStatus,
     getLoadout, loadItem, unloadItem,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,

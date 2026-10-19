@@ -429,6 +429,13 @@
   .wallet-item .verdict.valid, .info-card .verdict.valid { color: #57a593; }
   .wallet-item .verdict.invalid, .info-card .verdict.invalid { color: #e08a4c; }
   .wallet-item .verdict.unavailable, .info-card .verdict.unavailable { color: #c9a227; }
+  /* Unfinished operations: the status is always written out; the symbol and the border style repeat it. */
+  .pending-ops-list { list-style: none; margin: 0; padding: 0; }
+  .pending-ops-list li { border: 1px solid #2c3c44; border-radius: 8px; padding: 10px; margin-bottom: 6px; }
+  .pending-ops-list li[data-state="needs-attention"] { border-style: dashed; border-width: 2px; }
+  .pending-ops-list .op-status { font-weight: 600; }
+  .wallet-item.held-back { border-style: dashed; }
+  .held-note { font-size: 11px; margin-top: 6px; font-weight: 600; }
   .wallet-item .item-actions, .info-card .item-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
   .wallet-item .item-actions button, .info-card .item-actions button { flex: 1; font-size: 11px; padding: 6px 8px; min-width: 70px; }
   .wallet-item .item-actions button.danger-btn, .info-card .item-actions button.danger-btn { border-color: #c0405a; color: #f2a4b4; }
@@ -2024,6 +2031,17 @@
           <div id="pendingExportsSection" hidden>
             <div class="subhead">Saved transfer files (not yet claimed)</div>
             <div id="pendingExportsList" class="item-list"></div>
+          </div>
+
+          <!-- Unfinished issuer operations (mint, send, merge, convert): each is shown with a text
+               status (Pending, Recovering, Needs attention) and, below, the ones recovered recently.
+               Hidden when there is nothing to show. Built in viewer.js (refreshPendingOpsDisplay). -->
+          <div id="pendingOpsSection" role="region" aria-labelledby="pendingOpsHeading" hidden>
+            <div class="subhead" id="pendingOpsHeading">Transactions waiting for the issuer</div>
+            <p class="meta" id="pendingOpsExplainer">While a transaction is unconfirmed, the balances it uses are held: they are not shown as verified and cannot be spent, merged, traded or dropped.</p>
+            <div id="pendingOpsStatus" class="empty-note" role="status" aria-live="polite"></div>
+            <ul id="pendingOpsList" class="item-list pending-ops-list" aria-labelledby="pendingOpsHeading"></ul>
+            <ul id="recoveredOpsList" class="item-list pending-ops-list" aria-label="Recently completed transactions"></ul>
           </div>
 
           <div id="inventorySubtabBar" class="subtab-bar">

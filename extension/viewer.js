@@ -1603,6 +1603,10 @@ const bridgeOfferPreviewStatusEl = document.getElementById('bridgeOfferPreviewSt
 const importAssetFileBtn = document.getElementById('importAssetFileBtn');
 const importAssetFileInput = document.getElementById('importAssetFileInput');
 const importAssetFileStatusEl = document.getElementById('importAssetFileStatus');
+const pendingOpsSectionEl = document.getElementById('pendingOpsSection');
+const pendingOpsListEl = document.getElementById('pendingOpsList');
+const recoveredOpsListEl = document.getElementById('recoveredOpsList');
+const pendingOpsStatusEl = document.getElementById('pendingOpsStatus');
 const pendingExportsSectionEl = document.getElementById('pendingExportsSection');
 const pendingExportsListEl = document.getElementById('pendingExportsList');
 const markAllMailReadBtn = document.getElementById('markAllMailReadBtn');
@@ -5338,8 +5342,11 @@ function renderAssetCard(entry, container, opts) {
   // assetActionHandler()'s delegated click dispatch below didn't need any
   // changes to actually PERFORM these actions, only the new toggle-item-
   // menu open/close branch.
+  // A balance that belongs to an unfinished transaction (entry.pendingOutcome, set by getWallet) is held:
+  // it keeps its Hide control and offers nothing that would spend, drop, wear or export it.
+  const held = entry.pendingOutcome || null;
   let actionsHtml = '';
-  if (!fungible && opts.loadable) {
+  if (!held && !fungible && opts.loadable) {
     // Loadout (SPEC.md §5.2) only makes sense for a non-fungible asset.
     const loaded = opts.loadout.includes(entry.credential.id);
     actionsHtml += '<button data-action="toggle-load" data-id="' + entry.credential.id + '">' + (loaded ? 'Unload' : 'Load into this world') + '</button>';
@@ -5356,7 +5363,7 @@ function renderAssetCard(entry, container, opts) {
   // opts.droppable upstream, since a bound asset still belongs in this
   // same list and still needs its OTHER actions (Hide, etc.) — only the
   // Drop control itself disappears for it.
-  if (opts.droppable && entry.credential.asset.tradeScope !== 'bound') {
+  if (!held && opts.droppable && entry.credential.asset.tradeScope !== 'bound') {
     // Task #250 — dropping is no longer local-only, so how MUCH of a
     // fungible stack leaves the wallet actually matters now: someone else
     // can walk up and take exactly what's dropped, not "the whole balance,
@@ -5385,7 +5392,7 @@ function renderAssetCard(entry, container, opts) {
   // domain the same way the rest of the wallet already does, since it's
   // stored per-identity rather than per-scene (see wallet.js's
   // getAvatarLook()/setAvatarLook()).
-  if (opts.avatarLookEnabled && AtlasWallet.avatarLookPropertiesFromAsset(asset)) {
+  if (!held && opts.avatarLookEnabled && AtlasWallet.avatarLookPropertiesFromAsset(asset)) {
     const wearingThis = opts.equippedAvatarAssetId === entry.credential.id;
     actionsHtml += '<button data-action="toggle-avatar-look" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingThis ? 'Take off (stop wearing this look)' : 'Wear as my look') + '</button>';
   }
@@ -5393,12 +5400,12 @@ function renderAssetCard(entry, container, opts) {
   // opts.avatarHatEnabled/equippedAvatarHatAssetId are its own independent
   // pair (see refreshInventoryDisplay()), so wearing a hat never affects,
   // and is never affected by, whichever outfit is equipped.
-  if (opts.avatarHatEnabled && AtlasWallet.avatarHatPropertiesFromAsset(asset)) {
+  if (!held && opts.avatarHatEnabled && AtlasWallet.avatarHatPropertiesFromAsset(asset)) {
     const wearingThisHat = opts.equippedAvatarHatAssetId === entry.credential.id;
     actionsHtml += '<button data-action="toggle-avatar-hat" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingThisHat ? 'Take off hat' : 'Wear as my hat') + '</button>';
   }
   // Same pattern again, for the third (shoes) equip slot.
-  if (opts.avatarShoesEnabled && AtlasWallet.avatarShoePropertiesFromAsset(asset)) {
+  if (!held && opts.avatarShoesEnabled && AtlasWallet.avatarShoePropertiesFromAsset(asset)) {
     const wearingTheseShoes = opts.equippedAvatarShoesAssetId === entry.credential.id;
     actionsHtml += '<button data-action="toggle-avatar-shoes" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingTheseShoes ? 'Take off shoes' : 'Wear as my shoes') + '</button>';
   }
@@ -5406,7 +5413,7 @@ function renderAssetCard(entry, container, opts) {
   // be saved to a file (the domain hasn't enabled it, wrong kind of item) or
   // lets the owner do it, so the control is offered for every unique,
   // unbound item on a self card.
-  if (opts.fileExportEnabled && !fungible && asset.tradeScope !== 'bound') {
+  if (!held && opts.fileExportEnabled && !fungible && asset.tradeScope !== 'bound') {
     actionsHtml += '<button data-action="save-file" data-id="' + entry.credential.id + '" class="btn-secondary">Save to a file…</button>';
   }
   actionsHtml += '<button data-action="hide" data-id="' + entry.credential.id + '" class="btn-secondary">Hide</button>';
@@ -5424,6 +5431,15 @@ function renderAssetCard(entry, container, opts) {
     // list could not be read) is neither a pass nor a finding against the credential.
     '<div class="verdict ' + (v.valid ? 'valid' : v.status === 'unavailable' ? 'unavailable' : 'invalid') + '" data-status="' + escapeHtml(v.status || (v.valid ? 'verified' : 'invalid')) + '">' + (v.valid ? '✓ ' : v.status === 'unavailable' ? '⚠ ' : '✗ ') + escapeHtml(v.reason) + '</div>';
   el.innerHTML = html;
+  if (held) {
+    el.classList.add('held-back');
+    el.dataset.held = held.state;
+    const note = document.createElement('div');
+    note.className = 'held-note';
+    note.textContent = '⏸ On hold — ' + (held.state === 'needs-attention' ? 'part of a transaction that needs attention' : 'part of a transaction the issuer has not confirmed yet')
+      + '. It cannot be spent, merged, traded or dropped until that is settled.';
+    el.appendChild(note);
+  }
   container.appendChild(el);
 
   // Asset Viewer (task #150) — wired once, here, so every place
@@ -5455,17 +5471,18 @@ function groupFungibleEntries(entries) {
 
 function renderAssetGroup(group, container, opts) {
   const key = group[0].credential.asset.class + '::' + group[0].credential.issuer.domain;
-  if (group.length > 1) {
-    const total = group.reduce((sum, e) => sum + e.credential.quantity, 0);
+  const free = group.filter((e) => !e.pendingOutcome);
+  if (free.length > 1) {
+    const total = free.reduce((sum, e) => sum + e.credential.quantity, 0);
     const header = document.createElement('div');
     header.className = 'resource-group-header';
     header.dataset.group = key;
     header.innerHTML =
-      '<span>' + group.length + ' balances of ' + group[0].credential.asset.name + ' (' + formatMass(total) + ' total)</span>' +
+      '<span>' + free.length + ' balances of ' + group[0].credential.asset.name + ' (' + formatMass(total) + ' total)</span>' +
       '<button data-action="consolidate-group" data-key="' + key + '">Consolidate</button>';
     container.appendChild(header);
   }
-  group.forEach((entry) => renderAssetCard(entry, container, { ...opts, groupKey: group.length > 1 ? key : null }));
+  group.forEach((entry) => renderAssetCard(entry, container, { ...opts, groupKey: free.length > 1 ? key : null }));
 }
 
 // Renders one Inventory list (within either the Collectibles or
@@ -5585,7 +5602,104 @@ function walletGainedSomething(prevSnapshot, nextSnapshot) {
 // Inventory (task #44): renders both sub-tabs (Collectibles, Documents —
 // split on asset.presentation) from the ONE unified wallet, replacing the
 // former separate refreshItemsDisplay()/refreshResourcesDisplay() pair.
+// ---- unfinished issuer operations: status display and automatic recovery ----
+// Statuses are written out in words; the symbol repeats them and is not needed to read them.
+//   Pending          the issuer has not confirmed the transaction yet
+//   Recovering       a page is asking the issuer about it right now
+//   Needs attention  the wallet could not safely tell what happened; it is only sent again when asked
+//   Completed        the issuer's answer was applied to this wallet (listed for a few days from the activity log)
+const OPERATION_KIND_WORDS = { mint: 'Mint', split: 'Send', consolidate: 'Merge balances', convert: 'Convert' };
+const OPERATION_STATUS_TEXT = {
+  pending: { label: 'Pending', mark: '⏳', detail: 'The issuer has not confirmed this transaction yet. The balances it uses are held until it does.' },
+  recovering: { label: 'Recovering', mark: '🔄', detail: 'Checking with the issuer now.' },
+  'needs-attention': { label: 'Needs attention', mark: '⚠', detail: 'The wallet could not safely tell what happened. The balances it uses stay held and nothing is sent again unless you ask.' },
+  unreadable: { label: 'Needs attention', mark: '⚠', detail: 'A stored record could not be read. It has been kept as it is.' }
+};
+
+function describeWhen(iso) {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? new Date(t).toLocaleString() : 'unknown time';
+}
+
+async function refreshPendingOpsDisplay() {
+  if (!pendingOpsSectionEl) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) { pendingOpsSectionEl.hidden = true; return; }
+  let ops = [];
+  let recovered = [];
+  try {
+    ops = await AtlasWallet.getPendingOperations(identity.publicKey);
+    recovered = await AtlasWallet.getRecoveredOperations();
+  } catch (err) { /* nothing readable to show */ }
+  pendingOpsListEl.innerHTML = '';
+  recoveredOpsListEl.innerHTML = '';
+  for (const op of ops) {
+    const key = op.state === 'pending' && op.recovering ? 'recovering' : op.state;
+    const text = OPERATION_STATUS_TEXT[key] || OPERATION_STATUS_TEXT['needs-attention'];
+    const li = document.createElement('li');
+    li.dataset.state = key;
+    const when = op.createdAt ? ' · started ' + describeWhen(op.createdAt) : '';
+    const tried = op.attempts ? ' · asked ' + op.attempts + (op.attempts === 1 ? ' time' : ' times') + (op.lastAttemptAt ? ', last ' + describeWhen(op.lastAttemptAt) : '') : '';
+    li.innerHTML =
+      '<div class="name"><span class="op-status">' + text.mark + ' ' + escapeHtml(text.label) + '</span> — ' + escapeHtml(OPERATION_KIND_WORDS[op.kind] || 'Transaction') + ' at ' + escapeHtml(op.domain || 'an issuer') + '</div>' +
+      '<div class="meta">' + escapeHtml(text.detail) + escapeHtml(when + tried) + '</div>' +
+      (op.lastError && key !== 'recovering' ? '<div class="meta">Last answer: ' + escapeHtml(String(op.lastError).slice(0, 160)) + '</div>' : '') +
+      (op.state === 'unreadable' || !op.requestId ? '' : '<div class="item-actions"><button type="button" class="btn-secondary" data-action="retry-operation" data-request="' + escapeHtml(op.requestId) + '">Ask the issuer again</button></div>');
+    pendingOpsListEl.appendChild(li);
+  }
+  for (const done of recovered) {
+    const li = document.createElement('li');
+    li.dataset.state = 'completed';
+    li.innerHTML =
+      '<div class="name"><span class="op-status">✔ Completed</span> — ' + escapeHtml(OPERATION_KIND_WORDS[done.kind] || 'Transaction') + ' at ' + escapeHtml(done.domain || 'an issuer') + '</div>' +
+      '<div class="meta">The issuer\'s answer was applied to this wallet ' + (done.verified ? '(signature and revocation status checked)' : '(it could not be fully verified yet)') + ' · ' + escapeHtml(describeWhen(done.at)) + '</div>';
+    recoveredOpsListEl.appendChild(li);
+  }
+  pendingOpsSectionEl.hidden = ops.length === 0 && recovered.length === 0;
+}
+
+pendingOpsListEl && pendingOpsListEl.addEventListener('click', async (event) => {
+  const btn = event.target.closest('button[data-action="retry-operation"]');
+  if (!btn) return;
+  const identity = await AtlasWallet.getIdentity();
+  if (!identity) return;
+  btn.disabled = true;
+  pendingOpsStatusEl.textContent = 'Asking the issuer…';
+  try {
+    const result = await AtlasWallet.retryPendingOperation(identity.publicKey, btn.dataset.request);
+    pendingOpsStatusEl.textContent = result.status === 'completed' ? 'Completed — the issuer\'s answer is in your wallet.'
+      : result.status === 'needs-attention' ? 'Still needs attention — the issuer could not confirm what happened.'
+      : result.status === 'pending' ? 'No answer yet — the issuer could not be reached. Try again later.'
+      : 'The issuer refused it: ' + (result.error || 'no reason given') ;
+  } catch (err) {
+    pendingOpsStatusEl.textContent = 'Could not ask the issuer: ' + err.message;
+  }
+  await refreshInventoryDisplay();
+});
+
+// Automatic recovery of pending operations. Runs when the wallet has just been unlocked and when this
+// page opens already unlocked; wallet.js sends nothing while locked or unreadable, never sends an
+// entry that needs attention, and spaces attempts out. Several pages doing this at once is harmless:
+// one of them does the sending (see recoverAfterUnlock in wallet.js).
+let walletRecoveryRunning = false;
+async function runWalletRecovery() {
+  if (walletRecoveryRunning) return;
+  walletRecoveryRunning = true;
+  try {
+    const pending = AtlasWallet.recoverAfterUnlock();
+    setTimeout(() => { refreshPendingOpsDisplay().catch(() => {}); }, 400);
+    const result = await pending;
+    if (result.ran) {
+      await refreshPendingOpsDisplay();
+      await refreshInventoryDisplay();
+    }
+  } catch (err) {
+    console.warn('automatic recovery could not run:', err && err.message);
+  } finally { walletRecoveryRunning = false; }
+}
+
 async function refreshInventoryDisplay() {
+  refreshPendingOpsDisplay().catch(() => {});
   const identity = await AtlasWallet.getIdentity();
   const loadout = await AtlasWallet.getLoadout();
   const equippedAvatarAssetId = await AtlasWallet.getAvatarLookAssetId();
@@ -6234,6 +6348,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 chrome.storage.onChanged.addListener(async (changes, areaName) => {
+  if (areaName === 'local' && changes.atlasPendingOps) refreshPendingOpsDisplay().catch(() => {});
   if (areaName === 'local' && changes.atlasAutoBackupSettings) {
     // Fires from this same session's own debounced write (wallet.js), and
     // from backup-setup.html's separate top-level tab turning replication
@@ -6255,6 +6370,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     // Fetch mail and chat at once on login rather than at the periodic loop's next tick.
     // newValue is present only for a login (unlock, create, import), not for a lock.
     if (changes.atlasUnlockedIdentity.newValue) {
+      runWalletRecovery();
       // What is already stored is shown first, so the panel is usable at once even when a domain is
       // slow to answer; the network check then refreshes it.
       await refreshMailDisplay();
@@ -6457,6 +6573,7 @@ restoreFullBackupBtn.addEventListener('click', async () => {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
     await refreshInventoryDisplay();
+    runWalletRecovery(); // a restore sends nothing itself; restored pending operations are asked about once it is complete
     // Same reasoning as confirmImportBtn above — a restored backup's wallet
     // can already own oncePerUser items the current world's ownership cache
     // doesn't know about yet.
@@ -9179,7 +9296,7 @@ async function refreshTradingSellOfferOptions() {
       const wallet = await AtlasWallet.getWallet(identity.publicKey);
       wallet.forEach((e) => {
         const c = e.credential;
-        if (c.asset.tradeScope === 'bound') return;
+        if (e.pendingOutcome || c.asset.tradeScope === 'bound') return;
         const existing = totals.get(c.asset.class);
         if (existing) existing.quantity += c.quantity;
         else totals.set(c.asset.class, { quantity: c.quantity, name: c.asset.name, fungible: !!c.asset.fungible });
@@ -9443,7 +9560,7 @@ async function refreshConvertOptions() {
       const wallet = await AtlasWallet.getWallet(identity.publicKey);
       wallet.forEach((e) => {
         const c = e.credential;
-        if (!c.asset.fungible || c.issuer.domain !== domain) return;
+        if (e.pendingOutcome || !c.asset.fungible || c.issuer.domain !== domain) return;
         const existing = totals.get(c.asset.class);
         if (existing) existing.quantity += c.quantity;
         else totals.set(c.asset.class, { quantity: c.quantity, name: c.asset.name });
@@ -9750,7 +9867,7 @@ tradingBuyListEl && tradingBuyListEl.addEventListener('click', async (evt) => {
     // instance is found is the one presented" indifference Sell's own
     // balance lookup uses.
     const wallet = await AtlasWallet.getWallet(identity.publicKey);
-    const balance = wallet.map((e) => e.credential)
+    const balance = wallet.filter((e) => !e.pendingOutcome).map((e) => e.credential)
       .find((c) => c.asset.class === listing.want.class && (c.asset.fungible ? c.quantity >= listing.want.quantity : true));
     if (!balance) throw new Error('Not enough ' + listing.want.class + ' to claim this listing.');
 
@@ -9820,7 +9937,7 @@ tradingSellSubmitBtn && tradingSellSubmitBtn.addEventListener('click', async () 
     // already gets (this wallet doesn't let you pick a specific balance
     // object for a fungible class either).
     const wallet = await AtlasWallet.getWallet(identity.publicKey);
-    const balance = wallet.map((e) => e.credential)
+    const balance = wallet.filter((e) => !e.pendingOutcome).map((e) => e.credential)
       .find((c) => c.asset.class === offerClass && (c.asset.fungible ? c.quantity >= offerQty : true));
     if (!balance) throw new Error(offerIsUnique ? ('No ' + offerClass + ' held to offer.') : ('Not enough ' + offerClass + ' to offer ' + formatMass(offerQty) + '.'));
 
@@ -9875,7 +9992,7 @@ tradingConvertSubmitBtn && tradingConvertSubmitBtn.addEventListener('click', asy
     // presenting a same-named balance from a DIFFERENT issuer here would
     // silently submit to the wrong domain's endpoint).
     const wallet = await AtlasWallet.getWallet(identity.publicKey);
-    const balance = wallet.map((e) => e.credential).find((c) => c.asset.class === fromClass && c.issuer.domain === domain && c.asset.fungible && c.quantity >= spendAmount);
+    const balance = wallet.filter((e) => !e.pendingOutcome).map((e) => e.credential).find((c) => c.asset.class === fromClass && c.issuer.domain === domain && c.asset.fungible && c.quantity >= spendAmount);
     if (!balance) throw new Error('Not enough ' + fromClass + ' to convert ' + formatMass(spendAmount) + ' — try consolidating your balances first if you hold it split across more than one credential.');
 
     const result = await AtlasWallet.convertAsset('self', balance, spendAmount, toClass);
@@ -11558,6 +11675,7 @@ autoBackupRestoreBtn.addEventListener('click', async () => {
     showWalletScreen('mainWalletScreen');
     await refreshIdentityDisplay();
     await refreshInventoryDisplay();
+    runWalletRecovery();
     await refreshOwnedOncePerUserClassKeys();
     await AtlasWallet.checkAllMail();
     await refreshMailDisplay();
@@ -12133,7 +12251,7 @@ function assetActionHandler(listEl) {
       btn.textContent = 'Consolidating…';
       try {
         const wallet = await AtlasWallet.getWallet(who.publicKey);
-        const group = wallet.filter((x) => x.credential.asset.class === cls && x.credential.issuer.domain === issuerDomain && x.credential.asset.fungible);
+        const group = wallet.filter((x) => !x.pendingOutcome && x.credential.asset.class === cls && x.credential.issuer.domain === issuerDomain && x.credential.asset.fungible);
         await AtlasWallet.consolidateAsset('self', group.map((entry) => entry.credential));
         await refreshInventoryDisplay();
       } catch (err) {
@@ -12418,6 +12536,7 @@ setInterval(async () => {
 
 refreshIdentityDisplay();
 refreshInventoryDisplay();
+runWalletRecovery();
 refreshMailDisplay();
 AtlasWallet.getChatPanelSettings().then(applyChatPanelSize); // restore the chat panel's persisted size/opacity/text-size/minimized state before any world is entered
 AtlasWallet.getAssetViewerSettings().then(applyAssetViewerSettings); // restore the Asset Viewer panel's persisted size/opacity/text-size, same reasoning

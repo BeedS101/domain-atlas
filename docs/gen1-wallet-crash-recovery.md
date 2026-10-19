@@ -21,7 +21,7 @@ successors without it. There is no half-applied state.
 ## Results
 
 Run: `xvfb-run -a node test/manual-gen1-wallet-crash-recovery.js both` (add `--quick` for fewer random kills).
-Current result: 314 checks pass, 0 fail; 12 gap probes (6 per issuer).
+Current result: 314 checks pass, 0 fail; 8 gap probes (4 per issuer).
 
 | Interruption (SIGKILL of the browser, restart on the same profile, unlock) | Result |
 |---|---|
@@ -64,9 +64,11 @@ Ordered by consequence.
 3. **A lock during a non-fungible mint can erase the wallet. Fixed.** Wallet, journal and file-ledger writes now
    refuse when the stored value exists but cannot be read; see `docs/wallet-storage-safety.md` for the root cause,
    the change and the remaining unsafe paths.
-4. **Nothing recovers the journal automatically after a restart and unlock.** It runs before the next operation
-   for that owner, and in `reverifyAll` (the Re-verify button). Until then the wallet lists revoked predecessors as
-   live and verified, and a spend of one of them is refused.
+4. **Nothing recovered the journal automatically after a restart and unlock. Fixed.** Pending entries of the active
+   identity are now recovered after a successful unlock (and when a wallet page opens on an unlocked wallet), never
+   while locked, never for `needs-attention`, with single flight across pages and a two-minute gap per request; the
+   wallet page lists the unfinished transactions with their status. See `docs/gen1-auto-recovery.md`. The earlier
+   paths (next operation, Re-verify, explicit retry) are unchanged.
 5. **Operations that are not journalled at all** (no `requestId`, no replay on the issuer): non-fungible mint,
    `/atlas/asset/purchase` (museum stall) and `/atlas/trade/claim`. A lost answer after the issuer commits means the
    balance is spent and nothing arrives. Confirmed for non-fungible mint and purchase; trade claim by code reading.

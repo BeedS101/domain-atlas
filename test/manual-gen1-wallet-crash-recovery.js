@@ -145,7 +145,7 @@ async function main() {
       check('the journal entry survived', (await w.pending()).length === 1);
       const rec = await w.recover();
       check('recovery completes it', rec.length === 1 && rec[0].status === 'completed' && rec[0].applied === true, rec);
-      await successorOk(w, iss, r.preds, 'after recovery', r.revBefore);
+      await successorOk(w, iss, r.preds, 'after the unlock', r.revBefore);
     });
 
     await scenario(kind, 'A3 commit stored, browser killed immediately after', async (w, iss) => {
@@ -228,16 +228,15 @@ async function main() {
       await attempt('convertAsset', (a) => AtlasWallet.convertAsset('self', { id: 'x', asset: { class: 'x' }, issuer: { domain: a.d } }, 1, 'y'), { d: iss.domain });
       const after = JSON.stringify(await w.rawStores());
       check('every wallet operation attempted while locked leaves the stored wallet and journal byte-identical', before === after, tries);
+      // The extension asks the issuer by itself right after the unlock (docs/gen1-auto-recovery.md).
+      w.autoRecovery = true;
       await w.unlock();
-      check('after unlocking, the journal entry is still there', (await w.pending()).length === 1, await w.pending());
-      await sleep(3500);
-      const stillPending = (await w.pending()).length;
+      let settled = false;
+      for (let i = 0; i < 150 && !settled; i++) { settled = (await w.pending()).length === 0; if (!settled) await sleep(100); }
+      check('after unlocking, the journal entry is recovered by the extension without any other action', settled, await w.pending());
       const liveNow = await w.live(IRON);
-      gap('nothing recovers the journal by itself after a restart and unlock (it waits for the next operation or a manual re-verify)', stillPending === 1, { pending: stillPending });
-      gap('until then the wallet lists, as live and verified, credentials the issuer has already revoked', liveNow.some((x) => iss.revoked().has(x.id)), liveNow.map((x) => ({ q: x.q, revoked: iss.revoked().has(x.id), verdict: x.verdict })));
-      const rec = await w.recover();
-      check('recovery then completes it', rec.length === 1 && rec[0].status === 'completed', rec);
-      await successorOk(w, iss, r.preds, 'after recovery', r.revBefore);
+      check('and the wallet does not list anything the issuer has revoked as live', liveNow.every((x) => !iss.revoked().has(x.id)), liveNow);
+      await successorOk(w, iss, r.preds, 'after the unlock', r.revBefore);
     });
 
     // ---- 5. spending a stale predecessor, and minting again, before recovery has run ----
@@ -278,7 +277,9 @@ async function main() {
         page.evaluate((k) => AtlasWallet.recoverPendingOperations(k), w.pub)
       ]);
       const applied = results.flat().filter((o) => o.status === 'completed' && o.applied === true).length;
-      check('the answer is applied exactly once across both pages', applied === 1, results);
+      // The page also recovers by itself when it opens on an unlocked wallet, so the explicit calls may find nothing left to
+      // apply; the checks below fix the end state to exactly one successor.
+      check('the answer is applied at most once across both pages', applied <= 1, results);
       await successorOk(w, iss, r.preds, 'after the race', r.revBefore);
       await page.close();
     });
