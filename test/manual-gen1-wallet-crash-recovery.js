@@ -313,6 +313,8 @@ async function main() {
       const log = JSON.stringify(await w.log()).match(/could not be completed[^"]{0,160}/);
       console.log('INFO expired answer: recovery=' + JSON.stringify(rec) + ' wallet live=' + sum(live) + ' g (rows ' + all.length + ') issuer counts held=' + held + ' log=' + (log && log[0]));
       check('no live credential is revoked, and nothing is duplicated', live.every((x) => !iss.revoked().has(x.id)) && sum(live) <= 40, live);
+      const kept = await w.pending();
+      check('the journal entry is kept as needs-attention and recovery reports it as such', kept.length === 1 && kept[0].state === 'needs-attention' && rec.length === 1 && rec[0].status === 'needs-attention', { kept, rec });
       gap('after the issuer\'s stored answer expires the 40 g successor can no longer be retrieved: the wallet ends with ' + sum(live) + ' g', sum(live) < 40, { rec, live });
       gap('the issuer keeps counting the unretrievable successor toward the holding cap (issuer ' + held + ' g held, wallet ' + sum(live) + ' g)', held !== null && held !== sum(live), { held, wallet: sum(live) });
     }, { ATLAS_REPLAY_TTL_HOURS: '0.0006' });

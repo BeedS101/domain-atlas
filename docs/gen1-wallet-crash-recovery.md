@@ -52,9 +52,10 @@ Ordered by consequence.
 
 1. **Expired answer loses the successor.** The issuer keeps the stored answer for `ATLAS_REPLAY_TTL_HOURS`
    (default 168, 7 days). If the wallet retries later, the issuer sees the predecessors already revoked and answers
-   `revoked`; the wallet treats that as a definite refusal, deletes the journal entry and (after re-verify) flags the
-   predecessors spent. Result in the test: wallet 0 g, issuer still counts 40 g held, so the owner's cap is consumed
-   by credentials nobody can retrieve. The only trace is an activity-log line.
+   `revoked`. Originally the wallet treated that as a definite refusal, deleted the journal entry and flagged the
+   predecessors spent (wallet 0 g, issuer still counting 40 g held). **Wallet side fixed:** the entry is now kept as
+   `needs-attention` and its predecessors are held back; see `docs/gen1-replay-expiry.md`. The expired successor
+   itself still cannot be retrieved: that needs longer-lived outcome evidence at the issuer.
 2. **The journal is not in the backup** (`buildBackupPayload`; manual and automatic backups). A backup taken in the
    window, restored on a fresh profile, has the revoked predecessors and no journal: the wallet ends with 0 g of
    40 g (and, until a manual re-verify, one revoked 20 g credential still shown as live).
@@ -74,8 +75,9 @@ Ordered by consequence.
 - Immediately and without code: set `ATLAS_REPLAY_TTL_HOURS` (for example 720) on both issuers. The stored answers
   are live bearer credentials, so longer retention is a security trade-off; they stay private (0600, outside or
   behind the guarded folder).
-- Wallet: never delete a journal entry on a `revoked` refusal; keep it as "needs attention", show it, and keep it in
-  the backup. Include `atlasPendingOps` in the backup payload and restore it.
+- Wallet: never delete a journal entry on a `revoked` refusal; keep it as "needs attention" (done, see
+  `docs/gen1-replay-expiry.md`), show it, and keep it in the backup. Include `atlasPendingOps` in the backup payload
+  and restore it (not done).
 - Wallet: run `recoverPendingOperations` once after unlock and on a timer, and mark predecessors of a pending
   consolidation as "being replaced" in the display.
 - Issuer, for recovery without a journal or after expiry: an owner-signed endpoint that returns the unrevoked

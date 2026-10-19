@@ -20,7 +20,8 @@ Read section 3 (what is not fixed) before relying on the holding cap, and sectio
   together; a second page applying the same answer applies it once (the journal entry must still exist). If no
   answer arrives (network error, 60 s timeout, 5xx, "busy") the entry stays and the same request, with the same
   request id, is sent again: before the next operation for that owner, on "Re-verify wallet", and on demand
-  (`recoverPendingOperations`, `getPendingOperations`). A definite refusal (other 4xx) removes the entry.
+  (`recoverPendingOperations`, `getPendingOperations`). A refusal (other 4xx) removes the entry only when
+  nothing can have been committed; otherwise it is kept as `needs-attention` (`docs/gen1-replay-expiry.md`).
 - **Every other read-then-write site** (delete, hide, import, drop, pick up, trade claim and refund, mail gift,
   bridge offer, file-transfer claim, restore) now goes through `mutateWallet` or `commitOperation`.
 - **Spent balances stay visible but are never presented again.** An entry the issuer reports spent (or that a

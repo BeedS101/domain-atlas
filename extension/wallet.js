@@ -1082,7 +1082,7 @@ const AtlasWallet = (() => {
       await chrome.storage.local.set({ atlasWallets: wallets });
     }
     if (atlasResourceWallets) await chrome.storage.local.remove('atlasResourceWallets'); // fully orphaned since the merge — nothing valid to salvage, nothing else reads it
-    return cleaned;
+    return markUnresolved(cleaned, await readPendingOps(ownerPublicKey));
   }
 
   // Task #137's activity-tracking design needs to know "did THIS wallet's
@@ -1134,7 +1134,7 @@ const AtlasWallet = (() => {
       quarantine[ownerPublicKey] = (quarantine[ownerPublicKey] || []).concat([{ savedAt: new Date().toISOString(), store: 'wallet', blob: wallets[ownerPublicKey] }]).slice(-3);
       await chrome.storage.local.set({ atlasWalletQuarantine: quarantine });
     }
-    wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', entries);
+    wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', Array.isArray(entries) ? entries.map(withoutUnresolvedMark) : entries);
     await chrome.storage.local.set({ atlasWallets: wallets });
     notifyWalletChanged(ownerPublicKey);
   }
@@ -1160,6 +1160,11 @@ const AtlasWallet = (() => {
     return !!(entry && (entry.spent || (entry.lastVerdict && entry.lastVerdict.status === 'revoked')));
   }
 
+  // Spent, or held by an unfinished transaction (see markUnresolved): not merged, not presented, not counted.
+  function isHeldBack(entry) {
+    return isKnownSpent(entry) || !!(entry && entry.pendingOutcome);
+  }
+
   // ---------- issuer operations that replace balances (safe retry) ----------
   // A mint, split, consolidate or convert asks the issuer to sign successor
   // credentials and, for the last three, to revoke the predecessors. The signed
@@ -1176,7 +1181,17 @@ const AtlasWallet = (() => {
   //      answers with the stored result rather than doing the work twice. Entries
   //      are retried before the next operation for that owner, on re-verify, and
   //      on demand (recoverPendingOperations).
-  // A definite refusal (any other 4xx) removes the entry: nothing happened.
+  // A refusal (any other 4xx) is a definite "nothing happened" only when the
+  // request cannot have reached the issuer before: the first send of an entry
+  // that was just written. For an entry that was already sent, or recovered
+  // after a restart, the refusal may be the issuer answering a request it
+  // already completed whose stored answer has expired (the predecessors are
+  // then revoked and the successors exist only at the issuer). The entry is
+  // removed only when the predecessors are shown to be not revoked; otherwise
+  // it stays in the journal as state 'needs-attention', is not sent again
+  // automatically, and keeps its predecessors out of every spend, merge and
+  // "verified" display. Nothing is recreated or inferred from the revocation
+  // list: a settled outcome needs the issuer's answer.
   const OPERATION_TIMEOUT_MS = 60000;
   const MAX_CONSOLIDATE_BATCH = 20;
 
@@ -1191,6 +1206,75 @@ const AtlasWallet = (() => {
     return Array.isArray(list) ? list : [];
   }
 
+  // A journal entry the wallet can send again; anything else is kept as it is and reported.
+  function usablePendingEntry(e) {
+    return !!(e && typeof e === 'object' && typeof e.requestId === 'string' && typeof e.owner === 'string'
+      && typeof e.kind === 'string' && typeof e.domain === 'string' && typeof e.path === 'string' && e.body && typeof e.body === 'object');
+  }
+
+  // The credentials a journalled request presented, as sent.
+  function presentedCredentialsOf(entry) {
+    const body = entry.body || {};
+    const list = Array.isArray(body.credentials) ? body.credentials : (body.credential ? [body.credential] : []);
+    return list.filter((c) => c && typeof c === 'object');
+  }
+
+  // Credential ids held by unfinished journal entries (state 'pending' or 'needs-attention'):
+  // id -> { requestId, kind, state }. Their outcome at the issuer is not known to this wallet.
+  function unresolvedIdsOf(list) {
+    const map = new Map();
+    for (const e of list) {
+      if (!usablePendingEntry(e)) continue;
+      const ids = new Set((Array.isArray(e.predecessors) ? e.predecessors : []).filter((id) => typeof id === 'string'));
+      for (const c of presentedCredentialsOf(e)) if (typeof c.id === 'string') ids.add(c.id);
+      for (const id of ids) map.set(id, { requestId: e.requestId, kind: e.kind, state: e.state === 'needs-attention' ? 'needs-attention' : 'pending' });
+    }
+    return map;
+  }
+
+  // Refuses to spend, merge, trade, drop or delete a credential that is a predecessor in an
+  // unfinished journal entry. Reads the journal strictly: a journal that cannot be read refuses.
+  async function assertSettled(ownerPublicKey, credentialIds) {
+    const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
+    const { list } = await readStoredListForWrite('pendingOps', (atlasPendingOps || {})[ownerPublicKey]);
+    const held = unresolvedIdsOf(list);
+    const hit = (credentialIds || []).map((id) => held.get(id)).filter(Boolean);
+    if (!hit.length) return;
+    const attention = hit.some((h) => h.state === 'needs-attention');
+    const err = new Error(attention
+      ? 'This balance belongs to a transaction that needs attention: the issuer no longer shows its replacement and the wallet could not recover it. It cannot be spent, merged, traded or deleted until that is resolved.'
+      : 'This balance belongs to a transaction the issuer has not confirmed yet. It cannot be spent, merged, traded or deleted until the wallet has the issuer\'s answer.');
+    err.code = 'unresolved-operation';
+    err.unresolved = true;
+    err.state = attention ? 'needs-attention' : 'pending';
+    err.requestId = hit[0].requestId;
+    throw err;
+  }
+
+  // The wallet list as displayed: predecessors of an unfinished entry are never shown as verified.
+  function markUnresolved(entries, journal) {
+    const held = unresolvedIdsOf(journal);
+    if (!held.size) return entries;
+    return entries.map((e) => {
+      const info = held.get(e.credential.id);
+      if (!info) return e;
+      const verdict = e.lastVerdict && e.lastVerdict.status === 'revoked' ? e.lastVerdict : {
+        valid: false, status: 'unavailable', revocation: 'unavailable',
+        reason: 'not verified: ' + (info.state === 'needs-attention' ? 'part of a transaction that needs attention' : 'part of a transaction the issuer has not confirmed yet')
+      };
+      return Object.assign({}, e, { lastVerdict: verdict, pendingOutcome: Object.assign({}, info, { originalVerdict: e.lastVerdict || null }) });
+    });
+  }
+
+  // The inverse, applied wherever a list that came from getWallet() is stored again: the display marks
+  // are never written to the wallet, and the verdict the entry had before marking comes back.
+  function withoutUnresolvedMark(entry) {
+    if (!entry || typeof entry !== 'object' || !entry.pendingOutcome) return entry;
+    const { pendingOutcome, ...rest } = entry;
+    if (pendingOutcome.originalVerdict) rest.lastVerdict = pendingOutcome.originalVerdict; else delete rest.lastVerdict;
+    return rest;
+  }
+
   async function journalAdd(ownerPublicKey, entry) {
     await withWalletLock(async () => {
       const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
@@ -1203,16 +1287,17 @@ const AtlasWallet = (() => {
   }
 
   async function journalPatch(ownerPublicKey, requestId, patch) {
-    await withWalletLock(async () => {
+    return withWalletLock(async () => {
       const { atlasPendingOps } = await chrome.storage.local.get('atlasPendingOps');
       const all = atlasPendingOps || {};
       const { identity, list } = await readStoredListForWrite('pendingOps', all[ownerPublicKey]);
-      const entry = list.find((e) => e.requestId === requestId);
-      if (!entry) return;
+      const entry = list.find((e) => e && e.requestId === requestId);
+      if (!entry) return false;
       if (patch === null) list.splice(list.indexOf(entry), 1);
       else Object.assign(entry, patch);
       all[ownerPublicKey] = await encryptAtRest(identity, 'pendingOps', list);
       await chrome.storage.local.set({ atlasPendingOps: all });
+      return true;
     });
   }
 
@@ -1244,7 +1329,7 @@ const AtlasWallet = (() => {
       const pendingAll = stored.atlasPendingOps || {};
       if (requestId) {
         const pending = (await readStoredListForWrite('pendingOps', pendingAll[journalOwner])).list;
-        const index = pending.findIndex((e) => e.requestId === requestId);
+        const index = pending.findIndex((e) => e && e.requestId === requestId);
         if (index < 0) return false;
         pending.splice(index, 1);
         pendingAll[journalOwner] = await encryptAtRest(identity, 'pendingOps', pending);
@@ -1282,9 +1367,52 @@ const AtlasWallet = (() => {
     throw new Error('unknown operation kind: ' + entry.kind);
   }
 
+  // Whether an answer carries what this kind of operation must return, for the right owners. An
+  // answer that does not (a proxy page, a truncated body, the wrong credential) is never applied and
+  // never ends the entry: the request may have completed, so it is sent again.
+  function answerIsUsable(entry, data) {
+    const good = (c, owner) => !!(c && typeof c === 'object' && c.credential === 'domain-atlas-asset/1.0' && typeof c.id === 'string'
+      && c.owner && c.owner.publicKey === owner && c.issuer && typeof c.issuer.domain === 'string'
+      && c.asset && typeof c.asset === 'object' && typeof c.signature === 'string');
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+    if (entry.kind === 'mint' || entry.kind === 'consolidate') return good(data, entry.owner);
+    if (entry.kind === 'split') return good(data.sent, entry.toOwner || entry.owner) && (!data.remainder || good(data.remainder, entry.owner));
+    if (entry.kind === 'convert') return good(data.received, entry.owner) && (!data.remainder || good(data.remainder, entry.owner));
+    return false;
+  }
+
+  // After a refusal of a request that may have reached the issuer before: whether the revocation
+  // list shows that the request cannot have been committed. A replacement revokes all of its
+  // predecessors in one atomic step, so a single predecessor that is not revoked proves that nothing
+  // was committed (the others may have been spent by another request). Predecessors that are all
+  // revoked, or a list that cannot be read, prove nothing: the revocation may be this very request's.
+  async function predecessorsProvablyUnrevoked(entry) {
+    const ids = Array.isArray(entry.predecessors) ? entry.predecessors : [];
+    const result = { proven: false, revoked: [] };
+    const reads = new Map();
+    for (const id of ids) {
+      const credential = presentedCredentialsOf(entry).find((c) => c.id === id);
+      const domain = credential && credential.issuer && typeof credential.issuer.domain === 'string' ? credential.issuer.domain : null;
+      if (!domain) continue;
+      if (!reads.has(domain)) {
+        reads.set(domain, await readPublishedDoc(baseUrl(domain), 'atlas-revocations.json').catch(() => ({ doc: null, kind: 'unreachable', why: 'could not be reached' })));
+      }
+      const verdict = revocationVerdict(reads.get(domain), id);
+      if (verdict.revocation === 'revoked') result.revoked.push(id);
+      else if (verdict.revocation === 'not-revoked' && !verdict.notPublished) result.proven = true;
+    }
+    return result;
+  }
+
   // Sends one journalled entry and, on an answer, applies it. Throws an error
-  // with .pending = true when the entry stays in the journal to be retried.
-  async function sendOperation(entry) {
+  // with .pending = true when the entry stays in the journal to be retried, or
+  // .needsAttention = true when it stays and will not be sent again by itself.
+  //   opts.fresh  the entry was written for this call and has not been sent before
+  async function sendOperation(entry, opts) {
+    const fresh = !!(opts && opts.fresh) && !(entry.attempts > 0);
+    const retryLater = async (why) => {
+      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: String(why).slice(0, 200), lastAttemptAt: new Date().toISOString() }).catch(() => {});
+    };
     let res, text;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), OPERATION_TIMEOUT_MS);
@@ -1298,13 +1426,17 @@ const AtlasWallet = (() => {
       text = await res.text();
     } catch (err) {
       clearTimeout(timer);
-      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: String(err && err.message || err).slice(0, 200), lastAttemptAt: new Date().toISOString() }).catch(() => {});
+      await retryLater(err && err.message || err);
       throw operationError(entry.label, 0, 'no answer from ' + entry.domain + '; the request is saved and will be retried', null, { pending: true, requestId: entry.requestId });
     }
     clearTimeout(timer);
     let data = null;
     try { data = JSON.parse(text); } catch (err) { /* not JSON */ }
-    if (res.ok && data && typeof data === 'object') {
+    if (res.ok) {
+      if (!answerIsUsable(entry, data)) {
+        await retryLater('HTTP ' + res.status + ' answer was not a usable ' + entry.kind + ' result: ' + text);
+        throw operationError(entry.label, res.status, 'the answer from ' + entry.domain + ' could not be used; the request is saved and will be retried', null, { pending: true, requestId: entry.requestId });
+      }
       const changes = changesForAnswer(entry, data);
       for (const change of changes) {
         for (const add of change.add || []) add.lastVerdict = await verifyCredential(add.credential);
@@ -1322,11 +1454,37 @@ const AtlasWallet = (() => {
     }
     const unsettled = res.status >= 500 || (data && data.code === 'busy');
     if (unsettled) {
-      await journalPatch(entry.owner, entry.requestId, { attempts: (entry.attempts || 0) + 1, lastError: ('HTTP ' + res.status + ' ' + text).slice(0, 200), lastAttemptAt: new Date().toISOString() }).catch(() => {});
+      await retryLater('HTTP ' + res.status + ' ' + text);
       throw operationError(entry.label, res.status, text, data, { pending: true, requestId: entry.requestId });
     }
-    await journalPatch(entry.owner, entry.requestId, null).catch(() => {});
-    throw operationError(entry.label, res.status, text, data, { requestId: entry.requestId });
+    // A refusal. Definite for the first send of a fresh entry; otherwise only when the predecessors
+    // are shown to be unrevoked.
+    const check = fresh ? { proven: true, revoked: [] } : await predecessorsProvablyUnrevoked(entry);
+    if (check.proven) {
+      await journalPatch(entry.owner, entry.requestId, null).catch(() => {});
+      throw operationError(entry.label, res.status, text, data, { requestId: entry.requestId });
+    }
+    const marked = await journalPatch(entry.owner, entry.requestId, {
+      state: 'needs-attention',
+      attempts: (entry.attempts || 0) + 1,
+      lastError: ('HTTP ' + res.status + ' ' + text).slice(0, 200),
+      lastAttemptAt: new Date().toISOString(),
+      attention: {
+        at: new Date().toISOString(),
+        status: res.status,
+        code: data && typeof data.code === 'string' ? data.code : null,
+        message: String(text).slice(0, 200),
+        revokedPredecessors: check.revoked
+      }
+    });
+    if (!marked) {
+      // Another page settled this entry while this one was waiting.
+      throw operationError(entry.label, res.status, 'this request was settled by another page', null, { settledElsewhere: true, requestId: entry.requestId });
+    }
+    const attentionError = operationError(entry.label, res.status, '', null, { needsAttention: true, code: 'needs-attention', refusalCode: data && data.code, requestId: entry.requestId });
+    attentionError.message = entry.label + ' needs attention: the issuer refused a request it may already have completed (' + String(text).slice(0, 120)
+      + '). The replacement could not be recovered; the original balances are kept and held back, and the request is saved as needing attention.';
+    throw attentionError;
   }
 
   // Journals, sends and applies one replacement request.
@@ -1336,6 +1494,7 @@ const AtlasWallet = (() => {
     await assertWalletWritable(spec.owner);
     if (spec.toOwner && spec.toOwner !== spec.owner) await assertWalletWritable(spec.toOwner);
     await recoverPendingOperations(spec.owner);
+    await assertSettled(spec.owner, spec.predecessors);
     const requestId = newRequestId();
     const entry = {
       requestId, kind: spec.kind, label: spec.label, owner: spec.owner, toOwner: spec.toOwner || null,
@@ -1344,7 +1503,7 @@ const AtlasWallet = (() => {
       createdAt: new Date().toISOString(), attempts: 0
     };
     await journalAdd(spec.owner, entry);
-    return sendOperation(entry);
+    return sendOperation(entry, { fresh: true });
   }
 
   // A request that does not repeat safely (a non-fungible mint: the issuer
@@ -1359,21 +1518,32 @@ const AtlasWallet = (() => {
   }
 
   const recoveringOwners = new Set();
-  // Sends again every journalled request for this owner. Returns
-  // [{ requestId, kind, status: 'completed' | 'pending' | 'failed', error? }].
+  // Sends again every journalled request for this owner that is still waiting for an answer.
+  // Entries that need attention are not sent again here (see retryPendingOperation). Returns
+  // [{ requestId, kind, status: 'completed' | 'pending' | 'failed' | 'needs-attention', error? }].
   async function recoverPendingOperations(ownerPublicKey) {
     if (recoveringOwners.has(ownerPublicKey)) return [];
     recoveringOwners.add(ownerPublicKey);
     const outcomes = [];
     try {
       for (const entry of await readPendingOps(ownerPublicKey)) {
+        if (!usablePendingEntry(entry)) {
+          outcomes.push({ requestId: entry && entry.requestId || null, kind: entry && entry.kind || null, status: 'needs-attention', error: 'unreadable journal entry, left as it is' });
+          continue;
+        }
+        if (entry.state === 'needs-attention') {
+          outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'needs-attention' });
+          continue;
+        }
         try {
           const done = await sendOperation(entry);
           outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'completed', applied: done.applied });
           if (done.applied) await logActivity('asset', 'Recovered an interrupted ' + entry.kind + ' (' + entry.domain + '): the issuer had already completed it');
         } catch (err) {
-          outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: err.pending ? 'pending' : 'failed', error: err.message });
-          if (!err.pending) await logActivity('asset', 'An interrupted ' + entry.kind + ' at ' + entry.domain + ' could not be completed: ' + err.message.slice(0, 160));
+          if (err.settledElsewhere) { outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: 'completed', applied: false }); continue; }
+          outcomes.push({ requestId: entry.requestId, kind: entry.kind, status: err.needsAttention ? 'needs-attention' : (err.pending ? 'pending' : 'failed'), error: err.message });
+          if (err.needsAttention) await logActivity('asset', 'An interrupted ' + entry.kind + ' at ' + entry.domain + ' needs attention: ' + err.message.slice(0, 160));
+          else if (!err.pending) await logActivity('asset', 'An interrupted ' + entry.kind + ' at ' + entry.domain + ' could not be completed: ' + err.message.slice(0, 160));
         }
       }
     } finally {
@@ -1382,9 +1552,27 @@ const AtlasWallet = (() => {
     return outcomes;
   }
 
+  // Asks the issuer once more for one journalled request, including one that needs attention. Used
+  // when the person chooses to; applied at most once, like any recovery.
+  async function retryPendingOperation(ownerPublicKey, requestId) {
+    const entry = (await readPendingOps(ownerPublicKey)).find((e) => e && e.requestId === requestId);
+    if (!usablePendingEntry(entry)) throw new Error('No such pending request.');
+    try {
+      const done = await sendOperation(entry);
+      return { requestId, kind: entry.kind, status: 'completed', applied: done.applied };
+    } catch (err) {
+      if (err.settledElsewhere) return { requestId, kind: entry.kind, status: 'completed', applied: false };
+      return { requestId, kind: entry.kind, status: err.needsAttention ? 'needs-attention' : (err.pending ? 'pending' : 'failed'), error: err.message };
+    }
+  }
+
   async function getPendingOperations(ownerPublicKey) {
-    return (await readPendingOps(ownerPublicKey)).map((e) => ({
-      requestId: e.requestId, kind: e.kind, domain: e.domain, createdAt: e.createdAt, attempts: e.attempts || 0, lastError: e.lastError || null
+    return (await readPendingOps(ownerPublicKey)).filter((e) => e && typeof e === 'object').map((e) => ({
+      requestId: typeof e.requestId === 'string' ? e.requestId : null, kind: e.kind || null, domain: e.domain || null,
+      createdAt: e.createdAt || null, attempts: e.attempts || 0, lastError: e.lastError || null,
+      state: !usablePendingEntry(e) ? 'unreadable' : (e.state === 'needs-attention' ? 'needs-attention' : 'pending'),
+      predecessors: Array.isArray(e.predecessors) ? e.predecessors.slice() : [],
+      attention: e.attention || null
     }));
   }
 
@@ -1405,7 +1593,7 @@ const AtlasWallet = (() => {
     // these only to recognise balances it signed before it kept them. Spent
     // balances are left out.
     const existingBalances = quantity !== undefined
-      ? wallet.filter((e) => !isKnownSpent(e) && e.credential.asset.class === assetClass && e.credential.issuer.domain === issuerDomain).map((e) => e.credential)
+      ? wallet.filter((e) => !isHeldBack(e) && e.credential.asset.class === assetClass && e.credential.issuer.domain === issuerDomain).map((e) => e.credential)
       : undefined;
     const body = {
       ownerPublicKey: owner.publicKey, assetClass,
@@ -1487,12 +1675,14 @@ const AtlasWallet = (() => {
     // this to at most one) so a purchase never fails for want of merging
     // balances together first.
     const balanceCredential = wallet
+      .filter((e) => !isHeldBack(e))
       .map((e) => e.credential)
       .filter((c) => c.asset.class === info.purchase.priceClass && c.issuer.domain === issuerDomain && c.asset.fungible === true)
       .sort((a, b) => b.quantity - a.quantity)[0];
     if (!balanceCredential || balanceCredential.quantity < totalPrice) {
       throw new Error('Not enough ' + info.purchase.priceClass + ' — need ' + totalPrice + ', have ' + (balanceCredential ? balanceCredential.quantity : 0) + '.');
     }
+    await assertSettled(owner.publicKey, [balanceCredential.id]);
     const payload = { credentialId: balanceCredential.id, purchasedClass, quantity: qty, action: 'purchase' };
     const proof = await signAs(role, payload);
     const res = await fetch(baseUrl(issuerDomain) + '/atlas/asset/purchase', {
@@ -1733,6 +1923,7 @@ const AtlasWallet = (() => {
   // this throws with code 'leave-unreachable' and deletes nothing, so the
   // caller can offer to delete anyway (opts.keepOnServer).
   async function deleteAsset(ownerPublicKey, credentialId, opts = {}) {
+    await assertSettled(ownerPublicKey, [credentialId]);
     const before = await getWallet(ownerPublicKey);
     const deleted = before.find((e) => e.credential.id === credentialId);
     if (deleted && !opts.keepOnServer && deleted.credential.asset && deleted.credential.asset.class === 'atlas.postoffice.membership') {
@@ -1907,14 +2098,14 @@ const AtlasWallet = (() => {
     const ran = await withConsolidationSlot(ownerPublicKey, async () => {
       const groups = new Map();
       for (const entry of await getWallet(ownerPublicKey)) {
-        if (!entry.credential.asset.fungible || isKnownSpent(entry)) continue;
+        if (!entry.credential.asset.fungible || isHeldBack(entry)) continue;
         const key = entry.credential.asset.class + '::' + entry.credential.issuer.domain;
         if (!groups.has(key)) groups.set(key, { cls: entry.credential.asset.class, domain: entry.credential.issuer.domain });
       }
       for (const { cls, domain } of groups.values()) {
         for (let round = 0; round < 60; round++) {
           const group = (await getWallet(ownerPublicKey))
-            .filter((e) => e.credential.asset.fungible && !isKnownSpent(e) && e.credential.asset.class === cls && e.credential.issuer.domain === domain)
+            .filter((e) => e.credential.asset.fungible && !isHeldBack(e) && e.credential.asset.class === cls && e.credential.issuer.domain === domain)
             .map((e) => e.credential)
             .sort((a, b) => b.quantity - a.quantity);
           if (group.length < 2) break;
@@ -1922,6 +2113,11 @@ const AtlasWallet = (() => {
             await mergeAssetGroup(ownerPublicKey, group.slice(0, MAX_CONSOLIDATE_BATCH));
             report.merged++;
           } catch (err) {
+            if (err.needsAttention || err.unresolved) {
+              // The balances involved are held back (isHeldBack), so the next call leaves them out.
+              report.failed.push({ class: cls, domain, stacks: group.length, error: String(err.message).slice(0, 300), code: err.code || null, pending: false });
+              break;
+            }
             if (err.code === 'revoked' && err.credentialId && group.some((c) => c.id === err.credentialId)) {
               await markSpent(ownerPublicKey, err.credentialId, 'refused by issuer as already revoked');
               report.spent++;
@@ -2220,7 +2416,9 @@ const AtlasWallet = (() => {
   // (a clicked ground point for the 2D renderer, or a placeholder for 3D —
   // see viewer.js's beginDropPlacement).
   async function dropItem(credential, worldDomain, world, position) {
-    await assertWalletWritable((await identityOf('self')).publicKey);
+    const dropper = (await identityOf('self')).publicKey;
+    await assertWalletWritable(dropper);
+    await assertSettled(dropper, [credential.id]);
     const payload = { action: 'drop', credentialId: credential.id, world, droppedAt: new Date().toISOString() };
     const proof = await signWithSelf(payload);
     const res = await fetch(baseUrl(worldDomain) + '/atlas/world/drop', {
@@ -2308,6 +2506,7 @@ const AtlasWallet = (() => {
   // own Listings sub-tab display, with reconcileSubmittedTrades (see
   // checkAllMail below) noticing later once it's claimed.
   async function submitTradeIntent(issuerDomain, membership, offer, want, balance, expiresMinutes) {
+    if (balance && balance.id) await assertSettled((await identityOf('self')).publicKey, [balance.id]);
     const intent = await proposeIntent('self', offer, want, undefined, expiresMinutes);
     const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/submit', {
       method: 'POST',
@@ -2441,7 +2640,9 @@ const AtlasWallet = (() => {
   // this call, so their own remainder/received apply directly, right here,
   // the moment the claim succeeds.
   async function claimTradeListing(issuerDomain, membership, listing, balance, expiresMinutes) {
-    await assertWalletWritable((await identityOf('self')).publicKey);
+    const claimer = (await identityOf('self')).publicKey;
+    await assertWalletWritable(claimer);
+    if (balance && balance.id) await assertSettled(claimer, [balance.id]);
     const intent = await proposeIntent('self', listing.want, listing.offer, listing.posterPublicKey, expiresMinutes);
     const res = await fetch(baseUrl(issuerDomain) + '/atlas/trade/claim', {
       method: 'POST',
@@ -9559,7 +9760,7 @@ const AtlasWallet = (() => {
     getActivityLog, clearActivityLog,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
-    autoConsolidateAssetWallet, recoverPendingOperations, getPendingOperations, getConsolidationStatus,
+    autoConsolidateAssetWallet, recoverPendingOperations, retryPendingOperation, getPendingOperations, getConsolidationStatus,
     getLoadout, loadItem, unloadItem,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
