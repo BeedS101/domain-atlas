@@ -21,7 +21,7 @@ successors without it. There is no half-applied state.
 ## Results
 
 Run: `xvfb-run -a node test/manual-gen1-wallet-crash-recovery.js both` (add `--quick` for fewer random kills).
-Current result: 308 checks pass, 0 fail; 16 gap probes (8 per issuer).
+Current result: 314 checks pass, 0 fail; 12 gap probes (6 per issuer).
 
 | Interruption (SIGKILL of the browser, restart on the same profile, unlock) | Result |
 |---|---|
@@ -41,6 +41,7 @@ Current result: 308 checks pass, 0 fail; 16 gap probes (8 per issuer).
 | the lost request re-sent with the same `requestId` | same signed credential, no extra revocation |
 | the same predecessors re-sent under a new `requestId` | refused, no second successor |
 | stale predecessor spent before recovery ran | refused; recovery runs first; nothing spent twice |
+| backup taken in the window, restored on a fresh profile | the journal comes with it; recovery by the original request id gives one 40 g credential (`docs/gen1-backup-journal.md`) |
 
 So for the question asked: after the issuer commits a consolidation and the extension dies before storing the
 successor, restarting the wallet cannot duplicate or resurrect assets, and loses nothing **as long as the journal
@@ -56,9 +57,10 @@ Ordered by consequence.
    predecessors spent (wallet 0 g, issuer still counting 40 g held). **Wallet side fixed:** the entry is now kept as
    `needs-attention` and its predecessors are held back; see `docs/gen1-replay-expiry.md`. The expired successor
    itself still cannot be retrieved: that needs longer-lived outcome evidence at the issuer.
-2. **The journal is not in the backup** (`buildBackupPayload`; manual and automatic backups). A backup taken in the
-   window, restored on a fresh profile, has the revoked predecessors and no journal: the wallet ends with 0 g of
-   40 g (and, until a manual re-verify, one revoked 20 g credential still shown as live).
+2. **The journal was not in the backup. Fixed.** A backup taken in the window and restored on a fresh profile had the
+   revoked predecessors and no journal: the wallet ended with 0 g of 40 g. Manual and automatic backups now carry the
+   journal and a restore merges it by request id with conflict detection and a quarantine; see
+   `docs/gen1-backup-journal.md`. If the issuer has expired its answer the restored entry ends as `needs-attention`.
 3. **A lock during a non-fungible mint can erase the wallet. Fixed.** Wallet, journal and file-ledger writes now
    refuse when the stored value exists but cannot be read; see `docs/wallet-storage-safety.md` for the root cause,
    the change and the remaining unsafe paths.
@@ -76,8 +78,7 @@ Ordered by consequence.
   are live bearer credentials, so longer retention is a security trade-off; they stay private (0600, outside or
   behind the guarded folder).
 - Wallet: never delete a journal entry on a `revoked` refusal; keep it as "needs attention" (done, see
-  `docs/gen1-replay-expiry.md`), show it, and keep it in the backup. Include `atlasPendingOps` in the backup payload
-  and restore it (not done).
+  `docs/gen1-replay-expiry.md`), show it, and keep it in the backup (done, see `docs/gen1-backup-journal.md`).
 - Wallet: run `recoverPendingOperations` once after unlock and on a timer, and mark predecessors of a pending
   consolidation as "being replaced" in the display.
 - Issuer, for recovery without a journal or after expiry: an owner-signed endpoint that returns the unrevoked

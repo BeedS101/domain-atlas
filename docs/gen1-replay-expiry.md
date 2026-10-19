@@ -92,8 +92,9 @@ the revocation list, and no ownership is inferred from it.
   not this one, spent them.
 - **No way to dismiss an entry.** It is kept as evidence, indefinitely. A person-facing screen, a dismiss action and
   the display in `viewer.js` are not part of this change.
-- **The journal is still not in the backup** (gap 2 of the crash-recovery audit), and a journal that cannot be
-  decrypted cannot mark the display: sends and spends are refused, but the predecessors are listed unmarked.
+- **A journal that cannot be decrypted cannot mark the display**: sends and spends are refused, but the predecessors
+  are listed unmarked. (The journal is now carried in manual and automatic backups, see `docs/gen1-backup-journal.md`;
+  a restored entry keeps its state, so an expired request restores as `needs-attention`.)
 - **Operations that are not journalled** (non-fungible mint, purchase, trade claim) are unchanged.
 
 ## Tests
@@ -120,7 +121,7 @@ Run on isolated issuers and disposable Chromium profiles, Node and PHP backends 
 | Suite | Result |
 |---|---|
 | `manual-gen1-replay-expiry.js both` | 152 passed, 0 failed (76 per backend) |
-| `manual-gen1-wallet-crash-recovery.js both` | 310 passed, 0 failed, 16 gap probes (the expired-successor and backup probes remain gaps by design) |
+| `manual-gen1-wallet-crash-recovery.js both` | 310 passed, 0 failed, 16 gap probes (the expired-successor and backup probes remained gaps by design when this was written; the backup probes are closed, see `docs/gen1-backup-journal.md`) |
 | `manual-gen1-wallet-fixes.js` | 52 passed, 0 failed |
 | `manual-gen1-wallet-races.js` | no loss, no revoked credential left in the wallet, 0 of 6 trials short |
 | `manual-wallet-storage-safety.js node` and `php` | 79 passed, 0 failed each |

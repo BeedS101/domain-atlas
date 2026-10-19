@@ -1135,7 +1135,9 @@ const AtlasWallet = (() => {
       await chrome.storage.local.set({ atlasWalletQuarantine: quarantine });
     }
     wallets[ownerPublicKey] = await encryptAtRest(identity, 'wallet', Array.isArray(entries) ? entries.map(withoutUnresolvedMark) : entries);
-    await chrome.storage.local.set({ atlasWallets: wallets });
+    // `opts.extraWrites(identity)` returns more storage keys to write in the SAME storage write.
+    const extra = opts && opts.extraWrites ? await opts.extraWrites(identity) : {};
+    await chrome.storage.local.set(Object.assign({}, extra, { atlasWallets: wallets }));
     notifyWalletChanged(ownerPublicKey);
   }
 
@@ -1574,6 +1576,167 @@ const AtlasWallet = (() => {
       predecessors: Array.isArray(e.predecessors) ? e.predecessors.slice() : [],
       attention: e.attention || null
     }));
+  }
+
+  // ---------- the pending journal in backups ----------
+  // A full backup carries the journal next to the wallet, in the same encrypted payload, so a
+  // wallet restored on another device still has the request ids it needs to ask the issuer for an
+  // answer, and still knows which balances belong to an unfinished transaction.
+  //   data.pendingOps = { format, owner, entries: [journal entries as stored] }
+  // A backup made before this field existed has no `pendingOps` at all: that is "no journal was
+  // carried" and changes nothing. A field that is present but not in this shape is quarantined.
+  const PENDING_OPS_BACKUP_FORMAT = 'atlas-pending-ops/1.0';
+  const JOURNAL_PATHS = { mint: '/atlas/asset/issue', split: '/atlas/asset/split', consolidate: '/atlas/asset/consolidate', convert: '/atlas/convert' };
+
+  // The wallet list and the journal for one owner, from ONE storage read, so they describe the same
+  // instant: every write that changes both (applying an answer) is a single storage write. Reads
+  // strictly: a locked, unreadable or corrupted store throws instead of being captured as empty.
+  async function snapshotWalletAndJournal(ownerPublicKey) {
+    const stored = await chrome.storage.local.get(['atlasWallets', 'atlasPendingOps']);
+    const wallet = (await readStoredListForWrite('wallet', (stored.atlasWallets || {})[ownerPublicKey])).list.filter(isPostMergeAssetCredential);
+    const journal = (await readStoredListForWrite('pendingOps', (stored.atlasPendingOps || {})[ownerPublicKey])).list;
+    return { wallet, journal };
+  }
+
+  // Why a journal entry cannot be restored as it is, or null. `owner` is the identity being restored:
+  // an entry is never reassigned to another key.
+  function journalEntryProblem(entry, owner) {
+    if (!usablePendingEntry(entry)) return 'unusable';
+    if (entry.owner !== owner) return 'wrong-owner';
+    if (entry.toOwner !== undefined && entry.toOwner !== null && entry.toOwner !== owner) return 'wrong-owner';
+    if (!Object.prototype.hasOwnProperty.call(JOURNAL_PATHS, entry.kind) || JOURNAL_PATHS[entry.kind] !== entry.path) return 'unknown-operation';
+    if (!/^[A-Za-z0-9.\-:\[\]]{1,255}$/.test(entry.domain)) return 'malformed';
+    if (entry.state !== undefined && entry.state !== 'pending' && entry.state !== 'needs-attention') return 'malformed';
+    if (entry.attempts !== undefined && !(Number.isInteger(entry.attempts) && entry.attempts >= 0)) return 'malformed';
+    if (entry.predecessors !== undefined && !(Array.isArray(entry.predecessors) && entry.predecessors.every((id) => typeof id === 'string'))) return 'malformed';
+    if (entry.attention !== undefined && (!entry.attention || typeof entry.attention !== 'object' || Array.isArray(entry.attention))) return 'malformed';
+    if (entry.body.requestId !== entry.requestId) return 'malformed';
+    if (entry.body.ownerPublicKey !== undefined && entry.body.ownerPublicKey !== owner) return 'wrong-owner';
+    const carried = presentedCredentialsOf(entry).concat(Array.isArray(entry.body.existingBalances) ? entry.body.existingBalances : []);
+    for (const credential of carried) {
+      if (credential && credential.owner && credential.owner.publicKey !== owner) return 'wrong-owner';
+    }
+    return null;
+  }
+
+  // What makes two entries the same request. Progress fields (state, attempts, errors) are not part of it.
+  function journalCoreOf(entry) {
+    return canonicalize({
+      kind: entry.kind, owner: entry.owner, toOwner: entry.toOwner || null, label: entry.label || null, domain: entry.domain,
+      path: entry.path, predecessors: entry.predecessors || [], body: entry.body, createdAt: entry.createdAt || null
+    });
+  }
+
+  // The same request seen twice (stored, and in a backup): keeps the stored entry and takes from the
+  // other only what adds evidence: needs-attention, and the higher attempt count.
+  function mergeSameRequest(existing, other) {
+    let out = existing;
+    if (other.state === 'needs-attention' && existing.state !== 'needs-attention') {
+      out = Object.assign({}, out, { state: 'needs-attention', attention: other.attention, lastError: other.lastError, lastAttemptAt: other.lastAttemptAt });
+    }
+    const attempts = Math.max(existing.attempts || 0, other.attempts || 0);
+    if (attempts !== (out.attempts || 0)) out = Object.assign({}, out, { attempts });
+    return out;
+  }
+
+  // Pure. Merges the journal field of a backup into the stored list for `owner`, keyed by request id.
+  // Returns { list, quarantined: [{ reason, value }], summary }. Nothing is overwritten: a stored
+  // entry always stays, an entry that is not for this owner, not in the expected shape, or the same
+  // request id with different content is set aside whole, never dropped.
+  function mergeJournalFromBackup(local, field, owner) {
+    const summary = { status: 'absent', added: 0, merged: 0, unchanged: 0, quarantined: 0, conflicts: 0, overlaps: 0 };
+    const quarantined = [];
+    const list = local.slice();
+    if (field === undefined) return { list, quarantined, summary };
+    const setAside = (reason, value) => { quarantined.push({ reason, value }); summary.quarantined++; };
+    if (!field || typeof field !== 'object' || Array.isArray(field) || field.format !== PENDING_OPS_BACKUP_FORMAT || !Array.isArray(field.entries)) {
+      setAside('malformed-field', field === undefined ? null : field);
+      summary.status = 'quarantined';
+      return { list, quarantined, summary };
+    }
+    if (field.owner !== owner) {
+      setAside('wrong-owner', field);
+      summary.status = 'quarantined';
+      return { list, quarantined, summary };
+    }
+    summary.status = 'merged';
+    const byId = new Map();
+    list.forEach((e) => { if (e && typeof e === 'object' && typeof e.requestId === 'string') byId.set(e.requestId, e); });
+    for (const entry of field.entries) {
+      const problem = journalEntryProblem(entry, owner);
+      if (problem) { setAside(problem, entry); continue; }
+      const existing = byId.get(entry.requestId);
+      if (!existing) {
+        const mine = new Set(entry.predecessors || []);
+        if (list.some((e) => usablePendingEntry(e) && (e.predecessors || []).some((id) => mine.has(id)))) summary.overlaps++;
+        const copy = JSON.parse(JSON.stringify(entry));
+        list.push(copy);
+        byId.set(copy.requestId, copy);
+        summary.added++;
+        continue;
+      }
+      if (!usablePendingEntry(existing) || journalCoreOf(existing) !== journalCoreOf(entry)) {
+        setAside('conflict', entry);
+        summary.conflicts++;
+        continue;
+      }
+      const merged = mergeSameRequest(existing, entry);
+      if (merged === existing) { summary.unchanged++; continue; }
+      list[list.indexOf(existing)] = merged;
+      byId.set(merged.requestId, merged);
+      summary.merged++;
+    }
+    return { list, quarantined, summary };
+  }
+
+  // The storage writes a restore needs for the journal, to be made in the SAME storage write as the
+  // restored wallet (so a restore cannot leave the wallet without its journal). Runs inside the wallet
+  // lock. A stored journal that cannot be read is copied to the quarantine before it is replaced, and is
+  // left alone when the backup carries no journal.
+  async function planJournalRestore(identity, owner, field) {
+    const stored = await chrome.storage.local.get(['atlasPendingOps', 'atlasPendingOpsQuarantine']);
+    const journalAll = stored.atlasPendingOps || {};
+    const quarantineAll = stored.atlasPendingOpsQuarantine || {};
+    const aside = [];
+    let local = [];
+    let localUnreadable = false;
+    try {
+      local = (await readStoredListForWrite('pendingOps', journalAll[owner])).list;
+    } catch (err) {
+      if (!err || err.code !== 'wallet-unreadable') throw err;
+      localUnreadable = true;
+    }
+    if (localUnreadable && field === undefined) {
+      return { writes: {}, summary: { status: 'absent', added: 0, merged: 0, unchanged: 0, quarantined: 0, conflicts: 0, overlaps: 0, localJournalUnreadable: true } };
+    }
+    if (localUnreadable) aside.push({ reason: 'unreadable-local-journal', source: 'local', value: journalAll[owner] });
+    const merged = mergeJournalFromBackup(local, field, owner);
+    merged.quarantined.forEach((q) => aside.push({ reason: q.reason, source: 'backup', value: q.value }));
+    const summary = Object.assign({}, merged.summary, localUnreadable ? { localJournalUnreadable: true } : {});
+    const writes = {};
+    if (localUnreadable || canonicalize(merged.list) !== canonicalize(local)) {
+      journalAll[owner] = await encryptAtRest(identity, 'pendingOps', merged.list);
+      writes.atlasPendingOps = journalAll;
+    }
+    if (aside.length) {
+      const existing = (await readStoredListForWrite('pendingOpsQuarantine', quarantineAll[owner])).list;
+      const known = new Set(existing.map((q) => canonicalize({ reason: q.reason, source: q.source, value: q.value })));
+      const fresh = aside.filter((q) => !known.has(canonicalize({ reason: q.reason, source: q.source, value: q.value })))
+        .map((q) => Object.assign({ at: new Date().toISOString() }, q));
+      if (fresh.length) {
+        quarantineAll[owner] = await encryptAtRest(identity, 'pendingOpsQuarantine', existing.concat(fresh));
+        writes.atlasPendingOpsQuarantine = quarantineAll;
+      }
+    }
+    return { writes, summary };
+  }
+
+  // What a restore set aside instead of restoring: [{ at, reason, source: 'backup' | 'local', value }].
+  async function getPendingOpsQuarantine(ownerPublicKey) {
+    const { atlasPendingOpsQuarantine } = await chrome.storage.local.get('atlasPendingOpsQuarantine');
+    const identity = await getIdentity();
+    const list = await decryptAtRest(identity, 'pendingOpsQuarantine', (atlasPendingOpsQuarantine || {})[ownerPublicKey], []);
+    return Array.isArray(list) ? list : [];
   }
 
   // The one issuance entry point for every asset class this build can
@@ -4648,27 +4811,27 @@ const AtlasWallet = (() => {
   // (further down this file) protect — factored out so there's only ONE
   // place that knows which ~15 data families a full backup covers. Calls
   // the SAME getX() getters the UI already uses (see this section's
-  // original comment above for why), never a raw storage read.
+  // original comment above for why), except the wallet and its pending
+  // journal, which are read together and strictly (snapshotWalletAndJournal).
   async function buildBackupPayload(identity) {
     const owner = identity.publicKey;
+    // The wallet and its pending journal are captured from one storage read and strictly: a backup is
+    // never made from a store that cannot be read, and never from two different moments.
+    const snapshot = await snapshotWalletAndJournal(owner);
     const [
       wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
       friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
       mutedChatUsers, blockedChatUsers, loadout, chatMessages,
       chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles, friendRequests
     ] = await Promise.all([
-      // Task #250: dropped items no longer have a local-only "still
-      // secretly mine" state to back up — a drop now genuinely leaves this
-      // wallet (see dropItem()'s own comment) and lives server-side on
-      // whichever world hosts it, not in this device's own storage.
-      getWallet(owner), getMail(owner), getSentMail(owner), getSubmittedTrades(owner), getAssetUpdateNotices(owner),
+      // Dropped items are not backed up: a drop leaves this wallet (see dropItem()) and lives server-side
+      // on whichever world hosts it.
+      snapshot.wallet, getMail(owner), getSentMail(owner), getSubmittedTrades(owner), getAssetUpdateNotices(owner),
       getFriends(), getContactGroups(), getAliasesForOwner(identity), getRecentWorlds(), getFavoriteDomains(), getCalendarEvents(),
       getMutedChatUsers(), getBlockedChatUsers(), getLoadout(), getChatMessages(owner),
-      // Task #158 — without these, a restore would generate a BRAND NEW
-      // e2ee keypair on the new device, permanently losing the ability to
-      // decrypt this identity's past end-to-end-encrypted chat threads
-      // (the shared secret is tied to this exact keypair) and forgetting
-      // every peer key this identity had already verified.
+      // Without these, a restore would generate a new e2ee keypair on the new device, permanently losing
+      // the ability to decrypt this identity's past end-to-end-encrypted chat threads (the shared secret is
+      // tied to this exact keypair) and forgetting every peer key this identity had already verified.
       getChatE2eeKeyPair(identity), getE2eePeerKeysForOwner(identity),
       // The activity log is a data family like any other above: a restore
       // should bring someone's history back with it, not reset it.
@@ -4712,6 +4875,7 @@ const AtlasWallet = (() => {
         friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
         mutedChatUsers, blockedChatUsers, loadout, chatMessages,
         chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles, friendRequests,
+        pendingOps: { format: PENDING_OPS_BACKUP_FORMAT, owner, entries: snapshot.journal },
         deletedMailIds: (deletedMailIdsAll.atlasDeletedMailIds || {})[owner] || [],
         deletedChatIds: (deletedChatIdsAll.atlasDeletedChatIds || {})[owner] || [],
         lastChatSendDomain: (lastChatSendDomainAll.atlasLastChatSendDomain || {})[owner] || null,
@@ -4791,16 +4955,22 @@ const AtlasWallet = (() => {
 
     const owner = publicKey;
     const d = payload.data || {};
+    let journalSummary = null;
     await Promise.all([
-      withWalletLock(() => saveWallet(owner, d.wallet || [], { replaceUnreadable: true })),
+      // The restored wallet and the merged journal are written together or not at all.
+      withWalletLock(() => saveWallet(owner, d.wallet || [], {
+        replaceUnreadable: true,
+        extraWrites: async (restoredIdentity) => {
+          const plan = await planJournalRestore(restoredIdentity, owner, d.pendingOps);
+          journalSummary = plan.summary;
+          return plan.writes;
+        }
+      })),
       withMessageLock(() => saveMail(owner, d.mail || [])),
       saveSentMail(owner, d.sentMail || []),
       saveSubmittedTrades(owner, d.submittedTrades || []),
-      // Task #250: no saveDroppedItems() anymore — an OLDER backup file's
-      // d.droppedItems (if present) is simply not restored; the underlying
-      // credentials themselves still come back fine via d.wallet above,
-      // same as always, they just won't remember which position they were
-      // last left sitting at in a scene.
+      // An older backup's d.droppedItems (if present) is not restored; the credentials themselves come
+      // back through d.wallet, they just do not remember where in a scene they were left.
       saveAssetUpdateNotices(owner, d.assetUpdateNotices || []),
       saveFriends(owner, d.friends || []),
       saveContactGroups(owner, d.contactGroups || []),
@@ -4812,12 +4982,9 @@ const AtlasWallet = (() => {
       saveBlockedChatUsers(owner, d.blockedChatUsers || []),
       setLoadout(d.loadout || []),
       withMessageLock(() => saveChatMessages(owner, d.chatMessages || [])),
-      // Task #158 — restoring the SAME e2ee keypair (not generating a
-      // fresh one) is what keeps this identity able to decrypt its past
-      // end-to-end-encrypted chat threads on the new device; restoring
-      // the peer-key cache means it doesn't have to re-bootstrap (an
-      // unencrypted first message again) with everyone it already
-      // verified a key for.
+      // Restoring the same e2ee keypair (not a fresh one) keeps this identity able to decrypt its past
+      // end-to-end-encrypted chat threads on the new device; restoring the peer-key cache avoids
+      // re-bootstrapping (an unencrypted first message) with everyone already verified.
       ...(d.chatE2eeKeyPair ? [saveChatE2eeKeyPair(owner, d.chatE2eeKeyPair)] : []),
       saveE2eePeerKeysForOwner(owner, d.chatE2eePeerKeys || {}),
       // Carries the restored identity's own activity history back in, same
@@ -4860,8 +5027,11 @@ const AtlasWallet = (() => {
     // Logged AFTER the activity log itself was just overwritten by the
     // restore above (d.activityLog), so this becomes the newest entry on
     // top of the restored history rather than being wiped by it.
-    await logActivity('backup', 'Restored full wallet backup from ' + (restoreSourceLabel || 'a backup file'));
-    return { publicKey };
+    const journalNote = journalSummary && journalSummary.status !== 'absent'
+      ? ' (pending operations: ' + journalSummary.added + ' added, ' + journalSummary.merged + ' merged, ' + journalSummary.quarantined + ' set aside)'
+      : '';
+    await logActivity('backup', 'Restored full wallet backup from ' + (restoreSourceLabel || 'a backup file') + journalNote);
+    return { publicKey, pendingOps: journalSummary };
   }
 
   async function exportFullBackup(password, seedPhrase) {
@@ -9760,7 +9930,7 @@ const AtlasWallet = (() => {
     getActivityLog, clearActivityLog,
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
-    autoConsolidateAssetWallet, recoverPendingOperations, retryPendingOperation, getPendingOperations, getConsolidationStatus,
+    autoConsolidateAssetWallet, recoverPendingOperations, retryPendingOperation, getPendingOperations, getPendingOpsQuarantine, getConsolidationStatus,
     getLoadout, loadItem, unloadItem,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,

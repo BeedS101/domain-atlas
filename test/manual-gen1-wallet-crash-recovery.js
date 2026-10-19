@@ -410,7 +410,7 @@ async function main() {
       check('the refused mint reports the wallet as locked', /locked/i.test(String(out)), { out });
     });
 
-    // ---- 12. the backup does not carry the journal ----
+    // ---- 12. a backup taken inside the window, restored on a fresh profile ----
     await scenario(kind, 'D1 backup taken inside the window, restored on a fresh profile', async (w, iss) => {
       await interrupted(w, iss, 'dropAnswer');
       const file = await w.W(([pw, seed]) => AtlasWallet.exportFullBackup(pw, seed), [PASSWORD, w.seed]);
@@ -420,16 +420,13 @@ async function main() {
         await w2.unlock().catch(() => null);
         w2.pub = w.pub;
         const pend = await w2.pending();
-        const rows = await w2.live(IRON);
-        await w2.recover();
-        await w2.W((k) => AtlasWallet.autoConsolidateAssetWallet(k), w2.pub);
-        const afterConsolidate = sum(await w2.live(IRON));
+        check('the restored profile has the journal entry (the backup carries it; see docs/gen1-backup-journal.md)', pend.length === 1 && pend[0].state === 'pending', { res: JSON.stringify(res).slice(0, 120), pend });
+        const rec = await w2.recover();
+        const afterRecover = await w2.live(IRON);
+        check('recovery by the original request id gives the full 40 g, once', rec.length === 1 && rec[0].status === 'completed' && sum(afterRecover) === 40 && afterRecover.length === 1, { rec, afterRecover });
         await w2.W(() => AtlasWallet.reverifyAll());
         const afterLive = await w2.live(IRON);
-        console.log('INFO restore: import=' + JSON.stringify(res).slice(0, 80) + ' pending=' + pend.length + ' live before=' + sum(rows) + ' after recover+consolidate=' + afterConsolidate + ' after re-verify=' + sum(afterLive));
-        gap('one revoked credential is still shown as live after the restored wallet\'s own consolidation attempt (' + afterConsolidate + ' g) until a manual re-verify', afterConsolidate > 0, { afterConsolidate });
-        gap('a backup taken between "issuer committed" and "wallet stored the answer" does not include the journal; restored on a fresh profile the wallet ends with ' + sum(afterLive) + ' g of 40 g', pend.length === 0 && sum(afterLive) < 40, { pend: pend.length, rows: rows.length, afterLive: sum(afterLive) });
-        check('and the restored wallet does not hold anything revoked as live', afterLive.every((x) => !iss.revoked().has(x.id)), afterLive);
+        check('after a re-verify: still 40 g, and nothing revoked is held as live', sum(afterLive) === 40 && afterLive.every((x) => !iss.revoked().has(x.id)), afterLive);
       } finally { await w2.dispose(); }
     });
   }

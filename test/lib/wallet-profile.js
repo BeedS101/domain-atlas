@@ -14,10 +14,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------- browser
 class Wallet {
-  constructor(label) { this.label = label; this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-crash-' + label + '-')); this.context = null; this.sw = null; this.pub = null; }
+  constructor(label, opts) { this.label = label; this.extPath = (opts && opts.extPath) || EXT_PATH; this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-crash-' + label + '-')); this.context = null; this.sw = null; this.pub = null; }
   async launch() {
     for (const f of fs.readdirSync(this.dir)) if (/^Singleton/.test(f)) fs.rmSync(path.join(this.dir, f), { force: true });
-    const a = ['--disable-extensions-except=' + EXT_PATH, '--load-extension=' + EXT_PATH, '--no-sandbox'];
+    const a = ['--disable-extensions-except=' + this.extPath, '--load-extension=' + this.extPath, '--no-sandbox'];
     this.context = await chromium.launchPersistentContext(this.dir, { headless: false, executablePath: '/opt/pw-browsers/chromium', args: a, viewport: null });
     await this.resolveSw();
     return this;
