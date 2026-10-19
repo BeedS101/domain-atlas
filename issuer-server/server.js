@@ -33,17 +33,8 @@
 // station server called this same issuer's endpoints instead of running
 // them in-process.
 //
-// Also collapsed for the demo: a second visitor for §5.2's PvP-loss demo,
-// which genuinely needs two distinct signers in one browser tab to show at
-// all. The extension represents the primary visitor with a real WebAuthn
-// passkey (as it already did for the basic wallet) and a second, purely
-// local ECDSA keypair standing in for "the other visitor" — see
-// extension/wallet.js's counterparty functions and the README for why
-// that's an honest way to demo a two-party protocol without needing two
-// physical devices. §7's own two-party need is met differently since v1.15
-// removed in-person trading: a listing's poster and its claimant are just
-// two ordinary wallets, normally demoed with two separate browser profiles
-// (see test/manual-remote-trade.js) rather than this counterparty stand-in.
+// §7's two-party need is met by two ordinary wallets: a listing's poster and its claimant are
+// normally demoed with two separate browser profiles (see test/manual-remote-trade.js).
 //
 // Zero npm dependencies — Node's built-in http/crypto only.
 //
@@ -1629,7 +1620,7 @@ function derToRawEcdsaSig(der) {
 
 // Verifies a signed-payload "envelope" as produced by wallet.js's
 // signWithSelf() (a real WebAuthn assertion, challenge = hash of the
-// payload) or signWithCounterparty() (a direct ECDSA signature). Same
+// payload, or a direct ECDSA signature for a local identity). Same
 // dual-mode check on both ends of the wire, same as canonicalize().
 async function verifyEnvelope(payload, envelope) {
   const dataHash = new Uint8Array(await subtle.digest('SHA-256', new TextEncoder().encode(canonicalize(payload))));

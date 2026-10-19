@@ -1928,7 +1928,7 @@
            OPEN — it's what "your wallet" actually means, the reason you
            opened this panel — while Identity and Recent worlds default
            closed. Identity used to default open too, but your public
-           key/nickname/counterparty controls aren't what most visits to
+           key and nickname controls aren't what most visits to
            this panel are actually for, so it's tucked away the same as
            the situational categories now — just a tap on its header away,
            same as any other collapsed category here. Trading station used
@@ -1949,11 +1949,6 @@
             <button id="setAliasBtn" type="button" class="btn-secondary">Save nickname</button>
           </div>
           <div id="aliasStatus" class="mono"></div>
-
-          <div id="counterpartyIdentity" class="mono" style="margin-top:8px;">No counterparty yet — a second local keypair standing in for another visitor (see README).</div>
-          <div class="btn-col" style="margin-top:8px;">
-            <button id="createCounterpartyBtn" type="button">Create counterparty identity</button>
-          </div>
 
           <!-- Task #73: moved here from Inventory, where it sat left over
                from before Inventory became its own section (#44). A pure
@@ -2045,13 +2040,10 @@
                shows none. -->
           <div id="collectiblesSubscreen" class="subscreen active">
             <input type="text" id="collectiblesSearchInput" placeholder="Search collectibles…">
-            <!-- Task #151 — filters the "Yours" list below (only) down to
-                 assets whose class is in the CURRENT world's
-                 policy.acceptedItemClasses AND whose issuer passes its
-                 policy.trustedIssuers; see isAssetCompatibleWithWorld() in
-                 viewer.js. Never affects the Counterparty's list, since
-                 "compatible with this domain" is about what YOU could
-                 meaningfully load/drop here. -->
+            <!-- Filters the list below down to assets whose class is in the
+                 CURRENT world's policy.acceptedItemClasses AND whose issuer
+                 passes its policy.trustedIssuers; see
+                 isAssetCompatibleWithWorld() in viewer.js. -->
             <label class="check-row">
               <input type="checkbox" id="collectiblesCompatOnlyCheckbox">
               <span>Only show items compatible with this domain</span>
@@ -2070,26 +2062,21 @@
               <div id="droppedItemsList" class="item-list"></div>
             </div>
 
-            <div class="subhead">Counterparty's</div>
-            <div id="counterpartyCollectiblesList" class="item-list"></div>
           </div>
 
           <!-- Sub-screen: Documents — every asset with
                presentation: "document" (currently just atlas.membership,
                per the issuer's catalog — this panel works even though
-               it's sparse today). Same Yours/Counterparty's shape as
-               Collectibles above. -->
+               it's sparse today). -->
           <div id="documentsSubscreen" class="subscreen">
             <input type="text" id="documentsSearchInput" placeholder="Search documents…" style="margin-top:8px;">
-            <!-- Same "Yours"-only compatibility filter as Collectibles above (#151). -->
+            <!-- Same compatibility filter as Collectibles above. -->
             <label class="check-row">
               <input type="checkbox" id="documentsCompatOnlyCheckbox">
               <span>Only show items compatible with this domain</span>
             </label>
             <div class="subhead">Yours</div>
             <div id="selfDocumentsList" class="item-list"></div>
-            <div class="subhead">Counterparty's</div>
-            <div id="counterpartyDocumentsList" class="item-list"></div>
           </div>
 
           <!-- Sub-screen: Ledger — references to accounts whose balances are kept by a

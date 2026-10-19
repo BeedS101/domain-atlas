@@ -249,7 +249,7 @@ and its balance are not touched, and the confirmation says so.
 - Nothing assumes the default identity. Adding a credential owned by another identity is refused
   with a plain reason rather than filed under the wrong one.
 - This repository has local-password identities (silent signing) and passkey identities (a
-  hardware ceremony per signature), plus a local test counterparty. There is **no separate vault
+  hardware ceremony per signature). There is **no separate vault
   identity type here**; the rules key on whether an identity can sign without asking.
 
 ## Balance responses

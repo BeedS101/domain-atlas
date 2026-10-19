@@ -1,13 +1,6 @@
-// Verifies §5.2 (loadouts + transfer-on-loss) and §5.4 (fungible resources
-// + splitting) end to end: a real second signer (the "counterparty"
-// keypair — a second local ECDSA identity standing in for another
-// visitor), a real PvP loss with the loser's own key co-signing the
-// transfer, and a real resource split settled by the issuer. Trading
-// station coverage (§7) lives in test/manual-remote-trade.js instead —
-// v1.15 removed the in-person mechanism this file used to exercise here
-// (both sides' signed intents arriving in the same call, settled via the
-// now-removed #tradeBtn), and open-listing trading no longer needs this
-// file's counterparty stand-in at all.
+// Verifies §5.2 loadouts (warning in a combat world, load and unload) and mining of fungible resources
+// (§5.4) end to end against the demo issuer on localhost:8001. Trading station coverage (§7) lives in
+// test/manual-remote-trade.js, which uses two independent wallets.
 
 const { chromium } = require('playwright');
 const path = require('path');
@@ -115,12 +108,7 @@ async function clickCardMenuAction(actionLocator) {
     await frame.locator('#seedConfirmBtn').click();
     await frame.waitForFunction(() => document.getElementById('mainWalletScreen').classList.contains('active'), null, { timeout: 5000 });
 
-    // Identity now defaults to a collapsed category on the main wallet
-    // screen (see viewer.html) — expand it before its buttons are clickable.
-    await frame.locator('[data-category="identity"] .settings-category-toggle').click();
-    await frame.locator('#createCounterpartyBtn').click();
-    await frame.waitForFunction(() => document.getElementById('counterpartyIdentity').textContent.startsWith('Counterparty:'), null, { timeout: 5000 });
-    console.log('PASS: self (password-protected) and counterparty (local ECDSA) identities created');
+    console.log('PASS: identity (password-protected) created');
 
     await frame.waitForFunction(() => !document.getElementById('requestItemBtn').disabled, null, { timeout: 5000 });
     await frame.locator('#requestItemBtn').click();
@@ -128,7 +116,7 @@ async function clickCardMenuAction(actionLocator) {
     console.log('PASS: Bronze Compass issued to self');
     await page.screenshot({ path: shot('lt-01-plaza-item.png') });
 
-    // ---------- §5.2 loadout + transfer-on-loss ----------
+    // ---------- §5.2 loadout ----------
 
     console.log('STEP 1: entering the Arena (combat: pvp)');
     await clickPortalTo(frame, 'arena');
@@ -138,25 +126,19 @@ async function clickCardMenuAction(actionLocator) {
 
     console.log('STEP 2: loading the item into this world');
     await clickCardMenuAction(frame.locator('#selfCollectiblesList [data-action="toggle-load"]'));
-    await frame.waitForFunction(() => !!document.querySelector('#selfCollectiblesList [data-action="lose"]'), null, { timeout: 5000 });
-    console.log('PASS: item loaded, "Simulate PvP loss" now available');
+    await frame.waitForFunction(() => /Unload/.test((document.querySelector('#selfCollectiblesList [data-action="toggle-load"]') || {}).textContent || ''), null, { timeout: 5000 });
+    console.log('PASS: item loaded, offered as "Unload"');
     await page.screenshot({ path: shot('lt-02-loaded-in-arena.png') });
 
-    console.log('STEP 3: simulating a PvP loss (real ECDSA-signed transfer to the counterparty key)');
-    await clickCardMenuAction(frame.locator('#selfCollectiblesList [data-action="lose"]'));
-    await frame.waitForFunction(
-      () => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 0 &&
-            document.querySelectorAll('#counterpartyCollectiblesList .wallet-item').length > 0, null,
-      { timeout: 15000 }
-    );
-    const selfItemsAfterLoss = await frame.locator('#selfCollectiblesList').textContent();
-    const cpItemsAfterLoss = await frame.locator('#counterpartyCollectiblesList').textContent();
-    if (selfItemsAfterLoss.includes('Bronze Compass')) throw new Error('Item should be gone from self wallet after loss');
-    if (!cpItemsAfterLoss.includes('Bronze Compass')) throw new Error('Item should now be in counterparty wallet');
-    console.log('PASS: item moved to counterparty — real owner-signed transfer, not a server reassignment');
-    await page.screenshot({ path: shot('lt-03-item-transferred.png') });
+    console.log('STEP 3: unloading the item again; it stays in the wallet');
+    await clickCardMenuAction(frame.locator('#selfCollectiblesList [data-action="toggle-load"]'));
+    await frame.waitForFunction(() => /Load into this world/.test((document.querySelector('#selfCollectiblesList [data-action="toggle-load"]') || {}).textContent || ''), null, { timeout: 5000 });
+    const itemsAfterUnload = await frame.locator('#selfCollectiblesList').textContent();
+    if (!itemsAfterUnload.includes('Bronze Compass')) throw new Error('Item should still be in the wallet after unloading');
+    console.log('PASS: item unloaded and still held');
+    await page.screenshot({ path: shot('lt-03-item-unloaded.png') });
 
-    // ---------- §5.4 resources + split ----------
+    // ---------- §5.4 resources ----------
 
     console.log('STEP 4: back to Plaza, then into the Trading Post');
     await clickPortalTo(frame, 'plaza');
@@ -165,32 +147,13 @@ async function clickCardMenuAction(actionLocator) {
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), null, { timeout: 10000 });
     console.log('PASS: in the Trading Post');
 
-    console.log('STEP 5: mining resources — 20 iron to self, 10 gold to counterparty');
-    // Task #211 removed the wallet panel's own always-available mint
-    // shortcuts (Inventory category's "Mine 20 iron (self)"/"Mine 10 gold
-    // (counterparty)" buttons) — this now mints the exact same way those
-    // handlers used to (AtlasWallet.mintAsset then refreshInventoryDisplay()),
-    // still deliberately minting the gold to 'counterparty' (unchanged by
-    // v1.15's market-stall fix, which only touched the market scene's own
-    // "Mine Gold" interactable): this file, and test/manual-wallet-search.js,
-    // both rely on this to seed the counterparty's own list with a distinct
-    // fungible class.
+    console.log('STEP 5: mining resources — 20 iron and 10 gold');
     await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });
     await frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×20 g'), null, { timeout: 15000 });
-    await frame.evaluate(async () => { await AtlasWallet.mintAsset('counterparty', 'localhost:8001', 'atlas.element.gold', 10); await refreshInventoryDisplay(); });
-    await frame.waitForFunction(() => document.getElementById('counterpartyCollectiblesList').textContent.includes('Gold (Au) ×10 g'), null, { timeout: 15000 });
-    console.log('PASS: both real resource balances minted and verified');
+    await frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.gold', 10); await refreshInventoryDisplay(); });
+    await frame.waitForFunction(() => document.getElementById('selfCollectiblesList').textContent.includes('Gold (Au) ×10 g'), null, { timeout: 15000 });
+    console.log('PASS: both resource balances minted and verified');
     await page.screenshot({ path: shot('lt-04-resources-minted.png') });
-
-    console.log('STEP 6: splitting — sending 10 of self\'s iron to the counterparty');
-    await clickCardMenuAction(frame.locator('#selfCollectiblesList [data-action="split"]'));
-    await frame.waitForFunction(
-      () => document.getElementById('selfCollectiblesList').textContent.includes('Iron (Fe) ×10 g') &&
-            document.getElementById('counterpartyCollectiblesList').textContent.includes('Iron (Fe) ×10 g'), null,
-      { timeout: 15000 }
-    );
-    console.log('PASS: split settled — self kept the remainder, counterparty received a fresh balance, old one revoked');
-    await page.screenshot({ path: shot('lt-05-split-settled.png') });
 
     console.log('\nALL LOADOUT + RESOURCE CHECKS PASSED');
   } catch (err) {

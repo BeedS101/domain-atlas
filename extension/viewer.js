@@ -1846,8 +1846,6 @@ const walletIdentityEl = document.getElementById('walletIdentity');
 const aliasInput = document.getElementById('aliasInput');
 const setAliasBtn = document.getElementById('setAliasBtn');
 const aliasStatusEl = document.getElementById('aliasStatus');
-const counterpartyIdentityEl = document.getElementById('counterpartyIdentity');
-const createCounterpartyBtn = document.getElementById('createCounterpartyBtn');
 
 const requestItemBtn = document.getElementById('requestItemBtn');
 const presentBtn = document.getElementById('presentBtn');
@@ -1866,13 +1864,11 @@ const documentsSubscreen = document.getElementById('documentsSubscreen');
 const collectiblesSearchInput = document.getElementById('collectiblesSearchInput');
 const collectiblesCompatOnlyCheckbox = document.getElementById('collectiblesCompatOnlyCheckbox');
 const selfCollectiblesListEl = document.getElementById('selfCollectiblesList');
-const counterpartyCollectiblesListEl = document.getElementById('counterpartyCollectiblesList');
 const droppedItemsSectionEl = document.getElementById('droppedItemsSection');
 const droppedItemsListEl = document.getElementById('droppedItemsList');
 const documentsSearchInput = document.getElementById('documentsSearchInput');
 const documentsCompatOnlyCheckbox = document.getElementById('documentsCompatOnlyCheckbox');
 const selfDocumentsListEl = document.getElementById('selfDocumentsList');
-const counterpartyDocumentsListEl = document.getElementById('counterpartyDocumentsList');
 // Task #144 Phase 1 — Remote trade sub-tab of the Trading station category.
 const tradingBuySubtabBtn = document.getElementById('tradingBuySubtabBtn');
 const tradingSellSubtabBtn = document.getElementById('tradingSellSubtabBtn');
@@ -3540,10 +3536,6 @@ async function refreshIdentityDisplay() {
   // field with THAT key's own alias (or blank, if it has none yet).
   aliasInput.value = alias || '';
   aliasStatusEl.textContent = '';
-  const counterparty = await AtlasWallet.getCounterparty();
-  counterpartyIdentityEl.textContent = counterparty
-    ? 'Counterparty: ' + short(counterparty.publicKey, 28)
-    : 'No counterparty yet — a second local keypair standing in for another visitor (see README).';
 
   await refreshIdentityModeControls();
   await refreshQuickLockButtonVisibility();
@@ -5281,9 +5273,8 @@ function renderPropertiesToggle(properties) {
 // carries the same shape (asset.name/class/properties, top-level
 // quantity, asset.fungible), so one renderer covers both: a fungible
 // (stackable) entry shows its quantity in the name ("Iron (Fe) ×47 g") and
-// offers Split instead of Load/PvP-loss; a non-fungible (unique) entry
-// shows no quantity at all and offers Load/PvP-loss instead of Split —
-// SPEC.md §5's "false moves whole via §5.2, true splits via §5.4" split,
+// offers no Load button; a non-fungible (unique) entry
+// shows no quantity at all and offers Load (SPEC.md §5.2 loadouts) —
 // reflected directly in which actions a card offers.
 // Task #151 — "compatible with this domain" needs no new manifest field:
 // SPEC.md line 334 already defines policy.acceptedItemClasses as which
@@ -5328,10 +5319,7 @@ function renderAssetCard(entry, container, opts) {
     asset.name + ' ' + asset.class + ' ' + entry.credential.issuer.domain + ' ' + propsText
   ).toLowerCase();
   if (opts.groupKey) el.dataset.group = opts.groupKey;
-  // opts.checkCompat is the CURRENT world, passed only for the self
-  // ("Yours") lists — see refreshInventoryDisplay() below. Counterparty
-  // cards never get a dataset.compatible at all, which is fine since the
-  // compatibility checkbox is only ever wired to the self lists.
+  // opts.checkCompat is the CURRENT world — see refreshInventoryDisplay() below.
   // opts.checkCompatManifest (task #152) is that world's owning manifest,
   // needed only for the domain-level acceptedItemClasses default.
   if (opts.checkCompat) el.dataset.compatible = isAssetCompatibleWithWorld(entry, opts.checkCompat, opts.checkCompatManifest) ? '1' : '0';
@@ -5340,7 +5328,7 @@ function renderAssetCard(entry, container, opts) {
     ? ' · consolidated from ' + entry.credential.supersedes.length + ' balances'
     : entry.credential.supersedes ? ' · supersedes prior' : '';
 
-  // Task #211: every per-card action (Send half/Load/Simulate loss/Drop/
+  // Task #211: every per-card action (Load/Drop/
   // Hide) used to sit in its own .item-actions row underneath the card —
   // Bruno wanted that gone to cut down each card's height, since most of
   // these are reached far less often than just glancing at the name/
@@ -5355,26 +5343,10 @@ function renderAssetCard(entry, container, opts) {
   // changes to actually PERFORM these actions, only the new toggle-item-
   // menu open/close branch.
   let actionsHtml = '';
-  if (fungible) {
-    // Splitting/consolidating (SPEC.md §5.4) only makes sense for a
-    // fungible balance — send half of what's here to the other side.
-    const half = Math.floor(entry.credential.quantity / 2);
-    if (half > 0 && opts.otherLabel) {
-      // data-amount stays the raw integer — the split handler reads it
-      // straight back out to build the actual /atlas/asset/split call, so
-      // it must never be the formatted display string; only the button's
-      // own label text goes through formatMass (task #206).
-      actionsHtml += '<button data-action="split" data-id="' + entry.credential.id + '" data-amount="' + half + '">Send ' + formatMass(half) + ' to ' + opts.otherLabel + '</button>';
-    }
-  } else if (opts.loadable) {
-    // Loadout / PvP-loss (SPEC.md §5.2) only makes sense for a
-    // non-fungible asset — a fungible quantity moves via split, not by
-    // being "loaded" as a whole unit.
+  if (!fungible && opts.loadable) {
+    // Loadout (SPEC.md §5.2) only makes sense for a non-fungible asset.
     const loaded = opts.loadout.includes(entry.credential.id);
     actionsHtml += '<button data-action="toggle-load" data-id="' + entry.credential.id + '">' + (loaded ? 'Unload' : 'Load into this world') + '</button>';
-    if (loaded && opts.risky) {
-      actionsHtml += '<button data-action="lose" data-id="' + entry.credential.id + '">Simulate PvP loss</button>';
-    }
   }
   // Bruno's own catch after using this in the wild: the Drop control used
   // to render unconditionally whenever a list was droppable at all, even
@@ -5410,8 +5382,7 @@ function renderAssetCard(entry, container, opts) {
         '</div>'
       : '<button data-action="drop" data-id="' + entry.credential.id + '" class="btn-secondary">Drop here</button>';
   }
-  // Only offered on a self card (opts.avatarLookEnabled — false for every
-  // counterparty list) for an asset that actually carries the two atlas.*
+  // Only offered (opts.avatarLookEnabled) for an asset that actually carries the two atlas.*
   // properties a client renders anything from (see
   // AtlasWallet.avatarLookPropertiesFromAsset()) — this equips it as this
   // identity's own rendered look, which then travels to every world and
@@ -5460,9 +5431,8 @@ function renderAssetCard(entry, container, opts) {
   container.appendChild(el);
 
   // Asset Viewer (task #150) — wired once, here, so every place
-  // renderAssetCard() is used (both Collectibles and Documents, both the
-  // self and counterparty column of each — see refreshInventoryDisplay()
-  // above) gets the hover panel generically, with no per-call-site
+  // renderAssetCard() is used (both Collectibles and Documents — see
+  // refreshInventoryDisplay() above) gets the hover panel generically, with no per-call-site
   // special-casing. See the big comment block above openAssetViewer() for
   // the full hover/sticky-bridge design.
   el.addEventListener('mouseenter', () => openAssetViewer(entry, el));
@@ -5502,8 +5472,8 @@ function renderAssetGroup(group, container, opts) {
   group.forEach((entry) => renderAssetCard(entry, container, { ...opts, groupKey: group.length > 1 ? key : null }));
 }
 
-// Renders one Inventory list (a Yours or Counterparty's column, within
-// either the Collectibles or Documents sub-tab): fungible entries grouped
+// Renders one Inventory list (within either the Collectibles or
+// Documents sub-tab): fungible entries grouped
 // and offered for consolidation, non-fungible entries rendered
 // individually right after.
 function renderAssetList(entries, container, opts) {
@@ -5695,7 +5665,6 @@ function walletGainedSomething(prevSnapshot, nextSnapshot) {
 // former separate refreshItemsDisplay()/refreshResourcesDisplay() pair.
 async function refreshInventoryDisplay() {
   const identity = await AtlasWallet.getIdentity();
-  const counterparty = await AtlasWallet.getCounterparty();
   const loadout = await AtlasWallet.getLoadout();
   const equippedAvatarAssetId = await AtlasWallet.getAvatarLookAssetId();
   const equippedAvatarHatAssetId = await AtlasWallet.getAvatarHatAssetId();
@@ -5747,47 +5716,29 @@ async function refreshInventoryDisplay() {
   // all until/unless this identity (or someone else) picks it back up.
   const selfVisible = selfWalletAll.filter((e) => !e.hidden);
 
-  const cpWalletAll = counterparty ? await AtlasWallet.getWallet(counterparty.publicKey) : [];
-  const cpVisible = cpWalletAll.filter((e) => !e.hidden);
-
   const selfHasAny = (presentation) => selfWalletAll.some((e) => e.credential.asset.presentation === presentation);
-  const cpHasAny = (presentation) => cpWalletAll.some((e) => e.credential.asset.presentation === presentation);
 
   // --- Collectibles ---
   const selfCollectibles = selfVisible.filter((e) => e.credential.asset.presentation === 'collectible');
-  const cpCollectibles = cpVisible.filter((e) => e.credential.asset.presentation === 'collectible');
   selfCollectiblesListEl.innerHTML = '';
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
-  }
-  counterpartyCollectiblesListEl.innerHTML = '';
-  if (cpCollectibles.length === 0) {
-    counterpartyCollectiblesListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('collectible') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no collectibles yet.') + '</div>';
-  } else {
-    renderAssetList(cpCollectibles, counterpartyCollectiblesListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false, avatarHatEnabled: false, avatarShoesEnabled: false });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
   }
 
   renderDroppedItemsList(droppedHere, identity);
 
   // --- Documents ---
   const selfDocuments = selfVisible.filter((e) => e.credential.asset.presentation === 'document');
-  const cpDocuments = cpVisible.filter((e) => e.credential.asset.presentation === 'document');
   selfDocumentsListEl.innerHTML = '';
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, risky, droppable: true, otherLabel: 'counterparty', checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
-  }
-  counterpartyDocumentsListEl.innerHTML = '';
-  if (cpDocuments.length === 0) {
-    counterpartyDocumentsListEl.innerHTML = '<div class="empty-note">' + (cpHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'Counterparty holds no documents yet.') + '</div>';
-  } else {
-    renderAssetList(cpDocuments, counterpartyDocumentsListEl, { loadable: false, droppable: false, otherLabel: 'self', avatarLookEnabled: false, avatarHatEnabled: false, avatarShoesEnabled: false });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
   }
 
-  const totalHeld = selfVisible.length + cpVisible.length;
+  const totalHeld = selfVisible.length;
   walletBadge.textContent = String(totalHeld);
   walletBadge.classList.toggle('show', totalHeld > 0);
 
@@ -5796,9 +5747,7 @@ async function refreshInventoryDisplay() {
   // of the underlying data, just a view-layer filter over freshly-rendered
   // cards.
   applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
-  applyListFilter(counterpartyCollectiblesListEl, collectiblesSearchInput.value);
   applyListFilter(selfDocumentsListEl, documentsSearchInput.value, documentsCompatMatch());
-  applyListFilter(counterpartyDocumentsListEl, documentsSearchInput.value);
 
   await refreshHiddenAssetsDisplay();
   await refreshRecentWorldsDisplay();
@@ -5915,8 +5864,7 @@ async function finalizeDrop(id, amount, position) {
     // Task #250 — a partial-fungible drop is "split off exactly this much
     // into its own credential, THEN drop that new credential whole": the
     // world-drop endpoints themselves never need quantity/partial logic at
-    // all, same reasoning splitAsset() already established for gifting part
-    // of a stack to a counterparty. Uses the dedicated splitForDrop() (NOT
+    // all. Uses the dedicated splitForDrop() (NOT
     // splitAsset) — see that function's own comment in wallet.js for why a
     // self-to-self splitAsset call would just get auto-consolidated right
     // back together before this ever got to drop it.
@@ -6009,15 +5957,10 @@ function documentsCompatMatch() {
 
 collectiblesSearchInput && collectiblesSearchInput.addEventListener('input', () => {
   applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
-  applyListFilter(counterpartyCollectiblesListEl, collectiblesSearchInput.value);
 });
 documentsSearchInput && documentsSearchInput.addEventListener('input', () => {
   applyListFilter(selfDocumentsListEl, documentsSearchInput.value, documentsCompatMatch());
-  applyListFilter(counterpartyDocumentsListEl, documentsSearchInput.value);
 });
-// Only the "Yours" list re-filters here — the checkbox never applies to
-// Counterparty's, since "compatible with this domain" is about what YOU
-// could meaningfully load/drop here, not what they're holding.
 collectiblesCompatOnlyCheckbox && collectiblesCompatOnlyCheckbox.addEventListener('change', () => {
   applyListFilter(selfCollectiblesListEl, collectiblesSearchInput.value, collectiblesCompatMatch());
   AtlasWallet.setInventoryFilterSettings({ collectiblesCompatOnly: collectiblesCompatOnlyCheckbox.checked });
@@ -6046,21 +5989,21 @@ AtlasWallet.getInventoryFilterSettings().then((settings) => {
 });
 
 // The Settings-screen counterpart to the filtering above: lists every
-// hidden asset (self and counterparty) with an Unhide button, so hiding is
+// hidden asset with an Unhide button, so hiding is
 // never a one-way trip. Cheap to recompute on every refreshInventoryDisplay —
 // this list is normally short, and Settings isn't open most of the time.
-function renderHiddenAssetCard(entry, ownerLabel, container) {
+function renderHiddenAssetCard(entry, container) {
   const el = document.createElement('div');
   el.className = 'info-card';
   const asset = entry.credential.asset;
   const fungible = !!asset.fungible;
   el.innerHTML =
     '<div class="name">' + asset.name + (fungible ? ' ×' + formatMass(entry.credential.quantity) : '') + '</div>' +
-    '<div class="meta">' + asset.class + ' · ' + ownerLabel + '</div>' +
+    '<div class="meta">' + asset.class + '</div>' +
     renderPropertiesToggle(mergedAssetFields(entry)) +
     '<div class="item-actions">' +
-    '<button data-action="unhide" data-owner="' + ownerLabel + '" data-id="' + entry.credential.id + '">Unhide</button>' +
-    '<button data-action="delete" data-owner="' + ownerLabel + '" data-id="' + entry.credential.id + '" class="danger-btn">Delete</button>' +
+    '<button data-action="unhide" data-id="' + entry.credential.id + '">Unhide</button>' +
+    '<button data-action="delete" data-id="' + entry.credential.id + '" class="danger-btn">Delete</button>' +
     '</div>';
   container.appendChild(el);
 }
@@ -6068,16 +6011,13 @@ function renderHiddenAssetCard(entry, ownerLabel, container) {
 async function refreshHiddenAssetsDisplay() {
   if (!hiddenAssetsListEl) return;
   const identity = await AtlasWallet.getIdentity();
-  const counterparty = await AtlasWallet.getCounterparty();
   const selfHidden = identity ? (await AtlasWallet.getWallet(identity.publicKey)).filter((e) => e.hidden) : [];
-  const cpHidden = counterparty ? (await AtlasWallet.getWallet(counterparty.publicKey)).filter((e) => e.hidden) : [];
   hiddenAssetsListEl.innerHTML = '';
-  if (selfHidden.length === 0 && cpHidden.length === 0) {
+  if (selfHidden.length === 0) {
     hiddenAssetsListEl.innerHTML = '<div class="empty-note">No hidden assets.</div>';
     return;
   }
-  selfHidden.forEach((entry) => renderHiddenAssetCard(entry, 'self', hiddenAssetsListEl));
-  cpHidden.forEach((entry) => renderHiddenAssetCard(entry, 'counterparty', hiddenAssetsListEl));
+  selfHidden.forEach((entry) => renderHiddenAssetCard(entry, hiddenAssetsListEl));
 }
 
 hiddenAssetsListEl && hiddenAssetsListEl.addEventListener('click', async (e) => {
@@ -6091,7 +6031,7 @@ hiddenAssetsListEl && hiddenAssetsListEl.addEventListener('click', async (e) => 
     return;
   }
   if (btn.dataset.action !== 'unhide' && btn.dataset.action !== 'delete') return;
-  const owner = btn.dataset.owner === 'self' ? await AtlasWallet.getIdentity() : await AtlasWallet.getCounterparty();
+  const owner = await AtlasWallet.getIdentity();
   if (!owner) return;
   if (btn.dataset.action === 'delete') {
     // Delete only lives here, in the already-hidden view — a deliberate
@@ -6764,7 +6704,7 @@ quickLockWalletBtn && quickLockWalletBtn.addEventListener('click', async () => {
 // that's shown only while its category carries an .open class — present in
 // the HTML by default on categories meant to start open (Items and
 // Resources on the main wallet screen), absent on ones that start closed
-// (everything on Settings, plus Identity / Counterparty's items / Trading
+// (everything on Settings, plus Identity / Trading
 // station / Recent worlds on the main wallet screen). One delegated
 // listener on walletPanel — the shared ancestor of every wallet-screen —
 // covers both screens' categories, and any future one, without needing a
@@ -9231,9 +9171,7 @@ postOfficeJoinBtn && postOfficeJoinBtn.addEventListener('click', async () => {
 //
 // Always this browser's own "self" identity — trading settles between two
 // genuinely separate wallets/installs (see the claimant intent's plain
-// counterparty public-key string), so there's no in-profile role to pick
-// here the way the removed in-person mechanism once had (that flow's
-// self/counterparty toggle was a same-room stand-in, gone since v1.15).
+// counterparty public-key string), so there is no role to pick here.
 
 // Mirrors alreadyHasPostOfficeMembership exactly.
 async function alreadyHasTradingStationMembership(domain) {
@@ -11552,13 +11490,6 @@ setAliasBtn.addEventListener('click', async () => {
   }
 });
 
-createCounterpartyBtn.addEventListener('click', async () => {
-  createCounterpartyBtn.disabled = true;
-  await AtlasWallet.createCounterparty();
-  await refreshIdentityDisplay();
-  createCounterpartyBtn.disabled = false;
-});
-
 exportIdentityBtn.addEventListener('click', async () => {
   exportIdentityBtn.disabled = true;
   exportStatusEl.textContent = 'Encrypting…';
@@ -12211,15 +12142,12 @@ reverifyBtn.addEventListener('click', async () => {
   reverifyBtn.textContent = 'Re-verify wallet against current issuers';
 });
 
-// Event delegation for per-asset-card buttons — load/unload, simulate
-// loss, split, consolidate, drop, hide — since cards are re-rendered from
-// scratch on every refresh. One handler covers both self's and the
-// counterparty's list, for both Collectibles and Documents (task #44
-// replaced the former separate itemActionHandler/resourceActionHandler
-// pair with this one): self gets the extra loadout/PvP/split/consolidate
-// actions where the card itself offers them (see renderAssetCard's own
-// fungible-vs-not branching), hide is common to both roles.
-function assetActionHandler(listEl, role, toRole) {
+// Event delegation for per-asset-card buttons — load/unload, consolidate,
+// drop, hide — since cards are re-rendered from scratch on every refresh.
+// One handler covers both Collectibles and Documents (task #44 replaced the
+// former separate itemActionHandler/resourceActionHandler pair with this
+// one); the actions a card offers are decided in renderAssetCard.
+function assetActionHandler(listEl) {
   listEl.addEventListener('click', async (e) => {
     const btn = e.target.closest('button');
     if (!btn || !btn.dataset.action) return;
@@ -12244,24 +12172,13 @@ function assetActionHandler(listEl, role, toRole) {
       return;
     }
     closeAllCardMenus(); // a real action was just chosen — close the menu it came from
-    const who = role === 'self' ? await AtlasWallet.getIdentity() : await AtlasWallet.getCounterparty();
+    const who = await AtlasWallet.getIdentity();
     if (!who) return;
 
     if (btn.dataset.action === 'toggle-load') {
       const loadout = await AtlasWallet.getLoadout();
       if (loadout.includes(id)) await AtlasWallet.unloadItem(id); else await AtlasWallet.loadItem(id);
       await refreshInventoryDisplay();
-    } else if (btn.dataset.action === 'lose') {
-      btn.disabled = true;
-      btn.textContent = 'Signing…';
-      try {
-        const wallet = await AtlasWallet.getWallet(who.publicKey);
-        const entry = wallet.find((x) => x.credential.id === id);
-        await AtlasWallet.loseItemToCounterparty(entry.credential, { domain: manifestDomainOf(currentManifest), world: currentWorld.id });
-        await refreshInventoryDisplay();
-      } catch (err) {
-        statusEl.textContent = 'Transfer failed: ' + err.message;
-      }
     } else if (btn.dataset.action === 'drop') {
       // Task #250 — a fungible balance's Drop button sits next to its own
       // quantity input (renderAssetCard above) rather than always dropping
@@ -12283,7 +12200,7 @@ function assetActionHandler(listEl, role, toRole) {
         beginDropPlacement(id, null);
       }
     } else if (btn.dataset.action === 'save-file') {
-      if (role === 'self') await beginSaveAssetToFile(id);
+      await beginSaveAssetToFile(id);
     } else if (btn.dataset.action === 'hide') {
       await AtlasWallet.hideAsset(who.publicKey, id);
       await refreshInventoryDisplay();
@@ -12302,17 +12219,6 @@ function assetActionHandler(listEl, role, toRole) {
       await AtlasWallet.setAvatarShoes(currentlyEquippedShoes === id ? null : id);
       await applyAvatarShoesToScene();
       await refreshInventoryDisplay();
-    } else if (btn.dataset.action === 'split') {
-      btn.disabled = true;
-      btn.textContent = 'Sending…';
-      try {
-        const wallet = await AtlasWallet.getWallet(who.publicKey);
-        const entry = wallet.find((x) => x.credential.id === id);
-        await AtlasWallet.splitAsset(role, entry.credential, Number(btn.dataset.amount), toRole);
-        await refreshInventoryDisplay();
-      } catch (err) {
-        statusEl.textContent = 'Split failed: ' + err.message;
-      }
     } else if (btn.dataset.action === 'consolidate-group') {
       const sepIndex = btn.dataset.key.indexOf('::');
       const cls = btn.dataset.key.slice(0, sepIndex);
@@ -12322,7 +12228,7 @@ function assetActionHandler(listEl, role, toRole) {
       try {
         const wallet = await AtlasWallet.getWallet(who.publicKey);
         const group = wallet.filter((x) => x.credential.asset.class === cls && x.credential.issuer.domain === issuerDomain && x.credential.asset.fungible);
-        await AtlasWallet.consolidateAsset(role, group.map((entry) => entry.credential));
+        await AtlasWallet.consolidateAsset('self', group.map((entry) => entry.credential));
         await refreshInventoryDisplay();
       } catch (err) {
         statusEl.textContent = 'Consolidate failed: ' + err.message;
@@ -12330,10 +12236,8 @@ function assetActionHandler(listEl, role, toRole) {
     }
   });
 }
-assetActionHandler(selfCollectiblesListEl, 'self', 'counterparty');
-assetActionHandler(counterpartyCollectiblesListEl, 'counterparty', 'self');
-assetActionHandler(selfDocumentsListEl, 'self', 'counterparty');
-assetActionHandler(counterpartyDocumentsListEl, 'counterparty', 'self');
+assetActionHandler(selfCollectiblesListEl);
+assetActionHandler(selfDocumentsListEl);
 
 droppedItemsListEl.addEventListener('click', (e) => {
   const btn = e.target.closest('button');
@@ -12378,7 +12282,7 @@ async function handleInteractable(marker) {
     }
     if (marker.action === 'mint') {
       statusEl.textContent = 'Mining ' + marker.class + '…';
-      const mined = await AtlasWallet.mintAsset(marker.role || 'self', manifestDomainOf(currentManifest), marker.class, marker.quantity);
+      const mined = await AtlasWallet.mintAsset('self', manifestDomainOf(currentManifest), marker.class, marker.quantity);
       await refreshInventoryDisplay();
       // 'of', not '×': once the number itself already carries a
       // unit ("20 g"), "Collected 20 g × atlas.element.iron." read like a

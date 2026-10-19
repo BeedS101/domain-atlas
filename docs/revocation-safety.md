@@ -86,7 +86,6 @@ credential in, what to tell the person, and, in two places, to decide something 
 | Recovering an interrupted export | **Was:** a failed read counted as "not revoked", so the item could be reported as safe. **Now:** answered `waiting`; the record is untouched, and it is only called `lost` when the original is actually found revoked. |
 | Adopting a superseding credential from a mail check | Not adopted; the held credential stays as it is. |
 | Adding a ledger-account reference ("Check and add", opening an account, looking for accounts) | Not added; the new problem `revocation-unavailable` says the issuer's documents could not be read and nothing was changed. |
-| PvP demo transfer to the counterparty test identity | Unchanged: it copies the sender's stored verdict and does not verify. |
 
 ## Compatibility
 

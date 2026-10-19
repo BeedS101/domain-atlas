@@ -49,7 +49,7 @@ non-dismissible trust disclosure before you're let in (§3.6.1). On top of
 that, a real wallet: a genuine WebAuthn (or password-backed) identity, real
 ECDSA-signed credentials issued by an actual small server, verified with real
 cryptography — unique items and fungible resources under one credential
-shape, PvP loadouts with an owner-signed transfer-on-loss, open trade
+shape, loadouts, open trade
 listings a station settles atomically (unique items included, not just
 fungible balances), drops anyone present in a world can pick up, and
 cross-domain mail through a federated Post Office. A few things ride on
@@ -81,7 +81,7 @@ domain-atlas/
 └── test/
     ├── verify.js                  proves the manifest/portal mechanism
     ├── verify-wallet.js           proves the item wallet end to end
-    └── verify-loadout-trading.js  proves loadouts/transfer-on-loss and resources/trading
+    └── verify-loadout-trading.js  proves loadouts and resource mining
 ```
 
 Two local servers stand in for two independent domains — same mechanism as
@@ -360,36 +360,21 @@ Wallet/Settings panels once you've got items to work with:
   or leaving fullscreen — a small polish detail, not a behavior you need to
   configure.
 
-## 4. Try it — loadouts, transfer-on-loss, resources, and trading
+## 4. Try it — loadouts, resources, and trading
 
-These all live in the same wallet panel, and use one addition worth being
-upfront about: a second **counterparty** identity, needed for the
-transfer-on-loss demo below since that needs two independent signers and
-this demo runs in one browser tab. Rather than fake that, the "self"
-identity is a real WebAuthn passkey throughout, exactly as in section 3,
-and the "counterparty" is a second, purely local ECDSA P-256 keypair — no
-WebAuthn, generated and stored the same way a lightweight non-passkey
-client would. It signs for real; it just isn't a hardware-backed key. Click
-**Create counterparty identity** in the wallet panel to generate it. Trading
-below doesn't use it at all — see that section.
+These all live in the same wallet panel.
 
-**Loadouts and transfer-on-loss (§5.2):**
+**Loadouts (§5.2):**
 
-1. With an item in your self wallet, walk to the **arena** portal
-   (orange). The panel shows a PvP warning — this world's manifest
-   declares `profile.capabilities.combat: "pvp"`.
-2. Click **Load** on an item card to bring it into this world's loadout.
-   A loaded item in a PvP world gets a **Simulate PvP loss** button.
-3. Click it. This is the interesting part: the *loser's own key* signs the
-   transfer. `wallet.js` builds a `domain-atlas-transfer/1.0` payload
-   (`itemId`, `from`, `to`, `worldContext`, timestamp), hashes it, and runs
-   it through a real WebAuthn assertion — the same `challenge`-hash trick
-   used everywhere else, since a passkey can't sign arbitrary application
-   data directly, only the fixed assertion structure. The wallet verifies
-   its own signature before applying the move (if that check ever failed,
-   it would refuse). The item disappears from the self wallet and appears,
-   correctly signed, in the counterparty's — a real ownership change, not
-   the server unilaterally reassigning it.
+1. With an item in your wallet, walk to the **arena** portal (orange). The
+   panel shows a PvP warning — this world's manifest declares
+   `profile.capabilities.combat: "pvp"`.
+2. Click **Load** on an item card to bring it into this world's loadout, and
+   **Unload** to take it back out.
+
+The owner-signed transfer that §5.2 describes for a lost item is not part of
+this demo build: a loss needs a second, independent wallet to receive the
+item, and there is no delivery path for it yet.
 
 **Fungible resources (§5.4):**
 
@@ -804,8 +789,7 @@ only to have joined it at some point, same as receiving. Try it with two
 identities:
 
 1. Join Domain B's Post Office for BOTH identities you want to mail
-   between (a second browser profile, or Domain A's own counterparty
-   key) — since task #95, sending only works between two people who've
+   between (a second browser profile) — since task #95, sending only works between two people who've
    both joined the same Post Office. Two ways to do it: walk into Domain
    B's Neighbor Workshop and click the blue **Post Office** stall
    ("Claim Global Mail Membership", the same one-click "collect" pattern
@@ -1086,11 +1070,10 @@ in the pre-fill rather than being silently hidden.
 
 ## Direct credential transfers, and a standalone business demo
 
-The two ways of moving a unique credential to someone else covered above —
-loadouts' transfer-on-loss (§4, purely local, no domain call at all) and a
+The way of moving a unique credential to someone else covered above — a
 Trading Station settlement (§7, needs a mirrored counter-offer and a
-membership card) — both assume a specific context: losing something in a
-world, or negotiating a swap at a station. Neither fits the plainest case,
+membership card) — assumes a specific context: negotiating a swap at a
+station. It does not fit the plainest case,
 "I hold this, send it straight to that public key, nothing wanted back."
 `POST /atlas/asset/transfer` (SPEC.md §5.6) covers exactly that: `{credential,
 recipientPublicKey, intent: {payload: {credentialId, recipientPublicKey,
@@ -1113,10 +1096,7 @@ issuers.
 `demo-domain-a/business-demo.html` puts this in front of someone with
 nothing installed at all: no extension, no wallet, just a page. It
 generates two throwaway ECDSA keypairs entirely in the browser tab ("you"
-and a stand-in for "your friend" — the same device the extension's own
-counterparty identity already uses for the transfer-on-loss demo, just
-reused here for a real, domain-recognized transfer instead of a purely
-local one), issues "you" a giftable coupon (`atlas.demo.coupon`) alongside
+and a stand-in for "your friend"), issues "you" a giftable coupon (`atlas.demo.coupon`) alongside
 a non-transferable badge (`atlas.badge`), and lets a visitor try sending
 each to the "friend" identity. The coupon genuinely moves — a fresh,
 really-signed credential shows up in the friend panel, inspectable via a
@@ -1923,7 +1903,7 @@ whole walkthrough — also clean on the first run.
 ```bash
 node test/verify.js                    # manifest + portal mechanism
 node test/verify-wallet.js             # identity, issuance, cross-domain verification, revocation, export
-node test/verify-loadout-trading.js    # loadouts/transfer-on-loss, resources, trading station settlement
+node test/verify-loadout-trading.js    # loadouts and resource mining
 node test/verify-directory.js          # directory service: crawl/index/rank, filters, free-text, key-anchored verification
 node test/verify-asset-cache.js        # gltf-mini's local GLB cache: fresh on first load, 304'd on repeat, re-fetched on real change
 node test/verify-identity-backup.js    # password identity lifecycle: onboarding, lock/unlock, export/import by password + seed phrase
@@ -2024,11 +2004,6 @@ is more than §11.3 itself promises or requires.
 It's still not hardened for anything beyond a demo, and a few
 simplifications are worth naming plainly rather than leaving implicit:
 
-- The **counterparty identity** is a second real keypair, but not a second
-  WebAuthn device — see section 4 above. It demos §5.2's transfer-on-loss
-  in one browser tab; trading (§7) no longer uses it at all, having moved
-  to real, independent wallets posting and claiming listings. A production
-  wallet would just be two separate installs, each with its own passkey.
 - The **issuer also plays the trading station** for §7, instead of being a
   separate party the way the spec allows. The settlement logic (verify an
   intent, verify a presented balance, atomic issue+revoke) doesn't change

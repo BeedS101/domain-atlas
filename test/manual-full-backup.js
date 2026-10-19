@@ -87,9 +87,7 @@ function shot(name) {
         worldId: 'plaza',
         worldName: 'Example Plaza'
       });
-      await AtlasWallet.createCounterparty();
-      const counterparty = await AtlasWallet.getCounterparty();
-      await AtlasWallet.setAlias(counterparty.publicKey, 'Counterparty Nickname');
+      await AtlasWallet.setAlias('aliased-public-key-def456', 'Alias Nickname');
       await AtlasWallet.muteChatUser('muted-public-key-xyz789', 'Muted Person');
       const selfIdentity = await AtlasWallet.getIdentity();
       await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.membership');
@@ -112,8 +110,7 @@ function shot(name) {
         calendarId,
         calendarEvents: await AtlasWallet.getCalendarEvents(),
         favoriteDomains: await AtlasWallet.getFavoriteDomains(),
-        counterpartyPublicKey: counterparty.publicKey,
-        alias: await AtlasWallet.getAlias(counterparty.publicKey),
+        alias: await AtlasWallet.getAlias('aliased-public-key-def456'),
         mutedChatUsers: await AtlasWallet.getMutedChatUsers(),
         walletCount: (await AtlasWallet.getWallet(selfIdentity.publicKey)).length,
         groupId,
@@ -125,7 +122,7 @@ function shot(name) {
     if (seedData.contactGroups.length !== 1) throw new Error('Contact group was not saved before backup');
     if (seedData.calendarEvents.length !== 1) throw new Error('Calendar event was not saved before backup');
     if (seedData.favoriteDomains.length !== 1) throw new Error('Favorite domain was not saved before backup');
-    if (seedData.alias !== 'Counterparty Nickname') throw new Error('Alias was not saved before backup: ' + seedData.alias);
+    if (seedData.alias !== 'Alias Nickname') throw new Error('Alias was not saved before backup: ' + seedData.alias);
     if (seedData.mutedChatUsers.length !== 1) throw new Error('Muted chat user was not saved before backup');
     if (seedData.walletCount < 1) throw new Error('Minted membership asset was not saved before backup');
     if (!seedData.chatE2eePublicKeyJwk || seedData.chatE2eePublicKeyJwk.kty !== 'EC') throw new Error('Chat e2ee keypair was not generated/saved before backup');
@@ -175,7 +172,7 @@ function shot(name) {
     const readableFields = JSON.stringify({ ...exported, salt: undefined, iv: undefined, ciphertext: undefined });
     if (seedPhrase.split(' ').some((w) => readableFields.includes(w))) throw new Error('Exported file leaks a plaintext seed word');
     if (rawExportText.includes(seedPhrase) || seedPhrase.split(' ').some((w) => w.length >= 8 && rawExportText.includes(w))) throw new Error('Exported file leaks a plaintext seed word');
-    if (rawExportText.includes('Test Friend') || rawExportText.includes('Backup test event') || rawExportText.includes('Counterparty Nickname')) {
+    if (rawExportText.includes('Test Friend') || rawExportText.includes('Backup test event') || rawExportText.includes('Alias Nickname')) {
       throw new Error('Exported file leaks plaintext personal data outside the encrypted ciphertext field');
     }
     if (rawExportText.includes(seedData.chatE2eePrivateKeyJwk.d)) {
@@ -245,7 +242,7 @@ function shot(name) {
       contactGroups: await AtlasWallet.getContactGroups(),
       calendarEvents: await AtlasWallet.getCalendarEvents(),
       favoriteDomains: await AtlasWallet.getFavoriteDomains(),
-      counterparty: await AtlasWallet.getCounterparty(),
+      alias: await AtlasWallet.getAlias('aliased-public-key-def456'),
       mutedChatUsers: await AtlasWallet.getMutedChatUsers(),
       wallet: await AtlasWallet.getWallet((await AtlasWallet.getIdentity()).publicKey),
       rawWallets: await chrome.storage.local.get('atlasWallets'),
@@ -266,8 +263,8 @@ function shot(name) {
     if (restored.favoriteDomains.length !== 1 || restored.favoriteDomains[0].domain !== 'localhost:8001') {
       throw new Error('Favorite domains did not restore correctly: ' + JSON.stringify(restored.favoriteDomains));
     }
-    if (!restored.counterparty || restored.counterparty.publicKey !== seedData.counterpartyPublicKey) {
-      throw new Error('Counterparty did not restore correctly: ' + JSON.stringify(restored.counterparty));
+    if (restored.alias !== 'Alias Nickname') {
+      throw new Error('Alias did not restore correctly: ' + JSON.stringify(restored.alias));
     }
     if (restored.mutedChatUsers.length !== 1 || restored.mutedChatUsers[0].publicKey !== 'muted-public-key-xyz789') {
       throw new Error('Muted chat users did not restore correctly: ' + JSON.stringify(restored.mutedChatUsers));
@@ -283,7 +280,7 @@ function shot(name) {
     if (!rawWalletSlot || !rawWalletSlot.__atlasEncrypted) throw new Error('Restored wallet is not encrypted at rest on disk: ' + JSON.stringify(rawWalletSlot));
     const rawFriendsSlot = (restored.rawFriends.atlasFriends || {})[restored.publicKey];
     if (!rawFriendsSlot || !rawFriendsSlot.__atlasEncrypted) throw new Error('Restored friends are not encrypted at rest on disk: ' + JSON.stringify(rawFriendsSlot));
-    console.log('PASS: Friends, Contact groups, Calendar, Favorites, Counterparty+Alias, and Muted chat all restored correctly and are encrypted at rest on disk');
+    console.log('PASS: Friends, Contact groups, Calendar, Favorites, Alias, and Muted chat all restored correctly and are encrypted at rest on disk');
 
     // Task #158: THE critical check for this round — the restored identity
     // must have gotten back the exact SAME chat e2ee keypair it had before

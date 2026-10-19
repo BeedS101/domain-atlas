@@ -211,9 +211,7 @@ async function joinTradingStationIfNeeded(frame) {
     // through Plaza and into the Trading Post just to click a stall, and
     // this test cares about trading, not portal navigation. Calling
     // AtlasWallet.mintAsset('self', ...) directly is exactly what the
-    // market's own "Mine Gold" stall does under the hood as of v1.15 (it
-    // used to mint to role: 'counterparty' by mistake, fixed alongside
-    // in-person trading's removal) — see handleInteractable's 'mint'
+    // market's own "Mine Gold" stall does under the hood — see handleInteractable's 'mint'
     // branch in viewer.js. refreshInventoryDisplay() is called explicitly
     // since this bypasses the click handler that normally triggers it.
     await a.frame.evaluate(async () => { await AtlasWallet.mintAsset('self', 'localhost:8001', 'atlas.element.iron', 20); await refreshInventoryDisplay(); });

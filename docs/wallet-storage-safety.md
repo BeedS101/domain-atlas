@@ -84,10 +84,9 @@ Trading, purchase, drops, file transfer, backups and the ledger wallets are cove
   Journalling these is a separate item.
 - Other encrypted stores still use the lenient read and write: mail, sent mail, friends, friend requests, contact
   groups, aliases, loadout, activity log, calendar, recent worlds, favourite domains, muted and blocked chat users,
-  submitted trades, asset update notices, bridge settings, call state, avatar slots, the test counterparty identity
-  and the ledger account references. A write to one of these while locked or unreadable can replace it with an
-  empty list. They hold no spendable credentials, but the ledger references and the counterparty identity should be
-  moved to the same rule next.
+  submitted trades, asset update notices, bridge settings, call state, avatar slots and the ledger account
+  references. A write to one of these while locked or unreadable can replace it with an empty list. They hold no
+  spendable credentials, but the ledger references should be moved to the same rule next.
 - `getAssetFiles` followed by `saveAssetFiles` is read leniently and guarded only at the write; a lock and unlock
   inside that one step could still write a list built from an empty read.
 - `getWallet`'s one-time plaintext-to-encrypted migration still writes when it reads a legacy plaintext list while

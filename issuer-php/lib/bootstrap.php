@@ -200,7 +200,7 @@ function atlas_sign($privateKey, $payload) {
 
 // Verifies a signed-payload "envelope" as produced by wallet.js's
 // signWithSelf() (a real WebAuthn assertion, challenge = hash of the
-// payload) or signWithCounterparty() (a direct ECDSA signature). Same
+// payload, or a direct ECDSA signature for a local identity). Same
 // dual-mode check server.js does, and the same canonicalize().
 function verify_envelope($payload, $envelope) {
   if (!is_array($payload) || !is_array($envelope) || !isset($envelope['signerRole'])) return false;

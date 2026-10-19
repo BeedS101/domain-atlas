@@ -1,15 +1,14 @@
 // Domain Atlas — wallet (v1.2 of the prototype)
 //
 // A real implementation of SPEC.md §5 (asset credentials — unique and
-// fungible in one shape, as of the task #44 merge), §5.2 (loadouts and
-// transfer-on-loss, non-fungible), §5.4 (splitting/consolidating fungible
+// fungible in one shape, as of the task #44 merge), §5.2 (loadouts,
+// non-fungible), §5.4 (splitting/consolidating fungible
 // balances), and §6 (identity) — plus the client half of §7 (trading
 // stations, fungible), whose settlement lives in issuer-server/server.js.
 // Nothing here is simulated; everything that can be checked
 // cryptographically, is.
 //
-// Two identities exist in this wallet on purpose:
-//   - "self"        — YOU. Backed by either of two interchangeable
+// The wallet's identity is "self" — the user. Backed by either of two interchangeable
 //     mechanisms, the user's choice: a password-protected local ECDSA
 //     keypair ("local domain atlas identity"), or a real WebAuthn passkey
 //     (Windows Hello / Touch ID / security key). Exactly one is "active" at
@@ -17,19 +16,12 @@
 //     same device in parallel and switched between freely — switching just
 //     changes which public key "self" resolves to, so each mechanism keeps
 //     its own separate wallet contents under its own key.
-//   - "counterparty" — a second, purely local ECDSA keypair standing in
-//     for a second visitor. §5.2 and §7 only mean something with two
-//     independent signers; this wallet can't spin up a second physical
-//     device, so it spins up a second real keypair instead. It's still a
-//     genuine, distinct key capable of real signatures — it just isn't
-//     gated by a hardware authenticator prompt the way a WebAuthn "self"
-//     is. See README for the full reasoning.
 //
 // Signing abstraction: a WebAuthn "self" signs by turning a payload's hash
 // into a WebAuthn challenge and running a real assertion ceremony — the
 // only way a WebAuthn-bound key can sign application data at all (passkeys
-// don't expose raw signing). A local-password "self", and "counterparty"
-// always, sign directly with Web Crypto. All three produce a self-describing
+// don't expose raw signing). A local-password "self" signs directly with
+// Web Crypto. Both produce a self-describing
 // "envelope" {signerRole, publicKey, ...} that verifySignedPayload() (here)
 // and verifyEnvelope() (server) check the same way.
 
@@ -923,184 +915,22 @@ const AtlasWallet = (() => {
     return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, rawSig, signedData.buffer);
   }
 
-  // ---------- counterparty ("the other visitor") ----------
-
-  // Encrypted at rest (2026-09-14, second round) — this is the single
-  // most glaring plaintext gap the whole-storage-encryption pass turned
-  // up: unlike the real identity (always password/AES-GCM-protected from
-  // day one), this demo "other visitor" keypair's own privateKeyJwk sat
-  // in plain chrome.storage.local the entire time. It's global rather
-  // than per-owner (there's only ever one counterparty, not one per real
-  // identity), so it's encrypted under whichever LOCAL identity happens
-  // to be active when it's created/touched.
-  async function getCounterparty() {
-    const { atlasCounterparty } = await chrome.storage.local.get('atlasCounterparty');
-    const identity = await getIdentity();
-    return decryptAtRestAndMigrate(identity, 'counterparty', atlasCounterparty, null, (v) => saveCounterparty(v));
-  }
-
-  async function saveCounterparty(counterparty) {
-    const identity = await getIdentity();
-    await chrome.storage.local.set({ atlasCounterparty: await encryptAtRest(identity, 'counterparty', counterparty) });
-  }
-
-  async function createCounterparty() {
-    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-    const rawPublic = await crypto.subtle.exportKey('raw', pair.publicKey);
-    const privateKeyJwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
-    const counterparty = { publicKey: b64urlEncode(rawPublic), privateKeyJwk, createdAt: new Date().toISOString() };
-    await saveCounterparty(counterparty);
-    return counterparty;
-  }
-
+  // The role argument taken by the operations below names the identity acting. "self" is the only one this
+  // wallet has.
   async function identityOf(role) {
-    const who = role === 'self' ? await getIdentity() : await getCounterparty();
-    if (!who) throw new Error('Create the ' + role + ' identity first.');
+    if (role !== 'self') throw new Error('Unknown identity role: ' + role);
+    const who = await getIdentity();
+    if (!who) throw new Error('Create the self identity first.');
     return who;
-  }
-
-  // ---------- legacy counterparty audit (read-only) ----------
-  //
-  // Reports whether the old counterparty identity, or any other owner key that is not a main identity of
-  // this profile, still has anything stored. It only reads: no migration, no clean-up, nothing is written,
-  // and no key material is returned (public keys, counts and asset classes only).
-
-  const AUDIT_STORE_NAMES = {
-    atlasWallets: 'wallet', atlasPendingOps: 'pendingOps', atlasAssetFiles: 'assetFiles', atlasMail: 'mail',
-    atlasSentMail: 'sentMail', atlasSubmittedTrades: 'submittedTrades', atlasAssetUpdateNotices: 'assetUpdateNotices',
-    atlasLoadout: 'loadout', atlasAvatarLook: 'avatarLook', atlasAvatarHat: 'avatarHat', atlasAvatarShoes: 'avatarShoes',
-    atlasAliases: 'aliases', atlasFriends: 'friends', atlasContactGroups: 'contactGroups', atlasFriendRequests: 'friendRequests',
-    atlasMutedChatUsers: 'mutedChatUsers', atlasBlockedChatUsers: 'blockedChatUsers', atlasRecentWorlds: 'recentWorlds',
-    atlasFavoriteDomains: 'favoriteDomains', atlasCalendarEvents: 'calendarEvents', atlasActivityLog: 'activityLog',
-    atlasBridgeOffers: 'bridgeOffers', atlasTrustedBridgeDomains: 'trustedBridgeDomains', atlasCallState: 'callState'
-  };
-  const AUDIT_ASSET_STORES = new Set(['wallet', 'pendingOps', 'assetFiles']);
-
-  // Like decryptAtRest, but says why a value could not be read and never writes.
-  async function peekStored(identity, storeName, stored) {
-    if (stored === undefined || stored === null) return { state: 'absent' };
-    if (typeof stored !== 'object' || !stored.__atlasEncrypted) return { state: 'plain', value: stored };
-    if (!identity) return { state: 'locked' };
-    if (identity.mode !== 'local' || !identity.privateKeyJwk) return { state: 'unreadable' };
-    try {
-      const key = await deriveAtRestKey(identity.privateKeyJwk, storeName);
-      const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64urlDecode(stored.iv) }, key, b64urlDecode(stored.ciphertext));
-      return { state: 'ok', value: JSON.parse(new TextDecoder().decode(plaintext)) };
-    } catch (err) {
-      return { state: 'unreadable' };
-    }
-  }
-
-  function auditSummarise(value) {
-    if (Array.isArray(value)) {
-      const byClass = {};
-      const kinds = {};
-      let hidden = 0, withAttachedAsset = 0;
-      for (const e of value) {
-        const c = e && e.credential;
-        if (c && c.asset) {
-          const cls = c.asset.class || 'unknown';
-          byClass[cls] = (byClass[cls] || 0) + (c.asset.fungible ? Number(c.quantity) || 0 : 1);
-        }
-        if (e && e.kind) kinds[e.kind] = (kinds[e.kind] || 0) + 1;
-        if (e && e.hidden) hidden++;
-        if (e && e.message && e.message.attachedAsset) withAttachedAsset++;
-      }
-      return { entries: value.length, hidden, byClass, kinds, withAttachedAsset };
-    }
-    if (value && typeof value === 'object') return { entries: Object.keys(value).length };
-    return { entries: value ? 1 : 0 };
-  }
-
-  async function auditLegacyCounterparty() {
-    const identity = await getIdentity();
-    const all = await chrome.storage.local.get(null);
-    const has = (obj, key) => !!obj && typeof obj === 'object' && !Array.isArray(obj) && Object.prototype.hasOwnProperty.call(obj, key);
-    const short = (k) => String(k).slice(0, 12) + '…';
-
-    const mainKeys = new Set();
-    if (all.atlasIdentity && all.atlasIdentity.publicKey) mainKeys.add(all.atlasIdentity.publicKey);
-    if (all.atlasWebAuthnIdentity && all.atlasWebAuthnIdentity.publicKey) mainKeys.add(all.atlasWebAuthnIdentity.publicKey);
-    if (identity && identity.publicKey) mainKeys.add(identity.publicKey);
-
-    const cp = await peekStored(identity, 'counterparty', all.atlasCounterparty);
-    const counterparty = { stored: cp.state !== 'absent', state: cp.state };
-    let counterpartyKey = null;
-    if ((cp.state === 'ok' || cp.state === 'plain')) {
-      if (cp.value && typeof cp.value === 'object') {
-        counterpartyKey = cp.value.publicKey || null;
-        counterparty.publicKey = counterpartyKey;
-        counterparty.createdAt = cp.value.createdAt || null;
-        counterparty.holdsPrivateKey = !!cp.value.privateKeyJwk;
-      } else {
-        counterparty.state = 'cleared';
-      }
-    }
-
-    const ownerKeys = new Set();
-    for (const storageKey of ['atlasWallets', 'atlasPendingOps', 'atlasAssetFiles']) {
-      if (all[storageKey] && typeof all[storageKey] === 'object' && !Array.isArray(all[storageKey])) {
-        for (const k of Object.keys(all[storageKey])) ownerKeys.add(k);
-      }
-    }
-    if (counterpartyKey) ownerKeys.add(counterpartyKey);
-    for (const k of mainKeys) ownerKeys.delete(k);
-
-    const owners = [];
-    for (const key of ownerKeys) {
-      const stores = {};
-      for (const [storageKey, storeName] of Object.entries(AUDIT_STORE_NAMES)) {
-        if (!has(all[storageKey], key)) continue;
-        const p = await peekStored(identity, storeName, all[storageKey][key]);
-        stores[storeName] = (p.state === 'ok' || p.state === 'plain') ? { state: p.state, ...auditSummarise(p.value) } : { state: p.state };
-      }
-      owners.push({ publicKey: key, role: key === counterpartyKey ? 'counterparty' : 'unrecognised', stores });
-    }
-
-    const blockers = [], unknown = [], notes = [];
-    if (counterparty.stored && counterparty.state !== 'cleared' && counterparty.state !== 'ok' && counterparty.state !== 'plain') {
-      unknown.push('The counterparty record is stored but cannot be read (' + counterparty.state + ').');
-    }
-    for (const o of owners) {
-      for (const [store, s] of Object.entries(o.stores)) {
-        const where = o.role + ' ' + short(o.publicKey) + ' / ' + store;
-        if (s.state !== 'ok' && s.state !== 'plain') { unknown.push(where + ' is stored but cannot be read (' + s.state + ').'); continue; }
-        if (!s.entries) continue;
-        if (AUDIT_ASSET_STORES.has(store)) blockers.push(where + ' holds ' + s.entries + ' ' + (store === 'wallet' ? 'credential entries' : 'entries') + '.');
-        else if (store === 'mail' && s.withAttachedAsset) blockers.push(where + ' has ' + s.withAttachedAsset + ' unclaimed attached asset(s).');
-        else notes.push(where + ': ' + s.entries + ' entries (no assets).');
-      }
-    }
-
-    return {
-      readOnly: true,
-      scope: 'this browser profile only',
-      checkedAt: new Date().toISOString(),
-      walletUnlocked: !!identity,
-      identityMode: await getIdentityMode(),
-      counterparty,
-      owners,
-      verdict: blockers.length ? 'not-empty' : unknown.length ? 'cannot-confirm' : 'empty-confirmed',
-      blockers, unknown, notes,
-      limits: 'Covers what this profile stores. Whatever an issuer counts for these keys is not visible from here.'
-    };
   }
 
   // ---------- signing envelopes ----------
   // signWithSelf() lives above, in the identity section — it's the same
   // "self" role, just backed by the merged password-protected identity now.
 
-  async function signWithCounterparty(payload) {
-    const counterparty = await getCounterparty();
-    if (!counterparty) throw new Error('Create a counterparty identity first.');
-    const privateKey = await crypto.subtle.importKey('jwk', counterparty.privateKeyJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
-    const data = new TextEncoder().encode(canonicalize(payload));
-    const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, data);
-    return { signerRole: 'raw-ecdsa', publicKey: counterparty.publicKey, signature: b64urlEncode(sig) };
-  }
-
   async function signAs(role, payload) {
-    return role === 'self' ? signWithSelf(payload) : signWithCounterparty(payload);
+    if (role !== 'self') throw new Error('Unknown identity role: ' + role);
+    return signWithSelf(payload);
   }
 
   async function verifySignedPayload(payload, envelope) {
@@ -1143,7 +973,7 @@ const AtlasWallet = (() => {
   // resource-only split/consolidate and item-only update-notice handling)
   // with ONE store (atlasWallets) and ONE set of functions that branch
   // internally on asset.fungible only where the arithmetic actually
-  // differs (splitting, consolidating, auto-merging, loadout/PvP loss).
+  // differs (splitting, consolidating, auto-merging).
 
   // Task #44 was a clean-cut migration — no dual-schema verifier shim, old
   // local wallet data was meant to just stop being relevant. What that
@@ -1260,7 +1090,7 @@ const AtlasWallet = (() => {
   // presence, worlds, or connections — those are viewer.js's concern
   // entirely. saveWallet() is the one choke point essentially every
   // mutation already runs through (mint, split, consolidate, trade
-  // settle/claim, PvP-loss, mail-gift claim — 14 call sites as of this
+  // settle/claim, mail-gift claim — 14 call sites as of this
   // writing), so a listener registered here fires for all of them without
   // wallet.js needing a matching call added at each individual UI action.
   // Deliberately fire-and-forget: a listener throwing is caught and
@@ -1560,7 +1390,7 @@ const AtlasWallet = (() => {
 
   // The one issuance entry point for every asset class this build can
   // mint (SPEC.md §5) — `role` picks which local identity receives it
-  // ('self' or 'counterparty', same as every other role-taking function
+  // (always 'self', same as every other role-taking function
   // below), `quantity` is omitted (or 1) for a non-fungible class and a
   // caller-chosen positive integer for a fungible one. The issuer itself
   // is the real authority on what's required for a given class (see
@@ -1605,7 +1435,7 @@ const AtlasWallet = (() => {
       }
     }
     const consolidation = await autoConsolidateAssetWallet(owner.publicKey);
-    await logActivity('asset', 'Minted ' + (quantity !== undefined ? quantity + ' ' : '') + assetClass + ' from ' + issuerDomain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
+    await logActivity('asset', 'Minted ' + (quantity !== undefined ? quantity + ' ' : '') + assetClass + ' from ' + issuerDomain);
     return { credential, verdict, consolidation };
   }
 
@@ -1628,7 +1458,7 @@ const AtlasWallet = (() => {
     });
     const result = Object.assign({}, done.data);
     result.consolidation = await autoConsolidateAssetWallet(owner.publicKey);
-    await logActivity('asset', 'Converted ' + spendAmount + ' ' + credential.asset.class + ' into ' + toClass + ' at ' + credential.issuer.domain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
+    await logActivity('asset', 'Converted ' + spendAmount + ' ' + credential.asset.class + ' into ' + toClass + ' at ' + credential.issuer.domain);
     return result;
   }
 
@@ -1676,7 +1506,7 @@ const AtlasWallet = (() => {
     const purchasedEntry = { credential: result.purchased, lastVerdict: await verifyCredential(result.purchased) };
     await commitOperation(owner.publicKey, null, [{ owner: owner.publicKey, remove: [balanceCredential.id], add: [balanceEntry, purchasedEntry].filter(Boolean) }]);
     await autoConsolidateAssetWallet(owner.publicKey);
-    await logActivity('asset', 'Purchased ' + qty + ' ' + purchasedClass + ' from ' + issuerDomain + (role === 'counterparty' ? ' for the counterparty test identity' : ''));
+    await logActivity('asset', 'Purchased ' + qty + ' ' + purchasedClass + ' from ' + issuerDomain);
     return result;
   }
 
@@ -1912,9 +1742,7 @@ const AtlasWallet = (() => {
     await mutateWallet(ownerPublicKey, (list) => list.filter((e) => e.credential.id !== credentialId));
     await unloadItem(credentialId);
     if (deleted) {
-      const identity = await getIdentity();
-      const who = (identity && identity.publicKey === ownerPublicKey) ? '' : ' (counterparty test identity)';
-      await logActivity('asset', 'Deleted ' + deleted.credential.asset.class + ' from wallet' + who);
+      await logActivity('asset', 'Deleted ' + deleted.credential.asset.class + ' from wallet');
     }
   }
 
@@ -1965,16 +1793,7 @@ const AtlasWallet = (() => {
     if (remainder) await autoConsolidateAssetWallet(fromOwner.publicKey);
     await autoConsolidateAssetWallet(toOwner.publicKey);
 
-    let splitLogText;
-    if (role === 'self' && toRole === 'self') {
-      splitLogText = 'Split ' + sendAmount + ' ' + credential.asset.class + ' within your own wallet';
-    } else if (role === 'self') {
-      splitLogText = 'Sent ' + sendAmount + ' ' + credential.asset.class + ' to the counterparty test identity';
-    } else if (toRole === 'self') {
-      splitLogText = 'Received ' + sendAmount + ' ' + credential.asset.class + ' from the counterparty test identity';
-    } else {
-      splitLogText = 'Split ' + sendAmount + ' ' + credential.asset.class + ' between counterparty test identities';
-    }
+    const splitLogText = 'Split ' + sendAmount + ' ' + credential.asset.class + ' within your own wallet';
     await logActivity('asset', splitLogText);
     return { sent, remainder };
   }
@@ -2023,7 +1842,7 @@ const AtlasWallet = (() => {
     }
     const owner = await identityOf(role);
     const merged = await mergeInBatches(owner.publicKey, credentials);
-    await logActivity('asset', 'Consolidated ' + credentials.length + ' balances of ' + credentials[0].asset.class + ' into one' + (role === 'counterparty' ? ' (counterparty test identity)' : ''));
+    await logActivity('asset', 'Consolidated ' + credentials.length + ' balances of ' + credentials[0].asset.class + ' into one');
     return merged;
   }
 
@@ -2455,45 +2274,6 @@ const AtlasWallet = (() => {
     await autoConsolidateAssetWallet(identity.publicKey);
     await logActivity('asset', 'Picked up ' + credential.asset.class + ' in ' + worldDomain);
     return credential;
-  }
-
-  // Only self can lose something here, deliberately: the whole point of
-  // §5.2 is that the loser's OWN key has to co-sign the transfer — no
-  // world, including this one, can move an item it doesn't hold the key
-  // to. The "world" only referees; this function plays that referee role
-  // client-side (checking the loadout) but the authorization is entirely
-  // the signature below.
-  async function loseItemToCounterparty(itemCredential, worldContext) {
-    const identity = await getIdentity();
-    const counterparty = await getCounterparty();
-    if (!identity || !counterparty) throw new Error('Both identities are required to demo a loss.');
-
-    const payload = {
-      itemId: itemCredential.id,
-      from: { publicKey: identity.publicKey },
-      to: { publicKey: counterparty.publicKey },
-      worldContext,
-      transferredAt: new Date().toISOString()
-    };
-    const proof = await signWithSelf(payload);
-    const transfer = { credential: 'domain-atlas-transfer/1.0', ...payload, proof };
-
-    // Verify our own output the way any relying party would before
-    // applying it — proving the mechanism, not just trusting that signing
-    // succeeded.
-    const ok = await verifySignedPayload(payload, proof);
-    if (!ok) throw new Error('Transfer signature failed its own check — not applying it.');
-
-    const entry = (await getWallet(identity.publicKey)).find((e) => e.credential.id === itemCredential.id);
-    if (!entry) throw new Error('Item not found in self wallet.');
-    await commitOperation(identity.publicKey, null, [
-      { owner: identity.publicKey, remove: [itemCredential.id] },
-      { owner: counterparty.publicKey, add: [{ credential: entry.credential, lastVerdict: entry.lastVerdict, receivedVia: transfer }] }
-    ]);
-
-    await unloadItem(itemCredential.id);
-    await logActivity('asset', 'Lost ' + itemCredential.asset.class + ' to the counterparty test identity (PvP demo)');
-    return transfer;
   }
 
   // ---------- trading stations (§7 client half) ----------
@@ -2960,9 +2740,7 @@ const AtlasWallet = (() => {
   //
   // A deliberate, user-curated list of other people's Atlas identities —
   // distinct from setAlias/getAlias above (which just labels a key you've
-  // already interacted with) and from getCounterparty (a single local demo
-  // keypair standing in for "another visitor" in trade tests, not a real
-  // contact). Keyed by publicKey, one entry per key (re-adding an existing
+  // already interacted with). Keyed by publicKey, one entry per key (re-adding an existing
   // friend upserts their saved name rather than duplicating).
   //
   // Contacts are added by a friend request sent by handle through a Post
@@ -3751,7 +3529,7 @@ const AtlasWallet = (() => {
   // checked. Same device-level display-preference convention as the
   // settings above: not identity data, so it isn't wiped by lock/unlock
   // or switching identities, and the checkbox itself only ever filters
-  // the "Yours" list, never Counterparty's.
+  // the inventory lists.
   const DEFAULT_INVENTORY_FILTER_SETTINGS = { collectiblesCompatOnly: false, documentsCompatOnly: false };
 
   function clampInventoryFilterSettings(raw) {
@@ -3810,18 +3588,16 @@ const AtlasWallet = (() => {
   // ---------- misc ----------
 
   async function reverifyAll() {
-    const identity = await getIdentity();
-    const counterparty = await getCounterparty();
-    for (const who of [identity, counterparty].filter(Boolean)) {
-      await recoverPendingOperations(who.publicKey);
-      const verdicts = new Map();
-      for (const entry of await getWallet(who.publicKey)) verdicts.set(entry.credential.id, await verifyCredential(entry.credential));
-      await withWalletLock(async () => {
-        const wallet = await getWalletStrict(who.publicKey);
-        for (const entry of wallet) if (verdicts.has(entry.credential.id)) entry.lastVerdict = verdicts.get(entry.credential.id);
-        await saveWallet(who.publicKey, wallet);
-      });
-    }
+    const who = await getIdentity();
+    if (!who) return;
+    await recoverPendingOperations(who.publicKey);
+    const verdicts = new Map();
+    for (const entry of await getWallet(who.publicKey)) verdicts.set(entry.credential.id, await verifyCredential(entry.credential));
+    await withWalletLock(async () => {
+      const wallet = await getWalletStrict(who.publicKey);
+      for (const entry of wallet) if (verdicts.has(entry.credential.id)) entry.lastVerdict = verdicts.get(entry.credential.id);
+      await saveWallet(who.publicKey, wallet);
+    });
   }
 
   async function exportWallet() {
@@ -4677,7 +4453,7 @@ const AtlasWallet = (() => {
     const [
       wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
       friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
-      mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
+      mutedChatUsers, blockedChatUsers, loadout, chatMessages,
       chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles, friendRequests
     ] = await Promise.all([
       // Task #250: dropped items no longer have a local-only "still
@@ -4686,7 +4462,7 @@ const AtlasWallet = (() => {
       // whichever world hosts it, not in this device's own storage.
       getWallet(owner), getMail(owner), getSentMail(owner), getSubmittedTrades(owner), getAssetUpdateNotices(owner),
       getFriends(), getContactGroups(), getAliasesForOwner(identity), getRecentWorlds(), getFavoriteDomains(), getCalendarEvents(),
-      getMutedChatUsers(), getBlockedChatUsers(), getLoadout(), getChatMessages(owner), getCounterparty(),
+      getMutedChatUsers(), getBlockedChatUsers(), getLoadout(), getChatMessages(owner),
       // Task #158 — without these, a restore would generate a BRAND NEW
       // e2ee keypair on the new device, permanently losing the ability to
       // decrypt this identity's past end-to-end-encrypted chat threads
@@ -4733,7 +4509,7 @@ const AtlasWallet = (() => {
       data: {
         wallet, mail, sentMail, submittedTrades, assetUpdateNotices,
         friends, contactGroups, aliases, recentWorlds, favoriteDomains, calendarEvents,
-        mutedChatUsers, blockedChatUsers, loadout, chatMessages, counterparty,
+        mutedChatUsers, blockedChatUsers, loadout, chatMessages,
         chatE2eeKeyPair, chatE2eePeerKeys, activityLog, assetFiles, friendRequests,
         deletedMailIds: (deletedMailIdsAll.atlasDeletedMailIds || {})[owner] || [],
         deletedChatIds: (deletedChatIdsAll.atlasDeletedChatIds || {})[owner] || [],
@@ -4835,7 +4611,6 @@ const AtlasWallet = (() => {
       saveBlockedChatUsers(owner, d.blockedChatUsers || []),
       setLoadout(d.loadout || []),
       withMessageLock(() => saveChatMessages(owner, d.chatMessages || [])),
-      saveCounterparty(d.counterparty || null),
       // Task #158 — restoring the SAME e2ee keypair (not generating a
       // fresh one) is what keeps this identity able to decrypt its past
       // end-to-end-encrypted chat threads on the new device; restoring
@@ -8070,15 +7845,7 @@ const AtlasWallet = (() => {
   // the exact same code path the periodic background loop already uses,
   // rather than standing up a second, competing check mechanism.
   async function checkAllMail(opts = {}) {
-    // `opts.identity` lets a caller check mail for an identity other than
-    // "self" (getIdentity()) through this exact same path — e.g. tests
-    // exercising task #144 Phase 1's remote-settlement delivery, where the
-    // absent counterparty in this single-profile demo is the local
-    // "counterparty" role, which nothing else in this automatic loop ever
-    // polls on behalf of (see restartMailCheckLoop in viewer.js — it only
-    // ever calls this with no args, i.e. self). A real deployment doesn't
-    // need this at all: each visitor's own extension always IS "self" from
-    // its own point of view.
+    // `opts.identity` checks mail for an identity other than the active one ("self") through the same path.
     const identity = opts.identity || await getIdentity();
     if (!identity) return 0;
     // WebAuthn can't run ECDH client-side (see getChatE2eeKeyPair's own
@@ -9777,7 +9544,6 @@ const AtlasWallet = (() => {
     isAdminForDomain, adminRoleForDomain, adminLoginForDomain, adminLogoutForDomain,
     getIdentityMode, setIdentityMode, hasLocalIdentity, hasWebAuthnIdentity,
     getWebAuthnIdentity, createWebAuthnIdentity, presentWebAuthnIdentity,
-    getCounterparty, createCounterparty, auditLegacyCounterparty,
     getWallet, mintAsset, verifyCredential, verifyKeyAnchoredManifest, reverifyAll, exportWallet, importWallet, deleteAsset,
     // SPEC.md §13.5 single-asset transfer files.
     getFileTransferSupport, assetFileExportProblem, exportAssetToFile, getAssetFiles, saveAssetFiles, getInterruptedExports, recoverInterruptedExport, recoverInterruptedExports, dismissLostExport, EXPORT_RECOVERY_GRACE_MS, inspectAssetFile, claimAssetFile, getInterruptedClaims, recoverInterruptedClaim, recoverInterruptedClaims, dismissClaimRecord, restoreAssetCopy,
@@ -9794,7 +9560,7 @@ const AtlasWallet = (() => {
     hideAsset, unhideAsset,
     splitAsset, consolidateAsset, convertAsset, purchaseAsset,
     autoConsolidateAssetWallet, recoverPendingOperations, getPendingOperations, getConsolidationStatus,
-    getLoadout, loadItem, unloadItem, loseItemToCounterparty,
+    getLoadout, loadItem, unloadItem,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
     getAvatarShoes, getAvatarShoesAssetId, setAvatarShoes, avatarShoePropertiesFromAsset,

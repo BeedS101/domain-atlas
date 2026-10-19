@@ -6,10 +6,7 @@
 // Station" button it already had) — so walking up and clicking the sign is
 // now an alternative to opening the wallet's Trade tab -> Sell and using
 // its Join button. Covers: clicking each of the iron/gold/silver stalls
-// mints that resource for self (v1.15 fixed the gold stall, which used to
-// mint to a "counterparty" identity by mistake, and added the silver
-// stall — all three now behave identically, no counterparty needed for
-// any of them), clicking the membership desk issues a real
+// mints that resource for self (all three behave identically), clicking the membership desk issues a real
 // atlas.tradingstation.membership credential (with the same once-per-user
 // dedupe every "issue" stall gets), and that having joined this way is
 // correctly recognized by the wallet panel's own Join button (it hides
@@ -101,7 +98,7 @@ async function projectInteractables(frame) {
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), null, { timeout: 10000 });
     console.log('PASS: reached the Trading Post');
 
-    console.log('STEP 1: clicking the iron stall mints 20 iron for self, no counterparty needed');
+    console.log('STEP 1: clicking the iron stall mints 20 iron for self');
     const [ironStall, goldStall, silverStall, membershipDesk] = await projectInteractables(frame);
     if (!ironStall || ironStall.class !== 'atlas.element.iron') throw new Error('Expected the first interactable to be the iron stall, got: ' + JSON.stringify(ironStall));
     await frame.locator('#scene').click({ position: { x: ironStall.sx, y: ironStall.sy } });
@@ -117,7 +114,7 @@ async function projectInteractables(frame) {
     await frame.locator('#walletBtn').click();
     await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
-    console.log('STEP 2: clicking the gold stall mints 10 gold for self — v1.15 fixed this stall, which used to require a counterparty');
+    console.log('STEP 2: clicking the gold stall mints 10 gold for self');
     if (!goldStall || goldStall.class !== 'atlas.element.gold') throw new Error('Expected the second interactable to be the gold stall, got: ' + JSON.stringify(goldStall));
     // Status still reads STEP 1's "Collected ... iron." here — startsWith
     // ('Collected') alone would resolve instantly against that stale text
@@ -133,7 +130,7 @@ async function projectInteractables(frame) {
     if (!statusAfterGold.includes('atlas.element.gold')) throw new Error('Expected the status line to mention gold: ' + statusAfterGold);
     await frame.locator('#walletBtn').click();
     await frame.waitForFunction(() => document.querySelectorAll('#selfCollectiblesList .wallet-item').length === 2, null, { timeout: 5000 });
-    console.log('PASS: gold stall minted gold for self, with no counterparty in play at all ->', statusAfterGold);
+    console.log('PASS: gold stall minted gold for self ->', statusAfterGold);
     await frame.locator('#walletBtn').click();
     await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
