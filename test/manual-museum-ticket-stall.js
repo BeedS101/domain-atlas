@@ -62,8 +62,18 @@ function cleanGeneratedFiles() {
       if (name.startsWith('atlas-') && name.endsWith('.json')) fs.rmSync(path.join(ISSUER_SERVER_DIR, name), { force: true });
     }
   } catch (err) {}
-  try { fs.rmSync(path.join(WELL_KNOWN_DIR, 'atlas-key.json'), { force: true }); } catch (err) {}
-  try { fs.rmSync(path.join(WELL_KNOWN_DIR, 'atlas-revocations.json'), { force: true }); } catch (err) {}
+  // A fresh issuer means no trace of an earlier one: the revocation list is only created
+  // together with a new key, and not at all next to published documents, a reviewer key or
+  // replay / holdings / journal data left behind.
+  try {
+    for (const name of fs.readdirSync(WELL_KNOWN_DIR)) {
+      if (name.startsWith('atlas-') && name.endsWith('.json')) fs.rmSync(path.join(WELL_KNOWN_DIR, name), { force: true });
+    }
+  } catch (err) {}
+  try { fs.rmSync(path.join(ISSUER_SERVER_DIR, 'reviewer-private-key.jwk.json'), { force: true }); } catch (err) {}
+  for (const dir of ['replay', 'holdings', 'txn']) {
+    try { fs.rmSync(path.join(ISSUER_SERVER_DIR, dir), { recursive: true, force: true }); } catch (err) {}
+  }
   // A stale profile from a previous run already has a wallet identity
   // created in it — this test always wants a brand-new one, so the
   // profile dir is cleaned the same as every other generated state here,

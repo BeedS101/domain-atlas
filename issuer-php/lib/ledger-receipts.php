@@ -112,9 +112,9 @@ function atlas_receipt_load_signing_key($nowS) {
   return null;
 }
 
-// Reads the shared revocation list and reports one of: 'missing' (the file does not exist yet,
-// the only case treated as an empty list), 'unreadable', 'malformed' or 'ok'. Anything but
-// 'missing' and 'ok' means revocations cannot be consulted, and the caller must refuse to answer.
+// Reads the shared revocation list and reports one of: 'missing', 'unreadable', 'malformed' (not
+// JSON, no list, or an entry that is not an object with an id) or 'ok'. Anything but 'ok' means
+// revocations cannot be consulted, and the caller must refuse to answer.
 function atlas_receipt_revocation_list() {
   $path = atlas_revocations_file();
   clearstatcache(true, $path);
@@ -125,15 +125,16 @@ function atlas_receipt_revocation_list() {
   if (!is_array($doc) || !isset($doc['revoked']) || !is_array($doc['revoked'])) return ['state' => 'malformed', 'ids' => []];
   $ids = [];
   foreach ($doc['revoked'] as $r) {
-    if (is_array($r) && isset($r['id']) && is_string($r['id'])) $ids[$r['id']] = true;
+    if (!is_array($r) || !isset($r['id']) || !is_string($r['id']) || $r['id'] === '') return ['state' => 'malformed', 'ids' => []];
+    $ids[$r['id']] = true;
   }
   return ['state' => 'ok', 'ids' => $ids];
 }
 
-// true / false when the list could be consulted, null when it could not (unreadable or malformed).
+// true / false when the list could be consulted, null when it could not (missing, unreadable or malformed).
 function atlas_receipt_is_revoked($id) {
   $list = atlas_receipt_revocation_list();
-  if ($list['state'] === 'unreadable' || $list['state'] === 'malformed') return null;
+  if ($list['state'] !== 'ok') return null;
   return isset($list['ids'][$id]);
 }
 

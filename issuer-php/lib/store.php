@@ -2519,6 +2519,102 @@ function atlas_refuse_new_identity($publishedKeyFile, $role) {
   }
 }
 
+// The revocation list is created exactly once, together with the issuer key of a
+// new issuer, and never afterwards. A missing list on an issuer that already has
+// a key means revocation history was lost; it is never replaced by an empty one.
+//
+// Creates $file with $text only if it does not exist. The content goes to a
+// temporary file first and is linked into place in one step, so a reader sees no
+// file or the whole file, and an existing file is never replaced. Returns false
+// when the file was already there.
+function atlas_create_file_no_clobber($file, $text, $mode = 0644) {
+  $dir = dirname($file);
+  $name = basename($file);
+  if (!is_dir($dir) || !is_writable($dir)) {
+    throw new Exception('could not create ' . $name . ': its directory is not writable', 503);
+  }
+  $tmp = $dir . '/' . $name . '.' . bin2hex(random_bytes(6)) . '.tmp';
+  $old = umask(0777 & ~$mode);
+  try {
+    $fh = @fopen($tmp, 'xb');
+    if ($fh === false) throw new Exception('could not write a temporary file next to ' . $name, 503);
+    $written = @fwrite($fh, $text);
+    $flushed = @fflush($fh);
+    if (function_exists('fsync')) @fsync($fh);
+    fclose($fh);
+    if ($written !== strlen($text) || !$flushed) throw new Exception('could not write ' . $name . ' in full', 503);
+    atlas_fault_point('revocations:init-tmp-written');
+    if (@link($tmp, $file)) return true;
+    if (file_exists($file) || is_link($file)) return false;
+    // No hard links on this file system: create the file exclusively instead.
+    $out = @fopen($file, 'xb');
+    if ($out === false) return false;
+    $ok = @fwrite($out, $text) === strlen($text);
+    @fflush($out);
+    if (function_exists('fsync')) @fsync($out);
+    fclose($out);
+    if (!$ok) { @unlink($file); throw new Exception('could not write ' . $name . ' in full', 503); }
+    return true;
+  } finally {
+    umask($old);
+    if (file_exists($tmp)) @unlink($tmp);
+  }
+}
+
+// Everything that exists only on an issuer that has been in use. Any of it means
+// an empty revocation list would be wrong. Files an operator puts in place by hand
+// before the first request do not count (configuration files, the admin roster, the
+// trusted trade peers, the federation blocklist), nor do stores that sign-in and
+// request throttling create without anything having been issued (admin sessions and
+// nonces, login and mail nonces, relay rate counters, the calendar and the visit counter).
+function atlas_established_issuer_evidence() {
+  $found = [];
+  $names = function ($dir, $label) use (&$found) {
+    if (!is_dir($dir)) return [];
+    $list = @scandir($dir);
+    if ($list === false) { $found[] = $label . ' (cannot be read)'; return []; }
+    return $list;
+  };
+  $stateFile = '/^atlas-[A-Za-z0-9._-]*\.json$/';
+  $notEvidence = '/(-config\.json|^atlas-admin-[a-z-]*\.json|^atlas-(login|mail)-nonces-store\.json|^atlas-federation-(blocklist\.json|relay-rate-store\.json)|^atlas-trusted-trade-peers-store\.json|^atlas-(calendar|visits)-store\.json)$/';
+  // A zero-length state file holds nothing (a store creates one when it is first read), so it proves nothing.
+  $hasContent = function ($path) { clearstatcache(true, $path); $size = @filesize($path); return $size === false || $size > 0; };
+  $wellKnown = atlas_docroot() . '/.well-known';
+  foreach ($names($wellKnown, '.well-known/') as $n) {
+    if (preg_match($stateFile, $n) && $hasContent($wellKnown . '/' . $n)) $found[] = '.well-known/' . $n;
+  }
+  foreach ($names(__DIR__, 'lib/') as $n) {
+    if (preg_match($stateFile, $n) && !preg_match($notEvidence, $n) && $hasContent(__DIR__ . '/' . $n)) $found[] = 'lib/' . $n;
+  }
+  if (file_exists(__DIR__ . '/reviewer-private-key.pem')) $found[] = 'lib/reviewer-private-key.pem';
+  $dirs = [];
+  foreach (['replay', 'holdings', 'txn'] as $sub) {
+    $dirs[$sub . '/'] = [atlas_private_subdir($sub), __DIR__ . '/' . $sub];
+  }
+  foreach ($dirs as $label => $candidates) {
+    foreach (array_unique($candidates) as $dir) {
+      foreach ($names($dir, $label) as $n) {
+        if ($n[0] !== '.') { $found[] = $label; break 2; }
+      }
+    }
+  }
+  return array_values(array_unique($found));
+}
+
+// Called only when this request generates the issuer key.
+function atlas_initialise_revocations_for_new_issuer() {
+  $file = atlas_revocations_file();
+  if (file_exists($file) || is_link($file)) return;
+  $found = atlas_established_issuer_evidence();
+  if ($found) {
+    error_log('atlas: REVOCATION LIST NOT CREATED: a new issuer key is being generated, but this looks like an established deployment (' .
+      implode(', ', $found) . '). Restore atlas-revocations.json from a backup.');
+    return;
+  }
+  @mkdir(dirname($file), 0755, true);
+  atlas_create_file_no_clobber($file, json_encode(['revoked' => []], JSON_PRETTY_PRINT), 0644);
+}
+
 function load_or_create_keypair() {
   $keyFile = atlas_key_file();
   if (file_exists($keyFile)) {
@@ -2527,11 +2623,14 @@ function load_or_create_keypair() {
     if ($priv === false) throw new Exception('could not load issuer private key: ' . openssl_error_string());
   } else {
     atlas_refuse_new_identity(atlas_public_key_file(), 'issuer');
+    // The list is created before the key, so a crash between the two leaves a valid
+    // empty list and no key (the next request generates the key), never a key with no list.
+    atlas_initialise_revocations_for_new_issuer();
     $priv = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
     if ($priv === false) throw new Exception('could not generate issuer keypair: ' . openssl_error_string());
     openssl_pkey_export($priv, $pem);
-    file_put_contents($keyFile, $pem, LOCK_EX);
-    @chmod($keyFile, 0600);
+    // Another request starting at the same moment may have written its key first: use that one.
+    if (!atlas_create_file_no_clobber($keyFile, $pem, 0600)) return load_or_create_keypair();
   }
   $details = openssl_pkey_get_details($priv);
   if (!isset($details['ec']['x']) || !isset($details['ec']['y'])) {
@@ -2568,10 +2667,10 @@ function ensure_well_known_files($publicKeyB64url) {
   if ($needsWrite) {
     file_put_contents($keyFile, json_encode($keyDoc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX);
   }
-  $revFile = atlas_revocations_file();
-  if (!file_exists($revFile)) {
-    file_put_contents($revFile, json_encode(['revoked' => []], JSON_PRETTY_PRINT), LOCK_EX);
-  }
+  // A missing revocation list is not recreated here (see
+  // atlas_initialise_revocations_for_new_issuer): every request is refused until it is restored.
+  clearstatcache(true, atlas_revocations_file());
+  if (!file_exists(atlas_revocations_file())) throw atlas_revocations_unavailable('is missing');
 }
 
 // SPEC.md §13's "entering the system": a credential delivered by email has
@@ -2666,13 +2765,22 @@ function atlas_revocations_lock_file() {
 function read_revocations() {
   $file = atlas_revocations_file();
   clearstatcache(true, $file);
-  if (!file_exists($file)) return ['revoked' => []];
+  if (!file_exists($file)) throw atlas_revocations_unavailable('is missing');
   $data = @file_get_contents($file);
   if ($data === false) throw atlas_revocations_unavailable('could not be read');
   $doc = json_decode($data, true);
   if (!is_array($doc)) throw atlas_revocations_unavailable('is not valid JSON');
   if (!isset($doc['revoked']) || !is_array($doc['revoked'])) throw atlas_revocations_unavailable('has no "revoked" list');
+  foreach ($doc['revoked'] as $r) {
+    if (!atlas_is_revocation_entry($r)) throw atlas_revocations_unavailable('has an entry that is not an object with an id');
+  }
   return $doc;
+}
+
+// An entry is an object with a non-empty string id. This is what the wallet requires
+// of a published list too, and what every entry written here has.
+function atlas_is_revocation_entry($e) {
+  return is_array($e) && isset($e['id']) && is_string($e['id']) && $e['id'] !== '';
 }
 
 function is_revoked($id) {
@@ -2757,6 +2865,10 @@ function atlas_remove_stale_temp_files($dir) {
 // transaction-journal id of the replacement that made it, which is how
 // recovery after a crash tells a spend that committed from one that did not.
 function atlas_revoke_many($ids, $reason, $txn = null) {
+  // Never write an entry the reader would then refuse.
+  foreach ($ids as $id) {
+    if (!is_string($id) || $id === '') throw new Exception('a revocation needs a credential id', 400);
+  }
   $lock = @fopen(atlas_revocations_lock_file(), 'c');
   if ($lock === false) throw new Exception('could not take the revocation lock', 503);
   flock($lock, LOCK_EX);

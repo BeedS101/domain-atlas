@@ -88,12 +88,12 @@ async function revocationIntegrity(be) {
   writeRev(be, { revoked: fixture.entries(3) });
   const after = await A.post('/atlas/asset/split', { credential: spare[0], sendAmount: 1, toPublicKey: own, requestId: rid() });
   check(be, 'RV7 balances refused during the outage are spendable once the file is valid again', after.status === 200, [after.status, after.body.error]);
-  // A missing file is a fresh issuer, not an error.
+  // A missing file is lost history, not an empty list: the spend is refused and no list is created
+  // (test/manual-gen1-revocation-state.js covers this in full).
   fs.rmSync(be.revFile, { force: true });
   const fresh = await A.post('/atlas/asset/split', { credential: spare[1], sendAmount: 1, toPublicKey: own, requestId: rid() });
-  check(be, 'RV8 a missing revocation file starts an empty list', fresh.status === 200, [fresh.status, fresh.body.error]);
-  const created = A.revocations();
-  check(be, 'RV8 and records the spend', Array.isArray(created) && created.some((r) => r.id === spare[1].id));
+  check(be, 'RV8 a missing revocation file refuses the spend with 503', fresh.status === 503, [fresh.status, fresh.body.error]);
+  check(be, 'RV8 and does not create an empty list', !fs.existsSync(be.revFile));
 }
 
 async function replayAndRetry(be) {

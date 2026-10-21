@@ -70,6 +70,10 @@ Decided class by class, not generalised:
 
 Every other failure to read the list is unavailable for all classes.
 
+The issuers behave the same way towards their own list: a list that is missing, unreadable, malformed or has an
+entry without a string `id` makes every operation that consults it answer 503. A missing list is never replaced
+by an empty one (`docs/gen1-revocation-state.md`).
+
 ## What each caller does with an unavailable verdict
 
 The wallet never uses a stored verdict as permission to spend: spends are authorised by the issuer's

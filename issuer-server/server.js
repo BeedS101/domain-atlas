@@ -2146,6 +2146,98 @@ async function encryptMailBodyToKey(recipientPublicKeyJwk, plaintextObj) {
   return { v: 1, ephemeralPublicKeyJwk, iv: b64url(iv), ciphertext: b64url(new Uint8Array(ciphertext)) };
 }
 
+// The revocation list is created exactly once, together with the issuer key of a
+// new issuer, and never afterwards. A missing list on an issuer that already has
+// a key means revocation history was lost; it is never replaced by an empty one.
+//
+// Creates `file` with `text` only if it does not exist. The content goes to a
+// temporary file first and is linked into place in one step, so a reader sees no
+// file or the whole file, and an existing file is never replaced. Returns false
+// when the file was already there.
+function createFileNoClobber(file, text, mode) {
+  const tmp = file + '.' + process.pid + '.' + webcrypto.randomUUID().slice(0, 8) + '.tmp';
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', mode);
+    fs.fchmodSync(fd, mode);
+    fs.writeSync(fd, text);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    faultPoint('revocations:init-tmp-written');
+    try {
+      fs.linkSync(tmp, file);
+      return true;
+    } catch (err) {
+      if (err.code === 'EEXIST') return false;
+      if (!['EPERM', 'ENOSYS', 'EOPNOTSUPP', 'EXDEV'].includes(err.code)) throw err;
+    }
+    // The file system has no hard links: create the file exclusively instead.
+    let out;
+    try {
+      out = fs.openSync(file, 'wx', mode);
+    } catch (err) {
+      if (err.code === 'EEXIST') return false;
+      throw err;
+    }
+    try { fs.writeSync(out, text); fs.fsyncSync(out); } finally { fs.closeSync(out); }
+    return true;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch (e) { /* already closed */ } }
+    try { fs.unlinkSync(tmp); } catch (e) { /* nothing to clean up */ }
+  }
+}
+
+// Everything that exists only on an issuer that has been in use. Any of it means
+// an empty revocation list would be wrong. Files an operator puts in place by hand
+// before the first start do not count (configuration files, the admin roster, the
+// trusted trade peers, the federation blocklist), nor do stores that sign-in and
+// request throttling create without anything having been issued (admin sessions and
+// nonces, login and mail nonces, relay rate counters, the calendar and the visit counter).
+const ESTABLISHED_STATE_FILE = /^atlas-[A-Za-z0-9._-]*\.json$/;
+const NOT_EVIDENCE_FILE = /(-config\.json|^atlas-admin-[a-z-]*\.json|^atlas-(login|mail)-nonces-store\.json|^atlas-federation-(blocklist\.json|relay-rate-store\.json)|^atlas-trusted-trade-peers-store\.json|^atlas-(calendar|visits)-store\.json)$/;
+function listDirectoryNames(dir, found, label) {
+  try {
+    return fs.readdirSync(dir);
+  } catch (err) {
+    if (err.code !== 'ENOENT') found.push(label + ' (cannot be read: ' + err.code + ')');
+    return [];
+  }
+}
+function establishedIssuerEvidence() {
+  const found = [];
+  const wellKnown = path.join(DEMO_DOMAIN_A, '.well-known');
+  // A zero-length state file holds nothing (a store creates one when it is first read), so it proves nothing.
+  const hasContent = (dir, name) => {
+    try { return fs.statSync(path.join(dir, name)).size > 0; } catch { return true; }
+  };
+  for (const name of listDirectoryNames(wellKnown, found, '.well-known/')) {
+    if (ESTABLISHED_STATE_FILE.test(name) && hasContent(wellKnown, name)) found.push('.well-known/' + name);
+  }
+  for (const name of listDirectoryNames(STATE_DIR, found, 'the state folder')) {
+    if (ESTABLISHED_STATE_FILE.test(name) && !NOT_EVIDENCE_FILE.test(name) && hasContent(STATE_DIR, name)) found.push(name);
+  }
+  if (fs.existsSync(REVIEWER_KEY_FILE)) found.push(path.basename(REVIEWER_KEY_FILE));
+  for (const dir of [REPLAY_DIR, TXN_DIR, HOLDINGS_DIR]) {
+    const label = path.basename(dir) + '/';
+    if (listDirectoryNames(dir, found, label).some((n) => !n.startsWith('.'))) found.push(label);
+  }
+  return found;
+}
+
+// Called only when this start generates the issuer key.
+function initialiseRevocationsForNewIssuer() {
+  if (fs.existsSync(REVOCATIONS_FILE)) return;
+  const found = establishedIssuerEvidence();
+  if (found.length) {
+    console.error('REVOCATION LIST NOT CREATED: a new issuer key is being generated, but this looks like an established deployment (' +
+      found.join(', ') + '). Restore atlas-revocations.json from a backup.');
+    return;
+  }
+  fs.mkdirSync(path.dirname(REVOCATIONS_FILE), { recursive: true });
+  createFileNoClobber(REVOCATIONS_FILE, JSON.stringify({ revoked: [] }, null, 2), 0o644);
+}
+
 async function loadOrCreateKeypair() {
   if (fs.existsSync(KEY_FILE)) {
     const jwk = JSON.parse(fs.readFileSync(KEY_FILE, 'utf8'));
@@ -2156,9 +2248,13 @@ async function loadOrCreateKeypair() {
     return { privateKey, publicKeyB64url: b64url(rawPublic) };
   }
   console.log('No issuer key found — generating a new ECDSA P-256 keypair (first run only)...');
+  // The list is created before the key, so a crash between the two leaves a valid
+  // empty list and no key (the next start generates the key), never a key with no list.
+  initialiseRevocationsForNewIssuer();
   const pair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const jwk = await subtle.exportKey('jwk', pair.privateKey);
-  fs.writeFileSync(KEY_FILE, JSON.stringify(jwk, null, 2));
+  // Another process starting at the same moment may have written its key first: use that one.
+  if (!createFileNoClobber(KEY_FILE, JSON.stringify(jwk, null, 2), 0o600)) return loadOrCreateKeypair();
   const rawPublic = await subtle.exportKey('raw', pair.publicKey);
   return { privateKey: pair.privateKey, publicKeyB64url: b64url(rawPublic) };
 }
@@ -2176,8 +2272,11 @@ function ensureWellKnownFiles(publicKeyB64url) {
     const keyDoc = { keys: [{ publicKey: publicKeyB64url, validFrom: new Date().toISOString(), validUntil: null }] };
     fs.writeFileSync(PUBLIC_KEY_FILE, JSON.stringify(keyDoc, null, 2));
   }
+  // A missing revocation list is not recreated here (see initialiseRevocationsForNewIssuer).
+  // The server still starts, but every operation that reads the list answers 503.
   if (!fs.existsSync(REVOCATIONS_FILE)) {
-    fs.writeFileSync(REVOCATIONS_FILE, JSON.stringify({ revoked: [] }, null, 2));
+    console.error('REVOCATION LIST MISSING: ' + REVOCATIONS_FILE + ' does not exist. Operations that depend on revocations ' +
+      'answer 503 until it is restored from a backup. It will not be recreated empty.');
   }
   if (!fs.existsSync(SUSPENSIONS_FILE)) {
     fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify({ suspended: [] }, null, 2));
@@ -2730,12 +2829,17 @@ function storeUnavailable(message) {
   err.statusCode = 503;
   return err;
 }
+// An entry is an object with a non-empty string id. This is what the wallet requires
+// of a published list too, and what every entry written here has.
+function isRevocationEntry(e) {
+  return !!e && typeof e === 'object' && !Array.isArray(e) && typeof e.id === 'string' && e.id !== '';
+}
 function readRevocations() {
   let text;
   try {
     text = fs.readFileSync(REVOCATIONS_FILE, 'utf8');
   } catch (err) {
-    if (err.code === 'ENOENT') return { revoked: [] };
+    if (err.code === 'ENOENT') throw storeUnavailable('the revocation list is missing; refusing to treat it as empty - restore it from a backup');
     throw storeUnavailable('the revocation list could not be read (' + err.code + '); refusing to treat it as empty');
   }
   let doc;
@@ -2746,6 +2850,9 @@ function readRevocations() {
   }
   if (!doc || typeof doc !== 'object' || !Array.isArray(doc.revoked)) {
     throw storeUnavailable('the revocation list has no "revoked" list; refusing to treat it as empty - restore it from a backup');
+  }
+  if (!doc.revoked.every(isRevocationEntry)) {
+    throw storeUnavailable('the revocation list has an entry that is not an object with an id; refusing to use it - restore it from a backup');
   }
   return doc;
 }
@@ -2861,6 +2968,12 @@ async function lockSpend(id) {
 // replacement that made it, which is how recovery after a crash tells a spend
 // that committed from one that did not.
 function revokeMany(ids, reason, txn) {
+  // Never write an entry the reader would then refuse.
+  if (!ids.every((id) => typeof id === 'string' && id !== '')) {
+    const err = new Error('a revocation needs a credential id');
+    err.statusCode = 400;
+    throw err;
+  }
   const doc = readRevocations();
   const revokedAt = new Date().toISOString();
   for (const id of ids) doc.revoked.push(txn ? { id, revokedAt, reason, txn } : { id, revokedAt, reason });

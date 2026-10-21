@@ -11,6 +11,7 @@
 // widget rejected.
 
 const { spawn } = require('child_process');
+const { cleanIssuerPhpState } = require('./lib/clean-issuer-php');
 const { webcrypto } = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -31,6 +32,7 @@ const GENERATED_FILES = [
 ];
 function cleanGeneratedFiles() {
   for (const f of GENERATED_FILES) { try { fs.unlinkSync(f); } catch (err) {} }
+  cleanIssuerPhpState(BUNDLE_DIR);
   try { fs.rmdirSync(path.resolve(BUNDLE_DIR, '.well-known')); } catch (err) {}
 }
 

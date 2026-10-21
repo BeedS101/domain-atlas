@@ -202,7 +202,7 @@ function cli_preflight($probe) {
   echo "\n-- revocation list --\n";
   $rev = cli_revocation_summary();
   if ($rev['state'] === 'missing') {
-    cli_line('FAIL', '.well-known/atlas-revocations.json is missing: an existing domain must have one; do not let the issuer start a new one');
+    cli_line('FAIL', '.well-known/atlas-revocations.json is missing: an existing domain must have one. The issuer does not create it (every request answers 503); restore it from a backup');
   } elseif ($rev['state'] === 'bad') {
     cli_line('FAIL', $rev['message']);
   } else {

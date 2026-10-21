@@ -148,20 +148,21 @@ function createLedgerReceipts(opts) {
       return from !== null && until !== null && nowS >= from && nowS < until;
     });
   }
-  // true / false when the revocation list could be consulted, null when it could not. A file that
-  // does not exist yet is the only case read as an empty list; an unreadable or malformed one
-  // means revocations are unknown, and the caller must refuse to answer.
+  // true / false when the revocation list could be consulted, null when it could not. A missing,
+  // unreadable or malformed list, or one with an entry that is not an object with an id, means
+  // revocations are unknown, and the caller must refuse to answer.
   function isRevoked(id) {
     let text;
     try {
       text = fs.readFileSync(opts.revocationsFile, 'utf8');
     } catch (e) {
-      return e && e.code === 'ENOENT' ? false : null;
+      return null;
     }
     let doc;
     try { doc = JSON.parse(text); } catch (e) { return null; }
     if (!doc || typeof doc !== 'object' || !Array.isArray(doc.revoked)) return null;
-    return doc.revoked.some((r) => r && r.id === id);
+    if (!doc.revoked.every((r) => r && typeof r === 'object' && !Array.isArray(r) && typeof r.id === 'string' && r.id !== '')) return null;
+    return doc.revoked.some((r) => r.id === id);
   }
 
   // The only constructor of a signed receipt payload.

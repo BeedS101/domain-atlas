@@ -41,9 +41,11 @@ Only one consolidation per owner runs at a time across all extension pages.
 
 ### 1.3 Issuer (Node and PHP): revocation file integrity
 
-- A revocation file that is missing is an empty list (fresh issuer). One that exists but is unreadable, is not
-  valid JSON, or has no `revoked` array is an error: spends, splits, consolidations and conversions answer
+- A revocation file that is missing, unreadable, not valid JSON, without a `revoked` array, or holding an entry
+  that is not an object with a string `id` is an error: spends, splits, consolidations and conversions answer
   **503** and nothing is written. PHP no longer reads such a file as empty and truncates it on the next revoke.
+  (A missing file was first read as a fresh issuer's empty list; it is no longer. The list is created once,
+  with the key of a new issuer. See `docs/gen1-revocation-state.md`.)
 - Writes go to a temporary file in the same directory, are flushed, and replace the file with a rename
   (`writeFileAtomic` / `atlas_write_file_atomic`), keeping the file's mode. **There is no fallback.** If the
   temporary file cannot be created, written or renamed (unwritable directory, full disk), the existing file is not
@@ -119,8 +121,7 @@ or a file system that reorders flushed writes and renames. The commit is one fil
 
 `atlas_receipt_is_revoked` / `atlas_ledger_is_revoked` (PHP) and `isRevoked` in `lib-ledger-receipts.js` /
 `lib-ledger-issuance.js` (Node) no longer read an unreadable or malformed revocation document as an empty list.
-They distinguish: **missing** (the only case read as "nothing revoked", the same policy as the spend path: a fresh
-issuer), **unreadable** (cannot be read, including a path that is not a file), **malformed** (empty, not JSON,
+They distinguish: **missing** (no longer read as "nothing revoked"; see `docs/gen1-revocation-state.md`), **unreadable** (cannot be read, including a path that is not a file), **malformed** (empty, not JSON,
 not an object, no `revoked` array), and **ok**. For the last two the balance-receipt and account-credential
 requests answer **503** `revocations-unavailable` before the request nonce is spent, so the same signed request
 works once the list is restored.
@@ -160,9 +161,9 @@ works once the list is restored.
    this automatically on every fungible mint). Until then that key can mine up to the cap on top. The index is a
    record of what the issuer signed, not a ledger: the signed credentials and the revocation list remain the
    source of truth.
-3. **Deleting revocation records still resurrects credentials.** A 503 on a corrupt file protects against
-   corruption, not against someone removing entries from a valid file or deleting the file (a missing file is a
-   fresh, empty list). The report's section 5 item 4 (an append-only private log that the public file is rebuilt
+3. **Deleting revocation records still resurrects credentials.** A 503 on a corrupt or missing file protects
+   against corruption and loss of the file (a missing file is no longer a fresh, empty list:
+   `docs/gen1-revocation-state.md`), not against someone removing entries from a valid file. The report's section 5 item 4 (an append-only private log that the public file is rebuilt
    from) would address it and is not in this change. Take backups and compare entry counts (section 5).
 4. **Conversion into a capped class is not capped.** Converting 450 Gold gives 9,000 Iron; the cap gates mining
    only. Converted-in holdings do count toward the cap afterwards (a further Iron mint is refused). Repeated

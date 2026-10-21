@@ -66,7 +66,10 @@ Upload the contents of `issuer-php/` so that `lib/` sits directly inside the web
 
 - `lib/issuer-private-key.pem`, `lib/reviewer-private-key.pem`
 - any `lib/atlas-*-store.json`, `lib/atlas-recovery-secret.json`, any `lib/*.lock`
-- `.well-known/atlas-key.json`, `.well-known/atlas-revocations.json`, `.well-known/atlas-suspensions.json`
+- `.well-known/atlas-key.json`, `.well-known/atlas-revocations.json`, `.well-known/atlas-suspensions.json`,
+  `.well-known/atlas-reviewer-key.json`
+- `lib/atlas-private-dir.txt` and the folder it names; `lib/atlas-ledger-issuance-config.json`,
+  `lib/atlas-ledger-receipts-config.json`
 - `lib/replay/`, `lib/holdings/`, `lib/txn/` (leave whatever is there)
 - `test-router.php` (development only) and `README.txt` (harmless, but not needed on the host)
 
@@ -178,7 +181,9 @@ owner and from credentials wallets present; it is not a balance migration.
 
 If the preflight says a key file or the revocation list is missing on an existing domain, do not run anything else:
 restore it from your backup. The code refuses to create a new identity for a domain that already has a published
-one (it answers 503), and it never recreates a revocation list that is unreadable.
+one (it answers 503). It creates a revocation list only together with the key of a new issuer, and only when
+nothing shows the domain was ever used; a list that is missing, unreadable or invalid is never replaced, and every
+request answers 503 until it is restored (`docs/gen1-revocation-state.md`).
 
 ## 7. Watching after deployment
 
@@ -186,8 +191,9 @@ one (it answers 503), and it never recreates a revocation list that is unreadabl
 - `lib/txn/` (or the configured private folder) should be empty between requests. A file that stays means a
   decided transaction waiting for a retry or an inspection. `php lib/atlas-cli.php txn-list` shows it and
   `txn-recover` settles it.
-- 503 on a spend: the revocation list is unreadable, `.well-known/` is not writable, or the private folder is wrong.
-  The server's PHP error log names the cause. Restore from backup if the list is damaged. Do not recreate it.
+- 503 on a spend: the revocation list is missing, unreadable or invalid, `.well-known/` is not writable, or the
+  private folder is wrong. The server's PHP error log names the cause. Restore the list from backup if it is
+  damaged or gone. Do not recreate it by hand as an empty list: that makes every spent credential spendable.
 - 400 with `code: "busy"`: two requests for the same credential collided or a lock could not be taken. The wallet
   retries; nothing was spent.
 

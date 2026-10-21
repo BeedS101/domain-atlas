@@ -70,7 +70,10 @@ async function startNode(port, options) {
   be.restart = async (env) => { be.proc.removeAllListeners('exit'); be.proc.kill(); await waitExit(be.proc, 3000); await be.start(env); };
   be.waitExit = (ms) => waitExit(be.proc, ms);
   be.stop = () => { if (be.proc) { be.proc.removeAllListeners('exit'); be.proc.kill(); } fs.rmSync(tmp, { recursive: true, force: true }); };
-  await be.start();
+  // options.prepare(be) seeds the folders before the first start; autostart: false leaves the
+  // server stopped so a test can start it with its own environment.
+  if (options.prepare) options.prepare(be);
+  if (options.autostart !== false) await be.start();
   return be;
 }
 
@@ -113,7 +116,16 @@ async function startPhp(port, options) {
   };
   be.restart = async (env) => { be.proc.removeAllListeners('exit'); be.proc.kill(); await waitExit(be.proc, 3000); await be.start(env); };
   be.stop = () => { if (be.proc) { be.proc.removeAllListeners('exit'); be.proc.kill(); } fs.rmSync(tmp, { recursive: true, force: true }); };
-  if (options.autostart !== false) await be.start();
+  if (options.autostart !== false) {
+    await be.start();
+    // A PHP issuer creates its key, and with it the revocation list, on its first signing request.
+    // That list is only created while nothing else exists yet, so state a test puts in place after
+    // the start (trusted peers, for one) would count as a used deployment. Make the first request
+    // now; it changes nothing (a revoke with no id is refused). warm: false leaves the issuer fresh.
+    if (options.warm !== false) {
+      await fetch(be.base + '/atlas/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+    }
+  }
   return be;
 }
 

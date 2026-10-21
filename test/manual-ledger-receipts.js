@@ -245,7 +245,9 @@ async function suite(kind, ledger) {
       check('...the same signed request still works once the list is back (its nonce was not spent)', again.status === 200, again.text);
     }
     fs.unlinkSync(iss.revocationsPath);
-    check('a revocation list that does not exist yet is the one case read as empty', (await fresh()).status === 200);
+    const gone = await fresh();
+    check('a revocation list that is missing is refused like an unreadable one, never read as empty', refused(gone, 503, 'revocations-unavailable'), gone.text);
+    check('...and the issuer does not create it', !fs.existsSync(iss.revocationsPath));
     fs.writeFileSync(iss.revocationsPath, revRaw);
     x = await send(odd);
     check('a restored list still refuses the revoked account', refused(x.res, 409, 'account-revoked'), x.res.text);

@@ -14,6 +14,7 @@
 // suspend + clawback + consolidate, independently re-verified as revoked.
 
 const { spawn } = require('child_process');
+const { cleanIssuerPhpState } = require('./lib/clean-issuer-php');
 const { webcrypto } = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -37,6 +38,7 @@ const GENERATED_FILES = [
 ];
 function cleanGeneratedFiles() {
   for (const f of GENERATED_FILES) { try { fs.unlinkSync(f); } catch (err) {} }
+  cleanIssuerPhpState(BUNDLE_DIR);
   try { fs.rmdirSync(path.resolve(BUNDLE_DIR, '.well-known')); } catch (err) {}
 }
 
@@ -93,6 +95,9 @@ async function purchaseAsset(buyer, credential, purchasedClass, quantity) {
     serverProc.on('exit', (code) => reject(new Error('php -S exited early with code ' + code)));
   });
   console.log('PASS: PHP dev server up on port ' + PORT);
+  // The first request that loads the issuer key is what creates the revocation list, and only while
+  // nothing else exists yet. This one changes nothing (a revoke with no id is refused).
+  await post('/atlas/revoke', {});
 
   try {
     console.log('STEP 1: committee mints Reserve Credits to the treasury (2-of-3)');

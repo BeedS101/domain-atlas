@@ -244,7 +244,8 @@ async function suite(kind, core) {
       }
       fs.unlinkSync(issuer.revocationsPath);
       r = await issue(await fresh('GOPH'), 'GOPH');
-      t('a revocation list that does not exist yet is the one case read as empty', r.status === 200, r);
+      t('a revocation list that is missing is refused like an unreadable one, never read as empty', r.status === 503 && r.json.code === 'revocations-unavailable' && !('credential' in r.json), r);
+      t('...and the issuer does not create it', !fs.existsSync(issuer.revocationsPath));
       fs.writeFileSync(issuer.revocationsPath, revRaw);
       r = await issue(rv, 'GOPH');
       t('a restored list still refuses the revoked account', r.status === 409 && r.json.code === 'account-revoked', r);
