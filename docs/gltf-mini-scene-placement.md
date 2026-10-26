@@ -103,6 +103,45 @@ direction toward the chair they serve, and a chair faces its desk with the
 opposite rotation. The Lobby's reception desk has its chairs on the north side
 (`z` smaller than the desk), so its monitor and keyboard use `rotationY: 180`.
 
+## Textures
+
+A material may carry a base-colour texture. The fragment colour is
+`baseColorFactor * texture.rgb * light`; alpha is `baseColorFactor` alpha only
+(materials are drawn opaque). A model without a texture needs no UVs and
+renders exactly as before.
+
+Supported:
+
+- GLB 2.0, triangle primitives, `POSITION`, `NORMAL`, `TEXCOORD_0` (float, or
+  normalized unsigned byte/short).
+- `pbrMetallicRoughness.baseColorFactor` and `baseColorTexture` with
+  `texCoord` 0.
+- Images embedded in the GLB BIN chunk through `bufferView`, `image/png` and
+  `image/jpeg` only (checked against the file signature, 16 MB limit). They are
+  decoded with `createImageBitmap` and uploaded as a WebGL 2D texture with
+  the glTF UV origin (top-left) preserved.
+- Samplers: `wrapS`/`wrapT` repeat, clamp-to-edge and mirrored repeat;
+  `magFilter`/`minFilter` nearest and linear variants. Defaults: repeat,
+  linear magnification, trilinear minification with mipmaps. WebGL 1 limits
+  apply: a non-power-of-two image is resampled to the next power of two unless
+  both axes clamp, and mipmaps are only generated for power-of-two images.
+- Primitives that share an image and sampler share one GPU texture. Textured
+  models are released when their world is destroyed; the model is still fetched
+  once and cached by URL.
+
+Not supported (the primitive keeps its flat `baseColorFactor` colour and a
+console warning is logged, or the feature is ignored): external image URIs and
+`data:` URIs, other image types such as WebP, `texCoord` other than 0,
+`KHR_texture_transform` and other texture extensions, normal, metallic-roughness,
+occlusion and emissive textures, `alphaMode` `BLEND`/`MASK`, anisotropic
+filtering, and colour-space conversion (texture values are used as stored).
+A texture that fails to decode never stops the scene from loading.
+
+`demo-domain-a/assets/texture-test/textureTestBoard.glb` is a 1 x 1 board
+with a 16 x 16 asymmetric test image (an upright white "L" in the red top-left
+quadrant) for trying this in a scene. `tools/make-texture-test-glb.js`
+regenerates it.
+
 ## Dropped items
 
 A dropped item's model is normalized to a fixed size and centered on its

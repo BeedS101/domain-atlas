@@ -6,9 +6,10 @@
 // and this sandbox's own network policy blocks fetching one anyway. So:
 // write exactly enough of the glTF 2.0 spec to load this project's own
 // furniture-kit GLBs, which turn out to be a genuinely narrow subset — no
-// textures, no skinning, no animation, no interleaved buffers, no sparse
-// accessors, OPAQUE materials only (confirmed by inspecting the actual
-// files). A
+// skinning, no animation, no sparse accessors, OPAQUE materials only, and
+// colour from material.baseColorFactor, plus one optional embedded
+// baseColorTexture (see "base-colour textures" below for exactly what is and
+// is not supported). A
 // general-purpose glTF loader would be a much bigger undertaking; this one
 // only needs to be correct for that subset, not for glTF as a whole.
 //
@@ -319,6 +320,86 @@
 
   // ---------- model loading (cached by URL) ----------
 
+  // ---------- base-colour textures (CPU side: describe, no GL) ----------
+  //
+  // Supported: material.pbrMetallicRoughness.baseColorTexture reading
+  // TEXCOORD_0, resolved material -> texture -> image where the image is
+  // embedded in the GLB BIN chunk through a bufferView and is image/png or
+  // image/jpeg, with the texture's sampler (wrapS/wrapT repeat, clamp or
+  // mirrored repeat; mag/min filters; defaults when no sampler is given).
+  // The sampled colour is multiplied by baseColorFactor, then lit like any
+  // flat colour. Not supported (the material falls back to its flat
+  // baseColorFactor): external image URIs, data: URIs, other MIME types,
+  // texCoord other than 0, KHR_texture_transform and other texture
+  // extensions. Other texture slots (normal, metallic-roughness, occlusion,
+  // emissive) and alphaMode BLEND/MASK are ignored: materials draw opaque.
+  // Texture bytes are treated as the colour values to show, the same way
+  // flat baseColorFactor values are: no sRGB-to-linear conversion.
+  const MAX_EMBEDDED_IMAGE_BYTES = 16 * 1024 * 1024;
+  const IMAGE_MIME_MAGIC = {
+    'image/png': [0x89, 0x50, 0x4e, 0x47],
+    'image/jpeg': [0xff, 0xd8, 0xff]
+  };
+  const WRAP_MODES = { 33071: 33071, 33648: 33648, 10497: 10497 }; // clamp-to-edge, mirrored repeat, repeat
+  const FILTER_MODES = { 9728: 9728, 9729: 9729, 9984: 9984, 9985: 9985, 9986: 9986, 9987: 9987 };
+
+  // Returns { texture, warning }: texture is { key, mime, bytes, sampler } when
+  // the material has a usable embedded base-colour image, else null; warning
+  // says why a declared texture was unusable (null when none was declared).
+  function resolveBaseColorTexture(gltf, bin, materialIndex, hasUvs) {
+    const none = (warning) => ({ texture: null, warning: warning || null });
+    try {
+      const mat = materialIndex !== undefined && gltf.materials ? gltf.materials[materialIndex] : null;
+      const info = mat && mat.pbrMetallicRoughness && mat.pbrMetallicRoughness.baseColorTexture;
+      if (!info) return none();
+      if (info.texCoord !== undefined && info.texCoord !== 0) return none('baseColorTexture uses TEXCOORD_' + info.texCoord + ' (only TEXCOORD_0 is supported)');
+      if (!hasUvs) return none('baseColorTexture is declared but the primitive has no usable TEXCOORD_0');
+      const tex = gltf.textures && gltf.textures[info.index];
+      if (!tex) return none('baseColorTexture refers to a texture that does not exist');
+      if (tex.source === undefined) return none('texture has no image source (an extension-only image format is not supported)');
+      const image = gltf.images && gltf.images[tex.source];
+      if (!image) return none('texture refers to an image that does not exist');
+      if (image.bufferView === undefined) return none('only images embedded through a bufferView are supported (no external or data: URIs)');
+      const mime = image.mimeType;
+      if (!IMAGE_MIME_MAGIC[mime]) return none('unsupported image type ' + mime + ' (only image/png and image/jpeg)');
+      const view = gltf.bufferViews && gltf.bufferViews[image.bufferView];
+      if (!view || !bin) return none('image bufferView is missing');
+      const offset = view.byteOffset || 0, length = view.byteLength;
+      if (!(length > 0) || offset < 0 || offset + length > bin.byteLength) return none('image bufferView lies outside the BIN chunk');
+      if (length > MAX_EMBEDDED_IMAGE_BYTES) return none('embedded image is larger than ' + MAX_EMBEDDED_IMAGE_BYTES + ' bytes');
+      const bytes = new Uint8Array(bin, offset, length);
+      if (!IMAGE_MIME_MAGIC[mime].every((b, i) => bytes[i] === b)) return none('image data does not match its ' + mime + ' type');
+      const samplerDef = (tex.sampler !== undefined && gltf.samplers && gltf.samplers[tex.sampler]) || {};
+      const sampler = {
+        wrapS: WRAP_MODES[samplerDef.wrapS] || 10497,
+        wrapT: WRAP_MODES[samplerDef.wrapT] || 10497,
+        magFilter: FILTER_MODES[samplerDef.magFilter] || null,
+        minFilter: FILTER_MODES[samplerDef.minFilter] || null
+      };
+      return { texture: { key: tex.source + '|' + sampler.wrapS + '|' + sampler.wrapT + '|' + sampler.magFilter + '|' + sampler.minFilter, mime, bytes, sampler }, warning: null };
+    } catch (err) {
+      return none('could not read baseColorTexture: ' + err.message);
+    }
+  }
+
+  // TEXCOORD_0 as Float32 pairs, or null when absent or malformed (wrong
+  // type/count). Normalized 8- and 16-bit coordinates are accepted too.
+  function readUvs(gltf, bin, prim, vertexCount) {
+    const accessorIndex = prim.attributes.TEXCOORD_0;
+    if (accessorIndex === undefined) return null;
+    try {
+      const accessor = gltf.accessors[accessorIndex];
+      if (!accessor || accessor.type !== 'VEC2' || accessor.count !== vertexCount) return null;
+      const raw = readAccessor(gltf, bin, accessorIndex);
+      if (raw instanceof Float32Array) return raw;
+      const divisor = accessor.componentType === 5121 ? 255 : accessor.componentType === 5123 ? 65535 : 0;
+      if (!divisor || !accessor.normalized) return null;
+      return Float32Array.from(raw, (v) => v / divisor);
+    } catch (err) {
+      return null;
+    }
+  }
+
   // Walks a parsed GLB's node graph into a flat list of world-space
   // primitives (positions/normals/indices/color/nodeMatrix) plus the
   // overall bounding box — the CPU-side half of what loadModel() below used
@@ -405,11 +486,16 @@
               min[2] = Math.min(min[2], wz); max[2] = Math.max(max[2], wz);
             }
           }
-          primitives.push({
-            positions, normals, indices,
+          const uvs = readUvs(gltf, bin, prim, positions.length / 3);
+          const resolved = resolveBaseColorTexture(gltf, bin, prim.material, !!uvs);
+          const primitive = {
+            positions, normals, indices, uvs,
             color: materialColor(prim.material),
             nodeMatrix: world
-          });
+          };
+          if (resolved.texture) primitive.baseColorTexture = resolved.texture;
+          if (resolved.warning) primitive.textureWarning = resolved.warning;
+          primitives.push(primitive);
         });
       }
       (node.children || []).forEach((childIndex) => walkNode(childIndex, world));
@@ -433,10 +519,124 @@
 
   const modelCache = new Map(); // url -> Promise<parsedModel>
 
-  function loadModel(gl, url, onBytes) {
+  // ---------- base-colour textures (GPU side) ----------
+
+  const isPowerOfTwo = (n) => n > 0 && (n & (n - 1)) === 0;
+  const nextPowerOfTwo = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
+
+  // Decodes an embedded PNG/JPEG with the browser's own decoder. Colour
+  // management, alpha premultiplication and EXIF orientation are all switched
+  // off so the pixels reach the shader as authored.
+  async function decodeEmbeddedImage(bytes, mime) {
+    if (typeof createImageBitmap !== 'function' || typeof Blob === 'undefined') throw new Error('image decoding is not available');
+    const blob = new Blob([bytes], { type: mime });
+    try {
+      return await createImageBitmap(blob, { premultiplyAlpha: 'none', colorSpaceConversion: 'none', imageOrientation: 'none' });
+    } catch (err) {
+      return await createImageBitmap(blob); // older engines that reject the options
+    }
+  }
+
+  // Uploads a decoded image as a 2D texture. glTF's UV origin is the top-left
+  // of the image, which is also where a WebGL upload starts reading rows, so
+  // the image goes up unflipped. WebGL1 only allows repeat wrapping and
+  // mipmaps on power-of-two sizes, so other sizes are resampled up to one
+  // unless the sampler clamps on both axes, where they are used as they are.
+  function uploadTexture(gl, bitmap, sampler) {
+    const maxSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    let width = bitmap.width, height = bitmap.height;
+    const clampsBoth = sampler.wrapS === 33071 && sampler.wrapT === 33071;
+    let source = bitmap;
+    const needsPow2 = !(isPowerOfTwo(width) && isPowerOfTwo(height)) && !clampsBoth;
+    if (needsPow2 || width > maxSize || height > maxSize) {
+      const targetW = Math.min(maxSize, needsPow2 ? nextPowerOfTwo(width) : width);
+      const targetH = Math.min(maxSize, needsPow2 ? nextPowerOfTwo(height) : height);
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW; canvas.height = targetH;
+      canvas.getContext('2d').drawImage(bitmap, 0, 0, targetW, targetH);
+      source = canvas; width = targetW; height = targetH;
+    }
+    const pow2 = isPowerOfTwo(width) && isPowerOfTwo(height);
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    // No sampler (or no minFilter) means trilinear where mipmaps are possible.
+    let minFilter = sampler.minFilter || (pow2 ? 9987 : 9729);
+    const wantsMipmaps = minFilter >= 9984;
+    if (wantsMipmaps && !pow2) minFilter = (minFilter === 9984 || minFilter === 9985) ? 9728 : 9729;
+    else if (wantsMipmaps) gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, sampler.magFilter === 9728 ? 9728 : 9729);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, sampler.wrapS);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, sampler.wrapT);
+    return texture;
+  }
+
+  // Decodes and uploads every distinct base-colour texture of a model (one
+  // per image + sampler, shared by the primitives that use it) and attaches
+  // the UV buffer and texture to each textured primitive's vao. A texture
+  // that cannot be decoded or uploaded is skipped with a console warning and
+  // its primitive keeps drawing in its flat baseColorFactor colour, so a bad
+  // image never costs the model or the scene. Returns the GPU objects created
+  // so they can be released with releaseModelGpu().
+  async function attachTextures(gl, primitives, label, isCancelled) {
+    const created = { textures: [], buffers: [] };
+    const pending = new Map(); // texture key -> Promise<WebGLTexture|null>
+    primitives.forEach((prim) => {
+      if (prim.textureWarning) console.warn('gltf-mini: ' + label + ': ' + prim.textureWarning + '; drawing it with its flat colour');
+    });
+    await Promise.all(primitives.map(async (prim) => {
+      const desc = prim.baseColorTexture;
+      if (!desc || !prim.uvs || !prim.vao) return;
+      if (!pending.has(desc.key)) {
+        pending.set(desc.key, (async () => {
+          try {
+            const bitmap = await decodeEmbeddedImage(desc.bytes, desc.mime);
+            try {
+              if (isCancelled()) return null;
+              const texture = uploadTexture(gl, bitmap, desc.sampler);
+              created.textures.push(texture);
+              return texture;
+            } finally {
+              if (bitmap.close) bitmap.close();
+            }
+          } catch (err) {
+            console.warn('gltf-mini: ' + label + ': could not use its base-colour texture (' + (err && err.message || err) + '); drawing it with its flat colour');
+            return null;
+          }
+        })());
+      }
+      const texture = await pending.get(desc.key);
+      if (!texture || isCancelled()) return;
+      prim.vao.uvBuffer = createBuffer(gl, gl.ARRAY_BUFFER, prim.uvs);
+      prim.vao.texture = texture;
+      created.buffers.push(prim.vao.uvBuffer);
+    }));
+    return created;
+  }
+
+  function releaseModelGpu(gl, model) {
+    if (!model || !model.gpu) return;
+    model.gpu.textures.forEach((t) => gl.deleteTexture(t));
+    model.gpu.buffers.forEach((b) => gl.deleteBuffer(b));
+    model.primitives.forEach((prim) => {
+      if (!prim.vao) return;
+      [prim.vao.positionBuffer, prim.vao.normalBuffer, prim.vao.indexBuffer].forEach((b) => { if (b) gl.deleteBuffer(b); });
+      prim.vao.texture = null; prim.vao.uvBuffer = null;
+    });
+    model.gpu = null;
+  }
+
+  // `owner` ({ destroyed, urls }) is the world renderer that asked for the
+  // model. Models that carry GPU textures are released and dropped from the
+  // cache when their owner is destroyed; plain models stay cached as before.
+  function loadModel(gl, url, onBytes, owner) {
     if (modelCache.has(url)) return modelCache.get(url);
     const promise = fetchModelBuffer(url, onBytes)
-      .then((buffer) => {
+      .then(async (buffer) => {
         const { json: gltf, bin } = parseGLB(buffer);
         const { primitives, bounds } = extractPrimitives(gltf, bin);
 
@@ -452,10 +652,58 @@
           };
         });
 
-        return { primitives, bounds };
+        const model = { primitives, bounds };
+        // The image bytes come out of the one GLB fetched above; nothing is
+        // downloaded again for textures.
+        if (primitives.some((p) => p.baseColorTexture || p.textureWarning)) {
+          const gpu = await attachTextures(gl, primitives, url, () => !!(owner && owner.destroyed));
+          if (gpu.textures.length) {
+            model.gpu = gpu;
+            if (owner) owner.urls.add(url);
+            if (owner && owner.destroyed) { releaseModelGpu(gl, model); modelCache.delete(url); }
+          }
+        }
+        return model;
       });
     modelCache.set(url, promise);
     return promise;
+  }
+
+  // Frees the GPU memory of every textured model a destroyed world renderer
+  // loaded, and forgets them so a later world re-creates them.
+  function releaseOwnedModels(gl, owner) {
+    owner.destroyed = true;
+    owner.urls.forEach((url) => {
+      const cached = modelCache.get(url);
+      modelCache.delete(url);
+      if (cached) cached.then((model) => releaseModelGpu(gl, model), () => {});
+    });
+    owner.urls.clear();
+  }
+
+  // Per draw: a primitive with a texture and UVs samples it, any other
+  // primitive draws its flat colour with the texture state neutralised. The
+  // program starts in the flat state (UV attribute disabled, uHasTexture 0,
+  // fallback texture bound), so scenes without textures make no GL calls here.
+  function bindBaseColorTexture(gl, prog, vao) {
+    if (vao.texture && vao.uvBuffer) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, vao.uvBuffer);
+      gl.enableVertexAttribArray(prog.attribs.uv);
+      gl.vertexAttribPointer(prog.attribs.uv, 2, gl.FLOAT, false, 0, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, vao.texture);
+      gl.uniform1i(prog.uniforms.texture, 0);
+      gl.uniform1f(prog.uniforms.hasTexture, 1);
+      prog.textureBound = true;
+    } else if (prog.textureBound) {
+      gl.disableVertexAttribArray(prog.attribs.uv);
+      gl.vertexAttrib2f(prog.attribs.uv, 0, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, prog.fallbackTexture);
+      gl.uniform1i(prog.uniforms.texture, 0);
+      gl.uniform1f(prog.uniforms.hasTexture, 0);
+      prog.textureBound = false;
+    }
   }
 
   function createBuffer(gl, target, typedArray) {
@@ -470,27 +718,37 @@
   const VERTEX_SRC = `
     attribute vec3 aPosition;
     attribute vec3 aNormal;
+    attribute vec2 aUv;
     uniform mat4 uModel;
     uniform mat4 uView;
     uniform mat4 uProjection;
     uniform mat3 uNormalMatrix;
     varying vec3 vNormal;
+    varying vec2 vUv;
     void main() {
       vNormal = uNormalMatrix * aNormal;
+      vUv = aUv;
       gl_Position = uProjection * uView * uModel * vec4(aPosition, 1.0);
     }
   `;
+  // uHasTexture is 0 for every flat-colour draw (the default; it never reads
+  // the sampler then), so untextured materials shade exactly as before.
   const FRAGMENT_SRC = `
     precision mediump float;
     varying vec3 vNormal;
+    varying vec2 vUv;
     uniform vec4 uColor;
     uniform vec3 uLightDir;
     uniform float uAmbient;
+    uniform sampler2D uTexture;
+    uniform float uHasTexture;
     void main() {
       vec3 n = normalize(vNormal);
       float diffuse = max(dot(n, -normalize(uLightDir)), 0.0);
       float light = clamp(uAmbient + diffuse * (1.0 - uAmbient), 0.0, 1.0);
-      gl_FragColor = vec4(uColor.rgb * light, uColor.a);
+      vec3 base = uColor.rgb;
+      if (uHasTexture > 0.5) base *= texture2D(uTexture, vUv).rgb;
+      gl_FragColor = vec4(base * light, uColor.a);
     }
   `;
 
@@ -516,10 +774,19 @@
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       throw new Error('Program link failed: ' + gl.getProgramInfoLog(program));
     }
+    // 1x1 white texture kept bound while no texture is in use, so the
+    // sampler never points at an empty unit (which browsers warn about).
+    const fallbackTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, fallbackTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
     return {
       program,
-      attribs: { position: gl.getAttribLocation(program, 'aPosition'), normal: gl.getAttribLocation(program, 'aNormal') },
+      fallbackTexture,
+      textureBound: false,
+      attribs: { position: gl.getAttribLocation(program, 'aPosition'), normal: gl.getAttribLocation(program, 'aNormal'), uv: gl.getAttribLocation(program, 'aUv') },
       uniforms: {
+        texture: gl.getUniformLocation(program, 'uTexture'),
+        hasTexture: gl.getUniformLocation(program, 'uHasTexture'),
         model: gl.getUniformLocation(program, 'uModel'),
         view: gl.getUniformLocation(program, 'uView'),
         projection: gl.getUniformLocation(program, 'uProjection'),
@@ -955,6 +1222,7 @@
       throw new Error('This browser\'s WebGL is missing OES_element_index_uint, needed to load these models.');
     }
     const prog = createProgram(gl);
+    const modelOwner = { destroyed: false, urls: new Set() }; // textured models this renderer loaded, released in destroy()
     gl.enable(gl.DEPTH_TEST);
     // Deliberately NOT culling backfaces: the procedural floor quad's
     // winding didn't match every furniture model's own winding, and
@@ -1545,7 +1813,7 @@
             if (perUrlContribution.get(url) == null) perUrlContribution.set(url, info.bytes); // Content-Length was missing — now we know the real size anyway
             emitByteProgress(true);
           }
-        }).catch((err) => {
+        }, modelOwner).catch((err) => {
           // One missing or corrupt model shouldn't take the whole world down:
           // it is drawn as a plain placeholder crate (see placeholderModel)
           // and the rest of the scene loads normally.
@@ -1681,7 +1949,7 @@
           // Cached by URL (modelCache, see loadModel above) — every visitor
           // dropping the same class only pays the fetch once per session,
           // same as any other model this renderer loads.
-          loadModel(gl, drop.model).then((model) => {
+          loadModel(gl, drop.model, undefined, modelOwner).then((model) => {
             if (!itemDropEntries.has(drop.dropId)) return; // picked up/claimed before the model finished loading — don't resurrect a drop that's already gone
             entry.primitives = model.primitives;
             entry.bounds = model.bounds;
@@ -1730,6 +1998,8 @@
         gl.disableVertexAttribArray(prog.attribs.normal);
         gl.vertexAttrib3f(prog.attribs.normal, 0, 1, 0);
       }
+
+      bindBaseColorTexture(gl, prog, prim.vao);
 
       gl.uniformMatrix4fv(prog.uniforms.model, false, prim.modelMatrix);
       gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, prim.normalMatrix || mat3NormalFromMat4(prim.modelMatrix));
@@ -2177,6 +2447,8 @@
       window.removeEventListener('mouseup', onMouseUp);
       canvas.removeEventListener('mousemove', onCanvasHoverMove);
       canvas.removeEventListener('wheel', onWheel);
+      releaseOwnedModels(gl, modelOwner);
+      gl.deleteTexture(prog.fallbackTexture);
     }
 
     const ready = loadScene(sceneData).then(() => start());
@@ -2587,7 +2859,13 @@
     const { primitives, bounds } = extractPrimitives(gltf, bin);
     const prog = createProgram(gl);
 
+    // Textures (if any) are decoded after the first frames: the model shows
+    // in its flat colours until its image is ready, and keeps them if the
+    // image cannot be used.
+    primitives.forEach((prim) => { prim.vao = {}; });
+    let textureGpu = null;
     const gpuPrimitives = primitives.map((prim) => ({
+      texVao: prim.vao,
       color: prim.color,
       nodeMatrix: prim.nodeMatrix,
       positionBuffer: createBuffer(gl, gl.ARRAY_BUFFER, prim.positions),
@@ -2610,15 +2888,28 @@
     const cameraDistance = radius * 2.4;
     const view = mat4View([0, radius * 0.4, cameraDistance], 0, -0.15);
 
+    let rotation = 0;
+    let rafId = null;
+    let lost = false;
+
+    if (primitives.some((p) => p.baseColorTexture || p.textureWarning)) {
+      attachTextures(gl, primitives, 'preview', () => lost).then((gpu) => {
+        textureGpu = gpu;
+        if (lost) releasePreviewTextures();
+      });
+    }
+    function releasePreviewTextures() {
+      if (!textureGpu) return;
+      textureGpu.textures.forEach((t) => gl.deleteTexture(t));
+      textureGpu.buffers.forEach((b) => gl.deleteBuffer(b));
+      textureGpu = null;
+    }
+
     gl.enable(gl.DEPTH_TEST);
     // Transparent clear — the canvas sits inside the Asset Viewer panel's
     // own dark card, so an opaque clear color would paint a visible seam
     // around the model instead of it just sitting on the panel's background.
     gl.clearColor(0, 0, 0, 0);
-
-    let rotation = 0;
-    let rafId = null;
-    let lost = false;
 
     function frame() {
       rafId = null; // cleared before any early return so dispose() never double-cancels a stale id
@@ -2655,6 +2946,7 @@
           gl.vertexAttrib3f(prog.attribs.normal, 0, 1, 0);
         }
 
+        bindBaseColorTexture(gl, prog, prim.texVao);
         gl.uniformMatrix4fv(prog.uniforms.model, false, model);
         gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, mat3NormalFromMat4(model));
         gl.uniform4fv(prog.uniforms.color, prim.color);
@@ -2683,6 +2975,9 @@
         if (lost) return;
         lost = true;
         if (rafId !== null) cancelAnimationFrame(rafId);
+        releasePreviewTextures();
+        gpuPrimitives.forEach((p) => [p.positionBuffer, p.normalBuffer, p.indexBuffer].forEach((b) => { if (b) gl.deleteBuffer(b); }));
+        gl.deleteTexture(prog.fallbackTexture);
         const loseCtx = gl.getExtension('WEBGL_lose_context');
         if (loseCtx) loseCtx.loseContext();
       }
@@ -2825,6 +3120,7 @@
         if (lost) return;
         lost = true;
         if (rafId !== null) cancelAnimationFrame(rafId);
+        gl.deleteTexture(prog.fallbackTexture);
         const loseCtx = gl.getExtension('WEBGL_lose_context');
         if (loseCtx) loseCtx.loseContext();
       }

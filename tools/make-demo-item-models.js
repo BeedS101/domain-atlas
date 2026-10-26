@@ -18,10 +18,9 @@
 //    correct for any shape as long as triangles are wound consistently
 //    counter-clockwise as viewed from outside, and it matches the
 //    faceted, low-poly look this project's other primitives already have.
-//    gltf-mini.js's shader also has no UV/texture support at all (see its
-//    own header comment) — only per-material baseColorFactor — so flat,
-//    solid-colored faces are the ONLY kind of material this renderer can
-//    show correctly anyway.
+//    These models stay untextured on purpose: flat, solid-coloured faces
+//    use only the per-material baseColorFactor and need no UVs (gltf-mini.js
+//    supports base-colour textures too; see its header comment).
 //
 // Usage: node tools/make-demo-item-models.js
 // Regenerates demo-domain-a/assets/{compass,ring,trophy}.{glb,png} in
@@ -232,8 +231,7 @@ function buildGLB(json, binBuffer) {
 // Turns a mesh builder's color groups into a complete, single-node,
 // single-mesh GLB: one primitive (and one material) per color group, all
 // sharing one binary buffer. Every primitive is non-indexed (drawArrays)
-// and carries POSITION + NORMAL only — no UVs, no textures, matching
-// gltf-mini.js's own narrow supported subset exactly.
+// and carries POSITION + NORMAL only — no UVs, no textures.
 function buildGLBFromMesh(mesh) {
   const bufferChunks = [];
   let byteOffset = 0;
