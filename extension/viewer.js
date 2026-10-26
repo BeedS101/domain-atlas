@@ -139,6 +139,25 @@ window.addEventListener('unhandledrejection', (event) => {
 // for the previous one. See enterWorld().
 let active3D = null;
 
+// Wheel zoom fires in bursts, so the saved camera distance is written once
+// the scrolling pauses. A teardown or portal hop within the delay still
+// persists the latest value (see flushCameraDistance()).
+let pendingCameraDistance = null;
+let cameraDistanceTimer = null;
+function saveCameraDistanceSoon(distance) {
+  pendingCameraDistance = distance;
+  if (cameraDistanceTimer) clearTimeout(cameraDistanceTimer);
+  cameraDistanceTimer = setTimeout(flushCameraDistance, 400);
+}
+function flushCameraDistance() {
+  if (cameraDistanceTimer) { clearTimeout(cameraDistanceTimer); cameraDistanceTimer = null; }
+  if (pendingCameraDistance === null) return Promise.resolve();
+  const value = pendingCameraDistance;
+  pendingCameraDistance = null;
+  return AtlasWallet.setCameraDistance(value).catch((e) => console.warn('could not save camera distance', e));
+}
+window.addEventListener('pagehide', flushCameraDistance);
+
 // ---------- presence (multiplayer, with a polling fallback) ----------
 // A live connection to presence-server telling this domain+world "room"
 // who else is here and where. Only meaningful for 3D (gltf-mini-v1)
@@ -2406,6 +2425,7 @@ async function enterWorld(worldId, anchorId) {
   // render loop and input listeners need tearing down before anything else
   // starts, same idea as window.__atlasScene just getting overwritten below
   // for the 2D path.
+  await flushCameraDistance(); // a portal hop right after scrolling must still reopen at the latest zoom
   if (active3D) { active3D.destroy(); active3D = null; }
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
   disconnectPresence(); // leaving whichever world was active before also means leaving its presence room
@@ -2576,6 +2596,12 @@ async function enterWorld(worldId, anchorId) {
         // above) — no async wallet read inside this per-frame hot path.
         isMarkerAlreadyOwned: (marker) => isOncePerUserClassOwned(manifestDomainOf(currentManifest), marker),
         characterScale: await AtlasWallet.getCharacterScale(),
+        // Saved scroll-wheel camera distance (0 = first person) so every
+        // scene entry, including arriving through a portal, resumes the
+        // last zoom level; wheel changes are saved by
+        // saveCameraDistanceSoon().
+        cameraDistance: await AtlasWallet.getCameraDistance(),
+        onCameraDistanceChange: saveCameraDistanceSoon,
         // Just refreshed above — seeds the very first frame with this
         // identity's actual equipped look instead of the default colors.
         // Later changes (the equip/unequip wallet-card action) go through

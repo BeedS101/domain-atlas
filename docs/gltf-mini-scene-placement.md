@@ -49,6 +49,24 @@ go deeper are allowed.
 `y` below `0.5` (for example the ground-level `[x, 0, z]` anchors shown in
 SPEC.md section 3.5) is not a plausible eye height and resolves to `1.6`.
 
+The scroll wheel zooms the view from first person (distance `0`) out to a
+third-person follow camera (distance `5`). That zoom level is a device-wide
+viewer preference, saved in the extension settings (`atlasCameraDistance`,
+`AtlasWallet.getCameraDistance`/`setCameraDistance`) and applied whenever a
+scene is entered, including through a portal or anchor. It only offsets the
+rendered camera: eye height, anchor coordinates, the player position and
+collision never depend on it, and a scene cannot set it.
+
+## Facing
+
+The bundled furniture kit's models all face local `+z`, so a model's front in
+the world is `(sin(rotationY), cos(rotationY))`: `rotationY: 0` faces `+z`
+(south in the Lobby), `90` faces `+x`, `180` faces `-z` (north), `-90` faces
+`-x`. A monitor and keyboard therefore need the same `rotationY` as the
+direction toward the chair they serve, and a chair faces its desk with the
+opposite rotation. The Lobby's reception desk has its chairs on the north side
+(`z` smaller than the desk), so its monitor and keyboard use `rotationY: 180`.
+
 ## Dropped items
 
 A dropped item's model is normalized to a fixed size and centered on its

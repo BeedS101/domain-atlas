@@ -127,7 +127,7 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-per-page-anchor
       { timeout: 15000 }
     );
     const camPos = await frame.evaluate(() => window.__atlasActive3D && window.__atlasActive3D.camera && window.__atlasActive3D.camera.pos);
-    const expected = [-3.2, 1.6, -1.3];
+    const expected = [-3.9, 1.6, -0.8];
     if (!camPos || expected.some((v, i) => Math.abs(camPos[i] - v) > 0.001)) {
       throw new Error('Expected the 3D camera to spawn at the Reading Nook anchor ' + JSON.stringify(expected) + ', got: ' + JSON.stringify(camPos));
     }

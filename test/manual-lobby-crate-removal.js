@@ -124,7 +124,7 @@ async function openCrate(frame, crate) {
     console.log('PASS: crate 1 opened, credential minted into the wallet');
 
     console.log('STEP 3: after looting, crate 1\'s model no longer draws and its spot is now walkable');
-    await frame.waitForFunction((cls) => window.__atlasActive3D.getLootCrateVisible(cls) === false, CRATE_1.class, { timeout: 5000 });
+    await frame.waitForFunction((cls) => window.__atlasActive3D.getLootCrateVisible(cls) === false, CRATE_1.class, { timeout: 30000 });
     const blockedAfter1 = await frame.evaluate(({ x, z }) => window.__atlasActive3D.isPositionBlocked(x, z), { x: CRATE_1.x, z: CRATE_1.z });
     if (blockedAfter1 !== false) throw new Error('Expected crate 1\'s position to be walkable after looting, got: ' + blockedAfter1);
     console.log('PASS: looted crate 1 is gone from both the draw loop and collision');

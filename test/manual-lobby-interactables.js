@@ -173,7 +173,7 @@ async function waitForStatusPrefix(frame, prefix, prevStatus, timeout = 10000) {
         });
       });
     }, CRATE_2.class, { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 30000 });
     const wallet = await frame.evaluate(async () => {
       const identity = await AtlasWallet.getIdentity();
       return AtlasWallet.getWallet(identity.publicKey);

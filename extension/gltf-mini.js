@@ -1063,25 +1063,29 @@
     const ITEM_DROP_FLOAT_HEIGHT = 0.15;
     const ITEM_DROP_BOB_AMPLITUDE = 0.05;
 
-    // Camera distance (mouse scroll wheel) replaces the old discrete
-    // first-/third-person toggle with one continuous zoom: 0 is exactly
-    // the original first-person view (camera = eyes, nothing new added to
-    // the frustum — bit-for-bit the same as every release before this),
-    // and it smoothly pulls back into a third-person chase view as it
-    // increases. Always starts at 0 (first-person) on entering a world —
-    // deliberately NOT persisted the way the old toggle setting was, since
-    // "scroll to zoom" reads as a live camera control, not a saved
-    // preference.
+    // Camera distance (mouse scroll wheel): one continuous zoom. 0 is the
+    // first-person view (camera = eyes); larger values pull back into a
+    // third-person chase view and raise it slightly. Seeded from
+    // opts.cameraDistance (the saved preference) and reported through
+    // opts.onCameraDistanceChange after each wheel step so the host can
+    // persist it. It only offsets the rendered camera: eye height, scene
+    // anchors, player position and collision never read it.
     const MAX_CAMERA_DISTANCE = 5;
     const MAX_FOLLOW_HEIGHT = 1.7;
     const CAMERA_SCROLL_STEP = 0.4;
     const HEAD_VISIBLE_DISTANCE = 0.4; // below this, camera is still basically at eye level — drawing the head would just block the view
-    let cameraDistance = 0;
+    const clampCameraDistance = (d) => { const n = Number(d); return Number.isFinite(n) ? Math.max(0, Math.min(MAX_CAMERA_DISTANCE, n)) : 0; };
+    let cameraDistance = clampCameraDistance(opts.cameraDistance);
 
     function onWheel(e) {
       e.preventDefault(); // this is a camera control, not a page-scroll gesture
       const dir = e.deltaY > 0 ? 1 : (e.deltaY < 0 ? -1 : 0);
-      cameraDistance = Math.max(0, Math.min(MAX_CAMERA_DISTANCE, cameraDistance + dir * CAMERA_SCROLL_STEP));
+      const next = clampCameraDistance(Math.round((cameraDistance + dir * CAMERA_SCROLL_STEP) * 100) / 100);
+      if (next === cameraDistance) return;
+      cameraDistance = next;
+      if (typeof opts.onCameraDistanceChange === 'function') {
+        try { opts.onCameraDistanceChange(cameraDistance); } catch (err) { console.warn('onCameraDistanceChange failed', err); }
+      }
     }
     canvas.addEventListener('wheel', onWheel, { passive: false });
     // The character's own facing, separate from camera.yaw (look
@@ -1543,15 +1547,24 @@
         const pl = normalizePlacement(obj);
         const placement = placementMatrix(pl);
         const lootMarker = lootMarkerAt(pl.position);
+        const footprint = placedFootprint(model.bounds, pl);
+        // Bounding sphere of the whole placed object, for view culling in frame().
+        const cull = footprint ? {
+          c: [footprint.cx, (footprint.minY + footprint.maxY) / 2, footprint.cz],
+          r: Math.hypot(footprint.max[0] - footprint.min[0], footprint.maxY - footprint.minY, footprint.max[1] - footprint.min[1]) / 2
+        } : null;
         model.primitives.forEach((prim) => {
+          const modelMatrix = mat4Multiply(placement, prim.nodeMatrix);
           placedPrimitives.push({
             vao: prim.vao,
             color: prim.color,
-            modelMatrix: mat4Multiply(placement, prim.nodeMatrix),
+            modelMatrix,
+            normalMatrix: mat3NormalFromMat4(modelMatrix),
+            cull,
             lootMarker
           });
         });
-        placedItems.push({ footprint: placedFootprint(model.bounds, pl), lootMarker });
+        placedItems.push({ footprint, lootMarker });
       });
       // Oriented footprints from the models' real bounds (not a box
       // centered on the placement origin), minus rugs, overhead objects and
@@ -1684,7 +1697,7 @@
       }
 
       gl.uniformMatrix4fv(prog.uniforms.model, false, prim.modelMatrix);
-      gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, mat3NormalFromMat4(prim.modelMatrix));
+      gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, prim.normalMatrix || mat3NormalFromMat4(prim.modelMatrix));
       gl.uniform4fv(prog.uniforms.color, prim.color);
 
       if (prim.vao.indexBuffer) {
@@ -1923,19 +1936,36 @@
       // reduces to exactly the plain first-person view (eye = fwd*0 = no
       // offset at all), so there's no seam between the two.
       let view;
+      const cosPitch = Math.cos(camera.pitch), sinPitch = Math.sin(camera.pitch);
+      const viewFwd = [Math.sin(camera.yaw) * cosPitch, sinPitch, -Math.cos(camera.yaw) * cosPitch];
+      let viewEye = camera.pos;
       if (cameraDistance > 0) {
-        const cosP = Math.cos(camera.pitch), sinP = Math.sin(camera.pitch);
-        const fwd = [Math.sin(camera.yaw) * cosP, sinP, -Math.cos(camera.yaw) * cosP];
         const heightOffset = (cameraDistance / MAX_CAMERA_DISTANCE) * MAX_FOLLOW_HEIGHT;
-        const eye = [
-          camera.pos[0] - fwd[0] * cameraDistance,
-          standingEyeY + characterBaseY + heightOffset - fwd[1] * cameraDistance,
-          camera.pos[2] - fwd[2] * cameraDistance
+        viewEye = [
+          camera.pos[0] - viewFwd[0] * cameraDistance,
+          standingEyeY + characterBaseY + heightOffset - viewFwd[1] * cameraDistance,
+          camera.pos[2] - viewFwd[2] * cameraDistance
         ];
-        view = mat4View(eye, camera.yaw, camera.pitch);
-      } else {
-        view = mat4View(camera.pos, camera.yaw, camera.pitch);
       }
+      view = mat4View(viewEye, camera.yaw, camera.pitch);
+      // Whole objects outside the view frustum are skipped (a room's worth
+      // of furniture is mostly behind or beside the camera). The frustum
+      // matches mat4Perspective(Math.PI / 3, aspect, ...) above.
+      const viewRight = normalize(cross(viewFwd, [0, 1, 0]));
+      const viewUp = cross(viewRight, viewFwd);
+      const tanV = Math.tan(Math.PI / 6), tanH = tanV * aspect;
+      const normH = Math.sqrt(1 + tanH * tanH), normV = Math.sqrt(1 + tanV * tanV);
+      const outsideView = (cull) => {
+        if (!cull) return false;
+        const rx = cull.c[0] - viewEye[0], ry = cull.c[1] - viewEye[1], rz = cull.c[2] - viewEye[2];
+        const z = rx * viewFwd[0] + ry * viewFwd[1] + rz * viewFwd[2];
+        const r = cull.r;
+        if (z < -r) return true;
+        const x = rx * viewRight[0] + ry * viewRight[1] + rz * viewRight[2];
+        if (Math.abs(x) > z * tanH + r * normH) return true;
+        const y = rx * viewUp[0] + ry * viewUp[1] + rz * viewUp[2];
+        return Math.abs(y) > z * tanV + r * normV;
+      };
       gl.uniformMatrix4fv(prog.uniforms.projection, false, projection);
       gl.uniformMatrix4fv(prog.uniforms.view, false, view);
       const light = (sceneData.directionalLight && sceneData.directionalLight.direction) || [-0.4, -1, -0.3];
@@ -1949,6 +1979,7 @@
         // has no lootMarker at all and always draws; an already-claimed
         // crate's is skipped here instead of drawing a box the player can
         // no longer do anything with.
+        if (outsideView(prim.cull)) return;
         if (prim.lootMarker && opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(prim.lootMarker)) return;
         bindAndDraw(prim, view, projection);
       });
@@ -2115,7 +2146,7 @@
       // that wants to jump straight to a known distance without depending
       // on CAMERA_SCROLL_STEP's exact value.
       getCameraDistance: () => cameraDistance,
-      setCameraDistance: (d) => { cameraDistance = Math.max(0, Math.min(MAX_CAMERA_DISTANCE, Number(d) || 0)); },
+      setCameraDistance: (d) => { cameraDistance = clampCameraDistance(d); },
       getMaxCameraDistance: () => MAX_CAMERA_DISTANCE,
       // Whether the player is mid-drag actively looking around right now
       // (see `dragging` / onPointerDown/onPointerMove above). viewer.js's

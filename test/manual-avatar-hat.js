@@ -124,7 +124,7 @@ async function enterLobbyFromPlaza(frame) {
 }
 
 async function leaveLobbyToPlaza(frame) {
-  await teleport(frame, 0, 4.2);
+  await teleport(frame, 0, 4.7);
   await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 }
 
@@ -139,15 +139,20 @@ async function openCrate(frame, crate) {
   await frame.waitForFunction(() => window.__atlasActive3D.getInteractPrompt() === 'Open the crate', null, { timeout: 5000 });
   await pressE(frame);
   // The mint is a real network round trip to the issuer (handleInteractable
-  // -> mintAsset -> a POST that only then lands in wallet storage) — give
-  // it a moment before polling, rather than hammering AtlasWallet.getWallet()
-  // every animation frame from the very first instant.
-  await frame.waitForTimeout(1000);
-  await frame.waitForFunction(async (cls) => {
-    const identity = await AtlasWallet.getIdentity();
-    const wallet = await AtlasWallet.getWallet(identity.publicKey);
-    return wallet.some((e) => e.credential.asset.class === cls);
-  }, crate.class, { timeout: 10000 });
+  // -> mintAsset -> a POST that only then lands in wallet storage), and a
+  // software-GL frame loop can make that take several seconds, so poll the
+  // wallet from here instead of relying on a fixed delay.
+  const deadline = Date.now() + 30000;
+  for (;;) {
+    const minted = await frame.evaluate(async (cls) => {
+      const identity = await AtlasWallet.getIdentity();
+      const wallet = await AtlasWallet.getWallet(identity.publicKey);
+      return wallet.some((e) => e.credential.asset.class === cls);
+    }, crate.class);
+    if (minted) break;
+    if (Date.now() > deadline) throw new Error('Timed out waiting for ' + crate.class + ' to be minted');
+    await frame.waitForTimeout(250);
+  }
 }
 
 // action is 'toggle-avatar-look' or 'toggle-avatar-hat' — the two

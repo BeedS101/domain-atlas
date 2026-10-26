@@ -4012,6 +4012,30 @@ const AtlasWallet = (() => {
     return clamped;
   }
 
+  // The 3D renderer's scroll-wheel camera distance: 0 is first person,
+  // larger values pull back into the third-person follow view (and raise it
+  // slightly). Device-wide display preference like the character scale
+  // above. It is only the follow level; scene camera anchors, the player's
+  // position and collision never read it. MAX_CAMERA_DISTANCE mirrors the
+  // renderer's own limit in gltf-mini.js.
+  const DEFAULT_CAMERA_DISTANCE = 0;
+  const MAX_CAMERA_DISTANCE = 5;
+
+  function clampCameraDistance(n) {
+    return Number.isFinite(n) ? Math.max(0, Math.min(MAX_CAMERA_DISTANCE, n)) : DEFAULT_CAMERA_DISTANCE;
+  }
+
+  async function getCameraDistance() {
+    const { atlasCameraDistance } = await chrome.storage.local.get('atlasCameraDistance');
+    return clampCameraDistance(Number(atlasCameraDistance));
+  }
+
+  async function setCameraDistance(distance) {
+    const clamped = clampCameraDistance(Number(distance));
+    await chrome.storage.local.set({ atlasCameraDistance: clamped });
+    return clamped;
+  }
+
   // Task #209 — whether the wallet plays a short chime whenever the
   // holder's OWN wallet gains something (a mint, a gift, a claimed trade,
   // a mail-delivered credential — see viewer.js's refreshInventoryDisplay()
@@ -5189,7 +5213,7 @@ const AtlasWallet = (() => {
     // this one back up rather than starting cold on settings too.
     const settingsRaw = await chrome.storage.local.get([
       'atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings',
-      'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes',
+      'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasCameraDistance', 'atlasAutoLockMinutes',
       'atlasInventoryFilterSettings'
     ]);
 
@@ -5345,7 +5369,7 @@ const AtlasWallet = (() => {
     // about.
     const s = payload.settings || {};
     const settingsToSet = {};
-    ['atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings', 'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasAutoLockMinutes', 'atlasInventoryFilterSettings']
+    ['atlasChatPanelSettings', 'atlasMailSettings', 'atlasAssetViewerSettings', 'atlasMessagingWindowSettings', 'atlasCharacterScale', 'atlasCameraDistance', 'atlasAutoLockMinutes', 'atlasInventoryFilterSettings']
       .forEach((k) => { if (s[k] !== undefined) settingsToSet[k] = s[k]; });
     if (Object.keys(settingsToSet).length) await chrome.storage.local.set(settingsToSet);
 
@@ -10266,6 +10290,7 @@ const AtlasWallet = (() => {
     getSubmittedTrades, deleteSubmittedTrade, getTradingStationMemberships,
     recordWorldVisit, getRecentWorlds,
     getCharacterScale, setCharacterScale,
+    getCameraDistance, setCameraDistance,
     getWalletSoundEnabled, setWalletSoundEnabled,
     getChatPanelSettings, setChatPanelSettings, chatMessageContainsBlockedWord,
     getAssetViewerSettings, setAssetViewerSettings,

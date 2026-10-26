@@ -140,7 +140,7 @@ async function teleportTo(frame, position) {
     console.log('PASS: portal 0 -> same-domain, portal 1 -> key');
 
     console.log('STEP 2 (regression): walking into the ordinary same-domain portal still auto-enters Plaza, no disclosure');
-    await teleportTo(frame, [0.3, 1.6, 3.9]); // inside portal 0's radius ([0,0,4.2], radius 0.8)
+    await teleportTo(frame, [0.3, 1.6, 4.4]); // inside portal 0's radius ([0,0,4.7], radius 0.8)
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
     if (await keyAnchorModalActive(frame)) throw new Error('Expected no disclosure at all for an ordinary same-domain portal');
     console.log('PASS: ordinary walk-in portal still enters directly, unaffected by the kind rework');

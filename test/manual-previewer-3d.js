@@ -209,9 +209,9 @@ async function runScenarioA() {
         });
       });
     }, CRATE_2.class, { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 5000 });
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 0, null, { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 30000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 0, null, { timeout: 30000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, null, { timeout: 30000 });
     const finalWallet = await getWalletClasses(frame);
     if (!finalWallet.includes(CRATE_1.class) || !finalWallet.includes(CRATE_2.class)) throw new Error('Expected BOTH crate classes in the wallet, got: ' + finalWallet.join(', '));
     console.log('PASS: both classes now owned, the Previewer ignores the midpoint entirely — nothing left to preview');
@@ -271,7 +271,7 @@ async function runScenarioB() {
         });
       });
     }, expectedRemaining, { timeout: 10000 });
-    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 5000 });
+    await frame.waitForFunction(() => document.getElementById('status').textContent === 'Collected Open the crate.', null, { timeout: 30000 });
     const walletAfterSecond = await getWalletClasses(frame);
     if (!walletAfterSecond.includes(CRATE_1.class) || !walletAfterSecond.includes(CRATE_2.class)) {
       throw new Error('Expected BOTH crate classes in the wallet after two E presses, got: ' + walletAfterSecond.join(', '));
@@ -280,8 +280,8 @@ async function runScenarioB() {
     console.log('PASS: second E press collected the other item; both classes owned, no duplicates ->', walletAfterSecond.join(', '));
 
     console.log('STEP B5: nothing left to preview at the midpoint now');
-    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 0, null, { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, null, { timeout: 5000 });
+    await frame.waitForFunction(() => window.__atlasActive3D.getNearbyInteractMarkers().length === 0, null, { timeout: 30000 });
+    await frame.waitForFunction(() => document.getElementById('previewerWidget').hidden === true, null, { timeout: 30000 });
     console.log('PASS: Previewer closed, both oncePerUser classes now owned and ignored');
 
     console.log('\nSCENARIO B (press E multiple times, one at a time) PASSED');

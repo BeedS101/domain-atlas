@@ -117,7 +117,7 @@ async function enterLobbyFromPlaza(frame) {
 // needed, teleporting into the marker's own radius fires onPortalEnter the
 // very next frame.
 async function leaveLobbyToPlaza(frame) {
-  await teleport(frame, 0, 4.2);
+  await teleport(frame, 0, 4.7);
   await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 }
 

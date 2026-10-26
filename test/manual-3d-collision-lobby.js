@@ -9,7 +9,7 @@
 //      (including rotated pieces), clear in the empty space the old
 //      origin-centered boxes used to block, and the rug can be walked on.
 //   2. Real walking (WASD): furniture stops the player, the rug does not, and
-//      the floor edge does.
+//      each of the four room edges does.
 //   3. A player who starts inside an object's box can walk out of it.
 //   4. A ground-level anchor (SPEC.md section 3.5's [x, 0, z] shape) spawns at
 //      eye height, not on the floor.
@@ -109,7 +109,7 @@ async function enterLobby(frame, anchorId) {
     console.log('STEP 5: a scene object whose model is missing is drawn as a solid placeholder; the rest of the world still loads');
     await enterLobby(frame);
     assert(await blocked(frame, -2.0, 3.0), 'Expected the placeholder crate for the missing model to be solid at its position');
-    assert(await blocked(frame, -0.85, -3.6), 'Expected the rest of the Lobby (the desk) to have loaded normally');
+    assert(await blocked(frame, -0.45, -4.84), 'Expected the rest of the Lobby (the reception desk) to have loaded normally');
     console.log('PASS: Lobby loads with the missing model replaced by a solid placeholder');
 
     console.log('STEP 6: a dropped furniture model is centered on its bounding-box middle (corner-origin models do not orbit a corner)');
@@ -124,39 +124,55 @@ async function enterLobby(frame, anchorId) {
 
     console.log('STEP 1: collision matches what is drawn');
     const wantBlocked = [
-      ['desk center', -0.86, -3.6],
-      ['bookcase (rotated 90), where the old box did not reach', -4.28, -2.9],
-      ['sofa far end (rotated 90), where the old box did not reach', 2.7, 0.3],
-      ['TV cabinet right end', 3.9, -3.78],
-      ['coffee table', 3.95, 1.35]
+      ['reception desk', -0.45, -4.84],
+      ['second reception desk', 0.29, -4.84],
+      ['west shelving (rotated 90, flush to the wall)', -6.95, -3.0],
+      ['sofa far end (rotated 90), where an origin-centered box would not reach', 4.0, -0.6],
+      ['TV cabinet (rotated -90) end', 7.0, -0.5],
+      ['coffee table', 5.1, -0.2],
+      ['waiting-corner sofa (rotated 180)', -4.9, 5.25],
+      ['cafe table', 5.6, 4.1]
     ];
     for (const [name, x, z] of wantBlocked) assert(await blocked(frame, x, z), 'Expected ' + name + ' at (' + x + ', ' + z + ') to be solid');
     const wantClear = [
-      ['empty floor left of the desk (old box blocked here)', -1.6, -3.4],
-      ['rug away from the furniture on it (old box blocked here)', 3.9, 2.05],
-      ['player spawn', 0, 2.4],
-      ['portal marker', 0, 4.2]
+      ['open floor in front of the reception desk', -0.45, -3.8],
+      ['gap between the reception desk and the lounge', 2.0, -4.0],
+      ['centre rug', -0.4, 0.55],
+      ['lounge rug away from the furniture on it', 4.6, 0.7],
+      ['player spawn', 0, 3.4],
+      ['portal marker', 0, 4.7],
+      ['reading-nook anchor', -3.9, -0.8]
     ];
     for (const [name, x, z] of wantClear) assert(!(await blocked(frame, x, z)), 'Expected ' + name + ' at (' + x + ', ' + z + ') to be walkable');
-    assert(await blocked(frame, 5.5, 0), 'Expected beyond the +x floor edge to be blocked');
-    assert(await blocked(frame, 0, -5), 'Expected beyond the -z floor edge to be blocked');
+    for (const [name, x, z] of [['+x', 7.3, 0], ['-x', -7.3, 0], ['-z', 0, -5.7], ['+z', 3.0, 5.7]]) {
+      assert(await blocked(frame, x, z), 'Expected beyond the ' + name + ' floor edge at (' + x + ', ' + z + ') to be blocked');
+    }
     console.log('PASS: solid where furniture is, clear where it is not, rug walkable, floor edge limited');
 
     console.log('STEP 2: real walking — furniture stops the player, the rug and open floor do not');
-    await place(frame, -0.45, -2.2, 0); // facing -z toward the desk's right end, clear of the crate at [-1, 0, -2]
-    let end = await hold(frame, 'KeyW', () => false, 6000);
-    assert(end.z > -3.12 - 0.02 && end.z < -2.2, 'Expected the desk to stop the player at about z=-3.12, got z=' + end.z);
-    console.log('PASS: walking into the desk stops at its edge (z=' + end.z.toFixed(2) + ')');
+    await place(frame, -0.45, -3.2, 0); // facing -z toward the reception desk, clear of every crate
+    let end = await hold(frame, 'KeyW', () => false, 7000);
+    assert(end.z > -4.34 - 0.02 && end.z < -3.2, 'Expected the desk to stop the player at about z=-4.34, got z=' + end.z);
+    console.log('PASS: walking into the reception desk stops at its edge (z=' + end.z.toFixed(2) + ')');
 
-    await place(frame, 3.9, 3.2, 0); // facing -z over the rug, toward the coffee table
-    end = await hold(frame, 'KeyW', (c) => c.z <= 2.0, 20000);
-    assert(end.z <= 2.05, 'Expected to walk onto the rug (past z=2.13), got z=' + end.z);
+    await place(frame, -0.4, 3.0, 0); // facing -z over the centre rug
+    end = await hold(frame, 'KeyW', (c) => c.z <= 1.3, 20000);
+    assert(end.z <= 1.4, 'Expected to walk across the rug (past z=1.65 onto it), got z=' + end.z);
     console.log('PASS: the rug does not block (reached z=' + end.z.toFixed(2) + ')');
 
-    await place(frame, 2.8, 2.6, 90); // facing +x along open floor to the right wall
-    end = await hold(frame, 'KeyW', () => false, 8000);
-    assert(end.x <= 4.91 && end.x >= 4.5, 'Expected the floor edge to stop the player near x=4.9, got x=' + end.x);
-    console.log('PASS: the floor edge stops the player (x=' + end.x.toFixed(2) + ')');
+    // Walls sit just inside the floor, so the player stops a body-radius short of the inner wall face.
+    const edges = [
+      ['+x', 3.0, 2.0, 90, (c) => c.x, (v) => v >= 6.5 && v <= 7.1],
+      ['-x', -3.0, 2.0, -90, (c) => c.x, (v) => v <= -6.5 && v >= -7.1],
+      ['-z', 3.4, -2.5, 0, (c) => c.z, (v) => v <= -5.0 && v >= -5.5],
+      ['+z', -3.2, 2.0, 180, (c) => c.z, (v) => v >= 5.0 && v <= 5.5]
+    ];
+    for (const [name, x, z, yaw, pick, ok] of edges) {
+      await place(frame, x, z, yaw);
+      end = await hold(frame, 'KeyW', () => false, 14000);
+      assert(ok(pick(end)), 'Expected the ' + name + ' room edge to stop the player inside the floor, got ' + JSON.stringify(end));
+      console.log('PASS: the ' + name + ' edge stops the player (' + JSON.stringify({ x: +end.x.toFixed(2), z: +end.z.toFixed(2) }) + ')');
+    }
 
     console.log('STEP 3: a player inside an object\'s box can walk out');
     const crateCenter = [0.406, -0.906]; // cardboard crate at [0.3, 0, -0.8]

@@ -15,9 +15,11 @@
 //   4. GLB loader robustness: interleaved/misaligned accessors, 8-bit
 //      indices, missing accessor min/max, non-triangle primitives, scenes
 //      with no scene node list.
-//   5. The shipped Lobby: every object sits where it should (books inside
-//      the bookcase on a shelf, TV on its cabinet, desk items on the desk),
-//      nothing floats, spawn/anchor/portal points are reachable.
+//   5. The shipped Lobby: larger floor, every object sits where it should
+//      (books on a shelf, TV on its cabinet, monitor and keyboard on the
+//      desk and facing the chair, lamp clear of them), nothing floats or
+//      overlaps, and the spawn, anchors, portal, crates and all four room
+//      edges are reachable by the real collision rules.
 
 const fs = require('fs');
 const path = require('path');
@@ -212,30 +214,60 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   const inside = (inner, outer, tol) => inner.min[0] >= outer.min[0] - tol && inner.max[0] <= outer.max[0] + tol && inner.min[1] >= outer.min[1] - tol && inner.max[1] <= outer.max[1] + tol;
   const centerInside = (inner, outer) => inner.cx >= outer.min[0] && inner.cx <= outer.max[0] && inner.cz >= outer.min[1] && inner.cz <= outer.max[1];
 
-  // Books sit on the 0.55 shelf board of the bookcase, fully inside it.
-  const bookcase = byName('bookcaseClosedWide')[0].footprint;
+  const byPrefix = (p) => items.filter((i) => i.name.startsWith(p));
+
+  // The room is larger than the original 10 x 9 Lobby.
+  const [fw, fd] = scene.floor.size;
+  assert(fw > 10 && fd > 9, 'the Lobby floor should be larger than the original 10 x 9, got ' + fw + ' x ' + fd);
+  pass('Lobby floor is larger than the original 10 x 9 (' + fw + ' x ' + fd + ')');
+
+  // Books sit on a shelf board inside a bookcase, or on a side table top.
+  const bookHosts = [...byPrefix('bookcase'), ...byName('sideTable')];
   const SHELF_BOARD_TOPS = [0.07, 0.31, 0.55];
-  byName('books').forEach((b) => {
-    assert(inside(b.footprint, bookcase, 0.005), 'books footprint ' + JSON.stringify(b.footprint.min) + JSON.stringify(b.footprint.max) + ' must be inside the bookcase ' + JSON.stringify(bookcase.min) + JSON.stringify(bookcase.max));
-    assert(SHELF_BOARD_TOPS.some((y) => Math.abs(b.footprint.minY - y) < 0.01), 'books rest on a shelf board, got y ' + b.footprint.minY);
-    assert(b.footprint.maxY <= bookcase.maxY, 'books stay inside the bookcase height');
+  const books = byName('books');
+  assert(books.length > 0, 'the Lobby should have books');
+  books.forEach((b) => {
+    const host = bookHosts.find((c) => inside(b.footprint, c.footprint, 0.005));
+    assert(host, 'books footprint ' + JSON.stringify(b.footprint.min) + JSON.stringify(b.footprint.max) + ' must be inside a bookcase or on a side table');
+    if (host.name === 'sideTable') near(b.footprint.minY, host.footprint.maxY, 0.01, 'books rest on the table top');
+    else assert(SHELF_BOARD_TOPS.some((y) => Math.abs(b.footprint.minY - y) < 0.01), 'books rest on a shelf board, got y ' + b.footprint.minY);
+    assert(b.footprint.maxY <= host.footprint.maxY + 0.3, 'books stay within reach of their support');
   });
-  pass('Lobby books stand on a shelf board inside the bookcase (no longer floating beside it)');
+  pass('Lobby books stand on a shelf board or a table top (no longer floating beside the bookcase)');
 
   const cabinet = byName('cabinetTelevision')[0].footprint, tv = byName('televisionModern')[0].footprint;
   assert(inside(tv, cabinet, 0.005), 'TV footprint must be on the cabinet');
   near(tv.minY, cabinet.maxY, 0.01, 'TV base sits on the cabinet top');
   pass('Lobby TV sits on its cabinet');
 
-  const desk = byName('desk')[0].footprint;
-  ['computerScreen', 'computerKeyboard', 'lampRoundTable'].forEach((n) => {
-    const f = byName(n)[0].footprint;
-    assert(inside(f, desk, 0.005), n + ' must be fully on the desk top');
-    near(f.minY, desk.maxY, 0.01, n + ' base sits on the desk top');
+  // Reception desk: screen, keyboard and chair agree on which way is "front". Every kit model faces local +z,
+  // so a model's front direction in the world is (sin r, cos r) in the renderer's rotation convention.
+  const front = (it) => { const r = (it.obj.rotationY || 0) * Math.PI / 180; return [Math.sin(r), Math.cos(r)]; };
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1];
+  const toward = (from, to) => [to.footprint.cx - from.footprint.cx, to.footprint.cz - from.footprint.cz];
+  const screen = byName('computerScreen')[0], keyboard = byName('computerKeyboard')[0];
+  const deskTops = byName('desk');
+  const deskOf = (it) => deskTops.find((d) => inside(it.footprint, d.footprint, 0.005));
+  [screen, keyboard, ...byName('lampRoundTable'), ...byName('laptop'), ...byName('radio')].forEach((it) => {
+    const d = deskOf(it);
+    assert(d, it.name + ' must be fully on a desk top');
+    near(it.footprint.minY, d.footprint.maxY, 0.01, it.name + ' base sits on the desk top');
   });
-  const kb = byName('computerKeyboard')[0].footprint, lamp = byName('lampRoundTable')[0].footprint;
-  assert(kb.max[0] < lamp.min[0] || lamp.max[0] < kb.min[0] || kb.max[1] < lamp.min[1] || lamp.max[1] < kb.min[1], 'keyboard and lamp must not overlap');
-  pass('Lobby desk items sit fully on the desk top and do not overlap each other');
+  assert(deskOf(screen) === deskOf(keyboard), 'the monitor and its keyboard share a desk');
+  const chair = byName('chairDesk').map((c) => ({ c, d: Math.hypot(...toward(screen, c)) })).sort((x, y) => x.d - y.d)[0].c;
+  near(dot(front(screen), front(keyboard)), 1, 1e-6, 'screen and keyboard face the same way');
+  assert(dot(front(screen), toward(screen, chair)) > 0.9 * Math.hypot(...toward(screen, chair)), 'the monitor faces the chair side of the desk');
+  assert(dot(front(chair), front(screen)) < -0.99, 'the seated person (looking along the chair front) looks straight at the screen face');
+  const toKeyboard = toward(screen, keyboard);
+  assert(dot(front(screen), toKeyboard) > 0.05, 'the keyboard is on the chair side of the monitor, in front of it');
+  assert(Math.hypot(...toward(keyboard, chair)) < Math.hypot(...toward(screen, chair)), 'the keyboard sits between the chair and the monitor');
+  assert(Math.abs(dot([-front(screen)[1], front(screen)[0]], toKeyboard)) < 0.1, 'the keyboard is centered in front of the monitor');
+  const deskItems = items.filter((i) => ['computerScreen', 'computerKeyboard', 'lampRoundTable', 'laptop', 'radio'].includes(i.name) && deskOf(i) === deskOf(screen));
+  for (let i = 0; i < deskItems.length; i++) for (let j = i + 1; j < deskItems.length; j++) {
+    const A = deskItems[i].footprint, B = deskItems[j].footprint;
+    assert(A.max[0] <= B.min[0] + 1e-6 || B.max[0] <= A.min[0] + 1e-6 || A.max[1] <= B.min[1] + 1e-6 || B.max[1] <= A.min[1] + 1e-6, deskItems[i].name + ' and ' + deskItems[j].name + ' overlap on the desk');
+  }
+  pass('Lobby screen and keyboard face the chair, keyboard in front of the monitor, desk items (lamp included) do not overlap');
 
   // Nothing floats: every elevated object rests on something whose vertical span contains its base.
   items.forEach((it) => {
@@ -245,26 +277,64 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   });
   pass('no Lobby object floats above the floor without support');
 
-  // Everything is inside the floor.
-  const [fw, fd] = scene.floor.size;
-  items.forEach((it) => assert(it.footprint.min[0] >= -fw / 2 && it.footprint.max[0] <= fw / 2 && it.footprint.min[1] >= -fd / 2 && it.footprint.max[1] <= fd / 2, it.name + ' is off the floor'));
+  // Everything is inside the floor (the thicker window pieces overshoot by under a millimetre).
+  items.forEach((it) => assert(it.footprint.min[0] >= -fw / 2 - 0.002 && it.footprint.max[0] <= fw / 2 + 0.002 && it.footprint.min[1] >= -fd / 2 - 0.002 && it.footprint.max[1] <= fd / 2 + 0.002, it.name + ' is off the floor'));
   pass('every Lobby object is on the floor');
 
   // Collision set: rug walked over, supported items not separate solids, crates/furniture solid.
   const solids = L.selectSolidItems(items);
-  const rug = items.find((i) => i.name === 'rugRectangle');
-  assert(!solids.includes(rug), 'rug must not block');
+  byName('rugRectangle').forEach((r) => assert(!solids.includes(r), 'rug must not block'));
   ['televisionModern', 'computerScreen', 'computerKeyboard', 'lampRoundTable', 'books'].forEach((n) => byName(n).forEach((i) => assert(!solids.includes(i), n + ' is covered by its support')));
-  ['desk', 'cabinetTelevision', 'bookcaseClosedWide', 'loungeSofaCorner', 'tableCoffee', 'cardboardBoxClosed'].forEach((n) => byName(n).forEach((i) => assert(solids.includes(i), n + ' must be solid')));
-  pass('Lobby collision set: furniture and crates solid, rug walkable, supported items covered by their support');
+  ['desk', 'chairDesk', 'cabinetTelevision', 'bookcaseClosedWide', 'bookcaseOpen', 'loungeSofa', 'loungeChair', 'tableCoffee', 'tableRound', 'cardboardBoxClosed', 'wall'].forEach((n) => {
+    assert(byName(n).length > 0, 'the Lobby should contain ' + n);
+    byName(n).forEach((i) => assert(solids.includes(i), n + ' must be solid'));
+  });
+  pass('Lobby collision set: furniture, walls and crates solid, rugs walkable, supported items covered by their support');
 
-  // Reachability: spawn, portal markers must not be inside a solid; an anchor may overlap slightly (escape rule) but never deeply.
-  const depthAt = (x, z) => solids.reduce((d, s) => d + L.footprintDepth(s.footprint, x, z, L.PLAYER_RADIUS), 0);
+  // Solid furniture does not interpenetrate (wall pieces butt against each other on purpose).
+  for (let i = 0; i < solids.length; i++) for (let j = i + 1; j < solids.length; j++) {
+    const A = solids[i], B = solids[j];
+    if (A.name.startsWith('wall') && B.name.startsWith('wall')) continue;
+    const ox = Math.min(A.footprint.max[0], B.footprint.max[0]) - Math.max(A.footprint.min[0], B.footprint.min[0]);
+    const oz = Math.min(A.footprint.max[1], B.footprint.max[1]) - Math.max(A.footprint.min[1], B.footprint.min[1]);
+    assert(!(ox > 0.01 && oz > 0.01), A.name + ' overlaps ' + B.name + ' by ' + ox.toFixed(2) + ' x ' + oz.toFixed(2));
+  }
+  pass('no two solid Lobby objects overlap');
+
+  // Reachability on a 0.1 grid with the real player radius, floor limits and solids.
+  const limits = L.floorWalkLimits(scene.floor);
+  const depthAt = (x, z) => L.floorOverrun(limits, x, z) + solids.reduce((d, s) => d + L.footprintDepth(s.footprint, x, z, L.PLAYER_RADIUS), 0);
   const start = scene.camera.start;
   assert.strictEqual(depthAt(start[0], start[2]), 0, 'camera.start must be free');
-  (scene.portalMarkers || []).forEach((m) => assert.strictEqual(depthAt(m.position[0], m.position[2]), 0, 'portal marker ' + m.portalIndex + ' must be reachable'));
-  (scene.anchors || []).forEach((a) => assert(depthAt(a.position[0], a.position[2]) < 0.25, 'anchor ' + a.id + ' must not spawn deep inside furniture'));
-  pass('Lobby spawn and portal markers are reachable, anchors never start deep inside a solid');
+  (scene.portalMarkers || []).forEach((m) => assert.strictEqual(depthAt(m.position[0], m.position[2]), 0, 'portal marker ' + m.portalIndex + ' must be free'));
+  (scene.anchors || []).forEach((a) => assert.strictEqual(depthAt(a.position[0], a.position[2]), 0, 'anchor ' + a.id + ' must be free'));
+  const STEP = 0.1;
+  const nx = Math.round(fw / STEP), nz = Math.round(fd / STEP);
+  const gx = (i) => -fw / 2 + i * STEP, gz = (j) => -fd / 2 + j * STEP;
+  const seen = Array.from({ length: nx + 1 }, () => new Uint8Array(nz + 1));
+  const si = Math.round((start[0] + fw / 2) / STEP), sj = Math.round((start[2] + fd / 2) / STEP);
+  const queue = [[si, sj]]; seen[si][sj] = 1;
+  while (queue.length) {
+    const [i, j] = queue.pop();
+    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const ni = i + di, nj = j + dj;
+      if (ni < 0 || nj < 0 || ni > nx || nj > nz || seen[ni][nj] || depthAt(gx(ni), gz(nj)) !== 0) continue;
+      seen[ni][nj] = 1; queue.push([ni, nj]);
+    }
+  }
+  const reachable = (x, z, radius) => { for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) if (seen[i][j] && Math.hypot(gx(i) - x, gz(j) - z) <= radius) return true; return false; };
+  (scene.portalMarkers || []).forEach((m) => assert(reachable(m.position[0], m.position[2], 0.2), 'portal ' + m.portalIndex + ' must be reachable from the spawn'));
+  (scene.anchors || []).forEach((a) => assert(reachable(a.position[0], a.position[2], 0.2), 'anchor ' + a.id + ' must be reachable from the spawn'));
+  (scene.interactables || []).forEach((m) => assert(reachable(m.position[0], m.position[2], 1.2), 'crate ' + m.class + ' must be reachable from the spawn'));
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, cells = 0;
+  for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) if (seen[i][j]) { cells++; minX = Math.min(minX, gx(i)); maxX = Math.max(maxX, gx(i)); minZ = Math.min(minZ, gz(j)); maxZ = Math.max(maxZ, gz(j)); }
+  assert(minX < -fw / 2 + 0.7 && maxX > fw / 2 - 0.7 && minZ < -fd / 2 + 0.7 && maxZ > fd / 2 - 0.7, 'the player can walk to all four edges of the room, got x ' + minX + '..' + maxX + ' z ' + minZ + '..' + maxZ);
+  assert(cells * STEP * STEP > 0.55 * fw * fd, 'at least 55% of the floor stays walkable, got ' + (100 * cells * STEP * STEP / (fw * fd)).toFixed(0) + '%');
+  pass('Lobby portal, anchors and every crate are reachable from the spawn; all four edges can be walked to; ' + (100 * cells * STEP * STEP / (fw * fd)).toFixed(0) + '% of the floor is walkable');
+
+  // Loot markers match their crate objects by exact position.
+  (scene.interactables || []).forEach((m) => assert(byName('cardboardBoxClosed').some((c) => c.obj.position[0] === m.position[0] && c.obj.position[2] === m.position[2]), 'interactable ' + m.class + ' has no crate object at its position'));
+  pass('every interactable sits exactly on a crate object');
 }
 
 console.log('\nALL ' + checks + ' 3D LAYOUT CHECKS PASSED');
