@@ -190,12 +190,21 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
       await scaleCategory.locator('.settings-category-toggle').click();
     }
 
+    // The open world is the Lobby, whose scene.json owns the size (0.5): the slider shows it and is locked.
     const scaleDefault = await frame.locator('#characterScaleInput').inputValue();
-    // The open world is the Lobby, whose scene.json default is 0.5; the slider shows the scale in effect.
-    if (Number(scaleDefault) !== 0.5) throw new Error('Expected the size slider to show the Lobby default 0.5, got: ' + scaleDefault);
+    if (Number(scaleDefault) !== 0.5) throw new Error('Expected the size slider to show the Lobby scene size 0.5, got: ' + scaleDefault);
     const labelDefault = await frame.locator('#characterScaleValue').textContent();
     if (labelDefault !== '0.5×') throw new Error('Expected the size label to read "0.5×", got: ' + JSON.stringify(labelDefault));
-    console.log('  default slider=1, label=' + labelDefault);
+    if (!(await frame.locator('#characterScaleInput').isDisabled())) throw new Error('Expected the size slider to be disabled while the Lobby scene owns the size');
+    console.log('  in the Lobby: slider=' + scaleDefault + ' (locked), label=' + labelDefault);
+
+    // Leave the 3D world: a 2D world declares no size, so the slider is the user's again.
+    await frame.evaluate(() => loadManifest(currentManifestUrl, 'plaza'));
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 15000 });
+    await frame.waitForFunction(() => !document.getElementById('characterScaleInput').disabled, null, { timeout: 5000 });
+    const scaleUser = await frame.locator('#characterScaleInput').inputValue();
+    if (Number(scaleUser) !== 1) throw new Error('Expected the size slider to default to 1 outside a scene-owned size, got: ' + scaleUser);
+    console.log('  in a 2D world: slider unlocked, default=' + scaleUser);
 
     // Drive it like a real drag: set the DOM value then fire the same
     // 'input' event the browser fires while dragging, so the listener runs.
@@ -206,11 +215,9 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await page.waitForTimeout(100);
     const savedScale = await frame.evaluate(() => AtlasWallet.getCharacterScale());
     if (Math.abs(savedScale - 0.6) > 0.001) throw new Error('Expected AtlasWallet.getCharacterScale() to persist 0.6, got: ' + savedScale);
-    const liveScale = await frame.evaluate(() => window.__atlasActive3D.getCharacterScale());
-    if (Math.abs(liveScale - 0.6) > 0.001) throw new Error('Expected the live 3D model scale to update to 0.6 immediately, got: ' + liveScale);
     const labelAfter = await frame.locator('#characterScaleValue').textContent();
     if (labelAfter !== '0.6×') throw new Error('Expected the size label to read "0.6×", got: ' + JSON.stringify(labelAfter));
-    console.log('  after dragging to 0.6: AtlasWallet=' + savedScale + ', live 3D=' + liveScale + ', label=' + labelAfter);
+    console.log('  after dragging to 0.6: AtlasWallet=' + savedScale + ', label=' + labelAfter);
 
     console.log('  re-opening Settings shows the persisted value');
     await frame.locator('#backFromSettingsBtn').click();
@@ -219,7 +226,12 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.waitForFunction(() => document.getElementById('settingsScreen').classList.contains('active'), null, { timeout: 5000 });
     const scaleReopened = await frame.locator('#characterScaleInput').inputValue();
     if (Math.abs(Number(scaleReopened) - 0.6) > 0.001) throw new Error('Expected the slider to reflect the persisted 0.6 on re-open, got: ' + scaleReopened);
-    console.log('PASS: size slider persists (' + scaleReopened + '), clamps, and live-updates the model');
+    await frame.evaluate(() => loadManifest(currentManifestUrl, 'lobby'));
+    await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby') && !!window.__atlasActive3D, null, { timeout: 20000 });
+    await frame.evaluate(() => window.__atlasActive3D.ready);
+    const lobbyScale = await frame.evaluate(() => window.__atlasActive3D.getCharacterScale());
+    if (lobbyScale !== 0.5) throw new Error('Expected the Lobby to keep its own 0.5 with 0.6 saved, got: ' + lobbyScale);
+    console.log('PASS: size slider persists (' + scaleReopened + ') and clamps outside scene-owned sizes; the Lobby still uses its own 0.5');
 
     if (pageErrors.length) {
       throw new Error('Console/page errors occurred: ' + pageErrors.join(' | '));

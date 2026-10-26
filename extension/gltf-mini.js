@@ -1120,20 +1120,25 @@
     // walk speed, eye height, interaction radii or how far the camera
     // follows; it only scales the rendered mesh in charBase.
     //
-    // A scene may declare a default (scene.json characterScale) sized to
-    // its furniture. It applies only while the viewer has no saved
-    // preference of their own: opts.characterScale is that saved value, or
-    // null/absent when the viewer never chose one, and setCharacterScale()
-    // below counts as choosing. Other visitors' characters are drawn at the
-    // scene default, since their own preference isn't known here.
+    // A scene may declare its own size (scene.json characterScale) matched
+    // to its furniture and architecture. A valid declared value is
+    // authoritative: it is applied on entry and neither the viewer's saved
+    // preference (opts.characterScale, null/absent when they never chose
+    // one) nor setCharacterScale() can change it while that scene is open.
+    // A scene without one falls back to the viewer's saved preference, then
+    // to 1. The scale only resizes the drawn character; positions, collision,
+    // portals, anchors and interactables are never multiplied by it. Other
+    // visitors' characters are drawn at the scene's size, since their own
+    // preference isn't known here.
     const optionalScale = (v) => ((typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')) && Number.isFinite(Number(v))) ? clampCharacterScale(v) : null;
     let userCharacterScale = optionalScale(opts.characterScale);
+    let declaredCharacterScale = null;
     let sceneCharacterScale = 1;
     let characterScale = 1;
     function applyCharacterScaleDefaults() {
-      const declared = optionalScale(sceneData && sceneData.characterScale);
-      sceneCharacterScale = declared === null ? 1 : declared;
-      characterScale = userCharacterScale === null ? sceneCharacterScale : userCharacterScale;
+      declaredCharacterScale = optionalScale(sceneData && sceneData.characterScale);
+      sceneCharacterScale = declaredCharacterScale === null ? 1 : declaredCharacterScale;
+      characterScale = declaredCharacterScale !== null ? declaredCharacterScale : (userCharacterScale === null ? 1 : userCharacterScale);
     }
     applyCharacterScaleDefaults();
     // This viewer's own equipped look (see wallet.js's getAvatarLook()) —
@@ -1594,7 +1599,7 @@
             lootMarker
           });
         });
-        placedItems.push({ footprint, lootMarker, solid: obj.solid !== false });
+        placedItems.push({ footprint, lootMarker, solid: obj.solid !== false && obj.collision !== false });
       });
       // Oriented footprints from the models' real bounds (not a box
       // centered on the placement origin), minus rugs, overhead objects and
@@ -2095,7 +2100,12 @@
       // picks which height variant of the shoe geometry to draw (see
       // getShoeGeometryForScale() above) — a color-only shoe (scale 1) just
       // reuses the character's own default pair.
-      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale) => {
+      // In first person the eye is fixed at the scene's eye height while the
+      // body scales, so a large character (characterScale above about 1.04)
+      // would put the camera inside its torso and fill the screen with the
+      // shirt colour. The upper body is skipped then; legs and shoes stay.
+      const upperBodyAboveEye = cameraDistance <= HEAD_VISIBLE_DISTANCE && characterScale * character.shoulderY > standingEyeY - 0.1;
+      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale, hideUpperBody) => {
         const shirtColor = colors && colors.shirtColor;
         const pantsColor = colors && colors.pantsColor;
         const drawPart = (localMatrix, part, colorOverride) => {
@@ -2105,9 +2115,11 @@
           drawPart(mat4Translate(0, character.shoulderY, 0), character.head);
           if (hatColor) drawPart(mat4Translate(0, character.shoulderY, 0), character.hat, hatColor);
         }
-        drawPart(mat4Translate(0, character.hipY, 0), character.torso, shirtColor);
-        drawPart(mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing)), character.armL);
-        drawPart(mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing)), character.armR);
+        if (!hideUpperBody) {
+          drawPart(mat4Translate(0, character.hipY, 0), character.torso, shirtColor);
+          drawPart(mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing)), character.armL);
+          drawPart(mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing)), character.armR);
+        }
         const legLLocal = mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing));
         const legRLocal = mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing));
         drawPart(legLLocal, character.legL, pantsColor);
@@ -2118,7 +2130,7 @@
           drawPart(legRLocal, shoePair.shoeR, shoeColor);
         }
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale);
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale, upperBodyAboveEye);
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
@@ -2192,11 +2204,18 @@
       // value, write for it to apply a change live without re-entering
       // the world.
       getCharacterScale: () => characterScale,
-      setCharacterScale: (s) => { userCharacterScale = clampCharacterScale(s); characterScale = userCharacterScale; },
-      // The scene's own default size, and whether the viewer's saved
-      // preference is what is currently applied (see characterScale above).
+      // A no-op while the scene declares its own characterScale.
+      setCharacterScale: (s) => {
+        if (declaredCharacterScale !== null) return;
+        userCharacterScale = clampCharacterScale(s);
+        characterScale = userCharacterScale;
+      },
+      // The size the scene uses (1 when it declares none), whether the scene
+      // owns the size, and whether the viewer's saved preference is what is
+      // currently applied (see characterScale above).
       getSceneCharacterScale: () => sceneCharacterScale,
-      hasCharacterScaleOverride: () => userCharacterScale !== null,
+      isCharacterScaleSceneOwned: () => declaredCharacterScale !== null,
+      hasCharacterScaleOverride: () => declaredCharacterScale === null && userCharacterScale !== null,
       // Debug/test hook — lets a script confirm the character actually
       // turns to face its travel direction (see the characterYaw comment
       // above) without needing to read pixels back off the canvas.

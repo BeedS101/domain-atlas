@@ -1,17 +1,18 @@
-// Browser regression for the Lobby's default character scale. scene.json's
-// characterScale (0.5 for the Lobby) is only a default: a scale the user saved
+// Browser regression for the Lobby's character scale. scene.json's
+// characterScale (0.5 for the Lobby) is authoritative: a scale the user saved
 // from the settings slider (chrome.storage.local, key atlasCharacterScale)
-// always wins, including an explicitly saved 1.0.
+// does not override it, and is only used in a scene that declares none.
+// (manual-domain-b-gallery.js covers switching between scenes.)
 //
 // Checks:
-//   1. A profile with no saved scale gets 0.5 in the Lobby, with no override
-//      recorded and nothing written to storage.
-//   2. The scale does not move the camera: eye height, collision and the
+//   1. A profile with no saved scale gets 0.5 in the Lobby, with nothing
+//      written to storage.
+//   2. A saved 1.4, or an explicitly saved 1.0, does not change the Lobby's 0.5
+//      and is left in storage.
+//   3. The scale does not move the camera: eye height, collision and the
 //      interaction radius are the same at 0.5 and at 1.0.
-//   3. The settings slider shows the scale actually in effect (0.5).
-//   4. A saved 1.4 wins over the scene default; so does a saved 1.0.
-//   5. Removing the saved value returns to the scene default.
-//   6. A scene that declares no characterScale falls back to 1.
+//   4. The settings slider shows the scale in effect (0.5) and is locked.
+//   5. A scene that declares no characterScale uses the saved preference, then 1.
 
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -34,7 +35,7 @@ const near = (a, b, eps = 0.011) => Math.abs(a - b) < eps;
 
 const scaleInfo = (frame) => frame.evaluate(() => {
   const w = window.__atlasActive3D;
-  return { scale: w.getCharacterScale(), scene: w.getSceneCharacterScale(), override: w.hasCharacterScaleOverride() };
+  return { scale: w.getCharacterScale(), scene: w.getSceneCharacterScale(), owned: w.isCharacterScaleSceneOwned(), override: w.hasCharacterScaleOverride() };
 });
 const stored = (frame) => frame.evaluate(async () => (await chrome.storage.local.get('atlasCharacterScale')).atlasCharacterScale);
 const setStored = (frame, v) => frame.evaluate(async (value) => {
@@ -98,58 +99,60 @@ async function probe(frame, crate) {
     const frame = await frameHandle.contentFrame();
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
-    console.log('STEP 1: no saved scale -> the scene default 0.5');
+    console.log('STEP 1: no saved scale -> the scene value 0.5');
     assert(await stored(frame) === undefined, 'Expected no saved character scale on a fresh profile');
     assert(await frame.evaluate(() => AtlasWallet.getSavedCharacterScale()) === null, 'Expected getSavedCharacterScale() to be null when nothing was saved');
     await enterLobby(frame);
     let info = await scaleInfo(frame);
-    assert(info.scale === 0.5 && info.scene === 0.5 && info.override === false, 'Expected scale 0.5 from the scene with no override, got ' + JSON.stringify(info));
-    assert(await stored(frame) === undefined, 'Entering the Lobby must not write the scene default into storage');
-    console.log('PASS: Lobby defaults to 0.5 with no override and nothing stored');
+    assert(info.scale === 0.5 && info.scene === 0.5 && info.owned === true && info.override === false, 'Expected scale 0.5 owned by the scene, got ' + JSON.stringify(info));
+    assert(await stored(frame) === undefined, 'Entering the Lobby must not write the scene value into storage');
+    console.log('PASS: Lobby is 0.5, scene-owned, nothing stored');
 
-    console.log('STEP 2: eye height, collision and interaction range do not depend on the scale');
+    console.log('STEP 2: a saved scale does not override the scene value, and is kept');
+    for (const saved of [1.4, 1]) {
+      await setStored(frame, saved);
+      await enterLobby(frame);
+      info = await scaleInfo(frame);
+      assert(info.scale === 0.5 && info.owned === true && info.override === false, 'Expected the Lobby to stay at 0.5 with ' + saved + ' saved, got ' + JSON.stringify(info));
+      assert(await stored(frame) === saved, 'The saved ' + saved + ' must be left in storage');
+    }
+    await setStored(frame, undefined);
+    console.log('PASS: saved 1.4 and saved 1.0 both leave the Lobby at 0.5');
+
+    console.log('STEP 3: eye height, collision and interaction range do not depend on the scale');
+    await enterLobby(frame);
     const at05 = await probe(frame, crate);
     assert(near(at05.eye, 1.6), 'Expected eye height 1.6 at scale 0.5, got ' + at05.eye);
     assert(at05.blocked.deskEdge && at05.blocked.insideDesk && !at05.blocked.open, 'Expected the reception desk to block and open floor not to, got ' + JSON.stringify(at05.blocked));
     assert(at05.nearby[1.6] === true && at05.nearby[1.8] === false, 'Expected the crate prompt inside 1.7 and not beyond, got ' + JSON.stringify(at05.nearby));
-    await setStored(frame, 1);
+    const plain = JSON.parse(JSON.stringify(scene)); delete plain.characterScale;
+    fs.writeFileSync(SCENE_PATH, JSON.stringify(plain, null, 2));
     await enterLobby(frame);
     info = await scaleInfo(frame);
-    assert(info.scale === 1 && info.override === true, 'Expected an explicitly saved 1.0 to win, got ' + JSON.stringify(info));
+    assert(info.scale === 1 && info.owned === false, 'Expected 1 for a scene that declares none, got ' + JSON.stringify(info));
     const at1 = await probe(frame, crate);
     assert(JSON.stringify(at1) === JSON.stringify(at05), 'Expected identical eye height, collision and interaction range at 1.0 and 0.5, got ' + JSON.stringify(at1) + ' vs ' + JSON.stringify(at05));
-    console.log('PASS: camera height, collision and interaction radius are identical at 0.5 and 1.0; a saved 1.0 wins');
+    console.log('PASS: camera height, collision and interaction radius are identical at 0.5 and 1.0');
 
-    console.log('STEP 3: the settings slider shows the scale in effect');
-    await setStored(frame, undefined);
-    await enterLobby(frame);
-    await frame.evaluate(() => openSettings());
-    await sleep(300);
-    const slider = await frame.evaluate(() => ({ value: document.getElementById('characterScaleInput').value, label: document.getElementById('characterScaleValue').textContent }));
-    assert(near(parseFloat(slider.value), 0.5) && slider.label.startsWith('0.5'), 'Expected the slider to show 0.5, got ' + JSON.stringify(slider));
-    console.log('PASS: slider shows 0.5 (' + slider.label + ')');
-
-    console.log('STEP 4: a saved scale wins over the scene default');
+    console.log('STEP 4: a scene without characterScale uses the saved preference');
     await setStored(frame, 1.4);
     await enterLobby(frame);
     info = await scaleInfo(frame);
-    assert(near(info.scale, 1.4) && info.scene === 0.5 && info.override === true, 'Expected the saved 1.4 to win, got ' + JSON.stringify(info));
-    console.log('PASS: saved 1.4 wins; the scene default is still reported as 0.5');
-
-    console.log('STEP 5: removing the saved value restores the scene default');
+    assert(near(info.scale, 1.4) && info.owned === false && info.override === true, 'Expected the saved 1.4 when the scene declares none, got ' + JSON.stringify(info));
     await setStored(frame, undefined);
     await enterLobby(frame);
     info = await scaleInfo(frame);
-    assert(info.scale === 0.5 && info.override === false, 'Expected 0.5 again, got ' + JSON.stringify(info));
-    console.log('PASS: back to 0.5');
+    assert(info.scale === 1 && info.override === false, 'Expected 1 with nothing saved, got ' + JSON.stringify(info));
+    console.log('PASS: saved 1.4 applies in a scene without characterScale; 1 when nothing is saved');
 
-    console.log('STEP 6: a scene without characterScale uses 1');
-    delete scene.characterScale;
+    console.log('STEP 5: the settings slider shows the scale in effect and is locked while the scene owns it');
     fs.writeFileSync(SCENE_PATH, JSON.stringify(scene, null, 2));
     await enterLobby(frame);
-    info = await scaleInfo(frame);
-    assert(info.scale === 1 && info.scene === 1 && info.override === false, 'Expected 1 for a scene that declares none, got ' + JSON.stringify(info));
-    console.log('PASS: fallback is 1');
+    await frame.evaluate(() => openSettings());
+    await sleep(300);
+    const slider = await frame.evaluate(() => ({ value: document.getElementById('characterScaleInput').value, label: document.getElementById('characterScaleValue').textContent, disabled: document.getElementById('characterScaleInput').disabled }));
+    assert(near(parseFloat(slider.value), 0.5) && slider.label.startsWith('0.5') && slider.disabled === true, 'Expected the slider to show 0.5 and be locked, got ' + JSON.stringify(slider));
+    console.log('PASS: slider shows 0.5 (' + slider.label + ') and is disabled');
 
     console.log('\nALL CHARACTER SCALE DEFAULT CHECKS PASSED');
   } catch (err) {

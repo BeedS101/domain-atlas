@@ -37,7 +37,32 @@
           "to": "localhost:8001",
           "label": "Walk back to Example Plaza",
           "manifest": "http://localhost:8001/.well-known/spatial.json"
-        }
+        },
+        { "kind": "world", "to": "gallery", "label": "Enter the Atlas Showcase Gallery" }
+      ]
+    },
+    {
+      "id": "gallery",
+      "name": "Atlas Showcase Gallery",
+      "entry": {
+        "scene": "/spatial/gallery/scene.json",
+        "renderer": ["gltf-mini-v1"]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": true,
+        "identityRequired": false,
+        "itemDropsAllowed": true,
+        "acceptedItemClasses": ["atlas.wearable", "atlas.badge"],
+        "trustedIssuers": "any"
+      },
+      "profile": {
+        "genre": "gallery",
+        "scale": "building",
+        "capabilities": { "building": "residents", "vehicles": false, "combat": "none", "landOwnership": false }
+      },
+      "portals": [
+        { "kind": "world", "to": "workshop", "label": "Back to the Neighbor Workshop" }
       ]
     }
   ],

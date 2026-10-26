@@ -1,0 +1,1152 @@
+{
+  "format": "gltf-mini-v1",
+  "characterScale": 1.4,
+  "floor": {
+    "size": [
+      46,
+      40
+    ],
+    "color": "#494237"
+  },
+  "ambientLight": {
+    "intensity": 0.72
+  },
+  "directionalLight": {
+    "direction": [
+      -0.5,
+      -1,
+      -0.35
+    ]
+  },
+  "camera": {
+    "start": [
+      0,
+      1.6,
+      14
+    ],
+    "startYaw": 0
+  },
+  "objects": [
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        -18,
+        0,
+        -18
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/gallery-window-panel.glb",
+      "position": [
+        -12,
+        0,
+        -17.89
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/gallery-window-panel.glb",
+      "position": [
+        -6,
+        0,
+        -17.89
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        0,
+        0,
+        -18
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/gallery-window-panel.glb",
+      "position": [
+        6,
+        0,
+        -17.89
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/gallery-window-panel.glb",
+      "position": [
+        12,
+        0,
+        -17.89
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        18,
+        0,
+        -18
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        -21,
+        0,
+        -15
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        21,
+        0,
+        -15
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        -21,
+        0,
+        -9
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        21,
+        0,
+        -9
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        -21,
+        0,
+        -3
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        21,
+        0,
+        -3
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        -21,
+        0,
+        3
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        21,
+        0,
+        3
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        -21,
+        0,
+        9
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        21,
+        0,
+        9
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        -21,
+        0,
+        15
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/wall-panel.glb",
+      "position": [
+        21,
+        0,
+        15
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        -18,
+        0,
+        -17.65
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        -18,
+        0,
+        17.5
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        -9,
+        0,
+        -17.65
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        -9,
+        0,
+        17.5
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        0,
+        0,
+        -17.65
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        0,
+        0,
+        17.5
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        9,
+        0,
+        -17.65
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        9,
+        0,
+        17.5
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        18,
+        0,
+        -17.65
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/column.glb",
+      "position": [
+        18,
+        0,
+        17.5
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/potted-plant.glb",
+      "position": [
+        -18,
+        0,
+        -13
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/potted-plant.glb",
+      "position": [
+        -18,
+        0,
+        13
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/potted-plant.glb",
+      "position": [
+        18,
+        0,
+        -13
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/potted-plant.glb",
+      "position": [
+        18,
+        0,
+        13
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/globe-feature.glb",
+      "position": [
+        0,
+        0,
+        -1
+      ],
+      "rotationY": 0,
+      "scale": 2.1
+    },
+    {
+      "model": "/assets/gallery/business-kiosk.glb",
+      "position": [
+        -13,
+        0,
+        -8.02275
+      ],
+      "rotationY": 0,
+      "scale": 1.3
+    },
+    {
+      "model": "/assets/gallery/business-kiosk.glb",
+      "position": [
+        -13,
+        0,
+        -3.02275
+      ],
+      "rotationY": 0,
+      "scale": 1.3
+    },
+    {
+      "model": "/assets/gallery/business-kiosk.glb",
+      "position": [
+        -13,
+        0,
+        2.97725
+      ],
+      "rotationY": 0,
+      "scale": 1.3
+    },
+    {
+      "model": "/assets/gallery/book-display.glb",
+      "position": [
+        -18,
+        0,
+        -6
+      ],
+      "rotationY": 90,
+      "scale": 1.4
+    },
+    {
+      "model": "/assets/gallery/book-display.glb",
+      "position": [
+        -18,
+        0,
+        0
+      ],
+      "rotationY": 90,
+      "scale": 1.4
+    },
+    {
+      "model": "/assets/gallery/book-display.glb",
+      "position": [
+        -18,
+        0,
+        7
+      ],
+      "rotationY": 90,
+      "scale": 1.4
+    },
+    {
+      "model": "/assets/gallery/info-display.glb",
+      "position": [
+        -9,
+        0,
+        -8
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/info-display.glb",
+      "position": [
+        -9,
+        0,
+        3
+      ],
+      "rotationY": 90
+    },
+    {
+      "model": "/assets/gallery/display-plinth.glb",
+      "position": [
+        12,
+        0,
+        -9
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/display-plinth.glb",
+      "position": [
+        16,
+        0,
+        -9
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/display-plinth.glb",
+      "position": [
+        12,
+        0,
+        -3
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/display-plinth.glb",
+      "position": [
+        16,
+        0,
+        -3
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/display-plinth.glb",
+      "position": [
+        12,
+        0,
+        4
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/display-plinth.glb",
+      "position": [
+        16,
+        0,
+        4
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/reward-crate.glb",
+      "position": [
+        12,
+        1.39,
+        -9
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/reward-crate.glb",
+      "position": [
+        16,
+        1.39,
+        -9
+      ],
+      "rotationY": 25
+    },
+    {
+      "model": "/assets/gallery/reward-crate.glb",
+      "position": [
+        12,
+        1.39,
+        -3
+      ],
+      "rotationY": 45
+    },
+    {
+      "model": "/assets/gallery/reward-crate.glb",
+      "position": [
+        16,
+        1.39,
+        -3
+      ],
+      "rotationY": 60
+    },
+    {
+      "model": "/assets/gallery/workbench.glb",
+      "position": [
+        -9,
+        0,
+        -13
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/workbench.glb",
+      "position": [
+        -5,
+        0,
+        -13
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/workbench.glb",
+      "position": [
+        6,
+        0,
+        -13
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/workbench.glb",
+      "position": [
+        10,
+        0,
+        -13
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/lounge-sofa.glb",
+      "position": [
+        -10,
+        0,
+        6.5725
+      ],
+      "rotationY": 180
+    },
+    {
+      "model": "/assets/gallery/lounge-sofa.glb",
+      "position": [
+        -10,
+        0,
+        13.2275
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/lounge-sofa.glb",
+      "position": [
+        -14.2275,
+        0,
+        10
+      ],
+      "rotationY": 270
+    },
+    {
+      "model": "/assets/gallery/potted-plant.glb",
+      "position": [
+        -17,
+        0,
+        12
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/potted-plant.glb",
+      "position": [
+        -5,
+        0,
+        8.5
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/potted-plant.glb",
+      "position": [
+        12,
+        0,
+        12
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/potted-plant.glb",
+      "position": [
+        6,
+        0,
+        9
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/wood-bench.glb",
+      "position": [
+        -5.5,
+        0,
+        12.5
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/wood-bench.glb",
+      "position": [
+        10,
+        0,
+        8
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/portal-arch.glb",
+      "position": [
+        0,
+        0,
+        -16.08
+      ],
+      "rotationY": 0,
+      "scale": 1.6
+    },
+    {
+      "model": "/assets/gallery/info-display.glb",
+      "position": [
+        -6,
+        0,
+        -16
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/info-display.glb",
+      "position": [
+        6,
+        0,
+        -16
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/gallery-wayfinding-beacon.glb",
+      "position": [
+        -15,
+        0,
+        -16.6
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/gallery-wayfinding-beacon.glb",
+      "position": [
+        15,
+        0,
+        -16.6
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/gallery-exhibit-banner.glb",
+      "position": [
+        -15,
+        0.9,
+        -17.65
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gallery-exhibit-banner.glb",
+      "position": [
+        15,
+        0.9,
+        -17.65
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/lounge-coffee-table.glb",
+      "position": [
+        -10,
+        0,
+        10
+      ],
+      "rotationY": 0
+    },
+    {
+      "model": "/assets/gallery/roof-truss-long.glb",
+      "position": [
+        0,
+        7.3362,
+        -17.65
+      ],
+      "rotationY": 0,
+      "collision": false,
+      "scale": 0.82
+    },
+    {
+      "model": "/assets/gallery/roof-truss-long.glb",
+      "position": [
+        0,
+        7.3362,
+        17.5
+      ],
+      "rotationY": 0,
+      "collision": false,
+      "scale": 0.82
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        -20.65,
+        5.02,
+        -14
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        -20.65,
+        5.02,
+        -7
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        -20.65,
+        5.02,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        -20.65,
+        5.02,
+        7
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        -20.65,
+        5.02,
+        14
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        20.65,
+        5.02,
+        -14
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        20.65,
+        5.02,
+        -7
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        20.65,
+        5.02,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        20.65,
+        5.02,
+        7
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/side-rail-long.glb",
+      "position": [
+        20.65,
+        5.02,
+        14
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/display-bay-centered.glb",
+      "position": [
+        -20.25,
+        1.4,
+        -9
+      ],
+      "rotationY": 90,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/display-bay-centered.glb",
+      "position": [
+        -20.25,
+        1.4,
+        1
+      ],
+      "rotationY": 90,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/display-bay-centered.glb",
+      "position": [
+        -20.25,
+        1.4,
+        11
+      ],
+      "rotationY": 90,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/display-bay-centered.glb",
+      "position": [
+        20.25,
+        1.4,
+        -9
+      ],
+      "rotationY": 270,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/display-bay-centered.glb",
+      "position": [
+        20.25,
+        1.4,
+        1
+      ],
+      "rotationY": 270,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/display-bay-centered.glb",
+      "position": [
+        20.25,
+        1.4,
+        11
+      ],
+      "rotationY": 270,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/high-wall-medallion.glb",
+      "position": [
+        -13,
+        4.8,
+        -17.58
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/high-wall-medallion.glb",
+      "position": [
+        13,
+        4.8,
+        -17.58
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gallery-wall-sconce.glb",
+      "position": [
+        -20.5,
+        2.32,
+        -9
+      ],
+      "rotationY": 90,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gallery-wall-sconce.glb",
+      "position": [
+        -20.5,
+        2.32,
+        1
+      ],
+      "rotationY": 90,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gallery-wall-sconce.glb",
+      "position": [
+        -20.5,
+        2.32,
+        11
+      ],
+      "rotationY": 90,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gallery-wall-sconce.glb",
+      "position": [
+        20.5,
+        2.32,
+        -9
+      ],
+      "rotationY": 270,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gallery-wall-sconce.glb",
+      "position": [
+        20.5,
+        2.32,
+        1
+      ],
+      "rotationY": 270,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gallery-wall-sconce.glb",
+      "position": [
+        20.5,
+        2.32,
+        11
+      ],
+      "rotationY": 270,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-skin-left-01.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-skin-left-02.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-skin-left-03.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-skin-left-04.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-skin-right-01.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-skin-right-02.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-skin-right-03.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-skin-right-04.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-rafter-z-01764.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-rafter-z+00000.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/roof-rafter-z+01750.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/ridge-cap.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gable-front.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gable-rear.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/portal-frame.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/globe-plinth-detail.glb",
+      "position": [
+        0,
+        0,
+        0
+      ],
+      "collision": false
+    }
+  ],
+  "portalMarkers": [
+    {
+      "position": [
+        0,
+        0,
+        -16
+      ],
+      "radius": 2,
+      "portalIndex": 0
+    }
+  ],
+  "interactables": [
+    {
+      "position": [
+        12,
+        1,
+        -9
+      ],
+      "radius": 2.2,
+      "label": "Claim collectible (demo reward)",
+      "action": "issue",
+      "class": "atlas.wearable.ring",
+      "oncePerUser": true
+    },
+    {
+      "position": [
+        -13,
+        0,
+        -8
+      ],
+      "radius": 2.4,
+      "label": "Claim Global Mail Membership",
+      "action": "issue",
+      "class": "atlas.postoffice.membership",
+      "oncePerUser": true
+    }
+  ]
+}

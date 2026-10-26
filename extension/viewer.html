@@ -43,6 +43,8 @@
   }
   button:hover { border-color: #57ab9b; }
   button:disabled { opacity: 0.4; cursor: default; }
+  input[type=range]:disabled { opacity: 0.4; cursor: not-allowed; }
+  #characterScaleNote[hidden] { display: none; }
   #closeBtn { border-color: #c05a1f; color: #e08a4c; }
   /* statusEl.textContent in viewer.js carries everything from "In sync
      with <domain> · <world>" to full trade-settlement/error messages —
@@ -1885,7 +1887,9 @@
 
       <!-- Player character size — a purely visual scale on the rendered
            character model in 3D (gltf-mini-v1) worlds (see gltf-mini.js's
-           characterScale). Doesn't affect movement speed or collision.
+           characterScale). A world that declares its own characterScale
+           overrides this setting while you are in it. Doesn't affect
+           movement speed or collision.
            No effect in 2D (procedural-v1) worlds, which have no visible
            character at all. -->
       <div class="settings-category" data-category="player-character">
@@ -1897,6 +1901,7 @@
             <input type="range" id="characterScaleInput" min="0.5" max="2" step="0.1" value="1" style="flex:1;">
             <span id="characterScaleValue" class="mono">1.0×</span>
           </label>
+          <div id="characterScaleNote" class="empty-note" hidden>This world sets its own character size, so the slider is locked here. Your saved size still applies in worlds that don't.</div>
           <!-- A live view of the character an equipped outfit/hat (see the
                wallet card's "Wear as my look"/"Wear as my hat" actions)
                actually renders as — filled in by viewer.js's openSettings()

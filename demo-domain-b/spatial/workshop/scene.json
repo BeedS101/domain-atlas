@@ -7,7 +7,8 @@
     { "type": "box", "position": [3, 0.75, -2], "size": [1.5, 1.5, 1.5], "color": "#3a5fa0", "label": "Post Office" }
   ],
   "portalMarkers": [
-    { "position": [0, 0, 4], "portalIndex": 0 }
+    { "position": [0, 0, 4], "portalIndex": 0 },
+    { "position": [5, 0, 4], "portalIndex": 1 }
   ],
   "interactables": [
     {

@@ -13,10 +13,11 @@ Each entry in `objects[]` places one GLB:
   `z' = -x sin + z cos`, the same convention as Three.js, so
   `tools/scene-editor.html` and the renderer agree).
 - `scale` is a uniform factor, default `1`. Zero or non-numeric means `1`.
-- `solid` is `true` by default. `solid: false` removes the object's collision
-  box. Use it for pieces whose bounding box is mostly empty (a wall piece with
-  a door opening, an open door leaf) and for ground cover such as lawn patches
-  whose tuft rises above the rug threshold.
+- `solid` is `true` by default. `solid: false` (or `collision: false`) removes
+  the object's collision box. Use it for pieces whose bounding box is mostly
+  empty (a wall piece with a door opening, an open door leaf), for ground cover
+  such as lawn patches whose tuft rises above the rug threshold, and for
+  decoration such as roof pieces and wall banners.
 
 The model's own origin is what lands on `position`. Models are not recentered:
 the bundled furniture kit puts the origin at a back corner (x from `0` to
@@ -59,14 +60,24 @@ are allowed.
 
 ## Character scale
 
-`characterScale` at the top level of `scene.json` is the scene's default scale
-for the player's body (the Lobby uses `0.5`, which suits its half-scale
-furniture); a missing or non-numeric value means `1`. A scale the user saved
-from the settings slider (`atlasCharacterScale`,
-`AtlasWallet.getSavedCharacterScale`, `null` until they save one) always wins,
-including a saved `1`, and the scene default is never written back to storage.
-The scale is purely visual: eye height, the player radius, collision and
-interaction radii do not depend on it.
+`characterScale` at the top level of `scene.json` is the size of the player's
+body in that scene (the Lobby uses `0.5` for its half-scale furniture, the Domain B
+Gallery `1.4`). A valid declared value is authoritative: it is applied on entry,
+a scale saved from the settings slider (`atlasCharacterScale`,
+`AtlasWallet.getSavedCharacterScale`, `null` until they save one) does not
+override it, the slider is disabled while the scene owns it, and the saved value
+is left untouched. Entering another scene applies that scene's value at once. A
+scene that declares none (missing or non-numeric) falls back to the saved
+preference, then `1`. The scene value is never written to storage.
+
+The scale only resizes the drawn character (and other visitors' characters,
+which are drawn at the scene's size). Positions, collision, the player radius,
+eye height, portals, anchors and interaction radii are never multiplied by it.
+
+In first person the eye stays at the scene's eye height while the body scales,
+so when the scaled shoulders would reach the eye line (scales above about `1.04`
+at the default `1.6` eye height) the torso and arms are not drawn; legs and
+shoes still are, and the third-person camera is unaffected.
 
 ## Camera
 

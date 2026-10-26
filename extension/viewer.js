@@ -1854,6 +1854,7 @@ const importCacheStatusEl = document.getElementById('importCacheStatus');
 const clearAllCacheBtn = document.getElementById('clearAllCacheBtn');
 const characterScaleInputEl = document.getElementById('characterScaleInput');
 const characterScaleValueEl = document.getElementById('characterScaleValue');
+const characterScaleNoteEl = document.getElementById('characterScaleNote');
 const characterPreviewCanvasEl = document.getElementById('characterPreviewCanvas');
 const walletSoundEnabledInputEl = document.getElementById('walletSoundEnabledInput'); // task #209
 const backFromSettingsBtn = document.getElementById('backFromSettingsBtn');
@@ -2426,7 +2427,7 @@ async function enterWorld(worldId, anchorId) {
   // starts, same idea as window.__atlasScene just getting overwritten below
   // for the 2D path.
   await flushCameraDistance(); // a portal hop right after scrolling must still reopen at the latest zoom
-  if (active3D) { active3D.destroy(); active3D = null; }
+  if (active3D) { active3D.destroy(); active3D = null; refreshCharacterScaleControl(); }
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
   disconnectPresence(); // leaving whichever world was active before also means leaving its presence room
   disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), but ONLY if the new world actually opted in (#111) — see refreshChatAvailability() just below
@@ -2595,8 +2596,8 @@ async function enterWorld(worldId, anchorId) {
         // use (see refreshOwnedOncePerUserClassKeys()/isOncePerUserClassOwned
         // above) — no async wallet read inside this per-frame hot path.
         isMarkerAlreadyOwned: (marker) => isOncePerUserClassOwned(manifestDomainOf(currentManifest), marker),
-        // null until the viewer picks a size themselves, so the scene's own
-        // default (scene.json characterScale) applies in the meantime.
+        // The viewer's saved size (null until they pick one). Used only by
+        // scenes that declare no characterScale; a scene's own value wins.
         characterScale: await AtlasWallet.getSavedCharacterScale(),
         // Saved scroll-wheel camera distance (0 = first person) so every
         // scene entry, including arriving through a portal, resumes the
@@ -2624,6 +2625,7 @@ async function enterWorld(worldId, anchorId) {
       });
       window.__atlasActive3D = active3D;
       await active3D.ready;
+      refreshCharacterScaleControl(); // the new scene's size owns or releases the slider immediately
       hideSceneLoadProgress(); // loading finished — the render loop is about to take over the canvas
       // Whatever's already dropped in this world (from a previous visit, or
       // another visitor) shows up right away rather than waiting for the
@@ -6767,11 +6769,26 @@ walletPanel.addEventListener('click', (e) => {
 });
 
 // The size the character is actually drawn at: the open 3D world's current
-// size (the viewer's saved choice, else that scene's default), or the saved
-// choice / global default when no 3D world is open.
+// size (the scene's own characterScale when it declares one, else the
+// viewer's saved choice), or the saved choice / global default when no 3D
+// world is open.
 async function effectiveCharacterScale() {
   if (active3D && active3D.getCharacterScale) return active3D.getCharacterScale();
   return AtlasWallet.getCharacterScale();
+}
+
+// Shows the size in effect on the Settings slider and disables it while the
+// open scene declares its own characterScale; the saved preference is left
+// untouched and applies again in any scene that does not declare one.
+async function refreshCharacterScaleControl() {
+  if (!characterScaleInputEl) return;
+  const owned = !!(active3D && active3D.isCharacterScaleSceneOwned && active3D.isCharacterScaleSceneOwned());
+  const scale = await effectiveCharacterScale();
+  characterScaleInputEl.value = String(scale);
+  characterScaleInputEl.disabled = owned;
+  if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
+  if (characterScaleNoteEl) characterScaleNoteEl.hidden = !owned;
+  if (characterPreview && characterPreview.setScale) characterPreview.setScale(scale);
 }
 
 // Reached via the top tab bar's Settings tab (settingsTabBtn below) — used
@@ -6787,11 +6804,7 @@ async function openSettings() {
   await refreshPresenceApprovalsDisplay();
   await refreshAutoBackupDisplay();
   await refreshIdentitySyncDisplay();
-  if (characterScaleInputEl) {
-    const scale = await effectiveCharacterScale();
-    characterScaleInputEl.value = String(scale);
-    if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
-  }
+  await refreshCharacterScaleControl();
   if (autoLockMinutesInput) autoLockMinutesInput.value = String(await AtlasWallet.getAutoLockMinutes());
   if (walletSoundEnabledInputEl) walletSoundEnabledInputEl.checked = await AtlasWallet.getWalletSoundEnabled();
   showWalletScreen('settingsScreen');
@@ -6823,6 +6836,7 @@ async function openSettings() {
 // currently open (active3D.setCharacterScale), same "changes should be
 // felt right away" expectation as every other live wallet setting.
 characterScaleInputEl && characterScaleInputEl.addEventListener('input', async () => {
+  if (characterScaleInputEl.disabled) return;
   const scale = await AtlasWallet.setCharacterScale(characterScaleInputEl.value);
   if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
   if (active3D && active3D.setCharacterScale) active3D.setCharacterScale(scale);

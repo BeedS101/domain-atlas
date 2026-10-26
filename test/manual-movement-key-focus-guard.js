@@ -77,7 +77,8 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     await frame.locator('#scene3d').click({ position: { x: 5, y: 5 } });
     const posBeforeSanity = await readPos();
     await page.keyboard.down('KeyW');
-    await page.waitForTimeout(200);
+    // Software GL can take several hundred ms per frame, so wait for the first movement instead of a fixed 200 ms.
+    for (let waited = 0; waited < 3000 && !moved(posBeforeSanity, await readPos()); waited += 100) await page.waitForTimeout(100);
     await page.keyboard.up('KeyW');
     const posAfterSanity = await readPos();
     if (!moved(posBeforeSanity, posAfterSanity)) throw new Error('Expected normal W movement to actually move the camera on the focused canvas');

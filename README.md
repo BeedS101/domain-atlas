@@ -76,7 +76,7 @@ domain-atlas/
 │   └── keyworld/                    a SIXTH, separately-signed key-anchored manifest (§3.6) —
 │                                      not one of the five above, reachable only via Plaza's own
 │                                      amber portal, deliberately absent from any directory
-├── demo-domain-b/                 "Neighbor Workshop" — one world, a real issuer (see below)
+├── demo-domain-b/                 "Neighbor Workshop" + "Atlas Showcase Gallery" — TWO worlds, a real issuer (see below)
 ├── tools/                         scene-editor.html — a standalone editor for gltf-mini scenes
 └── test/
     ├── verify.js                  proves the manifest/portal mechanism
@@ -150,7 +150,7 @@ Confirm both are up:
 ```bash
 curl http://localhost:8001/.well-known/spatial.json      # five worlds: plaza, museum, arena, market, lobby
 curl http://localhost:8001/.well-known/atlas-key.json    # domain A's real public key
-curl http://localhost:8002/.well-known/spatial.json      # one world: workshop
+curl http://localhost:8002/.well-known/spatial.json      # two worlds: workshop (default), gallery
 curl http://localhost:8002/.well-known/atlas-key.json    # domain B's real public key — a SEPARATE keypair from domain A's
 ```
 
