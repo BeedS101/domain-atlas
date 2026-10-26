@@ -112,15 +112,26 @@ floor ring and a tall cross-shaped beacon there. `"hideMarker": true` skips
 only that drawing; the trigger is unchanged. A scene that places its own portal
 model at the marker sets it so the placeholder does not show through.
 
-The Lobby does this with `/assets/portals/townPortal.glb`: a stone gate with a
-textured portal surface and a destination plaque, placed at the marker with
-`rotationY: 180` (front toward the room) and `solid: false`. A piece with an
-opening cannot be one collision box (collision is the model's whole bounding
-box), so the gate has none and the opening stays walkable. The plaque text is
-the portal's `label` from the manifest.
-`tools/make-town-portal-glb.js` regenerates the GLB and its embedded PNG
-textures (`--label "TEXT"` overrides the plaque; letters, digits-free A-Z, `-`,
-`.` and space are available).
+The Lobby and the Gallery do this with a stone gate that has a textured portal
+surface and a destination plaque: `/assets/portals/townPortal.glb` (Lobby, placed
+at its marker with `rotationY: 180`, front toward the room) and
+`/assets/portals/galleryPortal.glb` (Gallery, `rotationY: 0`, `scale: 3`). Both
+use `solid: false`: a piece with an opening cannot be one collision box
+(collision is the model's whole bounding box), so the gate has none and the
+opening stays walkable. The plaque text is the portal's `label` from the
+manifest, on one line or split over two when it is long.
+
+A gate's colour follows the viewer's portal scheme, the same one the 2D worlds
+use: orange for a portal to another world of the same domain, blue for a
+portal to another domain, amber for a key-anchored portal. Both bundled gates
+lead to worlds on their own domain and are orange.
+
+`tools/make-town-portal-glb.js` regenerates the GLBs and their embedded PNG
+textures. `--only townPortal|galleryPortal` builds one, `--palette
+same-domain|cross-domain|key` picks the colour scheme for a different kind of
+destination, and `--label "TEXT"` overrides the plaque (letters A-Z, `-`, `.`
+and space are available). A new gate for another portal is one more entry in
+the script's `TARGETS` (output path, manifest, world and portal index, palette).
 
 ## Textures
 

@@ -620,14 +620,15 @@
       "rotationY": 0
     },
     {
-      "model": "/assets/gallery/portal-arch.glb",
+      "model": "/assets/portals/galleryPortal.glb",
       "position": [
         0,
         0,
-        -16.08
+        -15.8
       ],
       "rotationY": 0,
-      "scale": 1.6
+      "scale": 3,
+      "solid": false
     },
     {
       "model": "/assets/gallery/info-display.glb",
@@ -1120,7 +1121,8 @@
         -16
       ],
       "radius": 2,
-      "portalIndex": 0
+      "portalIndex": 0,
+      "hideMarker": true
     }
   ],
   "interactables": [

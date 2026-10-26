@@ -1,33 +1,36 @@
 #!/usr/bin/env node
-// Generates demo-domain-a/assets/portals/townPortal.glb: a low-poly stone
-// travel gate for the Lobby's exit portal. Everything is original and made in
-// this script: the textures are drawn procedurally, encoded as PNG and
-// embedded in the GLB (no external files, no absolute paths), and the output
-// is deterministic.
+// Generates the low-poly stone travel gates that stand on a world's portal:
+//   demo-domain-a/assets/portals/townPortal.glb      (Lobby -> Plaza)
+//   demo-domain-b/assets/portals/galleryPortal.glb   (Gallery -> Workshop)
+// Everything is original and made in this script: the textures are drawn
+// procedurally, encoded as PNG and embedded in the GLB (no external files, no
+// absolute paths), and the output is deterministic.
 //
 // Model space: metres, origin at the centre of the base, y up, the front of
 // the gate faces +z (scene `rotationY` 0 faces +z). The gate is 1.9 wide and
-// 2.0 tall; the walk-through opening is 1.0 wide and about 1.4 tall.
+// 2.0 tall; the walk-through opening is 1.0 wide and about 1.4 tall. A scene
+// scales it with the object's `scale`.
 //
 // Materials (all opaque, base-colour textures only, TEXCOORD_0):
 //   stone      tileable masonry, repeat sampler
-//   reveal     the same stone image tinted blue-grey for the inner faces
+//   reveal     the same stone image tinted toward the portal colour, for the inner faces
 //   runes      pillar fronts: stone with a carved border and rune column
 //   surface    the portal itself: oval swirl with rings and rune ticks
 //   plaque     the destination label, drawn with a built-in 5x7 pixel font
 //
-// The plaque text is the Lobby portal's label from
-// demo-domain-a/.well-known/spatial.json (world "lobby", portal 0), so the
-// sign matches the destination. Override with --label "TEXT".
+// The portal surface follows the viewer's portal colours (orange: another
+// world of the same domain, blue: another domain, amber: key-anchored). The
+// plaque text is the label of the portal the gate stands on, read from that
+// domain's manifest (see TARGETS), on one line or split over two.
 //
-// Usage: node tools/make-town-portal-glb.js [--label "TEXT"]
+// Usage: node tools/make-town-portal-glb.js [--only townPortal|galleryPortal]
+//                                           [--label "TEXT"] [--palette same-domain|cross-domain|key]
 
 const fs = require('fs');
 const path = require('path');
 const { buildMultiGlb, makePng } = require('./lib/glb-builder');
 
 const REPO = path.resolve(__dirname, '..');
-const OUT = path.join(REPO, 'demo-domain-a', 'assets', 'portals', 'townPortal.glb');
 
 // ---------- deterministic noise ----------
 
@@ -143,16 +146,32 @@ function pillarTexture() {
 
 // ---------- portal surface ----------
 
-function surfaceTexture() {
+// Portal colours follow the viewer's portal scheme: orange for a portal to
+// another world of the same domain, blue for a portal to another domain, amber
+// for a key-anchored portal.
+const PALETTES = {
+  'same-domain': {
+    ramp: [[0.0, [255, 248, 225]], [0.1, [255, 214, 120]], [0.32, [255, 160, 60]], [0.58, [232, 110, 38]], [0.8, [178, 70, 32]], [1.0, [70, 26, 18]]],
+    tick: [255, 240, 200], ring: [255, 226, 172], edge: [50, 18, 10], star: [255, 255, 240], core: [255, 250, 230],
+    reveal: [0.9, 0.72, 0.58]
+  },
+  'cross-domain': {
+    ramp: [[0.0, [236, 252, 255]], [0.1, [150, 238, 255]], [0.32, [56, 190, 240]], [0.58, [48, 100, 226]], [0.8, [118, 62, 214]], [1.0, [36, 18, 96]]],
+    tick: [220, 246, 255], ring: [200, 240, 255], edge: [30, 14, 80], star: [255, 255, 255], core: [255, 255, 255],
+    reveal: [0.62, 0.66, 0.9]
+  },
+  key: {
+    ramp: [[0.0, [255, 252, 225]], [0.1, [255, 234, 140]], [0.32, [244, 196, 66]], [0.58, [204, 148, 34]], [0.8, [146, 96, 22]], [1.0, [52, 32, 8]]],
+    tick: [255, 246, 210], ring: [255, 236, 170], edge: [40, 24, 6], star: [255, 255, 235], core: [255, 252, 232],
+    reveal: [0.92, 0.82, 0.58]
+  }
+};
+
+function surfaceTexture(palette) {
+  const pal = PALETTES[palette];
+  if (!pal) throw new Error('Unknown palette ' + JSON.stringify(palette));
   const S = 256;
-  const ramp = [
-    [0.0, [236, 252, 255]],
-    [0.1, [150, 238, 255]],
-    [0.32, [56, 190, 240]],
-    [0.58, [48, 100, 226]],
-    [0.8, [118, 62, 214]],
-    [1.0, [36, 18, 96]]
-  ];
+  const ramp = pal.ramp;
   const rampAt = (t) => {
     for (let i = 0; i + 1 < ramp.length; i++) {
       if (t <= ramp[i + 1][0]) return mixRgb(ramp[i][1], ramp[i + 1][1], (t - ramp[i][0]) / (ramp[i + 1][0] - ramp[i][0]));
@@ -162,8 +181,7 @@ function surfaceTexture() {
   return makePng(S, S, (x, y) => {
     const dx = ((x + 0.5) / S - 0.5) * 2, dy = ((y + 0.5) / S - 0.5) * 2;
     const r = Math.hypot(dx, dy), th = Math.atan2(dy, dx);
-    let t = clamp01(r);
-    let col = rampAt(t);
+    let col = rampAt(clamp01(r));
     // spiral arms and fine rings
     const arms = Math.sin(th * 5 + r * 16) * 0.5 + 0.5;
     const rings = Math.sin(r * 46) * 0.5 + 0.5;
@@ -175,16 +193,16 @@ function surfaceTexture() {
       const slot = Math.floor(((th + Math.PI) / (Math.PI * 2)) * 16);
       const within = ((th + Math.PI) / (Math.PI * 2)) * 16 - slot;
       const tick = within > 0.42 && within < 0.58 && (hash(slot, 3, 31) > 0.35 || r > 0.78);
-      if (tick) col = mixRgb(col, [220, 246, 255], 0.85);
+      if (tick) col = mixRgb(col, pal.tick, 0.85);
     }
     // bright thin ring and dark outer edge
-    if (Math.abs(r - 0.9) < 0.012) col = mixRgb(col, [200, 240, 255], 0.9);
-    if (r > 0.94) col = mixRgb(col, [30, 14, 80], clamp01((r - 0.94) / 0.05));
+    if (Math.abs(r - 0.9) < 0.012) col = mixRgb(col, pal.ring, 0.9);
+    if (r > 0.94) col = mixRgb(col, pal.edge, clamp01((r - 0.94) / 0.05));
     // stars
     const star = hash(x >> 1, y >> 1, 41);
-    if (star > 0.985 && r > 0.18 && r < 0.9) col = mixRgb(col, [255, 255, 255], 0.8);
+    if (star > 0.985 && r > 0.18 && r < 0.9) col = mixRgb(col, pal.star, 0.8);
     // bright core
-    if (r < 0.1) col = mixRgb(col, [255, 255, 255], (0.1 - r) / 0.1);
+    if (r < 0.1) col = mixRgb(col, pal.core, (0.1 - r) / 0.1);
     return toPx(col);
   });
 }
@@ -223,28 +241,52 @@ const FONT = {
   ' ': ['.....', '.....', '.....', '.....', '.....', '.....', '.....']
 };
 
+// Splits a label into at most two lines at a space, as evenly as possible.
+function splitLabel(text) {
+  const words = text.split(' ');
+  let best = null;
+  for (let i = 1; i < words.length; i++) {
+    const a = words.slice(0, i).join(' '), b = words.slice(i).join(' ');
+    const worst = Math.max(a.length, b.length);
+    if (!best || worst < best.worst) best = { lines: [a, b], worst };
+  }
+  return best ? best.lines : [text];
+}
+
 function plaqueTexture(label) {
   const W = 512, H = 128;
   const text = label.toUpperCase();
   for (const ch of text) if (!FONT[ch]) throw new Error('Plaque font has no glyph for ' + JSON.stringify(ch) + ' in label ' + JSON.stringify(label));
-  // Largest whole-pixel scale at which the text fits inside the plate margins.
-  const maxWidth = W - 2 * 36;
-  let scale = 8;
-  const widthAt = (s) => text.length * 6 * s - s;
-  while (scale > 1 && widthAt(scale) > maxWidth) scale--;
-  if (widthAt(scale) > maxWidth) throw new Error('Label too long for the plaque: ' + label);
-  const tw = widthAt(scale), th = 7 * scale;
-  const ox = Math.round((W - tw) / 2), oy = Math.round((H - th) / 2);
+  // The label goes on one line when it can be drawn at scale 3 or more,
+  // otherwise on two. The scale is the largest whole-pixel one that fits.
+  const maxWidth = W - 2 * 36, maxHeight = H - 2 * 24;
+  const widthOf = (line, s) => line.length * 6 * s - s;
+  const fit = (lines) => {
+    for (let s = 8; s >= 1; s--) {
+      const h = lines.length * 7 * s + (lines.length - 1) * 2 * s;
+      if (h <= maxHeight && lines.every((l) => widthOf(l, s) <= maxWidth)) return s;
+    }
+    return 0;
+  };
+  let lines = [text], scale = fit(lines);
+  if (scale < 3) { lines = splitLabel(text); scale = fit(lines); }
+  if (!scale) throw new Error('Label too long for the plaque: ' + label);
+  const th = lines.length * 7 * scale + (lines.length - 1) * 2 * scale;
+  const oy = Math.round((H - th) / 2);
   const ink = new Uint8Array(W * H);
-  for (let i = 0; i < text.length; i++) {
-    const g = FONT[text[i]];
-    for (let gy = 0; gy < 7; gy++) for (let gx = 0; gx < 5; gx++) {
-      if (g[gy][gx] !== '#') continue;
-      for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) {
-        ink[(oy + gy * scale + sy) * W + ox + i * 6 * scale + gx * scale + sx] = 1;
+  lines.forEach((line, li) => {
+    const ox = Math.round((W - widthOf(line, scale)) / 2);
+    const ly = oy + li * 9 * scale;
+    for (let i = 0; i < line.length; i++) {
+      const g = FONT[line[i]];
+      for (let gy = 0; gy < 7; gy++) for (let gx = 0; gx < 5; gx++) {
+        if (g[gy][gx] !== '#') continue;
+        for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) {
+          ink[(ly + gy * scale + sy) * W + ox + i * 6 * scale + gx * scale + sx] = 1;
+        }
       }
     }
-  }
+  });
   const at = (x, y) => (x < 0 || y < 0 || x >= W || y >= H ? 0 : ink[y * W + x]);
   return makePng(W, H, (x, y) => {
     // dark slate plate with a lit bevel and a thin inner border line
@@ -295,7 +337,7 @@ function addBox(mesh, min, max, faces) {
 const OPEN_HALF = 0.5, OPEN_BOTTOM = 0.07, SHOULDER_Y = 1.2, OPEN_TOP = 1.5, TOP_HALF = 0.3;
 const PILLAR_OUT = 0.85, PILLAR_Z = 0.18;
 
-function buildGeometry(label) {
+function buildGeometry(label, palette) {
   const stone = new Mesh(), reveal = new Mesh(), runes = new Mesh(), surface = new Mesh(), plaque = new Mesh(), plaqueFrame = stone;
 
   // plinth and pillar bases
@@ -357,27 +399,47 @@ function buildGeometry(label) {
   const stoneBytes = stoneTexture();
   return [
     stone.spec('stone', { texture: { bytes: stoneBytes, mimeType: 'image/png', sampler: REPEAT } }),
-    reveal.spec('reveal', { baseColorFactor: [0.62, 0.66, 0.9, 1], texture: { bytes: stoneBytes, mimeType: 'image/png', sampler: REPEAT } }),
+    reveal.spec('reveal', { baseColorFactor: [...PALETTES[palette].reveal, 1], texture: { bytes: stoneBytes, mimeType: 'image/png', sampler: REPEAT } }),
     runes.spec('pillarRunes', { texture: { bytes: pillarTexture(), mimeType: 'image/png', sampler: CLAMP } }),
     plaque.spec('plaque', { texture: { bytes: plaqueTexture(label), mimeType: 'image/png', sampler: CLAMP } }),
-    surface.spec('portalSurface', { texture: { bytes: surfaceTexture(), mimeType: 'image/png', sampler: CLAMP } })
+    surface.spec('portalSurface', { texture: { bytes: surfaceTexture(palette), mimeType: 'image/png', sampler: CLAMP } })
   ];
 }
 
-function lobbyPortalLabel() {
-  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'demo-domain-a', '.well-known', 'spatial.json'), 'utf8'));
-  const lobby = manifest.worlds.find((w) => w.id === 'lobby');
-  if (!lobby || !lobby.portals || !lobby.portals[0] || !lobby.portals[0].label) throw new Error('Lobby portal 0 has no label in the manifest');
-  return lobby.portals[0].label;
+// The gates this script produces. Each plaque shows the label of the portal
+// the gate stands on, read from that domain's manifest, and the portal colours
+// follow the portal's kind.
+const TARGETS = [
+  { name: 'townPortal', out: path.join('demo-domain-a', 'assets', 'portals', 'townPortal.glb'), domain: 'demo-domain-a', world: 'lobby', portal: 0, palette: 'same-domain' },
+  { name: 'galleryPortal', out: path.join('demo-domain-b', 'assets', 'portals', 'galleryPortal.glb'), domain: 'demo-domain-b', world: 'gallery', portal: 0, palette: 'same-domain' }
+];
+
+function portalLabel(target) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, target.domain, '.well-known', 'spatial.json'), 'utf8'));
+  const world = manifest.worlds.find((w) => w.id === target.world);
+  const portal = world && world.portals && world.portals[target.portal];
+  if (!portal || !portal.label) throw new Error(target.world + ' portal ' + target.portal + ' has no label in the ' + target.domain + ' manifest');
+  return portal.label;
+}
+
+function buildTarget(target, overrides) {
+  const label = (overrides && overrides.label) || portalLabel(target);
+  const palette = (overrides && overrides.palette) || target.palette;
+  return { label, palette, glb: buildMultiGlb({ name: target.name, primitives: buildGeometry(label, palette) }) };
 }
 
 if (require.main === module) {
-  const argIdx = process.argv.indexOf('--label');
-  const label = argIdx > 0 ? process.argv[argIdx + 1] : lobbyPortalLabel();
-  const glb = buildMultiGlb({ name: 'townPortal', primitives: buildGeometry(label) });
-  fs.mkdirSync(path.dirname(OUT), { recursive: true });
-  fs.writeFileSync(OUT, glb);
-  console.log('wrote ' + OUT + ' (' + glb.length + ' bytes), plaque: ' + JSON.stringify(label));
+  const arg = (name) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
+  const only = arg('--only');
+  const targets = TARGETS.filter((t) => !only || t.name === only);
+  if (!targets.length) throw new Error('No gate named ' + only + '; known: ' + TARGETS.map((t) => t.name).join(', '));
+  targets.forEach((t) => {
+    const { label, palette, glb } = buildTarget(t, { label: arg('--label'), palette: arg('--palette') });
+    const out = path.join(REPO, t.out);
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(out, glb);
+    console.log('wrote ' + t.out + ' (' + glb.length + ' bytes), plaque ' + JSON.stringify(label) + ', ' + palette + ' colours');
+  });
 }
 
-module.exports = { buildGeometry, lobbyPortalLabel, plaqueTexture, surfaceTexture, stoneTexture, pillarTexture };
+module.exports = { TARGETS, PALETTES, buildGeometry, buildTarget, portalLabel, plaqueTexture, surfaceTexture, stoneTexture, pillarTexture };

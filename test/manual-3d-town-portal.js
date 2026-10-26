@@ -1,8 +1,9 @@
-// Browser checks for the Lobby's textured portal gate (townPortal.glb) through
-// previewModel(). Needs a display (run under xvfb-run); WebGL is SwiftShader.
+// Browser checks for the textured portal gates (townPortal.glb, galleryPortal.glb)
+// through previewModel(). Needs a display (run under xvfb-run); WebGL is SwiftShader.
 //
-//   1. The GLB loads and its embedded textures render: stone, the portal
-//      surface (blue/violet/cyan), the plaque (dark plate, gold lettering).
+//   1. Each GLB loads and its embedded textures render: stone, the portal
+//      surface (orange: both gates lead to a world on their own domain), the
+//      plaque (dark plate, gold lettering, one or two lines).
 //   2. Orientation: the plaque text correlates with its own image the right
 //      way round and not mirrored, flipped or rotated; the portal opening is
 //      where the geometry puts it.
@@ -18,10 +19,13 @@ const path = require('path');
 const assert = require('assert');
 
 const REPO = path.resolve(__dirname, '..');
-const GLB = fs.readFileSync(path.join(REPO, 'demo-domain-a', 'assets', 'portals', 'townPortal.glb'));
+const GLBS = [
+  { name: 'townPortal', file: path.join(REPO, 'demo-domain-a', 'assets', 'portals', 'townPortal.glb') },
+  { name: 'galleryPortal', file: path.join(REPO, 'demo-domain-b', 'assets', 'portals', 'galleryPortal.glb') }
+];
 const SIZE = 640;
 
-function embeddedImage(materialName) {
+function embeddedImage(GLB, materialName) {
   const jsonLen = GLB.readUInt32LE(12);
   const json = JSON.parse(GLB.subarray(20, 20 + jsonLen).toString('utf8'));
   const binStart = 20 + jsonLen + 8;
@@ -91,7 +95,7 @@ const html = `<!doctype html><html><body style="margin:0;background:#000">
     const rw = px1 - px0 + 1, rh = py1 - py0 + 1;
     const img = await createImageBitmap(new Blob([toBuffer(plaqueB64)], { type: 'image/png' }));
     // The lettering is compared as a coarse grid of ink density over the
-    // text's own bounding box (7 glyph rows x 51 columns): tolerant of a pixel
+    // text's own bounding box (15 rows x 51 columns, enough for two lines of glyphs): tolerant of a pixel
     // or two of misregistration, but a mirrored, flipped or rotated line of
     // text produces a clearly different grid.
     const inkGrid = (data, w, h, shrink) => {
@@ -105,7 +109,7 @@ const html = `<!doctype html><html><body style="margin:0;background:#000">
       const thr = lo + 0.5 * (hi - lo);
       let bx0 = w, bx1 = -1, by0 = h, by1 = -1;
       for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (l[y * w + x] > thr) { bx0 = Math.min(bx0, x); bx1 = Math.max(bx1, x); by0 = Math.min(by0, y); by1 = Math.max(by1, y); }
-      const COLS = 51, ROWS = 7;
+      const COLS = 51, ROWS = 15;
       const grid = new Float64Array(COLS * ROWS), cnt = new Float64Array(COLS * ROWS);
       for (let y = by0; y <= by1; y++) for (let x = bx0; x <= bx1; x++) {
         const gc = Math.min(COLS - 1, Math.floor((x - bx0) / (bx1 - bx0 + 1) * COLS)), gr = Math.min(ROWS - 1, Math.floor((y - by0) / (by1 - by0 + 1) * ROWS));
@@ -148,35 +152,39 @@ const html = `<!doctype html><html><body style="margin:0;background:#000">
     args: ['--no-sandbox', '--use-gl=swiftshader', '--enable-webgl', '--ignore-gpu-blocklist']
   });
   try {
-    const page = await browser.newPage({ viewport: { width: SIZE, height: SIZE } });
-    const errors = [];
-    page.on('pageerror', (e) => errors.push(String(e)));
-    await page.setContent(html);
+    for (const G of GLBS) {
+      const GLB = fs.readFileSync(G.file);
+      const page = await browser.newPage({ viewport: { width: SIZE, height: SIZE } });
+      const errors = [];
+      page.on('pageerror', (e) => errors.push(String(e)));
+      await page.setContent(html);
 
-    const r = await page.evaluate(([g, p]) => window.__render(g, p), [GLB.toString('base64'), embeddedImage('plaque').toString('base64')]);
-    const w = r.box.maxX - r.box.minX + 1, h = r.box.maxY - r.box.minY + 1;
-    console.log('rendered gate box', JSON.stringify(r.box), 'samples', JSON.stringify(r.samples), 'plaque grid correlation', JSON.stringify(r.best));
+      const r = await page.evaluate(([g, p]) => window.__render(g, p), [GLB.toString('base64'), embeddedImage(GLB, 'plaque').toString('base64')]);
+      const w = r.box.maxX - r.box.minX + 1, h = r.box.maxY - r.box.minY + 1;
+      console.log(G.name + ': rendered gate box', JSON.stringify(r.box), 'samples', JSON.stringify(r.samples), 'plaque grid correlation', JSON.stringify(r.best));
 
-    // ---- 1. textures render ----
-    assert(w > 250 && h > 250, 'the gate is drawn, got ' + w + 'x' + h);
-    const s = r.samples;
-    const isBlueViolet = (c) => c[2] > 90 && c[2] > c[0] + 15 && c[2] > c[1] - 5;
-    ['portalCentre', 'portalUpper', 'portalLeft', 'portalRight'].forEach((k) => assert(isBlueViolet(s[k]), k + ' must be the blue/violet/cyan portal texture, got ' + s[k]));
-    const isStone = (c) => c[0] > 70 && c[0] >= c[1] && c[1] >= c[2] && c[0] - c[2] > 25;
-    ['lintel', 'base'].forEach((k) => assert(isStone(s[k]), k + ' must be warm stone, got ' + s[k]));
-    console.log('PASS: embedded textures render: stone on the frame, blue/violet portal surface in the opening');
+      // ---- 1. textures render ----
+      assert(w > 250 && h > 250, G.name + ': the gate is drawn, got ' + w + 'x' + h);
+      const s = r.samples;
+      const isOrange = (c) => c[0] > 110 && c[0] >= c[1] && c[1] > c[2] + 10 && c[0] - c[2] > 70;
+      const isStone = (c) => c[0] > 70 && c[0] >= c[1] && c[1] >= c[2] && c[0] - c[2] > 25 && c[0] - c[2] <= 70;
+      ['portalCentre', 'portalUpper', 'portalLeft', 'portalRight'].forEach((k) => assert(isOrange(s[k]), G.name + ': ' + k + ' must be the orange portal texture, got ' + s[k]));
+      ['lintel', 'base'].forEach((k) => assert(isStone(s[k]), G.name + ': ' + k + ' must be warm stone, got ' + s[k]));
+      console.log('PASS: ' + G.name + ': embedded textures render: stone on the frame, orange portal surface in the opening');
 
-    // ---- 2. orientation ----
-    assert(r.best.normal > 0.7, 'plaque lettering should match its image, correlation ' + r.best.normal);
-    ['mirrored', 'flipped', 'rotated'].forEach((k) => assert(r.best.normal > r.best[k] + 0.15, 'plaque matches the upright image (' + r.best.normal.toFixed(2) + ') clearly better than the ' + k + ' one (' + r.best[k].toFixed(2) + ')'));
-    console.log('PASS: the plaque is upright and unmirrored (ink correlation ' + r.best.normal.toFixed(2) + ' vs mirrored ' + r.best.mirrored.toFixed(2) + ', flipped ' + r.best.flipped.toFixed(2) + ')');
+      // ---- 2. orientation ----
+      assert(r.best.normal > 0.7, G.name + ': plaque lettering should match its image, correlation ' + r.best.normal);
+      ['mirrored', 'flipped', 'rotated'].forEach((k) => assert(r.best.normal > r.best[k] + 0.15, G.name + ': plaque matches the upright image (' + r.best.normal.toFixed(2) + ') clearly better than the ' + k + ' one (' + r.best[k].toFixed(2) + ')'));
+      console.log('PASS: ' + G.name + ': the plaque is upright and unmirrored (ink correlation ' + r.best.normal.toFixed(2) + ' vs mirrored ' + r.best.mirrored.toFixed(2) + ', flipped ' + r.best.flipped.toFixed(2) + ')');
 
-    // ---- 3. clean ----
-    const c = await page.evaluate(() => window.__counts());
-    assert(errors.length === 0, 'no page errors: ' + errors.join(' | '));
-    assert(!c.warnings.some((m) => /texture|image/i.test(m)), 'no texture warnings: ' + c.warnings.join(' | '));
-    assert(c.created > 0 && c.created === c.deleted, 'GL textures created (' + c.created + ') and deleted (' + c.deleted + ') balance');
-    console.log('PASS: no page errors or texture warnings; ' + c.created + ' GL textures created, all deleted on dispose()');
+      // ---- 3. clean ----
+      const c = await page.evaluate(() => window.__counts());
+      assert(errors.length === 0, G.name + ': no page errors: ' + errors.join(' | '));
+      assert(!c.warnings.some((m) => /texture|image/i.test(m)), G.name + ': no texture warnings: ' + c.warnings.join(' | '));
+      assert(c.created > 0 && c.created === c.deleted, G.name + ': GL textures created (' + c.created + ') and deleted (' + c.deleted + ') balance');
+      console.log('PASS: ' + G.name + ': no page errors or texture warnings; ' + c.created + ' GL textures created, all deleted on dispose()');
+      await page.close();
+    }
 
     console.log('\nALL TOWN PORTAL PREVIEW CHECKS PASSED');
   } catch (err) {

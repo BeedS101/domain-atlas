@@ -172,7 +172,7 @@ const png = quadrantPng();
       assert(Array.isArray(p.color) && p.color.length === 4, path.basename(f) + ' keeps its flat colour');
     });
   });
-  assert.deepStrictEqual(textured.sort(), ['textureTestBoard.glb', 'townPortal.glb'], 'only the two deliberate models carry images');
+  assert.deepStrictEqual(textured.sort(), ['galleryPortal.glb', 'textureTestBoard.glb', 'townPortal.glb'], 'only the deliberate models carry images');
   pass('all ' + (files.length - textured.length) + ' other bundled GLBs still extract as untextured models with their flat colours (textured: ' + textured.join(', ') + ')');
 }
 

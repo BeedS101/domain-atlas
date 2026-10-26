@@ -71,7 +71,13 @@ pass('Workshop scene, Post Office and its interactable are unchanged');
 const GALLERY_DIR = path.join(B, 'assets', 'gallery');
 const models = [...new Set(gallery.objects.map((o) => o.model))];
 assert(models.length > 0 && gallery.objects.length > 0);
+// The portal gate is the one model outside /assets/gallery/ (shared gate kit under /assets/portals/).
+const PORTAL_GATE = '/assets/portals/galleryPortal.glb';
 models.forEach((m) => {
+  if (m === PORTAL_GATE) {
+    assert.strictEqual(fs.readFileSync(path.join(B, m.replace(/^\//, ''))).slice(0, 4).toString(), 'glTF', m + ' is not a GLB');
+    return;
+  }
   assert(/^\/assets\/gallery\/[^/]+\.glb$/.test(m), 'Gallery model must be /assets/gallery/<file>.glb, got ' + m);
   assert(fs.existsSync(path.join(GALLERY_DIR, path.basename(m))), 'Gallery model file is missing: ' + m);
   assert.strictEqual(fs.readFileSync(path.join(GALLERY_DIR, path.basename(m))).slice(0, 4).toString(), 'glTF', m + ' is not a GLB');
@@ -82,7 +88,7 @@ fs.readdirSync(GALLERY_DIR).forEach((f) => assert(f.endsWith('.glb'), 'unexpecte
 const stray = [];
 (function walk(d) { fs.readdirSync(d, { withFileTypes: true }).forEach((e) => { if (e.isDirectory()) { if (/^(gallery-v\d|normalized|architecture-v\d)/.test(e.name)) stray.push(path.join(d, e.name)); walk(path.join(d, e.name)); } }); })(B);
 assert.deepStrictEqual(stray, [], 'old test asset folders must not be in the repo');
-pass('all ' + gallery.objects.length + ' Gallery objects (' + models.length + ' models) resolve to GLBs under /assets/gallery/; no old test paths or folders');
+pass('all ' + gallery.objects.length + ' Gallery objects (' + models.length + ' models) resolve to GLBs under /assets/gallery/ (plus the /assets/portals/ gate); no old test paths or folders');
 
 // ---- character scale owned by the scene ----
 assert.strictEqual(gallery.characterScale, 1.4, 'the Gallery declares characterScale 1.4');

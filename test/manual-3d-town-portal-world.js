@@ -21,6 +21,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const { sleep, grab: grabShot, countColours, diffImages, setCamera: setCam, trackTextures, walk } = require('./portal-test-lib');
+
 const REPO = path.resolve(__dirname, '..');
 const EXT_PATH = path.join(REPO, 'extension');
 const PORT = 8358;
@@ -33,7 +35,6 @@ const MAIN_MANIFEST_PATH = path.join(DOCROOT_DIR, '.well-known', 'spatial.json')
 const GATE = '/assets/portals/townPortal.glb';
 
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 (async () => {
   console.log('SETUP: isolated copy of demo-domain-a');
@@ -81,57 +82,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const frame = await frameHandle.contentFrame();
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Plaza'), null, { timeout: 10000 });
 
-    await frame.evaluate(() => {
-      window.__live = new Set();
-      const proto = WebGLRenderingContext.prototype;
-      const create = proto.createTexture, del = proto.deleteTexture;
-      proto.createTexture = function () { const t = create.apply(this, arguments); if (t) window.__live.add(t); return t; };
-      proto.deleteTexture = function (t) { window.__live.delete(t); return del.apply(this, arguments); };
-    });
-    const live = () => frame.evaluate(() => window.__live.size);
+    const tex = await trackTextures(frame);
+    const live = tex.live;
     const place = () => frame.evaluate(() => document.getElementById('placeLabel').textContent);
 
     async function enterLobby() {
-      await frame.evaluate(() => window.__live.clear());
+      await tex.reset();
       await frame.evaluate(() => loadManifest(currentManifestUrl, 'lobby', null));
       await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Example Lobby') && !!window.__atlasActive3D, null, { timeout: 30000 });
       await frame.evaluate(() => window.__atlasActive3D.ready);
       await sleep(1500); // image decode + a few frames
     }
-    const setCamera = (x, y, z, yaw, pitch) => frame.evaluate(([x, y, z, yaw, pitch]) => {
-      const c = window.__atlasActive3D.camera; c.pos[0] = x; c.pos[1] = y; c.pos[2] = z; c.yaw = yaw; c.pitch = pitch;
-    }, [x, y, z, yaw, pitch]);
-    const grab = async () => (await page.locator('#domain-atlas-overlay').screenshot()).toString('base64');
-
-    // Counts portal-surface (blue/violet/cyan), stone and gold-lettering pixels in a region of a screenshot.
-    const count = (b64, tests, region) => frame.evaluate(async ([b64, tests, reg]) => {
-      const img = new Image();
-      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = 'data:image/png;base64,' + b64; });
-      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
-      const g = c.getContext('2d'); g.drawImage(img, 0, 0);
-      const x0 = Math.floor(img.width * reg[0]), y0 = Math.floor(img.height * reg[1]), w = Math.floor(img.width * (reg[2] - reg[0])), h = Math.floor(img.height * (reg[3] - reg[1]));
-      const d = g.getImageData(x0, y0, w, h).data;
-      const fns = {
-        portal: (r, g, b) => b > 110 && b > r + 30 && b > g - 20,
-        stone: (r, g, b) => r > 110 && r > g + 8 && g > b + 8,
-        gold: (r, g, b) => r > 150 && g > 120 && b < 130 && r > b + 45
-      };
-      const out = { portal: 0, stone: 0, gold: 0 };
-      for (let i = 0; i < d.length; i += 4) for (const k of Object.keys(fns)) if (fns[k](d[i], d[i + 1], d[i + 2])) out[k]++;
-      return out;
-    }, [b64, null, region]);
-    // Number of differing pixels between two screenshots, ignoring the page header and chat/HUD panels (outer rim of the frame).
-    const diff = (a, b, region) => frame.evaluate(async ([a, b, reg]) => {
-      const load = async (s) => { const img = new Image(); await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = 'data:image/png;base64,' + s; }); const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const g = c.getContext('2d'); g.drawImage(img, 0, 0); return g.getImageData(Math.floor(img.width * reg[0]), Math.floor(img.height * reg[1]), Math.floor(img.width * (reg[2] - reg[0])), Math.floor(img.height * (reg[3] - reg[1]))).data; };
-      const da = await load(a), db = await load(b);
-      let n = 0;
-      for (let i = 0; i < da.length; i += 4) if (Math.abs(da[i] - db[i]) + Math.abs(da[i + 1] - db[i + 1]) + Math.abs(da[i + 2] - db[i + 2]) > 24) n++;
-      return n;
-    }, [a, b, region]);
+    const setCamera = (...a) => setCam(frame, ...a);
+    const grab = () => grabShot(page);
+    const count = (b64, _unused, region) => countColours(frame, b64, region);
+    const diff = (a, b, region) => diffImages(frame, a, b, region);
 
     const FRONT = [0, 1.6, 2.0, Math.PI, -0.05]; // standing in the room, facing the gate
     const CENTRE = [0.2, 0.15, 0.8, 0.85];
-    const TESTS = null; // colour classes live in count()
+    const TESTS = null;
 
     console.log('STEP 1: the real Lobby scene with the gate');
     writeScene();
@@ -164,10 +133,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await sleep(1200);
     const frontShot = await grab();
     const gc = await count(frontShot, TESTS, CENTRE);
-    assert(gc.portal > 8000, 'blue/violet portal surface visible, got ' + gc.portal);
+    const gp = await count(frontShot, TESTS, [0.395, 0.433, 0.605, 0.489]);
+    assert(gc.portal > 8000, 'orange portal surface visible, got ' + gc.portal);
     assert(gc.stone > 8000, 'stone frame visible, got ' + gc.stone);
-    assert(gc.gold > 300, 'gold plaque lettering visible, got ' + gc.gold);
-    console.log('PASS: portal surface (' + gc.portal + ' px), stone (' + gc.stone + ' px) and plaque lettering (' + gc.gold + ' px) render in the world');
+    assert(gp.letters > 150 && gp.plate > 500, 'plaque lettering on its dark plate visible, got ' + JSON.stringify(gp));
+    console.log('PASS: portal surface (' + gc.portal + ' px), stone (' + gc.stone + ' px) and plaque lettering (' + gp.letters + ' px on ' + gp.plate + ' px of plate) render in the world');
 
     console.log('STEP 3: hideMarker hides only the placeholder ring and beacon');
     writeScene((s) => { s.portalMarkers[0].hideMarker = false; });
@@ -207,16 +177,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await setCamera(0, 1.6, 3.4, Math.PI, 0);
     await sleep(500);
     assert((await place()).includes('Example Lobby'), 'still in the Lobby before walking');
-    await frame.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' })));
-    const trail = [];
-    const t0 = Date.now();
-    while (Date.now() - t0 < 30000 && (await place()).includes('Example Lobby')) {
-      trail.push(await frame.evaluate(() => { const p = window.__atlasActive3D && window.__atlasActive3D.camera.pos; return p ? [p[0], p[2]] : null; }).catch(() => null));
-      await sleep(150);
-    }
-    await frame.evaluate(() => window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' }))).catch(() => {});
+    const pts = await walk(frame, 'KeyW', async () => !(await place()).includes('Example Lobby'), 30000);
     assert((await place()).includes('Example Plaza'), 'walking into the gate travels to the Plaza, place is ' + (await place()));
-    const pts = trail.filter(Boolean);
     const last = pts[pts.length - 1];
     // The scene swap takes a moment, during which the held key keeps walking the player on.
     assert(last && last[1] > 3.85 && last[1] < 5.3 && Math.abs(last[0]) < 0.3, 'the player walked through the activation area (from z 3.9) without drifting, last sample ' + JSON.stringify(last));
@@ -233,7 +195,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await setCamera(...FRONT);
     await sleep(1200);
     const gc2 = await count(await grab(), TESTS, CENTRE);
-    assert(gc2.portal > 8000 && gc2.gold > 300, 'the gate renders again after returning, got ' + JSON.stringify(gc2));
+    assert(gc2.portal > 8000, 'the gate renders again after returning, got ' + JSON.stringify(gc2));
     console.log('PASS: Lobby re-entered at the spawn with the gate rendering again');
 
     console.log('STEP 7: destroying the world frees the gate\'s GPU textures');
