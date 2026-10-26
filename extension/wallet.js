@@ -4006,6 +4006,15 @@ const AtlasWallet = (() => {
     return clampCharacterScale(Number(atlasCharacterScale));
   }
 
+  // The viewer's own saved size, or null when they never chose one, so a
+  // scene's default character size (scene.json characterScale) applies until
+  // they do. getCharacterScale() can't tell "never chose" from "chose 1".
+  async function getSavedCharacterScale() {
+    const { atlasCharacterScale } = await chrome.storage.local.get('atlasCharacterScale');
+    if (typeof atlasCharacterScale !== 'number' || !Number.isFinite(atlasCharacterScale)) return null;
+    return clampCharacterScale(atlasCharacterScale);
+  }
+
   async function setCharacterScale(scale) {
     const clamped = clampCharacterScale(Number(scale));
     await chrome.storage.local.set({ atlasCharacterScale: clamped });
@@ -10289,7 +10298,7 @@ const AtlasWallet = (() => {
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
     getSubmittedTrades, deleteSubmittedTrade, getTradingStationMemberships,
     recordWorldVisit, getRecentWorlds,
-    getCharacterScale, setCharacterScale,
+    getCharacterScale, getSavedCharacterScale, setCharacterScale,
     getCameraDistance, setCameraDistance,
     getWalletSoundEnabled, setWalletSoundEnabled,
     getChatPanelSettings, setChatPanelSettings, chatMessageContainsBlockedWord,

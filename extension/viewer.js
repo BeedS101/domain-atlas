@@ -2595,7 +2595,9 @@ async function enterWorld(worldId, anchorId) {
         // use (see refreshOwnedOncePerUserClassKeys()/isOncePerUserClassOwned
         // above) — no async wallet read inside this per-frame hot path.
         isMarkerAlreadyOwned: (marker) => isOncePerUserClassOwned(manifestDomainOf(currentManifest), marker),
-        characterScale: await AtlasWallet.getCharacterScale(),
+        // null until the viewer picks a size themselves, so the scene's own
+        // default (scene.json characterScale) applies in the meantime.
+        characterScale: await AtlasWallet.getSavedCharacterScale(),
         // Saved scroll-wheel camera distance (0 = first person) so every
         // scene entry, including arriving through a portal, resumes the
         // last zoom level; wheel changes are saved by
@@ -6764,6 +6766,14 @@ walletPanel.addEventListener('click', (e) => {
   toggle.closest('.settings-category').classList.toggle('open');
 });
 
+// The size the character is actually drawn at: the open 3D world's current
+// size (the viewer's saved choice, else that scene's default), or the saved
+// choice / global default when no 3D world is open.
+async function effectiveCharacterScale() {
+  if (active3D && active3D.getCharacterScale) return active3D.getCharacterScale();
+  return AtlasWallet.getCharacterScale();
+}
+
 // Reached via the top tab bar's Settings tab (settingsTabBtn below) — used
 // to also be reachable via a redundant gear-icon button pinned to the
 // bottom of #mainWalletScreen, removed once the top tab bar made it a
@@ -6778,7 +6788,7 @@ async function openSettings() {
   await refreshAutoBackupDisplay();
   await refreshIdentitySyncDisplay();
   if (characterScaleInputEl) {
-    const scale = await AtlasWallet.getCharacterScale();
+    const scale = await effectiveCharacterScale();
     characterScaleInputEl.value = String(scale);
     if (characterScaleValueEl) characterScaleValueEl.textContent = scale.toFixed(1) + '×';
   }
@@ -6795,7 +6805,7 @@ async function openSettings() {
     disposeCharacterPreview();
     try {
       characterPreview = MiniGLTF.previewCharacter(characterPreviewCanvasEl, {
-        characterScale: await AtlasWallet.getCharacterScale(),
+        characterScale: await effectiveCharacterScale(),
         avatarLook: await AtlasWallet.getAvatarLook(),
         avatarHat: await AtlasWallet.getAvatarHat(),
         avatarShoes: await AtlasWallet.getAvatarShoes()

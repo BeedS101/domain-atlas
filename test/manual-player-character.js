@@ -191,9 +191,10 @@ const EXT_PATH = path.resolve(__dirname, '..', 'extension');
     }
 
     const scaleDefault = await frame.locator('#characterScaleInput').inputValue();
-    if (Number(scaleDefault) !== 1) throw new Error('Expected the size slider to default to 1, got: ' + scaleDefault);
+    // The open world is the Lobby, whose scene.json default is 0.5; the slider shows the scale in effect.
+    if (Number(scaleDefault) !== 0.5) throw new Error('Expected the size slider to show the Lobby default 0.5, got: ' + scaleDefault);
     const labelDefault = await frame.locator('#characterScaleValue').textContent();
-    if (labelDefault !== '1.0×') throw new Error('Expected the size label to read "1.0×", got: ' + JSON.stringify(labelDefault));
+    if (labelDefault !== '0.5×') throw new Error('Expected the size label to read "0.5×", got: ' + JSON.stringify(labelDefault));
     console.log('  default slider=1, label=' + labelDefault);
 
     // Drive it like a real drag: set the DOM value then fire the same

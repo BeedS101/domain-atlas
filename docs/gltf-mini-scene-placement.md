@@ -13,6 +13,10 @@ Each entry in `objects[]` places one GLB:
   `z' = -x sin + z cos`, the same convention as Three.js, so
   `tools/scene-editor.html` and the renderer agree).
 - `scale` is a uniform factor, default `1`. Zero or non-numeric means `1`.
+- `solid` is `true` by default. `solid: false` removes the object's collision
+  box. Use it for pieces whose bounding box is mostly empty (a wall piece with
+  a door opening, an open door leaf) and for ground cover such as lawn patches
+  whose tuft rises above the rug threshold.
 
 The model's own origin is what lands on `position`. Models are not recentered:
 the bundled furniture kit puts the origin at a back corner (x from `0` to
@@ -21,6 +25,12 @@ put one object on another, compute the supporting object's world extents (for
 example with `layout.placedFootprint` from `window.MiniGLTF.layout`) and place
 the object inside them at the support's top (or shelf-board) height.
 `test/manual-3d-layout-unit.js` checks this for the demo Lobby.
+
+Ground cover is sunk so its top sits at the floor: the outdoor kit's
+`grassPatch` has a 0.06 base slab with tufts up to 0.23, and `pathTile` is a
+thin slab, so the Lobby places them at `y = -0.05` and `y = -0.065`. The
+outdoor kit is authored at real-world size, so it is placed at scale `1`, while
+the furniture kit is roughly half scale.
 
 A GLB that fails to load is drawn as a 0.5 unit placeholder crate and the rest
 of the world still loads.
@@ -38,10 +48,25 @@ scale, with these exceptions:
   supporting object's box and gets none of its own.
 - A looted `oncePerUser` crate stops colliding.
 
-The player's center is also kept within the floor (`floor.size`, centered on the
-origin) minus `0.1`. A player who starts inside a box (a spawn or anchor placed
-too close to furniture) can walk out of it: while overlapping, moves that do not
-go deeper are allowed.
+The player's center is also kept within the floor minus `0.1`. The floor is
+`floor.size` (`[width, depth]`), centered on the origin unless `floor.center`
+(`[x, z]`) moves it; the Lobby's floor is centered at `[0, 3.1]` so that the
+south part is a yard outside the building, bounded by the floor edge.
+
+A player who starts inside a box (a spawn or anchor placed too close to
+furniture) can walk out of it: while overlapping, moves that do not go deeper
+are allowed.
+
+## Character scale
+
+`characterScale` at the top level of `scene.json` is the scene's default scale
+for the player's body (the Lobby uses `0.5`, which suits its half-scale
+furniture); a missing or non-numeric value means `1`. A scale the user saved
+from the settings slider (`atlasCharacterScale`,
+`AtlasWallet.getSavedCharacterScale`, `null` until they save one) always wins,
+including a saved `1`, and the scene default is never written back to storage.
+The scale is purely visual: eye height, the player radius, collision and
+interaction radii do not depend on it.
 
 ## Camera
 

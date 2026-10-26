@@ -100,6 +100,10 @@ function near(a, b, eps, msg) { assert(Math.abs(a - b) <= (eps || 1e-6), (msg ||
   const books = mk([0, 0, -0.1], [0.15, 0.1, 0], [0.3, 0.55, -0.1]);
   assert(!L.selectSolidItems([shelf, books]).includes(books), 'books inside the shelf envelope');
   pass('an object standing inside a shelf unit\'s envelope is covered by the shelf');
+
+  const openDoor = Object.assign(mk([0, 0, -0.1], [1, 1.29, 0], [4, 0, 4]), { solid: false });
+  assert(!L.selectSolidItems([openDoor]).includes(openDoor), 'solid:false opts an object out of collision');
+  pass('an object marked solid:false (a doorway whose bounding box is mostly opening) gets no collision box');
 }
 
 // ---------- 3. tolerant parsing, eye height, floor limits ----------
@@ -123,6 +127,12 @@ function near(a, b, eps, msg) { assert(Math.abs(a - b) <= (eps || 1e-6), (msg ||
   assert(L.floorOverrun(limits, 6, 0) > 1);
   assert.strictEqual(L.floorWalkLimits({}), null);
   assert.strictEqual(L.floorOverrun(null, 100, 100), 0);
+  // An off-center floor (scene.json floor.center) is bounded around its own center.
+  const offset = L.floorWalkLimits({ size: [10, 20], center: [0, 5] });
+  assert.strictEqual(L.floorOverrun(offset, 0, 14), 0);
+  assert(L.floorOverrun(offset, 0, 15) > 0.05);
+  assert(L.floorOverrun(offset, 0, -4.8) === 0 && L.floorOverrun(offset, 0, -5.5) > 0.3);
+  assert.strictEqual(L.floorOverrun(L.floorWalkLimits({ size: [10, 9], center: ['x', 1] }), 0, 4), 0);
   pass('floor walk limits keep the player on the floor and are absent when the floor has no usable size');
 }
 
@@ -208,7 +218,7 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   }
   const items = scene.objects.map((o) => {
     const pl = L.normalizePlacement(o);
-    return { name: path.basename(o.model, '.glb'), obj: o, footprint: L.placedFootprint(modelFor(o.model).bounds, pl) };
+    return { name: path.basename(o.model, '.glb'), obj: o, solid: o.solid !== false, footprint: L.placedFootprint(modelFor(o.model).bounds, pl) };
   });
   const byName = (n) => items.filter((i) => i.name === n);
   const inside = (inner, outer, tol) => inner.min[0] >= outer.min[0] - tol && inner.max[0] <= outer.max[0] + tol && inner.min[1] >= outer.min[1] - tol && inner.max[1] <= outer.max[1] + tol;
@@ -218,6 +228,7 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
 
   // The room is larger than the original 10 x 9 Lobby.
   const [fw, fd] = scene.floor.size;
+  const FC = L.floorCenter(scene.floor);
   assert(fw > 10 && fd > 9, 'the Lobby floor should be larger than the original 10 x 9, got ' + fw + ' x ' + fd);
   pass('Lobby floor is larger than the original 10 x 9 (' + fw + ' x ' + fd + ')');
 
@@ -269,6 +280,35 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   }
   pass('Lobby screen and keyboard face the chair, keyboard in front of the monitor, desk items (lamp included) do not overlap');
 
+  // ---- exterior ----
+  const outdoor = items.filter((i) => i.obj.model.startsWith('/assets/outdoor/'));
+  const outCount = (n) => outdoor.filter((i) => i.name === n).length;
+  ['grassPatch', 'pathTile', 'shrub', 'treeSmall', 'benchOutdoor', 'lampPost', 'welcomeSign', 'planterBox'].forEach((n) => assert(outCount(n) > 0, 'the exterior should use ' + n));
+  assert.strictEqual(outCount('treeSmall'), 1); assert.strictEqual(outCount('benchOutdoor'), 1);
+  assert.strictEqual(outCount('lampPost'), 1); assert.strictEqual(outCount('welcomeSign'), 1);
+  assert(outCount('shrub') + outCount('planterBox') >= 2 && outCount('shrub') + outCount('planterBox') <= 10, 'a small amount of landscaping');
+  outdoor.forEach((i) => assert(i.obj.scale === undefined || i.obj.scale === 1, i.name + ' keeps its native size'));
+  const buildingSouth = Math.max(...items.filter((i) => i.name.startsWith('wall')).map((i) => i.footprint.max[1]));
+  outdoor.forEach((i) => assert(i.footprint.min[1] >= buildingSouth - 0.001, i.name + ' stands inside the building'));
+  const GROUND = ['grassPatch', 'pathTile'];
+  outdoor.forEach((i) => {
+    const y = i.obj.position[1];
+    if (GROUND.includes(i.name)) assert(y >= -0.07 && y <= 0, i.name + ' is sunk only far enough for its top to sit at the floor, got y ' + y);
+    else assert.strictEqual(y, 0, i.name + ' stands on the ground');
+  });
+  outdoor.forEach((it) => assert(it.footprint.minY >= -0.07, it.name + ' is buried below the floor (' + it.footprint.minY + ')'));
+  assert(outdoor.filter((i) => GROUND.includes(i.name)).every((i) => i.solid === false || i.footprint.maxY <= 0.05), 'lawn and path never block movement');
+  const door = items.find((i) => i.name === 'wallDoorwayWide');
+  assert(door && door.solid === false && door.footprint.max[1] >= buildingSouth - 0.001, 'the exterior door is an open, collision-free piece of the south wall');
+  const doorX = door.footprint.cx;
+  const tiles = outdoor.filter((i) => i.name === 'pathTile').sort((a, b) => a.footprint.cz - b.footprint.cz);
+  assert(tiles.length >= 3 && tiles.length <= 8, 'a short path');
+  assert(Math.abs(tiles[0].footprint.cx - doorX) < 0.75 && tiles[0].footprint.min[1] - buildingSouth < 0.7, 'the path starts at the door');
+  for (let t = 1; t < tiles.length; t++) assert(tiles[t].footprint.min[1] - tiles[t - 1].footprint.max[1] < 0.01 && Math.abs(tiles[t].footprint.cx - tiles[t - 1].footprint.cx) < 0.01, 'path tiles form one continuous chain');
+  const nearDoor = (n) => Math.hypot(outdoor.find((i) => i.name === n).footprint.cx - doorX, outdoor.find((i) => i.name === n).footprint.cz - buildingSouth);
+  assert(nearDoor('welcomeSign') < 3, 'the welcome sign stands by the entrance');
+  pass('exterior: every outdoor GLB used at native size, south of the wall, ground tiles sunk just enough, props on the ground, short continuous path from the open door');
+
   // Nothing floats: every elevated object rests on something whose vertical span contains its base.
   items.forEach((it) => {
     if (it.footprint.minY <= 0.05) return;
@@ -278,7 +318,7 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   pass('no Lobby object floats above the floor without support');
 
   // Everything is inside the floor (the thicker window pieces overshoot by under a millimetre).
-  items.forEach((it) => assert(it.footprint.min[0] >= -fw / 2 - 0.002 && it.footprint.max[0] <= fw / 2 + 0.002 && it.footprint.min[1] >= -fd / 2 - 0.002 && it.footprint.max[1] <= fd / 2 + 0.002, it.name + ' is off the floor'));
+  items.forEach((it) => assert(it.footprint.min[0] >= FC[0] - fw / 2 - 0.002 && it.footprint.max[0] <= FC[0] + fw / 2 + 0.002 && it.footprint.min[1] >= FC[1] - fd / 2 - 0.002 && it.footprint.max[1] <= FC[1] + fd / 2 + 0.002, it.name + ' is off the floor'));
   pass('every Lobby object is on the floor');
 
   // Collision set: rug walked over, supported items not separate solids, crates/furniture solid.
@@ -310,9 +350,9 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   (scene.anchors || []).forEach((a) => assert.strictEqual(depthAt(a.position[0], a.position[2]), 0, 'anchor ' + a.id + ' must be free'));
   const STEP = 0.1;
   const nx = Math.round(fw / STEP), nz = Math.round(fd / STEP);
-  const gx = (i) => -fw / 2 + i * STEP, gz = (j) => -fd / 2 + j * STEP;
+  const gx = (i) => FC[0] - fw / 2 + i * STEP, gz = (j) => FC[1] - fd / 2 + j * STEP;
   const seen = Array.from({ length: nx + 1 }, () => new Uint8Array(nz + 1));
-  const si = Math.round((start[0] + fw / 2) / STEP), sj = Math.round((start[2] + fd / 2) / STEP);
+  const si = Math.round((start[0] - FC[0] + fw / 2) / STEP), sj = Math.round((start[2] - FC[1] + fd / 2) / STEP);
   const queue = [[si, sj]]; seen[si][sj] = 1;
   while (queue.length) {
     const [i, j] = queue.pop();
@@ -328,9 +368,20 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   (scene.interactables || []).forEach((m) => assert(reachable(m.position[0], m.position[2], 1.2), 'crate ' + m.class + ' must be reachable from the spawn'));
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, cells = 0;
   for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) if (seen[i][j]) { cells++; minX = Math.min(minX, gx(i)); maxX = Math.max(maxX, gx(i)); minZ = Math.min(minZ, gz(j)); maxZ = Math.max(maxZ, gz(j)); }
-  assert(minX < -fw / 2 + 0.7 && maxX > fw / 2 - 0.7 && minZ < -fd / 2 + 0.7 && maxZ > fd / 2 - 0.7, 'the player can walk to all four edges of the room, got x ' + minX + '..' + maxX + ' z ' + minZ + '..' + maxZ);
+  assert(minX < FC[0] - fw / 2 + 0.7 && maxX > FC[0] + fw / 2 - 0.7 && minZ < FC[1] - fd / 2 + 0.7 && maxZ > FC[1] + fd / 2 - 0.7, 'the player can walk to all four edges of the room, got x ' + minX + '..' + maxX + ' z ' + minZ + '..' + maxZ);
   assert(cells * STEP * STEP > 0.55 * fw * fd, 'at least 55% of the floor stays walkable, got ' + (100 * cells * STEP * STEP / (fw * fd)).toFixed(0) + '%');
   pass('Lobby portal, anchors and every crate are reachable from the spawn; all four edges can be walked to; ' + (100 * cells * STEP * STEP / (fw * fd)).toFixed(0) + '% of the floor is walkable');
+
+  // ---- exterior reachability and bounds ----
+  const free = (x, z) => depthAt(x, z) === 0;
+  for (let z = buildingSouth - 0.4; z <= tiles[tiles.length - 1].footprint.max[1]; z += 0.2) assert(free(doorX, z), 'the doorway and path centreline is clear at z ' + z.toFixed(1));
+  assert(!free(0, buildingSouth - 0.05), 'the centre (portal) doorway stays closed off');
+  outdoor.filter((i) => !GROUND.includes(i.name)).forEach((i) => assert(reachable(i.footprint.cx, i.footprint.cz, Math.max(i.footprint.hx, i.footprint.hz) + 0.9), i.name + ' at (' + i.footprint.cx.toFixed(1) + ', ' + i.footprint.cz.toFixed(1) + ') can be walked up to'));
+  [[-6, 7], [6, 7], [-6, 11], [6, 11], [0, 9]].forEach(([x, z]) => assert(reachable(x, z, 0.2), 'yard point (' + x + ', ' + z + ') is reachable'));
+  const yardCells = (() => { let n = 0; for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) if (seen[i][j] && gz(j) > buildingSouth) n++; return n; })();
+  assert(yardCells * STEP * STEP > 0.6 * fw * (FC[1] + fd / 2 - buildingSouth), 'most of the yard is walkable');
+  assert(maxZ <= FC[1] + fd / 2 - 0.1 + 1e-9 && maxZ > FC[1] + fd / 2 - 0.4, 'the yard is bounded by the floor edge and reaches it');
+  pass('exterior: path and open doorway are clear, the centre doorway is closed off, every prop can be walked up to, and the yard is bounded by the floor edge');
 
   // Loot markers match their crate objects by exact position.
   (scene.interactables || []).forEach((m) => assert(byName('cardboardBoxClosed').some((c) => c.obj.position[0] === m.position[0] && c.obj.position[2] === m.position[2]), 'interactable ' + m.class + ' has no crate object at its position'));

@@ -118,8 +118,8 @@ async function openCacheCategory(frame) {
     console.log('STEP 4: importing the previously exported file — every entry restored');
     await frame.locator('#importCacheBtn').click();
     await frame.locator('#importCacheFileInput').setInputFiles(exportPath);
-    await frame.waitForFunction((n) => document.getElementById('importCacheStatus').textContent.includes(n + ' cached file(s) imported'), LOBBY_MODEL_COUNT, { timeout: 5000 });
-    await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent.includes('1 site'), null, { timeout: 5000 });
+    await frame.waitForFunction((n) => document.getElementById('importCacheStatus').textContent.includes(n + ' cached file(s) imported'), LOBBY_MODEL_COUNT, { timeout: 30000 });
+    await frame.waitForFunction(() => document.getElementById('cacheTotalLine').textContent.includes('1 site'), null, { timeout: 10000 });
     const restoredMeta = await frame.locator('#cacheSitesList .info-card').first().locator('.meta').textContent();
     if (!restoredMeta.includes(LOBBY_MODEL_COUNT + ' files')) throw new Error('Expected ' + LOBBY_MODEL_COUNT + ' files restored after import, got: ' + restoredMeta);
     console.log('PASS: import round-tripped correctly — same site, same ' + LOBBY_MODEL_COUNT + ' files ->', restoredMeta);

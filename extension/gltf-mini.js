@@ -616,9 +616,11 @@
   }
 
   // Which placed objects get a collision box. `items` are
-  // { footprint, ... } entries; the filtered list is returned.
+  // { footprint, solid, ... } entries (solid: false opts an object out, for
+  // doorways and other pieces whose bounding box is mostly open space); the
+  // filtered list is returned.
   function selectSolidItems(items) {
-    const candidates = items.filter((it) => it.footprint && it.footprint.maxY > FLOOR_DECAL_MAX_Y && it.footprint.minY < OVERHEAD_MIN_Y);
+    const candidates = items.filter((it) => it.footprint && it.solid !== false && it.footprint.maxY > FLOOR_DECAL_MAX_Y && it.footprint.minY < OVERHEAD_MIN_Y);
     return candidates.filter((it) => !candidates.some((sup) => {
       if (sup === it) return false;
       const f = it.footprint, sf = sup.footprint;
@@ -628,17 +630,26 @@
     }));
   }
 
-  // Half-extents the player's center may reach on a floor of the given size
-  // (scene.json floor.size, centered on the origin), or null when unbounded.
+  // Where a floor is centered: scene.json floor.center ([x, z], default the
+  // origin), so a floor can extend further on one side than the other.
+  function floorCenter(floor) {
+    const c = floor && Array.isArray(floor.center) ? floor.center : null;
+    return (c && Number.isFinite(c[0]) && Number.isFinite(c[1])) ? [c[0], c[1]] : [0, 0];
+  }
+
+  // Limits the player's center may reach on a floor (scene.json floor.size
+  // around floor.center): [halfWidth, halfDepth, centerX, centerZ], or null
+  // when unbounded.
   function floorWalkLimits(floor) {
     const size = floor && Array.isArray(floor.size) ? floor.size : null;
     if (!size || !Number.isFinite(size[0]) || !Number.isFinite(size[1])) return null;
-    return [Math.max(0, size[0] / 2 - FLOOR_EDGE_MARGIN), Math.max(0, size[1] / 2 - FLOOR_EDGE_MARGIN)];
+    const [cx, cz] = floorCenter(floor);
+    return [Math.max(0, size[0] / 2 - FLOOR_EDGE_MARGIN), Math.max(0, size[1] / 2 - FLOOR_EDGE_MARGIN), cx, cz];
   }
 
   function floorOverrun(limits, x, z) {
     if (!limits) return 0;
-    return Math.max(0, Math.abs(x) - limits[0], Math.abs(z) - limits[1]);
+    return Math.max(0, Math.abs(x - (limits[2] || 0)) - limits[0], Math.abs(z - (limits[3] || 0)) - limits[1]);
   }
 
   // A camera.start y that isn't a plausible eye height (0, as in a
@@ -651,11 +662,12 @@
 
   // ---------- floor (procedural quad — not a glb, just two triangles) ----------
 
-  function buildFloor(gl, size, color) {
+  function buildFloor(gl, size, color, center) {
     const hw = size[0] / 2, hd = size[1] / 2;
+    const [cx, cz] = center || [0, 0];
     const positions = new Float32Array([
-      -hw, 0, -hd,  hw, 0, -hd,  hw, 0, hd,
-      -hw, 0, -hd,  hw, 0, hd,  -hw, 0, hd
+      cx - hw, 0, cz - hd,  cx + hw, 0, cz - hd,  cx + hw, 0, cz + hd,
+      cx - hw, 0, cz - hd,  cx + hw, 0, cz + hd,  cx - hw, 0, cz + hd
     ]);
     const normals = new Float32Array([0,1,0, 0,1,0, 0,1,0, 0,1,0, 0,1,0, 0,1,0]);
     const [r, g, b] = hexToRgb(color);
@@ -1105,9 +1117,25 @@
     let lastCharacterBaseY = 0;
     // Purely a visual size preference (Settings -> "Player character" ->
     // Size) — doesn't touch collision (PLAYER_RADIUS, below, stays fixed),
-    // walk speed, or how far the camera follows; it only scales the
-    // rendered mesh in charBase.
-    let characterScale = clampCharacterScale(opts.characterScale);
+    // walk speed, eye height, interaction radii or how far the camera
+    // follows; it only scales the rendered mesh in charBase.
+    //
+    // A scene may declare a default (scene.json characterScale) sized to
+    // its furniture. It applies only while the viewer has no saved
+    // preference of their own: opts.characterScale is that saved value, or
+    // null/absent when the viewer never chose one, and setCharacterScale()
+    // below counts as choosing. Other visitors' characters are drawn at the
+    // scene default, since their own preference isn't known here.
+    const optionalScale = (v) => ((typeof v === 'number' || (typeof v === 'string' && v.trim() !== '')) && Number.isFinite(Number(v))) ? clampCharacterScale(v) : null;
+    let userCharacterScale = optionalScale(opts.characterScale);
+    let sceneCharacterScale = 1;
+    let characterScale = 1;
+    function applyCharacterScaleDefaults() {
+      const declared = optionalScale(sceneData && sceneData.characterScale);
+      sceneCharacterScale = declared === null ? 1 : declared;
+      characterScale = userCharacterScale === null ? sceneCharacterScale : userCharacterScale;
+    }
+    applyCharacterScaleDefaults();
     // This viewer's own equipped look (see wallet.js's getAvatarLook()) —
     // { shirtColor, pantsColor } as resolved [r,g,b,a] arrays, or null for
     // the character's plain default colors. Read once at construction and
@@ -1415,14 +1443,16 @@
 
     async function loadScene(newSceneData) {
       sceneData = newSceneData;
+      applyCharacterScaleDefaults();
       placedPrimitives = [];
       boundingBoxes = [];
       const declaredFloor = sceneData.floor || {};
       const floor = {
         size: (Array.isArray(declaredFloor.size) && declaredFloor.size.length >= 2 && declaredFloor.size.every(Number.isFinite)) ? declaredFloor.size : [10, 10],
-        color: declaredFloor.color || '#1b2830'
+        color: declaredFloor.color || '#1b2830',
+        center: floorCenter(declaredFloor)
       };
-      floorPrim = buildFloor(gl, floor.size, floor.color);
+      floorPrim = buildFloor(gl, floor.size, floor.color, floor.center);
       floorLimits = floorWalkLimits(floor);
 
       const objects = sceneData.objects || [];
@@ -1564,7 +1594,7 @@
             lootMarker
           });
         });
-        placedItems.push({ footprint, lootMarker });
+        placedItems.push({ footprint, lootMarker, solid: obj.solid !== false });
       });
       // Oriented footprints from the models' real bounds (not a box
       // centered on the placement origin), minus rugs, overhead objects and
@@ -2111,7 +2141,7 @@
         // own charBase above — negate the yaw here too, or a remote
         // player's arms/legs would turn to face the mirror of wherever
         // they're actually walking.
-        const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4RotateY(-rp.yaw));
+        const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4Multiply(mat4RotateY(-rp.yaw), mat4Scale(sceneCharacterScale)));
         drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor, rp.shoeColor, rp.shoeScale); // always show the head — this is never our own first-person view
       });
 
@@ -2162,7 +2192,11 @@
       // value, write for it to apply a change live without re-entering
       // the world.
       getCharacterScale: () => characterScale,
-      setCharacterScale: (s) => { characterScale = clampCharacterScale(s); },
+      setCharacterScale: (s) => { userCharacterScale = clampCharacterScale(s); characterScale = userCharacterScale; },
+      // The scene's own default size, and whether the viewer's saved
+      // preference is what is currently applied (see characterScale above).
+      getSceneCharacterScale: () => sceneCharacterScale,
+      hasCharacterScaleOverride: () => userCharacterScale !== null,
       // Debug/test hook — lets a script confirm the character actually
       // turns to face its travel direction (see the characterYaw comment
       // above) without needing to read pixels back off the canvas.
@@ -2785,7 +2819,7 @@
     // without a WebGL context.
     layout: {
       normalizePlacement, placementMatrix, placedFootprint, footprintDepth,
-      selectSolidItems, floorWalkLimits, floorOverrun, eyeHeightFrom,
+      selectSolidItems, floorWalkLimits, floorOverrun, floorCenter, eyeHeightFrom,
       parseGLB, extractPrimitives, PLAYER_RADIUS
     },
     previewCharacter,
