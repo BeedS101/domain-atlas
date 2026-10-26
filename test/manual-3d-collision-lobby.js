@@ -169,12 +169,13 @@ async function enterLobby(frame, anchorId) {
     assert(end.z <= 1.4, 'Expected to walk across the rug (past z=1.65 onto it), got z=' + end.z);
     console.log('PASS: the rug does not block (reached z=' + end.z.toFixed(2) + ')');
 
-    // Walls sit just inside the floor, so the player stops a body-radius short of the inner wall face.
+    // Walls sit just inside the floor, so the player stops a body-radius short of the inner wall face
+    // (within one movement step of the limit, hence the small tolerance on the +z bound).
     const edges = [
       ['+x', 3.0, 2.0, 90, (c) => c.x, (v) => v >= 6.5 && v <= 7.1],
       ['-x', -3.0, 2.0, -90, (c) => c.x, (v) => v <= -6.5 && v >= -7.1],
       ['-z', 3.4, -2.5, 0, (c) => c.z, (v) => v <= -5.0 && v >= -5.5],
-      ['+z', -3.2, 2.0, 180, (c) => c.z, (v) => v >= 5.0 && v <= 5.5]
+      ['+z', -3.2, 2.0, 180, (c) => c.z, (v) => v >= 4.95 && v <= 5.5]
     ];
     for (const [name, x, z, yaw, pick, ok] of edges) {
       await place(frame, x, z, yaw);

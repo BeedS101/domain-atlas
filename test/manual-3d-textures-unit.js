@@ -154,22 +154,26 @@ const png = quadrantPng();
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).forEach((e) => {
     const f = path.join(d, e.name);
     if (e.isDirectory()) walk(f);
-    else if (f.endsWith('.glb') && !f.includes('texture-test')) files.push(f);
+    else if (f.endsWith('.glb')) files.push(f);
   });
   dirs.forEach(walk);
   assert(files.length > 100, 'expected the bundled models, found ' + files.length);
+  // The only textured bundled models are the two deliberate ones.
+  const textured = [];
   files.forEach((f) => {
     const buf = fs.readFileSync(f);
     const { json, bin } = L.parseGLB(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    if (json.images && json.images.length) { textured.push(path.basename(f)); return; }
     const r = L.extractPrimitives(json, bin);
     assert(r.primitives.length > 0, path.basename(f) + ' still has geometry');
     r.primitives.forEach((p) => {
-      assert.strictEqual(p.baseColorTexture, undefined, path.basename(f) + ' is untextured');
+      assert(p.baseColorTexture === undefined, path.basename(f) + ' is untextured');
       assert.strictEqual(p.textureWarning, undefined, path.basename(f));
       assert(Array.isArray(p.color) && p.color.length === 4, path.basename(f) + ' keeps its flat colour');
     });
   });
-  pass('all ' + files.length + ' bundled GLBs still extract as untextured models with their flat colours');
+  assert.deepStrictEqual(textured.sort(), ['textureTestBoard.glb', 'townPortal.glb'], 'only the two deliberate models carry images');
+  pass('all ' + (files.length - textured.length) + ' other bundled GLBs still extract as untextured models with their flat colours (textured: ' + textured.join(', ') + ')');
 }
 
 // ---- the repo's texture test model ----

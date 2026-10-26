@@ -1885,10 +1885,16 @@
         // visible marker and the actual walk-in trigger zone could be
         // nowhere near each other.
         const placement = mat4Translate(m.position[0], m.position[1] || 0, m.position[2]);
-        const ring = buildPortalRing(gl, m.radius || 1.2, 24, kind);
-        const beacon = buildPortalBeacon(gl, m.radius || 1.2, kind);
-        ring.modelMatrix = placement;
-        beacon.modelMatrix = placement;
+        // `hideMarker: true` skips only this ring/beacon drawing, for a scene
+        // that places its own portal model there; the walk-in trigger below
+        // is the same either way.
+        let ring = null, beacon = null;
+        if (m.hideMarker !== true) {
+          ring = buildPortalRing(gl, m.radius || 1.2, 24, kind);
+          beacon = buildPortalBeacon(gl, m.radius || 1.2, kind);
+          ring.modelMatrix = placement;
+          beacon.modelMatrix = placement;
+        }
         return { position: m.position, radius: m.radius || 1.2, portalIndex: m.portalIndex, kind, ring, beacon };
       });
 
@@ -2278,7 +2284,7 @@
       gl.uniform1f(prog.uniforms.ambient, (sceneData.ambientLight && sceneData.ambientLight.intensity) || 0.55);
 
       if (floorPrim) bindAndDraw(floorPrim, view, projection);
-      portalTriggers.forEach((tr) => { bindAndDraw(tr.ring, view, projection); bindAndDraw(tr.beacon, view, projection); });
+      portalTriggers.forEach((tr) => { if (tr.ring) bindAndDraw(tr.ring, view, projection); if (tr.beacon) bindAndDraw(tr.beacon, view, projection); });
       placedPrimitives.forEach((prim) => {
         // See lootMarkerAt() in loadScene() — a plain furniture placement
         // has no lootMarker at all and always draws; an already-claimed

@@ -114,6 +114,7 @@
     { "model": "/assets/furniture/rugDoormat.glb", "position": [-0.429, 0, 5.387], "rotationY": 0, "scale": 2 },
     { "model": "/assets/furniture/rugDoormat.glb", "position": [2.771, 0, 5.387], "rotationY": 0, "scale": 2 },
     { "model": "/assets/furniture/doorway.glb", "position": [0.389, 0, 5.458], "rotationY": 180, "scale": 1.6, "solid": false },
+    { "model": "/assets/portals/townPortal.glb", "position": [0, 0, 4.7], "rotationY": 180, "solid": false },
 
     { "model": "/assets/furniture/pottedPlant.glb", "position": [-1.4, 0, 5.1], "rotationY": 0 },
     { "model": "/assets/furniture/pottedPlant.glb", "position": [1.4, 0, 5.1], "rotationY": 0 },
@@ -172,7 +173,7 @@
     { "model": "/assets/furniture/cardboardBoxClosed.glb", "position": [4, 0, 3.8], "rotationY": -15 }
   ],
   "portalMarkers": [
-    { "position": [0, 0, 4.7], "radius": 0.8, "portalIndex": 0 }
+    { "position": [0, 0, 4.7], "radius": 0.8, "portalIndex": 0, "hideMarker": true }
   ],
   "interactables": [
     { "position": [0.3, 0, -0.8], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.trinket.pin", "oncePerUser": true },

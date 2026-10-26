@@ -103,6 +103,25 @@ direction toward the chair they serve, and a chair faces its desk with the
 opposite rotation. The Lobby's reception desk has its chairs on the north side
 (`z` smaller than the desk), so its monitor and keyboard use `rotationY: 180`.
 
+## Portal markers
+
+`portalMarkers[]` entries (`position`, `radius`, `portalIndex`) define the
+walk-in trigger: the player's planar distance to `position` under `radius`
+takes portal `portalIndex` of the world. By default the renderer also draws a
+floor ring and a tall cross-shaped beacon there. `"hideMarker": true` skips
+only that drawing; the trigger is unchanged. A scene that places its own portal
+model at the marker sets it so the placeholder does not show through.
+
+The Lobby does this with `/assets/portals/townPortal.glb`: a stone gate with a
+textured portal surface and a destination plaque, placed at the marker with
+`rotationY: 180` (front toward the room) and `solid: false`. A piece with an
+opening cannot be one collision box (collision is the model's whole bounding
+box), so the gate has none and the opening stays walkable. The plaque text is
+the portal's `label` from the manifest.
+`tools/make-town-portal-glb.js` regenerates the GLB and its embedded PNG
+textures (`--label "TEXT"` overrides the plaque; letters, digits-free A-Z, `-`,
+`.` and space are available).
+
 ## Textures
 
 A material may carry a base-colour texture. The fragment colour is

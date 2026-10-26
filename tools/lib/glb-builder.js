@@ -1,7 +1,9 @@
-// Small GLB 2.0 writer used by the texture test asset generator and the
-// texture tests. Builds one mesh with POSITION, optional NORMAL/TEXCOORD_0,
+// Small GLB 2.0 writer used by the texture asset generators and the texture
+// tests. buildGlb() builds one mesh with POSITION, optional NORMAL/TEXCOORD_0,
 // one material, and an optional PNG/JPEG embedded in the BIN chunk through a
-// bufferView. `mutateJson(json)` lets a test damage the glTF on purpose.
+// bufferView. buildMultiGlb() builds one mesh with several primitives, each
+// with its own material and optional embedded texture. `mutateJson(json)`
+// lets a test damage the glTF on purpose.
 
 const zlib = require('zlib');
 
@@ -98,6 +100,81 @@ function buildGlb(spec) {
   return assembleGlb(json, Buffer.concat(parts));
 }
 
+// spec: { name?, primitives: [{ positions, normals?, uvs?, indices?,
+//   material: { baseColorFactor?, texture?: { bytes, mimeType, sampler? } } }] }
+// A texture whose `bytes` Buffer (and sampler values) match an earlier one
+// reuses that image and sampler instead of embedding another copy.
+function buildMultiGlb(spec) {
+  const parts = [];
+  const bufferViews = [], accessors = [], images = [], samplers = [], textures = [], materials = [], primitives = [];
+  let offset = 0;
+  function addView(data, target) {
+    const raw = data.buffer ? Buffer.from(data.buffer, data.byteOffset, data.byteLength) : Buffer.from(data);
+    bufferViews.push({ buffer: 0, byteOffset: offset, byteLength: raw.length, ...(target ? { target } : {}) });
+    const padded = pad4(raw, 0);
+    parts.push(padded); offset += padded.length;
+    return bufferViews.length - 1;
+  }
+  function addAccessor(typed, type, componentType, extra) {
+    const view = addView(typed, 34962);
+    accessors.push({ bufferView: view, componentType, count: typed.length / ({ VEC2: 2, VEC3: 3, SCALAR: 1 }[type]), type, ...(extra || {}) });
+    return accessors.length - 1;
+  }
+  const imageOf = new Map();
+  const samplerKeys = new Map();
+  const textureKeys = new Map();
+  function textureIndex(t) {
+    let img = imageOf.get(t.bytes);
+    if (img === undefined) {
+      images.push({ bufferView: addView(t.bytes), mimeType: t.mimeType });
+      img = images.length - 1;
+      imageOf.set(t.bytes, img);
+    }
+    let smp;
+    if (t.sampler) {
+      const sk = JSON.stringify(t.sampler);
+      smp = samplerKeys.get(sk);
+      if (smp === undefined) { samplers.push(t.sampler); smp = samplers.length - 1; samplerKeys.set(sk, smp); }
+    }
+    const tk = img + ':' + smp;
+    let tex = textureKeys.get(tk);
+    if (tex === undefined) {
+      textures.push({ source: img, ...(smp !== undefined ? { sampler: smp } : {}) });
+      tex = textures.length - 1;
+      textureKeys.set(tk, tex);
+    }
+    return tex;
+  }
+  spec.primitives.forEach((p) => {
+    const positions = Float32Array.from(p.positions);
+    const mins = [Infinity, Infinity, Infinity], maxs = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < positions.length; i += 3) for (let k = 0; k < 3; k++) { mins[k] = Math.min(mins[k], positions[i + k]); maxs[k] = Math.max(maxs[k], positions[i + k]); }
+    const attributes = { POSITION: addAccessor(positions, 'VEC3', 5126, { min: mins, max: maxs }) };
+    if (p.normals) attributes.NORMAL = addAccessor(Float32Array.from(p.normals), 'VEC3', 5126);
+    if (p.uvs) attributes.TEXCOORD_0 = addAccessor(Float32Array.from(p.uvs), 'VEC2', 5126);
+    const prim = { attributes, material: materials.length };
+    if (p.indices) {
+      const idx = Uint16Array.from(p.indices);
+      const view = addView(idx, 34963);
+      accessors.push({ bufferView: view, componentType: 5123, count: idx.length, type: 'SCALAR' });
+      prim.indices = accessors.length - 1;
+    }
+    const pbr = { baseColorFactor: (p.material && p.material.baseColorFactor) || [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 1 };
+    if (p.material && p.material.texture) pbr.baseColorTexture = { index: textureIndex(p.material.texture) };
+    materials.push({ ...(p.name ? { name: p.name } : {}), pbrMetallicRoughness: pbr, doubleSided: true });
+    primitives.push(prim);
+  });
+  const json = {
+    asset: { version: '2.0', generator: 'domain-atlas glb-builder' },
+    scene: 0, scenes: [{ nodes: [0] }], nodes: [{ name: spec.name || 'model', mesh: 0 }],
+    meshes: [{ primitives }],
+    materials, accessors, bufferViews, buffers: [{ byteLength: offset }]
+  };
+  if (images.length) { json.images = images; json.textures = textures; }
+  if (samplers.length) json.samplers = samplers;
+  return assembleGlb(json, Buffer.concat(parts));
+}
+
 // A flat vertical quad, 1 wide x 1 tall, standing on y = 0 and facing +z, with
 // the image upright across it (glTF UV (0,0) = top-left of the image).
 function quadSpec() {
@@ -109,4 +186,4 @@ function quadSpec() {
   };
 }
 
-module.exports = { buildGlb, makePng, assembleGlb, quadSpec, crc32 };
+module.exports = { buildGlb, buildMultiGlb, makePng, assembleGlb, quadSpec, crc32 };
