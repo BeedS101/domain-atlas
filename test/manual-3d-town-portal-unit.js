@@ -45,8 +45,8 @@ const GATES = [
     placed: { model: '/assets/portals/townPortal.glb', position: [0, 0, 4.7], rotationY: 180, solid: false },
     marker: { position: [0, 0, 4.7], radius: 0.8, portalIndex: 0, hideMarker: true },
     camera: { start: [0, 1.6, 3.4], startYaw: 0 },
-    floor: { size: [14.4, 17.4], center: [0, 3.1], color: '#3a2f22' },
-    characterScale: 0.5, objectCount: 146, interactables: 8,
+    floor: { size: [40, 40], center: [0, 3], color: '#3a2f22' },
+    characterScale: 0.5, objectCount: 263, interactables: 8,
     // gate footprint (world x, z extents incl. the approach) that must be walkable
     gateArea: { x: [-0.95, 0.95], z: [4.3, 5.05] }, approach: { x: 0, z: [3.4, 4.7] },
     grid: { x: [-7, 7], z: [-5.4, 11] }

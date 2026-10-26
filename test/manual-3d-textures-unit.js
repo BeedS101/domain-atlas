@@ -172,8 +172,12 @@ const png = quadrantPng();
       assert(Array.isArray(p.color) && p.color.length === 4, path.basename(f) + ' keeps its flat colour');
     });
   });
-  assert.deepStrictEqual(textured.sort(), ['galleryPortal.glb', 'textureTestBoard.glb', 'townPortal.glb'], 'only the deliberate models carry images');
-  pass('all ' + (files.length - textured.length) + ' other bundled GLBs still extract as untextured models with their flat colours (textured: ' + textured.join(', ') + ')');
+  // the town models (assets/town) are textured on purpose; every other bundled model must stay flat-coloured
+  const known = ['galleryPortal.glb', 'textureTestBoard.glb', 'townPortal.glb'];
+  const townTextured = textured.filter((n) => fs.existsSync(path.join(REPO, 'demo-domain-a', 'assets', 'town', n)) && !known.includes(n));
+  assert.deepStrictEqual(textured.filter((n) => !townTextured.includes(n)).sort(), known, 'only the deliberate models carry images');
+  assert(townTextured.length >= 10 && townTextured.length <= 19, 'the town set carries its textures (' + townTextured.length + ' textured town models)');
+  pass('all ' + (files.length - textured.length) + ' other bundled GLBs still extract as untextured models with their flat colours (textured: ' + known.join(', ') + ' and ' + townTextured.length + ' town models)');
 }
 
 // ---- the repo's texture test model ----

@@ -33,6 +33,12 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-3d-gate-profile
 const SCENE_PATH = path.join(DOCROOT_DIR, 'spatial', 'lobby', 'scene.json');
 const MAIN_MANIFEST_PATH = path.join(DOCROOT_DIR, '.well-known', 'spatial.json');
 const GATE = '/assets/portals/townPortal.glb';
+// The Lobby's town models carry their own textures; each image is one live GL texture.
+const TOWN_TEXTURES = fs.readdirSync(path.join(REPO, 'demo-domain-a', 'assets', 'town')).filter((f) => f.endsWith('.glb')).reduce((n, f) => {
+  const b = fs.readFileSync(path.join(REPO, 'demo-domain-a', 'assets', 'town', f));
+  return n + (JSON.parse(b.slice(20, 20 + b.readUInt32LE(12)).toString()).images || []).length;
+}, 0);
+const LIVE_TEXTURES = 5 + TOWN_TEXTURES;
 
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
@@ -119,14 +125,14 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     const gateRequests = requests.filter((u) => u.endsWith(GATE)).length;
     assert(gateRequests === 1, 'the gate GLB is requested once, got ' + gateRequests);
     const during = await live();
-    assert(during === 5, 'expected 5 live GL textures (fallback + stone, runes, plaque, portal surface), got ' + during);
+    assert(during === LIVE_TEXTURES, 'expected ' + LIVE_TEXTURES + ' live GL textures (fallback + 4 gate textures + ' + TOWN_TEXTURES + ' town textures), got ' + during);
     const blocked = await frame.evaluate(() => {
       const w = window.__atlasActive3D; const bad = [];
       for (let x = -0.9; x <= 0.9001; x += 0.1) for (let z = 4.4; z <= 5.0; z += 0.1) if (w.isPositionBlocked(x, z)) bad.push([+x.toFixed(2), +z.toFixed(2)]);
       return bad;
     });
     assert(blocked.length === 0, 'no point of the gate (frame, opening, plinth) blocks movement, blocked: ' + JSON.stringify(blocked));
-    console.log('PASS: portal 0 is still "Back to the Plaza" at [0,0,4.7] (same-domain), scale 0.5; the gate GLB is fetched once with 5 live textures; the gate blocks nothing');
+    console.log('PASS: portal 0 is still "Back to the Plaza" at [0,0,4.7] (same-domain), scale 0.5; the gate GLB is fetched once with its 4 textures plus the town textures; the gate blocks nothing');
 
     console.log('STEP 2: from the front the gate renders with its textures');
     await setCamera(...FRONT);
@@ -199,7 +205,7 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     console.log('PASS: Lobby re-entered at the spawn with the gate rendering again');
 
     console.log('STEP 7: destroying the world frees the gate\'s GPU textures');
-    assert((await live()) === 5, 'expected 5 live textures after re-entering, got ' + (await live()));
+    assert((await live()) === LIVE_TEXTURES, 'expected ' + LIVE_TEXTURES + ' live textures after re-entering, got ' + (await live()));
     await frame.evaluate(() => window.__atlasActive3D.destroy());
     assert((await live()) === 0, 'expected 0 live GL textures after destroy(), got ' + (await live()));
     console.log('PASS: 0 live GL textures after destroy()');

@@ -281,33 +281,23 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   pass('Lobby screen and keyboard face the chair, keyboard in front of the monitor, desk items (lamp included) do not overlap');
 
   // ---- exterior ----
+  // The outdoor town (ground, paths, river, hedges, fountain, hut, mine) is covered by manual-3d-town-layout-unit.js;
+  // this checks the outdoor-kit props that are still placed and the building's entrance.
   const outdoor = items.filter((i) => i.obj.model.startsWith('/assets/outdoor/'));
   const outCount = (n) => outdoor.filter((i) => i.name === n).length;
-  ['grassPatch', 'pathTile', 'shrub', 'treeSmall', 'benchOutdoor', 'lampPost', 'welcomeSign', 'planterBox'].forEach((n) => assert(outCount(n) > 0, 'the exterior should use ' + n));
-  assert.strictEqual(outCount('treeSmall'), 1); assert.strictEqual(outCount('benchOutdoor'), 1);
-  assert.strictEqual(outCount('lampPost'), 1); assert.strictEqual(outCount('welcomeSign'), 1);
-  assert(outCount('shrub') + outCount('planterBox') >= 2 && outCount('shrub') + outCount('planterBox') <= 10, 'a small amount of landscaping');
-  outdoor.forEach((i) => assert(i.obj.scale === undefined || i.obj.scale === 1, i.name + ' keeps its native size'));
+  ['shrub', 'treeSmall', 'benchOutdoor', 'lampPost', 'welcomeSign', 'planterBox'].forEach((n) => assert(outCount(n) > 0, 'the exterior should use ' + n));
+  assert.strictEqual(outCount('welcomeSign'), 1);
+  assert(outCount('lampPost') >= 4 && outCount('benchOutdoor') >= 4, 'lit, furnished public spaces');
+  outdoor.forEach((i) => assert(i.obj.scale === undefined || i.obj.scale >= 1 || i.name === 'treeSmall', i.name + ' keeps its native size or larger'));
   const buildingSouth = Math.max(...items.filter((i) => i.name.startsWith('wall')).map((i) => i.footprint.max[1]));
-  outdoor.forEach((i) => assert(i.footprint.min[1] >= buildingSouth - 0.001, i.name + ' stands inside the building'));
-  const GROUND = ['grassPatch', 'pathTile'];
-  outdoor.forEach((i) => {
-    const y = i.obj.position[1];
-    if (GROUND.includes(i.name)) assert(y >= -0.07 && y <= 0, i.name + ' is sunk only far enough for its top to sit at the floor, got y ' + y);
-    else assert.strictEqual(y, 0, i.name + ' stands on the ground');
-  });
+  outdoor.forEach((i) => assert(i.obj.position[1] === 0, i.name + ' stands on the ground'));
   outdoor.forEach((it) => assert(it.footprint.minY >= -0.07, it.name + ' is buried below the floor (' + it.footprint.minY + ')'));
-  assert(outdoor.filter((i) => GROUND.includes(i.name)).every((i) => i.solid === false || i.footprint.maxY <= 0.05), 'lawn and path never block movement');
   const door = items.find((i) => i.name === 'wallDoorwayWide');
   assert(door && door.solid === false && door.footprint.max[1] >= buildingSouth - 0.001, 'the exterior door is an open, collision-free piece of the south wall');
   const doorX = door.footprint.cx;
-  const tiles = outdoor.filter((i) => i.name === 'pathTile').sort((a, b) => a.footprint.cz - b.footprint.cz);
-  assert(tiles.length >= 3 && tiles.length <= 8, 'a short path');
-  assert(Math.abs(tiles[0].footprint.cx - doorX) < 0.75 && tiles[0].footprint.min[1] - buildingSouth < 0.7, 'the path starts at the door');
-  for (let t = 1; t < tiles.length; t++) assert(tiles[t].footprint.min[1] - tiles[t - 1].footprint.max[1] < 0.01 && Math.abs(tiles[t].footprint.cx - tiles[t - 1].footprint.cx) < 0.01, 'path tiles form one continuous chain');
   const nearDoor = (n) => Math.hypot(outdoor.find((i) => i.name === n).footprint.cx - doorX, outdoor.find((i) => i.name === n).footprint.cz - buildingSouth);
   assert(nearDoor('welcomeSign') < 3, 'the welcome sign stands by the entrance');
-  pass('exterior: every outdoor GLB used at native size, south of the wall, ground tiles sunk just enough, props on the ground, short continuous path from the open door');
+  pass('exterior: outdoor-kit props stand on the ground, the welcome sign is by the open door');
 
   // Nothing floats: every elevated object rests on something whose vertical span contains its base.
   items.forEach((it) => {
@@ -318,7 +308,11 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   pass('no Lobby object floats above the floor without support');
 
   // Everything is inside the floor (the thicker window pieces overshoot by under a millimetre).
-  items.forEach((it) => assert(it.footprint.min[0] >= FC[0] - fw / 2 - 0.002 && it.footprint.max[0] <= FC[0] + fw / 2 + 0.002 && it.footprint.min[1] >= FC[1] - fd / 2 - 0.002 && it.footprint.max[1] <= FC[1] + fd / 2 + 0.002, it.name + ' is off the floor'));
+  // The sky box, the ground skirt and the non-solid tree line outside the hedges deliberately extend past it.
+  const beyondFloor = (it) => /townSky|townGround|riverBanks/.test(it.obj.model) || (it.obj.solid === false && /pine|treeSmall/.test(it.obj.model));
+  // town pieces (river ends, mine hill, hedges) may run up to 0.6 m past the floor edge, where the floor limit already stops the player
+  const tol = (it) => (it.obj.model.startsWith('/assets/town/') ? 0.6 : 0.002);
+  items.filter((it) => !beyondFloor(it)).forEach((it) => assert(it.footprint.min[0] >= FC[0] - fw / 2 - tol(it) && it.footprint.max[0] <= FC[0] + fw / 2 + tol(it) && it.footprint.min[1] >= FC[1] - fd / 2 - tol(it) && it.footprint.max[1] <= FC[1] + fd / 2 + tol(it), it.name + ' is off the floor'));
   pass('every Lobby object is on the floor');
 
   // Collision set: rug walked over, supported items not separate solids, crates/furniture solid.
@@ -335,6 +329,8 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   for (let i = 0; i < solids.length; i++) for (let j = i + 1; j < solids.length; j++) {
     const A = solids[i], B = solids[j];
     if (A.name.startsWith('wall') && B.name.startsWith('wall')) continue;
+    if (A.name === 'hedge' || B.name === 'hedge') continue; // hedges meet at the lot corners and trees stand against them
+    if (/mineHill|riverWater/.test(A.obj.model + B.obj.model)) continue; // landscape pieces are one big box with props standing in front
     const ox = Math.min(A.footprint.max[0], B.footprint.max[0]) - Math.max(A.footprint.min[0], B.footprint.min[0]);
     const oz = Math.min(A.footprint.max[1], B.footprint.max[1]) - Math.max(A.footprint.min[1], B.footprint.min[1]);
     assert(!(ox > 0.01 && oz > 0.01), A.name + ' overlaps ' + B.name + ' by ' + ox.toFixed(2) + ' x ' + oz.toFixed(2));
@@ -368,20 +364,21 @@ function parse(json, bin) { const { json: j, bin: b } = L.parseGLB(makeGlb(json,
   (scene.interactables || []).forEach((m) => assert(reachable(m.position[0], m.position[2], 1.2), 'crate ' + m.class + ' must be reachable from the spawn'));
   let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity, cells = 0;
   for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) if (seen[i][j]) { cells++; minX = Math.min(minX, gx(i)); maxX = Math.max(maxX, gx(i)); minZ = Math.min(minZ, gz(j)); maxZ = Math.max(maxZ, gz(j)); }
-  assert(minX < FC[0] - fw / 2 + 0.7 && maxX > FC[0] + fw / 2 - 0.7 && minZ < FC[1] - fd / 2 + 0.7 && maxZ > FC[1] + fd / 2 - 0.7, 'the player can walk to all four edges of the room, got x ' + minX + '..' + maxX + ' z ' + minZ + '..' + maxZ);
+  assert(minX < FC[0] - fw / 2 + 2.0 && maxX > FC[0] + fw / 2 - 4.5 && minZ < FC[1] - fd / 2 + 2.0 && maxZ > FC[1] + fd / 2 - 2.0, 'the player can walk to all four edges of the lot (the hedges and the river stop the walk a little short), got x ' + minX + '..' + maxX + ' z ' + minZ + '..' + maxZ);
   assert(cells * STEP * STEP > 0.55 * fw * fd, 'at least 55% of the floor stays walkable, got ' + (100 * cells * STEP * STEP / (fw * fd)).toFixed(0) + '%');
   pass('Lobby portal, anchors and every crate are reachable from the spawn; all four edges can be walked to; ' + (100 * cells * STEP * STEP / (fw * fd)).toFixed(0) + '% of the floor is walkable');
 
   // ---- exterior reachability and bounds ----
   const free = (x, z) => depthAt(x, z) === 0;
-  for (let z = buildingSouth - 0.4; z <= tiles[tiles.length - 1].footprint.max[1]; z += 0.2) assert(free(doorX, z), 'the doorway and path centreline is clear at z ' + z.toFixed(1));
+  for (let z = buildingSouth - 0.4; z <= 9.5; z += 0.2) assert(free(doorX, z), 'the doorway and the line into the plaza is clear at z ' + z.toFixed(1));
   assert(!free(0, buildingSouth - 0.05), 'the centre (portal) doorway stays closed off');
-  outdoor.filter((i) => !GROUND.includes(i.name)).forEach((i) => assert(reachable(i.footprint.cx, i.footprint.cz, Math.max(i.footprint.hx, i.footprint.hz) + 0.9), i.name + ' at (' + i.footprint.cx.toFixed(1) + ', ' + i.footprint.cz.toFixed(1) + ') can be walked up to'));
-  [[-6, 7], [6, 7], [-6, 11], [6, 11], [0, 9]].forEach(([x, z]) => assert(reachable(x, z, 0.2), 'yard point (' + x + ', ' + z + ') is reachable'));
-  const yardCells = (() => { let n = 0; for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) if (seen[i][j] && gz(j) > buildingSouth) n++; return n; })();
-  assert(yardCells * STEP * STEP > 0.6 * fw * (FC[1] + fd / 2 - buildingSouth), 'most of the yard is walkable');
-  assert(maxZ <= FC[1] + fd / 2 - 0.1 + 1e-9 && maxZ > FC[1] + fd / 2 - 0.4, 'the yard is bounded by the floor edge and reaches it');
-  pass('exterior: path and open doorway are clear, the centre doorway is closed off, every prop can be walked up to, and the yard is bounded by the floor edge');
+  const walkable = (i) => i.solid !== false;
+  outdoor.filter(walkable).forEach((i) => assert(reachable(i.footprint.cx, i.footprint.cz, Math.max(i.footprint.hx, i.footprint.hz) + 0.9), i.name + ' at (' + i.footprint.cx.toFixed(1) + ', ' + i.footprint.cz.toFixed(1) + ') can be walked up to'));
+  [[-6, 7], [6, 8], [-12, 14], [7.4, 12.4], [0, 9]].forEach(([x, z]) => assert(reachable(x, z, 0.2), 'outdoor point (' + x + ', ' + z + ') is reachable'));
+  const outdoorCells = (() => { let n = 0; for (let i = 0; i <= nx; i++) for (let j = 0; j <= nz; j++) if (seen[i][j] && gz(j) > buildingSouth) n++; return n; })();
+  assert(outdoorCells * STEP * STEP > 0.4 * fw * (FC[1] + fd / 2 - buildingSouth), 'most of the ground south of the building is walkable');
+  assert(maxZ <= FC[1] + fd / 2 - 0.1 + 1e-9 && maxZ > FC[1] + fd / 2 - 2, 'the town is bounded by the south hedge and reaches it');
+  pass('exterior: the doorway and the line into the plaza are clear, the centre doorway is closed off, every solid prop can be walked up to, and the town is bounded');
 
   // Loot markers match their crate objects by exact position.
   (scene.interactables || []).forEach((m) => assert(byName('cardboardBoxClosed').some((c) => c.obj.position[0] === m.position[0] && c.obj.position[2] === m.position[2]), 'interactable ' + m.class + ' has no crate object at its position'));

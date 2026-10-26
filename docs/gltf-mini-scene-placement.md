@@ -29,9 +29,11 @@ the object inside them at the support's top (or shelf-board) height.
 
 Ground cover is sunk so its top sits at the floor: the outdoor kit's
 `grassPatch` has a 0.06 base slab with tufts up to 0.23, and `pathTile` is a
-thin slab, so the Lobby places them at `y = -0.05` and `y = -0.065`. The
+thin slab, so a scene places them at `y = -0.05` and `y = -0.065`. The
 outdoor kit is authored at real-world size, so it is placed at scale `1`, while
-the furniture kit is roughly half scale.
+the furniture kit is roughly half scale. The Lobby's outdoor town draws its
+ground as a few flat world-coordinate models instead; see
+[lobby-town-layout.md](lobby-town-layout.md).
 
 A GLB that fails to load is drawn as a 0.5 unit placeholder crate and the rest
 of the world still loads.
@@ -51,8 +53,8 @@ scale, with these exceptions:
 
 The player's center is also kept within the floor minus `0.1`. The floor is
 `floor.size` (`[width, depth]`), centered on the origin unless `floor.center`
-(`[x, z]`) moves it; the Lobby's floor is centered at `[0, 3.1]` so that the
-south part is a yard outside the building, bounded by the floor edge.
+(`[x, z]`) moves it; the Lobby's floor is 40 x 40 m centered at `[0, 3]`, so the building sits in
+the north-middle of a walkable town lot bounded by the floor edge.
 
 A player who starts inside a box (a spawn or anchor placed too close to
 furniture) can walk out of it: while overlapping, moves that do not go deeper

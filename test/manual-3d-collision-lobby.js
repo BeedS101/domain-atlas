@@ -11,8 +11,9 @@
 //   2. Real walking (WASD): furniture stops the player, the rug does not, and
 //      each of the four room edges does.
 //   2b. The exterior: the player walks out through the entrance door, along the
-//      path to the bench, around the yard and back inside; the closed centre
-//      doorway and the yard edges stop the player.
+//      path to the fountain, to the south hedge, west hedge and river bank, and
+//      back inside; the closed centre doorway and the edges of the town stop
+//      the player.
 //   3. A player who starts inside an object's box can walk out of it.
 //   4. A ground-level anchor (SPEC.md section 3.5's [x, 0, z] shape) spawns at
 //      eye height, not on the floor.
@@ -145,7 +146,7 @@ async function enterLobby(frame, anchorId) {
       ['player spawn', 0, 3.4],
       ['entrance doorway', 3.2, 5.55],
       ['path in front of the entrance', 3.2, 7.5],
-      ['lawn beside the path (grass patches are not solid)', 5.6, 9.5],
+      ['plaza paving beside the entrance path (ground layers are not solid)', 5.6, 9.5],
       ['portal marker', 0, 4.7],
       ['reading-nook anchor', -3.9, -0.8]
     ];
@@ -153,7 +154,7 @@ async function enterLobby(frame, anchorId) {
     for (const [name, x, z] of [['centre doorway (closed door)', 0, 5.55], ['wall beside the entrance', 1.8, 5.55]]) {
       assert(await blocked(frame, x, z), 'Expected the ' + name + ' at (' + x + ', ' + z + ') to be solid');
     }
-    for (const [name, x, z] of [['+x', 7.3, 0], ['-x', -7.3, 0], ['-z', 0, -5.7], ['+z', 3.0, 12.0], ['yard +x', 7.3, 8.5], ['yard -x', -7.3, 8.5]]) {
+    for (const [name, x, z] of [['+x', 20.3, 0], ['-x', -20.3, 0], ['-z', 0, -17.3], ['+z', 3.0, 23.3], ['south hedge', 0, 22.5], ['west hedge', -19.5, 0], ['river', 18, 0]]) {
       assert(await blocked(frame, x, z), 'Expected beyond the ' + name + ' floor edge at (' + x + ', ' + z + ') to be blocked');
     }
     console.log('PASS: solid where furniture is, clear where it is not, rug walkable, floor edge limited');
@@ -184,7 +185,7 @@ async function enterLobby(frame, anchorId) {
       console.log('PASS: the ' + name + ' edge stops the player (' + JSON.stringify({ x: +end.x.toFixed(2), z: +end.z.toFixed(2) }) + ')');
     }
 
-    console.log('STEP 2b: out through the entrance, around the yard and back inside');
+    console.log('STEP 2b: out through the entrance, across the plaza edge and back inside');
     await place(frame, 3.2, 3.5, 180); // facing +z at the entrance door
     end = await hold(frame, 'KeyW', (c) => c.z >= 9.8, 30000);
     assert(end.z >= 9.7 && end.z < 10.6 && Math.abs(end.x - 3.2) < 0.3, 'Expected to walk through the doorway and along the path up to the bench, got ' + JSON.stringify(end));
@@ -197,9 +198,9 @@ async function enterLobby(frame, anchorId) {
     assert(end.z <= 4.2 && Math.abs(end.x - 3.2) < 0.3, 'Expected to walk back in through the entrance, got ' + JSON.stringify(end));
     console.log('PASS: walked back inside through the entrance (z=' + end.z.toFixed(2) + ')');
     for (const [name, x, z, yaw, pick, ok] of [
-      ['yard south edge', -1.0, 8.0, 180, (c) => c.z, (v) => v >= 11.4 && v <= 11.8],
-      ['yard west edge', -1.0, 7.4, -90, (c) => c.x, (v) => v <= -6.7 && v >= -7.1],
-      ['yard east edge', 5.5, 8.5, 90, (c) => c.x, (v) => v >= 6.7 && v <= 7.1]
+      ['south hedge', -1.5, 18.5, 180, (c) => c.z, (v) => v >= 21.4 && v <= 22.1],
+      ['west hedge', -11.0, 5.5, -90, (c) => c.x, (v) => v <= -18.5 && v >= -19.1],
+      ['river bank', 11.0, 6.5, 90, (c) => c.x, (v) => v >= 15.8 && v <= 16.4]
     ]) {
       await place(frame, x, z, yaw);
       end = await hold(frame, 'KeyW', () => false, 14000);
