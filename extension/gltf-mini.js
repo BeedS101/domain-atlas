@@ -158,17 +158,37 @@
     return { json, bin };
   }
 
+  const DATAVIEW_GETTERS = { 5120: 'getInt8', 5121: 'getUint8', 5122: 'getInt16', 5123: 'getUint16', 5125: 'getUint32', 5126: 'getFloat32' };
+
   function readAccessor(gltf, bin, accessorIndex) {
     const accessor = gltf.accessors[accessorIndex];
-    const bufferView = gltf.bufferViews[accessor.bufferView];
     const ctype = COMPONENT_TYPES[accessor.componentType];
     const numComponents = TYPE_COMPONENTS[accessor.type];
-    const byteOffset = (bufferView.byteOffset || 0) + (accessor.byteOffset || 0);
     const count = accessor.count * numComponents;
-    // None of the assets this loader targets use interleaved bufferViews
-    // (verified against the actual files) so a straight typed-array view
-    // over the byte range is safe — no manual stride walking needed.
-    return new ctype.array(bin, byteOffset, count);
+    // An accessor with no bufferView is all zeros per the glTF spec.
+    if (accessor.bufferView === undefined) return new ctype.array(count);
+    const bufferView = gltf.bufferViews[accessor.bufferView];
+    const byteOffset = (bufferView.byteOffset || 0) + (accessor.byteOffset || 0);
+    const elementBytes = ctype.size * numComponents;
+    const stride = bufferView.byteStride || elementBytes;
+    // Fast path: tightly packed and naturally aligned, so a typed-array
+    // view over the byte range is enough. Interleaved views (byteStride
+    // wider than one element) and misaligned offsets would otherwise throw
+    // or read neighbouring attributes as vertex data, so they take the
+    // element-by-element path below.
+    if (stride === elementBytes && byteOffset % ctype.size === 0) {
+      return new ctype.array(bin, byteOffset, count);
+    }
+    const dv = new DataView(bin);
+    const getter = DATAVIEW_GETTERS[accessor.componentType];
+    const out = new ctype.array(count);
+    for (let i = 0; i < accessor.count; i++) {
+      const base = byteOffset + i * stride;
+      for (let c = 0; c < numComponents; c++) {
+        out[i * numComponents + c] = dv[getter](base + c * ctype.size, true);
+      }
+    }
+    return out;
   }
 
   // ---------- persistent asset cache (IndexedDB, keyed by URL) ----------
@@ -344,18 +364,38 @@
       if (node.mesh !== undefined) {
         const mesh = gltf.meshes[node.mesh];
         mesh.primitives.forEach((prim) => {
+          // Points/lines/strips/fans would be drawn as plain triangle lists
+          // (the only draw call used) and come out as garbage geometry.
+          if (prim.mode !== undefined && prim.mode !== 4) return;
           const positions = readAccessor(gltf, bin, prim.attributes.POSITION);
           const normals = prim.attributes.NORMAL !== undefined ? readAccessor(gltf, bin, prim.attributes.NORMAL) : null;
-          const indices = prim.indices !== undefined ? readAccessor(gltf, bin, prim.indices) : null;
+          let indices = prim.indices !== undefined ? readAccessor(gltf, bin, prim.indices) : null;
+          // drawElements below only distinguishes 16- from 32-bit indices;
+          // 8-bit ones would be reinterpreted as pairs of 16-bit values.
+          if (indices instanceof Uint8Array) indices = Uint16Array.from(indices);
           const posAccessor = gltf.accessors[prim.attributes.POSITION];
-          if (posAccessor.min && posAccessor.max) {
+          // Accessor min/max is optional in glTF; measure the vertices
+          // themselves when an exporter left it out, otherwise the model
+          // would get no bounds (and so no collision box or drop scaling).
+          let localMin = posAccessor.min, localMax = posAccessor.max;
+          if (!(localMin && localMax) && positions.length >= 3) {
+            localMin = [Infinity, Infinity, Infinity];
+            localMax = [-Infinity, -Infinity, -Infinity];
+            for (let i = 0; i + 2 < positions.length; i += 3) {
+              for (let k = 0; k < 3; k++) {
+                if (positions[i + k] < localMin[k]) localMin[k] = positions[i + k];
+                if (positions[i + k] > localMax[k]) localMax[k] = positions[i + k];
+              }
+            }
+          }
+          if (localMin && localMax) {
             // Bounding box in model space, transformed by this node's
             // world matrix — approximate by transforming all 8 corners.
             for (let cx = 0; cx < 2; cx++) for (let cy = 0; cy < 2; cy++) for (let cz = 0; cz < 2; cz++) {
               const corner = [
-                cx ? posAccessor.max[0] : posAccessor.min[0],
-                cy ? posAccessor.max[1] : posAccessor.min[1],
-                cz ? posAccessor.max[2] : posAccessor.min[2]
+                cx ? localMax[0] : localMin[0],
+                cy ? localMax[1] : localMin[1],
+                cz ? localMax[2] : localMin[2]
               ];
               const wx = world[0]*corner[0] + world[4]*corner[1] + world[8]*corner[2] + world[12];
               const wy = world[1]*corner[0] + world[5]*corner[1] + world[9]*corner[2] + world[13];
@@ -376,7 +416,13 @@
     }
 
     const sceneIndex = gltf.scene || 0;
-    const rootNodes = (gltf.scenes && gltf.scenes[sceneIndex] && gltf.scenes[sceneIndex].nodes) || [];
+    let rootNodes = (gltf.scenes && gltf.scenes[sceneIndex] && gltf.scenes[sceneIndex].nodes) || [];
+    if (!rootNodes.length && gltf.nodes) {
+      // No scene listing: every node that isn't some other node's child is a root.
+      const childIndices = new Set();
+      gltf.nodes.forEach((node) => (node.children || []).forEach((c) => childIndices.add(c)));
+      rootNodes = gltf.nodes.map((_, i) => i).filter((i) => !childIndices.has(i));
+    }
     rootNodes.forEach((n) => walkNode(n, mat4Identity()));
 
     return {
@@ -483,6 +529,124 @@
         ambient: gl.getUniformLocation(program, 'uAmbient')
       }
     };
+  }
+
+  // ---------- scene placement and collision layout (pure, no GL) ----------
+  //
+  // scene.json places a model by translating its own origin, rotating around
+  // Y (degrees) and scaling uniformly, exactly as mat4 below composes it.
+  // Model origins are NOT centered: the bundled furniture kit puts them at a
+  // back corner (x from 0 to width, z from -depth to 0) while a few pieces
+  // (TV, plants) are centered, so any footprint derived from a placement has
+  // to go through the model's real bounds and the placement's rotation
+  // rather than assuming the origin is the middle.
+
+  const PLAYER_RADIUS = 0.3;
+  // Flat floor coverings (rugs, mats) are walked over, never collided with.
+  const FLOOR_DECAL_MAX_Y = 0.05;
+  // Anything whose lowest point is above head height can't be walked into.
+  const OVERHEAD_MIN_Y = 1.8;
+  // An object that starts at least this far above another's base, within
+  // that other's vertical extent, is resting on or in it (books on a shelf,
+  // a monitor on a desk) and is covered by the supporting object's box.
+  const RESTING_MIN_RISE = 0.05;
+  // How far past the floor edge the player's center may stand.
+  const FLOOR_EDGE_MARGIN = 0.1;
+  const DEFAULT_EYE_HEIGHT = 1.6;
+  const MIN_EYE_HEIGHT = 0.5;
+
+  function finiteOr(v, fallback) { v = Number(v); return Number.isFinite(v) ? v : fallback; }
+
+  // Tolerant read of one scene.json object entry: a missing/short/non-numeric
+  // position or a zero/non-numeric scale falls back to origin/1 instead of
+  // throwing (which would take the whole world down) or producing NaN matrices.
+  function normalizePlacement(obj) {
+    const pos = Array.isArray(obj && obj.position) ? obj.position : [];
+    const scale = finiteOr(obj && obj.scale, 1);
+    return {
+      position: [finiteOr(pos[0], 0), finiteOr(pos[1], 0), finiteOr(pos[2], 0)],
+      rotationYRad: (finiteOr(obj && obj.rotationY, 0) * Math.PI) / 180,
+      scale: scale === 0 ? 1 : scale
+    };
+  }
+
+  function placementMatrix(pl) {
+    return mat4Multiply(
+      mat4Translate(pl.position[0], pl.position[1], pl.position[2]),
+      mat4Multiply(mat4RotateY(pl.rotationYRad), mat4Scale(pl.scale))
+    );
+  }
+
+  // Oriented XZ footprint plus vertical extent of a placed model. Returns
+  // null for a model with no usable bounds.
+  function placedFootprint(bounds, pl) {
+    if (!bounds || !bounds.min || !bounds.max || !bounds.min.concat(bounds.max).every(Number.isFinite)) return null;
+    const c = Math.cos(pl.rotationYRad), s = Math.sin(pl.rotationYRad);
+    const lx = ((bounds.min[0] + bounds.max[0]) / 2) * pl.scale;
+    const lz = ((bounds.min[2] + bounds.max[2]) / 2) * pl.scale;
+    // Same x' = c*x + s*z, z' = -s*x + c*z that mat4RotateY applies.
+    const cx = pl.position[0] + c * lx + s * lz;
+    const cz = pl.position[2] - s * lx + c * lz;
+    const absScale = Math.abs(pl.scale);
+    const hx = ((bounds.max[0] - bounds.min[0]) * absScale) / 2;
+    const hz = ((bounds.max[2] - bounds.min[2]) * absScale) / 2;
+    const ex = Math.abs(c) * hx + Math.abs(s) * hz;
+    const ez = Math.abs(s) * hx + Math.abs(c) * hz;
+    const y0 = pl.position[1] + bounds.min[1] * pl.scale, y1 = pl.position[1] + bounds.max[1] * pl.scale;
+    return {
+      cx, cz, hx, hz, cos: c, sin: s,
+      min: [cx - ex, cz - ez], max: [cx + ex, cz + ez],
+      minY: Math.min(y0, y1), maxY: Math.max(y0, y1)
+    };
+  }
+
+  // Point in the footprint's own (rotated) frame: x' = c*x + s*z means the
+  // inverse is lx = c*dx - s*dz, lz = s*dx + c*dz.
+  function footprintLocal(fp, x, z) {
+    const dx = x - fp.cx, dz = z - fp.cz;
+    return [fp.cos * dx - fp.sin * dz, fp.sin * dx + fp.cos * dz];
+  }
+
+  // How far a circle of `radius` centered at (x,z) is inside the footprint
+  // (0 when clear) — the shallowest way out, measured in the footprint's frame.
+  function footprintDepth(fp, x, z, radius) {
+    const [lx, lz] = footprintLocal(fp, x, z);
+    const dxDepth = fp.hx + radius - Math.abs(lx), dzDepth = fp.hz + radius - Math.abs(lz);
+    return (dxDepth > 0 && dzDepth > 0) ? Math.min(dxDepth, dzDepth) : 0;
+  }
+
+  // Which placed objects get a collision box. `items` are
+  // { footprint, ... } entries; the filtered list is returned.
+  function selectSolidItems(items) {
+    const candidates = items.filter((it) => it.footprint && it.footprint.maxY > FLOOR_DECAL_MAX_Y && it.footprint.minY < OVERHEAD_MIN_Y);
+    return candidates.filter((it) => !candidates.some((sup) => {
+      if (sup === it) return false;
+      const f = it.footprint, sf = sup.footprint;
+      if (f.minY < sf.minY + RESTING_MIN_RISE || f.minY > sf.maxY + RESTING_MIN_RISE) return false;
+      const [lx, lz] = footprintLocal(sf, f.cx, f.cz);
+      return Math.abs(lx) <= sf.hx && Math.abs(lz) <= sf.hz;
+    }));
+  }
+
+  // Half-extents the player's center may reach on a floor of the given size
+  // (scene.json floor.size, centered on the origin), or null when unbounded.
+  function floorWalkLimits(floor) {
+    const size = floor && Array.isArray(floor.size) ? floor.size : null;
+    if (!size || !Number.isFinite(size[0]) || !Number.isFinite(size[1])) return null;
+    return [Math.max(0, size[0] / 2 - FLOOR_EDGE_MARGIN), Math.max(0, size[1] / 2 - FLOOR_EDGE_MARGIN)];
+  }
+
+  function floorOverrun(limits, x, z) {
+    if (!limits) return 0;
+    return Math.max(0, Math.abs(x) - limits[0], Math.abs(z) - limits[1]);
+  }
+
+  // A camera.start y that isn't a plausible eye height (0, as in a
+  // ground-level anchor position like SPEC.md §3.5's [4, 0, -2], or missing)
+  // would put the first-person camera on the floor.
+  function eyeHeightFrom(y) {
+    y = Number(y);
+    return (Number.isFinite(y) && y >= MIN_EYE_HEIGHT) ? y : DEFAULT_EYE_HEIGHT;
   }
 
   // ---------- floor (procedural quad — not a glb, just two triangles) ----------
@@ -791,8 +955,9 @@
     let placedPrimitives = [];
     let floorPrim = null;
     let portalTriggers = []; // [{position:[x,z], radius, portalIndex, ring}]
-    let boundingBoxes = []; // [{min:[x,z], max:[x,z]}] for simple collision
-    // Task #208 — scene.json-declared "walk up and press E" nodes (loot
+    let boundingBoxes = []; // [{footprint, lootMarker}] solid colliders, see selectSolidItems()
+    let floorLimits = null; // see floorWalkLimits()
+    // scene.json-declared "walk up and press E" nodes (loot
     // crates today, a mining node's respawn timer tomorrow — see the
     // frame()-loop comment on interactCooldownUntil for why the cooldown
     // is generic rather than crate-specific). Same shape as the 2D
@@ -804,7 +969,7 @@
     let interactTriggers = []; // [{position:[x,z], radius, marker}]
     let interactCooldownUntil = new Map(); // trigger index -> performance.now() ms it becomes interactable again
     let lastInteractPromptLabel = null; // debug/test hook, see getInteractPrompt() below
-    let lastInteractPromptMarker = null; // task #213 — the same raw scene.json entry the label was derived from, or null; see getInteractPromptMarker() below
+    let lastInteractPromptMarker = null; // the same raw scene.json entry the label was derived from, or null; see getInteractPromptMarker() below
     let lastNearbyInteractMarkers = []; // task #227 — every in-range, not-yet-owned marker (not just the nearest), nearest-first; see getNearbyInteractMarkers() below
 
     // Dropped items, visible and pickupable in a gltf-mini world (previously
@@ -831,9 +996,10 @@
     // enables, and the render loop for how the two are drawn differently.
     let itemDropEntries = new Map();
 
+    const cameraStart = (sceneData.camera && Array.isArray(sceneData.camera.start)) ? sceneData.camera.start : [0, DEFAULT_EYE_HEIGHT, 4];
     const camera = {
-      pos: (sceneData.camera && sceneData.camera.start) ? sceneData.camera.start.slice() : [0, 1.6, 4],
-      yaw: ((sceneData.camera && sceneData.camera.startYaw) || 0) * Math.PI / 180,
+      pos: [finiteOr(cameraStart[0], 0), eyeHeightFrom(cameraStart[1]), finiteOr(cameraStart[2], 4)],
+      yaw: finiteOr(sceneData.camera && sceneData.camera.startYaw, 0) * Math.PI / 180,
       pitch: 0
     };
 
@@ -1204,9 +1370,9 @@
       for (let i = 0; i < candidates.length; i++) {
         // The proximity radius interactTriggers/itemDropEntries carry is a
         // walk-up trigger distance, not an authored visual bounding sphere
-        // — reusing it directly (per the design Bruno approved: no new
-        // scene.json field, no per-model bounding-box extraction) makes the
-        // hover target a bit generous rather than pixel-tight, which is
+        // — reusing it directly (no new scene.json field, no per-model
+        // bounding-box extraction) makes the hover target a bit generous
+        // rather than pixel-tight, which is
         // fine for a distance hint whose whole job is "something's over
         // there."
         if (raySphereHit(eye, dir, candidates[i].position, candidates[i].radius) !== null) { hit = true; break; }
@@ -1229,12 +1395,31 @@
     window.addEventListener('mouseup', onMouseUp);
     canvas.addEventListener('mousemove', onCanvasHoverMove);
 
+    // Stand-in for a scene object whose GLB can't be fetched or parsed: a
+    // 0.5 unit crate with a base-centered origin, built once per init.
+    let placeholderModelCache = null;
+    function placeholderModel() {
+      if (!placeholderModelCache) {
+        const box = buildBox(gl, 0.5, 0, 0.5, 0.5, [0.78, 0.27, 0.27, 1]);
+        placeholderModelCache = {
+          primitives: [{ vao: box.vao, color: box.color, nodeMatrix: mat4Identity() }],
+          bounds: { min: [-0.25, 0, -0.25], max: [0.25, 0.5, 0.25], size: [0.5, 0.5, 0.5] }
+        };
+      }
+      return placeholderModelCache;
+    }
+
     async function loadScene(newSceneData) {
       sceneData = newSceneData;
       placedPrimitives = [];
       boundingBoxes = [];
-      const floor = sceneData.floor || { size: [10, 10], color: '#1b2830' };
+      const declaredFloor = sceneData.floor || {};
+      const floor = {
+        size: (Array.isArray(declaredFloor.size) && declaredFloor.size.length >= 2 && declaredFloor.size.every(Number.isFinite)) ? declaredFloor.size : [10, 10],
+        color: declaredFloor.color || '#1b2830'
+      };
       floorPrim = buildFloor(gl, floor.size, floor.color);
+      floorLimits = floorWalkLimits(floor);
 
       const objects = sceneData.objects || [];
       const urls = objects.map((obj) => opts.resolveAssetUrl(obj.model));
@@ -1321,8 +1506,14 @@
             if (perUrlContribution.get(url) == null) perUrlContribution.set(url, info.bytes); // Content-Length was missing — now we know the real size anyway
             emitByteProgress(true);
           }
+        }).catch((err) => {
+          // One missing or corrupt model shouldn't take the whole world down:
+          // it is drawn as a plain placeholder crate (see placeholderModel)
+          // and the rest of the scene loads normally.
+          console.warn('Scene model failed to load (' + url + '), using a placeholder:', err);
+          return null;
         }).then((model) => {
-          modelByUrl.set(url, model);
+          modelByUrl.set(url, model || placeholderModel());
           loadedCount++;
           // Whether this particular url resolved instantly (a 304 cache
           // hit, or an already-in-flight duplicate from modelCache) or took
@@ -1343,15 +1534,15 @@
       // instead of an already-looted crate sitting there solid forever.
       const interactables = sceneData.interactables || [];
       function lootMarkerAt(position) {
-        return interactables.find((m) => m.oncePerUser &&
-          m.position[0] === position[0] && m.position[1] === position[1] && m.position[2] === position[2]) || null;
+        return interactables.find((m) => m.oncePerUser && Array.isArray(m.position) &&
+          m.position[0] === position[0] && finiteOr(m.position[1], 0) === position[1] && m.position[2] === position[2]) || null;
       }
+      const placedItems = [];
       objects.forEach((obj, i) => {
         const model = loaded[i];
-        const rotY = ((obj.rotationY || 0) * Math.PI) / 180;
-        const scale = obj.scale || 1;
-        const placement = mat4Multiply(mat4Translate(obj.position[0], obj.position[1] || 0, obj.position[2]), mat4Multiply(mat4RotateY(rotY), mat4Scale(scale)));
-        const lootMarker = lootMarkerAt(obj.position);
+        const pl = normalizePlacement(obj);
+        const placement = placementMatrix(pl);
+        const lootMarker = lootMarkerAt(pl.position);
         model.primitives.forEach((prim) => {
           placedPrimitives.push({
             vao: prim.vao,
@@ -1360,17 +1551,12 @@
             lootMarker
           });
         });
-        // Bounding box for collision, in XZ, expanded from the model's own
-        // bounds and roughly re-centered at the placement (good enough —
-        // furniture is placed axis-aligned-ish and this only needs to feel
-        // right, not be exact).
-        const b = model.bounds;
-        if (isFinite(b.min[0])) {
-          const cx = obj.position[0], cz = obj.position[2];
-          const hx = (b.size[0] * scale) / 2, hz = (b.size[2] * scale) / 2;
-          boundingBoxes.push({ min: [cx - hx, cz - hz], max: [cx + hx, cz + hz], lootMarker });
-        }
+        placedItems.push({ footprint: placedFootprint(model.bounds, pl), lootMarker });
       });
+      // Oriented footprints from the models' real bounds (not a box
+      // centered on the placement origin), minus rugs, overhead objects and
+      // anything resting on another solid — see selectSolidItems().
+      boundingBoxes = selectSolidItems(placedItems);
 
       portalTriggers = (sceneData.portalMarkers || []).map((m) => {
         const kind = opts.portalKind(m.portalIndex);
@@ -1439,7 +1625,8 @@
             label: itemDropLabel(drop.credential)
           },
           primitives: null,
-          bounds: null
+          bounds: null,
+          pivot: [0, 0, 0]
         };
         itemDropEntries.set(drop.dropId, entry);
         if (drop.model) {
@@ -1461,6 +1648,8 @@
             const size = model.bounds.size;
             const maxDim = Math.max(size[0], size[1], size[2]);
             entry.scale = (Number.isFinite(maxDim) && maxDim > 0) ? (ITEM_MODEL_TARGET_SIZE / maxDim) : 1;
+            const centers = [0, 1, 2].map((k) => (model.bounds.min[k] + model.bounds.max[k]) / 2);
+            entry.pivot = centers.every(Number.isFinite) ? centers : [0, 0, 0];
           }).catch((err) => {
             // Graceful, not fatal — same "no broken-image icon" spirit the
             // Asset Viewer's thumbnail already follows (viewer.js): a bad
@@ -1506,27 +1695,33 @@
       }
     }
 
-    // Shared by tryMove() and the isPositionBlocked() debug hook below, so
-    // there's exactly one place that knows a claimed crate's box no longer
-    // blocks anything, rather than the two staying in sync by hand.
-    function isBlockedAt(x, z) {
-      const PLAYER_RADIUS = 0.3;
+    // How deep (x, z) is inside solid space: the summed penetration of every
+    // box the player's circle overlaps, plus how far it is past the floor
+    // edge. 0 means free. Shared by tryMove() and the isPositionBlocked()
+    // debug hook below, so there's exactly one place that knows a claimed
+    // crate's box no longer blocks anything.
+    function collisionDepth(x, z) {
+      let depth = floorOverrun(floorLimits, x, z);
       for (const box of boundingBoxes) {
         // An already-claimed crate is skipped the same way it's skipped in
         // the draw loop above — no invisible wall left where a looted box
         // used to be.
         if (box.lootMarker && opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(box.lootMarker)) continue;
-        if (x + PLAYER_RADIUS > box.min[0] && x - PLAYER_RADIUS < box.max[0] &&
-            z + PLAYER_RADIUS > box.min[1] && z - PLAYER_RADIUS < box.max[1]) {
-          return true;
-        }
+        depth += footprintDepth(box.footprint, x, z, PLAYER_RADIUS);
       }
-      return false;
+      return depth;
     }
+
+    function isBlockedAt(x, z) { return collisionDepth(x, z) > 0; }
 
     function tryMove(dx, dz) {
       const next = [camera.pos[0] + dx, camera.pos[2] + dz];
-      if (isBlockedAt(next[0], next[1])) return false;
+      const nextDepth = collisionDepth(next[0], next[1]);
+      // A player who starts inside something solid (an anchor spawn too
+      // close to furniture, a drop that landed in a box) must be able to
+      // walk out: while already overlapping, any move that doesn't go
+      // deeper is allowed instead of freezing them in place.
+      if (nextDepth > 0 && nextDepth > collisionDepth(camera.pos[0], camera.pos[2])) return false;
       camera.pos[0] = next[0];
       camera.pos[2] = next[1];
       return true;
@@ -1779,8 +1974,11 @@
           // down to ITEM_MODEL_TARGET_SIZE, applied in the model's own
           // local space (before nodeMatrix), the same composition order
           // loadScene()'s objects.forEach already uses for a scene.json
-          // object's own author-chosen scale.
-          const withScale = mat4Multiply(placement, mat4Scale(entry.scale || 1));
+          // object's own author-chosen scale. entry.pivot (the model's
+          // bounding-box center, also set at load) is moved to the origin
+          // first, so the item sits on its drop position and spins about
+          // its own middle instead of orbiting a corner/base origin.
+          const withScale = mat4Multiply(placement, mat4Multiply(mat4Scale(entry.scale || 1), mat4Translate(-entry.pivot[0], -entry.pivot[1], -entry.pivot[2])));
           entry.primitives.forEach((prim) => {
             bindAndDraw({ vao: prim.vao, color: prim.color, modelMatrix: mat4Multiply(withScale, prim.nodeMatrix) }, view, projection);
           });
@@ -2032,6 +2230,13 @@
       getItemDropScale: (dropId) => {
         const entry = itemDropEntries.get(dropId);
         return entry && entry.primitives ? entry.scale : null;
+      },
+      // The model-space point a loaded drop is centered on and spins
+      // around (its bounding-box center, see setItemDrops()); null while
+      // the drop is still a marker.
+      getItemDropPivot: (dropId) => {
+        const entry = itemDropEntries.get(dropId);
+        return entry && entry.primitives ? entry.pivot.slice() : null;
       },
       // SPEC.md §3.6.1 — same debug/test-hook convention as every getter
       // above: lets a test confirm a portal actually got the right
@@ -2545,6 +2750,13 @@
   window.MiniGLTF = {
     init,
     previewModel,
+    // Pure helpers, exposed so tests can check placement/collision math
+    // without a WebGL context.
+    layout: {
+      normalizePlacement, placementMatrix, placedFootprint, footprintDepth,
+      selectSolidItems, floorWalkLimits, floorOverrun, eyeHeightFrom,
+      parseGLB, extractPrimitives, PLAYER_RADIUS
+    },
     previewCharacter,
     cache: {
       listBySite: listCacheBySite,

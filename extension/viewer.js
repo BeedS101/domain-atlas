@@ -4101,7 +4101,7 @@ function renderAssetViewerContent(entry) {
   }
   html += renderAssetViewerProperties(mergedAssetFields(entry));
   if (asset.model) {
-    html += '<button type="button" id="assetViewerShowModelBtn" data-model="' + asset.model + '">Show model</button>';
+    html += '<button type="button" id="assetViewerShowModelBtn" data-model="' + escapeHtml(asset.model) + '">Show model</button>';
   }
   html += '<div id="assetViewerModelArea"></div>';
   assetViewerBodyEl.innerHTML = html;
