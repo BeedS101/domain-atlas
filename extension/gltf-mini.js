@@ -6,10 +6,12 @@
 // and this sandbox's own network policy blocks fetching one anyway. So:
 // write exactly enough of the glTF 2.0 spec to load this project's own
 // furniture-kit GLBs, which turn out to be a genuinely narrow subset — no
-// skinning, no animation, no sparse accessors, OPAQUE materials only, and
-// colour from material.baseColorFactor, plus one optional embedded
-// baseColorTexture (see "base-colour textures" below for exactly what is and
-// is not supported). A
+// skinning, no animation, no sparse accessors, and colour from
+// material.baseColorFactor plus an optional embedded baseColorTexture, with
+// a few small optional extras (emissive, tangent-space normal maps,
+// alphaMode MASK, KHR_materials_unlit and scene fog); see "material
+// textures" below and docs/gltf-mini-materials.md for exactly what is and is
+// not supported. A
 // general-purpose glTF loader would be a much bigger undertaking; this one
 // only needs to be correct for that subset, not for glTF as a whole.
 //
@@ -255,7 +257,7 @@
     }
   }
 
-  // onBytes (task #74, optional — every existing caller still works
+  // onBytes (optional — every caller still works
   // unchanged without it) reports this one URL's download progress as a
   // sequence of events: {status:'cached'} for a 304 or offline-fallback hit
   // (nothing to download, so it never becomes part of a speed/ETA
@@ -320,21 +322,26 @@
 
   // ---------- model loading (cached by URL) ----------
 
-  // ---------- base-colour textures (CPU side: describe, no GL) ----------
+  // ---------- material textures (CPU side: describe, no GL) ----------
   //
-  // Supported: material.pbrMetallicRoughness.baseColorTexture reading
-  // TEXCOORD_0, resolved material -> texture -> image where the image is
+  // Three texture slots are read, all from TEXCOORD_0:
+  //   - pbrMetallicRoughness.baseColorTexture, multiplied by baseColorFactor
+  //     and lit like any flat colour;
+  //   - emissiveTexture, multiplied by emissiveFactor and added after
+  //     lighting;
+  //   - normalTexture, a tangent-space normal map (see "normal maps" in the
+  //     shader section).
+  // Each is resolved material -> texture -> image where the image is
   // embedded in the GLB BIN chunk through a bufferView and is image/png or
   // image/jpeg, with the texture's sampler (wrapS/wrapT repeat, clamp or
   // mirrored repeat; mag/min filters; defaults when no sampler is given).
-  // The sampled colour is multiplied by baseColorFactor, then lit like any
-  // flat colour. Not supported (the material falls back to its flat
-  // baseColorFactor): external image URIs, data: URIs, other MIME types,
-  // texCoord other than 0, KHR_texture_transform and other texture
-  // extensions. Other texture slots (normal, metallic-roughness, occlusion,
-  // emissive) and alphaMode BLEND/MASK are ignored: materials draw opaque.
-  // Texture bytes are treated as the colour values to show, the same way
-  // flat baseColorFactor values are: no sRGB-to-linear conversion.
+  // Not supported (the slot is dropped and the material draws without it):
+  // external image URIs, data: URIs, other MIME types, texCoord other than 0,
+  // KHR_texture_transform and other texture extensions. Metallic-roughness
+  // and occlusion textures are ignored, as is alphaMode BLEND (the material
+  // draws opaque). Texture bytes are treated as the colour values to show,
+  // the same way flat baseColorFactor values are: no sRGB-to-linear
+  // conversion.
   const MAX_EMBEDDED_IMAGE_BYTES = 16 * 1024 * 1024;
   const IMAGE_MIME_MAGIC = {
     'image/png': [0x89, 0x50, 0x4e, 0x47],
@@ -342,20 +349,22 @@
   };
   const WRAP_MODES = { 33071: 33071, 33648: 33648, 10497: 10497 }; // clamp-to-edge, mirrored repeat, repeat
   const FILTER_MODES = { 9728: 9728, 9729: 9729, 9984: 9984, 9985: 9985, 9986: 9986, 9987: 9987 };
+  const DEFAULT_ALPHA_CUTOFF = 0.5;
 
-  // Returns { texture, warning }: texture is { key, mime, bytes, sampler } when
-  // the material has a usable embedded base-colour image, else null; warning
+  // Returns { texture, warning } for one texture slot (`info` is the glTF
+  // textureInfo, `slot` names it in warnings): texture is { key, mime, bytes,
+  // sampler } when the slot has a usable embedded image, else null; warning
   // says why a declared texture was unusable (null when none was declared).
-  function resolveBaseColorTexture(gltf, bin, materialIndex, hasUvs) {
+  // `usable` is a string when the primitive lacks what the slot needs
+  // (TEXCOORD_0, and normals for a normal map), else null.
+  function resolveTexture(gltf, bin, info, slot, usable) {
     const none = (warning) => ({ texture: null, warning: warning || null });
     try {
-      const mat = materialIndex !== undefined && gltf.materials ? gltf.materials[materialIndex] : null;
-      const info = mat && mat.pbrMetallicRoughness && mat.pbrMetallicRoughness.baseColorTexture;
       if (!info) return none();
-      if (info.texCoord !== undefined && info.texCoord !== 0) return none('baseColorTexture uses TEXCOORD_' + info.texCoord + ' (only TEXCOORD_0 is supported)');
-      if (!hasUvs) return none('baseColorTexture is declared but the primitive has no usable TEXCOORD_0');
+      if (info.texCoord !== undefined && info.texCoord !== 0) return none(slot + ' uses TEXCOORD_' + info.texCoord + ' (only TEXCOORD_0 is supported)');
+      if (usable) return none(slot + ' is declared but ' + usable);
       const tex = gltf.textures && gltf.textures[info.index];
-      if (!tex) return none('baseColorTexture refers to a texture that does not exist');
+      if (!tex) return none(slot + ' refers to a texture that does not exist');
       if (tex.source === undefined) return none('texture has no image source (an extension-only image format is not supported)');
       const image = gltf.images && gltf.images[tex.source];
       if (!image) return none('texture refers to an image that does not exist');
@@ -378,8 +387,72 @@
       };
       return { texture: { key: tex.source + '|' + sampler.wrapS + '|' + sampler.wrapT + '|' + sampler.magFilter + '|' + sampler.minFilter, mime, bytes, sampler }, warning: null };
     } catch (err) {
-      return none('could not read baseColorTexture: ' + err.message);
+      return none('could not read ' + slot + ': ' + err.message);
     }
+  }
+
+  function resolveBaseColorTexture(gltf, bin, materialIndex, hasUvs) {
+    const mat = materialIndex !== undefined && gltf.materials ? gltf.materials[materialIndex] : null;
+    const info = mat && mat.pbrMetallicRoughness && mat.pbrMetallicRoughness.baseColorTexture;
+    return resolveTexture(gltf, bin, info, 'baseColorTexture', hasUvs ? null : 'the primitive has no usable TEXCOORD_0');
+  }
+
+  // The optional material features of one primitive, all on top of the flat
+  // colour: { emissive, emissiveTexture, normalTexture, normalScale, mask,
+  // alphaCutoff, unlit, warnings }. Every field is absent unless its feature
+  // is used, so a plain material extracts exactly as it always did. Anything
+  // malformed or unsupported drops just that feature (with a warning) and
+  // never the model.
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const named = (slot, warning) => (warning.indexOf(slot) >= 0 ? warning : slot + ': ' + warning);
+  function resolveMaterialFeatures(gltf, bin, materialIndex, hasUvs, hasNormals) {
+    const out = { warnings: [] };
+    const mat = materialIndex !== undefined && gltf.materials ? gltf.materials[materialIndex] : null;
+    if (!mat) return out;
+    try {
+      // KHR_materials_unlit: the base colour is shown as it is, without lighting.
+      if (mat.extensions && mat.extensions.KHR_materials_unlit) out.unlit = true;
+
+      if (mat.alphaMode === 'MASK') {
+        const cutoff = mat.alphaCutoff;
+        out.mask = true;
+        out.alphaCutoff = typeof cutoff === 'number' && Number.isFinite(cutoff) && cutoff >= 0 ? Math.min(1, cutoff) : DEFAULT_ALPHA_CUTOFF;
+      }
+      // alphaMode BLEND stays unsupported: such materials draw opaque, as
+      // several bundled models rely on, without a warning.
+
+      // emissive = emissiveFactor * emissiveTexture, added after lighting.
+      // An unusable factor, or a texture that cannot be used, leaves the
+      // material non-emissive. The factor defaults to [0,0,0] as in glTF, so
+      // a texture only glows when a factor is given.
+      const factorRaw = mat.emissiveFactor;
+      if (factorRaw !== undefined) {
+        const ok = Array.isArray(factorRaw) && factorRaw.length === 3 && factorRaw.every((v) => typeof v === 'number' && Number.isFinite(v));
+        if (!ok) out.warnings.push('emissiveFactor is not three numbers; the material is not emissive');
+        else if (factorRaw.some((v) => v > 0)) out.emissive = factorRaw.map((v) => clamp01(v));
+      }
+      if (mat.emissiveTexture && out.emissive) {
+        const r = resolveTexture(gltf, bin, mat.emissiveTexture, 'emissiveTexture', hasUvs ? null : 'the primitive has no usable TEXCOORD_0');
+        if (r.texture) out.emissiveTexture = r.texture;
+        else { delete out.emissive; if (r.warning) out.warnings.push(named('emissiveTexture', r.warning) + '; the material is not emissive'); }
+      }
+
+      // Tangent-space normal map. Needs TEXCOORD_0 and vertex normals (the
+      // tangent frame is built from them); without them the model keeps its
+      // vertex normals.
+      if (mat.normalTexture) {
+        const missing = !hasUvs ? 'the primitive has no usable TEXCOORD_0' : (!hasNormals ? 'the primitive has no NORMAL' : null);
+        const r = resolveTexture(gltf, bin, mat.normalTexture, 'normalTexture', missing);
+        if (r.texture) {
+          out.normalTexture = r.texture;
+          const scale = mat.normalTexture.scale;
+          out.normalScale = typeof scale === 'number' && Number.isFinite(scale) ? scale : 1;
+        } else if (r.warning) out.warnings.push(named('normalTexture', r.warning) + '; using the vertex normals');
+      }
+    } catch (err) {
+      out.warnings.push('could not read the material extras: ' + err.message);
+    }
+    return out;
   }
 
   // TEXCOORD_0 as Float32 pairs, or null when absent or malformed (wrong
@@ -494,7 +567,11 @@
             nodeMatrix: world
           };
           if (resolved.texture) primitive.baseColorTexture = resolved.texture;
-          if (resolved.warning) primitive.textureWarning = resolved.warning;
+          const warnings = resolved.warning ? [resolved.warning] : [];
+          const features = resolveMaterialFeatures(gltf, bin, prim.material, !!uvs, !!normals && normals.length === positions.length);
+          ['emissive', 'emissiveTexture', 'normalTexture', 'normalScale', 'mask', 'alphaCutoff', 'unlit'].forEach((k) => { if (features[k] !== undefined) primitive[k] = features[k]; });
+          warnings.push(...features.warnings);
+          if (warnings.length) primitive.textureWarning = warnings.join('; ');
           primitives.push(primitive);
         });
       }
@@ -575,22 +652,38 @@
     return texture;
   }
 
-  // Decodes and uploads every distinct base-colour texture of a model (one
-  // per image + sampler, shared by the primitives that use it) and attaches
-  // the UV buffer and texture to each textured primitive's vao. A texture
+  // The draw-time material state of a primitive, kept on its vao. `emissive`
+  // is only set while it can be shown correctly: a primitive with an
+  // emissive texture stays non-emissive until that texture is on the GPU.
+  const TEXTURE_SLOTS = [['baseColorTexture', 'texture'], ['emissiveTexture', 'emissiveTexture'], ['normalTexture', 'normalTexture']];
+  function makeMaterial(prim) {
+    const pending = !!prim.emissiveTexture;
+    return {
+      emissive: (prim.emissive && !pending) ? prim.emissive : null,
+      mask: !!prim.mask,
+      alphaCutoff: prim.mask ? prim.alphaCutoff : 0,
+      unlit: !!prim.unlit,
+      normalScale: prim.normalScale === undefined ? 1 : prim.normalScale
+    };
+  }
+  const hasMaterialFeatures = (p) => !!(p.baseColorTexture || p.emissiveTexture || p.normalTexture || p.textureWarning);
+
+  // Decodes and uploads every distinct texture of a model (one per image +
+  // sampler, shared by the primitives and slots that use it) and attaches
+  // the UV buffer and textures to each textured primitive's vao. A texture
   // that cannot be decoded or uploaded is skipped with a console warning and
-  // its primitive keeps drawing in its flat baseColorFactor colour, so a bad
-  // image never costs the model or the scene. Returns the GPU objects created
-  // so they can be released with releaseModelGpu().
+  // its slot falls back: a base-colour texture to the flat baseColorFactor
+  // colour, an emissive texture to a non-emissive material, a normal map to
+  // the vertex normals. A bad image never costs the model or the scene.
+  // Returns the GPU objects created so they can be released with
+  // releaseModelGpu().
   async function attachTextures(gl, primitives, label, isCancelled) {
     const created = { textures: [], buffers: [] };
     const pending = new Map(); // texture key -> Promise<WebGLTexture|null>
     primitives.forEach((prim) => {
-      if (prim.textureWarning) console.warn('gltf-mini: ' + label + ': ' + prim.textureWarning + '; drawing it with its flat colour');
+      if (prim.textureWarning) console.warn('gltf-mini: ' + label + ': ' + prim.textureWarning);
     });
-    await Promise.all(primitives.map(async (prim) => {
-      const desc = prim.baseColorTexture;
-      if (!desc || !prim.uvs || !prim.vao) return;
+    const load = (desc, slot) => {
       if (!pending.has(desc.key)) {
         pending.set(desc.key, (async () => {
           try {
@@ -604,16 +697,26 @@
               if (bitmap.close) bitmap.close();
             }
           } catch (err) {
-            console.warn('gltf-mini: ' + label + ': could not use its base-colour texture (' + (err && err.message || err) + '); drawing it with its flat colour');
+            console.warn('gltf-mini: ' + label + ': could not use its ' + slot + ' (' + (err && err.message || err) + '); that slot falls back to the plain material');
             return null;
           }
         })());
       }
-      const texture = await pending.get(desc.key);
-      if (!texture || isCancelled()) return;
+      return pending.get(desc.key);
+    };
+    await Promise.all(primitives.map(async (prim) => {
+      if (!prim.uvs || !prim.vao) return;
+      const found = await Promise.all(TEXTURE_SLOTS.map(async ([slot, field]) => {
+        const desc = prim[slot];
+        return desc ? [field, await load(desc, slot)] : null;
+      }));
+      if (isCancelled()) return;
+      const got = found.filter((f) => f && f[1]);
+      if (!got.length) return;
       prim.vao.uvBuffer = createBuffer(gl, gl.ARRAY_BUFFER, prim.uvs);
-      prim.vao.texture = texture;
       created.buffers.push(prim.vao.uvBuffer);
+      got.forEach(([field, texture]) => { prim.vao[field] = texture; });
+      if (prim.emissive && prim.vao.emissiveTexture && prim.vao.material) prim.vao.material.emissive = prim.emissive;
     }));
     return created;
   }
@@ -625,7 +728,8 @@
     model.primitives.forEach((prim) => {
       if (!prim.vao) return;
       [prim.vao.positionBuffer, prim.vao.normalBuffer, prim.vao.indexBuffer].forEach((b) => { if (b) gl.deleteBuffer(b); });
-      prim.vao.texture = null; prim.vao.uvBuffer = null;
+      prim.vao.texture = null; prim.vao.emissiveTexture = null; prim.vao.normalTexture = null; prim.vao.uvBuffer = null;
+      if (prim.vao.material) prim.vao.material.emissive = null;
     });
     model.gpu = null;
   }
@@ -648,14 +752,15 @@
             normalBuffer: prim.normals ? createBuffer(gl, gl.ARRAY_BUFFER, prim.normals) : null,
             indexBuffer: prim.indices ? createBuffer(gl, gl.ELEMENT_ARRAY_BUFFER, prim.indices) : null,
             indexCount: prim.indices ? prim.indices.length : (prim.positions.length / 3),
-            indexType: prim.indices ? (prim.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT) : null
+            indexType: prim.indices ? (prim.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT) : null,
+            material: makeMaterial(prim)
           };
         });
 
         const model = { primitives, bounds };
         // The image bytes come out of the one GLB fetched above; nothing is
         // downloaded again for textures.
-        if (primitives.some((p) => p.baseColorTexture || p.textureWarning)) {
+        if (primitives.some(hasMaterialFeatures)) {
           const gpu = await attachTextures(gl, primitives, url, () => !!(owner && owner.destroyed));
           if (gpu.textures.length) {
             model.gpu = gpu;
@@ -681,28 +786,58 @@
     owner.urls.clear();
   }
 
-  // Per draw: a primitive with a texture and UVs samples it, any other
-  // primitive draws its flat colour with the texture state neutralised. The
-  // program starts in the flat state (UV attribute disabled, uHasTexture 0,
-  // fallback texture bound), so scenes without textures make no GL calls here.
-  function bindBaseColorTexture(gl, prog, vao) {
-    if (vao.texture && vao.uvBuffer) {
+  // Per draw: sets the primitive's material state. A primitive with textures
+  // and UVs samples them (base colour on unit 0, emissive on 1, normal map on
+  // 2); anything else draws its flat colour with the texture state
+  // neutralised. The program starts in the neutral state (UV attribute
+  // disabled, every flag 0, the fallback texture on all three units), and
+  // `prog.mat` remembers what is currently set, so a scene without any of
+  // these features makes no GL calls here. Parts without a `material`
+  // (character, floor, portal rings) reset to neutral after a special one.
+  const NEUTRAL_MATERIAL = { emissive: null, mask: false, alphaCutoff: 0, unlit: false, normalScale: 1 };
+  const ZERO3 = [0, 0, 0];
+  function bindMaterial(gl, prog, vao) {
+    const m = vao.material || NEUTRAL_MATERIAL;
+    const st = prog.mat;
+    const slotTextures = [
+      vao.texture || null,
+      (m.emissive && vao.emissiveTexture) || null,
+      (prog.derivatives && vao.normalTexture) || null
+    ];
+    const wantUv = !!(vao.uvBuffer && slotTextures.some(Boolean));
+    if (wantUv) {
       gl.bindBuffer(gl.ARRAY_BUFFER, vao.uvBuffer);
       gl.enableVertexAttribArray(prog.attribs.uv);
       gl.vertexAttribPointer(prog.attribs.uv, 2, gl.FLOAT, false, 0, 0);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, vao.texture);
-      gl.uniform1i(prog.uniforms.texture, 0);
-      gl.uniform1f(prog.uniforms.hasTexture, 1);
-      prog.textureBound = true;
-    } else if (prog.textureBound) {
+    } else if (st.uv) {
       gl.disableVertexAttribArray(prog.attribs.uv);
       gl.vertexAttrib2f(prog.attribs.uv, 0, 0);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, prog.fallbackTexture);
-      gl.uniform1i(prog.uniforms.texture, 0);
-      gl.uniform1f(prog.uniforms.hasTexture, 0);
-      prog.textureBound = false;
+    }
+    st.uv = wantUv;
+    slotTextures.forEach((texture, unit) => {
+      const want = wantUv ? texture : null;
+      if (st.textures[unit] === want) return;
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, want || prog.fallbackTexture);
+      gl.uniform1f(prog.uniforms.hasTexture[unit], want ? 1 : 0);
+      st.textures[unit] = want;
+    });
+    if (st.emissive !== m.emissive) {
+      gl.uniform3fv(prog.uniforms.emissive, m.emissive || ZERO3);
+      st.emissive = m.emissive;
+    }
+    if (st.mask !== m.mask || st.alphaCutoff !== m.alphaCutoff) {
+      gl.uniform1f(prog.uniforms.mask, m.mask ? 1 : 0);
+      gl.uniform1f(prog.uniforms.alphaCutoff, m.alphaCutoff);
+      st.mask = m.mask; st.alphaCutoff = m.alphaCutoff;
+    }
+    if (st.unlit !== m.unlit) {
+      gl.uniform1f(prog.uniforms.unlit, m.unlit ? 1 : 0);
+      st.unlit = m.unlit;
+    }
+    if (st.normalScale !== m.normalScale) {
+      gl.uniform1f(prog.uniforms.normalScale, m.normalScale);
+      st.normalScale = m.normalScale;
     }
   }
 
@@ -715,6 +850,8 @@
 
   // ---------- shader ----------
 
+  // The vertex stage keeps the original clip-space expression exactly; the
+  // world position and eye distance are extra outputs for normal maps and fog.
   const VERTEX_SRC = `
     attribute vec3 aPosition;
     attribute vec3 aNormal;
@@ -725,30 +862,94 @@
     uniform mat3 uNormalMatrix;
     varying vec3 vNormal;
     varying vec2 vUv;
+    varying vec3 vWorld;
+    varying float vEyeDist;
     void main() {
       vNormal = uNormalMatrix * aNormal;
       vUv = aUv;
+      vec4 world = uModel * vec4(aPosition, 1.0);
+      vWorld = world.xyz;
+      vEyeDist = length((uView * world).xyz);
       gl_Position = uProjection * uView * uModel * vec4(aPosition, 1.0);
     }
   `;
-  // uHasTexture is 0 for every flat-colour draw (the default; it never reads
-  // the sampler then), so untextured materials shade exactly as before.
+  // Every optional feature is behind a uniform that is 0 by default, so a
+  // plain material shades exactly as before:
+  //   uHasTexture / uHasEmissiveTexture / uHasNormalTexture - slot is bound
+  //   uEmissive    - emissiveFactor, added after lighting (times its texture)
+  //   uMask        - alphaMode MASK: pixels under uAlphaCutoff are discarded
+  //                  (so they write neither colour nor depth), the rest are opaque
+  //   uUnlit       - KHR_materials_unlit: base colour without lighting
+  //   uFogOn       - linear distance fog toward uFogColor between uFogRange
+  // Normal maps need screen-space derivatives (OES_standard_derivatives): the
+  // tangent frame is built per pixel from the UVs and the world position, so
+  // no tangent data is needed in the model. Without the extension, normal
+  // maps are not bound at all (see createProgram) and the vertex normals stay.
   const FRAGMENT_SRC = `
+    #ifdef GL_OES_standard_derivatives
+    #extension GL_OES_standard_derivatives : enable
+    #endif
     precision mediump float;
+    #ifdef GL_FRAGMENT_PRECISION_HIGH
+    #define HP highp
+    #else
+    #define HP mediump
+    #endif
     varying vec3 vNormal;
     varying vec2 vUv;
+    varying vec3 vWorld;
+    varying float vEyeDist;
     uniform vec4 uColor;
     uniform vec3 uLightDir;
     uniform float uAmbient;
     uniform sampler2D uTexture;
+    uniform sampler2D uEmissiveTexture;
+    uniform sampler2D uNormalTexture;
     uniform float uHasTexture;
+    uniform float uHasEmissiveTexture;
+    uniform float uHasNormalTexture;
+    uniform float uNormalScale;
+    uniform vec3 uEmissive;
+    uniform float uMask;
+    uniform float uAlphaCutoff;
+    uniform float uUnlit;
+    uniform float uFogOn;
+    uniform vec3 uFogColor;
+    uniform vec2 uFogRange;
     void main() {
       vec3 n = normalize(vNormal);
+      #ifdef GL_OES_standard_derivatives
+      if (uHasNormalTexture > 0.5) {
+        HP vec2 uvDx = dFdx(vUv);
+        HP vec2 uvDy = dFdy(vUv);
+        HP float det = uvDx.x * uvDy.y - uvDy.x * uvDx.y;
+        if (abs(det) > 1e-14) {
+          HP vec3 tRaw = (uvDy.y * dFdx(vWorld) - uvDx.y * dFdy(vWorld)) / det;
+          vec3 t = tRaw - n * dot(n, tRaw);
+          float tLen = length(t);
+          if (tLen > 1e-9) {
+            t /= tLen;
+            vec3 b = cross(n, t);
+            vec3 tn = texture2D(uNormalTexture, vUv).xyz * 2.0 - 1.0;
+            n = normalize(mat3(t, b, n) * (tn * vec3(uNormalScale, uNormalScale, 1.0)));
+          }
+        }
+      }
+      #endif
       float diffuse = max(dot(n, -normalize(uLightDir)), 0.0);
       float light = clamp(uAmbient + diffuse * (1.0 - uAmbient), 0.0, 1.0);
-      vec3 base = uColor.rgb;
-      if (uHasTexture > 0.5) base *= texture2D(uTexture, vUv).rgb;
-      gl_FragColor = vec4(base * light, uColor.a);
+      vec4 baseColor = uColor;
+      if (uHasTexture > 0.5) baseColor *= texture2D(uTexture, vUv);
+      vec3 emissive = uEmissive;
+      if (uHasEmissiveTexture > 0.5) emissive *= texture2D(uEmissiveTexture, vUv).rgb;
+      if (uMask > 0.5 && baseColor.a < uAlphaCutoff) discard;
+      vec3 color = baseColor.rgb;
+      if (uUnlit < 0.5) {
+        color *= light;
+        if (dot(uEmissive, vec3(1.0)) > 0.0) color += emissive;
+      }
+      if (uFogOn > 0.5) color = mix(color, uFogColor, clamp((vEyeDist - uFogRange.x) / max(uFogRange.y - uFogRange.x, 0.0001), 0.0, 1.0));
+      gl_FragColor = vec4(color, uMask > 0.5 ? 1.0 : uColor.a);
     }
   `;
 
@@ -765,6 +966,9 @@
   }
 
   function createProgram(gl) {
+    // Must be requested before the fragment shader compiles, or its
+    // #ifdef GL_OES_standard_derivatives branch is left out.
+    const derivatives = !!gl.getExtension('OES_standard_derivatives');
     const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SRC);
     const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SRC);
     const program = gl.createProgram();
@@ -774,19 +978,39 @@
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       throw new Error('Program link failed: ' + gl.getProgramInfoLog(program));
     }
-    // 1x1 white texture kept bound while no texture is in use, so the
-    // sampler never points at an empty unit (which browsers warn about).
+    // 1x1 white texture kept bound on every texture unit while it is not in
+    // use, so a sampler never points at an empty unit (which browsers warn
+    // about). The emissive and normal samplers live on units 1 and 2.
     const fallbackTexture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, fallbackTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
+    gl.useProgram(program);
+    gl.uniform1i(gl.getUniformLocation(program, 'uTexture'), 0);
+    gl.uniform1i(gl.getUniformLocation(program, 'uEmissiveTexture'), 1);
+    gl.uniform1i(gl.getUniformLocation(program, 'uNormalTexture'), 2);
+    gl.uniform1f(gl.getUniformLocation(program, 'uNormalScale'), 1); // GL defaults uniforms to 0
+    for (const unit of [1, 2]) {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, fallbackTexture);
+    }
+    gl.activeTexture(gl.TEXTURE0);
     return {
       program,
       fallbackTexture,
-      textureBound: false,
+      derivatives,
+      // what bindMaterial() last set; matches the neutral program defaults
+      mat: { uv: false, textures: [null, null, null], emissive: null, mask: false, alphaCutoff: 0, unlit: false, normalScale: 1 },
       attribs: { position: gl.getAttribLocation(program, 'aPosition'), normal: gl.getAttribLocation(program, 'aNormal'), uv: gl.getAttribLocation(program, 'aUv') },
       uniforms: {
-        texture: gl.getUniformLocation(program, 'uTexture'),
-        hasTexture: gl.getUniformLocation(program, 'uHasTexture'),
+        hasTexture: ['uHasTexture', 'uHasEmissiveTexture', 'uHasNormalTexture'].map((n) => gl.getUniformLocation(program, n)),
+        emissive: gl.getUniformLocation(program, 'uEmissive'),
+        mask: gl.getUniformLocation(program, 'uMask'),
+        alphaCutoff: gl.getUniformLocation(program, 'uAlphaCutoff'),
+        unlit: gl.getUniformLocation(program, 'uUnlit'),
+        normalScale: gl.getUniformLocation(program, 'uNormalScale'),
+        fogOn: gl.getUniformLocation(program, 'uFogOn'),
+        fogColor: gl.getUniformLocation(program, 'uFogColor'),
+        fogRange: gl.getUniformLocation(program, 'uFogRange'),
         model: gl.getUniformLocation(program, 'uModel'),
         view: gl.getUniformLocation(program, 'uView'),
         projection: gl.getUniformLocation(program, 'uProjection'),
@@ -796,6 +1020,27 @@
         ambient: gl.getUniformLocation(program, 'uAmbient')
       }
     };
+  }
+
+  // ---------- scene fog (pure, no GL) ----------
+  //
+  // scene.json may declare linear distance fog:
+  //   "fog": { "color": "#c9d7d7", "near": 25, "far": 60 }
+  // Distance is measured from the eye in world units: nothing is fogged
+  // closer than `near`, everything is the fog colour from `far` on. Returns
+  // { color: [r, g, b], near, far }, or null (fog off) when the scene has no
+  // fog or it is not valid: color a "#rgb" / "#rrggbb" string, near a finite
+  // number >= 0 and far a finite number greater than near.
+  function normalizeFog(raw) {
+    if (raw === undefined || raw === null) return null;
+    const bad = (why) => { console.warn('gltf-mini: scene fog ignored (' + why + ')'); return null; };
+    if (typeof raw !== 'object' || Array.isArray(raw)) return bad('fog must be an object');
+    const m = typeof raw.color === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw.color);
+    if (!m) return bad('color must be a "#rgb" or "#rrggbb" string');
+    const hex = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+    if (typeof raw.near !== 'number' || !Number.isFinite(raw.near) || raw.near < 0) return bad('near must be a number >= 0');
+    if (typeof raw.far !== 'number' || !Number.isFinite(raw.far) || raw.far <= raw.near) return bad('far must be a number greater than near');
+    return { color: hexToRgb('#' + hex), near: raw.near, far: raw.far };
   }
 
   // ---------- scene placement and collision layout (pure, no GL) ----------
@@ -1232,6 +1477,7 @@
     gl.clearColor(0.055, 0.086, 0.106, 1); // matches the app's dark background
 
     let sceneData = opts.sceneData;
+    let sceneFog = null; // see normalizeFog(); set by loadScene()
     let placedPrimitives = [];
     let floorPrim = null;
     let portalTriggers = []; // [{position:[x,z], radius, portalIndex, ring}]
@@ -1716,6 +1962,7 @@
 
     async function loadScene(newSceneData) {
       sceneData = newSceneData;
+      sceneFog = normalizeFog(sceneData.fog);
       applyCharacterScaleDefaults();
       placedPrimitives = [];
       boundingBoxes = [];
@@ -2005,7 +2252,7 @@
         gl.vertexAttrib3f(prog.attribs.normal, 0, 1, 0);
       }
 
-      bindBaseColorTexture(gl, prog, prim.vao);
+      bindMaterial(gl, prog, prim.vao);
 
       gl.uniformMatrix4fv(prog.uniforms.model, false, prim.modelMatrix);
       gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, prim.normalMatrix || mat3NormalFromMat4(prim.modelMatrix));
@@ -2282,6 +2529,13 @@
       const light = (sceneData.directionalLight && sceneData.directionalLight.direction) || [-0.4, -1, -0.3];
       gl.uniform3fv(prog.uniforms.lightDir, light);
       gl.uniform1f(prog.uniforms.ambient, (sceneData.ambientLight && sceneData.ambientLight.intensity) || 0.55);
+      // Fog is a program-wide state, so the floor, models, item drops, the
+      // character and remote players are all faded the same way.
+      gl.uniform1f(prog.uniforms.fogOn, sceneFog ? 1 : 0);
+      if (sceneFog) {
+        gl.uniform3fv(prog.uniforms.fogColor, sceneFog.color);
+        gl.uniform2f(prog.uniforms.fogRange, sceneFog.near, sceneFog.far);
+      }
 
       if (floorPrim) bindAndDraw(floorPrim, view, projection);
       portalTriggers.forEach((tr) => { if (tr.ring) bindAndDraw(tr.ring, view, projection); if (tr.beacon) bindAndDraw(tr.beacon, view, projection); });
@@ -2466,6 +2720,8 @@
       // that wants to jump straight to a known distance without depending
       // on CAMERA_SCROLL_STEP's exact value.
       getCameraDistance: () => cameraDistance,
+      // the scene's validated fog ({ color, near, far }) or null when off
+      getSceneFog: () => sceneFog,
       setCameraDistance: (d) => { cameraDistance = clampCameraDistance(d); },
       getMaxCameraDistance: () => MAX_CAMERA_DISTANCE,
       // Whether the player is mid-drag actively looking around right now
@@ -2826,7 +3082,7 @@
     return { imported };
   }
 
-  // ---------- single-model preview (task #150, Asset Viewer) ----------
+  // ---------- single-model preview (Asset Viewer) ----------
   //
   // A SEPARATE, deliberately tiny entry point from init() above. init() is
   // the full first-person world renderer — camera fly-around, keyboard/
@@ -2868,7 +3124,7 @@
     // Textures (if any) are decoded after the first frames: the model shows
     // in its flat colours until its image is ready, and keeps them if the
     // image cannot be used.
-    primitives.forEach((prim) => { prim.vao = {}; });
+    primitives.forEach((prim) => { prim.vao = { material: makeMaterial(prim) }; });
     let textureGpu = null;
     const gpuPrimitives = primitives.map((prim) => ({
       texVao: prim.vao,
@@ -2898,7 +3154,7 @@
     let rafId = null;
     let lost = false;
 
-    if (primitives.some((p) => p.baseColorTexture || p.textureWarning)) {
+    if (primitives.some(hasMaterialFeatures)) {
       attachTextures(gl, primitives, 'preview', () => lost).then((gpu) => {
         textureGpu = gpu;
         if (lost) releasePreviewTextures();
@@ -2952,7 +3208,7 @@
           gl.vertexAttrib3f(prog.attribs.normal, 0, 1, 0);
         }
 
-        bindBaseColorTexture(gl, prog, prim.texVao);
+        bindMaterial(gl, prog, prim.texVao);
         gl.uniformMatrix4fv(prog.uniforms.model, false, model);
         gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, mat3NormalFromMat4(model));
         gl.uniform4fv(prog.uniforms.color, prim.color);
@@ -3141,7 +3397,7 @@
     layout: {
       normalizePlacement, placementMatrix, placedFootprint, footprintDepth,
       selectSolidItems, floorWalkLimits, floorOverrun, floorCenter, eyeHeightFrom,
-      parseGLB, extractPrimitives, PLAYER_RADIUS
+      parseGLB, extractPrimitives, normalizeFog, PLAYER_RADIUS
     },
     previewCharacter,
     cache: {

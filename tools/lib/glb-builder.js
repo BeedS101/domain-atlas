@@ -101,7 +101,10 @@ function buildGlb(spec) {
 }
 
 // spec: { name?, primitives: [{ positions, normals?, uvs?, indices?,
-//   material: { baseColorFactor?, texture?: { bytes, mimeType, sampler? } } }] }
+//   material: { baseColorFactor?, texture?: { bytes, mimeType, sampler? },
+//     emissiveFactor?, emissiveTexture?, normalTexture? (each { bytes, mimeType,
+//     sampler?, texCoord?, scale? }), alphaMode?, alphaCutoff?, unlit?,
+//     json? (merged into the glTF material as it is, to build broken ones) } }] }
 // A texture whose `bytes` Buffer (and sampler values) match an earlier one
 // reuses that image and sampler instead of embedding another copy.
 function buildMultiGlb(spec) {
@@ -120,6 +123,7 @@ function buildMultiGlb(spec) {
     accessors.push({ bufferView: view, componentType, count: typed.length / ({ VEC2: 2, VEC3: 3, SCALAR: 1 }[type]), type, ...(extra || {}) });
     return accessors.length - 1;
   }
+  let usesUnlit = false;
   const imageOf = new Map();
   const samplerKeys = new Map();
   const textureKeys = new Map();
@@ -161,7 +165,17 @@ function buildMultiGlb(spec) {
     }
     const pbr = { baseColorFactor: (p.material && p.material.baseColorFactor) || [1, 1, 1, 1], metallicFactor: 0, roughnessFactor: 1 };
     if (p.material && p.material.texture) pbr.baseColorTexture = { index: textureIndex(p.material.texture) };
-    materials.push({ ...(p.name ? { name: p.name } : {}), pbrMetallicRoughness: pbr, doubleSided: true });
+    const m = p.material || {};
+    const mat = { ...(p.name ? { name: p.name } : {}), pbrMetallicRoughness: pbr, doubleSided: true };
+    const textureInfo = (t) => ({ index: textureIndex(t), ...(t.texCoord !== undefined ? { texCoord: t.texCoord } : {}), ...(t.scale !== undefined ? { scale: t.scale } : {}) });
+    if (m.emissiveFactor !== undefined) mat.emissiveFactor = m.emissiveFactor;
+    if (m.emissiveTexture) mat.emissiveTexture = textureInfo(m.emissiveTexture);
+    if (m.normalTexture) mat.normalTexture = textureInfo(m.normalTexture);
+    if (m.alphaMode) mat.alphaMode = m.alphaMode;
+    if (m.alphaCutoff !== undefined) mat.alphaCutoff = m.alphaCutoff;
+    if (m.unlit) { mat.extensions = { KHR_materials_unlit: {} }; usesUnlit = true; }
+    if (m.json) Object.assign(mat, m.json);
+    materials.push(mat);
     primitives.push(prim);
   });
   const json = {
@@ -172,6 +186,7 @@ function buildMultiGlb(spec) {
   };
   if (images.length) { json.images = images; json.textures = textures; }
   if (samplers.length) json.samplers = samplers;
+  if (usesUnlit) json.extensionsUsed = ['KHR_materials_unlit'];
   return assembleGlb(json, Buffer.concat(parts));
 }
 

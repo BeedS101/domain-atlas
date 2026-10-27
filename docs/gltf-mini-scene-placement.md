@@ -139,8 +139,10 @@ the script's `TARGETS` (output path, manifest, world and portal index, palette).
 
 A material may carry a base-colour texture. The fragment colour is
 `baseColorFactor * texture.rgb * light`; alpha is `baseColorFactor` alpha only
-(materials are drawn opaque). A model without a texture needs no UVs and
-renders exactly as before.
+(materials are drawn opaque unless `alphaMode` is `MASK`). A model without a
+texture needs no UVs and renders exactly as before. Emissive, normal-map,
+alpha-cutout, unlit and scene-fog support is described in
+[gltf-mini-materials.md](gltf-mini-materials.md).
 
 Supported:
 
@@ -164,9 +166,9 @@ Supported:
 Not supported (the primitive keeps its flat `baseColorFactor` colour and a
 console warning is logged, or the feature is ignored): external image URIs and
 `data:` URIs, other image types such as WebP, `texCoord` other than 0,
-`KHR_texture_transform` and other texture extensions, normal, metallic-roughness,
-occlusion and emissive textures, `alphaMode` `BLEND`/`MASK`, anisotropic
-filtering, and colour-space conversion (texture values are used as stored).
+`KHR_texture_transform` and other texture extensions, metallic-roughness and
+occlusion textures, `alphaMode` `BLEND`, anisotropic filtering, and
+colour-space conversion (texture values are used as stored).
 A texture that fails to decode never stops the scene from loading.
 
 `demo-domain-a/assets/texture-test/textureTestBoard.glb` is a 1 x 1 board
