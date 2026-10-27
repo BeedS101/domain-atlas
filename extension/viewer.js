@@ -139,6 +139,10 @@ window.addEventListener('unhandledrejection', (event) => {
 // for the previous one. See enterWorld().
 let active3D = null;
 
+// F3 toggles the developer HUD (gltf-mini-hud.js) for whichever 3D world is
+// running; it reads the renderer's getDebugInfo() and does nothing else.
+if (window.MiniGLTFHud) window.MiniGLTFHud.install({ getRenderer: () => active3D });
+
 // Wheel zoom fires in bursts, so the saved camera distance is written once
 // the scrolling pauses. A teardown or portal hop within the delay still
 // persists the latest value (see flushCameraDistance()).
@@ -2430,10 +2434,10 @@ async function enterWorld(worldId, anchorId) {
   if (active3D) { active3D.destroy(); active3D = null; refreshCharacterScaleControl(); }
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
   disconnectPresence(); // leaving whichever world was active before also means leaving its presence room
-  disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), but ONLY if the new world actually opted in (#111) — see refreshChatAvailability() just below
+  disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), but ONLY if the new world actually opted in — see refreshChatAvailability() just below
   await refreshChatAvailability(manifest, world); // shows/hides the widget + Domain tab for wherever we just landed, whether or not a scene ends up loading successfully below
   refreshCalendarDomainSources(manifest, world); // SPEC.md §12 — rebuilds the Calendar sub-tab's own "Domain" dropdown for wherever we just landed, same "fresh on every world entry" reasoning as refreshChatAvailability() just above
-  hideSceneLoadProgress(); // whichever world was active before might have left this showing (#36) — never carry it into the next one
+  hideSceneLoadProgress(); // whichever world was active before might have left this showing — never carry it into the next one
 
   // A pending "click where you want to drop it" from whichever world was
   // active before doesn't carry over to a new one.
@@ -2480,7 +2484,7 @@ async function enterWorld(worldId, anchorId) {
         placeLabel.innerHTML += ' <span class="anchorLabel">📍 ' + escapeHtml(anchor.label || anchor.id) + '</span>';
       }
 
-      // Task #227 — onInteractPrompt below fires every single animation
+      // onInteractPrompt below fires every single animation
       // frame (gltf-mini.js's own proximity check runs in its render loop,
       // unconditionally, whether or not anything actually changed since the
       // last frame — see its own comment there), unlike the 2D canvas's
@@ -2513,6 +2517,7 @@ async function enterWorld(worldId, anchorId) {
         // this particular visit happened to land through.
         sceneData: anchor ? { ...sceneData, camera: { ...(sceneData.camera || {}), start: anchor.position } } : sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
+        debugLabel: world.id, // shown by the F3 debug HUD
         // SPEC.md §3.6.1 — a three-way portal kind, matching the 2D
         // renderer's own portalPalette() exactly: 'key' (trusted only by
         // its signature, no domain at all) gets its own amber look, never
@@ -2526,7 +2531,7 @@ async function enterWorld(worldId, anchorId) {
           return 'same-domain';
         },
         onPortalEnter: (portalIndex) => followPortal(world.portals[portalIndex]),
-        // Task #208 — same handleInteractable() the 2D renderer's click
+        // Same handleInteractable() the 2D renderer's click
         // handler already calls for the market's mining stalls (see
         // interactableHitboxes above); gltf-mini.js just supplies a
         // different way to trigger it (proximity + E instead of a mouse
@@ -2543,12 +2548,11 @@ async function enterWorld(worldId, anchorId) {
         onInteract: (marker) => (
           marker.kind === 'item-drop' ? pickUpDroppedItem(marker.domain, marker.dropId) : handleInteractable(marker)
         ),
-        // Task #213/#227 — `nearbyMarkers` (the raw scene.json
-        // interactables, added by gltf-mini.js's proximity loop — task
-        // #241) is this renderer's equivalent of the 2D canvas's
+        // `nearbyMarkers` (the raw scene.json
+        // interactables, added by gltf-mini.js's proximity loop) is this renderer's equivalent of the 2D canvas's
         // item/interactable mousemove hover: the 3D lobby has no literal
         // mouse hover at all (proximity + "E — label" is the whole
-        // interaction model, task #208), so being in E-range of one or
+        // interaction model), so being in E-range of one or
         // more class-bearing interactables IS "hovering" them here.
         // Markers with no `class` at all (the plaza's "Play Chess" stall)
         // are already excluded upstream by gltf-mini.js, same as before.

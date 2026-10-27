@@ -37,7 +37,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["viewer.html", "viewer.js", "wallet.js", "chess.js", "gltf-mini.js", "identity-popup.html", "identity-popup.js", "backup-setup.html", "backup-setup.js", "confirm-bridge.html", "confirm-bridge.js", "preview-bridge.html", "preview-bridge.js"],
+      "resources": ["viewer.html", "viewer.js", "wallet.js", "chess.js", "gltf-mini.js", "gltf-mini-hud.js", "identity-popup.html", "identity-popup.js", "backup-setup.html", "backup-setup.js", "confirm-bridge.html", "confirm-bridge.js", "preview-bridge.html", "preview-bridge.js"],
       "matches": ["<all_urls>"]
     }
   ]

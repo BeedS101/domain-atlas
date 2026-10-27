@@ -596,6 +596,12 @@
 
   const modelCache = new Map(); // url -> Promise<parsedModel>
 
+  // Live GL textures per context (every upload, plus each program's 1x1
+  // fallback), for the debug HUD's resource count. Adjusted where textures
+  // are created and deleted, so reading it costs nothing.
+  const liveTextureCounts = new WeakMap();
+  function adjustLiveTextures(gl, delta) { liveTextureCounts.set(gl, (liveTextureCounts.get(gl) || 0) + delta); }
+
   // ---------- base-colour textures (GPU side) ----------
 
   const isPowerOfTwo = (n) => n > 0 && (n & (n - 1)) === 0;
@@ -635,6 +641,7 @@
     }
     const pow2 = isPowerOfTwo(width) && isPowerOfTwo(height);
     const texture = gl.createTexture();
+    adjustLiveTextures(gl, 1);
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -724,6 +731,7 @@
   function releaseModelGpu(gl, model) {
     if (!model || !model.gpu) return;
     model.gpu.textures.forEach((t) => gl.deleteTexture(t));
+    adjustLiveTextures(gl, -model.gpu.textures.length);
     model.gpu.buffers.forEach((b) => gl.deleteBuffer(b));
     model.primitives.forEach((prim) => {
       if (!prim.vao) return;
@@ -982,6 +990,7 @@
     // use, so a sampler never points at an empty unit (which browsers warn
     // about). The emissive and normal samplers live on units 1 and 2.
     const fallbackTexture = gl.createTexture();
+    adjustLiveTextures(gl, 1);
     gl.bindTexture(gl.TEXTURE_2D, fallbackTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255]));
     gl.useProgram(program);
@@ -1479,6 +1488,12 @@
     let sceneData = opts.sceneData;
     let sceneFog = null; // see normalizeFog(); set by loadScene()
     let placedPrimitives = [];
+    // Debug HUD support (see getDebugInfo()): a frame counter, and the
+    // optional-feature counts of what is currently drawn. The counts are
+    // computed on demand and reused until the drawn set changes.
+    let frameCount = 0;
+    let featureCounts = null;
+    let sceneModelCount = 0; // distinct scene models loaded for this scene, placeholders excluded
     let floorPrim = null;
     let portalTriggers = []; // [{position:[x,z], radius, portalIndex, ring}]
     let boundingBoxes = []; // [{footprint, lootMarker}] solid colliders, see selectSolidItems()
@@ -1977,7 +1992,7 @@
 
       const objects = sceneData.objects || [];
       const urls = objects.map((obj) => opts.resolveAssetUrl(obj.model));
-      // Progress (#36) is tracked by UNIQUE url, not by placed object — a
+      // Load progress is tracked by UNIQUE url, not by placed object — a
       // scene can place the same furniture piece many times (one couch
       // model, six placements), and loadModel already coalesces repeats to
       // one fetch via modelCache below, so reporting per-placement would
@@ -1989,7 +2004,7 @@
       let loadedCount = 0;
       if (opts.onLoadProgress) opts.onLoadProgress(0, uniqueUrls.length);
 
-      // ---------- byte-level speed/ETA (task #74), additive to the count
+      // ---------- byte-level speed/ETA, additive to the count
       // above — the count-based fill/percentage keeps working exactly as
       // before for the common case (cache hits, small local assets) where
       // byte tracking wouldn't add much. `perUrlContribution` holds each
@@ -2078,6 +2093,7 @@
         })
       ));
       const loaded = urls.map((url) => modelByUrl.get(url));
+      sceneModelCount = Array.from(modelByUrl.values()).filter((m) => m !== placeholderModelCache).length;
       // A loot crate's visible model is placed here as an ordinary scene
       // object — it carries no reference back to the interactable guarding
       // it, that's a separate entry in sceneData.interactables authored at
@@ -2164,6 +2180,7 @@
       // anyway so a future caller of loadScene() on a still-alive instance
       // (there is none today) doesn't inherit another world's drops.
       itemDropEntries.clear();
+      featureCounts = null;
     }
 
     // Diffs `drops` (viewer.js's live poll of this world's drops, same
@@ -2179,7 +2196,7 @@
     function setItemDrops(drops) {
       const incomingIds = new Set((drops || []).map((d) => d.dropId));
       for (const dropId of itemDropEntries.keys()) {
-        if (!incomingIds.has(dropId)) itemDropEntries.delete(dropId);
+        if (!incomingIds.has(dropId)) { itemDropEntries.delete(dropId); featureCounts = null; }
       }
       (drops || []).forEach((drop) => {
         if (itemDropEntries.has(drop.dropId)) return; // already tracked — a drop's position/model never change after it lands, nothing to update
@@ -2219,6 +2236,7 @@
             entry.scale = (Number.isFinite(maxDim) && maxDim > 0) ? (ITEM_MODEL_TARGET_SIZE / maxDim) : 1;
             const centers = [0, 1, 2].map((k) => (model.bounds.min[k] + model.bounds.max[k]) / 2);
             entry.pivot = centers.every(Number.isFinite) ? centers : [0, 0, 0];
+            featureCounts = null;
           }).catch((err) => {
             // Graceful, not fatal — same "no broken-image icon" spirit the
             // Asset Viewer's thumbnail already follows (viewer.js): a bad
@@ -2228,6 +2246,58 @@
           });
         }
       });
+    }
+
+    // How many currently drawn primitives use each optional material feature,
+    // from the same material state bindMaterial() draws with: a normal map
+    // counts once its texture is on the GPU, emissive once it is usable.
+    function countFeatures() {
+      const counts = { normalMaps: 0, emissive: 0, mask: 0, unlit: 0 };
+      const add = (prim) => {
+        const vao = prim.vao, m = vao && vao.material;
+        if (vao && vao.normalTexture) counts.normalMaps++;
+        if (m && m.emissive) counts.emissive++;
+        if (m && m.mask) counts.mask++;
+        if (m && m.unlit) counts.unlit++;
+      };
+      placedPrimitives.forEach(add);
+      itemDropEntries.forEach((entry) => { if (entry.primitives) entry.primitives.forEach(add); });
+      return counts;
+    }
+
+    // Read-only snapshot for the debug HUD (extension/gltf-mini-hud.js).
+    // Everything here is an existing counter or a handful of arithmetic ops;
+    // nothing is traversed except the feature counts, which are cached.
+    function getDebugInfo() {
+      if (!featureCounts) featureCounts = countFeatures();
+      let dropModels = 0;
+      itemDropEntries.forEach((entry) => { if (entry.primitives) dropModels++; });
+      return {
+        renderer: 'gltf-mini-v1',
+        label: opts.debugLabel || null,
+        frames: frameCount,
+        characterScale,
+        characterScaleFromScene: declaredCharacterScale !== null,
+        playerPos: [camera.pos[0], lastCharacterBaseY, camera.pos[2]],
+        cameraPos: currentEyeAndBasis().eye.slice(0, 3),
+        cameraDistance,
+        resources: {
+          sceneModels: sceneModelCount,
+          dropModels,
+          cachedModels: modelCache.size,
+          textures: liveTextureCounts.get(gl) || 0,
+          itemDrops: itemDropEntries.size,
+          objects: ((sceneData && sceneData.objects) || []).length,
+          drawables: placedPrimitives.length
+        },
+        features: {
+          fog: !!sceneFog,
+          normalMaps: featureCounts.normalMaps,
+          emissive: featureCounts.emissive,
+          mask: featureCounts.mask,
+          unlit: featureCounts.unlit
+        }
+      };
     }
 
     function resize() {
@@ -2301,6 +2371,7 @@
     let lastT = performance.now();
     let rafId = null;
     function frame(t) {
+      frameCount++;
       const dt = Math.min(0.1, (t - lastT) / 1000);
       lastT = t;
       resize();
@@ -2693,6 +2764,7 @@
     function start() { if (!rafId) { lastT = performance.now(); rafId = requestAnimationFrame(frame); } }
     function stop() { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } }
     function destroy() {
+      if (modelOwner.destroyed) return; // already torn down; the texture count must not be decremented twice
       stop();
       remotePlayers.clear();
       itemDropEntries.clear();
@@ -2709,6 +2781,7 @@
       canvas.removeEventListener('wheel', onWheel);
       releaseOwnedModels(gl, modelOwner);
       gl.deleteTexture(prog.fallbackTexture);
+      adjustLiveTextures(gl, -1);
     }
 
     const ready = loadScene(sceneData).then(() => start());
@@ -2722,6 +2795,7 @@
       getCameraDistance: () => cameraDistance,
       // the scene's validated fog ({ color, near, far }) or null when off
       getSceneFog: () => sceneFog,
+      getDebugInfo,
       setCameraDistance: (d) => { cameraDistance = clampCameraDistance(d); },
       getMaxCameraDistance: () => MAX_CAMERA_DISTANCE,
       // Whether the player is mid-drag actively looking around right now
@@ -3240,6 +3314,7 @@
         releasePreviewTextures();
         gpuPrimitives.forEach((p) => [p.positionBuffer, p.normalBuffer, p.indexBuffer].forEach((b) => { if (b) gl.deleteBuffer(b); }));
         gl.deleteTexture(prog.fallbackTexture);
+        adjustLiveTextures(gl, -1);
         const loseCtx = gl.getExtension('WEBGL_lose_context');
         if (loseCtx) loseCtx.loseContext();
       }
@@ -3383,6 +3458,7 @@
         lost = true;
         if (rafId !== null) cancelAnimationFrame(rafId);
         gl.deleteTexture(prog.fallbackTexture);
+        adjustLiveTextures(gl, -1);
         const loseCtx = gl.getExtension('WEBGL_lose_context');
         if (loseCtx) loseCtx.loseContext();
       }
