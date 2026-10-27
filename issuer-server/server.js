@@ -682,7 +682,8 @@ const OUTBOUND_REQUEST_HEADERS = { 'User-Agent': 'DomainAtlas-Relay/1.0', Accept
 // One catalog for every asset class this issuer knows how to mint —
 // unique and fungible alike (SPEC.md §5, task #44's merge of the former
 // ITEM_CATALOG and RESOURCE_CATALOG). Each entry carries everything
-// `asset` needs: `name`, `model`, an optional `thumbnail`, the two flags
+// `asset` needs: `name`, `model`, an optional `thumbnail`, an optional
+// `dropPreviewModel` (a lightweight model for the item lying in a world), the two flags
 // that are fixed per class and signed fresh on every credential of it
 // (`fungible`, `presentation` — SPEC.md §5's "two flags, one discipline"),
 // and an optional `properties` bag. Looked up fresh by issueAsset() on
@@ -4960,6 +4961,9 @@ async function main() {
     const asset = {
       name: catalogEntry.name, class: cls, model: catalogEntry.model,
       ...(catalogEntry.thumbnail ? { thumbnail: catalogEntry.thumbnail } : {}),
+      // Optional lightweight model for the item lying in a world (SPEC.md §5);
+      // absent unless the class defines one.
+      ...(catalogEntry.dropPreviewModel ? { dropPreviewModel: catalogEntry.dropPreviewModel } : {}),
       fungible: catalogEntry.fungible,
       presentation: catalogEntry.presentation,
       // The third asset-level flag, always present (never
@@ -7860,6 +7864,7 @@ async function main() {
           name: entry.name,
           thumbnail: entry.thumbnail || null,
           model: entry.model || null,
+          ...(entry.dropPreviewModel ? { dropPreviewModel: entry.dropPreviewModel } : {}),
           fungible: entry.fungible,
           presentation: entry.presentation,
           tradeScope: entry.tradeScope || 'local',

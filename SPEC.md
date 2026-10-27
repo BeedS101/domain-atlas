@@ -185,6 +185,8 @@ Several fields that live on a world's own `policy` are also meaningful one level
 
 `policy.acceptedItemClasses` is the reference case: a domain can declare `"acceptedItemClasses": [...]` once at the top level, and every world inherits it unless that specific world's own `policy.acceptedItemClasses` is present — including an explicitly empty `[]`, which means "this world accepts nothing," not "fall back to the domain default." Any future per-world policy field that a domain plausibly wants to set once for every world it owns (a visitor-identity requirement, an opt-out from direct/quick-travel entry, and so on) should default to this same shape rather than inventing a new one — it's already the established convention here, not a one-off.
 
+`worldDropPolicy` follows the same shape: a client-side render budget for dropped items' 3D models (`maxModelBytes`, `maxTriangles`, `maxTextureSize`, `maxTextures`, `maxPrimitives`), declared at the manifest's top level for every world or inside one world's `policy`, where it replaces the domain value as a whole (keys are not merged). Missing or invalid keys use the client's built-in defaults. It only changes how a drop is drawn, never whether it can be seen or picked up (§5.5).
+
 This is a manifest-authoring convention for how such a field composes, not new protocol machinery — a client resolves it by checking the world's own `policy` first and falling back to the manifest's top level, nothing more.
 
 ### 3.5 Per-page discovery and anchors
@@ -448,6 +450,8 @@ The issuer signs the canonical JSON of `{id, asset, owner, quantity, supersedes,
 4. Confirm `id` isn't present on the issuer's revocation list (§5.3).
 
 **On terminology.** This mechanism — a portable, cryptographically verifiable ownership claim independent of any platform — is the property NFTs were reaching for, without a token, a chain, or a gas fee. Keep the mechanism; don't borrow the vocabulary. A domain **issues** a credential, it doesn't "mint" one. A visitor **holds** an asset, they don't "own an NFT of" it. Calling this an open credential standard rather than a token scheme is both more accurate and doesn't drag in 2022's baggage by association.
+
+**`asset.dropPreviewModel`** (optional, absolute URL) is a lighter stand-in for `asset.model` that a client may draw when the asset is lying in a world as a drop (§5.5), where the model spins in a shared scene. It is part of `asset`, so it is signed only when the issuer includes it, and a client that does not know it ignores it. A client chooses a drop's 3D representation in this order: the preview model if it is usable and within the client's render budget (`worldDropPolicy`, §3.4.1), otherwise `asset.model` under the same budget, otherwise a generic placeholder shape. The placeholder replaces only what is drawn; the drop's id, position, asset and pickup are unchanged.
 
 **Three flags, one discipline** (`tradeScope` joins `fungible`/`presentation` as of v1.13 — see below). `asset.fungible`, `asset.presentation`, and `asset.tradeScope` are all fixed per `class` and all signed fresh by the issuer on every mint, split, consolidate, trade, or reissue of that class — never copied forward from an older credential of the same class. That's not an arbitrary rule; it's the same discipline `asset.properties` already needs for a fungible class (§5.1), stated here for three fields:
 

@@ -2518,6 +2518,10 @@ async function enterWorld(worldId, anchorId) {
         sceneData: anchor ? { ...sceneData, camera: { ...(sceneData.camera || {}), start: anchor.position } } : sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
         debugLabel: world.id, // shown by the F3 debug HUD
+        // Bounds what a dropped item's model may cost in this world, and the
+        // small generic model shown instead of one that is over them.
+        dropPolicy: effectiveWorldDropPolicy(manifest, world),
+        dropFallbackModelUrl: new URL('models/drop-fallback.glb', location.href).href,
         // SPEC.md §3.6.1 — a three-way portal kind, matching the 2D
         // renderer's own portalPalette() exactly: 'key' (trusted only by
         // its signature, no domain at all) gets its own amber look, never
@@ -3187,29 +3191,25 @@ const domainPortalInfoCache = new Map(); // manifest URL -> Promise<world|null>
 // mousemove tick in between, exactly like a portal marker does.
 let hoveredAssetMarker = null;
 
-// Task #152 (follow-up to #151, prompted by Bruno hitting both gaps live
-// while writing his own operator-example.com manifest):
-//
-// 1. A domain-level DEFAULT for acceptedItemClasses. Same two-level shape
-//    as manifest.chat/world.chat (see chatEnabledForWorld() above), except
-//    "world wins outright if it declares anything at all" rather than an
-//    OR — a world's own array, even an empty one, is a deliberate
-//    "recognizes nothing via this mechanism" statement (per SPEC.md line
-//    334 and task #151's own notes) and must never be silently merged with
-//    or overridden by the domain default. Only a world that omits the
-//    field entirely falls back to manifest.acceptedItemClasses. This is
-//    what lets a domain with many worlds declare its shared class list
-//    ONCE instead of copy-pasting the identical array into every world's
-//    policy block.
-// 2. Trailing-".*" CATEGORY matching — "atlas.element.*" matches
-//    "atlas.element.iron", "atlas.element.gold", etc. without hand-listing
-//    every element, the exact friction Bruno hit trying "atlas.element" and
-//    "atlas.wearable" expecting them to cover their whole families. Plain
-//    prefix-of-the-dotted-string matching, not a general glob: the "*" only
-//    ever appears as the trailing segment after a literal ".", so
-//    "atlas.element.*" won't accidentally also match an unrelated
-//    "atlas.elementary.thing". An entry with no trailing ".*" still means
-//    exactly that one class, same as before either of these existed.
+// How a dropped item's own model is held to cost limits in a 3D world
+// (policy.worldDropPolicy, SPEC.md section 3.4.1 shape): a world's own object
+// wins outright, the manifest's top-level one is only the fallback, and
+// gltf-mini.js fills anything missing with its defaults. null = all defaults.
+function effectiveWorldDropPolicy(manifest, world) {
+  const own = world && world.policy && world.policy.worldDropPolicy;
+  if (own && typeof own === 'object' && !Array.isArray(own)) return own;
+  const domainWide = manifest && manifest.worldDropPolicy;
+  if (domainWide && typeof domainWide === 'object' && !Array.isArray(domainWide)) return domainWide;
+  return null;
+}
+
+// Accepted item classes (SPEC.md section 3.4.1): a domain-level default, with
+// a world's own array, even an empty one, winning outright; only a world that
+// omits the field falls back to manifest.acceptedItemClasses. An entry ending
+// in ".*" matches a whole family ("atlas.element.*" matches
+// "atlas.element.iron"): plain prefix matching on the dotted string, so it
+// never matches an unrelated "atlas.elementary.thing". An entry without it
+// means exactly that class.
 function effectiveAcceptedItemClasses(manifest, world) {
   const policy = (world && world.policy) || {};
   if (Array.isArray(policy.acceptedItemClasses)) return policy.acceptedItemClasses;
@@ -5841,7 +5841,7 @@ async function refreshSceneItemMarkers() {
     else window.__atlasScene.itemMarkers = [];
     return;
   }
-  // Task #250 — shared drops: every visitor's drop in this world, not just
+  // Shared drops: every visitor's drop in this world, not just
   // this identity's own. The credential is embedded right in each drop
   // record now (no wallet lookup by credentialId — someone else's dropped
   // credential was never in THIS wallet to begin with), so every marker
@@ -5863,6 +5863,7 @@ async function refreshSceneItemMarkers() {
       dropId: d.dropId,
       position: d.position,
       model: (d.credential.asset && d.credential.asset.model) || null,
+      previewModel: (d.credential.asset && d.credential.asset.dropPreviewModel) || null,
       domain,
       credential: d.credential
     })));
@@ -5878,7 +5879,7 @@ async function refreshSceneItemMarkers() {
 }
 
 // Entry point for the "Drop here"/"Drop…" button on an item card. `amount`
-// (task #250) is null for a non-fungible item or a fungible stack being
+// is null for a non-fungible item or a fungible stack being
 // dropped whole, else the exact quantity the assetActionHandler's
 // quantity-input already validated against the credential's own balance —
 // finalizeDrop() below is what actually turns that into a split first.

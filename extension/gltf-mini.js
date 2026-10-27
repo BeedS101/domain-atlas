@@ -268,8 +268,22 @@
   // streams in; and {status:'done', bytes} with the exact final byte count
   // once the download completes — the one moment a caller can always learn
   // this URL's true size, even if totalBytes was never known ahead of time.
-  async function fetchModelBuffer(url, onBytes) {
+  //
+  // `maxBytes` (optional, > 0) is a hard ceiling for the model. A Content-Length
+  // above it, or a body that streams past it, aborts the read (the rest of
+  // the body is cancelled, never buffered) and throws a MODEL_REJECTED error;
+  // Content-Length is only a shortcut, the streamed byte count is what is
+  // enforced. A cached copy above the ceiling is refused too. Without a
+  // streaming reader the body can only be checked once it has been read.
+  async function fetchModelBuffer(url, onBytes, maxBytes) {
+    const limit = maxBytes > 0 ? maxBytes : 0;
+    const tooLarge = (bytes) => modelRejection('bytes', bytes + ' bytes exceeds the ' + limit + '-byte limit');
     const cached = await getCachedAsset(url);
+    const fromCache = () => {
+      if (limit && cached.buffer.byteLength > limit) throw tooLarge(cached.buffer.byteLength);
+      if (onBytes) onBytes({ status: 'cached' });
+      return cached.buffer;
+    };
     const headers = cached && cached.lastModified ? { 'If-Modified-Since': cached.lastModified } : {};
     let res;
     try {
@@ -278,14 +292,18 @@
       // second, invisible caching layer second-guessing it.
       res = await fetch(url, { cache: 'no-store', headers });
     } catch (networkErr) {
-      if (cached) { if (onBytes) onBytes({ status: 'cached' }); return cached.buffer; } // offline/unreachable — stale beats broken
+      if (cached) return fromCache(); // offline/unreachable — stale beats broken
       throw networkErr;
     }
-    if (res.status === 304 && cached) { if (onBytes) onBytes({ status: 'cached' }); return cached.buffer; }
+    if (res.status === 304 && cached) return fromCache();
     if (!res.ok) throw new Error('Could not fetch model: ' + url);
 
     const contentLengthHeader = res.headers.get('Content-Length');
     const totalBytes = contentLengthHeader ? Number(contentLengthHeader) : null;
+    if (limit && Number.isFinite(totalBytes) && totalBytes > limit) {
+      try { if (res.body && res.body.cancel) await res.body.cancel(); } catch (e) { /* already closed */ }
+      throw tooLarge(totalBytes);
+    }
     if (onBytes) onBytes({ status: 'downloading', totalBytes: Number.isFinite(totalBytes) ? totalBytes : null });
 
     let buffer;
@@ -299,8 +317,12 @@
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        chunks.push(value);
         received += value.byteLength;
+        if (limit && received > limit) {
+          try { await reader.cancel(); } catch (e) { /* already closed */ }
+          throw tooLarge('more than ' + limit);
+        }
+        chunks.push(value);
         if (onBytes) onBytes({ status: 'progress', bytes: value.byteLength });
       }
       const merged = new Uint8Array(received);
@@ -312,6 +334,7 @@
       // No streaming reader available in this environment — the download
       // still counts, just reported as one lump at the end instead of live.
       buffer = await res.arrayBuffer();
+      if (limit && buffer.byteLength > limit) throw tooLarge(buffer.byteLength);
       if (onBytes) onBytes({ status: 'progress', bytes: buffer.byteLength });
       if (onBytes) onBytes({ status: 'done', bytes: buffer.byteLength });
     }
@@ -742,42 +765,166 @@
     model.gpu = null;
   }
 
+  // ---------- world-drop render policy (pure, no GL) ----------
+  //
+  // A dropped item may carry a rich model, but the world should not pay for
+  // it while the item spins on the floor. The policy below bounds what a drop
+  // may cost; a model over it is replaced by a small generic one (see
+  // setItemDrops()). Declared in the manifest as `worldDropPolicy` (per world
+  // under policy, or domain-wide at the top level, SPEC.md section 3.4.1) and
+  // handed to init() as `dropPolicy`. Missing or invalid values use the
+  // defaults.
+  const DEFAULT_DROP_POLICY = Object.freeze({
+    maxModelBytes: 1000000,   // size of the fetched GLB
+    maxTriangles: 50000,
+    maxTextureSize: 1024,     // longest side of any embedded image
+    maxTextures: 4,           // distinct embedded images
+    maxPrimitives: 32         // draw calls per drop
+  });
+  function normalizeDropPolicy(raw) {
+    const out = { ...DEFAULT_DROP_POLICY };
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      Object.keys(DEFAULT_DROP_POLICY).forEach((key) => {
+        const v = raw[key];
+        if (v === undefined) return;
+        if (typeof v === 'number' && Number.isFinite(v) && v >= 1) out[key] = Math.floor(v);
+        else console.warn('gltf-mini: worldDropPolicy.' + key + ' ignored (must be a number of at least 1); using ' + out[key]);
+      });
+    }
+    return out;
+  }
+
+  // A model that is not drawn because it is over the drop policy. Thrown
+  // before any GPU object exists for it.
+  function modelRejection(reason, detail) {
+    const err = new Error('model over the world-drop policy (' + reason + '): ' + detail);
+    err.code = 'MODEL_REJECTED';
+    err.reason = reason;
+    return err;
+  }
+
+  // Pixel size of an embedded PNG or JPEG from its header, without decoding
+  // it; null when the header cannot be read.
+  function imageDimensions(bytes, mime) {
+    try {
+      if (mime === 'image/png') {
+        if (bytes.length < 24) return null;
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        return { width: dv.getUint32(16), height: dv.getUint32(20) };
+      }
+      if (mime === 'image/jpeg') {
+        let i = 2;
+        while (i + 9 < bytes.length) {
+          if (bytes[i] !== 0xFF) { i++; continue; }
+          const marker = bytes[i + 1];
+          if (marker === 0xFF) { i++; continue; }
+          if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD9)) { i += 2; continue; }
+          const length = (bytes[i + 2] << 8) | bytes[i + 3];
+          if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
+            return { height: (bytes[i + 5] << 8) | bytes[i + 6], width: (bytes[i + 7] << 8) | bytes[i + 8] };
+          }
+          if (length < 2) return null;
+          i += 2 + length;
+        }
+      }
+    } catch (err) { /* fall through */ }
+    return null;
+  }
+
+  // What a parsed model costs, from its primitives (before any GPU upload).
+  function modelStats(primitives, bytes) {
+    let triangles = 0, maxTextureSize = 0;
+    const images = new Map();
+    primitives.forEach((prim) => {
+      triangles += (prim.indices ? prim.indices.length : prim.positions.length / 3) / 3;
+      ['baseColorTexture', 'emissiveTexture', 'normalTexture'].forEach((slot) => { if (prim[slot]) images.set(prim[slot].key, prim[slot]); });
+    });
+    images.forEach((tex) => {
+      const dims = imageDimensions(tex.bytes, tex.mime);
+      maxTextureSize = Math.max(maxTextureSize, dims ? Math.max(dims.width, dims.height) : Infinity);
+    });
+    return { bytes, triangles, primitives: primitives.length, textures: images.size, maxTextureSize };
+  }
+
+  // The first limit `stats` breaks, as { reason, detail }, or null.
+  function dropPolicyViolation(stats, policy) {
+    if (!stats) return null;
+    const checks = [
+      ['bytes', stats.bytes, policy.maxModelBytes], ['triangles', stats.triangles, policy.maxTriangles],
+      ['primitives', stats.primitives, policy.maxPrimitives], ['textures', stats.textures, policy.maxTextures],
+      ['textureSize', stats.maxTextureSize, policy.maxTextureSize]
+    ];
+    for (const [reason, value, max] of checks) if (value > max) return { reason, detail: value + ' exceeds the limit of ' + max };
+    return null;
+  }
+
+  // A cheap upper bound on the triangles and primitives a GLB would produce,
+  // from its JSON alone (node and accessor counts), so a model that instances
+  // one mesh thousands of times is refused before anything is read out of it.
+  function estimateGltfCost(gltf) {
+    let triangles = 0, primitives = 0;
+    (gltf.nodes || []).forEach((node) => {
+      if (node.mesh === undefined || !gltf.meshes || !gltf.meshes[node.mesh]) return;
+      (gltf.meshes[node.mesh].primitives || []).forEach((prim) => {
+        primitives++;
+        const acc = gltf.accessors && gltf.accessors[prim.indices !== undefined ? prim.indices : prim.attributes && prim.attributes.POSITION];
+        if (acc && Number.isFinite(acc.count)) triangles += acc.count / 3;
+      });
+    });
+    return { triangles, primitives };
+  }
+
+  // Fetches, parses and uploads one model. With `limits` (a normalized drop
+  // policy) the model is refused, before any GPU upload, when it is over them.
+  // Always records `stats` on the model.
+  async function buildModel(gl, url, onBytes, owner, limits) {
+    const buffer = await fetchModelBuffer(url, onBytes, limits ? limits.maxModelBytes : 0);
+    const { json: gltf, bin } = parseGLB(buffer);
+    if (limits) {
+      const cost = estimateGltfCost(gltf);
+      const early = dropPolicyViolation({ bytes: buffer.byteLength, triangles: cost.triangles, primitives: cost.primitives, textures: 0, maxTextureSize: 0 }, limits);
+      if (early) throw modelRejection(early.reason, early.detail);
+    }
+    const { primitives, bounds } = extractPrimitives(gltf, bin);
+    const stats = modelStats(primitives, buffer.byteLength);
+    if (limits) {
+      const why = dropPolicyViolation(stats, limits);
+      if (why) throw modelRejection(why.reason, why.detail);
+    }
+
+    // Upload each primitive's geometry to the GPU once; instances at
+    // different placements in the scene reuse these same buffers.
+    primitives.forEach((prim) => {
+      prim.vao = {
+        positionBuffer: createBuffer(gl, gl.ARRAY_BUFFER, prim.positions),
+        normalBuffer: prim.normals ? createBuffer(gl, gl.ARRAY_BUFFER, prim.normals) : null,
+        indexBuffer: prim.indices ? createBuffer(gl, gl.ELEMENT_ARRAY_BUFFER, prim.indices) : null,
+        indexCount: prim.indices ? prim.indices.length : (prim.positions.length / 3),
+        indexType: prim.indices ? (prim.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT) : null,
+        material: makeMaterial(prim)
+      };
+    });
+
+    const model = { primitives, bounds, stats };
+    // The image bytes come out of the one GLB fetched above; nothing is
+    // downloaded again for textures.
+    if (primitives.some(hasMaterialFeatures)) {
+      const gpu = await attachTextures(gl, primitives, url, () => !!(owner && owner.destroyed));
+      if (gpu.textures.length) {
+        model.gpu = gpu;
+        if (owner) owner.urls.add(url);
+        if (owner && owner.destroyed) { releaseModelGpu(gl, model); modelCache.delete(url); }
+      }
+    }
+    return model;
+  }
+
   // `owner` ({ destroyed, urls }) is the world renderer that asked for the
   // model. Models that carry GPU textures are released and dropped from the
   // cache when their owner is destroyed; plain models stay cached as before.
   function loadModel(gl, url, onBytes, owner) {
     if (modelCache.has(url)) return modelCache.get(url);
-    const promise = fetchModelBuffer(url, onBytes)
-      .then(async (buffer) => {
-        const { json: gltf, bin } = parseGLB(buffer);
-        const { primitives, bounds } = extractPrimitives(gltf, bin);
-
-        // Upload each primitive's geometry to the GPU once; instances at
-        // different placements in the scene reuse these same buffers.
-        primitives.forEach((prim) => {
-          prim.vao = {
-            positionBuffer: createBuffer(gl, gl.ARRAY_BUFFER, prim.positions),
-            normalBuffer: prim.normals ? createBuffer(gl, gl.ARRAY_BUFFER, prim.normals) : null,
-            indexBuffer: prim.indices ? createBuffer(gl, gl.ELEMENT_ARRAY_BUFFER, prim.indices) : null,
-            indexCount: prim.indices ? prim.indices.length : (prim.positions.length / 3),
-            indexType: prim.indices ? (prim.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT) : null,
-            material: makeMaterial(prim)
-          };
-        });
-
-        const model = { primitives, bounds };
-        // The image bytes come out of the one GLB fetched above; nothing is
-        // downloaded again for textures.
-        if (primitives.some(hasMaterialFeatures)) {
-          const gpu = await attachTextures(gl, primitives, url, () => !!(owner && owner.destroyed));
-          if (gpu.textures.length) {
-            model.gpu = gpu;
-            if (owner) owner.urls.add(url);
-            if (owner && owner.destroyed) { releaseModelGpu(gl, model); modelCache.delete(url); }
-          }
-        }
-        return model;
-      });
+    const promise = buildModel(gl, url, onBytes, owner, null);
     modelCache.set(url, promise);
     return promise;
   }
@@ -1511,7 +1658,7 @@
     let interactCooldownUntil = new Map(); // trigger index -> performance.now() ms it becomes interactable again
     let lastInteractPromptLabel = null; // debug/test hook, see getInteractPrompt() below
     let lastInteractPromptMarker = null; // the same raw scene.json entry the label was derived from, or null; see getInteractPromptMarker() below
-    let lastNearbyInteractMarkers = []; // task #227 — every in-range, not-yet-owned marker (not just the nearest), nearest-first; see getNearbyInteractMarkers() below
+    let lastNearbyInteractMarkers = []; // every in-range, not-yet-owned marker (not just the nearest), nearest-first; see getNearbyInteractMarkers() below
 
     // Dropped items, visible and pickupable in a gltf-mini world (previously
     // this renderer had no idea a drop even existed visually — see
@@ -1536,6 +1683,17 @@
     // loading — see setItemDrops() below for the glow-marker fallback this
     // enables, and the render loop for how the two are drawn differently.
     let itemDropEntries = new Map();
+
+    // World-drop model guard (see setItemDrops()). `dropPolicy` bounds what a
+    // dropped item's own model may cost; the rest is bookkeeping so that many
+    // drops of one model cost one fetch, one parse and one set of GPU objects:
+    // loads in flight, models already refused (url -> why; no model data kept),
+    // and the shared generic fallback.
+    const dropPolicy = normalizeDropPolicy(opts.dropPolicy);
+    const dropLoads = new Map();
+    const dropRejections = new Map();
+    const warnedDropUrls = new Set();
+    let dropFallbackLoad = null;
 
     const cameraStart = (sceneData.camera && Array.isArray(sceneData.camera.start)) ? sceneData.camera.start : [0, DEFAULT_EYE_HEIGHT, 4];
     const camera = {
@@ -2191,8 +2349,8 @@
     // in place to the asset's own model, if it declares one and it loads
     // successfully (see the render loop for how the two draw differently).
     // Each `drop` is { dropId, position, radius, model (asset.model URL,
-    // already absolute — see SPEC.md §5 — or null/undefined), domain,
-    // credential }.
+    // already absolute — see SPEC.md §5 — or null/undefined), previewModel
+    // (asset.dropPreviewModel, optional), domain, credential }.
     function setItemDrops(drops) {
       const incomingIds = new Set((drops || []).map((d) => d.dropId));
       for (const dropId of itemDropEntries.keys()) {
@@ -2212,40 +2370,121 @@
           },
           primitives: null,
           bounds: null,
-          pivot: [0, 0, 0]
+          pivot: [0, 0, 0],
+          source: null,         // 'pending' | 'preview' | 'model' | 'fallback' | 'marker', see resolveDropModel()
+          fallbackReason: null  // 'policy' (model over the drop policy) or 'failed' when it is a fallback / marker for that reason
         };
         itemDropEntries.set(drop.dropId, entry);
-        if (drop.model) {
-          // Cached by URL (modelCache, see loadModel above) — every visitor
-          // dropping the same class only pays the fetch once per session,
-          // same as any other model this renderer loads.
-          loadModel(gl, drop.model, undefined, modelOwner).then((model) => {
-            if (!itemDropEntries.has(drop.dropId)) return; // picked up/claimed before the model finished loading — don't resurrect a drop that's already gone
-            entry.primitives = model.primitives;
-            entry.bounds = model.bounds;
-            // Normalize to ITEM_MODEL_TARGET_SIZE by the model's own
-            // largest bounding dimension — a finely detailed model authored
-            // in real-world-scale units (say, meters, with a trophy modeled
-            // several units tall) would otherwise render at whatever raw
-            // size it happens to carry, dwarfing every other item in the
-            // scene. `size` can be non-finite/zero for a degenerate model
-            // (no accessor min/max at all) — falls back to no rescaling
-            // rather than dividing by zero or NaN-ing the whole matrix.
-            const size = model.bounds.size;
-            const maxDim = Math.max(size[0], size[1], size[2]);
-            entry.scale = (Number.isFinite(maxDim) && maxDim > 0) ? (ITEM_MODEL_TARGET_SIZE / maxDim) : 1;
-            const centers = [0, 1, 2].map((k) => (model.bounds.min[k] + model.bounds.max[k]) / 2);
-            entry.pivot = centers.every(Number.isFinite) ? centers : [0, 0, 0];
-            featureCounts = null;
-          }).catch((err) => {
-            // Graceful, not fatal — same "no broken-image icon" spirit the
-            // Asset Viewer's thumbnail already follows (viewer.js): a bad
-            // or missing model just means this drop keeps showing the
-            // amber glow fallback forever instead of its real shape.
-            console.warn('Dropped item model failed to load (' + drop.model + '), showing a marker instead:', err);
-          });
-        }
+        resolveDropModel(drop, entry);
       });
+    }
+
+    // Gives `entry` the shared primitives of `model` and normalizes it to
+    // ITEM_MODEL_TARGET_SIZE by the model's own largest bounding dimension — a
+    // finely detailed model authored in real-world-scale units (say, meters,
+    // with a trophy modeled several units tall) would otherwise render at
+    // whatever raw size it happens to carry, dwarfing every other item in the
+    // scene. `size` can be non-finite/zero for a degenerate model (no accessor
+    // min/max at all) — falls back to no rescaling rather than dividing by zero
+    // or NaN-ing the whole matrix. The pivot is the bounding-box center the item
+    // is drawn and spun around.
+    function applyDropModel(entry, model, source, reason) {
+      entry.primitives = model.primitives;
+      entry.bounds = model.bounds;
+      const size = model.bounds.size;
+      const maxDim = Math.max(size[0], size[1], size[2]);
+      entry.scale = (Number.isFinite(maxDim) && maxDim > 0) ? (ITEM_MODEL_TARGET_SIZE / maxDim) : 1;
+      const centers = [0, 1, 2].map((k) => (model.bounds.min[k] + model.bounds.max[k]) / 2);
+      entry.pivot = centers.every(Number.isFinite) ? centers : [0, 0, 0];
+      entry.source = source;
+      entry.fallbackReason = reason || null;
+      featureCounts = null;
+    }
+
+    // A dropped item's model, under the drop policy. Never rejects for policy
+    // reasons into the shared model cache: a refused model is not cached, only
+    // remembered by url (so the next drop of it does not fetch it again).
+    // A model another part of this renderer already loaded is reused, but is
+    // still held to the policy.
+    function loadDropModel(url) {
+      const refused = dropRejections.get(url);
+      if (refused) return Promise.reject(refused);
+      const checkCached = () => modelCache.get(url).then((model) => {
+        const why = dropPolicyViolation(model.stats, dropPolicy);
+        if (why) { const err = modelRejection(why.reason, why.detail); dropRejections.set(url, err); throw err; }
+        return model;
+      });
+      if (modelCache.has(url)) return checkCached();
+      if (dropLoads.has(url)) return dropLoads.get(url);
+      const load = buildModel(gl, url, undefined, modelOwner, dropPolicy).then((model) => {
+        if (modelCache.has(url)) { releaseModelGpu(gl, model); return checkCached(); } // loaded elsewhere meanwhile: keep that one
+        modelCache.set(url, Promise.resolve(model));
+        return model;
+      }, (err) => {
+        if (err && err.code === 'MODEL_REJECTED') dropRejections.set(url, err);
+        throw err;
+      }).finally(() => dropLoads.delete(url));
+      dropLoads.set(url, load);
+      return load;
+    }
+
+    // The generic fallback model, loaded once and shared by every drop that
+    // needs it.
+    function loadDropFallback() {
+      const url = opts.dropFallbackModelUrl;
+      if (!url) return Promise.reject(new Error('no drop fallback model is configured'));
+      if (!dropFallbackLoad) {
+        dropFallbackLoad = loadModel(gl, url, undefined, modelOwner).catch((err) => {
+          modelCache.delete(url); dropFallbackLoad = null; // a failed load is not remembered
+          throw err;
+        });
+      }
+      return dropFallbackLoad;
+    }
+
+    // Chooses what a drop looks like, asynchronously, in this order:
+    //   1. drop.previewModel (the asset's optional lightweight drop model),
+    //   2. drop.model (the asset's normal model),
+    //   each only if it loads and is within the drop policy, else
+    //   3. the generic fallback model.
+    // Until one is ready — and for a drop with no model at all, or if even
+    // the fallback cannot load — the drop shows the amber glow marker. Only
+    // the drawn representation depends on this; the marker (what E picks
+    // up), position and credential are the entry's own and never change.
+    function resolveDropModel(drop, entry) {
+      const candidates = [];
+      [[drop.previewModel, 'preview'], [drop.model, 'model']].forEach(([url, source]) => {
+        if (typeof url === 'string' && url && !candidates.some((c) => c.url === url)) candidates.push({ url, source });
+      });
+      if (!candidates.length) { entry.source = 'marker'; return; }
+      entry.source = 'pending';
+      const tracked = () => itemDropEntries.get(drop.dropId) === entry; // picked up/claimed meanwhile: don't resurrect a drop that is gone
+      (async () => {
+        let refused = null, found = null;
+        for (const c of candidates) {
+          try {
+            found = { model: await loadDropModel(c.url), source: c.source };
+            break;
+          } catch (err) {
+            if (err && err.code === 'MODEL_REJECTED') refused = refused || err;
+            if (!warnedDropUrls.has(c.url)) {
+              warnedDropUrls.add(c.url);
+              console.warn('Dropped item model not used (' + c.url + '), ' + (err && err.code === 'MODEL_REJECTED' ? 'over the world-drop policy: ' + err.reason : 'failed to load') + ':', err && err.message);
+            }
+          }
+        }
+        if (!tracked()) return;
+        if (found) { applyDropModel(entry, found.model, found.source, null); return; }
+        const reason = refused ? 'policy' : 'failed';
+        try {
+          const fallback = await loadDropFallback();
+          if (tracked()) applyDropModel(entry, fallback, 'fallback', reason);
+        } catch (err) {
+          // Graceful, not fatal: the drop keeps showing the amber glow marker.
+          entry.source = 'marker'; entry.fallbackReason = reason;
+          console.warn('Drop fallback model failed to load, showing a marker instead:', err);
+        }
+      })();
     }
 
     // How many currently drawn primitives use each optional material feature,
@@ -2270,8 +2509,15 @@
     // nothing is traversed except the feature counts, which are cached.
     function getDebugInfo() {
       if (!featureCounts) featureCounts = countFeatures();
-      let dropModels = 0;
-      itemDropEntries.forEach((entry) => { if (entry.primitives) dropModels++; });
+      // Drop render decisions, from the entries' own state (no work per frame).
+      const drops = { rendered: 0, preview: 0, fallback: 0, rejected: 0, failed: 0, pending: 0, markers: 0 };
+      itemDropEntries.forEach((entry) => {
+        if (entry.source === 'preview' || entry.source === 'model') { drops.rendered++; if (entry.source === 'preview') drops.preview++; }
+        else if (entry.source === 'fallback') { drops.fallback++; if (entry.fallbackReason === 'policy') drops.rejected++; else drops.failed++; }
+        else if (entry.source === 'pending') drops.pending++;
+        else drops.markers++;
+      });
+      const dropModels = drops.rendered;
       return {
         renderer: 'gltf-mini-v1',
         label: opts.debugLabel || null,
@@ -2287,6 +2533,7 @@
           cachedModels: modelCache.size,
           textures: liveTextureCounts.get(gl) || 0,
           itemDrops: itemDropEntries.size,
+          drops,
           objects: ((sceneData && sceneData.objects) || []).length,
           drawables: placedPrimitives.length
         },
@@ -2468,27 +2715,21 @@
       // keydown (edge-detected via wasInteractKeyDown so holding the key
       // down doesn't repeat-fire every frame).
       //
-      // Task #227 — collects EVERY in-range, not-yet-owned trigger into
-      // `nearby`, sorted nearest-first, instead of tracking only the
-      // single closest one: Bruno asked for the Previewer to show a list
-      // when the character is close to two or more items at once, and for
-      // E to keep working — collecting the nearest one at a time — even
-      // when several are in range together. `nearestInteract` (E's actual
-      // target, and what the "E — <label>" prompt names) is simply
-      // `nearby[0]`, so E always fires on the closest AVAILABLE one; once
-      // that one is collected, opts.isMarkerAlreadyOwned starts returning
-      // true for it and it drops out of `nearby` on the very next frame —
-      // the next-nearest naturally becomes nearby[0], which is exactly
-      // "press E multiple times to collect them one at a time" with no
-      // extra bookkeeping needed here.
+      // Collects every in-range, not-yet-owned trigger into `nearby`,
+      // sorted nearest-first, so the Previewer can list all items in range
+      // while E keeps collecting the nearest one at a time.
+      // `nearestInteract` (E's target, and what the "E — <label>" prompt
+      // names) is `nearby[0]`; once that one is collected,
+      // opts.isMarkerAlreadyOwned starts returning true for it, it drops out
+      // of `nearby` on the next frame and the next-nearest takes its place.
       //
       // opts.isMarkerAlreadyOwned (viewer.js's isOncePerUserClassOwned) is
       // optional and checked once per trigger per frame — a plain sync
       // predicate, never a wallet read from inside this loop; a marker
       // it flags is excluded here, upstream of both E's own target
-      // selection AND whatever the Previewer ends up showing, so "the
-      // previewer must ignore it" (Bruno's own words) and "E skips an
-      // already-owned crate" are the same one filter, not two.
+      // selection AND whatever the Previewer ends up showing, so the
+      // previewer ignoring it and E skipping an already-owned crate are the
+      // same one filter.
       // localAvatarHatInteractRangeMultiplier (1 = no bonus) widens both
       // proximity checks below — a hat's atlas.avatar.hatInteractRangeMultiplier
       // scales the AUTHORED radius itself, so E-range and the Previewer's
@@ -2527,13 +2768,9 @@
       lastInteractPromptLabel = nearestInteract ? (nearestInteract.marker.label || 'Interact') : null;
       lastInteractPromptMarker = nearestInteract ? nearestInteract.marker : null;
       lastNearbyInteractMarkers = nearby.map((n) => n.marker);
-      // Task #213/#227 — the nearest marker (still the "E — <label>"
-      // prompt's own target) travels alongside the label as before, plus
-      // now the FULL nearby list as a third argument — still backward
-      // compatible, since a caller reading only the first one or two
-      // arguments (there is none left in this codebase, but the shape is
-      // kept anyway) keeps working unchanged. viewer.js uses the full list
-      // to drive the Previewer's multi-item view.
+      // The nearest marker (the "E — <label>" prompt's target) travels
+      // alongside the label, plus the full nearby list as a third argument
+      // for the Previewer's multi-item view.
       if (opts.onInteractPrompt) opts.onInteractPrompt(lastInteractPromptLabel, lastInteractPromptMarker, lastNearbyInteractMarkers);
       const interactKeyDown = !!keys['KeyE'];
       if (interactKeyDown && !wasInteractKeyDown && nearestInteract && opts.onInteract) {
@@ -2858,29 +3095,19 @@
         const len = Math.hypot(x, z) || 1;
         return [x / len, z / len];
       },
-      // Debug/test hook, task #208 — the same string the on-screen "E —
-      // <label>" prompt is currently showing (or null when nothing's in
-      // range), computed fresh every frame in the proximity check above.
-      // Lets a test confirm the prompt appears/disappears at the right
-      // moment without reading canvas pixels, same convention as every
-      // other getter here. A test can teleport by writing directly to the
-      // already-exposed `camera.pos` array (no separate teleport hook
-      // needed) and then poll this to confirm the trigger radius worked.
+      // Debug/test hook: the string the on-screen "E — <label>" prompt is
+      // currently showing (or null when nothing is in range), computed every
+      // frame in the proximity check above. A test can move by writing to
+      // `camera.pos` and poll this to confirm the trigger radius.
       getInteractPrompt: () => lastInteractPromptLabel,
-      // Task #213 — same debug/test-hook convention as getInteractPrompt()
-      // just above, one level less processed: the raw scene.json entry the
-      // current prompt label was derived from (or null), so a test can
-      // confirm which interactable's `class` a proximity-driven Asset
-      // Viewer preview should be showing without re-deriving it from the
-      // label string.
+      // The raw marker the current prompt label was derived from (or null),
+      // so a test can see which interactable's `class` a proximity-driven
+      // preview should show without parsing the label.
       getInteractPromptMarker: () => lastInteractPromptMarker,
-      // Task #227 — same debug/test-hook convention as the two getters just
-      // above, one step wider: every marker currently in E-range (not just
-      // whichever one is nearest/would-be-collected-next), nearest-first,
-      // already filtered through opts.isMarkerAlreadyOwned. Lets a test
-      // confirm the Previewer's multi-item list matches the renderer's own
-      // idea of what's actually in range, without re-deriving proximity
-      // math the test has no access to.
+      // Every marker currently in E-range (not just the nearest),
+      // nearest-first, already filtered through opts.isMarkerAlreadyOwned.
+      // Lets a test check the Previewer's list against the renderer's own
+      // idea of what is in range.
       getNearbyInteractMarkers: () => lastNearbyInteractMarkers,
       // Debug/test hooks for the loot-crate removal above — same
       // read-the-real-internal-state convention as every other getter
@@ -2910,6 +3137,15 @@
       // it's showing (a real model vs. the amber glow fallback) without
       // reading canvas pixels.
       getItemDropCount: () => itemDropEntries.size,
+      // Which representation a drop is showing: 'preview' (its dropPreviewModel),
+      // 'model' (its normal model), 'fallback' (the generic model), 'marker'
+      // (the amber glow), 'pending' (still loading) — and, for a fallback or a
+      // marker, why: 'policy' (over the drop policy) or 'failed' (could not
+      // be loaded). null for an unknown drop.
+      getItemDropSource: (dropId) => { const e = itemDropEntries.get(dropId); return e ? e.source : null; },
+      getItemDropFallbackReason: (dropId) => { const e = itemDropEntries.get(dropId); return e ? e.fallbackReason : null; },
+      // The normalized drop render policy in force.
+      getDropPolicy: () => ({ ...dropPolicy }),
       getItemDropRenderKind: (dropId) => {
         const entry = itemDropEntries.get(dropId);
         return entry ? (entry.primitives ? 'model' : 'marker') : null;
@@ -3473,7 +3709,8 @@
     layout: {
       normalizePlacement, placementMatrix, placedFootprint, footprintDepth,
       selectSolidItems, floorWalkLimits, floorOverrun, floorCenter, eyeHeightFrom,
-      parseGLB, extractPrimitives, normalizeFog, PLAYER_RADIUS
+      parseGLB, extractPrimitives, normalizeFog, PLAYER_RADIUS,
+      normalizeDropPolicy, DEFAULT_DROP_POLICY, imageDimensions, modelStats, dropPolicyViolation, estimateGltfCost
     },
     previewCharacter,
     cache: {

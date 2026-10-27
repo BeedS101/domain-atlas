@@ -40,9 +40,18 @@ RESOURCES
   fallback texture. It is maintained where textures are created and deleted, so it
   matches an independent GL count, and returns to 0 once the renderer is
   destroyed (the models' textures are released on the next microtask turn).
-- `Item drops`: drops currently held, drawn as a marker or as their model.
+- `Item drops`: drops currently held, drawn as a marker, as their model or as the fallback.
 - `Objects` and `drawables`: scene objects, and the primitives drawn for them
   (one object can have several).
+
+DROPS (shown while there are item drops; see `docs/world-drop-render-policy.md`)
+
+- `Rendered`: drops drawn from their own model (`(n preview)` of them from a
+  `dropPreviewModel`).
+- `Fallback`: drops drawn as the generic fallback shape.
+- `Rejected GLB`: the fallbacks that were refused on the world-drop budget, as
+  opposed to a model that was missing or corrupt.
+- `Pending` and `Marker only` appear only when non-zero.
 
 ACTIVE FEATURES: see below.
 

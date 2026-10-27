@@ -2486,6 +2486,9 @@ function atlas_asset_catalog_entry($assetClass) {
   // below, an appearance recolor with no held/displayed object of its own.
   if (!empty($entry['modelPath'])) $result['model'] = 'https://' . atlas_domain() . $entry['modelPath'];
   if (!empty($entry['thumbnailPath'])) $result['thumbnail'] = 'https://' . atlas_domain() . $entry['thumbnailPath'];
+  // Optional lightweight model for the item lying in a world (SPEC.md §5);
+  // mirrors issuer-server/server.js's `dropPreviewModel`.
+  if (!empty($entry['dropPreviewModelPath'])) $result['dropPreviewModel'] = 'https://' . atlas_domain() . $entry['dropPreviewModelPath'];
   $result['fungible'] = $entry['fungible'];
   $result['presentation'] = $entry['presentation'];
   // Task #160: the third asset-level flag, always present (never

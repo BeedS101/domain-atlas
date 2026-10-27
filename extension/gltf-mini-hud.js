@@ -64,6 +64,16 @@
       lines.push(pad('GPU textures', 13) + r.textures);
       lines.push(pad('Item drops', 13) + r.itemDrops);
       lines.push(pad('Objects', 13) + r.objects + '  (' + r.drawables + ' drawables)');
+      const d = r.drops;
+      if (d && r.itemDrops > 0) {
+        lines.push('');
+        lines.push('DROPS');
+        lines.push(pad('Rendered', 13) + d.rendered + (d.preview ? '  (' + d.preview + ' preview)' : ''));
+        lines.push(pad('Fallback', 13) + d.fallback);
+        lines.push(pad('Rejected GLB', 13) + d.rejected);
+        if (d.pending) lines.push(pad('Pending', 13) + d.pending);
+        if (d.markers) lines.push(pad('Marker only', 13) + d.markers);
+      }
       lines.push('');
       lines.push('ACTIVE FEATURES');
       lines.push(pad('Fog', 13) + onOff(f.fog));
