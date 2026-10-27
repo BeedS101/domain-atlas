@@ -242,29 +242,38 @@ function screenUvFor(prim) {
 
 // Re-emits a bundled model: every material is kept as it was, and the materials
 // named in `rules` get UVs and the extra material fields. A rule with `where`
-// (a test on the triangle's surface normal) textures only those triangles, as a
+// (a test on the triangle's unit normal and its centre point) textures only those triangles, as a
 // new primitive called `rule.name`; the rest keep the original material untouched.
-function retextured(file, rules) {
-  const prims = flattenGlb(path.join(FURNITURE_DIR, file));
+// A material may have a list of rules: each takes its triangles from what the
+// earlier ones left. `srcDir` is where the bundled model lives.
+function retextured(file, rules, srcDir) {
+  const prims = flattenGlb(path.join(srcDir || FURNITURE_DIR, file));
   const specs = [];
   for (const p of prims) {
     const src = p.material;
     const material = { baseColorFactor: (src.pbrMetallicRoughness && src.pbrMetallicRoughness.baseColorFactor) || [1, 1, 1, 1] };
     if (src.alphaMode) material.alphaMode = src.alphaMode;
-    const rule = rules[src.name];
-    if (!rule) { specs.push({ name: src.name, material, positions: p.positions, normals: p.normals, indices: p.indices }); continue; }
-    let textured = p, rest = null;
-    if (rule.where) {
-      const pick = [], other = [];
-      for (let t = 0; t < p.indices.length; t += 3) {
-        const n = [0, 1, 2].map((c) => [0, 1, 2].reduce((sum, k) => sum + p.normals[p.indices[t + k] * 3 + c], 0));
-        (rule.where(unit(n)) ? pick : other).push(p.indices[t], p.indices[t + 1], p.indices[t + 2]);
-      }
-      textured = { ...p, indices: pick };
-      if (other.length) rest = { ...p, indices: other };
+    const list = [].concat(rules[src.name] || []);
+    if (!list.length) { specs.push({ name: src.name, material, positions: p.positions, normals: p.normals, indices: p.indices }); continue; }
+    let rest = p;
+    const done = [];
+    for (const rule of list) {
+      if (!rest) break;
+      let textured = rest;
+      if (rule.where) {
+        const pick = [], other = [];
+        for (let t = 0; t < rest.indices.length; t += 3) {
+          const n = [0, 1, 2].map((c) => [0, 1, 2].reduce((sum, k) => sum + rest.normals[rest.indices[t + k] * 3 + c], 0));
+          const centre = [0, 1, 2].map((c) => [0, 1, 2].reduce((sum, k) => sum + rest.positions[rest.indices[t + k] * 3 + c], 0) / 3);
+          (rule.where(unit(n), centre) ? pick : other).push(rest.indices[t], rest.indices[t + 1], rest.indices[t + 2]);
+        }
+        textured = { ...rest, indices: pick };
+        rest = other.length ? { ...rest, indices: other } : null;
+      } else rest = null;
+      if (textured.indices.length) done.push({ rule, textured });
     }
     if (rest) specs.push({ name: src.name, material, positions: rest.positions, normals: rest.normals, indices: rest.indices });
-    specs.push({ name: rule.name || src.name, material: { ...material, ...rule.material }, ...projectTriangles(textured, rule.uv(textured)) });
+    for (const { rule, textured } of done) specs.push({ name: rule.name || src.name, material: { ...material, ...rule.material }, ...projectTriangles(textured, rule.uv(textured)) });
   }
   return buildMultiGlb({ name: path.basename(file, '.glb'), primitives: specs });
 }
@@ -391,4 +400,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { SWAPPED, WALLS, WOODEN, SCREENS, LAMPS, NEW_OBJECTS, URL_DIR, allModels, sceneText };
+module.exports = { SWAPPED, WALLS, WOODEN, SCREENS, LAMPS, NEW_OBJECTS, URL_DIR, allModels, sceneText, retextured, textures, wallUv, woodUv, WALL_HEIGHT, LIGHT_REPEAT, encodeNormal, normalMap, smoothstep, px };

@@ -2,7 +2,7 @@
 // Lays the Domain A Lobby's outdoor town into demo-domain-a/spatial/lobby/scene.json.
 //
 // Only the floor and the outdoor objects change: every line of the scene that
-// is not an /assets/outdoor/ or /assets/town/ model (the building, its
+// is not an outdoor prop or /assets/town/ model (the building, its
 // furniture, the portal gate, the crates, portal markers, interactables and
 // anchors) is kept exactly as it is. The outdoor block is rebuilt from
 // tools/lib/lobby-town-layout.js, so the script can be run again after editing
@@ -22,8 +22,23 @@ const num = (v) => String(Math.round(v * 1000) / 1000);
 const T = (name) => '/assets/town/' + name + '.glb';
 const O = (name) => '/assets/outdoor/' + name + '.glb';
 
-function obj(model, x, z, opts) {
+// The outdoor kit props are used in their textured versions from assets/lobby/exterior/
+// (tools/make-lobby-exterior-assets.js); trees, shrubs and pines come in two tints, chosen
+// from the object's position so the choice is stable and nothing else about it changes.
+const EXTERIOR_PROPS = ['treeSmall', 'shrub', 'benchOutdoor', 'lampPost', 'planterBox', 'welcomeSign'];
+const TINT_B = { treeSmall: 0.45, shrub: 0.5, pine: 0.4 };
+function modelFor(model, x, z) {
+  const m = /^\/assets\/(outdoor|town)\/(\w+)\.glb$/.exec(model);
+  if (!m) return model;
+  let name = m[2];
+  if (TINT_B[name] !== undefined && hash(Math.round(x * 10), Math.round(z * 10), 61) < TINT_B[name]) name += 'B';
+  if (m[1] === 'outdoor') return EXTERIOR_PROPS.includes(m[2]) ? '/assets/lobby/exterior/' + name + '.glb' : model;
+  return '/assets/town/' + name + '.glb';
+}
+
+function obj(rawModel, x, z, opts) {
   const o = opts || {};
+  const model = modelFor(rawModel, x, z);
   const parts = ['"model": "' + model + '"', '"position": [' + [x, o.y || 0, z].map(num).join(', ') + ']', '"rotationY": ' + num(o.rot || 0)];
   if (o.scale !== undefined) parts.push('"scale": ' + num(o.scale));
   if (o.solid === false) parts.push('"solid": false');
@@ -133,7 +148,7 @@ const OBJECTS = [].concat(...GROUPS.map((x) => x.items));
 
 function render(text) {
   const lines = text.split('\n');
-  const isOutdoor = (l) => /"model": "\/assets\/(outdoor|town)\//.test(l);
+  const isOutdoor = (l) => /"model": "\/assets\/(outdoor|town)\//.test(l) || /"model": "\/assets\/lobby\/exterior\/(treeSmall|shrub|benchOutdoor|lampPost|planterBox|welcomeSign)/.test(l);
   const first = lines.findIndex(isOutdoor);
   if (first < 0) throw new Error('no outdoor block found in the Lobby scene');
   const kept = lines.filter((l) => !isOutdoor(l));

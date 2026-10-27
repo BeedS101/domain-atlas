@@ -39,7 +39,9 @@ hills texture closes the horizon.
 - `tools/make-lobby-town-scene.js` rebuilds the outdoor part of
   `demo-domain-a/spatial/lobby/scene.json` (the floor and every
   `/assets/outdoor/` and `/assets/town/` object). Everything else in the scene
-  is left byte for byte as it was. `--check` verifies the file is current.
+  is left byte for byte as it was. `--check` verifies the file is current. Outdoor
+  props and the building walls use the textured models of
+  `assets/lobby/exterior/` (see `docs/lobby-exterior-materials.md`).
 - `tools/lib/procedural.js` holds the noise, PNG and mesh helpers shared with
   `tools/make-town-portal-glb.js`.
 

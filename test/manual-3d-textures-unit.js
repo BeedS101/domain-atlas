@@ -157,9 +157,10 @@ const png = quadrantPng();
     else if (f.endsWith('.glb')) files.push(f);
   });
   dirs.forEach(walk);
-  // assets/lobby/interior holds the Lobby's deliberate material models (see manual-3d-lobby-interior-unit.js)
+  // assets/lobby/interior and assets/lobby/exterior hold the Lobby's deliberate material models (see manual-3d-lobby-interior-unit.js)
   const interiorDir = path.join('assets', 'lobby', 'interior') + path.sep;
-  files.splice(0, files.length, ...files.filter((f) => !f.includes(interiorDir)));
+  const exteriorDir = path.join('assets', 'lobby', 'exterior') + path.sep;
+  files.splice(0, files.length, ...files.filter((f) => !f.includes(interiorDir) && !f.includes(exteriorDir)));
   assert(files.length > 100, 'expected the bundled models, found ' + files.length);
   // The only textured bundled models are the two deliberate ones.
   const textured = [];
@@ -179,7 +180,7 @@ const png = quadrantPng();
   const known = ['galleryPortal.glb', 'textureTestBoard.glb', 'townPortal.glb'];
   const townTextured = textured.filter((n) => fs.existsSync(path.join(REPO, 'demo-domain-a', 'assets', 'town', n)) && !known.includes(n));
   assert.deepStrictEqual(textured.filter((n) => !townTextured.includes(n)).sort(), known, 'only the deliberate models carry images');
-  assert(townTextured.length >= 10 && townTextured.length <= 19, 'the town set carries its textures (' + townTextured.length + ' textured town models)');
+  assert(townTextured.length >= 10 && townTextured.length <= 24, 'the town set carries its textures (' + townTextured.length + ' textured town models)');
   pass('all ' + (files.length - textured.length) + ' other bundled GLBs still extract as untextured models with their flat colours (textured: ' + known.join(', ') + ' and ' + townTextured.length + ' town models)');
 }
 

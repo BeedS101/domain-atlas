@@ -11,16 +11,18 @@
 //     (ground, paths and paving, river banks, river water, mine hill, sky), whose
 //     shapes come from tools/lib/lobby-town-layout.js.
 //
-// Textures are base colour only (the renderer's supported subset): grass, gravel,
-// paving, flagstones, sand, water, planks, shingles, rock, leaves, signboard
-// lettering and a sky with distant hills. Pieces that look fine as flat colour
-// (pines, barrel, cart, wood pile, flowers) have none.
+// Textures are base colour only (grass, gravel, paving, flagstones, sand, water,
+// planks, shingles, rock, leaves, bark, needles, iron, glass, signboard lettering,
+// a sky with distant hills). Normal maps were tried on the rock, hut and pier and
+// left out: they cost about 15-20% frame time on those views for little extra
+// relief. Geometry, bounds and placement come from the town layout, not the materials.
 //
 // Usage: node tools/make-town-assets.js [--only name[,name...]]
 
 const fs = require('fs');
 const path = require('path');
 const { buildMultiGlb, makePng } = require('./lib/glb-builder');
+const { makePngRgb } = require('./lib/png-rgb');
 const { hash, mod, noise, clamp01, mix, mixRgb, scaleRgb, toPx, FONT, Mesh } = require('./lib/procedural');
 const portal = require('./make-town-portal-glb');
 const W = require('./lib/lobby-town-layout');
@@ -42,15 +44,15 @@ const tile = (w, h, tw, th, fn) => makePng(w, h, (x, y) => toPx(fn((x + 0.5) / w
 function grassAt(x, y) {
   const T = 8;
   const big = nz(x, y, 1, T, T, 0.5), mid = nz(x, y, 2, T, T, 2), fine = nz(x, y, 3, T, T, 8), fine2 = nz(x, y, 4, T, T, 16);
-  let col = mixRgb([98, 142, 66], [128, 164, 78], big);
+  let col = mixRgb([96, 140, 64], [130, 166, 80], big);
   col = scaleRgb(col, 0.9 + 0.2 * mid);
-  if (fine > 0.78) col = scaleRgb(col, 1.12); else if (fine < 0.2) col = scaleRgb(col, 0.86);
-  if (fine2 > 0.9) col = mixRgb(col, [196, 206, 110], 0.45);
+  col = scaleRgb(col, 1 + 0.12 * smoothstep(0.68, 0.86, fine) - 0.14 * smoothstep(0.32, 0.14, fine)); // patches with soft edges
+  if (fine2 > 0.9) col = mixRgb(col, [196, 206, 110], 0.35 * (fine2 - 0.9) * 10);
   const dirt = nz(x, y, 5, T, T, 1);
   if (dirt > 0.82) col = mixRgb(col, [140, 120, 80], (dirt - 0.82) * 4);
   return col;
 }
-const grassTexture = memo(() => tile(256, 256, 8, 8, grassAt));
+const grassTexture = memo(() => tileRgb(256, 256, 8, 8, grassAt));
 
 function gravelAt(x, y) {
   const T = 2;
@@ -99,7 +101,7 @@ function sandAt(x, y) {
   const T = 2;
   let col = mixRgb([214, 194, 148], [226, 208, 162], nz(x, y, 31, T, T, 1.5));
   const p = nz(x, y, 32, T, T, 28);
-  if (p > 0.84) col = scaleRgb(col, 0.86); else if (p < 0.12) col = scaleRgb(col, 1.07);
+  if (p > 0.84) col = mixRgb(scaleRgb(col, 0.86), [150, 146, 140], clamp01((p - 0.84) * 6) * 0.45); else if (p < 0.12) col = scaleRgb(col, 1.07);
   return scaleRgb(col, 0.95 + 0.1 * nz(x, y, 33, T, T, 8));
 }
 const sandTexture = memo(() => tile(128, 128, 2, 2, sandAt));
@@ -238,6 +240,133 @@ const skyTexture = memo(() => makePng(512, 128, (x, y) => {
   return toPx(skyColour(col));
 }));
 
+// ---------- material textures: bark, needles, iron, glass, weathered wood ----------
+
+const rgbPx = (c) => toPx(c).slice(0, 3);
+// Opaque RGB tile; `fn(x, y)` in metres over a tw x th tile.
+const tileRgb = (w, h, tw, th, fn) => makePngRgb(w, h, (x, y) => rgbPx(fn((x + 0.5) / w * tw, (y + 0.5) / h * th)));
+const smoothstep = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+// Weathered decking for the pier: boards of different greys and browns, nails, a few dark stains. Tile 1 x 1 m.
+function pierBoardAt(x, y) {
+  const row = Math.floor(y / 0.2), ly = mod(y, 0.2);
+  const pid = hash(mod(row, 5), 0, 181), pid2 = hash(mod(row, 5), 1, 182);
+  let col = mixRgb([132, 104, 76], [170, 138, 100], pid);
+  col = mixRgb(col, [126, 120, 108], pid2 * 0.35);
+  col = scaleRgb(col, 0.88 + 0.24 * noise(x * 3, y * 40, 183, 3, 40));
+  if (noise(x * 2, y * 2, 184, 2, 2) > 0.7) col = scaleRgb(col, 0.82);
+  if (ly < 0.008 || ly > 0.192) col = scaleRgb(col, 0.5);
+  else if (ly < 0.02) col = scaleRgb(col, 1.1);
+  for (const nx of [0.12, 0.88]) if (Math.hypot(x - nx, ly - 0.03) < 0.014 || Math.hypot(x - nx, ly - 0.17) < 0.014) col = [70, 62, 56];
+  return col;
+}
+const pierTexture = memo(() => tileRgb(128, 128, 1, 1, pierBoardAt));
+
+// River: deeper in the middle, sun glints and pale foam at the edges (u across, v along; 4 m per repeat).
+const riverTexture = memo(() => makePngRgb(64, 128, (x, y) => {
+  const u = (x + 0.5) / 64, v = (y + 0.5) / 128;
+  const flow = noise(u * 6, v * 8, 41, 0, 8), flow2 = noise(u * 14, v * 20, 191, 0, 20);
+  let col = mixRgb([52, 120, 158], [78, 152, 184], flow);
+  col = scaleRgb(col, 0.94 + 0.12 * flow2);
+  col = mixRgb(col, [36, 92, 134], (1 - Math.abs(u - 0.5) * 2) * 0.5);
+  const streak = noise(u * 10, v * 3, 42, 0, 3);
+  if (streak > 0.64) col = mixRgb(col, [168, 218, 230], (streak - 0.64) * 2.4);
+  const glint = noise(u * 30, v * 40, 192, 0, 40);
+  if (glint > 0.86) col = mixRgb(col, [236, 248, 250], (glint - 0.86) * 5);
+  const e = Math.min(u, 1 - u);
+  if (e < 0.07) col = mixRgb(col, [232, 244, 242], clamp01((0.07 - e) / 0.07 * 0.9) * (0.45 + 0.55 * noise(u * 40, v * 40, 43, 0, 40)));
+  return rgbPx(col);
+}));
+
+// The fountain basin: lighter, clearer water with a caustic web, 3 m across the basin.
+const fountainWaterTexture = memo(() => makePngRgb(64, 64, (x, y) => {
+  const u = (x + 0.5) / 64, v = (y + 0.5) / 64;
+  const a = Math.abs(noise(u * 6, v * 6, 201, 6, 6) - 0.5), b = Math.abs(noise(u * 9 + 3, v * 9, 202, 9, 9) - 0.5);
+  let col = mixRgb([70, 160, 190], [96, 186, 208], noise(u * 3, v * 3, 203, 3, 3));
+  const web = Math.min(a, b);
+  if (web < 0.035) col = mixRgb(col, [190, 236, 238], (0.035 - web) / 0.035 * 0.7);
+  return rgbPx(col);
+}));
+
+// Pine needles: near-white drooping strands, tinted by the material. Tiles seamlessly.
+const leafTexture = memo(() => makePngRgb(64, 64, (x, y) => {
+  const a = noise(x / 8, y / 8, 301, 8, 8), b = noise(x / 3, y / 3, 302, 21, 21), c = noise(x / 16, y / 16, 303, 4, 4);
+  const v = 0.84 + 0.22 * a + 0.1 * (b - 0.5) + 0.12 * (c - 0.5);
+  return rgbPx([255 * v, 255 * v, 255 * v]);
+}));
+const needleTexture = memo(() => makePngRgb(64, 64, (x, y) => {
+  const strand = noise(x / 2.5, y / 9, 211, 26, 7), clump = noise(x / 10, y / 10, 212, 6, 6);
+  let v = 0.8 + 0.2 * clump + 0.2 * (strand - 0.5);
+  if (strand < 0.25) v *= 0.82;
+  if (strand > 0.85) v += 0.08;
+  return rgbPx([255 * v, 255 * v, 255 * v]);
+}));
+
+const barkTexture = memo(() => makePngRgb(64, 64, (x, y) => {
+  const groove = noise(x / 3, y / 24, 221, 21, 3);
+  let v = 0.9 + 0.14 * (noise(x / 8, y / 16, 222, 8, 4) - 0.5) + 0.12 * (noise(x / 2, y / 6, 223, 32, 11) - 0.5);
+  if (groove < 0.3) v *= 0.7 + groove * 0.8;
+  return rgbPx([255 * v, 255 * v, 255 * v]);
+}));
+
+const ironTexture = memo(() => makePngRgb(64, 64, (x, y) => {
+  const m = noise(x / 10, y / 10, 231, 7, 7), f = noise(x / 2, y / 2, 232, 32, 32);
+  let v = 0.9 + 0.14 * m + 0.06 * (f - 0.5);
+  if (f > 0.9) v += 0.12;
+  return rgbPx([255 * v, 255 * v, 255 * v]);
+}));
+
+// Barrel staves: 8 staves round the barrel (u in staves), v up the barrel.
+const staveTexture = memo(() => makePngRgb(32, 64, (x, y) => {
+  const u = (x + 0.5) / 32, v = (y + 0.5) / 64;
+  let col = scaleRgb([255, 255, 255], 0.88 + 0.2 * noise(u * 2, v * 30, 241, 0, 30));
+  if (u < 0.06 || u > 0.94) col = scaleRgb(col, 0.6);
+  return rgbPx(col);
+}));
+
+// Log ends: growth rings. u, v over the end face (0.5, 0.5 at the centre).
+const ringTexture = memo(() => makePngRgb(32, 32, (x, y) => {
+  const r = Math.hypot((x + 0.5) / 32 - 0.5, (y + 0.5) / 32 - 0.5) * 2;
+  let col = mixRgb([214, 176, 124], [172, 132, 88], 0.5 + 0.5 * Math.sin(r * 22 + noise(x / 6, y / 6, 251, 6, 6) * 3));
+  if (r > 0.9) col = [120, 88, 60];
+  return rgbPx(col);
+}));
+
+const soilTexture = memo(() => makePngRgb(64, 64, (x, y) => {
+  const m = noise(x / 6, y / 6, 261, 11, 11), f = noise(x / 2, y / 2, 262, 32, 32);
+  const v = 0.78 + 0.3 * m + 0.2 * (f - 0.5);
+  return rgbPx([255 * v, 255 * v, 255 * v]);
+}));
+
+// Window glass: sky at the top, darker below, a faint diagonal reflection.
+const glassTexture = memo(() => makePngRgb(32, 32, (x, y) => {
+  const u = (x + 0.5) / 32, v = (y + 0.5) / 32;
+  let col = mixRgb([122, 158, 190], [52, 70, 92], Math.pow(v, 0.8));
+  const d = Math.abs(u + v * 0.6 - 0.75);
+  if (d < 0.07) col = mixRgb(col, [210, 226, 238], (0.07 - d) / 0.07 * 0.55);
+  return rgbPx(col);
+}));
+
+// The doorway recess and the dark walls of the mine mouth: u runs from the opening (lit rock and timber)
+// into the dark, v adds streaks.
+const recessTexture = memo(() => makePngRgb(64, 32, (x, y) => {
+  const u = (x + 0.5) / 64, v = (y + 0.5) / 32;
+  const t = Math.pow(1 - clamp01(u * 1.25), 2);
+  const streak = noise(u * 6, v * 5, 271, 0, 5);
+  return rgbPx(scaleRgb(mixRgb([20, 16, 14], [92, 78, 66], t), 0.8 + 0.4 * streak));
+}));
+
+// Steel rail with a bright running surface (u across the strip) and a sleeper (v along).
+const railTexture = memo(() => makePngRgb(16, 64, (x, y) => {
+  const u = (x + 0.5) / 16;
+  let col = [78, 74, 76];
+  if (u > 0.3 && u < 0.7) col = [140, 134, 130];
+  if (u < 0.12 || u > 0.88) col = [58, 52, 50];
+  return rgbPx(scaleRgb(col, 0.92 + 0.16 * noise(x / 2, y / 6, 281, 0, 11)));
+}));
+// Sleepers: dark timber with grain along the length.
+const sleeperTexture = memo(() => makePngRgb(64, 16, (x, y) => rgbPx(scaleRgb([88, 66, 48], 0.85 + 0.3 * noise(x / 10, y / 1.5, 291, 7, 11)))));
+
 // ---------- geometry helpers ----------
 
 const rgb = (r, g, b) => ({ baseColorFactor: [r / 255, g / 255, b / 255, 1] });
@@ -317,8 +446,9 @@ function lathe(mesh, rings, n, a0, opts) {
   if (o.cap) {
     const top = rings[rings.length - 1], bot = rings[0];
     for (let i = 0; i < n; i++) {
-      if (o.cap.includes('t')) mesh.tri([[0, top[0], 0], pt(top[1], i, top[0]), pt(top[1], i + 1, top[0])], [0, 1, 0], [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]]);
-      if (o.cap.includes('b')) mesh.tri([[0, bot[0], 0], pt(bot[1], i + 1, bot[0]), pt(bot[1], i, bot[0])], [0, -1, 0], [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]]);
+      const cuv = (tri) => tri.map((q) => (o.capUv ? o.capUv(q) : [0.5, 0.5]));
+      if (o.cap.includes('t')) { const tri = [[0, top[0], 0], pt(top[1], i, top[0]), pt(top[1], i + 1, top[0])]; mesh.tri(tri, [0, 1, 0], cuv(tri)); }
+      if (o.cap.includes('b')) { const tri = [[0, bot[0], 0], pt(bot[1], i + 1, bot[0]), pt(bot[1], i, bot[0])]; mesh.tri(tri, [0, -1, 0], cuv(tri)); }
     }
   }
 }
@@ -346,9 +476,16 @@ function buildPaths() {
   const gravel = new Mesh(), plaza = new Mesh(), flag = new Mesh(), terrace = new Mesh(), quarry = new Mesh(), inlay = new Mesh();
   W.PATHS.forEach(([ax, az, bx, bz, w]) => flat(gravel, stripPts(ax, az, bx, bz, w), W.LAYER.path, 2));
   flat(quarry, rectPts(W.QUARRY.minX, W.QUARRY.minZ, W.QUARRY.maxX, W.QUARRY.maxZ), W.LAYER.path, 2);
-  // two timber rails running out of the mine opening across the rock yard
-  const rails = new Mesh();
-  for (const rx of [W.MINE.entranceX - 0.65, W.MINE.entranceX + 0.65]) flat(rails, rectPts(rx - 0.07, W.MINE.maxZ + 0.01, rx + 0.07, W.MINE.maxZ + 3.4), W.LAYER.path + 0.006, 1);
+  // two steel rails on sleepers running out of the mine opening across the rock yard
+  const rails = new Mesh(), sleepers = new Mesh();
+  const rz0 = W.MINE.maxZ + 0.01, rz1 = W.MINE.maxZ + 3.4, ry = W.LAYER.path + 0.006;
+  for (const rx of [W.MINE.entranceX - 0.65, W.MINE.entranceX + 0.65]) {
+    rails.quad([[rx - 0.07, ry, rz1], [rx + 0.07, ry, rz1], [rx + 0.07, ry, rz0], [rx - 0.07, ry, rz0]], [0, 1, 0], [[0, 0], [1, 0], [1, (rz1 - rz0) / 1.0], [0, (rz1 - rz0) / 1.0]]);
+  }
+  for (let z = rz0 + 0.25; z < rz1 - 0.1; z += 0.55) {
+    const sx = W.MINE.entranceX, hw = 0.95, sy = W.LAYER.path + 0.004;
+    sleepers.quad([[sx - hw, sy, z + 0.09], [sx + hw, sy, z + 0.09], [sx + hw, sy, z - 0.09], [sx - hw, sy, z - 0.09]], [0, 1, 0], [[0, 0], [1, 0], [1, 1], [0, 1]]);
+  }
   const P = W.PLAZA, S = W.STOOP, M = W.MARKET, T = W.TERRACE;
   flat(plaza, rectPts(P.minX, P.minZ, P.maxX, P.maxZ), W.LAYER.paving, 1.6);
   flat(plaza, rectPts(S.minX, S.minZ, S.maxX, S.maxZ), W.LAYER.paving, 1.6);
@@ -366,7 +503,8 @@ function buildPaths() {
   return [
     gravel.spec('gravelPath', textured(gravelTexture())),
     quarry.spec('rockYard', textured(gravelTexture(), REPEAT, [0.8, 0.82, 0.86])),
-    rails.spec('mineRails', textured(woodTexture(), REPEAT, [0.7, 0.62, 0.55])),
+    sleepers.spec('mineSleepers', textured(sleeperTexture(), CLAMP)),
+    rails.spec('mineRails', textured(railTexture(), REPEAT_T)),
     plaza.spec('plazaPaving', textured(plazaTexture())),
     flag.spec('marketFlagstones', textured(flagTexture())),
     terrace.spec('terraceFlagstones', textured(flagTexture(), REPEAT, [0.9, 1, 0.92])),
@@ -403,7 +541,7 @@ function buildRiverWater() {
   const lip = W.LAYER.bank;
   m.quad([[R.minX, lip, R.minZ], [R.minX, lip, R.maxZ], [R.minX, y, R.maxZ], [R.minX, y, R.minZ]], [-1, 0, 0], [[0, 0], [0, len / 4], [0.02, len / 4], [0.02, 0]]);
   m.quad([[R.maxX, lip, R.maxZ], [R.maxX, lip, R.minZ], [R.maxX, y, R.minZ], [R.maxX, y, R.maxZ]], [1, 0, 0], [[0.98, len / 4], [0.98, 0], [1, 0], [1, len / 4]]);
-  return [m.spec('water', textured(waterTexture(), REPEAT_T))];
+  return [m.spec('water', textured(riverTexture(), REPEAT_T))];
 }
 
 // A sky box: four walls with distant hills and a flat-coloured top, lit uniformly.
@@ -474,11 +612,12 @@ function buildMine() {
   }
   // the recess: dark walls, ceiling and back
   const depth = 0.9, zb = front - depth, yh = M.entranceH;
-  dark.quad([[ex0, 0.03, zb], [ex1, 0.03, zb], [ex1, yh, zb], [ex0, yh, zb]], [0, 0, 1], [[0, 0], [1, 0], [1, 1], [0, 1]]);
+  // u runs from the opening (0) into the dark (1)
+  dark.quad([[ex0, 0.03, zb], [ex1, 0.03, zb], [ex1, yh, zb], [ex0, yh, zb]], [0, 0, 1], [[1, 0], [1, 0], [1, 1], [1, 1]]);
   dark.quad([[ex0, 0.03, front], [ex0, 0.03, zb], [ex0, yh, zb], [ex0, yh, front]], [1, 0, 0], [[0, 0], [1, 0], [1, 1], [0, 1]]);
-  dark.quad([[ex1, 0.03, zb], [ex1, 0.03, front], [ex1, yh, front], [ex1, yh, zb]], [-1, 0, 0], [[0, 0], [1, 0], [1, 1], [0, 1]]);
-  dark.quad([[ex0, yh, front], [ex1, yh, front], [ex1, yh, zb], [ex0, yh, zb]], [0, -1, 0], [[0, 0], [1, 0], [1, 1], [0, 1]]);
-  dark.quad([[ex0, 0.03, front], [ex1, 0.03, front], [ex1, 0.03, zb], [ex0, 0.03, zb]], [0, 1, 0], [[0, 0], [1, 0], [1, 1], [0, 1]]);
+  dark.quad([[ex1, 0.03, zb], [ex1, 0.03, front], [ex1, yh, front], [ex1, yh, zb]], [-1, 0, 0], [[1, 0], [0, 0], [0, 1], [1, 1]]);
+  dark.quad([[ex0, yh, front], [ex1, yh, front], [ex1, yh, zb], [ex0, yh, zb]], [0, -1, 0], [[0, 0], [0, 1], [1, 1], [1, 0]]);
+  dark.quad([[ex0, 0.03, front], [ex1, 0.03, front], [ex1, 0.03, zb], [ex0, 0.03, zb]], [0, 1, 0], [[0, 0], [0, 1], [1, 1], [1, 0]]);
   // timber frame: posts, lintel and two cross braces, flush with the face
   const t = 0.3, fz0 = front - 0.2, fz1 = front;
   box(wood, [ex0 - t, 0, fz0], [ex0, yh + 0.35, fz1], 1);
@@ -487,10 +626,10 @@ function buildMine() {
   box(wood, [ex0, yh - 0.45, fz0 - 0.0], [ex0 + 0.45, yh, fz1], 1, 'fl');
   box(wood, [ex1 - 0.45, yh - 0.45, fz0], [ex1, yh, fz1], 1, 'fr');
   return [
-    rock.spec('rock', textured(rockTexture())),
+    rock.spec('rock', textured(rockTexture(), REPEAT)),
     turf.spec('turf', textured(grassTexture())),
-    wood.spec('timber', textured(woodTexture())),
-    dark.spec('mineDark', rgb(26, 21, 19))
+    wood.spec('timber', textured(woodTexture(), REPEAT)),
+    dark.spec('mineDark', textured(recessTexture(), CLAMP))
   ];
 }
 
@@ -524,9 +663,10 @@ function buildHut() {
   box(wood, [0.55, y0, hz - th], [hx, y1, hz], 1);
   box(wood, [-0.55, 1.95, hz - th], [0.55, y1, hz], 1);
   // the doorway: a dark recess with a frame and a stone step
-  dark.quad([[-0.55, y0, hz - 0.35], [0.55, y0, hz - 0.35], [0.55, 1.95, hz - 0.35], [-0.55, 1.95, hz - 0.35]], [0, 0, 1], [[0, 0], [1, 0], [1, 1], [0, 1]]);
+  // u runs from the doorway (0) into the dark (1)
+  dark.quad([[-0.55, y0, hz - 0.35], [0.55, y0, hz - 0.35], [0.55, 1.95, hz - 0.35], [-0.55, 1.95, hz - 0.35]], [0, 0, 1], [[0.9, 0], [0.9, 0], [0.9, 1], [0.9, 1]]);
   dark.quad([[-0.55, y0, hz - th], [-0.55, y0, hz - 0.35], [-0.55, 1.95, hz - 0.35], [-0.55, 1.95, hz - th]], [1, 0, 0], [[0, 0], [1, 0], [1, 1], [0, 1]]);
-  dark.quad([[0.55, y0, hz - 0.35], [0.55, y0, hz - th], [0.55, 1.95, hz - th], [0.55, 1.95, hz - 0.35]], [-1, 0, 0], [[0, 0], [1, 0], [1, 1], [0, 1]]);
+  dark.quad([[0.55, y0, hz - 0.35], [0.55, y0, hz - th], [0.55, 1.95, hz - th], [0.55, 1.95, hz - 0.35]], [-1, 0, 0], [[1, 0], [0, 0], [0, 1], [1, 1]]);
   box(door, [-0.72, y0, hz], [-0.55, 2.2, hz + 0.05], 1, 'frt');
   box(door, [0.55, y0, hz], [0.72, 2.2, hz + 0.05], 1, 'flt');
   box(door, [-0.72, 1.95, hz], [0.72, 2.2, hz + 0.06], 1, 'frlt');
@@ -565,11 +705,11 @@ function buildHut() {
   box(stone, [0.95, 4.05, -1.05], [1.55, 4.18, -0.5], STONE_TILE);
   return [
     stone.spec('stone', STONE()),
-    wood.spec('planks', textured(woodTexture())),
-    roof.spec('shingles', textured(shingleTexture())),
+    wood.spec('planks', textured(woodTexture(), REPEAT)),
+    roof.spec('shingles', textured(shingleTexture(), REPEAT)),
     door.spec('trim', textured(woodTexture(), REPEAT, [0.62, 0.5, 0.42])),
-    dark.spec('doorway', rgb(30, 24, 22)),
-    glass.spec('glass', rgb(70, 92, 112))
+    dark.spec('doorway', textured(recessTexture(), CLAMP)),
+    glass.spec('glass', textured(glassTexture(), CLAMP))
   ];
 }
 
@@ -607,7 +747,7 @@ function buildFountain() {
   const bowl = octagon(0.74, 1.46).map((p) => [p[0], 1.44, p[2]]);
   surface(bowl, 1.44);
   lathe(stone, [[1.5, 0.16], [1.7, 0.1], [1.92, 0.0]], 8, Math.PI / 8, { uv: stoneUvL });
-  return [stone.spec('stone', STONE()), water.spec('water', textured(waterTexture(), REPEAT))];
+  return [stone.spec('stone', STONE()), water.spec('water', textured(fountainWaterTexture(), REPEAT))];
 }
 
 function buildPier() {
@@ -620,7 +760,11 @@ function buildPier() {
   }
   // two taller mooring posts at the tip
   for (const z of [-hz + 0.2, hz - 0.2]) box(posts, [hx - 0.3, 0.09, z - 0.08], [hx - 0.14, 0.95, z + 0.08], 1);
-  return [deck.spec('decking', textured(woodTexture())), sides.spec('edge', textured(woodTexture(), REPEAT, [0.72, 0.66, 0.6])), posts.spec('posts', textured(woodTexture(), REPEAT, [0.68, 0.6, 0.55]))];
+  return [
+    deck.spec('decking', textured(pierTexture(), REPEAT)),
+    sides.spec('edge', textured(pierTexture(), REPEAT, [0.78, 0.72, 0.66])),
+    posts.spec('posts', textured(pierTexture(), REPEAT, [0.7, 0.64, 0.58]))
+  ];
 }
 
 function buildHedge() {
@@ -662,22 +806,32 @@ function blob(mesh, radius, seed, squash, sink) {
   const uv = rockUv(2);
   faces.forEach(([a, b, c]) => facet(mesh, pts[a], pts[b], pts[c], uv, [0, radius * 0.3, 0]));
 }
-const buildBoulder = (radius, seed) => () => { const m = new Mesh(); blob(m, radius, seed, 0.78, 0.12); return [m.spec('rock', textured(rockTexture()))]; };
+const buildBoulder = (radius, seed) => () => { const m = new Mesh(); blob(m, radius, seed, 0.78, 0.12); return [m.spec('rock', textured(rockTexture(), REPEAT))]; };
 
-function buildPine() {
+// Pines: bark on the trunk and a needle texture on the cones. The B variant differs only by a tint.
+const PINE_TINT = { A: [[1, 1, 1], [1, 1, 1]], B: [[1.14, 1.1, 0.86], [1.1, 1.08, 0.9]] };
+function buildPine(variant) {
   const trunk = new Mesh(), a = new Mesh(), b = new Mesh();
-  lathe(trunk, [[0, 0.15], [0.7, 0.11]], 6, 0, { cap: 't' });
-  [[0.5, 1.15, 1.9, a], [1.3, 0.95, 2.8, b], [2.2, 0.72, 3.8, a], [3.1, 0.46, 4.6, b]].forEach(([y0, r, y1, mesh]) => lathe(mesh, [[y0, r], [y1, 0]], 8, 0, { cap: 'b' }));
-  return [trunk.spec('trunk', rgb(98, 68, 46)), a.spec('needlesA', rgb(46, 94, 62)), b.spec('needlesB', rgb(56, 108, 70))];
+  const bark = (p, nn, i) => [i / 6, p[1] * 1.1];
+  const needles = (p, nn, i) => [i * 0.5, p[1] * 1.3];
+  lathe(trunk, [[0, 0.15], [0.7, 0.11]], 6, 0, { cap: 't', uv: bark });
+  [[0.5, 1.15, 1.9, a], [1.3, 0.95, 2.8, b], [2.2, 0.72, 3.8, a], [3.1, 0.46, 4.6, b]].forEach(([y0, r, y1, mesh]) => lathe(mesh, [[y0, r], [y1, 0]], 8, 0, { cap: 'b', uv: needles }));
+  const tint = (base, k) => [(base[0] * k[0]) / 255, (base[1] * k[1]) / 255, (base[2] * k[2]) / 255];
+  const [ta, tb] = PINE_TINT[variant];
+  return [
+    trunk.spec('trunk', textured(barkTexture(), REPEAT, tint([98, 68, 46], [1, 1, 1]))),
+    a.spec('needlesA', textured(needleTexture(), REPEAT, tint([46, 94, 62], ta))),
+    b.spec('needlesB', textured(needleTexture(), REPEAT, tint([56, 108, 70], tb)))
+  ];
 }
 
 function buildBarrel() {
   const body = new Mesh(), hoop = new Mesh(), lid = new Mesh();
-  lathe(body, [[0, 0.22], [0.2, 0.27], [0.42, 0.29], [0.64, 0.27], [0.84, 0.22]], 8, Math.PI / 8, {});
+  lathe(body, [[0, 0.22], [0.2, 0.27], [0.42, 0.29], [0.64, 0.27], [0.84, 0.22]], 8, Math.PI / 8, { uv: (p, nn, i) => [i, -p[1] / 0.84] });
   lathe(hoop, [[0.16, 0.268], [0.2, 0.275]], 8, Math.PI / 8, {});
   lathe(hoop, [[0.64, 0.27], [0.68, 0.272]], 8, Math.PI / 8, {});
   lathe(lid, [[0.84, 0.22], [0.845, 0.0]], 8, Math.PI / 8, { cap: 't' });
-  return [body.spec('staves', rgb(150, 104, 62)), hoop.spec('hoops', rgb(70, 62, 58)), lid.spec('lid', rgb(124, 86, 54))];
+  return [body.spec('staves', textured(staveTexture(), REPEAT, [150 / 255, 104 / 255, 62 / 255])), hoop.spec('hoops', rgb(70, 62, 58)), lid.spec('lid', rgb(124, 86, 54))];
 }
 
 function buildOreCart() {
@@ -708,10 +862,11 @@ function buildOreCart() {
     for (let i = k * n; i < (k + 1) * n; i++) {
       moved.positions.push(ore.positions[i * 3] + sh[k][0], ore.positions[i * 3 + 1] + 0.62, ore.positions[i * 3 + 2] + sh[k][1]);
       moved.normals.push(ore.normals[i * 3], ore.normals[i * 3 + 1], ore.normals[i * 3 + 2]);
+      moved.uvs.push(ore.uvs[i * 2], ore.uvs[i * 2 + 1]);
     }
   }
   moved.indices = ore.indices.slice();
-  return [wood.spec('wood', textured(woodTexture(), REPEAT, [0.8, 0.7, 0.62])), iron.spec('iron', rgb(64, 60, 62)), moved.spec('ore', rgb(120, 112, 108))];
+  return [wood.spec('wood', textured(woodTexture(), REPEAT, [0.8, 0.7, 0.62])), iron.spec('iron', rgb(64, 60, 62)), moved.spec('ore', textured(rockTexture(), REPEAT, [0.66, 0.62, 0.7]))];
 }
 
 function buildWoodPile() {
@@ -720,7 +875,7 @@ function buildWoodPile() {
   rows.forEach(([count, y, x0]) => {
     for (let i = 0; i < count; i++) {
       const x = x0 + i * 0.26, w = new Mesh();
-      lathe(w, [[-0.5, 0.12], [0.5, 0.12]], 6, 0, { cap: 'tb' });
+      lathe(w, [[-0.5, 0.12], [0.5, 0.12]], 6, 0, { cap: 'tb', uv: (p, nn, i) => [i / 6, p[1] * 1.5], capUv: (q) => [0.5 + q[0] / 0.24, 0.5 + q[2] / 0.24] });
       // axis y -> z; the round ends become the end faces
       for (let k = 0; k < w.positions.length; k += 3) {
         const px = w.positions[k], py = w.positions[k + 1], pz = w.positions[k + 2];
@@ -737,12 +892,13 @@ function buildWoodPile() {
           const v = w.indices[t + q];
           target.positions.push(w.positions[v * 3], w.positions[v * 3 + 1], w.positions[v * 3 + 2]);
           target.normals.push(w.normals[v * 3], w.normals[v * 3 + 1], w.normals[v * 3 + 2]);
+          target.uvs.push(w.uvs[v * 2], w.uvs[v * 2 + 1]);
         }
         target.indices.push(base, base + 1, base + 2);
       }
     }
   });
-  return [bark.spec('bark', rgb(112, 78, 50)), ends.spec('cutEnds', rgb(196, 156, 104))];
+  return [bark.spec('bark', textured(barkTexture(), REPEAT, [112 / 255 * 1.05, 78 / 255 * 1.05, 50 / 255 * 1.05])), ends.spec('cutEnds', textured(ringTexture(), CLAMP))];
 }
 
 function buildFlowerBed() {
@@ -755,7 +911,7 @@ function buildFlowerBed() {
     const x = -0.76 + hash(i, 1, 99) * 1.52, z = -0.21 + hash(i, 2, 99) * 0.42, h = 0.2 + hash(i, 3, 99) * 0.1;
     box(flowers[i % 4], [x - 0.04, h, z - 0.04], [x + 0.04, h + 0.08, z + 0.04], 1);
   }
-  return [soil.spec('soil', rgb(88, 62, 44)), leaf.spec('foliage', rgb(70, 124, 62))].concat(flowers.map((f, i) => f.spec('bloom' + i, rgb(...cols[i]))));
+  return [soil.spec('soil', textured(soilTexture(), REPEAT, [88 / 255, 62 / 255, 44 / 255])), leaf.spec('foliage', textured(leafTexture(), REPEAT, [70 / 255, 124 / 255, 62 / 255]))].concat(flowers.map((f, i) => f.spec('bloom' + i, rgb(...cols[i]))));
 }
 
 function buildStoneWall() {
@@ -808,7 +964,7 @@ function buildSignpost() {
 const MODELS = {
   townGround: buildGround, townPaths: buildPaths, riverBanks: buildRiverBanks, riverWater: buildRiverWater, townSky: buildSky,
   mineHill: buildMine, hut: buildHut, fountain: buildFountain, pier: buildPier, hedge: buildHedge,
-  boulderLarge: buildBoulder(0.9, 3), boulderSmall: buildBoulder(0.5, 9), pine: buildPine, barrel: buildBarrel, oreCart: buildOreCart,
+  boulderLarge: buildBoulder(0.9, 3), boulderSmall: buildBoulder(0.5, 9), pine: () => buildPine('A'), pineB: () => buildPine('B'), barrel: buildBarrel, oreCart: buildOreCart,
   woodPile: buildWoodPile, flowerBed: buildFlowerBed, stoneWall: buildStoneWall, townSignpost: buildSignpost
 };
 

@@ -57,7 +57,9 @@ node tools/make-lobby-interior-assets.js --scene
 node tools/make-lobby-interior-assets.js --check
 ```
 
-The original `assets/furniture/` models are not modified. Reverting the scene
+The building's walls are further swapped for the exterior-finish variants of
+`docs/lobby-exterior-materials.md`, which carry the same interior plaster. The
+original `assets/furniture/` models are not modified. Reverting the scene
 URLs restores the previous look.
 
 ## Tests

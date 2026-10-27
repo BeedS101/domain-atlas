@@ -34,15 +34,17 @@ const pass = (msg) => { checks++; console.log('PASS: ' + msg); };
 const scenePath = path.join(DOMAIN_DIR, 'spatial', 'lobby', 'scene.json');
 const sceneText = fs.readFileSync(scenePath, 'utf8');
 const scene = JSON.parse(sceneText);
-const OUTDOOR = /\/assets\/(outdoor|town)\//;
+// town models, plus the textured outdoor props of assets/lobby/exterior (the wall variants there belong to the building)
+const OUTDOOR = /\/assets\/(outdoor|town)\/|\/assets\/lobby\/exterior\/(treeSmall|shrub|benchOutdoor|lampPost|planterBox|welcomeSign)/;
 const townObjects = scene.objects.filter((o) => OUTDOOR.test(o.model));
 // The interior as it was before the town: the Lobby interior pass swaps some furniture models for
-// interior-material versions at the same placement and adds a floor and a plaque, so map those back.
+// interior-material versions at the same placement and adds a floor and a plaque, so map those back; the
+// building's walls use the exterior-finish variants, which map back to the interior ones first.
 const interiorTool = require(path.join(REPO, 'tools', 'make-lobby-interior-assets.js'));
 const interiorNow = scene.objects.filter((o) => !OUTDOOR.test(o.model));
 const interiorAdded = new Set(interiorTool.NEW_OBJECTS.map((o) => o.model));
 const interior = interiorNow.filter((o) => !interiorAdded.has(o.model)).map((o) => {
-  const m = /^\/assets\/lobby\/interior\/(\w+)\.glb$/.exec(o.model);
+  const m = /^\/assets\/lobby\/(?:interior|exterior)\/(\w+)\.glb$/.exec(o.model);
   return m && interiorTool.SWAPPED.includes(m[1]) ? { ...o, model: '/assets/furniture/' + m[1] + '.glb' } : o;
 });
 

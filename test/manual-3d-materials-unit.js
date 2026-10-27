@@ -184,9 +184,10 @@ const tex = (fill) => ({ bytes: makePng(4, 4, () => fill || [128, 128, 255, 255]
     if (e.isDirectory()) walk(f); else if (f.endsWith('.glb')) files.push(f);
   });
   ['demo-domain-a', 'demo-domain-b'].forEach((d) => walk(path.join(REPO, d, 'assets')));
-  // assets/lobby/interior holds the Lobby's deliberate material-feature models (see manual-3d-lobby-interior-unit.js)
+  // assets/lobby/interior and assets/lobby/exterior hold the Lobby's deliberate material-feature models (see manual-3d-lobby-interior-unit.js)
   const interiorDir = path.join('assets', 'lobby', 'interior') + path.sep;
-  files.splice(0, files.length, ...files.filter((f) => !f.includes(interiorDir)));
+  const exteriorDir = path.join('assets', 'lobby', 'exterior') + path.sep;
+  files.splice(0, files.length, ...files.filter((f) => !f.includes(interiorDir) && !f.includes(exteriorDir)));
   assert(files.length > 100, 'expected the bundled models, found ' + files.length);
   let withBlend = 0;
   files.forEach((f) => {
