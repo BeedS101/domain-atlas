@@ -33,12 +33,15 @@ const PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-3d-gate-profile
 const SCENE_PATH = path.join(DOCROOT_DIR, 'spatial', 'lobby', 'scene.json');
 const MAIN_MANIFEST_PATH = path.join(DOCROOT_DIR, '.well-known', 'spatial.json');
 const GATE = '/assets/portals/townPortal.glb';
-// The Lobby's town models carry their own textures; each image is one live GL texture.
-const TOWN_TEXTURES = fs.readdirSync(path.join(REPO, 'demo-domain-a', 'assets', 'town')).filter((f) => f.endsWith('.glb')).reduce((n, f) => {
-  const b = fs.readFileSync(path.join(REPO, 'demo-domain-a', 'assets', 'town', f));
-  return n + (JSON.parse(b.slice(20, 20 + b.readUInt32LE(12)).toString()).images || []).length;
-}, 0);
-const LIVE_TEXTURES = 5 + TOWN_TEXTURES;
+// Each image of each distinct model in the Lobby scene is one live GL texture, plus the 1x1 fallback.
+const imagesOf = (url) => {
+  const b = fs.readFileSync(path.join(REPO, 'demo-domain-a', url.replace(/^\//, '')));
+  return (JSON.parse(b.slice(20, 20 + b.readUInt32LE(12)).toString()).images || []).length;
+};
+const SCENE_MODELS = [...new Set(JSON.parse(fs.readFileSync(path.join(REPO, 'demo-domain-a', 'spatial', 'lobby', 'scene.json'), 'utf8')).objects.map((o) => o.model))];
+const GATE_TEXTURES = imagesOf('/assets/portals/townPortal.glb');
+const SCENE_TEXTURES = SCENE_MODELS.reduce((n, u) => n + imagesOf(u), 0);
+const LIVE_TEXTURES = 1 + SCENE_TEXTURES;
 
 function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
@@ -125,7 +128,7 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     const gateRequests = requests.filter((u) => u.endsWith(GATE)).length;
     assert(gateRequests === 1, 'the gate GLB is requested once, got ' + gateRequests);
     const during = await live();
-    assert(during === LIVE_TEXTURES, 'expected ' + LIVE_TEXTURES + ' live GL textures (fallback + 4 gate textures + ' + TOWN_TEXTURES + ' town textures), got ' + during);
+    assert(during === LIVE_TEXTURES, 'expected ' + LIVE_TEXTURES + ' live GL textures (fallback + ' + GATE_TEXTURES + ' gate textures + ' + (SCENE_TEXTURES - GATE_TEXTURES) + ' other scene textures), got ' + during);
     const blocked = await frame.evaluate(() => {
       const w = window.__atlasActive3D; const bad = [];
       for (let x = -0.9; x <= 0.9001; x += 0.1) for (let z = 4.4; z <= 5.0; z += 0.1) if (w.isPositionBlocked(x, z)) bad.push([+x.toFixed(2), +z.toFixed(2)]);

@@ -57,6 +57,9 @@ beds, backdrop trees) is placed with `"solid": false`. Solid pieces are the
 hedges, fountain, hut, mine hill, river water, boulders, walls, barrels, ore
 cart, wood pile and lamp posts.
 
+The building interior's materials are described in
+`docs/lobby-interior-materials.md`.
+
 ## Tests
 
 - `test/manual-3d-town-layout-unit.js`: floor and scene match the generator;

@@ -117,7 +117,8 @@ async function enterLobby(frame, anchorId) {
     console.log('PASS: Lobby loads with the missing model replaced by a solid placeholder');
 
     console.log('STEP 6: a dropped furniture model is centered on its bounding-box middle (corner-origin models do not orbit a corner)');
-    const dropModel = 'http://' + DOMAIN + '/assets/furniture/desk.glb';
+    // The scene's own desk model, so the drop loads from the renderer's model cache instead of racing the drop poll.
+    const dropModel = 'http://' + DOMAIN + scene.objects.find((o) => /\/desk\.glb$/.test(o.model)).model;
     await frame.evaluate(([model, domain]) => window.__atlasActive3D.setItemDrops([{ dropId: 'pivot-test', position: [-3.5, 0, 3.0], radius: 0.9, model, domain, credential: { id: 'pivot-test-credential', issuer: { domain }, asset: { class: 'test.desk', name: 'Desk' } } }]), [dropModel, DOMAIN]);
     await waitFor(frame, () => window.__atlasActive3D.getItemDropRenderKind('pivot-test') === 'model', 'the dropped desk model to load', 3500);
     const pivot = await frame.evaluate(() => window.__atlasActive3D.getItemDropPivot('pivot-test'));

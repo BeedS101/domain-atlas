@@ -157,6 +157,9 @@ const png = quadrantPng();
     else if (f.endsWith('.glb')) files.push(f);
   });
   dirs.forEach(walk);
+  // assets/lobby/interior holds the Lobby's deliberate material models (see manual-3d-lobby-interior-unit.js)
+  const interiorDir = path.join('assets', 'lobby', 'interior') + path.sep;
+  files.splice(0, files.length, ...files.filter((f) => !f.includes(interiorDir)));
   assert(files.length > 100, 'expected the bundled models, found ' + files.length);
   // The only textured bundled models are the two deliberate ones.
   const textured = [];

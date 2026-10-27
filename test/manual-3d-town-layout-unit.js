@@ -36,7 +36,15 @@ const sceneText = fs.readFileSync(scenePath, 'utf8');
 const scene = JSON.parse(sceneText);
 const OUTDOOR = /\/assets\/(outdoor|town)\//;
 const townObjects = scene.objects.filter((o) => OUTDOOR.test(o.model));
-const interior = scene.objects.filter((o) => !OUTDOOR.test(o.model));
+// The interior as it was before the town: the Lobby interior pass swaps some furniture models for
+// interior-material versions at the same placement and adds a floor and a plaque, so map those back.
+const interiorTool = require(path.join(REPO, 'tools', 'make-lobby-interior-assets.js'));
+const interiorNow = scene.objects.filter((o) => !OUTDOOR.test(o.model));
+const interiorAdded = new Set(interiorTool.NEW_OBJECTS.map((o) => o.model));
+const interior = interiorNow.filter((o) => !interiorAdded.has(o.model)).map((o) => {
+  const m = /^\/assets\/lobby\/interior\/(\w+)\.glb$/.exec(o.model);
+  return m && interiorTool.SWAPPED.includes(m[1]) ? { ...o, model: '/assets/furniture/' + m[1] + '.glb' } : o;
+});
 
 // ---- 1. floor and generated scene ----
 {
@@ -51,8 +59,10 @@ const interior = scene.objects.filter((o) => !OUTDOOR.test(o.model));
 // ---- 2. nothing that existed moved ----
 {
   // Fingerprints of the Lobby as it was before the town: 110 non-outdoor objects (walls, furniture, portal gate, crates)
-  // and the markers, interactables, anchors, spawn, lights and character scale.
+  // and the markers, interactables, anchors, spawn, lights and character scale. Placement, rotation, scale and
+  // collision flags of every one are unchanged; only some model files are swapped for interior-material versions.
   assert.strictEqual(interior.length, 110);
+  assert.strictEqual(interiorNow.length, 112, 'plus the interior floor and the wall plaque');
   assert.strictEqual(sha(JSON.stringify(interior)), '674311223f2f4bb4ff3991102d5ea4d3126583f125b17d4f946d0426d7aadbeb', 'building, furniture, portal gate and crates are unchanged');
   const fixed = { portalMarkers: scene.portalMarkers, interactables: scene.interactables, anchors: scene.anchors, camera: scene.camera, characterScale: scene.characterScale, ambientLight: scene.ambientLight, directionalLight: scene.directionalLight };
   assert.strictEqual(sha(JSON.stringify(fixed)), 'b39020f9be20dfe3e1e2ee161059739c22c35e522fa4a28e8d58be898a131aeb', 'markers, interactables, anchors, spawn, lights and character scale are unchanged');
