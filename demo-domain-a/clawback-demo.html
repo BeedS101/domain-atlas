@@ -80,6 +80,12 @@
     and then either a real release or a real clawback, your call. Nothing here is staged;
     every request below is a live call to this domain's own server.
   </p>
+  <p class="props">
+    This page also plays the issuer. When it mints your token it generates a separate issuer
+    key, and the token itself (signed by this domain) names that key as the only one that can
+    freeze, release or claw it back here. Neither you nor the thief can, and no other token
+    answers to it.
+  </p>
 
   <div class="panel pitch">
     <h2>What this looks like for a real business</h2>
@@ -220,11 +226,6 @@
     const json = await res.json().catch(() => ({}));
     return { ok: res.ok, status: res.status, body: json };
   }
-  async function issueAsset(ownerPublicKey, assetClass) {
-    const res = await postJson('/atlas/asset/issue', { ownerPublicKey, assetClass });
-    if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
-    return res.body;
-  }
   // Real /atlas/asset/transfer, signed by whichever identity currently
   // holds the credential — used for the theft itself, the optional
   // laundering hop, the blocked sale attempt, and the post-unsuspend retry.
@@ -233,14 +234,26 @@
     const proof = await signWithSelf(sender, payload);
     return postJson('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload, proof } });
   }
+  // The issuer's side of the demo: a request signed by the demo authority key
+  // the token was minted with (issuer-php/lib/demo-authority.php).
+  async function demoRequest(signer, action, credential, fields) {
+    const payload = Object.assign({ purpose: 'atlas.demo.request/1', action, credentialId: credential.id,
+      domain: location.host, issuedAt: new Date().toISOString() }, fields || {});
+    return { payload, proof: await signWithSelf(signer, payload) };
+  }
+  async function demoMint(ownerPublicKey, authorityPublicKey) {
+    const res = await postJson('/atlas/demo/clawback/mint', { ownerPublicKey, authorityPublicKey, assetClass: 'atlas.demo.clawback.token' });
+    if (!res.ok) throw new Error((res.body && res.body.error) || 'mint failed');
+    return res.body;
+  }
   async function demoSuspend(credential) {
-    return postJson('/atlas/demo/clawback/suspend', { credential });
+    return postJson('/atlas/demo/clawback/suspend', { credential, intent: await demoRequest(issuer, 'demo-suspend', credential) });
   }
   async function demoUnsuspend(credential) {
-    return postJson('/atlas/demo/clawback/unsuspend', { credential });
+    return postJson('/atlas/demo/clawback/unsuspend', { credential, intent: await demoRequest(issuer, 'demo-unsuspend', credential) });
   }
   async function demoClawback(credential, toPublicKey) {
-    return postJson('/atlas/demo/clawback/clawback', { credential, toPublicKey });
+    return postJson('/atlas/demo/clawback/clawback', { credential, toPublicKey, intent: await demoRequest(issuer, 'demo-clawback', credential, { toPublicKey }) });
   }
   // Same signed-payload shape and same checks as business-demo.html's own
   // verifyCredentialIndependently() (SPEC.md §5, steps 1/2/4) — fetches
@@ -303,6 +316,7 @@
   // identities" shape business-demo.html already uses for "you" and "your
   // friend".
   let you = null, thief = null, fence = null, buyer = null;
+  let issuer = null;             // the demo authority this page plays
   let liveCredential = null;     // the current, currently-valid signed body
   let holderName = null;         // 'you' | 'thief' | 'fence' | 'buyer'
   let launderedThroughFence = false;
@@ -354,7 +368,8 @@
     status.textContent = 'Generating a wallet keypair and minting your token…';
     try {
       you = await genIdentity();
-      liveCredential = await issueAsset(you.publicKey, 'atlas.demo.clawback.token');
+      issuer = await genIdentity();
+      liveCredential = await demoMint(you.publicKey, issuer.publicKey);
       holderName = 'you';
       renderTokenCard();
       status.textContent = 'Done — minted to a fresh public key generated just now in this tab.';
@@ -494,7 +509,7 @@
   document.getElementById('verifyBtn').addEventListener('click', runVerify);
 
   document.getElementById('resetBtn').addEventListener('click', () => {
-    you = null; thief = null; fence = null; buyer = null;
+    you = null; thief = null; fence = null; buyer = null; issuer = null;
     liveCredential = null; holderName = null; launderedThroughFence = false; suspended = false;
     document.getElementById('tokenCard').innerHTML = '';
     document.getElementById('mintStatus').textContent = '';

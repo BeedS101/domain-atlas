@@ -19,10 +19,10 @@
 //      history?id=<the reissued credential's own supersedes> shows exactly
 //      one archived link: the original mint, reason "superseded",
 //      supersedes: null.
-//   3. The self-serve /atlas/demo/warranty/stamp-sale supersedes it again —
-//      the history now shows two links, oldest first, the second one
-//      reason "superseded" too and still carrying the earlier stamp's own
-//      retailer/sale facts.
+//   3. A second admin-gated reissue stamps the sale (a factory certificate's
+//      sale is never stamped through the self-serve demo route) — the
+//      history now shows two links, oldest first, the second one reason
+//      "superseded" too and still carrying the earlier reissue's note.
 //   4. A genuine /atlas/asset/transfer supersedes it a third time — the
 //      history grows to three links, the newest one reason "transferred".
 //   5. A class that never opted into auditHistory (atlas.demo.attestation.
@@ -127,12 +127,17 @@ async function historyChain(id) {
     assert(chain[0].asset.properties['com.example.serialNumber'] === 'SN-PHP-HIST-1', 'expected the archived body to carry the original serial number');
     console.log('PASS: history after the real admin-gated reissue shows exactly the original mint —', chain[0].id);
 
-    console.log('STEP 3: self-serve /atlas/demo/warranty/stamp-sale supersedes it again; history grows to two links');
-    const stampRes = await postJson('/atlas/demo/warranty/stamp-sale', {
+    console.log('STEP 3: an admin-gated reissue stamps the sale; history grows to two links');
+    const refused = await postJson('/atlas/demo/warranty/stamp-sale', {
       credential: cred,
       properties: { 'com.example.saleDate': '2026-01-01', 'com.example.warrantyMonths': 24, 'com.example.retailer': 'Test Retailer' }
     });
-    assert(stampRes.status === 200, 'expected the self-serve stamp-sale to succeed, got: ' + JSON.stringify(stampRes.body));
+    assert(refused.status === 400, 'expected the self-serve route to refuse a factory certificate, got: ' + JSON.stringify(refused.body));
+    const stampRes = await adminCall('/atlas/asset/reissue', admin, {
+      credential: cred,
+      properties: { 'com.example.saleDate': '2026-01-01', 'com.example.warrantyMonths': 24, 'com.example.retailer': 'Test Retailer' }
+    });
+    assert(stampRes.status === 200, 'expected the admin sale stamp to succeed, got: ' + JSON.stringify(stampRes.body));
     cred = stampRes.body.newCredential;
     chain = await historyChain(cred.supersedes);
     assert(chain.length === 2, 'expected 2 archived links after the reissue and the stamp, got ' + chain.length);

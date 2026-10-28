@@ -1177,10 +1177,11 @@ each just a catalog entry with its own price), and each purchase mints a
 receipt credential. Clicking "Collect" fulfills the receipt right on the
 same page, no operator login needed: `POST /atlas/demo/cafeteria/fulfill`
 is a self-serve sibling of the admin-gated `/atlas/asset/fulfill` above,
-doing exactly the same check-then-revoke, but with no `requireAdminAuth`
-at all and hardcoded to only ever touch this menu's own three classes — a
-live-site visitor has no way to become an admin, so this lets them play
-"the counter" themselves instead of asking someone who isn't there.
+doing exactly the same check-then-revoke, but with no `requireAdminAuth`,
+hardcoded to only ever touch this menu's own three classes, and only for
+the receipt's owner: the request must carry the owner's signed demo
+request (see "Who may act on a demo credential" below), so a copy of
+someone else's receipt cannot be collected.
 "Check status" re-reads this domain's own public revocation list to
 confirm the same fact independently, live, no extra API needed.
 `test/manual-asset-purchase.js` covers the real admin-gated endpoint
@@ -1284,8 +1285,10 @@ demo password) before running the genuine nonce/sign/verify round trip for
 real. Its "see revocation take effect live" callout revokes the credential
 right on the page: `POST /atlas/demo/login/revoke` is a self-serve sibling
 of the admin-gated `POST /atlas/revoke`, doing the same genuine revoke,
-minus the auth, hardcoded to only ever touch `atlas.demo.login.badge` — a
-live-site visitor has no admin login to revoke it with otherwise. Clicking
+minus the admin auth, hardcoded to only ever touch `atlas.demo.login.badge`,
+and only with the badge owner's signed demo request — the page signs with
+the throwaway key it generated, so only the visitor holding that key can
+revoke the badge. Clicking
 it, then "Try signing in again" back on the same tab with the same
 already-cached credential, shows the identical password step still
 succeed while the second factor now fails, on the spot.
@@ -1334,20 +1337,26 @@ identity file `admin-reissue.js`/`admin-revoke.js` already use.
 
 A live-site visitor has no way to become an admin, though, so the demo
 page itself doesn't call that admin-gated route at all: `POST
-/atlas/demo/warranty/mint` is a self-serve sibling doing the identical
-mint-with-properties, minus the auth, hardcoded to only ever mint
-`atlas.demo.warranty.certificate` — it plays "the factory" for whoever's
-visiting, so the page's own step 1 needs nothing beyond the page itself.
+/atlas/demo/warranty/mint` is a self-serve sibling that mints only the
+separate `atlas.demo.warranty.selfserve` class ("Warranty Certificate
+(self-serve demo)"), with only a serial number as input. The page plays
+"the factory" with a key it generates (`authorityPublicKey`, which must
+differ from the owner's); the issuer writes that key into the certificate
+as `atlas.demo.authority`. The admin-minted
+`atlas.demo.warranty.certificate` is never minted or stamped by a demo
+route, so a self-serve certificate can always be told apart from an
+official one.
 
 The retailer's stamp is built on the *existing*, already-generic
 `/atlas/asset/reissue` (SPEC.md §5.1.1) — no new mechanism at all, just a
 properties patch of `saleDate`/`warrantyMonths`/`retailer` instead of a
 museum exhibit's info card — and for the same reason as minting, the page
 calls a self-serve sibling instead: `POST /atlas/demo/warranty/stamp-sale`
-does the identical revoke-old/mint-new reissue, minus the auth, hardcoded
-to `atlas.demo.warranty.certificate` only, playing "the retailer" so a
-solo visitor can see both halves of the story without an operator login of
-their own. In a real deployment both steps would be genuinely gated —
+does the identical revoke-old/mint-new reissue for
+`atlas.demo.warranty.selfserve` only, with exactly
+`saleDate` (a real date), `warrantyMonths` (1–120) and `retailer` (plain
+text), signed by the certificate's demo authority — the owner's own
+signature never counts as the retailer's. In a real deployment both steps would be genuinely gated —
 this is also where a real protocol boundary shows up plainly: only the
 domain that minted a credential can ever reissue it, so "the retailer
 stamps the sale" has to mean an authorized role on the *same* domain as
@@ -1377,8 +1386,9 @@ whole chain of successive resales instead of a single hand-off.
 the HTTP layer on both issuers (admin-gating, the properties merge, an
 unknown class, a bad properties value, fungible/non-fungible quantity
 rules, and that the self-serve `/atlas/asset/issue` is unaffected);
-`test/manual-demo-self-serve.js` covers the self-serve mint and
-stamp-sale siblings' own class-scoping, and confirms the real admin-gated
+`test/manual-demo-self-serve.js` and
+`test/manual-demo-route-authorization.js` cover the self-serve mint and
+stamp-sale siblings' class-scoping and signer rules, and confirm the real admin-gated
 routes stay just as gated; `test/manual-warranty-demo.js` drives the
 actual page end to end — minting a certificate with no admin panel
 involved, stamping a sale to flip the status to Active, a further stamp
@@ -1448,7 +1458,8 @@ true`, and a no-op (one cheap lookup) for every other class. `GET
 given id, following each link's own `supersedes` in turn, and returns
 the chain oldest-first.
 
-`atlas.demo.warranty.certificate` is the first class to opt in —
+`atlas.demo.warranty.certificate` and `atlas.demo.warranty.selfserve` are
+the first classes to opt in —
 `warranty-demo.html`'s own "View full history" button calls this
 endpoint with the certificate's current `supersedes` value and renders
 every prior stamp and resale it can find, each one still an
@@ -1535,7 +1546,9 @@ its siblings) that additionally refuse anything currently on the
 suspension list, and a clawed-back credential is an ordinary asset
 credential like any other.
 
-The page mints one `atlas.demo.clawback.token` to a fresh identity, then
+The page mints one `atlas.demo.clawback.token` to a fresh identity through
+`POST /atlas/demo/clawback/mint`, naming a second key it generates as the
+token's demo authority (playing the issuer), then
 plays the rest of the story with identities it generates in the same tab:
 a real `/atlas/asset/transfer`, signed with the rightful owner's own key,
 moves it to a "thief" — dishonest, but cryptographically indistinguishable
@@ -1553,25 +1566,47 @@ stolen one — wherever it's since moved to, laundering hop or not.
 Suspend, unsuspend, and clawback are ordinarily an operator's own
 admin-gated actions (`POST /atlas/suspend`, `/atlas/unsuspend`,
 `/atlas/clawback`, all `require_admin_auth()`-gated) — a live-site visitor
-has no such login. The three new `/atlas/demo/clawback/*` routes are the
-same self-serve pattern `login-demo.html`'s revoke and the warranty/
-cafeteria demos already use: no admin auth at all, hardcoded to
-`atlas.demo.clawback.token` only, and gated instead on the credential's
-own currently-valid issuer signature — whoever can produce the full
-signed body is treated as "the rightful reporter of its own theft" for
-this one toy class, the same "you can only act on what you can already
-fully name" rule every other self-serve route already relies on. Unlike
-those siblings, suspend/unsuspend deliberately skip an ownership check —
-a stolen credential's whole point is that it no longer sits with whoever
-can prove they minted it.
+has no such login. The `/atlas/demo/clawback/*` routes are self-serve
+siblings, restricted to `atlas.demo.clawback.token` and
+`atlas.demo.clawback.funds`, and each needs a signed request from the
+credential's demo authority. Neither the holder (who may be the thief) nor
+the original owner can sign in its place, and a copied credential alone
+authorizes nothing. Demo routes only add the `demo-fraud-report`
+suspension, only lift that one, and refuse to claw back while any other
+suspension (an operator's, a trade lock) is in place.
+
+### Who may act on a demo credential
+
+Two kinds of signature authorize the self-serve demo routes, and they are
+never interchangeable:
+
+- **Owner consent** — the credential's current owner: cafeteria
+  `fulfill`, login `revoke`.
+- **Demo authority** — a key the page generates to play the issuer, bank
+  or retailer, written into the credential as the issuer-signed property
+  `atlas.demo.authority` by a demo mint route, and only for the demo-only
+  classes `atlas.demo.clawback.token`, `atlas.demo.clawback.funds` and
+  `atlas.demo.warranty.selfserve`: clawback `suspend`, `unsuspend`,
+  `clawback`, warranty `stamp-sale`. No production route reads this
+  property, so it cannot authorize an issuer or settlement operation.
+
+Both sign `{ purpose: 'atlas.demo.request/1', action, credentialId,
+domain, issuedAt, ... }` as an ordinary signed envelope, with `issuedAt`
+within five minutes. A wallet-bridge signature is not accepted.
 
 `test/manual-demo-self-serve.js` (which already covered the warranty,
 cafeteria, and login self-serve routes) now also drives these three end
-to end on both backends: suspending and proving a real transfer is
+to end on both backends, each signed by the demo authority: suspending and proving a real transfer is
 genuinely blocked by it (not just that the endpoint said ok), unsuspending
 and proving that exact same transfer now succeeds, and clawing a stolen
 token back while rejecting a no-op target — plus a regression check that
 the real admin-gated siblings still reject an unauthenticated request.
+`test/manual-demo-route-authorization.js` is the negative side: an
+unsigned request, the holder's or owner's signature in place of the
+authority's, a request for another credential, action or target, an
+expired request, and a credential without a demo authority are all
+refused, and operator and trade-lock suspensions are never overwritten or
+lifted by a demo route.
 
 The real, operator-only siblings behind all this (`POST /atlas/suspend`,
 `/atlas/unsuspend`, `/atlas/clawback`) had no form on the admin panel
@@ -1637,14 +1672,11 @@ than glossing over. A second, independent key this domain also controls
 — the same reviewer-key stand-in `attestation-demo.html` already uses —
 attests that Bank Alpha's reserves are sufficient to back what it's
 issued. Finally, Bank Beta's key is simulated as compromised: a
-genuinely valid, correctly-signed split drains a chunk of its balance to
-an attacker, exactly like every legitimate split earlier on the page,
-and only suspend-then-clawback (reusing the same demo endpoints
-`clawback-demo.html` introduced, generalized from one hardcoded class to
-a short list of suspendable currency classes) tells the two apart —
-followed by `/atlas/asset/consolidate` (SPEC.md §5.4.1) folding the
-recovered balance back into whatever Bank Beta still held, when it held
-anything left to fold.
+15,000 block of its demo funds (`atlas.demo.clawback.funds`, minted with
+Bank Beta's operations desk as demo authority) leaves through a genuinely
+valid, owner-signed transfer, and only suspend-then-clawback, signed by
+that desk, recovers it. The real currencies are never suspendable or
+recoverable through a demo route.
 
 The reserve-mint approval endpoints needed one genuine addition beyond
 `bank-demo.html`'s own pattern: because no endpoint anywhere in this

@@ -180,8 +180,15 @@
     if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
     return res.body;
   }
+  // A request about the owner's own credential, signed with the owner's key
+  // (issuer-php/lib/demo-authority.php).
+  async function demoRequest(signer, action, credential) {
+    const payload = { purpose: 'atlas.demo.request/1', action, credentialId: credential.id,
+      domain: location.host, issuedAt: new Date().toISOString() };
+    return { payload, proof: await signWithSelf(signer, payload) };
+  }
   async function revokeCredential(credential) {
-    const res = await postJson('/atlas/demo/login/revoke', { credential });
+    const res = await postJson('/atlas/demo/login/revoke', { credential, intent: await demoRequest(you, 'demo-login-revoke', credential) });
     if (!res.ok) throw new Error((res.body && res.body.error) || 'revoke failed');
     return res.body;
   }

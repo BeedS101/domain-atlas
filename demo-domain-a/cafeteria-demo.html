@@ -198,8 +198,15 @@
     const revDoc = await fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }));
     return (revDoc.revoked || []).some((r) => r.id === credentialId);
   }
+  // A request about the owner's own credential, signed with the owner's key
+  // (issuer-php/lib/demo-authority.php).
+  async function demoRequest(signer, action, credential) {
+    const payload = { purpose: 'atlas.demo.request/1', action, credentialId: credential.id,
+      domain: location.host, issuedAt: new Date().toISOString() };
+    return { payload, proof: await signWithSelf(signer, payload) };
+  }
   async function fulfillAsset(credential) {
-    const res = await postJson('/atlas/demo/cafeteria/fulfill', { credential });
+    const res = await postJson('/atlas/demo/cafeteria/fulfill', { credential, intent: await demoRequest(student, 'demo-fulfill', credential) });
     if (!res.ok) throw new Error((res.body && res.body.error) || 'fulfill failed');
     return res.body;
   }

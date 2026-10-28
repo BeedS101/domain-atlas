@@ -1356,12 +1356,13 @@ const ATLAS_DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
 const ATLAS_DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
 const ATLAS_DEMO_RESERVE_CLASS = 'atlas.currency.reserve';
 
-// reserve-bank-demo.html's own fraud/clawback act reuses the suspend/
-// unsuspend/clawback endpoints below, widened from a single hardcoded
-// class to this short allow-list — mirrors issuer-server/server.js's
-// DEMO_SUSPENDABLE_CLASSES.
+// Mirrors issuer-server/server.js's DEMO_SUSPENDABLE_CLASSES.
+// Demo-only classes the demo clawback routes act on, and only when the
+// credential carries a demo authority (lib/demo-authority.php). Real
+// currencies are never on this list.
+const ATLAS_DEMO_CLAWBACK_FUNDS_CLASS = 'atlas.demo.clawback.funds';
 function atlas_demo_suspendable_classes() {
-  return [ATLAS_DEMO_CLAWBACK_TOKEN_CLASS, ATLAS_DEMO_ALPHA_DOLLAR_CLASS, ATLAS_DEMO_BETA_DOLLAR_CLASS];
+  return [ATLAS_DEMO_CLAWBACK_TOKEN_CLASS, ATLAS_DEMO_CLAWBACK_FUNDS_CLASS];
 }
 
 function atlas_bank_approvals_file() {
@@ -2320,6 +2321,15 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'name' => 'Warranty Certificate', 'modelPath' => '/assets/badge.glb',
     'fungible' => false, 'presentation' => 'document', 'auditHistory' => true,
   ],
+  // warranty-demo.html's self-serve certificates: minted by
+  // /atlas/demo/warranty/mint with a demo authority playing factory and
+  // retailer. A separate class, so the issuer-signed class itself says the
+  // serial was not set by the factory (atlas.demo.warranty.certificate is
+  // minted only through the admin-gated /atlas/asset/mint).
+  'atlas.demo.warranty.selfserve' => [
+    'name' => 'Warranty Certificate (self-serve demo)', 'modelPath' => '/assets/badge.glb',
+    'fungible' => false, 'presentation' => 'document', 'auditHistory' => true,
+  ],
   // demo-domain-a/attestation-demo.html (SPEC.md §5.11) — the asset a
   // completely separate domain then independently attests to. An ordinary
   // document credential, nothing special about the class itself. Mirrors
@@ -2328,6 +2338,15 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'name' => 'Business Filing', 'modelPath' => '/assets/badge.glb',
     'fungible' => false, 'presentation' => 'document',
     'properties' => ['com.example.filingType' => 'Annual Compliance Filing'],
+  ],
+  // reserve-bank-demo.html Act 7: one block of a bank's funds for the fraud
+  // and clawback act, minted by /atlas/demo/clawback/mint with the bank's demo
+  // authority and the amount as a signed property. Demo-only, so a demo
+  // clawback never touches a real currency; a single item, so it moves by an
+  // ordinary signed transfer.
+  'atlas.demo.clawback.funds' => [
+    'name' => 'Demo Bank Funds', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => false, 'presentation' => 'document',
   ],
   // demo-domain-a/clawback-demo.html (SPEC.md §5.3's suspend-style
   // reversible freeze and §5.12's clawback) — mirrors issuer-server/
@@ -3008,6 +3027,52 @@ function atlas_unsuspend($id) {
   flock($fh, LOCK_UN);
   fclose($fh);
   return $wasSuspended;
+}
+
+// Suspension changes a demo route may make, each as one locked
+// read-modify-write so a concurrent admin, trade or delivery suspension is
+// never overwritten or removed.
+//   atlas_suspend_if_free(): adds this suspension only when the credential has
+//     none; returns false when one already exists.
+//   atlas_unsuspend_if_reason(): removes the suspension only when it carries
+//     $reason; returns 'none', 'removed' or 'other'.
+function atlas_suspensions_locked($fn) {
+  $fh = fopen(atlas_suspensions_file(), 'c+');
+  if ($fh === false) throw new Exception('could not open the suspension list', 503);
+  flock($fh, LOCK_EX);
+  try {
+    $doc = json_decode(stream_get_contents($fh), true);
+    if (!is_array($doc) || !isset($doc['suspended']) || !is_array($doc['suspended'])) $doc = ['suspended' => []];
+    list($changed, $result) = $fn($doc);
+    if ($changed) {
+      ftruncate($fh, 0);
+      rewind($fh);
+      fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+      fflush($fh);
+    }
+    return $result;
+  } finally {
+    flock($fh, LOCK_UN);
+    fclose($fh);
+  }
+}
+function atlas_suspend_if_free($id, $reason) {
+  return atlas_suspensions_locked(function (&$doc) use ($id, $reason) {
+    foreach ($doc['suspended'] as $s) if (($s['id'] ?? null) === $id) return [false, false];
+    $doc['suspended'][] = ['id' => $id, 'suspendedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason, 'expiresAt' => null, 'onExpire' => 'lift'];
+    return [true, true];
+  });
+}
+function atlas_unsuspend_if_reason($id, $reason) {
+  return atlas_suspensions_locked(function (&$doc) use ($id, $reason) {
+    foreach ($doc['suspended'] as $i => $s) {
+      if (($s['id'] ?? null) !== $id) continue;
+      if (($s['reason'] ?? null) !== $reason) return [false, 'other'];
+      array_splice($doc['suspended'], $i, 1);
+      return [true, 'removed'];
+    }
+    return [false, 'none'];
+  });
 }
 
 // See atlas_asset_history_file()'s own comment above. Called alongside

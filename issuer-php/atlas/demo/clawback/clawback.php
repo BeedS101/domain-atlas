@@ -1,48 +1,44 @@
 <?php
-// POST /atlas/demo/clawback/clawback — mirrors issuer-server/server.js's
-// same route. Self-serve sibling of the real, admin-gated
-// atlas/clawback.php (SPEC.md §5.12), hardcoded the same way as
-// suspend.php/unsuspend.php above.
-//
-// Confirms SPEC.md §5.12's own framing that clawback finds a stolen asset
-// wherever it currently sits: toPublicKey only has to differ from the
-// credential's CURRENT owner, not from whoever first held it, so the
-// demo's optional thief-to-fence laundering hop makes no difference to
-// this check. No roster to fix up here — atlas.demo.clawback.token is
-// never a membership credential — so this mirrors the real endpoint's
-// core three steps only (reissue, revoke, archive) and skips its
-// mail-delivery and roster fix-up, which exist there for classes this
-// demo class was never meant to touch.
+// POST /atlas/demo/clawback/clawback: reissues a demo token or demo funds to
+// toPublicKey and revokes the original, as the issuer would after a theft.
+// Needs the credential's demo authority, never the owner. Refused while the
+// credential has any suspension the demo did not make (admin, trade lock,
+// delivery hold). clawback-demo.html and reserve-bank-demo.html Act 7.
+// Mirrors issuer-server/server.js.
 require_once __DIR__ . '/../../../lib/bootstrap.php';
+require_once __DIR__ . '/../../../lib/demo-authority.php';
 handle_preflight();
 require_post();
 $kp = atlas_load_keys();
-
 try {
   $body = read_json_body();
 } catch (Exception $e) {
   send_json(400, ['error' => 'invalid JSON body']);
 }
 $credential = $body['credential'] ?? null;
-$toPublicKey = $body['toPublicKey'] ?? null;
-if (!is_array($credential) || !isset($credential['asset'])) send_json(400, ['error' => 'credential is required']);
-if (!$toPublicKey) send_json(400, ['error' => 'toPublicKey is required']);
+if (!is_array($credential) || !isset($credential['asset'], $credential['id'])) send_json(400, ['error' => 'credential is required']);
 if (!in_array($credential['asset']['class'] ?? null, atlas_demo_suspendable_classes(), true)) {
-  send_json(400, ['error' => 'this endpoint only claws back: ' . implode(', ', atlas_demo_suspendable_classes())]);
+  send_json(400, ['error' => 'this endpoint only acts on: ' . implode(', ', atlas_demo_suspendable_classes())]);
 }
-if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !== atlas_domain()) {
-  send_json(400, ['error' => 'this domain did not issue this credential']);
-}
+if (($credential['issuer']['domain'] ?? null) !== atlas_domain()) send_json(400, ['error' => 'this domain did not issue this credential']);
+$toPublicKey = $body['toPublicKey'] ?? null;
+if (!atlas_demo_valid_key($toPublicKey)) send_json(400, ['error' => 'toPublicKey must be a raw P-256 public key']);
 if ($toPublicKey === ($credential['owner']['publicKey'] ?? null)) {
   send_json(400, ['error' => "toPublicKey already matches the credential's current owner — nothing to claw back"]);
 }
 $busy = atlas_spend_lock($credential['id']);
 if ($busy !== null) send_json(409, ['error' => $busy]);
-if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked — nothing to claw back']);
-$sigOk = verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential));
-if (!$sigOk) send_json(400, ['error' => "credential signature does not check out against this issuer's key"]);
-
+if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked']);
+// The issuer's signature makes the demo authority it names trustworthy.
+if (!verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential))) {
+  send_json(400, ['error' => "credential signature does not check out against this issuer's key"]);
+}
+atlas_require_demo_request($body, $credential, 'demo-clawback', atlas_demo_authority_of($credential), ['toPublicKey' => $toPublicKey]);
+if (atlas_demo_suspension_state($credential['id']) === 'other') {
+  send_json(409, ['error' => 'this credential is held by a suspension the demo did not make', 'code' => 'not-a-demo-suspension']);
+}
 $newCredential = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $toPublicKey, $credential['asset'], $credential['quantity'], $credential['id']);
 atlas_revoke($credential['id'], 'clawback');
+atlas_unsuspend_if_reason($credential['id'], ATLAS_DEMO_SUSPENSION_REASON);
 archive_if_audited($credential, 'clawback');
 send_json(200, ['newCredential' => $newCredential]);

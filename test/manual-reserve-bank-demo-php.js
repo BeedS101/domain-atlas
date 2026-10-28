@@ -11,7 +11,11 @@
 // conversion by purchase, a bank crediting a customer then that customer
 // paying a second person, a cross-currency Trading Station settlement,
 // an independent reserve-backing attestation, and a fraud recovered by
-// suspend + clawback + consolidate, independently re-verified as revoked.
+// demo suspend + clawback (signed by the bank's demo authority, not the
+// fraudster or the owner), independently re-verified as revoked.
+//
+// `node test/manual-reserve-bank-demo-php.js act7` runs act 7 alone; acts 2
+// and 4 still use the unsigned split, which the issuer refuses.
 
 const { spawn } = require('child_process');
 const { cleanIssuerPhpState } = require('./lib/clean-issuer-php');
@@ -79,6 +83,40 @@ async function issueAsset(ownerPublicKey, assetClass, quantity) {
 async function splitAsset(credential, sendAmount, toPublicKey) {
   return post('/atlas/asset/split', { credential, sendAmount, toPublicKey });
 }
+async function transferAsset(sender, credential, recipientPublicKey) {
+  const payload = { credentialId: credential.id, recipientPublicKey, action: 'transfer' };
+  return post('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload, proof: await signPayload(sender, payload) } });
+}
+async function demoRequest(signer, action, credential, fields) {
+  const payload = Object.assign({ purpose: 'atlas.demo.request/1', action, credentialId: credential.id, domain: 'localhost:' + PORT,
+    issuedAt: new Date().toISOString() }, fields || {});
+  return { payload, proof: await signPayload(signer, payload) };
+}
+
+// Act 7: Bank Beta's funds block leaves under its own compromised key; its
+// operations desk (the demo authority) suspends and claws it back.
+async function act7(bankBeta) {
+  const desk = await genIdentity(), fraudster = await genIdentity();
+  const minted = await post('/atlas/demo/clawback/mint', { ownerPublicKey: bankBeta.publicKey, authorityPublicKey: desk.publicKey, assetClass: 'atlas.demo.clawback.funds', amount: 15000 });
+  assert(minted.status === 200, 'demo funds mint failed: ' + JSON.stringify(minted.body));
+  const moved = await transferAsset(bankBeta, minted.body, fraudster.publicKey);
+  assert(moved.status === 200, 'owner-signed transfer failed: ' + JSON.stringify(moved.body));
+  const stolen = moved.body.credential;
+  const unsigned = await post('/atlas/demo/clawback/suspend', { credential: stolen });
+  assert(unsigned.status === 403, 'expected an unsigned suspend to be refused, got: ' + JSON.stringify(unsigned.body));
+  const byThief = await post('/atlas/demo/clawback/suspend', { credential: stolen, intent: await demoRequest(fraudster, 'demo-suspend', stolen) });
+  assert(byThief.status === 403, 'expected the holder\'s own signature to be refused, got: ' + JSON.stringify(byThief.body));
+  const suspendRes = await post('/atlas/demo/clawback/suspend', { credential: stolen, intent: await demoRequest(desk, 'demo-suspend', stolen) });
+  assert(suspendRes.status === 200, 'suspend failed: ' + JSON.stringify(suspendRes.body));
+  const clawRes = await post('/atlas/demo/clawback/clawback', { credential: stolen, toPublicKey: bankBeta.publicKey,
+    intent: await demoRequest(desk, 'demo-clawback', stolen, { toPublicKey: bankBeta.publicKey }) });
+  assert(clawRes.status === 200, 'clawback failed: ' + JSON.stringify(clawRes.body));
+  const back = clawRes.body.newCredential;
+  assert(back.owner.publicKey === bankBeta.publicKey && back.asset.properties['com.example.amount'] === 15000, 'unexpected clawback result');
+  const revDoc = await fetch(BASE + '/.well-known/atlas-revocations.json').then((r) => r.json());
+  assert((revDoc.revoked || []).some((r) => r.id === stolen.id), 'expected the stolen credential to be in the public revocation list');
+}
+
 async function purchaseAsset(buyer, credential, purchasedClass, quantity) {
   const payload = { credentialId: credential.id, purchasedClass, quantity, action: 'purchase' };
   const proof = await signPayload(buyer, payload);
@@ -100,6 +138,13 @@ async function purchaseAsset(buyer, credential, purchasedClass, quantity) {
   await post('/atlas/revoke', {});
 
   try {
+    if (process.argv.includes('act7')) {
+      console.log('STEP 7 (alone): a fraudulent transfer, then demo-authority suspend + clawback recover it');
+      await act7(await genIdentity());
+      console.log('PASS: stolen block suspended, clawed back to Bank Beta, and independently confirmed revoked');
+      console.log('\nACT 7 PASSED against a real issuer-php instance.');
+      return;
+    }
     console.log('STEP 1: committee mints Reserve Credits to the treasury (2-of-3)');
     const officerA = await genIdentity(), officerB = await genIdentity(), officerC = await genIdentity();
     const treasury = await genIdentity();
@@ -184,19 +229,9 @@ async function purchaseAsset(buyer, credential, purchasedClass, quantity) {
     assert(attestRes.status === 200, 'attestation failed: ' + JSON.stringify(attestRes.body));
     console.log('PASS: attestation issued —', attestRes.body.attestation.claim);
 
-    console.log('STEP 7: a fraudulent split, then suspend + clawback recover it');
-    const fraudster = await genIdentity();
-    const fraudRes = await splitAsset(bankBetaBeta, 15000, fraudster.publicKey);
-    assert(fraudRes.status === 200, 'fraud split failed: ' + JSON.stringify(fraudRes.body));
-    const stolen = fraudRes.body.sent;
-    const suspendRes = await post('/atlas/demo/clawback/suspend', { credential: stolen });
-    assert(suspendRes.status === 200, 'suspend failed: ' + JSON.stringify(suspendRes.body));
-    const clawRes = await post('/atlas/demo/clawback/clawback', { credential: stolen, toPublicKey: bankBeta.publicKey });
-    assert(clawRes.status === 200, 'clawback failed: ' + JSON.stringify(clawRes.body));
-    assert(clawRes.body.newCredential.quantity === 15000 && clawRes.body.newCredential.owner.publicKey === bankBeta.publicKey, 'unexpected clawback result');
-    const revDoc = await fetch(BASE + '/.well-known/atlas-revocations.json').then((r) => r.json());
-    assert((revDoc.revoked || []).some((r) => r.id === stolen.id), 'expected the stolen credential to be in the public revocation list');
-    console.log('PASS: stolen balance suspended, clawed back to Bank Beta, and independently confirmed revoked');
+    console.log('STEP 7: a fraudulent transfer, then demo-authority suspend + clawback recover it');
+    await act7(bankBeta);
+    console.log('PASS: stolen block suspended, clawed back to Bank Beta, and independently confirmed revoked');
 
     console.log('\nALL SEVEN ACTS PASSED against a real issuer-php instance.');
   } catch (err) {

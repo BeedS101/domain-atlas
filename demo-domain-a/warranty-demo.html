@@ -120,10 +120,12 @@
     <p class="props" style="margin-top:0;">
       A real factory authenticates once, at manufacture time, before assigning a serial
       number. Pick whatever serial you like — this page mints the certificate straight to
-      the identity above, playing the factory's part for you.
+      the identity above, playing the factory's part for you. Because a visitor chose the
+      serial, the certificate is minted as a separate self-serve class, so it can never pass
+      for a real factory certificate; only this page's own factory key can stamp its sale.
     </p>
     <label for="serialInput">Serial number</label>
-    <input type="text" id="serialInput" value="SN-0001">
+    <input type="text" id="serialInput" value="SN-0001" maxlength="40" pattern="[A-Za-z0-9-]+">
     <div style="margin-top:0.6rem;">
       <button type="button" id="mintBtn">Mint certificate</button>
     </div>
@@ -267,6 +269,7 @@
   }
 
   let you = null;            // {kp, publicKey} — this tab's own identity, the FIRST owner
+  let factory = null;        // the demo authority this page plays as factory and retailer
   let currentHolder = null;  // whichever identity currently holds the certificate (starts as `you`)
   let currentCredential = null;
 
@@ -357,8 +360,10 @@
     result.className = 'result pending';
     result.textContent = 'Minting…';
     try {
+      factory = await genIdentity();
       const res = await postJson('/atlas/demo/warranty/mint', {
         ownerPublicKey: you.publicKey,
+        authorityPublicKey: factory.publicKey,
         properties: { 'com.example.serialNumber': serial }
       });
       if (!res.ok) throw new Error((res.body && res.body.error) || 'mint failed');
@@ -392,13 +397,17 @@
     result.className = 'result pending';
     result.textContent = 'Stamping…';
     try {
+      const properties = {
+        'com.example.saleDate': saleDate,
+        'com.example.warrantyMonths': warrantyMonths,
+        'com.example.retailer': retailer
+      };
+      // Signed by the factory's demo key, never the owner's
+      // (issuer-php/lib/demo-authority.php).
+      const payload = { purpose: 'atlas.demo.request/1', action: 'demo-stamp-sale', credentialId: currentCredential.id,
+        domain: location.host, issuedAt: new Date().toISOString(), properties };
       const res = await postJson('/atlas/demo/warranty/stamp-sale', {
-        credential: currentCredential,
-        properties: {
-          'com.example.saleDate': saleDate,
-          'com.example.warrantyMonths': warrantyMonths,
-          'com.example.retailer': retailer
-        }
+        credential: currentCredential, properties, intent: { payload, proof: await signWithSelf(factory, payload) }
       });
       if (!res.ok) throw new Error((res.body && res.body.error) || 'stamp failed');
       currentCredential = res.body.newCredential;

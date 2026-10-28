@@ -233,9 +233,10 @@
     <h2>Act 7 — a fraud, then a clawback</h2>
     <p class="stepnote">
       Bank Beta's own operational key gets compromised. The attacker uses it to do something that looks
-      completely ordinary — split off a large chunk of Bank Beta's legitimate Beta Dollar balance — straight
-      to a wallet they control. Nothing here is fabricated: this is a real, valid, correctly-signed split,
-      exactly like the ones Acts 2–4 already ran. What makes the difference is what happens next.
+      completely ordinary — transfer a block of 15,000 in Bank Beta's funds straight to a wallet they
+      control. Nothing here is fabricated: this is a real, valid, correctly-signed transfer. What makes the
+      difference is what happens next: the block names Bank Beta's operations desk (a separate key this page
+      generates) as the only key that can freeze or claw it back. The thief, holding it now, cannot.
     </p>
     <button id="fraudBtn" type="button">Simulate the theft</button>
     <div id="fraudResult"></div>
@@ -389,14 +390,26 @@
     if (!res.ok) throw new Error(errText(res));
     return res.body;
   }
-  async function demoSuspend(credential) { return postJson('/atlas/demo/clawback/suspend', { credential }); }
-  async function demoClawback(credential, toPublicKey) { return postJson('/atlas/demo/clawback/clawback', { credential, toPublicKey }); }
-  // POST /atlas/asset/consolidate (SPEC.md §5.4.1) — merges two or more of
-  // the same owner's own balances of the same class into one. Used below to
-  // fold a clawed-back credential back into whatever the victim already
-  // held, rather than leaving them holding two separate balances forever.
-  async function consolidateAssets(credentials) {
-    return postJson('/atlas/asset/consolidate', { credentials });
+  // Requests from Bank Beta's operations desk, the demo authority the funds
+  // block was minted with (issuer-php/lib/demo-authority.php).
+  async function demoRequest(signer, action, credential, fields) {
+    const payload = Object.assign({ purpose: 'atlas.demo.request/1', action, credentialId: credential.id,
+      domain: location.host, issuedAt: new Date().toISOString() }, fields || {});
+    return { payload, proof: await signWithSelf(signer, payload) };
+  }
+  async function demoMintFunds(ownerPublicKey, authorityPublicKey, amount) {
+    return postJson('/atlas/demo/clawback/mint', { ownerPublicKey, authorityPublicKey, assetClass: 'atlas.demo.clawback.funds', amount });
+  }
+  async function transferAsset(sender, credential, recipientPublicKey) {
+    const payload = { credentialId: credential.id, recipientPublicKey, action: 'transfer' };
+    const proof = await signWithSelf(sender, payload);
+    return postJson('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload, proof } });
+  }
+  async function demoSuspend(credential) {
+    return postJson('/atlas/demo/clawback/suspend', { credential, intent: await demoRequest(bankBetaDesk, 'demo-suspend', credential) });
+  }
+  async function demoClawback(credential, toPublicKey) {
+    return postJson('/atlas/demo/clawback/clawback', { credential, toPublicKey, intent: await demoRequest(bankBetaDesk, 'demo-clawback', credential, { toPublicKey }) });
   }
 
   // Handles both credential shapes this page deals with: SPEC.md §5's
@@ -798,17 +811,21 @@
   // --- Act 7: fraud, then suspend + clawback ---
 
   let stolenCredential = null;
+  let bankBetaDesk = null; // Bank Beta's operations desk: the demo authority over its funds block
 
   document.getElementById('fraudBtn').addEventListener('click', async () => {
     const btn = document.getElementById('fraudBtn');
     const resultEl = document.getElementById('fraudResult');
     btn.disabled = true;
+    if (!bankBeta) bankBeta = await genIdentity();
+    bankBetaDesk = await genIdentity();
     fraudster = await genIdentity();
-    const res = await splitAsset(bal.bankBetaBeta, 15000, fraudster.publicKey);
+    const minted = await demoMintFunds(bankBeta.publicKey, bankBetaDesk.publicKey, 15000);
+    if (!minted.ok) { resultEl.innerHTML = '<div class="result err">' + errText(minted) + '</div>'; btn.disabled = false; return; }
+    const res = await transferAsset(bankBeta, minted.body, fraudster.publicKey);
     if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
-    stolenCredential = res.body.sent;
-    bal.bankBetaBeta = res.body.remainder;
-    resultEl.innerHTML = '<div class="result err">Gone — 15,000 Beta Dollars just left Bank Beta for a wallet it never authorized, using its own compromised key. Cryptographically, this is a completely ordinary, valid split.</div>';
+    stolenCredential = res.body.credential;
+    resultEl.innerHTML = '<div class="result err">Gone — a 15,000 block of Bank Beta\'s funds just left for a wallet it never authorized, using its own compromised key. Cryptographically, this is a completely ordinary, valid transfer.</div>';
     resultEl.appendChild(rawBox(stolenCredential));
     document.getElementById('decideRow').style.display = '';
     renderLedger();
@@ -823,23 +840,12 @@
     resultEl.innerHTML = '<div class="result ok">Suspended — frozen pending review, wherever it currently sits.</div>';
     const clawRes = await demoClawback(stolenCredential, bankBeta.publicKey);
     if (!clawRes.ok) { resultEl.innerHTML += '<div class="result err">' + errText(clawRes) + '</div>'; return; }
-    let recovered = clawRes.body.newCredential;
-    resultEl.innerHTML += '<div class="result ok">Clawed back — a fresh ' + recovered.quantity + '-Beta-Dollar credential lands straight in Bank Beta\'s own wallet, and the stolen one is permanently revoked.</div>';
-    // Bank Beta may still be separately holding whatever it had left over
-    // after the theft — fold the two back into one balance (SPEC.md
-    // §5.4.1) rather than leaving it split across two credentials forever.
-    if (bal.bankBetaBeta) {
-      const mergeRes = await consolidateAssets([bal.bankBetaBeta, recovered]);
-      if (mergeRes.ok) {
-        recovered = mergeRes.body;
-        resultEl.innerHTML += '<div class="result ok">Consolidated with what it already held — Bank Beta now holds one clean balance of ' + recovered.quantity + ' Beta Dollars again.</div>';
-      }
-    }
-    bal.bankBetaBeta = recovered;
+    const recovered = clawRes.body.newCredential;
+    resultEl.innerHTML += '<div class="result ok">Clawed back — a fresh credential for the same ' + recovered.asset.properties['com.example.amount'] + ' lands straight in Bank Beta\'s own wallet, and the stolen one is permanently revoked.</div>';
     const verdict = await verifyCredentialIndependently(stolenCredential);
     resultEl.innerHTML += '<div class="result ' + (verdict.valid ? 'err' : 'ok') + '">Checking the stolen credential independently: ' +
       (verdict.valid ? 'still valid?! (unexpected)' : 'no longer valid — ' + verdict.reason) + '</div>';
-    resultEl.appendChild(rawBox(bal.bankBetaBeta));
+    resultEl.appendChild(rawBox(recovered));
     renderLedger();
   });
 

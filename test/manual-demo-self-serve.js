@@ -1,56 +1,29 @@
-// Manual check for the self-serve /atlas/demo/* routes added so a solo
-// visitor to warranty-demo.html, cafeteria-demo.html, login-demo.html, and
-// clawback-demo.html can finish those pages without a real admin login —
-// the live site (evtec.co.za) has no way for an ordinary visitor to become
-// an admin, so those pages previously asked a visitor to do something they
-// simply couldn't do. Each new route does exactly what its admin-gated
-// sibling does (POST /atlas/asset/mint, /atlas/asset/reissue,
-// /atlas/asset/fulfill, /atlas/revoke, /atlas/suspend, /atlas/unsuspend,
-// /atlas/clawback respectively), minus the auth, but hardcoded to touch
-// only its own page's own toy class — this test's main job is proving
-// that class-scoping actually holds, on both backends.
+// Manual check that the self-serve /atlas/demo/* routes still carry their
+// demo pages (warranty-demo.html, cafeteria-demo.html, login-demo.html,
+// clawback-demo.html), each acting only on its own page's demo class, and
+// only with the right authorization (issuer-php/lib/demo-authority.php):
+// the owner for what a holder may do to their own credential, a demo
+// authority key (minted into the credential) for what the issuer, factory or
+// retailer does. test/manual-demo-route-authorization.js covers who is refused.
 //
-// Run at the HTTP layer directly against BOTH backends, same isolated-
-// instance reasoning every other manual-*.js test in this project uses.
+//   node test/manual-demo-self-serve.js [node|php|both]
 //
-// Checks:
-//   1. Node — POST /atlas/demo/warranty/mint succeeds with no auth at all,
-//      applies the given properties patch, and is genuinely signed by this
-//      issuer.
-//   2. Node — the same route rejects a non-object properties value.
-//   3. Node — POST /atlas/demo/warranty/stamp-sale merges the sale
-//      properties onto the minted certificate (keeping the serial number
-//      already there) and revokes the superseded credential.
-//   4. Node — the same route rejects a credential whose class isn't
-//      atlas.demo.warranty.certificate.
-//   5. Node — POST /atlas/demo/cafeteria/fulfill succeeds for one of its
-//      three allowed classes and genuinely revokes it.
-//   6. Node — the same route rejects a credential outside that three-class
-//      allow-list.
-//   7. Node — POST /atlas/demo/login/revoke succeeds for
-//      atlas.demo.login.badge and genuinely revokes it.
-//   8. Node — the same route rejects a credential outside that one class.
-//   9. Node — regression: the real admin-gated siblings still reject an
-//      unauthenticated request exactly as before — adding the self-serve
-//      routes didn't loosen them.
-//  10. PHP — the same mint+stamp-sale, cafeteria class-scoping, and login
-//      class-scoping behavior on an independent issuer-php bundle.
-//  11. Node — POST /atlas/demo/clawback/suspend succeeds with no auth, and
-//      a real /atlas/asset/transfer attempt against that exact credential
-//      is genuinely rejected as suspended — proving the freeze holds, not
-//      just that the endpoint returned ok.
-//  12. Node — the same suspend route rejects a credential outside
-//      atlas.demo.clawback.token.
-//  13. Node — POST /atlas/demo/clawback/unsuspend lifts the freeze, and the
-//      identical transfer blocked in step 11 now succeeds for real.
-//  14. Node — POST /atlas/demo/clawback/clawback reissues a stolen token
-//      straight to a chosen recipient, genuinely signed, revokes the old
-//      one, and rejects toPublicKey already matching the current owner.
-//  15. Node — regression: the real admin-gated /atlas/suspend,
-//      /atlas/unsuspend, and /atlas/clawback still reject an
-//      unauthenticated request exactly as before.
-//  16. PHP — the same suspend/block/unsuspend/retry and clawback behavior
-//      on the independent issuer-php bundle.
+// For each backend:
+//   1. warranty/mint makes a genuinely signed self-serve certificate with the
+//      serial and the demo authority; refuses a non-serial property.
+//   2. warranty/stamp-sale, signed by the demo authority, adds the sale and
+//      keeps the serial, revokes the superseded certificate; refuses another
+//      class.
+//   3. cafeteria/fulfill, signed by the owner, revokes the item; refuses a
+//      class outside its three.
+//   4. login/revoke, signed by the owner, revokes the badge; refuses another
+//      class.
+//   5. clawback/suspend, signed by the demo authority, genuinely blocks a
+//      transfer; unsuspend lifts it and the same transfer succeeds; both
+//      refuse another class.
+//   6. clawback/clawback returns a stolen token to its owner, genuinely
+//      signed, revokes the stolen one, and refuses the current owner as target.
+//   7. The real admin-gated siblings still refuse an unauthenticated request.
 //
 // Not part of the permanent suite, same reasoning as the other
 // manual-*.js scripts.
@@ -120,6 +93,110 @@ async function isRevoked(base, credentialId) {
   return (revDoc.revoked || []).some((r) => r.id === credentialId);
 }
 
+// A demo request, as the pages build it.
+async function demoRequest(domain, signer, action, credential, fields) {
+  const payload = Object.assign({ purpose: 'atlas.demo.request/1', action, credentialId: credential.id, domain,
+    issuedAt: new Date().toISOString() }, fields || {});
+  return { payload, proof: await signWithSelf(signer, payload) };
+}
+
+async function runChecks(label, base, domain) {
+  const holder = await genIdentity();
+  const factory = await genIdentity();
+  const outOfScope = await issueAsset(base, holder.publicKey, 'atlas.demo.warranty.certificate');
+
+  console.log('STEP 1: ' + label + ' — warranty/mint makes a signed self-serve certificate');
+  const minted = await postJson(base, '/atlas/demo/warranty/mint', { ownerPublicKey: holder.publicKey, authorityPublicKey: factory.publicKey, properties: { 'com.example.serialNumber': 'SN-0001' } });
+  assert(minted.status === 200, 'expected the self-serve mint to succeed, got: ' + JSON.stringify(minted.body));
+  assert(minted.body.asset.class === 'atlas.demo.warranty.selfserve', 'expected the self-serve class, got: ' + JSON.stringify(minted.body.asset));
+  assert(minted.body.asset.properties['com.example.serialNumber'] === 'SN-0001', 'expected the serial number, got: ' + JSON.stringify(minted.body.asset));
+  assert(minted.body.asset.properties['atlas.demo.authority'] === factory.publicKey, 'expected the demo authority, got: ' + JSON.stringify(minted.body.asset));
+  assert(await verifyGenuineSignature(base, minted.body), 'expected a genuine issuer signature');
+  const badProps = await postJson(base, '/atlas/demo/warranty/mint', { ownerPublicKey: holder.publicKey, authorityPublicKey: factory.publicKey, properties: { 'com.example.serialNumber': 'SN-1', 'com.example.extra': 'x' } });
+  assert(badProps.status === 400, 'expected a non-serial property to be refused, got: ' + JSON.stringify(badProps.body));
+  console.log('PASS: ' + label + ' self-serve warranty mint —', minted.body.id);
+
+  console.log('STEP 2: ' + label + ' — warranty/stamp-sale, by the demo authority');
+  const sale = { 'com.example.saleDate': '2026-01-01', 'com.example.warrantyMonths': 24, 'com.example.retailer': 'Example Retailer' };
+  const stamped = await postJson(base, '/atlas/demo/warranty/stamp-sale', { credential: minted.body, properties: sale,
+    intent: await demoRequest(domain, factory, 'demo-stamp-sale', minted.body, { properties: sale }) });
+  assert(stamped.status === 200, 'expected the stamp to succeed, got: ' + JSON.stringify(stamped.body));
+  const newCert = stamped.body.newCredential;
+  assert(newCert.asset.properties['com.example.serialNumber'] === 'SN-0001' && newCert.asset.properties['com.example.retailer'] === 'Example Retailer',
+    'expected the serial kept and the retailer added, got: ' + JSON.stringify(newCert.asset));
+  assert(await verifyGenuineSignature(base, newCert), 'expected the stamped certificate to carry a genuine issuer signature');
+  assert(await isRevoked(base, minted.body.id), 'expected the pre-stamp certificate to be revoked as superseded');
+  const wrongClassStamp = await postJson(base, '/atlas/demo/warranty/stamp-sale', { credential: outOfScope, properties: sale,
+    intent: await demoRequest(domain, factory, 'demo-stamp-sale', outOfScope, { properties: sale }) });
+  assert(wrongClassStamp.status === 400 && /only stamps/.test(wrongClassStamp.body.error), 'expected a wrong-class rejection, got: ' + JSON.stringify(wrongClassStamp.body));
+  console.log('PASS: ' + label + ' stamp-sale —', newCert.id);
+
+  console.log('STEP 3: ' + label + ' — cafeteria/fulfill, by the owner');
+  const sandwich = await issueAsset(base, holder.publicKey, 'atlas.demo.cafeteria.sandwich');
+  const fulfilled = await postJson(base, '/atlas/demo/cafeteria/fulfill', { credential: sandwich, intent: await demoRequest(domain, holder, 'demo-fulfill', sandwich) });
+  assert(fulfilled.status === 200 && fulfilled.body.status === 'fulfilled', 'expected the fulfill to succeed, got: ' + JSON.stringify(fulfilled.body));
+  assert(await isRevoked(base, sandwich.id), 'expected the fulfilled item to be revoked');
+  const wrongClassFulfill = await postJson(base, '/atlas/demo/cafeteria/fulfill', { credential: outOfScope, intent: await demoRequest(domain, holder, 'demo-fulfill', outOfScope) });
+  assert(wrongClassFulfill.status === 400 && /only fulfills/.test(wrongClassFulfill.body.error), 'expected an out-of-scope rejection, got: ' + JSON.stringify(wrongClassFulfill.body));
+  console.log('PASS: ' + label + ' cafeteria fulfill —', sandwich.id);
+
+  console.log('STEP 4: ' + label + ' — login/revoke, by the owner');
+  const badge = await issueAsset(base, holder.publicKey, 'atlas.demo.login.badge');
+  const revoked = await postJson(base, '/atlas/demo/login/revoke', { credential: badge, intent: await demoRequest(domain, holder, 'demo-login-revoke', badge) });
+  assert(revoked.status === 200 && revoked.body.ok === true, 'expected the revoke to succeed, got: ' + JSON.stringify(revoked.body));
+  assert(await isRevoked(base, badge.id), 'expected the login badge to be revoked');
+  const wrongClassRevoke = await postJson(base, '/atlas/demo/login/revoke', { credential: outOfScope, intent: await demoRequest(domain, holder, 'demo-login-revoke', outOfScope) });
+  assert(wrongClassRevoke.status === 400 && /only revokes/.test(wrongClassRevoke.body.error), 'expected an out-of-scope rejection, got: ' + JSON.stringify(wrongClassRevoke.body));
+  console.log('PASS: ' + label + ' login revoke —', badge.id);
+
+  console.log('STEP 5: ' + label + ' — clawback/suspend and unsuspend, by the demo authority');
+  const owner = await genIdentity(), buyer = await genIdentity(), issuer = await genIdentity();
+  const mintToken = async (who) => {
+    const r = await postJson(base, '/atlas/demo/clawback/mint', { ownerPublicKey: who.publicKey, authorityPublicKey: issuer.publicKey, assetClass: 'atlas.demo.clawback.token' });
+    assert(r.status === 200, 'expected the demo token mint to succeed, got: ' + JSON.stringify(r.body));
+    return r.body;
+  };
+  const token = await mintToken(owner);
+  const suspended = await postJson(base, '/atlas/demo/clawback/suspend', { credential: token, intent: await demoRequest(domain, issuer, 'demo-suspend', token) });
+  assert(suspended.status === 200 && suspended.body.ok === true, 'expected the suspend to succeed, got: ' + JSON.stringify(suspended.body));
+  const blockedSale = await transferAsset(base, owner, token, buyer.publicKey);
+  assert(blockedSale.status === 400 && /suspended pending review/.test(blockedSale.body.error), 'expected the transfer to be blocked by the suspension, got: ' + JSON.stringify(blockedSale.body));
+  const wrongClassSuspend = await postJson(base, '/atlas/demo/clawback/suspend', { credential: outOfScope, intent: await demoRequest(domain, issuer, 'demo-suspend', outOfScope) });
+  assert(wrongClassSuspend.status === 400 && /only acts on/.test(wrongClassSuspend.body.error), 'expected an out-of-scope rejection, got: ' + JSON.stringify(wrongClassSuspend.body));
+  const unsuspended = await postJson(base, '/atlas/demo/clawback/unsuspend', { credential: token, intent: await demoRequest(domain, issuer, 'demo-unsuspend', token) });
+  assert(unsuspended.status === 200 && unsuspended.body.wasSuspended === true, 'expected the unsuspend to lift it, got: ' + JSON.stringify(unsuspended.body));
+  const retriedSale = await transferAsset(base, owner, token, buyer.publicKey);
+  assert(retriedSale.status === 200, 'expected the same transfer to succeed once unsuspended, got: ' + JSON.stringify(retriedSale.body));
+  console.log('PASS: ' + label + ' suspend blocks, unsuspend releases —', retriedSale.body.credential.id);
+
+  console.log('STEP 6: ' + label + ' — clawback/clawback returns a stolen token, by the demo authority');
+  const victim = await genIdentity(), thief = await genIdentity();
+  let stolen = await mintToken(victim);
+  const theft = await transferAsset(base, victim, stolen, thief.publicKey);
+  assert(theft.status === 200, 'expected the simulated theft transfer to succeed, got: ' + JSON.stringify(theft.body));
+  stolen = theft.body.credential;
+  const noop = await postJson(base, '/atlas/demo/clawback/clawback', { credential: stolen, toPublicKey: thief.publicKey,
+    intent: await demoRequest(domain, issuer, 'demo-clawback', stolen, { toPublicKey: thief.publicKey }) });
+  assert(noop.status === 400 && /nothing to claw back/.test(noop.body.error), 'expected the current owner to be refused as target, got: ' + JSON.stringify(noop.body));
+  const clawed = await postJson(base, '/atlas/demo/clawback/clawback', { credential: stolen, toPublicKey: victim.publicKey,
+    intent: await demoRequest(domain, issuer, 'demo-clawback', stolen, { toPublicKey: victim.publicKey }) });
+  assert(clawed.status === 200 && clawed.body.newCredential.owner.publicKey === victim.publicKey, 'expected the clawback to return it to the victim, got: ' + JSON.stringify(clawed.body));
+  assert(await verifyGenuineSignature(base, clawed.body.newCredential), 'expected the returned token to carry a genuine issuer signature');
+  assert(await isRevoked(base, stolen.id), 'expected the stolen token to be revoked');
+  console.log('PASS: ' + label + ' clawback —', clawed.body.newCredential.id);
+
+  console.log('STEP 7: ' + label + ' — the real admin-gated siblings still refuse an unauthenticated request');
+  const statuses = [];
+  for (const [route, body] of [['/atlas/asset/mint', { payload: { ownerPublicKey: holder.publicKey, assetClass: 'atlas.demo.warranty.certificate' } }],
+    ['/atlas/asset/reissue', { payload: { credential: newCert, properties: {} } }], ['/atlas/asset/fulfill', { payload: { credential: sandwich } }],
+    ['/atlas/revoke', { payload: { id: badge.id } }], ['/atlas/suspend', { payload: { id: token.id, reason: 'test' } }],
+    ['/atlas/unsuspend', { payload: { id: token.id } }], ['/atlas/clawback', { payload: { credential: token, toPublicKey: buyer.publicKey } }]]) {
+    statuses.push((await postJson(base, route, body)).status);
+  }
+  assert(statuses.every((st) => st === 401), 'expected every admin-gated route to refuse with 401, got: ' + JSON.stringify(statuses));
+  console.log('PASS: ' + label + ' admin-gated routes still 401');
+}
+
 (async () => {
   console.log('SETUP: starting an isolated issuer-server instance on port ' + NODE_PORT);
   const nodeProc = spawn('node', ['issuer-server/server.js'], {
@@ -150,162 +227,12 @@ async function isRevoked(base, credentialId) {
   });
   console.log('PASS: isolated issuer-php dev server up on port ' + PHP_PORT);
 
+  const WHICH = process.argv[2] || 'both';
   try {
-    console.log('SETUP: minting a holder identity');
-    const holder = await genIdentity();
-
-    console.log('STEP 1: Node — /atlas/demo/warranty/mint succeeds with no auth, applies the properties patch, genuinely signed');
-    const minted = await postJson(NODE_BASE, '/atlas/demo/warranty/mint', { ownerPublicKey: holder.publicKey, properties: { 'com.example.serialNumber': 'SN-0001' } });
-    assert(minted.status === 200, 'expected the self-serve mint to succeed, got: ' + JSON.stringify(minted.body));
-    assert(minted.body.asset.class === 'atlas.demo.warranty.certificate', 'expected the minted class to be the warranty certificate, got: ' + JSON.stringify(minted.body.asset));
-    assert(minted.body.asset.properties['com.example.serialNumber'] === 'SN-0001', 'expected the serial number property to be set, got: ' + JSON.stringify(minted.body.asset));
-    assert(await verifyGenuineSignature(NODE_BASE, minted.body), 'expected the self-serve-minted certificate to carry a genuine issuer signature');
-    console.log('PASS: self-serve warranty mint works with no admin login —', minted.body.id);
-
-    console.log('STEP 2: Node — /atlas/demo/warranty/mint rejects a non-object properties value');
-    const badProps = await postJson(NODE_BASE, '/atlas/demo/warranty/mint', { ownerPublicKey: holder.publicKey, properties: 'not-an-object' });
-    assert(badProps.status === 400 && /patch object/.test(badProps.body.error), 'expected a bad-properties rejection, got: ' + JSON.stringify(badProps.body));
-    console.log('PASS: a non-object properties value is rejected —', badProps.body.error);
-
-    console.log('STEP 3: Node — /atlas/demo/warranty/stamp-sale merges the sale properties, keeps the serial number, and revokes the old credential');
-    const stamped = await postJson(NODE_BASE, '/atlas/demo/warranty/stamp-sale', {
-      credential: minted.body,
-      properties: { 'com.example.saleDate': '2026-01-01', 'com.example.warrantyMonths': 24, 'com.example.retailer': 'Example Retailer' }
-    });
-    assert(stamped.status === 200, 'expected the self-serve stamp-sale to succeed, got: ' + JSON.stringify(stamped.body));
-    const newCert = stamped.body.newCredential;
-    assert(newCert.asset.properties['com.example.serialNumber'] === 'SN-0001', 'expected the serial number to survive the merge, got: ' + JSON.stringify(newCert.asset));
-    assert(newCert.asset.properties['com.example.retailer'] === 'Example Retailer', 'expected the retailer property to be set, got: ' + JSON.stringify(newCert.asset));
-    assert(await verifyGenuineSignature(NODE_BASE, newCert), 'expected the stamped certificate to carry a genuine issuer signature');
-    assert(await isRevoked(NODE_BASE, minted.body.id), 'expected the pre-stamp credential to be revoked as superseded');
-    console.log('PASS: self-serve stamp-sale merges properties and revokes the superseded credential —', newCert.id);
-
-    console.log('STEP 4: Node — /atlas/demo/warranty/stamp-sale rejects a credential of the wrong class');
-    const badgeCred = await issueAsset(NODE_BASE, holder.publicKey, 'atlas.demo.login.badge');
-    const wrongClassStamp = await postJson(NODE_BASE, '/atlas/demo/warranty/stamp-sale', { credential: badgeCred, properties: { 'com.example.saleDate': '2026-01-01' } });
-    assert(wrongClassStamp.status === 400 && /only stamps/.test(wrongClassStamp.body.error), 'expected a wrong-class rejection, got: ' + JSON.stringify(wrongClassStamp.body));
-    console.log('PASS: stamping a non-warranty credential is rejected —', wrongClassStamp.body.error);
-
-    console.log('STEP 5: Node — /atlas/demo/cafeteria/fulfill succeeds for an allowed class and genuinely revokes it');
-    const sandwich = await issueAsset(NODE_BASE, holder.publicKey, 'atlas.demo.cafeteria.sandwich');
-    const fulfilled = await postJson(NODE_BASE, '/atlas/demo/cafeteria/fulfill', { credential: sandwich });
-    assert(fulfilled.status === 200 && fulfilled.body.status === 'fulfilled', 'expected the self-serve fulfill to succeed, got: ' + JSON.stringify(fulfilled.body));
-    assert(await isRevoked(NODE_BASE, sandwich.id), 'expected the fulfilled receipt to be revoked');
-    console.log('PASS: self-serve cafeteria fulfill works with no admin login —', sandwich.id);
-
-    console.log('STEP 6: Node — /atlas/demo/cafeteria/fulfill rejects a credential outside its three-class allow-list');
-    const outOfScope = await issueAsset(NODE_BASE, holder.publicKey, 'atlas.demo.warranty.certificate');
-    const wrongClassFulfill = await postJson(NODE_BASE, '/atlas/demo/cafeteria/fulfill', { credential: outOfScope });
-    assert(wrongClassFulfill.status === 400 && /only fulfills/.test(wrongClassFulfill.body.error), 'expected an out-of-scope rejection, got: ' + JSON.stringify(wrongClassFulfill.body));
-    console.log('PASS: fulfilling an out-of-scope class is rejected —', wrongClassFulfill.body.error);
-
-    console.log('STEP 7: Node — /atlas/demo/login/revoke succeeds for atlas.demo.login.badge and genuinely revokes it');
-    const badgeToRevoke = await issueAsset(NODE_BASE, holder.publicKey, 'atlas.demo.login.badge');
-    const revoked = await postJson(NODE_BASE, '/atlas/demo/login/revoke', { credential: badgeToRevoke });
-    assert(revoked.status === 200 && revoked.body.ok === true, 'expected the self-serve revoke to succeed, got: ' + JSON.stringify(revoked.body));
-    assert(await isRevoked(NODE_BASE, badgeToRevoke.id), 'expected the login badge to actually be revoked');
-    console.log('PASS: self-serve login revoke works with no admin login —', badgeToRevoke.id);
-
-    console.log('STEP 8: Node — /atlas/demo/login/revoke rejects a credential outside atlas.demo.login.badge');
-    const wrongClassRevoke = await postJson(NODE_BASE, '/atlas/demo/login/revoke', { credential: outOfScope });
-    assert(wrongClassRevoke.status === 400 && /only revokes/.test(wrongClassRevoke.body.error), 'expected an out-of-scope rejection, got: ' + JSON.stringify(wrongClassRevoke.body));
-    console.log('PASS: revoking an out-of-scope class is rejected —', wrongClassRevoke.body.error);
-
-    console.log('STEP 9: Node — regression: the real admin-gated siblings still reject an unauthenticated request');
-    const realMint = await postJson(NODE_BASE, '/atlas/asset/mint', { payload: { ownerPublicKey: holder.publicKey, assetClass: 'atlas.demo.warranty.certificate' } });
-    const realReissue = await postJson(NODE_BASE, '/atlas/asset/reissue', { payload: { credential: minted.body, properties: {} } });
-    const realFulfill = await postJson(NODE_BASE, '/atlas/asset/fulfill', { payload: { credential: sandwich } });
-    const realRevoke = await postJson(NODE_BASE, '/atlas/revoke', { payload: { id: badgeToRevoke.id } });
-    assert([realMint.status, realReissue.status, realFulfill.status, realRevoke.status].every((s) => s === 401), 'expected every real admin-gated route to still reject with no auth, got: ' + JSON.stringify([realMint.status, realReissue.status, realFulfill.status, realRevoke.status]));
-    console.log('PASS: the real admin-gated routes are unaffected — still 401 with no admin proof');
-
-    console.log('STEP 10: PHP — the same self-serve mint+stamp-sale, cafeteria class-scoping, and login class-scoping behavior');
-    const phpHolder = await genIdentity();
-    const phpMinted = await postJson(PHP_BASE, '/atlas/demo/warranty/mint', { ownerPublicKey: phpHolder.publicKey, properties: { 'com.example.serialNumber': 'SN-PHP-0001' } });
-    assert(phpMinted.status === 200 && phpMinted.body.asset.properties['com.example.serialNumber'] === 'SN-PHP-0001', 'expected PHP self-serve mint to succeed, got: ' + JSON.stringify(phpMinted.body));
-    const phpStamped = await postJson(PHP_BASE, '/atlas/demo/warranty/stamp-sale', { credential: phpMinted.body, properties: { 'com.example.saleDate': '2026-01-01', 'com.example.retailer': 'PHP Retailer' } });
-    assert(phpStamped.status === 200 && phpStamped.body.newCredential.asset.properties['com.example.serialNumber'] === 'SN-PHP-0001', 'expected PHP stamp-sale to merge properties, got: ' + JSON.stringify(phpStamped.body));
-    const phpSandwich = await issueAsset(PHP_BASE, phpHolder.publicKey, 'atlas.demo.cafeteria.sandwich');
-    const phpFulfilled = await postJson(PHP_BASE, '/atlas/demo/cafeteria/fulfill', { credential: phpSandwich });
-    assert(phpFulfilled.status === 200 && phpFulfilled.body.status === 'fulfilled', 'expected PHP self-serve fulfill to succeed, got: ' + JSON.stringify(phpFulfilled.body));
-    const phpOutOfScope = await issueAsset(PHP_BASE, phpHolder.publicKey, 'atlas.demo.warranty.certificate');
-    const phpWrongFulfill = await postJson(PHP_BASE, '/atlas/demo/cafeteria/fulfill', { credential: phpOutOfScope });
-    assert(phpWrongFulfill.status === 400, 'expected PHP to reject an out-of-scope fulfill too, got: ' + JSON.stringify(phpWrongFulfill.body));
-    const phpBadge = await issueAsset(PHP_BASE, phpHolder.publicKey, 'atlas.demo.login.badge');
-    const phpRevoked = await postJson(PHP_BASE, '/atlas/demo/login/revoke', { credential: phpBadge });
-    assert(phpRevoked.status === 200 && phpRevoked.body.ok === true, 'expected PHP self-serve revoke to succeed, got: ' + JSON.stringify(phpRevoked.body));
-    const phpWrongRevoke = await postJson(PHP_BASE, '/atlas/demo/login/revoke', { credential: phpOutOfScope });
-    assert(phpWrongRevoke.status === 400, 'expected PHP to reject an out-of-scope revoke too, got: ' + JSON.stringify(phpWrongRevoke.body));
-    console.log('PASS: PHP matches Node across all four self-serve demo routes');
-
-    console.log('STEP 11: Node — /atlas/demo/clawback/suspend succeeds with no auth, and a real transfer attempt against it is genuinely blocked');
-    const owner = await genIdentity();
-    const buyer = await genIdentity();
-    let token = await issueAsset(NODE_BASE, owner.publicKey, 'atlas.demo.clawback.token');
-    const suspended = await postJson(NODE_BASE, '/atlas/demo/clawback/suspend', { credential: token });
-    assert(suspended.status === 200 && suspended.body.ok === true, 'expected the self-serve suspend to succeed, got: ' + JSON.stringify(suspended.body));
-    const blockedSale = await transferAsset(NODE_BASE, owner, token, buyer.publicKey);
-    assert(blockedSale.status === 400 && /suspended pending review/.test(blockedSale.body.error), 'expected the transfer to be genuinely blocked by the suspension, got: ' + JSON.stringify(blockedSale.body));
-    console.log('PASS: suspending with no admin login actually freezes the credential —', token.id);
-
-    console.log('STEP 12: Node — /atlas/demo/clawback/suspend rejects a credential outside atlas.demo.clawback.token');
-    const wrongClassSuspend = await postJson(NODE_BASE, '/atlas/demo/clawback/suspend', { credential: outOfScope });
-    assert(wrongClassSuspend.status === 400 && /only suspends/.test(wrongClassSuspend.body.error), 'expected an out-of-scope rejection, got: ' + JSON.stringify(wrongClassSuspend.body));
-    console.log('PASS: suspending an out-of-scope class is rejected —', wrongClassSuspend.body.error);
-
-    console.log('STEP 13: Node — /atlas/demo/clawback/unsuspend lifts the freeze, and the same blocked sale now succeeds for real');
-    const unsuspended = await postJson(NODE_BASE, '/atlas/demo/clawback/unsuspend', { credential: token });
-    assert(unsuspended.status === 200 && unsuspended.body.ok === true && unsuspended.body.wasSuspended === true, 'expected the self-serve unsuspend to succeed and report it lifted something, got: ' + JSON.stringify(unsuspended.body));
-    const retriedSale = await transferAsset(NODE_BASE, owner, token, buyer.publicKey);
-    assert(retriedSale.status === 200, 'expected the identical transfer to succeed once unsuspended, got: ' + JSON.stringify(retriedSale.body));
-    console.log('PASS: unsuspending with no admin login genuinely lifts the freeze —', retriedSale.body.credential.id);
-
-    console.log('STEP 14: Node — /atlas/demo/clawback/clawback reissues a stolen token to its rightful owner, revokes the old one, and rejects a no-op target');
-    const victim = await genIdentity();
-    const thief = await genIdentity();
-    let stolen = await issueAsset(NODE_BASE, victim.publicKey, 'atlas.demo.clawback.token');
-    const theftTransfer = await transferAsset(NODE_BASE, victim, stolen, thief.publicKey);
-    assert(theftTransfer.status === 200, 'expected the simulated theft transfer to succeed, got: ' + JSON.stringify(theftTransfer.body));
-    stolen = theftTransfer.body.credential;
-    const noopClawback = await postJson(NODE_BASE, '/atlas/demo/clawback/clawback', { credential: stolen, toPublicKey: thief.publicKey });
-    assert(noopClawback.status === 400 && /nothing to claw back/.test(noopClawback.body.error), 'expected clawing back to the current owner to be rejected, got: ' + JSON.stringify(noopClawback.body));
-    const clawedBack = await postJson(NODE_BASE, '/atlas/demo/clawback/clawback', { credential: stolen, toPublicKey: victim.publicKey });
-    assert(clawedBack.status === 200, 'expected the self-serve clawback to succeed, got: ' + JSON.stringify(clawedBack.body));
-    assert(clawedBack.body.newCredential.owner.publicKey === victim.publicKey, 'expected the new credential to belong to the victim, got: ' + JSON.stringify(clawedBack.body.newCredential.owner));
-    assert(await verifyGenuineSignature(NODE_BASE, clawedBack.body.newCredential), 'expected the clawed-back credential to carry a genuine issuer signature');
-    assert(await isRevoked(NODE_BASE, stolen.id), 'expected the stolen credential to be revoked after clawback');
-    console.log('PASS: self-serve clawback returns a stolen token straight to its owner —', clawedBack.body.newCredential.id);
-
-    console.log('STEP 15: Node — regression: the real admin-gated /atlas/suspend, /atlas/unsuspend, and /atlas/clawback still reject an unauthenticated request');
-    const realSuspend = await postJson(NODE_BASE, '/atlas/suspend', { payload: { id: token.id, reason: 'test' } });
-    const realUnsuspend = await postJson(NODE_BASE, '/atlas/unsuspend', { payload: { id: token.id } });
-    const realClawback = await postJson(NODE_BASE, '/atlas/clawback', { payload: { credential: token, toPublicKey: buyer.publicKey } });
-    assert([realSuspend.status, realUnsuspend.status, realClawback.status].every((s) => s === 401), 'expected every real admin-gated suspend/unsuspend/clawback route to still reject with no auth, got: ' + JSON.stringify([realSuspend.status, realUnsuspend.status, realClawback.status]));
-    console.log('PASS: the real admin-gated suspend/unsuspend/clawback routes are unaffected — still 401 with no admin proof');
-
-    console.log('STEP 16: PHP — the same suspend/block/unsuspend/retry and clawback behavior on the independent issuer-php bundle');
-    const phpOwner = await genIdentity();
-    const phpBuyer = await genIdentity();
-    let phpToken = await issueAsset(PHP_BASE, phpOwner.publicKey, 'atlas.demo.clawback.token');
-    const phpSuspended = await postJson(PHP_BASE, '/atlas/demo/clawback/suspend', { credential: phpToken });
-    assert(phpSuspended.status === 200 && phpSuspended.body.ok === true, 'expected PHP self-serve suspend to succeed, got: ' + JSON.stringify(phpSuspended.body));
-    const phpBlockedSale = await transferAsset(PHP_BASE, phpOwner, phpToken, phpBuyer.publicKey);
-    assert(phpBlockedSale.status === 400 && /suspended pending review/.test(phpBlockedSale.body.error), 'expected PHP to genuinely block the suspended transfer too, got: ' + JSON.stringify(phpBlockedSale.body));
-    const phpUnsuspended = await postJson(PHP_BASE, '/atlas/demo/clawback/unsuspend', { credential: phpToken });
-    assert(phpUnsuspended.status === 200 && phpUnsuspended.body.wasSuspended === true, 'expected PHP self-serve unsuspend to succeed, got: ' + JSON.stringify(phpUnsuspended.body));
-    const phpRetriedSale = await transferAsset(PHP_BASE, phpOwner, phpToken, phpBuyer.publicKey);
-    assert(phpRetriedSale.status === 200, 'expected PHP to allow the retried transfer once unsuspended, got: ' + JSON.stringify(phpRetriedSale.body));
-    const phpVictim = await genIdentity();
-    const phpThief = await genIdentity();
-    let phpStolen = await issueAsset(PHP_BASE, phpVictim.publicKey, 'atlas.demo.clawback.token');
-    const phpTheftTransfer = await transferAsset(PHP_BASE, phpVictim, phpStolen, phpThief.publicKey);
-    assert(phpTheftTransfer.status === 200, 'expected the PHP simulated theft transfer to succeed, got: ' + JSON.stringify(phpTheftTransfer.body));
-    phpStolen = phpTheftTransfer.body.credential;
-    const phpClawedBack = await postJson(PHP_BASE, '/atlas/demo/clawback/clawback', { credential: phpStolen, toPublicKey: phpVictim.publicKey });
-    assert(phpClawedBack.status === 200 && phpClawedBack.body.newCredential.owner.publicKey === phpVictim.publicKey, 'expected PHP self-serve clawback to succeed, got: ' + JSON.stringify(phpClawedBack.body));
-    assert(await isRevoked(PHP_BASE, phpStolen.id), 'expected PHP to revoke the stolen credential after clawback');
-    console.log('PASS: PHP matches Node across suspend, unsuspend, and clawback self-serve routes');
-
+    for (const [label, base, domain] of [['Node', NODE_BASE, NODE_DOMAIN], ['PHP', PHP_BASE, 'localhost:' + PHP_PORT]]) {
+      if (WHICH !== 'both' && WHICH !== label.toLowerCase()) continue;
+      await runChecks(label, base, domain);
+    }
     console.log('\nALL DEMO SELF-SERVE CHECKS PASSED');
   } catch (err) {
     console.error('FAILURE:', err);

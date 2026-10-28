@@ -1324,6 +1324,18 @@ const ASSET_CATALOG = {
     presentation: 'document',
     auditHistory: true
   },
+  // warranty-demo.html's self-serve certificates: minted by
+  // /atlas/demo/warranty/mint with a demo authority playing factory and
+  // retailer. A separate class, so the issuer-signed class itself says the
+  // serial was not set by the factory (atlas.demo.warranty.certificate is
+  // minted only through the admin-gated /atlas/asset/mint).
+  'atlas.demo.warranty.selfserve': {
+    name: 'Warranty Certificate (self-serve demo)',
+    model: `https://${DOMAIN}/assets/badge.glb`,
+    fungible: false,
+    presentation: 'document',
+    auditHistory: true
+  },
   // demo-domain-a/attestation-demo.html (SPEC.md §5.11): the asset a
   // completely separate domain then independently attests to. Nothing
   // about this class is special — it's an ordinary document credential,
@@ -1340,6 +1352,18 @@ const ASSET_CATALOG = {
     properties: {
       'com.example.filingType': 'Annual Compliance Filing'
     }
+  },
+  // reserve-bank-demo.html Act 7: one block of a bank's funds for the fraud
+  // and clawback act, minted by /atlas/demo/clawback/mint with the bank's demo
+  // authority and the amount as a signed property. Demo-only, so a demo
+  // clawback never touches a real currency; a single item, so it moves by an
+  // ordinary signed transfer.
+  'atlas.demo.clawback.funds': {
+    name: 'Demo Bank Funds',
+    model: `https://${DOMAIN}/assets/compass.glb`,
+    thumbnail: `https://${DOMAIN}/assets/compass.png`,
+    fungible: false,
+    presentation: 'document'
   },
   // demo-domain-a/clawback-demo.html (SPEC.md §5.3's suspend-style
   // reversible freeze and §5.12's clawback): stands in for anything worth
@@ -1508,7 +1532,7 @@ Object.assign(ASSET_CATALOG, require('./elements-catalog')(DOMAIN));
 // canteen counter, revoking service) that would ordinarily need a real
 // admin login, but only ever for its own page's own toy class, never
 // anything else in ASSET_CATALOG. See those routes' own comments.
-const DEMO_WARRANTY_CLASS = 'atlas.demo.warranty.certificate';
+const DEMO_WARRANTY_CLASS = 'atlas.demo.warranty.selfserve';
 const DEMO_LOGIN_BADGE_CLASS = 'atlas.demo.login.badge';
 const DEMO_CAFETERIA_FULFILLABLE_CLASSES = [
   'atlas.demo.cafeteria.sandwich',
@@ -1521,11 +1545,68 @@ const DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
 const DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
 const DEMO_RESERVE_CLASS = 'atlas.currency.reserve';
 
-// reserve-bank-demo.html's own fraud/clawback act reuses the suspend/
-// unsuspend/clawback endpoints just below, widened from a single hardcoded
-// class to this short allow-list rather than duplicating three more
-// endpoints for the same operation on a different class.
-const DEMO_SUSPENDABLE_CLASSES = [DEMO_CLAWBACK_TOKEN_CLASS, DEMO_ALPHA_DOLLAR_CLASS, DEMO_BETA_DOLLAR_CLASS];
+// Demo-only classes the demo clawback routes act on, and only when the
+// credential carries a demo authority. Real currencies are never on this list.
+const DEMO_CLAWBACK_FUNDS_CLASS = 'atlas.demo.clawback.funds';
+const DEMO_SUSPENDABLE_CLASSES = [DEMO_CLAWBACK_TOKEN_CLASS, DEMO_CLAWBACK_FUNDS_CLASS];
+
+// Authorization for the self-serve /atlas/demo/* routes. Two separate kinds:
+//
+// Owner consent: the credential's current owner signs a request about their
+// own credential (redeem a cafeteria item, revoke their own login badge).
+//
+// Demo authority: a key a demo page generates to play the issuer, retailer or
+// bank. It is written into the credential, as the issuer-signed property
+// 'atlas.demo.authority', only by a demo mint route and only for a demo-only
+// class (DEMO_AUTHORITY_CLASSES). Demo suspend, unsuspend, clawback and the
+// warranty sale stamp need its signature; the owner's signature never stands
+// in for it. No production route reads the property, so a demo authority
+// cannot authorize anything outside these demo routes.
+//
+// Both sign { purpose: 'atlas.demo.request/1', action, credentialId, domain,
+// issuedAt, ...fields } as an ordinary signed envelope; issuedAt must be within
+// DEMO_REQUEST_WINDOW_MS. A wallet-bridge signature is refused
+// (verifyEnvelope()). Mirrors issuer-php/lib/demo-authority.php.
+const DEMO_REQUEST_PURPOSE = 'atlas.demo.request/1';
+const DEMO_AUTHORITY_PROPERTY = 'atlas.demo.authority';
+const DEMO_REQUEST_WINDOW_MS = 300 * 1000;
+// The only reason a demo route suspends with, and the only one it lifts.
+const DEMO_SUSPENSION_REASON = 'demo-fraud-report';
+const DEMO_AUTHORITY_CLASSES = [DEMO_CLAWBACK_TOKEN_CLASS, DEMO_CLAWBACK_FUNDS_CLASS, DEMO_WARRANTY_CLASS];
+
+// A raw P-256 public key (65-byte point), base64url.
+function isDemoKey(key) {
+  if (typeof key !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(key)) return false;
+  const raw = Buffer.from(key, 'base64url');
+  return raw.length === 65 && raw[0] === 4;
+}
+// The demo authority key a credential carries, or null.
+function demoAuthorityOf(credential) {
+  const key = credential && credential.asset && credential.asset.properties && credential.asset.properties[DEMO_AUTHORITY_PROPERTY];
+  return isDemoKey(key) ? key : null;
+}
+// Null when body.intent is a signed request for exactly this action on this
+// credential, by signerKey, within the window; otherwise why not. fields are
+// the extra payload fields the request must name.
+async function demoRequestProblem(body, credential, action, signerKey, fields) {
+  if (typeof signerKey !== 'string' || !signerKey) return 'this credential has no key that may authorize ' + action;
+  const intent = body && body.intent;
+  const payload = intent && typeof intent === 'object' ? intent.payload : null;
+  const proof = intent && typeof intent === 'object' ? intent.proof : null;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !proof || typeof proof !== 'object' || Array.isArray(proof)) {
+    return 'a signed request (intent.payload, intent.proof) is required';
+  }
+  const expected = Object.assign({ purpose: DEMO_REQUEST_PURPOSE, action, credentialId: credential.id, domain: DOMAIN, issuedAt: payload.issuedAt }, fields || {});
+  if (Object.keys(payload).sort().join('\n') !== Object.keys(expected).sort().join('\n')) return 'the signed request does not have the fields this action needs';
+  for (const k of Object.keys(expected)) {
+    if (canonicalize(payload[k]) !== canonicalize(expected[k])) return 'the signed request is for a different ' + k;
+  }
+  const issuedAt = typeof payload.issuedAt === 'string' ? Date.parse(payload.issuedAt) : NaN;
+  if (!Number.isFinite(issuedAt) || Math.abs(Date.now() - issuedAt) > DEMO_REQUEST_WINDOW_MS) return 'the signed request is too old or not yet valid';
+  let ok = false;
+  if (proof.publicKey === signerKey) { try { ok = await verifyEnvelope(payload, proof); } catch (err) { ok = false; } }
+  return ok ? null : 'the request is not signed by the key that may authorize ' + action;
+}
 
 // Fixed claim text an attestation-demo.html visitor can request FROM the
 // second, independent domain playing "the reviewer" (SPEC.md §5.11) — a
@@ -3392,6 +3473,36 @@ function unsuspend(id) {
   doc.suspended = doc.suspended.filter((s) => s.id !== id);
   fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify(doc, null, 2));
   return doc.suspended.length !== before;
+}
+
+// Suspension changes a demo route may make. Synchronous, so no other request
+// runs between the read and the write; an admin, trade or delivery
+// suspension is never overwritten or removed.
+//   suspendIfFree(): adds this suspension only when the credential has none;
+//     returns false when one already exists.
+//   unsuspendIfReason(): removes the suspension only when it carries reason;
+//     returns 'none', 'removed' or 'other'.
+//   demoSuspensionState(): 'none', 'demo' or 'other'.
+function suspendIfFree(id, reason) {
+  const doc = readSuspensions();
+  if (doc.suspended.some((s) => s.id === id)) return false;
+  doc.suspended.push({ id, suspendedAt: new Date().toISOString(), reason, expiresAt: null, onExpire: 'lift' });
+  fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify(doc, null, 2));
+  return true;
+}
+function unsuspendIfReason(id, reason) {
+  const doc = readSuspensions();
+  const i = doc.suspended.findIndex((s) => s.id === id);
+  if (i < 0) return 'none';
+  if (doc.suspended[i].reason !== reason) return 'other';
+  doc.suspended.splice(i, 1);
+  fs.writeFileSync(SUSPENSIONS_FILE, JSON.stringify(doc, null, 2));
+  return 'removed';
+}
+function demoSuspensionState(id) {
+  const s = findSuspension(id);
+  if (!s) return 'none';
+  return s.reason === DEMO_SUSPENSION_REASON ? 'demo' : 'other';
 }
 
 // See ASSET_HISTORY_FILE's own comment above. Called alongside revoke()
@@ -6115,34 +6226,58 @@ async function main() {
       // class, never anything else in ASSET_CATALOG, so none of it can be
       // pointed at a class that actually matters.
 
-      // POST /atlas/demo/warranty/mint — self-serve sibling of
-      // POST /atlas/asset/mint above, hardcoded to DEMO_WARRANTY_CLASS.
-      // Plays "the factory" for warranty-demo.html's step 1.
+      // Refusal for a missing or wrong demo signature (demoRequestProblem()).
+      const demoRefuse = (why) => sendJson(res, 403, { error: why, code: 'demo-authorization-required' });
+
+      // POST /atlas/demo/warranty/mint: warranty-demo.html's "factory" step.
+      // Mints DEMO_WARRANTY_CLASS, separate from the factory's
+      // atlas.demo.warranty.certificate (admin-gated /atlas/asset/mint only),
+      // so the issuer-signed class says the serial was not set by a factory.
+      // The only property a visitor sets is the serial number; the
+      // certificate also carries the demo authority that alone may stamp its
+      // sale. Input: {ownerPublicKey, authorityPublicKey, properties:
+      // {'com.example.serialNumber'}}.
       if (req.method === 'POST' && req.url === '/atlas/demo/warranty/mint') {
-        const { ownerPublicKey, properties } = JSON.parse((await readBody(req)) || '{}');
-        if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
-        if (properties !== undefined && (typeof properties !== 'object' || properties === null || Array.isArray(properties))) {
-          return sendJson(res, 400, { error: "properties, when given, must be a patch object onto the class's own base properties" });
+        const { ownerPublicKey, authorityPublicKey, properties } = JSON.parse((await readBody(req)) || '{}');
+        if (!isDemoKey(ownerPublicKey) || !isDemoKey(authorityPublicKey)) {
+          return sendJson(res, 400, { error: 'ownerPublicKey and authorityPublicKey must be raw P-256 public keys' });
         }
-        const credential = await mintAssetByClass(ownerPublicKey, DEMO_WARRANTY_CLASS, 1, null, properties);
+        if (authorityPublicKey === ownerPublicKey) return sendJson(res, 400, { error: 'the demo authority must be a different key from the owner' });
+        const serial = properties && typeof properties === 'object' ? properties['com.example.serialNumber'] : undefined;
+        if (!properties || typeof properties !== 'object' || Array.isArray(properties) || Object.keys(properties).join() !== 'com.example.serialNumber' ||
+            typeof serial !== 'string' || !/^[A-Za-z0-9-]{1,40}$/.test(serial)) {
+          return sendJson(res, 400, { error: "properties must be exactly {'com.example.serialNumber': up to 40 letters, digits or dashes}" });
+        }
+        const credential = await mintAssetByClass(ownerPublicKey, DEMO_WARRANTY_CLASS, 1, null,
+          { 'com.example.serialNumber': serial, [DEMO_AUTHORITY_PROPERTY]: authorityPublicKey });
         console.log('Demo-minted warranty certificate to', ownerPublicKey.slice(0, 16) + '...');
         return sendJson(res, 200, credential);
       }
 
-      // POST /atlas/demo/warranty/stamp-sale — self-serve sibling of
-      // POST /atlas/asset/reissue, hardcoded to DEMO_WARRANTY_CLASS —
-      // same revoke-old/mint-new mechanics reissue itself uses. Plays "the
-      // retailer" for warranty-demo.html's step 2.
+      // POST /atlas/demo/warranty/stamp-sale: warranty-demo.html's "retailer"
+      // step. Stamps the sale date, warranty length and retailer onto a
+      // self-serve certificate and supersedes it (same mechanics as
+      // /atlas/asset/reissue). Needs the certificate's demo authority, never
+      // the owner; only those three properties, and only on DEMO_WARRANTY_CLASS.
       if (req.method === 'POST' && req.url === '/atlas/demo/warranty/stamp-sale') {
-        const { credential, properties } = JSON.parse((await readBody(req)) || '{}');
-        if (!credential || credential.credential !== 'domain-atlas-asset/1.0') {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const { credential, properties } = body;
+        if (!credential || credential.credential !== 'domain-atlas-asset/1.0' || !credential.id) {
           return sendJson(res, 400, { error: 'credential must be a domain-atlas-asset/1.0 credential' });
         }
         if (!credential.asset || credential.asset.class !== DEMO_WARRANTY_CLASS) {
-          return sendJson(res, 400, { error: 'this endpoint only stamps a ' + DEMO_WARRANTY_CLASS + ' credential' });
+          return sendJson(res, 400, { error: 'this endpoint only stamps an ' + DEMO_WARRANTY_CLASS + ' credential' });
         }
-        if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
-          return sendJson(res, 400, { error: 'properties (a patch onto asset.properties) is required' });
+        const isObj = properties && typeof properties === 'object' && !Array.isArray(properties);
+        const saleDate = isObj ? properties['com.example.saleDate'] : undefined;
+        const months = isObj ? properties['com.example.warrantyMonths'] : undefined;
+        const retailer = isObj ? properties['com.example.retailer'] : undefined;
+        const dm = typeof saleDate === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(saleDate) : null;
+        const validDate = !!dm && (() => { const d = new Date(Date.UTC(+dm[1], +dm[2] - 1, +dm[3])); return d.getUTCFullYear() === +dm[1] && d.getUTCMonth() === +dm[2] - 1 && d.getUTCDate() === +dm[3]; })();
+        if (!isObj || Object.keys(properties).sort().join() !== 'com.example.retailer,com.example.saleDate,com.example.warrantyMonths' || !validDate ||
+            !Number.isInteger(months) || months < 1 || months > 120 ||
+            typeof retailer !== 'string' || !/^[\p{L}\p{N} .,&'-]{1,64}$/u.test(retailer)) {
+          return sendJson(res, 400, { error: 'properties must be exactly a saleDate (YYYY-MM-DD), warrantyMonths (1-120) and retailer (up to 64 characters)' });
         }
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'credential was not issued by this domain' });
@@ -6151,6 +6286,7 @@ async function main() {
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
+        { const why = await demoRequestProblem(body, credential, 'demo-stamp-sale', demoAuthorityOf(credential), { properties }); if (why) return demoRefuse(why); }
 
         const newAsset = { ...credential.asset, properties: mergeProperties(credential.asset.properties, properties) };
         const newCredential = await issueAsset(credential.owner.publicKey, newAsset, credential.quantity, credential.id);
@@ -6161,32 +6297,34 @@ async function main() {
         return sendJson(res, 200, { newCredential });
       }
 
-      // POST /atlas/demo/cafeteria/fulfill — self-serve sibling of
-      // POST /atlas/asset/fulfill, hardcoded to
-      // DEMO_CAFETERIA_FULFILLABLE_CLASSES. Plays "the counter" for
-      // cafeteria-demo.html's step 4.
+      // POST /atlas/demo/cafeteria/fulfill: the counter redeems a cafeteria
+      // item the owner presents. Self-serve sibling of /atlas/asset/fulfill
+      // for DEMO_CAFETERIA_FULFILLABLE_CLASSES. The owner's signed request is
+      // what the counter acts on, so nobody can redeem someone else's item.
       if (req.method === 'POST' && req.url === '/atlas/demo/cafeteria/fulfill') {
-        const { credential } = JSON.parse((await readBody(req)) || '{}');
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const { credential } = body;
         if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
         if (!DEMO_CAFETERIA_FULFILLABLE_CLASSES.includes(credential.asset.class)) {
           return sendJson(res, 400, { error: 'this endpoint only fulfills ' + DEMO_CAFETERIA_FULFILLABLE_CLASSES.join(', ') });
         }
         const problem = await checkPresentedFulfillableAsset(credential);
         if (problem) return sendJson(res, 400, { error: problem });
+        { const why = await demoRequestProblem(body, credential, 'demo-fulfill', credential.owner && credential.owner.publicKey); if (why) return demoRefuse(why); }
         revoke(credential.id, 'fulfilled');
         console.log('Demo-fulfilled', credential.asset.class, credential.id, 'for', credential.owner.publicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { status: 'fulfilled', id: credential.id, asset: credential.asset, owner: credential.owner });
       }
 
-      // POST /atlas/demo/login/revoke — self-serve sibling of POST
-      // /atlas/revoke, hardcoded to DEMO_LOGIN_BADGE_CLASS. Lets
-      // login-demo.html's optional "see revocation take effect live" step
-      // run without an admin login — a genuine revoke against this
-      // domain's own revocation list, just narrowed to a class with
-      // nothing real at stake.
+      // POST /atlas/demo/login/revoke: the owner of a demo login badge revokes
+      // it, for login-demo.html's "see revocation take effect" step. The
+      // owner's signed request is required, so nobody can revoke someone
+      // else's badge; revoking another holder's credential stays with the
+      // admin-gated /atlas/revoke.
       if (req.method === 'POST' && req.url === '/atlas/demo/login/revoke') {
-        const { credential } = JSON.parse((await readBody(req)) || '{}');
-        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const { credential } = body;
+        if (!credential || !credential.asset || !credential.id) return sendJson(res, 400, { error: 'credential is required' });
         if (credential.asset.class !== DEMO_LOGIN_BADGE_CLASS) {
           return sendJson(res, 400, { error: 'this endpoint only revokes ' + DEMO_LOGIN_BADGE_CLASS });
         }
@@ -6197,6 +6335,7 @@ async function main() {
         if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
+        { const why = await demoRequestProblem(body, credential, 'demo-login-revoke', credential.owner && credential.owner.publicKey); if (why) return demoRefuse(why); }
         revoke(credential.id, 'demo-self-serve');
         console.log('Demo-revoked', credential.id);
         return sendJson(res, 200, { ok: true });
@@ -6272,94 +6411,108 @@ async function main() {
         return sendJson(res, 200, { ok: true });
       }
 
-      // POST /atlas/demo/clawback/suspend — self-serve sibling of the real,
-      // admin-gated suspend action behind /atlas/clawback (SPEC.md §5.3),
-      // gated to DEMO_SUSPENDABLE_CLASSES (originally just
-      // DEMO_CLAWBACK_TOKEN_CLASS; widened for reserve-bank-demo.html's own
-      // fraud act rather than duplicating this endpoint for one more
-      // class). clawback-demo.html has no admin login to freeze a
-      // credential with, so — same "plays the privileged role" reasoning
-      // as every other /atlas/demo/* route above — this lets the
-      // credential's own currently-valid signature stand in for that
-      // authority: whoever can still produce a full, correctly signed copy
-      // of the credential is treated as "the rightful reporter of its own
-      // theft/fraud" for these toy classes, never anything else in
-      // ASSET_CATALOG. Deliberately does NOT check who currently owns it —
-      // a stolen credential's whole point is that it no longer sits with
-      // the person who can prove they minted it, so ownership can't be the
-      // gate here the way it is for an ordinary transfer.
-      if (req.method === 'POST' && req.url === '/atlas/demo/clawback/suspend') {
-        const { credential } = JSON.parse((await readBody(req)) || '{}');
-        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
+      // /atlas/demo/clawback/*: clawback-demo.html and reserve-bank-demo.html
+      // Act 7. Self-serve siblings of the admin-gated /atlas/suspend,
+      // /atlas/unsuspend and /atlas/clawback, for DEMO_SUSPENDABLE_CLASSES
+      // only. Each needs the credential's demo authority, never the owner
+      // or holder. They add and lift only DEMO_SUSPENSION_REASON
+      // suspensions, and clawback is refused while any other suspension
+      // (admin, trade lock, delivery hold) exists.
+      //
+      // Shared checks: class, issuer, spend lock, not revoked, issuer
+      // signature (which makes the demo authority it names trustworthy),
+      // then the signed demo request. Returns the parsed body, or null once
+      // a refusal has been sent.
+      const demoClawbackChecks = async (action, extra) => {
+        const body = JSON.parse((await readBody(req)) || '{}');
+        const { credential } = body;
+        if (!credential || !credential.asset || !credential.id) { sendJson(res, 400, { error: 'credential is required' }); return null; }
         if (!DEMO_SUSPENDABLE_CLASSES.includes(credential.asset.class)) {
-          return sendJson(res, 400, { error: 'this endpoint only suspends: ' + DEMO_SUSPENDABLE_CLASSES.join(', ') });
+          sendJson(res, 400, { error: 'this endpoint only acts on: ' + DEMO_SUSPENDABLE_CLASSES.join(', ') }); return null;
         }
-        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
-          return sendJson(res, 400, { error: 'this domain did not issue this credential' });
-        }
-        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
-        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked' });
+        if (!credential.issuer || credential.issuer.domain !== DOMAIN) { sendJson(res, 400, { error: 'this domain did not issue this credential' }); return null; }
+        const fields = extra ? extra(body) : null;
+        if (fields && fields.error) { sendJson(res, 400, { error: fields.error }); return null; }
+        { const busy = await lockSpend(credential.id); if (busy) { sendJson(res, 409, { error: busy }); return null; } }
+        if (isRevoked(credential.id)) { sendJson(res, 400, { error: 'credential is already revoked' }); return null; }
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
-        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
-        suspend(credential.id, 'demo-fraud-report', null);
-        console.log('Demo-suspended', credential.id);
+        if (!sigOk) { sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" }); return null; }
+        const why = await demoRequestProblem(body, credential, action, demoAuthorityOf(credential), fields);
+        if (why) { demoRefuse(why); return null; }
+        return body;
+      };
+
+      // POST /atlas/demo/clawback/mint: mints a demo recovery token, or a
+      // block of demo bank funds ({amount}), carrying a demo authority key.
+      // Only that key may later suspend, unsuspend or claw it back.
+      if (req.method === 'POST' && req.url === '/atlas/demo/clawback/mint') {
+        const { ownerPublicKey, authorityPublicKey, assetClass = DEMO_CLAWBACK_TOKEN_CLASS, amount } = JSON.parse((await readBody(req)) || '{}');
+        if (!isDemoKey(ownerPublicKey) || !isDemoKey(authorityPublicKey)) {
+          return sendJson(res, 400, { error: 'ownerPublicKey and authorityPublicKey must be raw P-256 public keys' });
+        }
+        if (authorityPublicKey === ownerPublicKey) return sendJson(res, 400, { error: 'the demo authority must be a different key from the owner' });
+        if (!DEMO_SUSPENDABLE_CLASSES.includes(assetClass)) {
+          return sendJson(res, 400, { error: 'this endpoint only mints: ' + DEMO_SUSPENDABLE_CLASSES.join(', ') });
+        }
+        const properties = { [DEMO_AUTHORITY_PROPERTY]: authorityPublicKey };
+        if (assetClass === DEMO_CLAWBACK_FUNDS_CLASS) {
+          if (!Number.isSafeInteger(amount) || amount < 1 || amount > 1000000) return sendJson(res, 400, { error: 'amount must be a positive integer up to 1,000,000' });
+          properties['com.example.amount'] = amount;
+        } else if (amount !== undefined && amount !== null) {
+          return sendJson(res, 400, { error: 'amount applies only to ' + DEMO_CLAWBACK_FUNDS_CLASS });
+        }
+        const credential = await mintAssetByClass(ownerPublicKey, assetClass, 1, null, properties);
+        console.log('Demo-minted', assetClass, 'to', ownerPublicKey.slice(0, 16) + '...');
+        return sendJson(res, 200, credential);
+      }
+
+      // POST /atlas/demo/clawback/suspend: freezes a demo token or demo funds,
+      // as the issuer would after a fraud report. Only adds a suspension where
+      // there is none.
+      if (req.method === 'POST' && req.url === '/atlas/demo/clawback/suspend') {
+        const body = await demoClawbackChecks('demo-suspend');
+        if (!body) return;
+        if (!suspendIfFree(body.credential.id, DEMO_SUSPENSION_REASON)) {
+          return sendJson(res, 409, { error: 'this credential is already suspended', code: 'already-suspended' });
+        }
+        console.log('Demo-suspended', body.credential.id);
         return sendJson(res, 200, { ok: true });
       }
 
-      // POST /atlas/demo/clawback/unsuspend — the "false alarm" branch of
-      // the same walkthrough above: lifts a suspension placed by the
-      // endpoint above, under the identical class/issuer/signature checks.
-      // No isRevoked/isSuspended precondition here — unsuspend() itself
-      // already reports whether there was anything to lift, and asking a
-      // demo visitor to first re-diagnose the credential's current state
-      // just to call this would add nothing but a redundant round trip.
+      // POST /atlas/demo/clawback/unsuspend: lifts a suspension the demo
+      // itself made (the false-alarm path). Any other suspension is left in
+      // place and refused.
       if (req.method === 'POST' && req.url === '/atlas/demo/clawback/unsuspend') {
-        const { credential } = JSON.parse((await readBody(req)) || '{}');
-        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
-        if (!DEMO_SUSPENDABLE_CLASSES.includes(credential.asset.class)) {
-          return sendJson(res, 400, { error: 'this endpoint only unsuspends: ' + DEMO_SUSPENDABLE_CLASSES.join(', ') });
+        const body = await demoClawbackChecks('demo-unsuspend');
+        if (!body) return;
+        const result = unsuspendIfReason(body.credential.id, DEMO_SUSPENSION_REASON);
+        if (result === 'other') {
+          return sendJson(res, 409, { error: 'this suspension was not made by the demo and cannot be lifted here', code: 'not-a-demo-suspension' });
         }
-        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
-          return sendJson(res, 400, { error: 'this domain did not issue this credential' });
-        }
-        const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
-        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
-        const wasSuspended = unsuspend(credential.id);
-        console.log('Demo-unsuspended', credential.id, wasSuspended ? '(was suspended)' : '(was not suspended)');
-        return sendJson(res, 200, { ok: true, wasSuspended });
+        console.log('Demo-unsuspended', body.credential.id, result);
+        return sendJson(res, 200, { ok: true, wasSuspended: result === 'removed' });
       }
 
-      // POST /atlas/demo/clawback/clawback — self-serve sibling of the
-      // real, admin-gated /atlas/clawback (SPEC.md §5.12), hardcoded the
-      // same way as the two routes above. Confirms SPEC.md §5.12's own
-      // framing that clawback finds a stolen asset wherever it currently
-      // sits: toPublicKey only has to differ from the credential's CURRENT
-      // owner, not from whoever first held it, so the demo's optional
-      // thief-to-fence laundering hop makes no difference to this check.
-      // No roster to fix up here — DEMO_CLAWBACK_TOKEN_CLASS is never a
-      // membership credential — so this mirrors the real endpoint's
-      // core three steps only (reissue, revoke, archive) and skips its
-      // mail-delivery and roster fix-up, which exist there for classes
-      // this demo class was never meant to touch.
+      // POST /atlas/demo/clawback/clawback: reissues a demo token or demo
+      // funds to toPublicKey and revokes the original, wherever it has moved
+      // since. Only the core reissue, revoke and archive of /atlas/clawback;
+      // no roster or mail fix-up, which these classes never need.
       if (req.method === 'POST' && req.url === '/atlas/demo/clawback/clawback') {
-        const { credential, toPublicKey } = JSON.parse((await readBody(req)) || '{}');
-        if (!credential || !credential.asset) return sendJson(res, 400, { error: 'credential is required' });
-        if (!toPublicKey) return sendJson(res, 400, { error: 'toPublicKey is required' });
-        if (!DEMO_SUSPENDABLE_CLASSES.includes(credential.asset.class)) {
-          return sendJson(res, 400, { error: 'this endpoint only claws back: ' + DEMO_SUSPENDABLE_CLASSES.join(', ') });
+        const body = await demoClawbackChecks('demo-clawback', (b) => {
+          if (!isDemoKey(b.toPublicKey)) return { error: 'toPublicKey must be a raw P-256 public key' };
+          if (b.toPublicKey === (b.credential.owner && b.credential.owner.publicKey)) {
+            return { error: "toPublicKey already matches the credential's current owner — nothing to claw back" };
+          }
+          return { toPublicKey: b.toPublicKey };
+        });
+        if (!body) return;
+        const { credential, toPublicKey } = body;
+        if (demoSuspensionState(credential.id) === 'other') {
+          return sendJson(res, 409, { error: 'this credential is held by a suspension the demo did not make', code: 'not-a-demo-suspension' });
         }
-        if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
-          return sendJson(res, 400, { error: 'this domain did not issue this credential' });
-        }
-        if (toPublicKey === credential.owner.publicKey) {
-          return sendJson(res, 400, { error: "toPublicKey already matches the credential's current owner — nothing to claw back" });
-        }
-        { const busy = await lockSpend(credential.id); if (busy) return sendJson(res, 409, { error: busy }); }
-        if (isRevoked(credential.id)) return sendJson(res, 400, { error: 'credential is already revoked — nothing to claw back' });
-        const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
-        if (!sigOk) return sendJson(res, 400, { error: "credential signature does not check out against this issuer's key" });
         const newCredential = await issueAsset(toPublicKey, credential.asset, credential.quantity, credential.id);
         revoke(credential.id, 'clawback');
+        unsuspendIfReason(credential.id, DEMO_SUSPENSION_REASON);
         archiveIfAudited(credential, 'clawback');
         console.log('Demo-clawed-back', credential.id, '-> reissued to', toPublicKey.slice(0, 16) + '...');
         return sendJson(res, 200, { newCredential });
