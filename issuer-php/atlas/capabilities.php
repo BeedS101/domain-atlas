@@ -17,9 +17,14 @@ $has = function ($file, $needle) {
 $operations = [];
 if ($has('asset/issue.php', 'atlas_commit_replacement')) $operations[] = 'issue';
 if ($has('asset/issue.php', 'atlas_record_issuance')) $operations[] = 'issue-unique';
-if ($has('asset/split.php', 'atlas_commit_replacement')) $operations[] = 'split';
-if ($has('asset/consolidate.php', 'atlas_commit_replacement')) $operations[] = 'consolidate';
-if ($has('convert.php', 'atlas_commit_replacement')) $operations[] = 'convert';
+// Split, consolidate and convert are listed only when their file is not the
+// disabled version (owner-authorization-required), whichever files were uploaded.
+$enabled = function ($file) use ($has) {
+  return $has($file, 'atlas_commit_replacement') && !$has($file, 'owner-authorization-required');
+};
+if ($enabled('asset/split.php')) $operations[] = 'split';
+if ($enabled('asset/consolidate.php')) $operations[] = 'consolidate';
+if ($enabled('convert.php')) $operations[] = 'convert';
 if ($has('asset/purchase.php', "'purchase', [\$credential]")) $operations[] = 'purchase';
 if ($has('trade/claim.php', 'atlas_store_claim_outcome')) $operations[] = 'trade-claim';
 if ($has('trade/claim.php', "'remainder' => \$bRemainder, 'code' => 'claim-incomplete'")) $operations[] = 'trade-claim-remainder';

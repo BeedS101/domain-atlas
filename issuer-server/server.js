@@ -5653,6 +5653,17 @@ async function main() {
     return { held, adopt };
   }
 
+  // Split, consolidate and convert take a credential and its parameters but
+  // no signature from the credential's owner, and a credential is not a
+  // secret: anyone holding a copy could split it to their own key. These
+  // routes refuse every request, before reading the body, until a signed
+  // owner authorization is verified for them. The handlers' bodies are kept
+  // below the refusal for that work.
+  const OWNER_AUTHORIZATION_REQUIRED = {
+    error: 'This operation needs a signature from the owner of the credential, which this issuer does not check yet, so it is disabled.',
+    code: 'owner-authorization-required'
+  };
+
   // The 400 body for a presented credential that failed a check: `code` and
   // `credentialId` let a wallet drop one spent balance and retry the rest.
   function spendProblemBody(problem, credential) {
@@ -7722,6 +7733,8 @@ async function main() {
 
       // --- §5.4 splitting and consolidating fungible balances ---
       if (req.method === 'POST' && req.url === '/atlas/asset/split') {
+        // Disabled: see OWNER_AUTHORIZATION_REQUIRED.
+        return sendJson(res, 403, OWNER_AUTHORIZATION_REQUIRED);
         const splitBody = JSON.parse((await readBody(req)) || '{}');
         const { credential, sendAmount, toPublicKey } = splitBody;
         if (!credential || !toPublicKey || !Number.isInteger(sendAmount) || sendAmount <= 0) {
@@ -7758,6 +7771,8 @@ async function main() {
       // of just one. checkPresentedAsset (below) rejects any credential
       // here that isn't fungible, same gate splitting and trading share.
       if (req.method === 'POST' && req.url === '/atlas/asset/consolidate') {
+        // Disabled: see OWNER_AUTHORIZATION_REQUIRED.
+        return sendJson(res, 403, OWNER_AUTHORIZATION_REQUIRED);
         const consolidateBody = JSON.parse((await readBody(req)) || '{}');
         const { credentials } = consolidateBody;
         if (!Array.isArray(credentials) || credentials.length < 2) {
@@ -7808,6 +7823,8 @@ async function main() {
       // convert directly — iron -> silver works exactly the same way
       // gold -> silver does, not just base-currency pairs.
       if (req.method === 'POST' && req.url === '/atlas/convert') {
+        // Disabled: see OWNER_AUTHORIZATION_REQUIRED.
+        return sendJson(res, 403, OWNER_AUTHORIZATION_REQUIRED);
         const convertBody = JSON.parse((await readBody(req)) || '{}');
         const { credential, spendAmount, toClass } = convertBody;
         if (!credential || !toClass || !Number.isInteger(spendAmount) || spendAmount <= 0) {
@@ -7862,12 +7879,13 @@ async function main() {
       // GET /atlas/capabilities - which operations this issuer answers a repeated requestId for. A wallet
       // that finds an operation here may send it again with the same requestId after a lost answer; an
       // issuer that does not list it (or has no such route) creates a second result for a repeat, so the
-      // wallet does not repeat the request.
+      // wallet does not repeat the request. Split, consolidate and convert are not listed while they are
+      // disabled (OWNER_AUTHORIZATION_REQUIRED).
       if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/capabilities') {
         return sendJson(res, 200, {
           requestIds: {
             version: 1,
-            operations: ['issue', 'issue-unique', 'split', 'consolidate', 'convert', 'purchase', 'trade-claim', 'trade-claim-remainder'],
+            operations: ['issue', 'issue-unique', 'purchase', 'trade-claim', 'trade-claim-remainder'],
             retentionHours: REPLAY_TTL_MS / 3600000
           }
         });

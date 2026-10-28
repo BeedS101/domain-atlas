@@ -11,6 +11,11 @@
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
+// Disabled: the request carries no signature from the credentials' owner, so
+// anyone holding copies could merge someone else's balances. Refused until a
+// signed owner authorization is verified here. Mirrors issuer-server/server.js
+// (OWNER_AUTHORIZATION_REQUIRED).
+send_json(403, ['error' => 'This operation needs a signature from the owner of the credential, which this issuer does not check yet, so it is disabled.', 'code' => 'owner-authorization-required']);
 $kp = atlas_load_keys();
 
 try {
