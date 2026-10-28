@@ -20,8 +20,8 @@
 //      real currencies are out of reach of the demo routes.
 //   4. Cafeteria and login: only the owner's signature redeems or revokes.
 //   5. Warranty: only a serial number can be set at mint, the class is the
-//      self-serve one, only the demo authority stamps a sale, once, and only
-//      with the three sale properties.
+//      self-serve one, and only the demo authority stamps (or restamps) a
+//      sale, only with the three sale properties.
 //   6. Demo funds (one item carrying its amount) move by the owner's
 //      ordinary signed transfer and can be
 //      clawed back by the demo authority (reserve-bank-demo.html Act 7);
