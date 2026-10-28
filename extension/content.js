@@ -401,15 +401,29 @@
   // would add a message round trip without adding any actual trust
   // boundary.
   //
-  // origin/kind/detail/payload are handed over by postMessage, never baked
-  // into the iframe's src URL — avoids URL-encoding an arbitrary JSON
-  // payload and keeps it out of any history-like surface a src attribute
-  // might otherwise brush up against, however briefly.
-  function openBridgeConfirmOverlay(kind, detail, payload, onDone) {
+  // The request is filed with background.js under a random token, and the
+  // iframe reads it back from there by the token in its URL. It is never
+  // sent to the iframe by window.postMessage: the host page can post to the
+  // iframe too, and a message from it is indistinguishable from one sent by
+  // this script. background.js records the origin Chrome reports for this
+  // script, so the origin shown and signed is never taken from the page.
+  async function openBridgeConfirmOverlay(kind, detail, payload, onDone) {
+    const tokenBytes = crypto.getRandomValues(new Uint8Array(24));
+    const token = Array.from(tokenBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    let stashed = null;
+    try {
+      stashed = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-confirm-stash', token, kind, detail, payload });
+    } catch (err) {
+      stashed = null;
+    }
+    if (!stashed || !stashed.ok) {
+      onDone(null);
+      return;
+    }
     const iframe = document.createElement('iframe');
     iframe.id = 'domain-atlas-bridge-confirm';
     const src = chrome.runtime.getURL('confirm-bridge.html');
-    iframe.src = src;
+    iframe.src = src + '#' + token;
     Object.assign(iframe.style, {
       position: 'fixed',
       inset: '0',
@@ -440,13 +454,6 @@
     function onMessage(event) {
       if (event.source !== iframe.contentWindow) return;
       if (!event.data || typeof event.data !== 'object') return;
-      if (event.data.type === 'domain-atlas-bridge-confirm-ready') {
-        iframe.contentWindow.postMessage(
-          { type: 'domain-atlas-bridge-confirm-init', origin: location.origin, kind, detail, payload },
-          new URL(src).origin
-        );
-        return;
-      }
       if (event.data.type === 'domain-atlas-bridge-confirm-decision') {
         finish(event.data.approved ? (event.data.result || null) : null);
       }

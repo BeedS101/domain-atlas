@@ -198,12 +198,47 @@ function atlas_sign($privateKey, $payload) {
   return b64url_encode($rawSig);
 }
 
+// The ctx a wallet puts on everything it signs for a web page through the
+// wallet bridge (SPEC.md §3.8.1): { ctx, origin, payload }. Such a signature
+// was approved as a page's request, so verify_envelope() refuses it for every
+// protocol request; only a route meant to take one reads it, through
+// atlas_unwrap_bridge_signed(), which also checks the origin it was made for.
+// Mirrors issuer-server/server.js.
+const ATLAS_BRIDGE_SIGN_CTX = 'atlas.bridge.sign/1';
+
+function atlas_is_bridge_signed($payload) {
+  return is_array($payload) && ($payload['ctx'] ?? null) === ATLAS_BRIDGE_SIGN_CTX;
+}
+
+// The origins a page of this domain is served from.
+function atlas_own_origins() {
+  $domain = strtolower(atlas_domain());
+  $host = preg_replace('/:\d+$/', '', $domain);
+  $local = in_array($host, ['localhost', '127.0.0.1', '[::1]'], true);
+  return $local ? ['https://' . $domain, 'http://' . $domain] : ['https://' . $domain];
+}
+
+// The page payload inside a bridge-signed object, or null unless it is
+// exactly { ctx, origin, payload } and the origin is one of this domain's.
+function atlas_unwrap_bridge_signed($signed) {
+  if (!atlas_is_bridge_signed($signed)) return null;
+  $keys = array_keys($signed);
+  sort($keys, SORT_STRING);
+  if ($keys !== ['ctx', 'origin', 'payload']) return null;
+  if (!is_string($signed['origin']) || !in_array($signed['origin'], atlas_own_origins(), true)) return null;
+  $inner = $signed['payload'];
+  if (!is_array($inner) || ($inner !== [] && array_keys($inner) === range(0, count($inner) - 1))) return null;
+  return $inner;
+}
+
 // Verifies a signed-payload "envelope" as produced by wallet.js's
 // signWithSelf() (a real WebAuthn assertion, challenge = hash of the
 // payload, or a direct ECDSA signature for a local identity). Same
 // dual-mode check server.js does, and the same canonicalize().
-function verify_envelope($payload, $envelope) {
+// A bridge-signed payload is refused unless $allowBridge is set.
+function verify_envelope($payload, $envelope, $allowBridge = false) {
   if (!is_array($payload) || !is_array($envelope) || !isset($envelope['signerRole'])) return false;
+  if (atlas_is_bridge_signed($payload) && !$allowBridge) return false;
   $dataHash = sha256_raw(canonicalize($payload));
 
   if ($envelope['signerRole'] === 'webauthn') {
@@ -265,7 +300,7 @@ function parse_iso_ms($value) {
 
 // verify_envelope() plus what a read grant needs from a passkey assertion:
 // it must be a "get" assertion and the user must have been present.
-function verify_mail_envelope($payload, $envelope) {
+function verify_mail_envelope($payload, $envelope, $allowBridge = false) {
   if (!is_array($envelope) || !isset($envelope['signerRole'])) return false;
   if ($envelope['signerRole'] === 'webauthn') {
     try {
@@ -279,7 +314,7 @@ function verify_mail_envelope($payload, $envelope) {
   } elseif ($envelope['signerRole'] !== 'raw-ecdsa') {
     return false;
   }
-  return verify_envelope($payload, $envelope);
+  return verify_envelope($payload, $envelope, $allowBridge);
 }
 
 // Authenticates one signed mail request and returns the identity public key

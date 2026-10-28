@@ -1619,11 +1619,43 @@ function derToRawEcdsaSig(der) {
   return raw;
 }
 
+// The ctx a wallet puts on everything it signs for a web page through the
+// wallet bridge (SPEC.md §3.8.1): { ctx, origin, payload }. Such a signature
+// was approved as a page's request, so verifyEnvelope() refuses it for every
+// protocol request; only a route that is meant to take one reads it, through
+// unwrapBridgeSigned(), which also checks the origin it was made for.
+const BRIDGE_SIGN_CTX = 'atlas.bridge.sign/1';
+
+function isBridgeSigned(payload) {
+  return !!payload && typeof payload === 'object' && !Array.isArray(payload) && payload.ctx === BRIDGE_SIGN_CTX;
+}
+
+// The origins a page of this domain is served from.
+function ownOrigins() {
+  const host = DOMAIN.toLowerCase().replace(/:\d+$/, '');
+  const local = host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+  return local ? ['https://' + DOMAIN.toLowerCase(), 'http://' + DOMAIN.toLowerCase()] : ['https://' + DOMAIN.toLowerCase()];
+}
+
+// The page payload inside a bridge-signed object, or null unless it is
+// exactly { ctx, origin, payload } and the origin is one of this domain's.
+function unwrapBridgeSigned(signed) {
+  if (!isBridgeSigned(signed)) return null;
+  const keys = Object.keys(signed).sort();
+  if (keys.length !== 3 || keys[0] !== 'ctx' || keys[1] !== 'origin' || keys[2] !== 'payload') return null;
+  if (typeof signed.origin !== 'string' || !ownOrigins().includes(signed.origin)) return null;
+  const inner = signed.payload;
+  if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return null;
+  return inner;
+}
+
 // Verifies a signed-payload "envelope" as produced by wallet.js's
 // signWithSelf() (a real WebAuthn assertion, challenge = hash of the
 // payload, or a direct ECDSA signature for a local identity). Same
 // dual-mode check on both ends of the wire, same as canonicalize().
-async function verifyEnvelope(payload, envelope) {
+// A bridge-signed payload is refused here; see BRIDGE_SIGN_CTX.
+async function verifyEnvelope(payload, envelope, opts) {
+  if (isBridgeSigned(payload) && !(opts && opts.allowBridge)) return false;
   const dataHash = new Uint8Array(await subtle.digest('SHA-256', new TextEncoder().encode(canonicalize(payload))));
 
   if (envelope.signerRole === 'webauthn') {
@@ -1710,7 +1742,7 @@ function sendAdminAuthFailure(res, auth) {
 // verifyEnvelope() plus what an admin assertion needs from a passkey: it must
 // be a "get" assertion and the user must have been present. Same rule the
 // signed mail reads use (verifyMailEnvelope).
-const verifyAdminEnvelope = (payload, envelope) => verifyMailEnvelope(payload, envelope);
+const verifyAdminEnvelope = (payload, envelope, opts) => verifyMailEnvelope(payload, envelope, opts);
 
 // What each scope needs. 'admin' (the default for every route) is the
 // administrator role only; 'moderation' is the moderation-grant route and
@@ -1765,7 +1797,10 @@ function checkAdminAuthFields(payload, action, nowMs) {
 // Order matters: shape and freshness are cheap and need no secret, the
 // signature and the roster come next, and the nonce is spent only after both
 // have passed, so unauthenticated traffic can never fill the nonce store.
-async function authenticateAdminProof(payload, proof, action, req, need) {
+// `bridgeSigned`, when given, is the { ctx, origin, payload } object the
+// signature covers (a request signed through the wallet bridge, already
+// unwrapped to `payload` by unwrapBridgeSigned()).
+async function authenticateAdminProof(payload, proof, action, req, need, bridgeSigned) {
   if (!payload || typeof payload !== 'object' || !proof || typeof proof !== 'object') {
     return adminFailure(401, 'auth-required', 'payload and proof are required');
   }
@@ -1774,7 +1809,8 @@ async function authenticateAdminProof(payload, proof, action, req, need) {
   const nowMs = Date.now();
   const fieldError = checkAdminAuthFields(payload, action, nowMs);
   if (fieldError) return fieldError;
-  if (typeof proof.publicKey !== 'string' || !proof.publicKey || !(await verifyAdminEnvelope(payload, proof))) {
+  const signed = bridgeSigned || payload;
+  if (typeof proof.publicKey !== 'string' || !proof.publicKey || !(await verifyAdminEnvelope(signed, proof, { allowBridge: !!bridgeSigned }))) {
     recordAdminFailure(req);
     return adminFailure(401, 'bad-signature', 'admin signature does not check out');
   }
@@ -1988,7 +2024,7 @@ function deleteAdminSession(token) {
 // that says nothing is administrator-only, so a moderator can reach only the
 // routes that explicitly ask for 'moderation'. Returns an adminFailure
 // (rejected; pass it to sendAdminAuthFailure) or { publicKey, authority }.
-async function requireAdminAuth(payload, proof, token, req, need) {
+async function requireAdminAuth(payload, proof, token, req, need, bridgeSigned) {
   const scope = need || 'admin';
   if (typeof token === 'string' && token) {
     const checked = checkAdminSession(token);
@@ -2003,7 +2039,7 @@ async function requireAdminAuth(payload, proof, token, req, need) {
       ? adminFailure(401, 'not-admin', 'this key is not a registered domain admin')
       : adminFailure(401, 'session-invalid', 'session is missing, unknown, or expired');
   }
-  return authenticateAdminProof(payload, proof, req.url.split('?')[0], req, scope);
+  return authenticateAdminProof(payload, proof, req.url.split('?')[0], req, scope, bridgeSigned);
 }
 
 // SPEC.md §11.4: reads the operator's own federation blocklist —
@@ -3600,7 +3636,7 @@ function consumeMailNonce(signerKey, nonce, nowMs) {
 
 // verifyEnvelope() plus what a read grant needs from a passkey assertion:
 // it must be a "get" assertion and the user must have been present.
-async function verifyMailEnvelope(payload, envelope) {
+async function verifyMailEnvelope(payload, envelope, opts) {
   try {
     if (!envelope || typeof envelope !== 'object') return false;
     if (envelope.signerRole === 'webauthn') {
@@ -3611,7 +3647,7 @@ async function verifyMailEnvelope(payload, envelope) {
     } else if (envelope.signerRole !== 'raw-ecdsa') {
       return false;
     }
-    return await verifyEnvelope(payload, envelope);
+    return await verifyEnvelope(payload, envelope, opts);
   } catch (e) {
     return false;
   }
@@ -7036,13 +7072,24 @@ async function main() {
       // requester's ephemeral proof-of-possession key. See
       // docs/moderation-authorization.md for the format.
       if (req.method === 'POST' && req.url === '/atlas/admin/moderation/grant') {
-        const { payload, proof } = await readAdminJson(req);
+        const body = await readAdminJson(req);
+        const proof = body.proof;
         // A session token is not accepted here, even next to a proof: every
         // grant needs a signature made for this request by the moderator's own key.
         if (!proof || typeof proof !== 'object') {
           return sendAdminAuthFailure(res, adminFailure(401, 'signature-required', 'a moderation grant needs a fresh signed request; a session token alone is not accepted'));
         }
-        const auth = await requireAdminAuth(payload, proof, null, req, 'moderation');
+        // The admin panel asks for this signature through the wallet bridge,
+        // so it arrives as { ctx, origin, payload } and must have been made
+        // on one of this domain's own pages.
+        let payload = body.payload;
+        let bridgeSigned = null;
+        if (isBridgeSigned(payload)) {
+          bridgeSigned = payload;
+          payload = unwrapBridgeSigned(bridgeSigned);
+          if (!payload) return sendAdminAuthFailure(res, adminFailure(401, 'wrong-origin', 'the request was not signed on one of this domain\'s own pages'));
+        }
+        const auth = await requireAdminAuth(payload, proof, null, req, 'moderation', bridgeSigned);
         if (auth.error) return sendAdminAuthFailure(res, auth);
         const audiences = moderationAudiences();
         if (!audiences.length) return sendAdminAuthFailure(res, adminFailure(503, 'moderation-not-configured', 'no presence endpoint is configured to receive moderation grants'));

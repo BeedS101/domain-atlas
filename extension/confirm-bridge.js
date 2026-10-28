@@ -2,14 +2,17 @@
 // asset offers, §3.8.3 trusted offer domains)
 //
 // Loaded as an extension-origin iframe by content.js's
-// openBridgeConfirmOverlay() — the host page that injected this iframe is
-// a different origin and has no way to script into it, read its contents,
-// or change what's displayed; everything on screen here comes from this
-// file's own code, never from the page that asked for a signature or
-// offered an asset. That's the entire point of this file existing as a
-// separate page rather than being drawn by content.js directly inside the
-// host page's own DOM, where a sufficiently creative page script could at
-// least try to interfere with it.
+// openBridgeConfirmOverlay(). The host page cannot script into it or read
+// it. The request (origin, kind, detail, payload) is read from
+// background.js by the token in this page's URL, never from a
+// window message: the host page can post messages to this iframe as
+// easily as content.js can, so nothing received that way is trusted.
+//
+// A page's payload is never signed as it stands. What gets signed is
+// { ctx: 'atlas.bridge.sign/1', origin, payload }, with the origin
+// background.js recorded, so the signature cannot be mistaken for any
+// protocol request (a transfer intent, an admin request, a mail check), all
+// of which issuers refuse when they carry this ctx.
 //
 // Acts on an approval directly (loads wallet.js via a plain <script> tag,
 // same as viewer.html already does) rather than asking background.js to —
@@ -92,17 +95,24 @@
     // Explicit 'block'/'none' on all three, not '' — '' only clears an
     // inline override and falls back to the stylesheet rule, which is
     // `display: none` for each of these (so every state starts hidden
-    // before this message ever arrives); '' would leave the intended one
-    // hidden forever instead of actually showing it. (This is the exact
-    // bug this file's own history already hit once for the sign/locked
-    // pair — see the private notes.)
+    // before the request is loaded); '' would leave the intended one
+    // hidden forever instead of actually showing it.
     lockedState.style.display = unlocked ? 'none' : 'block';
   }
 
-  window.addEventListener('message', async (event) => {
-    if (event.source !== window.parent) return;
-    if (!event.data || event.data.type !== 'domain-atlas-bridge-confirm-init') return;
-    const { origin, kind, detail, payload } = event.data;
+  async function loadRequest() {
+    const token = location.hash.slice(1);
+    let request = null;
+    try {
+      request = await chrome.runtime.sendMessage({ type: 'domain-atlas-bridge-confirm-fetch', token });
+    } catch (err) {
+      request = null;
+    }
+    if (!request || !request.ok || typeof request.origin !== 'string') {
+      decide(false, null);
+      return;
+    }
+    const { origin, kind, detail, payload } = request;
     currentKind = kind;
     currentOrigin = origin;
     currentPayload = payload;
@@ -138,14 +148,18 @@
       // leave a half-rendered prompt sitting there with no way out.
       decide(false, null);
     }
-  });
+  }
 
   approveBtn.addEventListener('click', async () => {
     approveBtn.disabled = true;
     denyBtn.disabled = true;
     try {
-      const envelope = await AtlasWallet.signWithSelf(currentPayload);
-      decide(true, envelope);
+      if (currentKind !== 'sign' || !currentOrigin) throw new Error('no signing request loaded');
+      const signedPayload = { ctx: 'atlas.bridge.sign/1', origin: currentOrigin, payload: currentPayload };
+      const envelope = await AtlasWallet.signWithSelf(signedPayload);
+      // The proof envelope's own fields stay at the top level; signedPayload
+      // is the exact object the signature covers.
+      decide(true, Object.assign({}, envelope, { signedPayload }));
     } catch (err) {
       // Unlocked a moment ago (checked on init) but not anymore by the
       // time of the click (locked mid-prompt, a race rather than the
@@ -194,5 +208,5 @@
 
   dismissBtn.addEventListener('click', () => decide(false, null));
 
-  window.parent.postMessage({ type: 'domain-atlas-bridge-confirm-ready' }, '*');
+  loadRequest();
 })();

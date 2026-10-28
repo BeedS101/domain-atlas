@@ -76,9 +76,59 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (watchedKeys.some((key) => key in changes)) refreshToolbarIcon();
 });
 
+// Pending wallet-bridge confirmations (SPEC.md §3.8.1/§3.8.2), keyed by a
+// random token. content.js files a request here; confirm-bridge.html reads it
+// back once by the token in its own URL. The requesting origin is taken from
+// the sender Chrome reports, never from anything the page can influence, and
+// the request never travels through window.postMessage, which the host page
+// can also send to the confirmation iframe.
+const BRIDGE_CONFIRM_TTL_MS = 150000;
+const pendingBridgeConfirms = new Map();
+
+function pruneBridgeConfirms(nowMs) {
+  for (const [token, entry] of pendingBridgeConfirms) {
+    if (entry.expiresAtMs <= nowMs) pendingBridgeConfirms.delete(token);
+  }
+}
+
+function senderOrigin(sender) {
+  if (sender.origin && sender.origin !== 'null') return sender.origin;
+  try { return new URL(sender.url).origin; } catch (err) { return null; }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!sender.tab || typeof sender.tab.id !== 'number') return;
   const tabId = sender.tab.id;
+  if (message && message.type === 'domain-atlas-bridge-confirm-stash') {
+    // From content.js, which runs only in a tab's top frame.
+    const origin = senderOrigin(sender);
+    const kind = message.kind;
+    if (sender.frameId !== 0 || !origin || /^chrome-extension:/.test(origin) ||
+        typeof message.token !== 'string' || message.token.length < 32 ||
+        (kind !== 'sign' && kind !== 'offer')) {
+      sendResponse({ ok: false });
+      return;
+    }
+    const nowMs = Date.now();
+    pruneBridgeConfirms(nowMs);
+    pendingBridgeConfirms.set(message.token, {
+      tabId, origin, kind, detail: message.detail, payload: message.payload, expiresAtMs: nowMs + BRIDGE_CONFIRM_TTL_MS
+    });
+    sendResponse({ ok: true });
+    return;
+  } else if (message && message.type === 'domain-atlas-bridge-confirm-fetch') {
+    // From confirm-bridge.html only, inside the same tab. One read per token.
+    const ownPage = chrome.runtime.getURL('confirm-bridge.html');
+    pruneBridgeConfirms(Date.now());
+    const entry = typeof message.token === 'string' ? pendingBridgeConfirms.get(message.token) : null;
+    if (!entry || entry.tabId !== tabId || typeof sender.url !== 'string' || sender.url.split('#')[0] !== ownPage) {
+      sendResponse({ ok: false });
+      return;
+    }
+    pendingBridgeConfirms.delete(message.token);
+    sendResponse({ ok: true, origin: entry.origin, kind: entry.kind, detail: entry.detail, payload: entry.payload });
+    return;
+  }
   if (message && message.type === 'domain-atlas-world-entered') {
     chrome.sidePanel.setOptions({ tabId, enabled: false }).catch(() => {});
     // chrome.sidePanel.close() (Chrome 141+) closes one already open for
@@ -125,8 +175,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // asset.class against this page's own effective policy.walletBridge.
     // offer whitelist before ever sending this; this file's only job is
     // the one thing it has that content.js never could (AtlasWallet): is
-    // message.origin on the ACTIVE identity's own trusted-offer-domains
-    // list. {trusted:false} (no active identity, or this origin was never
+    // the sender's origin (as Chrome reports it) on the ACTIVE identity's
+    // own trusted-offer-domains list. {trusted:false} (no active identity, or this origin was never
     // trusted for it) tells content.js to fall through to the ordinary
     // confirmation overlay, unchanged from §3.8.2 — this is deliberately
     // the only outcome on any failure path below, never a third shape
@@ -138,13 +188,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // access (see confirm-bridge.js's own, visitor-driven version of this
     // exact two-call sequence); skipping the prompt is the whole point of
     // being trusted, so there is nothing left for a human to decide here.
+    const origin = senderOrigin(sender);
     (async () => {
       try {
         const identity = await AtlasWallet.getIdentity();
-        if (!identity) { sendResponse({ trusted: false }); return; }
-        const trusted = await AtlasWallet.isTrustedBridgeDomain(identity.publicKey, message.origin);
+        if (!identity || !origin || sender.frameId !== 0) { sendResponse({ trusted: false }); return; }
+        const trusted = await AtlasWallet.isTrustedBridgeDomain(identity.publicKey, origin);
         if (!trusted) { sendResponse({ trusted: false }); return; }
-        const entry = await AtlasWallet.queueBridgeOffer(identity.publicKey, message.origin, message.credential);
+        const entry = await AtlasWallet.queueBridgeOffer(identity.publicKey, origin, message.credential);
         try {
           const { verdict } = await AtlasWallet.claimBridgeOffer(identity.publicKey, entry.id);
           sendResponse({ trusted: true, claimed: !!verdict.valid, offerId: entry.id });

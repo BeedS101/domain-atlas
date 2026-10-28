@@ -589,6 +589,14 @@ signs only for a purpose the domain manifest allows
 says what the operator must change. The panel never reads or exports the wallet's private
 keys; it receives only the signature.
 
+The wallet does not sign the grant request as it stands: it signs
+`{ ctx: "atlas.bridge.sign/1", origin, payload }` (SPEC.md §3.8.1), with the origin of the
+page that asked, and returns that object as `signedPayload`. The panel sends it as the
+request's `payload`. The issuer accepts a bridge-signed request on this route only, and only
+when `origin` is one of the domain's own origins (`https://<domain>`, plus
+`http://<domain>` for localhost); any other origin, or any extra field around the payload,
+is refused with `401 wrong-origin`. Every other route refuses bridge-signed requests.
+
 **Renewal.** A grant is not renewed silently. When it is about to lapse, or has lapsed, the
 next action asks the wallet again for the same scope, with a new ephemeral key and nonce.
 It cannot widen the scope: the request lists exactly the worlds and operations the issuer

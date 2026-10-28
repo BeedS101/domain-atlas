@@ -697,15 +697,18 @@ function check_admin_auth_fields($payload, $action, $nowMs) {
 // Authenticates one signed admin request for $action (the route path). Shape
 // and freshness first (cheap, no secret), then signature and roster, and the
 // nonce is spent only after both pass, so unauthenticated traffic can never
-// fill the nonce store. Mirrors authenticateAdminProof().
-function authenticate_admin_proof($payload, $proof, $action, $need = 'admin') {
+// fill the nonce store. Mirrors authenticateAdminProof(). $bridgeSigned, when
+// given, is the { ctx, origin, payload } object the signature covers (a
+// request signed through the wallet bridge, already unwrapped to $payload).
+function authenticate_admin_proof($payload, $proof, $action, $need = 'admin', $bridgeSigned = null) {
   if (!is_array($payload) || !is_array($proof)) return admin_failure(401, 'auth-required', 'payload and proof are required');
   $retryAfter = atlas_admin_failure_retry_after();
   if ($retryAfter) return admin_rate_limited($retryAfter);
   $nowMs = atlas_now_ms();
   $fieldError = check_admin_auth_fields($payload, $action, $nowMs);
   if ($fieldError) return $fieldError;
-  if (!is_string($proof['publicKey'] ?? null) || $proof['publicKey'] === '' || !verify_mail_envelope($payload, $proof)) {
+  $signed = $bridgeSigned !== null ? $bridgeSigned : $payload;
+  if (!is_string($proof['publicKey'] ?? null) || $proof['publicKey'] === '' || !verify_mail_envelope($signed, $proof, $bridgeSigned !== null)) {
     atlas_admin_record_failure();
     return admin_failure(401, 'bad-signature', 'admin signature does not check out');
   }
@@ -916,7 +919,7 @@ function delete_admin_session($token) {
 // says nothing is administrator-only, so a moderator reaches only the routes
 // that explicitly ask for 'moderation'. Returns a refusal (isset($r['error']);
 // pass it to admin_auth_fail()) or ['publicKey', 'authority'].
-function require_admin_auth($payload, $proof, $token, $action, $need = 'admin') {
+function require_admin_auth($payload, $proof, $token, $action, $need = 'admin', $bridgeSigned = null) {
   if (is_string($token) && $token !== '') {
     $checked = check_admin_session($token);
     if (isset($checked['publicKey'])) {
@@ -930,7 +933,7 @@ function require_admin_auth($payload, $proof, $token, $action, $need = 'admin') 
       ? admin_failure(401, 'not-admin', 'this key is not a registered domain admin')
       : admin_failure(401, 'session-invalid', 'session is missing, unknown, or expired');
   }
-  return authenticate_admin_proof($payload, $proof, $action, $need);
+  return authenticate_admin_proof($payload, $proof, $action, $need, $bridgeSigned);
 }
 
 // ---------- Moderation grants ----------

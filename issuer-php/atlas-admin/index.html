@@ -1541,7 +1541,11 @@
         }
         if (!signed.result) throw fail('declined', 'The wallet request was declined, closed, or timed out. No session was started.');
         if (sessionKey && signed.result.publicKey !== sessionKey) throw fail('wrong-identity', 'The wallet signed with a different identity from the one you are logged in with. Switch identity in the wallet and try again.');
-        const res = await postJson('/atlas/admin/moderation/grant', { payload, proof: signed.result });
+        // The wallet signs { ctx, origin, payload }, not the payload alone, and
+        // returns that object as signedPayload; it is what the issuer verifies.
+        const { signedPayload, ...proof } = signed.result;
+        if (!signedPayload) throw fail('old-wallet', 'This wallet extension is out of date. Update it and try again.');
+        const res = await postJson('/atlas/admin/moderation/grant', { payload: signedPayload, proof });
         if (!res.ok) throw fail(res.body && res.body.code, explain(res.body && res.body.code, 'The domain refused to issue a moderation grant.'));
         const expiresAtMs = Date.parse(res.body.expiresAt);
         active = { grant: res.body.grant, popKey: popKey.privateKey, audience, worlds, operations, expiresAtMs };

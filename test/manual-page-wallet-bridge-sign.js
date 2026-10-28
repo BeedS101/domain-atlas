@@ -159,13 +159,21 @@ function pageHtml(title, linkTag) {
     const approveResult = await approveResultPromise;
     if (approveResult.allowed !== true || !approveResult.result) throw new Error('Expected a real signature envelope on approval, got: ' + JSON.stringify(approveResult));
     if (approveResult.result.publicKey !== realPublicKey) throw new Error('Expected the envelope\'s publicKey to match the active identity, got: ' + approveResult.result.publicKey);
+    const { signedPayload, ...envelope } = approveResult.result;
+    const expectedSigned = { ctx: 'atlas.bridge.sign/1', origin: 'http://' + DOMAIN, payload: signPayload };
+    if (JSON.stringify(signedPayload) !== JSON.stringify(expectedSigned)) throw new Error('Expected signedPayload to be { ctx, origin, payload } for this origin and payload, got: ' + JSON.stringify(signedPayload));
     const verified = await walletPage.evaluate(
       ({ payload, envelope }) => AtlasWallet.verifySignedPayload(payload, envelope),
-      { payload: signPayload, envelope: approveResult.result }
+      { payload: expectedSigned, envelope }
     );
-    if (!verified) throw new Error('Expected the approved signature to actually verify against the exact payload the page sent');
+    if (!verified) throw new Error('Expected the approved signature to verify over { ctx, origin, payload }');
+    const verifiesBare = await walletPage.evaluate(
+      ({ payload, envelope }) => AtlasWallet.verifySignedPayload(payload, envelope),
+      { payload: signPayload, envelope }
+    );
+    if (verifiesBare) throw new Error('The signature must not verify over the bare page payload');
     await approvePage.close();
-    console.log('PASS: approval produced a real, verifiable signature over the exact payload, correctly attributed to the active identity, with the real requesting origin and payload shown in the prompt');
+    console.log('PASS: approval produced a real signature over { ctx, origin, payload } (not over the bare page payload), attributed to the active identity, with the real requesting origin and payload shown in the prompt');
 
     console.log('STEP 5: the SAME whitelisted purpose, this time Denied, resolves allowed:true, result:null — a visitor\'s own "no" is final, not a fallback the page can route around');
     const denyPage = await context.newPage();
@@ -180,6 +188,36 @@ function pageHtml(title, linkTag) {
     if (denyResult.allowed !== true || denyResult.result !== null) throw new Error('Expected {allowed:true, result:null} on denial, got: ' + JSON.stringify(denyResult));
     await denyPage.close();
     console.log('PASS: a second whitelisted purpose ("age-attestation") also prompts correctly, and an explicit Deny yields no signature');
+
+    console.log('STEP 6: the page posts its own request messages into the confirmation iframe; the prompt and the signature ignore them');
+    const forgePage = await context.newPage();
+    await forgePage.goto('http://' + DOMAIN + '/page-sign.html', { waitUntil: 'load' });
+    const forgedPayload = { action: 'transfer', credentialId: 'urn:test:forged', recipientPublicKey: 'ATTACKER' };
+    const forgeResultPromise = forgePage.evaluate((forgedPayload) => {
+      const forged = { type: 'domain-atlas-bridge-confirm-init', origin: 'https://bank.example', kind: 'sign', detail: 'login', payload: forgedPayload };
+      const timer = setInterval(() => {
+        const frame = document.getElementById('domain-atlas-bridge-confirm');
+        if (frame && frame.contentWindow) frame.contentWindow.postMessage(forged, '*');
+      }, 20);
+      setTimeout(() => clearInterval(timer), 4000);
+      return window.atlasWallet.requestSignature({ purpose: 'login', nonce: 'genuine-request' });
+    }, forgedPayload);
+    forgeResultPromise.catch(() => {});
+    await forgePage.waitForSelector('#domain-atlas-bridge-confirm', { timeout: 10000 });
+    const forgeFrame = forgePage.frameLocator('#domain-atlas-bridge-confirm');
+    await forgeFrame.locator('#readyState').waitFor({ state: 'visible', timeout: 10000 });
+    await forgePage.waitForTimeout(1500);
+    const forgeOriginShown = await forgeFrame.locator('#origin').innerText();
+    if (forgeOriginShown !== 'http://' + DOMAIN) throw new Error('Expected the real origin to stay on the prompt, got: ' + forgeOriginShown);
+    const forgePayloadShown = await forgeFrame.locator('#payloadBox').innerText();
+    if (!forgePayloadShown.includes('genuine-request') || forgePayloadShown.includes('ATTACKER')) throw new Error('Expected the genuine payload to stay on the prompt, got: ' + forgePayloadShown);
+    await forgeFrame.locator('#approveBtn').click();
+    const forgeResult = await forgeResultPromise;
+    if (!forgeResult.result || !forgeResult.result.signedPayload) throw new Error('Expected a signature, got: ' + JSON.stringify(forgeResult));
+    const forgeSigned = forgeResult.result.signedPayload;
+    if (forgeSigned.origin !== 'http://' + DOMAIN || forgeSigned.payload.nonce !== 'genuine-request') throw new Error('Expected the signature to cover the genuine request, got: ' + JSON.stringify(forgeSigned));
+    await forgePage.close();
+    console.log('PASS: forged messages from the page change neither the prompt nor what is signed');
 
     console.log('\nALL CHECKS PASSED — SPEC.md §3.8.1\'s wallet-bridge signing refuses a non-whitelisted purpose with no prompt at all, shows a real non-spoofable confirmation (correct origin, correct payload) for a whitelisted one, correctly reflects whether an identity is actually unlocked, and only ever produces a genuine, verifiable signature when the visitor explicitly approves it.');
   } finally {

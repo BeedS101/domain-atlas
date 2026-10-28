@@ -18,7 +18,16 @@ $proof = $requestBody['proof'] ?? null;
 if (!is_array($proof)) {
   admin_auth_fail(admin_failure(401, 'signature-required', 'a moderation grant needs a fresh signed request; a session token alone is not accepted'));
 }
-$auth = require_admin_auth($payload, $proof, null, '/atlas/admin/moderation/grant', 'moderation');
+// The admin panel asks for this signature through the wallet bridge, so it
+// arrives as { ctx, origin, payload } and must have been made on one of this
+// domain's own pages.
+$bridgeSigned = null;
+if (atlas_is_bridge_signed($payload)) {
+  $bridgeSigned = $payload;
+  $payload = atlas_unwrap_bridge_signed($bridgeSigned);
+  if ($payload === null) admin_auth_fail(admin_failure(401, 'wrong-origin', 'the request was not signed on one of this domain\'s own pages'));
+}
+$auth = require_admin_auth($payload, $proof, null, '/atlas/admin/moderation/grant', 'moderation', $bridgeSigned);
 if (isset($auth['error'])) admin_auth_fail($auth);
 
 $config = atlas_moderation_config();

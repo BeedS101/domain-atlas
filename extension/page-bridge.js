@@ -80,6 +80,12 @@
     // sign with, or the request simply timed out) — deliberately
     // indistinguishable from each other, per SPEC.md §3.8.1, since none of
     // them is a page's business to tell apart. Never throws.
+    //
+    // On approval, result is a proof envelope (signerRole, publicKey,
+    // signature, ...) plus result.signedPayload, the exact object signed:
+    // { ctx: 'atlas.bridge.sign/1', origin: <this page's origin>, payload }.
+    // A verifier checks the signature over signedPayload and checks its
+    // origin, never over the bare payload.
     async requestSignature(payload) {
       if (!payload || typeof payload !== 'object' || typeof payload.purpose !== 'string' || !payload.purpose) {
         return { allowed: false, result: null };
