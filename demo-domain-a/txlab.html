@@ -88,18 +88,19 @@
 
 <div id="app" style="display:none">
 
-<div class="panel">
-  <h2>Demo administrator</h2>
-  <p class="muted">Viewing needs no login. Creating a transaction and signing a decision need this domain's demo-administrator token. It is kept in this page's memory only.</p>
-  <div class="row">
-    <div><label for="tok">Administrator token for <span class="domainName"></span></label><input id="tok" type="password" autocomplete="off"></div>
-    <button id="tokBtn" class="secondary">Unlock</button>
-    <span id="tokState" class="muted">locked</span>
-  </div>
+<div class="panel" id="visitorPanel" style="display:none">
+  <h2>Try it yourself: one complete 2-of-2 transfer</h2>
+  <p class="muted">You get a private test session with <b>100.00 DEMO</b> for Alice and 0.00 for Bob. Start a transfer, then ask each domain to approve it: each one fetches the same transaction, checks it against its own rules and signs with its own server-side key. Only when both have signed does the transfer execute and a signed receipt appear. No wallet, no administrator token, no real money.</p>
+  <div id="sessionInfo" class="muted"></div>
+  <div class="row"><button id="newSession" class="secondary">Start a fresh test session</button></div>
 </div>
 
-<div class="panel">
-  <h2>1. Transaction</h2>
+<div class="panel caution" id="approverNotice" style="display:none">
+  <p><b>This is an approving domain.</b> Test transfers are started on <a id="settleLink" href="#"><span id="settleName"></span></a>; when a visitor asks this domain to approve, it fetches the transfer from there, validates it under its own limits and signs it with its own key. Open a transfer here (paste its id below, or follow the link shown on the settlement domain) to see this domain's own independent verification.</p>
+</div>
+
+<div class="panel" id="txPanel">
+  <h2 id="txHeading">1. Transaction</h2>
   <div class="row">
     <div><label for="from">Sender</label><select id="from"></select></div>
     <div><label for="to">Recipient</label><select id="to"></select></div>
@@ -114,7 +115,7 @@
 
 <div class="panel">
   <h2>2. Authorization</h2>
-  <div class="row"><div><label for="txid">Transaction</label><input id="txid" size="40" placeholder="transaction id"></div><button id="load" class="secondary">Load</button></div>
+  <div class="row"><div><label for="txid">Transaction</label><input id="txid" size="40" placeholder="transaction id"></div><button id="load" class="secondary">Load</button><button id="runAll" style="display:none">Request both approvals</button></div>
   <div id="recent" class="muted" style="margin-top:0.5rem"></div>
   <div id="authBox" style="display:none">
     <div style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap; margin-top:0.9rem">
@@ -135,8 +136,10 @@
     <tr><th>Canonical payload digest (sha-256)</th><td class="mono" id="evDigest"></td></tr>
     <tr><th>Digest recomputed in this browser</th><td id="evDigestOk"></td></tr>
     <tr><th>Origin / settlement authority</th><td id="evOrigin"></td></tr>
+    <tr><th>Ledger</th><td id="evLedger"></td></tr>
     <tr><th>Created / expires</th><td id="evTimes"></td></tr>
   </table>
+  <p class="muted" style="margin-top:0.8rem">Verify it yourself: the "This browser" column is computed in your browser with Web Crypto against the public keys each domain publishes at <a id="keysLink" href="#" target="_blank" rel="noopener">its roster endpoint</a>; nothing there is taken on trust from this page.</p>
   <h3 style="font-size:0.95rem; margin:1rem 0 0.2rem">Signed approvals</h3>
   <table id="evApprovals"><thead><tr><th>Signing domain</th><th>Decision</th><th>Signed at</th><th>Signature</th><th>Server check</th><th>This browser</th></tr></thead><tbody></tbody></table>
   <h3 style="font-size:0.95rem; margin:1rem 0 0.2rem">Settlement receipt</h3>
@@ -150,15 +153,33 @@
   <p id="conserve" class="muted"></p>
 </div>
 
+<details class="panel" id="inspect" style="display:none">
+  <summary>Read-only inspection: the administrator demo ledger on this domain</summary>
+  <p class="muted">The separate main ledger used for administrator demonstrations. Public visitors never touch it.</p>
+  <div id="mainBalances" class="grid"></div>
+  <p class="muted" id="mainConservation"></p>
+</details>
+
 <div class="panel">
   <h2>Event log</h2>
   <p class="muted">Server-side events as they actually happen, including every rejected attempt.</p>
   <div id="log"></div>
 </div>
 
-<div class="panel caution">
+<details class="panel" id="adminBox">
+  <summary><b>Demo administrator</b> (protected manual mode)</summary>
+  <p class="muted">Viewing and the public test flow need no login. Creating a transaction on the administrator ledger and signing a manual decision need this domain's demo-administrator token. It is kept in this page's memory only.</p>
+  <div class="row">
+    <div><label for="tok">Administrator token for <span class="domainName"></span></label><input id="tok" type="password" autocomplete="off"></div>
+    <button id="tokBtn" class="secondary">Unlock</button>
+    <span id="tokState" class="muted">locked</span>
+    <button id="adminSubmit" class="secondary" style="display:none">Submit above transfer on the administrator ledger</button>
+  </div>
+</details>
+
+<div class="panel caution" id="caution">
   <p><b>What this proves, and what it does not.</b> One domain alone can never execute the transfer; each domain signs with its own key and verifies the other's signature against a public key it pinned in its own configuration. A single settlement authority holds the demo balances and executes, so this is <b>not</b> atomic settlement across two independent ledgers; that needs a separate prepare/commit/recovery protocol.</p>
-  <p>Failure cases (forged signature, wrong transaction, modified amount, duplicate approval, duplicate execution, insufficient balance, unavailable domain, restart, expiry) are exercised by the automated test <code>test/manual-txlab-php.js</code>, not by controls on this public page.</p>
+  <p>Failure cases (forged signature, wrong transaction, modified amount, duplicate approval, duplicate execution, insufficient balance, unavailable domain, restart, expiry) are exercised by the automated tests <code>test/manual-txlab-php.js</code> and <code>test/manual-txlab-public-php.js</code>, not by controls on this public page. Public sessions are limited, rate-limited and expire; the public test mode can never reset state, mint balances or sign arbitrary data.</p>
 </div>
 
 </div>
@@ -169,6 +190,7 @@
   var API = '/atlas/demo/txlab/api.php';
   var adminToken = null;
   var health = null, roster = null, currentTx = null, lastView = null;
+  var pub = false, isSettle = false, session = null, busy = false, limits = null, starting = false;
   var enc = new TextEncoder();
 
   function $(id) { return document.getElementById(id); }
@@ -184,6 +206,10 @@
     var init = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
     return fetch(url, init).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, body: j }; }); });
   }
+  // per-tab session (sessionStorage is a convenience only: everything still works without it)
+  function storeKey() { return 'txlab-session-' + (roster ? roster.domain : ''); }
+  function loadStored() { try { var s = JSON.parse(sessionStorage.getItem(storeKey())); if (s && s.sid && s.token) return s; } catch (e) { /* unavailable */ } return null; }
+  function saveStored(s) { try { if (s) sessionStorage.setItem(storeKey(), JSON.stringify(s)); else sessionStorage.removeItem(storeKey()); } catch (e) { /* unavailable */ } }
   // integer minor units only: never a float
   function fmt(minor) { var neg = minor < 0; var m = Math.abs(minor); return (neg ? '-' : '') + Math.floor(m / 100) + '.' + String(m % 100).padStart(2, '0'); }
   function parseAmount(s) {
@@ -227,9 +253,15 @@
         $('whoami').textContent = 'Viewing from ' + roster.domain + ' (' + (health.role === 'settlement-authority' ? 'settlement authority: holds the demo balances and executes' : 'approving domain: signs with its own key') + '). Policy: ' + pol.threshold + ' of ' + pol.roster.length + ' domains (' + pol.roster.join(', ') + '); required: ' + pol.mandatory.join(', ') + '. Settlement authority: ' + roster.settlementDomain + '.';
         Array.prototype.forEach.call(document.querySelectorAll('.domainName'), function (n) { n.textContent = roster.domain; });
         $('app').style.display = 'block';
-        var isSettle = health.role === 'settlement-authority';
-        $('submit').disabled = !isSettle;
-        $('createNote').textContent = isSettle ? '' : 'Transactions are created at ' + roster.settlementDomain + '; you can still view them here and sign this domain\'s decision.';
+        isSettle = health.role === 'settlement-authority';
+        pub = !!(health.publicDemo && health.publicDemo.enabled);
+        limits = pub ? health.publicDemo.limits : null;
+        $('keysLink').href = API + '?op=roster';
+        if (pub) setupPublicMode(); else {
+          $('adminBox').open = true;
+          $('submit').disabled = !isSettle;
+          $('createNote').textContent = isSettle ? '' : 'Transactions are created at ' + roster.settlementDomain + '; you can still view them here and sign this domain\'s decision.';
+        }
         var hash = /tx=([0-9a-f-]{36})/.exec(location.hash);
         if (hash) { $('txid').value = hash[1]; loadTx(hash[1]); }
         refreshState();
@@ -238,15 +270,96 @@
     });
   }
 
+  // ---- public demo mode
+  function setupPublicMode() {
+    var app = $('app');
+    app.insertBefore($('adminBox'), $('caution'));
+    if (!isSettle) {
+      $('txPanel').style.display = 'none';
+      $('approverNotice').style.display = 'block';
+      $('settleName').textContent = roster.settlementDomain;
+      $('settleLink').href = roster.settlementDomain.indexOf('.') >= 0 ? 'https://' + roster.settlementDomain + '/txlab.html' : '#';
+      return;
+    }
+    $('visitorPanel').style.display = 'block';
+    $('inspect').style.display = 'block';
+    $('txHeading').textContent = '1. Start a test transfer';
+    $('submit').textContent = 'Start test transfer';
+    $('amt').value = '30';
+    $('createNote').textContent = 'Test balances only. Limit per transfer: ' + fmt(limits.maxAmountMinor) + ' DEMO; at most ' + limits.maxTransfersPerSession + ' transfers per session.';
+    var stored = loadStored();
+    if (stored) { session = stored; refreshSession(); } else startSession();
+  }
+
+  function startSession() {
+    if (starting) return Promise.resolve();
+    starting = true;
+    $('sessionInfo').textContent = 'Starting your test session…';
+    return api('public-start', '', {}).then(function (r) {
+      starting = false;
+      if (r.status !== 200) { $('sessionInfo').textContent = 'Could not start a session: ' + (r.body.error || ('HTTP ' + r.status)); say('err', r.body.error || ('HTTP ' + r.status)); return; }
+      session = { sid: r.body.sid, token: r.body.token, expiresAtMs: r.body.expiresAtMs };
+      saveStored(session);
+      currentTx = null; lastView = null;
+      $('authBox').style.display = 'none'; $('evidencePanel').style.display = 'none'; $('balancePanel').style.display = 'none'; $('txid').value = '';
+      say('', ''); $('msg').style.display = 'none';
+      renderSession({ session: { sid: r.body.sid, expiresAtMs: r.body.expiresAtMs, transfersMade: 0 }, balances: r.body.balances, conservation: { totalMinor: r.body.balances.alice, sumMinor: r.body.balances.alice, ok: true }, transactions: [] });
+    });
+  }
+
+  function refreshSession() {
+    if (!session) return Promise.resolve();
+    return api('public-session', '', { sid: session.sid, token: session.token }).then(function (r) {
+      if (r.status === 401) { session = null; saveStored(null); return startSession(); }
+      if (r.status !== 200) { $('conservation').textContent = 'Cannot read your session: ' + (r.body.error || r.status); return; }
+      renderSession(r.body);
+    });
+  }
+
+  function drawBalances(map) {
+    var b = $('balances'); clear(b);
+    Object.keys(map).forEach(function (n) { b.appendChild(el('div', { class: 'card' }, [el('h3', { text: n }), el('div', { class: 'quorum', text: fmt(map[n]) + ' DEMO' })])); });
+  }
+
+  function renderSession(s) {
+    session.expiresAtMs = s.session.expiresAtMs;
+    $('sessionInfo').textContent = 'Your private test session ' + s.session.sid.slice(0, 6) + '… · ' + s.session.transfersMade + ' of ' + limits.maxTransfersPerSession + ' transfers used · expires ' + when(s.session.expiresAtMs).slice(11, 19) + ' UTC. Nobody else can spend these balances.';
+    drawBalances(s.balances);
+    $('conservation').textContent = 'Conservation check (your session): total ' + fmt(s.conservation.totalMinor) + ' DEMO, accounts sum to ' + fmt(s.conservation.sumMinor) + ' DEMO: ' + (s.conservation.ok ? 'OK' : 'MISMATCH');
+    var rec = $('recent'); clear(rec);
+    if (s.transactions.length) {
+      rec.appendChild(document.createTextNode('Your transfers: '));
+      s.transactions.slice(0, 8).forEach(function (t) {
+        var a = el('a', { href: '#tx=' + t.txId, text: t.from + '→' + t.to + ' ' + fmt(t.amountMinor) + ' [' + t.status + ']' });
+        a.addEventListener('click', function (ev) { ev.preventDefault(); $('txid').value = t.txId; loadTx(t.txId); });
+        rec.appendChild(a); rec.appendChild(document.createTextNode('  '));
+      });
+    }
+  }
+
   var accountsFilled = false;
+  function fillAccounts(list) {
+    if (accountsFilled) return;
+    ['from', 'to'].forEach(function (id, i) { var sel = $(id); list.forEach(function (a) { sel.appendChild(el('option', { value: a, text: a })); }); sel.selectedIndex = Math.min(i, list.length - 1); });
+    accountsFilled = true;
+  }
+
   function refreshState() {
+    if (pub && isSettle) fillAccounts(limits.accounts);
+    if (pub) {
+      if (isSettle) refreshSession();
+      if (!isSettle) return;
+    }
     api('state').then(function (r) {
       if (r.status !== 200) { $('conservation').textContent = 'Cannot read state: ' + (r.body.error || r.status); return; }
       var s = r.body;
-      if (!accountsFilled) {
-        ['from', 'to'].forEach(function (id, i) { var sel = $(id); s.accounts.forEach(function (a) { sel.appendChild(el('option', { value: a, text: a })); }); sel.selectedIndex = Math.min(i, s.accounts.length - 1); });
-        accountsFilled = true;
+      if (pub) {
+        var mb = $('mainBalances'); clear(mb);
+        Object.keys(s.balances).forEach(function (n) { mb.appendChild(el('div', { class: 'card' }, [el('h3', { text: n }), el('div', { class: 'quorum', text: fmt(s.balances[n]) + ' DEMO' })])); });
+        $('mainConservation').textContent = 'Conservation check: total ' + fmt(s.conservation.totalMinor) + ' DEMO, accounts sum to ' + fmt(s.conservation.sumMinor) + ' DEMO: ' + (s.conservation.ok ? 'OK' : 'MISMATCH');
+        return;
       }
+      fillAccounts(s.accounts);
       var b = $('balances'); clear(b);
       Object.keys(s.balances).forEach(function (n) { b.appendChild(el('div', { class: 'card' }, [el('h3', { text: n }), el('div', { class: 'quorum', text: fmt(s.balances[n]) + ' DEMO' })])); });
       $('conservation').textContent = 'Conservation check: total ' + fmt(s.conservation.totalMinor) + ' DEMO, accounts sum to ' + fmt(s.conservation.sumMinor) + ' DEMO: ' + (s.conservation.ok ? 'OK' : 'MISMATCH');
@@ -300,7 +413,20 @@
         el('span', { class: 'badge ' + d.status, text: d.status }),
         el('div', { class: 'muted', text: d.mandatory ? 'required: owns the ledger state' : 'quorum member' })
       ]);
-      if (mine && v.status === 'pending' && d.status === 'pending') {
+      var publicTx = v.ledger === 'public-demo';
+      var owned = publicTx && session && v.payload.session === session.sid;
+      if (publicTx) {
+        if (v.status === 'pending' && d.status === 'pending') {
+          if (owned) {
+            var ask = el('button', { class: 'ask', 'data-domain': d.domain, text: 'Ask ' + d.domain + ' to validate & sign' });
+            ask.disabled = busy;
+            ask.addEventListener('click', function () { publicApprove(v.txId, d.domain); });
+            card.appendChild(el('div', { class: 'row' }, [ask]));
+          } else {
+            card.appendChild(el('div', { class: 'muted', text: isSettle ? 'view only: this transfer belongs to another session' : 'view only: approvals are requested from ' + roster.settlementDomain }));
+          }
+        }
+      } else if (mine && v.status === 'pending' && d.status === 'pending') {
         var ap = el('button', { text: 'Verify & sign approval' }), rj = el('button', { class: 'danger', text: 'Reject' });
         ap.disabled = rj.disabled = !adminToken;
         ap.addEventListener('click', function () { decide(v.txId, 'approve'); });
@@ -312,6 +438,7 @@
       }
       cards.appendChild(card);
     });
+    if (pub && v.ledger === 'public-demo' && session && v.payload.session === session.sid) drawBalances(v.balances);
     var steps = $('steps'); clear(steps);
     function step(text, cls) { steps.appendChild(el('li', { class: cls || '', text: text })); }
     step('Transaction created', 'done');
@@ -324,7 +451,7 @@
     var other = $('otherSite'); clear(other);
     roster.policy.roster.forEach(function (d) {
       if (d === roster.domain || d.indexOf('.') < 0) return;
-      other.appendChild(document.createTextNode('View the same transaction on '));
+      other.appendChild(document.createTextNode('See what ' + d + ' independently shows and verifies: '));
       other.appendChild(el('a', { href: 'https://' + d + '/txlab.html#tx=' + v.txId, text: d, target: '_blank', rel: 'noopener' }));
       other.appendChild(document.createTextNode('. '));
     });
@@ -333,6 +460,9 @@
     $('evId').textContent = v.txId;
     $('evDigest').textContent = v.digest;
     $('evOrigin').textContent = v.payload.origin + ' / ' + v.settlementDomain;
+    $('evLedger').textContent = v.ledger === 'public-demo' ? 'public demo session ' + v.payload.session.slice(0, 6) + '… (private test balances)' : 'administrator demo ledger';
+    $('runAll').style.display = v.ledger === 'public-demo' && session && v.payload.session === session.sid && v.status === 'pending' ? '' : 'none';
+    $('runAll').disabled = busy;
     $('evTimes').textContent = when(v.createdAtMs) + ' → ' + when(v.expiresAtMs);
     $('evPayload').textContent = JSON.stringify(v.payload, null, 2);
     digestOf(v.payload).then(function (d) { var n = $('evDigestOk'); n.textContent = d === v.digest ? '✓ matches' : '✗ MISMATCH'; n.className = d === v.digest ? 'ok' : 'no'; });
@@ -379,24 +509,65 @@
   $('tokBtn').addEventListener('click', function () {
     var t = $('tok').value;
     api('admin-check', '', { adminToken: t }).then(function (r) {
-      if (r.status === 200) { adminToken = t; $('tok').value = ''; $('tokState').textContent = 'unlocked'; $('tokState').className = 'ok'; if (lastView) render(lastView); }
+      if (r.status === 200) { adminToken = t; $('tok').value = ''; $('tokState').textContent = 'unlocked'; $('tokState').className = 'ok'; if (pub && isSettle) $('adminSubmit').style.display = ''; if (lastView) render(lastView); }
       else { adminToken = null; $('tokState').textContent = r.body.error || 'refused'; $('tokState').className = 'no'; }
     });
   });
   $('load').addEventListener('click', function () { var id = $('txid').value.trim(); if (id) loadTx(id); });
-  $('submit').addEventListener('click', function () {
+  function newRequestId() { return 'web-' + Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(8)), function (b) { return ('0' + b.toString(16)).slice(-2); }).join(''); }
+  function createAsAdmin() {
     var minor = parseAmount($('amt').value);
     if (minor === null || minor < 1) { say('err', 'Enter an amount like 30 or 30.50.'); return; }
     if (!adminToken) { say('err', 'Unlock with the administrator token first.'); return; }
-    var rid = 'web-' + Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(8)), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
-    $('submit').disabled = true;
-    api('create', '', { adminToken: adminToken, requestId: rid, from: $('from').value, to: $('to').value, amountMinor: minor }).then(function (r) {
-      $('submit').disabled = health.role !== 'settlement-authority';
+    var btn = pub ? $('adminSubmit') : $('submit');
+    btn.disabled = true;
+    api('create', '', { adminToken: adminToken, requestId: newRequestId(), from: $('from').value, to: $('to').value, amountMinor: minor }).then(function (r) {
+      btn.disabled = !isSettle;
       if (r.status !== 200) { say('err', r.body.error || ('HTTP ' + r.status)); return; }
       say('ok', 'Transaction created and awaiting independent approvals.');
       $('txid').value = r.body.txId; currentTx = r.body.txId; location.hash = 'tx=' + r.body.txId; render(r.body); refreshState();
     });
+  }
+  function createAsVisitor() {
+    var minor = parseAmount($('amt').value);
+    if (minor === null || minor < 1) { say('err', 'Enter an amount like 30 or 30.50.'); return; }
+    if (!session) { say('err', 'Your session is not ready yet.'); return; }
+    $('submit').disabled = true;
+    api('public-transfer', '', { sid: session.sid, token: session.token, requestId: newRequestId(), from: $('from').value, to: $('to').value, amountMinor: minor }).then(function (r) {
+      $('submit').disabled = false;
+      if (r.status === 401) { say('err', 'Your session expired. A fresh one has been started; please try again.'); session = null; saveStored(null); startSession(); return; }
+      if (r.status !== 200) { say('err', r.body.error || ('HTTP ' + r.status)); return; }
+      say('ok', 'Test transfer started. Neither domain has approved it yet, so no balance has moved.');
+      $('txid').value = r.body.txId; currentTx = r.body.txId; location.hash = 'tx=' + r.body.txId; render(r.body); refreshSession();
+    });
+  }
+  $('submit').addEventListener('click', function () { if (pub) createAsVisitor(); else createAsAdmin(); });
+  $('adminSubmit').addEventListener('click', createAsAdmin);
+
+  // ask one domain to validate and sign (the settlement domain does it itself; others are asked server to server)
+  function publicApprove(id, domain) {
+    if (!session || busy) return Promise.resolve(false);
+    busy = true;
+    say('ok', 'Asking ' + domain + ' to fetch, validate and sign this transfer…');
+    if (lastView) render(lastView);
+    return api('public-approve', '', { sid: session.sid, token: session.token, id: id, domain: domain }).then(function (r) {
+      busy = false;
+      if (r.status !== 200) {
+        say('err', (r.body.state === 'peer-unavailable' ? domain + ' is unavailable right now; the transfer stays pending. ' : '') + (r.body.error || ('HTTP ' + r.status)));
+        loadTx(id, true); return false;
+      }
+      say('ok', domain + ' validated the transfer under its own rules and signed it with its own key.');
+      render(r.body.view); refreshSession();
+      return true;
+    });
+  }
+  $('runAll').addEventListener('click', function () {
+    if (!lastView) return;
+    var id = lastView.txId;
+    var order = lastView.domains.filter(function (d) { return d.status === 'pending'; }).map(function (d) { return d.domain; }).sort(function (a, b) { return (b === roster.settlementDomain) - (a === roster.settlementDomain); });
+    order.reduce(function (p, d) { return p.then(function (ok) { return ok === false ? false : publicApprove(id, d); }); }, Promise.resolve(true));
   });
+  $('newSession').addEventListener('click', function () { session = null; saveStored(null); startSession(); });
   function decide(id, decision) {
     api('decide', '', { adminToken: adminToken, id: id, decision: decision }).then(function (r) {
       if (r.status !== 200) { say('err', (r.body.state === 'peer-unavailable' ? 'Settlement authority unavailable: ' : '') + (r.body.error || ('HTTP ' + r.status))); return; }

@@ -2,8 +2,11 @@
 // Domain Atlas - Multi-Domain Transaction Authorization Lab (test only, no real value).
 // Single entry point: /atlas/demo/txlab/api.php?op=<operation>. Read operations are public;
 // create and decide need the demo-administrator token; submit-approval is public but
-// only accepts a decision signed by a roster domain's own key. No CORS headers are sent:
-// the lab page talks to its own domain, and domains talk to each other server to server.
+// only accepts a decision signed by a roster domain's own key. The public-* operations exist
+// only when publicDemo is enabled in the private config: each is bound to one visitor
+// session and offers no way to sign arbitrary data; peer-approve only answers a request
+// signed by the settlement domain. No CORS headers are sent: the lab page talks to its own
+// domain, and domains talk to each other server to server.
 require_once __DIR__ . '/inc/txlab.php';
 
 header('Content-Type: application/json');
@@ -16,7 +19,9 @@ function txlab_reply($status, $obj) {
   exit;
 }
 
-function txlab_body() {
+function txlab_body($requireJson = false) {
+  // a JSON content type cannot be sent cross-site without a CORS preflight, which this API never grants
+  if ($requireJson && (!isset($_SERVER['CONTENT_TYPE']) || stripos($_SERVER['CONTENT_TYPE'], 'application/json') !== 0)) txlab_fail(415, 'send application/json');
   $declared = isset($_SERVER['CONTENT_LENGTH']) ? (int) $_SERVER['CONTENT_LENGTH'] : 0;
   if ($declared > TXLAB_MAX_BODY) txlab_fail(413, 'request body too large');
   $raw = file_get_contents('php://input', false, null, 0, TXLAB_MAX_BODY + 1);
@@ -77,6 +82,38 @@ try {
         isset($b['approval']) ? $b['approval'] : null,
         isset($b['signature']) ? $b['signature'] : null
       ));
+    case 'public-start':
+      txlab_need('POST');
+      txlab_body(true);
+      txlab_reply(200, txlab_public_start());
+    case 'public-session':
+      txlab_need('POST');
+      $b = txlab_body(true);
+      txlab_reply(200, txlab_public_session_state(isset($b['sid']) ? $b['sid'] : null, isset($b['token']) ? $b['token'] : null));
+    case 'public-transfer':
+      txlab_need('POST');
+      $b = txlab_body(true);
+      txlab_reply(200, txlab_public_transfer(
+        isset($b['sid']) ? $b['sid'] : null,
+        isset($b['token']) ? $b['token'] : null,
+        isset($b['requestId']) ? $b['requestId'] : null,
+        isset($b['from']) ? $b['from'] : null,
+        isset($b['to']) ? $b['to'] : null,
+        isset($b['amountMinor']) ? $b['amountMinor'] : null
+      ));
+    case 'public-approve':
+      txlab_need('POST');
+      $b = txlab_body(true);
+      txlab_reply(200, txlab_public_approve(
+        isset($b['sid']) ? $b['sid'] : null,
+        isset($b['token']) ? $b['token'] : null,
+        isset($b['id']) ? $b['id'] : null,
+        isset($b['domain']) ? $b['domain'] : null
+      ));
+    case 'peer-approve':
+      txlab_need('POST');
+      $b = txlab_body(true);
+      txlab_reply(200, txlab_public_peer_approve(isset($b['request']) ? $b['request'] : null, isset($b['signature']) ? $b['signature'] : null));
     default:
       txlab_fail(404, 'unknown operation');
   }

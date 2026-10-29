@@ -11,9 +11,14 @@
 // own key; verifiers use public keys pinned in their own configuration, never keys
 // supplied in a request. This is NOT atomic settlement across independent ledgers.
 //
+// Public-demo mode (inc/txlab-public.php) is a separate, explicitly enabled path: visitor
+// sessions, per-session test balances and server-enforced limits, in its own SQLite file.
+// It never touches the main ledger, and administrator operations stay token-gated.
+//
 // Compatible with PHP 7.2+ (shared hosting): no arrow functions, match or typed properties.
 
 require_once __DIR__ . '/../../../../lib/crypto.php';
+require_once __DIR__ . '/txlab-public.php';
 
 const TXLAB_VERSION = 'domain-atlas-txlab/1';
 const TXLAB_APPROVAL_VERSION = 'domain-atlas-txlab-approval/1';
@@ -169,6 +174,8 @@ function txlab_load_config() {
     if (canonicalize(['b' => 1, 'a' => ['z' => true, 'y' => 'x']]) !== '{"a":{"y":"x","z":true},"b":1}') $problems[] = 'canonical JSON self-test failed';
   } catch (Exception $e) { $problems[] = 'canonical JSON self-test failed'; }
 
+  $public = txlab_public_config(isset($c['publicDemo']) ? $c['publicDemo'] : null, $problems);
+
   if ($problems) return $cache = [null, $problems];
   ksort($roster);
   $mandatory = array_values(array_unique($mandatory));
@@ -186,6 +193,7 @@ function txlab_load_config() {
     'accounts' => $accounts,
     'ttlMs' => $ttl * 1000,
     'insecure' => $insecure,
+    'public' => $public,
     'privateKey' => $priv,
   ];
   return $cache = [$cfg, []];
@@ -203,21 +211,25 @@ function txlab_policy($cfg) {
 
 // ---------------------------------------------------------------- database
 
-function txlab_db() {
-  static $db = null;
-  if ($db !== null) return $db;
+// Two separate SQLite files: 'main' (administrator-driven ledger) and 'public' (visitor
+// sessions, only when publicDemo is enabled).
+function txlab_db($scope = 'main') {
+  static $dbs = [];
+  if (isset($dbs[$scope])) return $dbs[$scope];
   $cfg = txlab_require_config();
-  $db = new PDO('sqlite:' . $cfg['dir'] . '/txlab.sqlite');
+  if ($scope !== 'main' && $scope !== 'public') throw new InvalidArgumentException('unknown database scope');
+  if ($scope === 'public' && $cfg['public'] === null) txlab_fail(403, 'the public demo is not enabled on this domain');
+  $db = new PDO('sqlite:' . $cfg['dir'] . ($scope === 'public' ? '/txlab-public.sqlite' : '/txlab.sqlite'));
   $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
   $db->exec('PRAGMA busy_timeout = 8000');
   $db->exec('PRAGMA foreign_keys = ON');
   try { $db->exec('PRAGMA journal_mode = WAL'); } catch (Exception $e) { /* some filesystems refuse WAL; the default journal is still durable */ }
   $db->exec('PRAGMA synchronous = FULL');
-  txlab_migrate($db, $cfg);
-  return $db;
+  txlab_migrate($db, $cfg, $scope);
+  return $dbs[$scope] = $db;
 }
 
-function txlab_migrate($db, $cfg) {
+function txlab_migrate($db, $cfg, $scope) {
   $db->exec('BEGIN IMMEDIATE');
   try {
     $db->exec('CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)');
@@ -252,14 +264,16 @@ function txlab_migrate($db, $cfg) {
     // a stored transaction can never be edited, and a finished one never changes state again
     $db->exec('CREATE TRIGGER IF NOT EXISTS tx_payload_immutable BEFORE UPDATE OF tx_id, request_id, payload_json, digest, created_ms, expires_ms ON tx BEGIN SELECT RAISE(ABORT, \'transaction payload is immutable\'); END');
     $db->exec('CREATE TRIGGER IF NOT EXISTS tx_status_final BEFORE UPDATE OF status ON tx WHEN OLD.status <> \'pending\' BEGIN SELECT RAISE(ABORT, \'transaction is already final\'); END');
-    $db->exec('CREATE TRIGGER IF NOT EXISTS tx_no_delete BEFORE DELETE ON tx BEGIN SELECT RAISE(ABORT, \'transactions are never deleted\'); END');
+    // main-ledger records are never deleted; public-demo records are pruned with their expired session
+    if ($scope === 'main') $db->exec('CREATE TRIGGER IF NOT EXISTS tx_no_delete BEFORE DELETE ON tx BEGIN SELECT RAISE(ABORT, \'transactions are never deleted\'); END');
     $db->exec('CREATE TRIGGER IF NOT EXISTS approvals_immutable BEFORE UPDATE ON approvals BEGIN SELECT RAISE(ABORT, \'approvals are immutable\'); END');
-    $db->exec('CREATE TRIGGER IF NOT EXISTS approvals_no_delete BEFORE DELETE ON approvals BEGIN SELECT RAISE(ABORT, \'approvals are never deleted\'); END');
+    if ($scope === 'main') $db->exec('CREATE TRIGGER IF NOT EXISTS approvals_no_delete BEFORE DELETE ON approvals BEGIN SELECT RAISE(ABORT, \'approvals are never deleted\'); END');
     $db->exec('CREATE TRIGGER IF NOT EXISTS ledger_immutable BEFORE UPDATE ON ledger BEGIN SELECT RAISE(ABORT, \'ledger entries are immutable\'); END');
-    $db->exec('CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger BEGIN SELECT RAISE(ABORT, \'ledger entries are never deleted\'); END');
+    if ($scope === 'main') $db->exec('CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger BEGIN SELECT RAISE(ABORT, \'ledger entries are never deleted\'); END');
     $db->exec('CREATE TRIGGER IF NOT EXISTS receipts_immutable BEFORE UPDATE ON receipts BEGIN SELECT RAISE(ABORT, \'receipts are immutable\'); END');
-    // accounts exist only on the settlement authority
-    if ($cfg['isSettlement']) {
+    if ($scope === 'public') txlab_public_schema($db);
+    // the main accounts exist only on the settlement authority
+    if ($scope === 'main' && $cfg['isSettlement']) {
       $row = $db->query('SELECT v FROM meta WHERE k = \'seeded\'')->fetch(PDO::FETCH_ASSOC);
       if (!$row) {
         $ins = $db->prepare('INSERT INTO accounts (name, balance_minor) VALUES (?, ?)');
@@ -276,8 +290,8 @@ function txlab_migrate($db, $cfg) {
   }
 }
 
-function txlab_in_txn($fn) {
-  $db = txlab_db();
+function txlab_in_txn($fn, $scope = 'main') {
+  $db = txlab_db($scope);
   $db->exec('BEGIN IMMEDIATE');
   try {
     $r = $fn($db);
@@ -306,6 +320,12 @@ function txlab_payload_shape_ok($p) {
   $keys = ['amountMinor', 'createdAtMs', 'currency', 'expiresAtMs', 'from', 'origin', 'policy', 'to', 'txId', 'type', 'v'];
   $have = array_keys($p);
   sort($have);
+  if (isset($p['session'])) {
+    // a public-demo transfer carries the visitor session it belongs to
+    if (!is_string($p['session']) || !preg_match('/^[0-9a-f]{16}$/', $p['session'])) return false;
+    $keys[] = 'session';
+    sort($keys);
+  }
   if ($have !== $keys) return false;
   if ($p['v'] !== TXLAB_VERSION || $p['type'] !== 'transfer' || $p['currency'] !== TXLAB_CURRENCY) return false;
   foreach (['from', 'to', 'origin', 'txId'] as $f) if (!is_string($p[$f]) || $p[$f] === '') return false;
@@ -365,7 +385,11 @@ function txlab_check_payload_against_policy($cfg, $payload, $digest) {
     txlab_fail(400, 'the quorum policy in the transaction differs from this domain\'s own policy');
   }
   if ($payload['amountMinor'] < 1 || $payload['amountMinor'] > TXLAB_MAX_AMOUNT_MINOR) txlab_fail(400, 'amount is outside the allowed range');
-  if ($payload['from'] === $payload['to'] || !isset($cfg['accounts'][$payload['from']]) || !isset($cfg['accounts'][$payload['to']])) txlab_fail(400, 'unknown demo accounts');
+  if (isset($payload['session'])) {
+    txlab_public_check_payload($cfg, $payload);
+  } elseif ($payload['from'] === $payload['to'] || !isset($cfg['accounts'][$payload['from']]) || !isset($cfg['accounts'][$payload['to']])) {
+    txlab_fail(400, 'unknown demo accounts');
+  }
   if ($payload['expiresAtMs'] <= $payload['createdAtMs'] || $payload['expiresAtMs'] - $payload['createdAtMs'] > 3600000) txlab_fail(400, 'invalid expiry');
 }
 
@@ -448,6 +472,38 @@ function txlab_sweep_expired($db) {
   }
 }
 
+// Which database holds a transaction (settlement authority only): the main ledger, or the
+// public-demo database when that mode is enabled. Null when it exists in neither.
+function txlab_tx_scope($cfg, $txId) {
+  $st = txlab_db('main')->prepare('SELECT 1 FROM tx WHERE tx_id = ?');
+  $st->execute([$txId]);
+  if ($st->fetchColumn()) return 'main';
+  if ($cfg['public'] !== null) {
+    $st = txlab_db('public')->prepare('SELECT 1 FROM tx WHERE tx_id = ?');
+    $st->execute([$txId]);
+    if ($st->fetchColumn()) return 'public';
+  }
+  return null;
+}
+
+// Balance access for a transaction: a session-tagged transfer moves that session's own test
+// balances, every other transfer moves the main ledger accounts.
+function txlab_acct_balance($db, $payload, $name) {
+  if (!isset($payload['session'])) return txlab_balance($db, $name);
+  $st = $db->prepare('SELECT balance_minor FROM session_accounts WHERE sid = ? AND name = ?');
+  $st->execute([$payload['session'], $name]);
+  $v = $st->fetchColumn();
+  return $v === false ? null : (int) $v;
+}
+
+function txlab_acct_add($db, $payload, $name, $delta) {
+  if (!isset($payload['session'])) {
+    $db->prepare('UPDATE accounts SET balance_minor = balance_minor + ? WHERE name = ?')->execute([$delta, $name]);
+    return;
+  }
+  $db->prepare('UPDATE session_accounts SET balance_minor = balance_minor + ? WHERE sid = ? AND name = ?')->execute([$delta, $payload['session'], $name]);
+}
+
 function txlab_load_tx($db, $txId) {
   $st = $db->prepare('SELECT * FROM tx WHERE tx_id = ?');
   $st->execute([$txId]);
@@ -492,6 +548,8 @@ function txlab_submit_approval($txId, $approval, $signature) {
   // so the failure is visible in the evidence without changing the transaction.
   $reject = null;
   $res = null;
+  $scope = txlab_tx_scope($cfg, $txId);
+  if ($scope === null) txlab_fail(404, 'no such transaction');
   try {
     $res = txlab_in_txn(function ($db) use ($cfg, $txId, $approval, $signature, &$reject) {
       txlab_sweep_expired($db);
@@ -514,7 +572,7 @@ function txlab_submit_approval($txId, $approval, $signature) {
       txlab_event($db, $txId, $approval['decision'] === 'approve' ? 'approval-accepted' : 'rejection-accepted', $approval['approver'], 'signature verified against the pinned public key');
       txlab_advance($cfg, $db, $tx);
       return true;
-    });
+    }, $scope);
   } catch (PDOException $e) {
     txlab_fail(409, 'duplicate approval or conflicting update');
   }
@@ -537,8 +595,8 @@ function txlab_advance($cfg, $db, $tx) {
   if ($eval['satisfied']) {
     txlab_event($db, $txId, 'quorum-reached', null, count($eval['approved']) . '/' . $policy['threshold'] . ' approvals and every mandatory domain has approved');
     $p = $tx['payload'];
-    $fromBefore = txlab_balance($db, $p['from']);
-    $toBefore = txlab_balance($db, $p['to']);
+    $fromBefore = txlab_acct_balance($db, $p, $p['from']);
+    $toBefore = txlab_acct_balance($db, $p, $p['to']);
     if ($fromBefore === null || $toBefore === null || $fromBefore < $p['amountMinor']) {
       $db->prepare('UPDATE tx SET status = \'failed\', fail_reason = ?, finished_ms = ? WHERE tx_id = ? AND status = \'pending\'')
          ->execute(['insufficient balance at execution time', $now, $txId]);
@@ -548,8 +606,8 @@ function txlab_advance($cfg, $db, $tx) {
     $up = $db->prepare('UPDATE tx SET status = \'executed\', finished_ms = ? WHERE tx_id = ? AND status = \'pending\'');
     $up->execute([$now, $txId]);
     if ($up->rowCount() !== 1) return; // someone else already finalized it: never execute twice
-    $db->prepare('UPDATE accounts SET balance_minor = balance_minor - ? WHERE name = ?')->execute([$p['amountMinor'], $p['from']]);
-    $db->prepare('UPDATE accounts SET balance_minor = balance_minor + ? WHERE name = ?')->execute([$p['amountMinor'], $p['to']]);
+    txlab_acct_add($db, $p, $p['from'], -$p['amountMinor']);
+    txlab_acct_add($db, $p, $p['to'], $p['amountMinor']);
     $fromAfter = $fromBefore - $p['amountMinor'];
     $toAfter = $toBefore + $p['amountMinor'];
     $db->prepare('INSERT INTO ledger (tx_id, from_acct, to_acct, amount_minor, from_before, from_after, to_before, to_after, executed_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
@@ -569,6 +627,7 @@ function txlab_advance($cfg, $db, $tx) {
       'balancesAfter' => [$p['from'] => $fromAfter, $p['to'] => $toAfter],
       'ledgerEntryId' => $entryId, 'approvals' => $approvals,
     ];
+    if (isset($p['session'])) $receipt['session'] = $p['session'];
     $json = canonicalize($receipt);
     $db->prepare('INSERT INTO receipts (tx_id, receipt_json, signature) VALUES (?, ?, ?)')->execute([$txId, $json, txlab_sign($cfg, $json)]);
     txlab_event($db, $txId, 'executed', $cfg['domain'], $p['from'] . ' ' . $fromBefore . ' -> ' . $fromAfter . ', ' . $p['to'] . ' ' . $toBefore . ' -> ' . $toAfter);
@@ -588,15 +647,18 @@ function txlab_advance($cfg, $db, $tx) {
 function txlab_recover() {
   $cfg = txlab_require_config();
   if (!$cfg['isSettlement']) return;
-  txlab_in_txn(function ($db) use ($cfg) {
-    txlab_sweep_expired($db);
-    $ids = $db->query('SELECT tx_id FROM tx WHERE status = \'pending\'')->fetchAll(PDO::FETCH_COLUMN);
-    foreach ($ids as $id) {
-      $tx = txlab_load_tx($db, $id);
-      $eval = txlab_evaluate($tx['payload']['policy'], txlab_stored_decisions($db, $id));
-      if ($eval['satisfied']) txlab_advance($cfg, $db, $tx);
-    }
-  });
+  $scopes = $cfg['public'] !== null ? ['main', 'public'] : ['main'];
+  foreach ($scopes as $scope) {
+    txlab_in_txn(function ($db) use ($cfg) {
+      txlab_sweep_expired($db);
+      $ids = $db->query('SELECT tx_id FROM tx WHERE status = \'pending\'')->fetchAll(PDO::FETCH_COLUMN);
+      foreach ($ids as $id) {
+        $tx = txlab_load_tx($db, $id);
+        $eval = txlab_evaluate($tx['payload']['policy'], txlab_stored_decisions($db, $id));
+        if ($eval['satisfied']) txlab_advance($cfg, $db, $tx);
+      }
+    }, $scope);
+  }
 }
 
 // ---------------------------------------------------------------- views / evidence
@@ -605,7 +667,9 @@ function txlab_view($txId) {
   $cfg = txlab_require_config();
   if (!$cfg['isSettlement']) return txlab_remote_view($cfg, $txId);
   txlab_recover();
-  $db = txlab_db();
+  $scope = txlab_tx_scope($cfg, $txId);
+  if ($scope === null) txlab_fail(404, 'no such transaction');
+  $db = txlab_db($scope);
   $tx = txlab_load_tx($db, $txId);
   if (!$tx) txlab_fail(404, 'no such transaction');
   $policy = $tx['payload']['policy'];
@@ -651,7 +715,8 @@ function txlab_view($txId) {
     'quorum' => ['approved' => count($eval['approved']), 'required' => $policy['threshold'], 'missingMandatory' => $eval['missingMandatory']],
     'domains' => $domains, 'approvals' => $approvals, 'receipt' => $receipt,
     'events' => $ev->fetchAll(PDO::FETCH_ASSOC),
-    'balances' => txlab_balances($db),
+    'ledger' => isset($tx['payload']['session']) ? 'public-demo' : 'main',
+    'balances' => isset($tx['payload']['session']) ? txlab_session_balances($db, $tx['payload']['session']) : txlab_balances($db),
   ];
 }
 
@@ -764,7 +829,7 @@ function txlab_decide($txId, $decision) {
   if ($decision !== 'approve' && $decision !== 'reject') txlab_fail(400, 'decision must be approve or reject');
   if ($cfg['isSettlement']) {
     txlab_recover();
-    $db = txlab_db();
+    $db = txlab_db('main');
     $tx = txlab_load_tx($db, $txId);
     if (!$tx) txlab_fail(404, 'no such transaction');
     $payload = $tx['payload'];
@@ -782,6 +847,7 @@ function txlab_decide($txId, $decision) {
     if (!is_string($digest) || !is_string($status) || !is_array($payload)) txlab_fail(502, 'the settlement authority returned a malformed transaction');
     if (isset($payload['txId']) && $payload['txId'] !== $txId) txlab_fail(400, 'the settlement authority returned a different transaction');
   }
+  if (is_array($payload) && isset($payload['session'])) txlab_fail(400, 'public-demo transfers are approved only through the public flow, not by administrator decision');
   txlab_check_payload_against_policy($cfg, $payload, $digest);
   if ($status !== 'pending') txlab_fail(409, 'the transaction is ' . $status . ', not pending');
   if (txlab_now_ms() > $payload['expiresAtMs']) txlab_fail(409, 'the authorization window has closed');
@@ -827,6 +893,7 @@ function txlab_health() {
     $out['domain'] = $cfg['domain'];
     $out['role'] = $cfg['isSettlement'] ? 'settlement-authority' : 'approver';
     $out['insecureTransport'] = $cfg['insecure'];
+    $out['publicDemo'] = $cfg['public'] === null ? ['enabled' => false] : ['enabled' => true, 'limits' => txlab_public_limits($cfg)];
   } else {
     $out['reasons'] = $problems;
   }

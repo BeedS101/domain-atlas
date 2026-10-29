@@ -7,10 +7,12 @@
 //   php txlab-admin.php config --dir DIR --domain NAME --settlement NAME --threshold N
 //         --mandatory a,b --roster "name=PUBLICKEY@https://name/atlas/demo/txlab/api.php,..." [--ttl 900]
 //         [--accounts alice=10000,bob=0] [--allow-insecure-http] [--enable]
-//       writes DIR/config.php (disabled unless --enable)
+//         [--public-demo [--public-set maxAmountMinor=5000,maxSessions=100]]
+//       writes DIR/config.php (disabled unless --enable). --public-demo adds a publicDemo block with
+//       enabled => true (visitor sessions, no administrator token); --public-set overrides limits.
 //   php txlab-admin.php check --dir DIR     validates the setup the way the web endpoints do
 //   php txlab-admin.php disable --dir DIR   creates DIR/DISABLED (the kill switch); delete it to re-enable
-//   php txlab-admin.php reset --dir DIR --yes   deletes the lab's database (balances return to the seeded values)
+//   php txlab-admin.php reset --dir DIR --yes   deletes the lab's databases, main and public-demo (balances return to the seeded values)
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 require_once __DIR__ . '/../../../../lib/crypto.php';
 
@@ -74,6 +76,17 @@ if ($cmd === 'config') {
     'ttlSeconds' => (int) arg('ttl', 900), 'accounts' => $accounts, 'roster' => $roster,
     'adminTokenHash' => trim(file_get_contents($hashFile)), 'allowInsecureHttp' => (bool) arg('allow-insecure-http', false),
   ];
+  if (arg('public-demo', false)) {
+    $pub = ['enabled' => true];
+    if (is_string(arg('public-set'))) {
+      foreach (explode(',', arg('public-set')) as $kv) {
+        $parts = explode('=', $kv);
+        if (count($parts) !== 2 || !preg_match('/^[A-Za-z]+$/', $parts[0]) || !preg_match('/^[0-9]+$/', $parts[1])) die_msg('bad --public-set item: ' . $kv);
+        $pub[$parts[0]] = (int) $parts[1];
+      }
+    }
+    $cfg['publicDemo'] = $pub;
+  }
   file_put_contents($dir . '/config.php', "<?php\n// Transaction lab configuration. Keep this directory outside the web root.\nreturn " . var_export($cfg, true) . ";\n");
   chmod($dir . '/config.php', 0600);
   echo 'wrote ' . $dir . '/config.php (' . ($cfg['enabled'] ? 'ENABLED' : 'disabled; re-run with --enable or set enabled to true') . ")\n";
@@ -89,6 +102,8 @@ if ($cmd === 'check') {
   txlab_db();
   echo "OK: domain {$cfg['domain']}, settlement {$cfg['settlementDomain']}, {$cfg['threshold']}-of-" . count($cfg['rosterDomains']) . ', roster ' . implode(', ', $cfg['rosterDomains']) . "\n";
   if ($cfg['insecure']) echo "WARNING: allowInsecureHttp is on (tests only; never on a live domain)\n";
+  if ($cfg['public'] !== null) { txlab_db('public'); echo 'public demo: ENABLED (' . json_encode(txlab_public_limits($cfg)) . ")\n"; }
+  else echo "public demo: off\n";
   exit(0);
 }
 
@@ -101,7 +116,7 @@ if ($cmd === 'disable') {
 if ($cmd === 'reset') {
   if (!arg('yes')) die_msg('refusing without --yes');
   $n = 0;
-  foreach (['txlab.sqlite', 'txlab.sqlite-wal', 'txlab.sqlite-shm'] as $f) if (is_file($dir . '/' . $f) && unlink($dir . '/' . $f)) $n++;
+  foreach (['txlab.sqlite', 'txlab.sqlite-wal', 'txlab.sqlite-shm', 'txlab-public.sqlite', 'txlab-public.sqlite-wal', 'txlab-public.sqlite-shm'] as $f) if (is_file($dir . '/' . $f) && unlink($dir . '/' . $f)) $n++;
   echo "removed $n database file(s); balances are re-seeded from config.php on the next request\n";
   exit(0);
 }

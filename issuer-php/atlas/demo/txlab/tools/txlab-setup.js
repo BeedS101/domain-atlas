@@ -6,6 +6,7 @@
 //   node txlab-setup.js keygen --dir DIR --domain NAME
 //   node txlab-setup.js config --dir DIR --domain NAME --settlement NAME --threshold N --mandatory a,b
 //        --roster "name=PUBLICKEY@https://name/atlas/demo/txlab/api.php,..." [--ttl 900] [--accounts alice=10000,bob=0] [--enable]
+//        [--public-demo [--public-set maxAmountMinor=5000,maxSessions=100]]
 //
 // The key is generated on the machine running this script, so prefer the PHP tool on the server
 // itself when you can run it there; this exists for hosts without a command line.
@@ -61,6 +62,18 @@ if (cmd === 'keygen') {
   if (!fs.existsSync(hashFile)) die('run keygen first (admin-token.sha256 missing)');
   let accounts = [['alice', 10000], ['bob', 0]];
   if (typeof arg('accounts') === 'string') accounts = arg('accounts').split(',').map((a) => { const [n, v] = a.split('='); return [n, parseInt(v, 10)]; });
+  const publicBlock = [];
+  if (arg('public-demo', false)) {
+    const items = ["'enabled' => true"];
+    if (typeof arg('public-set') === 'string') {
+      for (const kv of arg('public-set').split(',')) {
+        const m = /^([A-Za-z]+)=([0-9]+)$/.exec(kv);
+        if (!m) die('bad --public-set item: ' + kv);
+        items.push(phpStr(m[1]) + ' => ' + parseInt(m[2], 10));
+      }
+    }
+    publicBlock.push('  \'publicDemo\' => [' + items.join(', ') + '],');
+  }
   const php = [
     '<?php', '// Transaction lab configuration. Keep this directory outside the web root.', 'return [',
     '  \'enabled\' => ' + (arg('enable', false) ? 'true' : 'false') + ',',
@@ -75,6 +88,7 @@ if (cmd === 'keygen') {
     '  ],',
     '  \'adminTokenHash\' => ' + phpStr(fs.readFileSync(hashFile, 'utf8').trim()) + ',',
     '  \'allowInsecureHttp\' => ' + (arg('allow-insecure-http', false) ? 'true' : 'false') + ',',
+    ...publicBlock,
     '];', '',
   ].join('\n');
   fs.writeFileSync(path.join(dir, 'config.php'), php, { mode: 0o600 });
