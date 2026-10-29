@@ -1,0 +1,4 @@
+<?php
+// Copy to private-dir.php (not this example) and return the ABSOLUTE path of the private
+// directory, which must be OUTSIDE the web root (for example the folder above public_html).
+return "/home/CPANELUSER/txlab-private";
