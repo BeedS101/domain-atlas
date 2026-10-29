@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Multi-Issuer Portable Asset Lab</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb; --amber: #96650f; --amber-bg: #fbf1de;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", sans-serif; max-width: 960px; margin: 0 auto 6rem; padding: 0 1.5rem; color: var(--ink); line-height: 1.5; }
+  .banner { background: var(--red); color: #fff; text-align: center; font-weight: 700; letter-spacing: 0.04em; padding: 0.55rem; margin: 0 -1.5rem 1.6rem; }
+  h1 { margin: 0 0 0.2rem; font-size: 1.6rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  code { background: #eef1f3; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.88em; }
+  .panel { border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem 1.3rem; margin: 1.2rem 0; background: var(--bg-card); }
+  .panel h2 { margin: 0 0 0.5rem; font-size: 1.05rem; }
+  .panel h3 { font-size: 0.95rem; margin: 1rem 0 0.2rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { margin: 0.15rem 0; }
+  .panel.caution { background: var(--amber-bg); border-color: var(--amber); }
+  .panel.caution p { margin: 0.25rem 0; }
+  button { font: inherit; font-weight: 600; padding: 0.45rem 0.95rem; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: end; margin-top: 0.5rem; }
+  label { display: block; font-size: 0.82rem; color: var(--muted); margin: 0 0 0.25rem; }
+  input, select, textarea { font: inherit; font-size: 0.92rem; padding: 0.4rem 0.55rem; border: 1px solid var(--line); border-radius: 6px; }
+  textarea { width: 100%; min-height: 6rem; font-family: ui-monospace, Consolas, monospace; font-size: 0.74rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0.7rem; margin-top: 0.6rem; }
+  .card { border: 1px solid var(--line); border-radius: 9px; padding: 0.7rem 0.85rem; background: #fbfcfd; }
+  .card h3 { margin: 0 0 0.3rem; font-size: 0.92rem; }
+  .badge { display: inline-block; font-size: 0.78rem; font-weight: 700; padding: 0.12rem 0.5rem; border-radius: 999px; }
+  .badge.pending, .badge.warn { background: var(--amber-bg); color: var(--amber); }
+  .badge.issued, .badge.executed, .badge.good { background: var(--green-bg); color: var(--green); }
+  .badge.rejected, .badge.failed, .badge.expired, .badge.bad { background: var(--red-bg); color: var(--red); }
+  .badge.neutral { background: #eef1f3; color: var(--muted); }
+  .muted { color: var(--muted); font-size: 0.85rem; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 0.76rem; word-break: break-all; }
+  .bar { height: 9px; border-radius: 999px; background: #eef1f3; overflow: hidden; margin-top: 0.35rem; }
+  .fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+  .fill.done { background: var(--green); }
+  .quorum { font-size: 1.4rem; font-weight: 700; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.86rem; margin-top: 0.4rem; }
+  th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.8rem; }
+  .ok { color: var(--green); font-weight: 600; }
+  .no { color: var(--red); font-weight: 600; }
+  .lvl { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-top: 0.5rem; }
+  .lvl > div { flex: 1; min-width: 250px; border: 1px solid var(--line); border-radius: 9px; padding: 0.6rem 0.8rem; }
+  .lvl .t { font-weight: 700; font-size: 0.9rem; }
+  #log { max-height: 18rem; overflow: auto; background: #14212c; color: #d8e3ea; border-radius: 8px; padding: 0.6rem 0.75rem; font-family: ui-monospace, Consolas, monospace; font-size: 0.74rem; }
+  #log div { padding: 0.1rem 0; white-space: pre-wrap; word-break: break-word; }
+  #log .bad { color: #ff9c94; } #log .good { color: #7fe3a8; }
+  #msg { margin-top: 0.6rem; padding: 0.5rem 0.65rem; border-radius: 6px; font-size: 0.88rem; display: none; }
+  #msg.err { display: block; background: var(--red-bg); color: var(--red); }
+  #msg.ok { display: block; background: var(--green-bg); color: var(--green); }
+  details { font-size: 0.82rem; margin-top: 0.4rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  details pre { background: #14212c; color: #d8e3ea; padding: 0.6rem; border-radius: 6px; overflow-x: auto; font-size: 0.72rem; white-space: pre-wrap; word-break: break-all; max-height: 18rem; }
+  a { color: var(--accent); }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<div class="banner">TEST DEMO — NO REAL VALUE</div>
+<h1>Multi-Issuer Portable Asset Lab</h1>
+<p class="tag">One portable asset, issued jointly by independent domains. It carries its issuers, their signatures and the rules for moving it, and finds the services that can authorize a transfer through each issuer's own domain.</p>
+
+<div class="panel pitch"><p id="whoami">Checking this domain…</p><p class="muted" id="policyLine"></p></div>
+
+<div id="disabled" class="panel caution hide">
+  <p><b>The lab is disabled on this domain.</b> It stays off until its configuration, key, permissions and isolation checks all pass.</p>
+  <p class="muted" id="disabledWhy"></p>
+</div>
+
+<div id="app" class="hide">
+
+<div class="panel caution">
+  <p><b>Test identities, not wallets.</b> Owners are test keys generated in this tab with Web Crypto (ECDSA P-256) and kept only in this tab's session storage. They disappear when the tab closes and cannot be recovered; use "Export identities" if you want to bring them back. Nothing here is a durable production wallet, and the server never sees a private key.</p>
+</div>
+
+<div class="panel" id="identPanel">
+  <h2>Test identities (this browser only)</h2>
+  <table id="identTable"><thead><tr><th>Name</th><th>Key id</th><th>Owns</th><th></th></tr></thead><tbody></tbody></table>
+  <div class="row">
+    <button id="btnIdExport" class="secondary">Export identities</button>
+    <div><label for="idFile">Import identities</label><input id="idFile" type="file" accept="application/json"></div>
+  </div>
+</div>
+
+<div class="panel" id="issuePanel">
+  <h2>1. Create and jointly issue an asset</h2>
+  <div id="visitor" class="hide">
+    <p class="muted">You get a private test session. Create a test certificate owned by <b>Alice</b>, then ask each issuing domain to approve its issuance. Each domain fetches the same definition from the registry, checks it against its own pinned roster, keys, policies and limits, and signs with its own key. No wallet and no administrator token.</p>
+    <div id="sessionInfo" class="muted"></div>
+    <div class="row">
+      <button id="btnSession" class="secondary">Start a fresh test session</button>
+      <div><label for="assetLabel">Label (optional)</label><input id="assetLabel" size="20" maxlength="40" placeholder="e.g. demo"></div>
+      <button id="btnCreate">Create test asset</button>
+    </div>
+  </div>
+  <div id="approverNotice" class="hide"><p class="muted">This is an approving domain. Assets are created on <a id="registryLink" href="#"><span id="registryName"></span></a>; when asked, this domain fetches the definition from there, validates it under its own rules and signs. Paste an asset id or an exported asset below to see this domain's own independent verification.</p></div>
+  <div class="row">
+    <div><label for="assetId">Open an asset by id</label><input id="assetId" size="40" placeholder="asset id"></div>
+    <button id="btnOpen" class="secondary">Open</button>
+  </div>
+  <div id="msg"></div>
+</div>
+
+<div class="panel hide" id="assetPanel">
+  <h2 id="assetTitle">Asset</h2>
+  <table>
+    <tr><th>Asset id</th><td class="mono" id="aId"></td></tr>
+    <tr><th>Class / metadata</th><td id="aClass"></td></tr>
+    <tr><th>Definition digest (sha-256)</th><td class="mono" id="aDigest"></td></tr>
+    <tr><th>Status at this registry</th><td id="aStatus"></td></tr>
+    <tr><th>Current owner</th><td id="aOwner"></td></tr>
+  </table>
+  <div class="lvl">
+    <div id="lvlIssuance"><div class="t">Original issuance</div><div id="lvlIssuanceBody" class="muted">…</div></div>
+    <div id="lvlOwnership"><div class="t">Current ownership</div><div id="lvlOwnershipBody" class="muted">…</div></div>
+  </div>
+  <div class="row"><button id="btnCheck" class="secondary">Ask the registry for current ownership</button></div>
+
+  <h3>Issuers and quorum</h3>
+  <div style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap">
+    <div><div class="muted">Issuance quorum</div><div class="quorum" id="issueQuorum">0/2</div></div>
+    <div style="flex:1; min-width:10rem"><div class="bar"><div class="fill" id="issueFill" style="width:0"></div></div><div class="muted" id="issueNote"></div></div>
+  </div>
+  <div class="grid" id="issuerCards"></div>
+
+  <h3>Authorization policy carried by the asset</h3>
+  <table id="policyTable"></table>
+
+  <h3>Service discovery (resolved now from each issuer's own domain)</h3>
+  <table id="discTable"><thead><tr><th>Issuer</th><th>Result</th><th>Seq</th><th>Key</th><th>Services found</th></tr></thead><tbody></tbody></table>
+  <p class="muted">The asset stores only each issuer's identity key and manifest location, never an endpoint. If a service moves, the issuer publishes a new signed manifest and this table shows the new address with no change to the asset.</p>
+</div>
+
+<div class="panel hide" id="transferPanel">
+  <h2>2. Transfer ownership</h2>
+  <p class="muted">The current owner signs this exact transfer in the browser. Then each issuing domain independently fetches the transaction from the registry, verifies the asset, the ownership evidence and the owner's signature, and signs; the registry executes only after verifying the whole approval certificate against the current ownership state.</p>
+  <div class="row" id="xferForm">
+    <div><label for="newOwner">New owner</label><select id="newOwner"></select></div>
+    <button id="btnPropose">Sign and propose transfer</button>
+  </div>
+  <p class="muted" id="xferNote"></p>
+  <div id="xferBox" class="hide">
+    <div style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap; margin-top:0.8rem">
+      <div><div class="muted">Transfer quorum</div><div class="quorum" id="xQuorum">0/2</div></div>
+      <div style="flex:1; min-width:10rem"><div class="bar"><div class="fill" id="xFill" style="width:0"></div></div><div class="muted" id="xNote"></div></div>
+      <div><span class="badge pending" id="xStatus">pending</span></div>
+    </div>
+    <table>
+      <tr><th>Transfer id</th><td class="mono" id="xId"></td></tr>
+      <tr><th>Canonical transfer digest</th><td class="mono" id="xDigest"></td></tr>
+      <tr><th>Digest recomputed in this browser</th><td id="xDigestOk"></td></tr>
+      <tr><th>Owner authorization</th><td id="xOwnerAuth"></td></tr>
+    </table>
+    <div class="grid" id="xCards"></div>
+    <h3>Signed receipt</h3>
+    <div id="xReceipt" class="muted">No receipt yet: the transfer has not executed.</div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Export and import (portable JSON)</h2>
+  <p class="muted">The exported file contains the asset id, issuer identities and keys, the complete roster, the issuance signatures, the signed issuance and transfer policies, discovery references and capabilities, the ownership authority and the signed ownership history. It is verified here with Web Crypto. A file on its own can prove who issued the asset and how it has changed hands, but not what is current: only the registry can say that.</p>
+  <div class="row">
+    <button id="btnExport" class="secondary" disabled>Download this asset as JSON</button>
+    <div><label for="impFile">Import asset JSON</label><input id="impFile" type="file" accept="application/json"></div>
+  </div>
+  <textarea id="impText" placeholder="…or paste portable asset JSON here" spellcheck="false"></textarea>
+  <div class="row"><button id="btnImport">Verify imported asset</button><button id="btnUseImported" class="secondary hide">Open it on this domain</button></div>
+  <div id="impResult" class="hide">
+    <div class="lvl">
+      <div><div class="t">Original issuance</div><div id="impIssuance" class="muted"></div></div>
+      <div><div class="t">Current ownership</div><div id="impOwnership" class="muted"></div></div>
+    </div>
+    <table id="impTable"></table>
+    <table id="impDisc"><thead><tr><th>Issuer</th><th>Discovery</th><th>Services</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>History and domain-to-domain events</h2>
+  <p class="muted">Server-side events as they happened, including every rejected attempt and every request one domain made to another.</p>
+  <div id="log"></div>
+  <details><summary>Show the portable asset JSON</summary><pre id="rawAsset"></pre></details>
+</div>
+
+<div class="panel caution">
+  <p><b>What this proves, and what it does not.</b> Each issuing domain signs only after validating the asset itself under its own pinned configuration, and the registry executes only a transfer the current owner signed and a satisfied approval certificate. This is <b>not</b> atomic settlement across independent ledgers and <b>not</b> Byzantine fault tolerant consensus: one designated state authority holds ownership state and could withhold or roll back history, which a fresh signed state attestation and the signed history make detectable but not impossible.</p>
+  <p>Forged signatures, tampered metadata, duplicate approvals, replays, stale state, competing transfers, unavailable peers, restarts and service relocation are exercised by <code>test/manual-multi-issuer-php.js</code>, not by controls here. Public sessions are limited, rate-limited and expire.</p>
+</div>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var API = '/atlas/demo/multi-issuer/api.php';
+  var enc = new TextEncoder();
+  var subtle = window.crypto.subtle;
+  var S = { health: null, session: null, ids: {}, active: 'alice', assetId: null, view: null, tx: null, bv: null, imported: null };
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, props, kids) {
+    var e = document.createElement(tag);
+    Object.keys(props || {}).forEach(function (k) { if (k === 'text') e.textContent = props[k]; else if (k === 'class') e.className = props[k]; else e.setAttribute(k, props[k]); });
+    (kids || []).forEach(function (c) { e.appendChild(c); });
+    return e;
+  }
+  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+  function show(id, on) { $(id).classList[on ? 'remove' : 'add']('hide'); }
+  function short(s, n) { return s ? s.slice(0, n || 12) : ''; }
+  function when(ms) { return ms ? new Date(ms).toLocaleTimeString() : ''; }
+  function store(k, v) { try { if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage may be unavailable */ } }
+  function load(k) { try { var v = sessionStorage.getItem(k); return v ? JSON.parse(v) : null; } catch (e) { return null; } }
+  function note(text, ok) { var m = $('msg'); m.textContent = text || ''; m.className = text ? (ok ? 'ok' : 'err') : ''; }
+
+  // ---- canonical JSON, base64url, digests, keys (all in the browser)
+  function canonicalize(v) {
+    if (v === null || typeof v !== 'object') return JSON.stringify(v);
+    if (Array.isArray(v)) return '[' + v.map(canonicalize).join(',') + ']';
+    return '{' + Object.keys(v).sort().map(function (k) { return JSON.stringify(k) + ':' + canonicalize(v[k]); }).join(',') + '}';
+  }
+  function b64u(buf) { var b = new Uint8Array(buf), s = ''; for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+  function unb64u(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; var r = atob(s), a = new Uint8Array(r.length); for (var i = 0; i < r.length; i++) a[i] = r.charCodeAt(i); return a; }
+  function hex(buf) { return Array.prototype.map.call(new Uint8Array(buf), function (x) { return ('0' + x.toString(16)).slice(-2); }).join(''); }
+  function sha256hex(str) { return subtle.digest('SHA-256', enc.encode(str)).then(hex); }
+  function digestOf(o) { return sha256hex(canonicalize(o)); }
+  function keyIdOf(pub) { return subtle.digest('SHA-256', unb64u(pub)).then(function (h) { return hex(h).slice(0, 32); }); }
+  function verifySig(pub, sig, obj) {
+    return subtle.importKey('raw', unb64u(pub), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
+      .then(function (k) { return subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, k, unb64u(sig), enc.encode(canonicalize(obj))); })
+      .catch(function () { return false; });
+  }
+  function uuid() { return crypto.randomUUID ? crypto.randomUUID() : ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, function (c) { return (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16); }); }
+
+  // ---- browser verification of a portable asset (does not trust the server's report)
+  function evaluate(policy, decisions) {
+    var approved = [], rejected = [];
+    Object.keys(decisions).forEach(function (d) { if (policy.roster.indexOf(d) < 0) return; (decisions[d] === 'approve' ? approved : rejected).push(d); });
+    var missing = policy.mandatory.filter(function (m) { return approved.indexOf(m) < 0; });
+    return { approved: approved, rejected: rejected, missingMandatory: missing, satisfied: approved.length >= policy.threshold && missing.length === 0 };
+  }
+  function checkSigs(def, entries, refId, digest, policy) {
+    var decisions = {}, seen = {}, chain = Promise.resolve();
+    (entries || []).forEach(function (e) {
+      chain = chain.then(function () {
+        var dom = e && (e.domain || e.approver);
+        var iss = (def.issuers || []).filter(function (i) { return i.domain === dom; })[0];
+        var d = Promise.resolve(false);
+        if (iss && policy.roster.indexOf(dom) >= 0 && !seen[dom] && e.approval && e.approval.approver === dom && e.approval.txId === refId && e.approval.payloadDigest === digest) d = verifySig(iss.publicKey, e.signature, e.approval);
+        return d.then(function (ok) { if (ok) decisions[dom] = e.approval.decision; if (dom) seen[dom] = true; });
+      });
+    });
+    return chain.then(function () { return evaluate(policy, decisions); });
+  }
+  function verifyPortable(asset) {
+    var out = { digestOk: false, issuance: null, issuanceVerified: false, chainValid: false, version: null, owner: null, problems: [] };
+    try {
+      var def = asset.definition;
+      return digestOf(def).then(function (d) {
+        out.digestOk = d === asset.definitionDigest;
+        if (!out.digestOk) { out.problems.push('the definition does not match its digest'); return out; }
+        return checkSigs(def, asset.issuance && asset.issuance.signatures, def.assetId, asset.definitionDigest, def.issuancePolicy).then(function (ev) {
+          out.issuance = ev; out.issuanceVerified = ev.satisfied;
+          var reg = def.issuers.filter(function (i) { return i.domain === def.stateAuthority.domain; })[0];
+          var evid = (asset.ownership && asset.ownership.evidence) || [];
+          if (!evid.length) { out.problems.push('no ownership evidence'); return out; }
+          var prev = null, owner = null, chain = Promise.resolve(), stop = false;
+          evid.forEach(function (st, i) {
+            chain = chain.then(function () {
+              if (stop) return;
+              var rc = st.receipt, fail = function (m) { out.problems.push('version ' + i + ': ' + m); stop = true; };
+              return verifySig(reg.publicKey, st.signature, rc).then(function (ok) {
+                if (!ok) return fail('the registry signature does not verify');
+                if (i === 0) {
+                  if (rc.assetId !== def.assetId || rc.definitionDigest !== asset.definitionDigest || rc.owner !== def.originalOwner.publicKey) return fail('registration does not match the asset');
+                  return digestOf({ v: 'domain-atlas-mi-state/1', assetId: def.assetId, version: 0, owner: rc.owner, previous: asset.definitionDigest }).then(function (sd) {
+                    if (sd !== rc.stateDigest) return fail('state digest mismatch');
+                    owner = rc.owner; prev = rc.stateDigest;
+                  });
+                }
+                var t = rc.transfer;
+                return digestOf(t).then(function (td) {
+                  if (td !== rc.transferDigest || t.fromOwner !== owner || t.baseVersion !== i - 1 || t.baseStateDigest !== prev || t.assetId !== def.assetId) return fail('the transfer does not match the state it moves');
+                  return verifySig(t.fromOwner, rc.ownerAuthorization.signature, rc.ownerAuthorization.object).then(function (ok2) {
+                    if (!ok2 || rc.ownerAuthorization.object.transferDigest !== td) return fail('the previous owner\'s signature does not verify');
+                    return checkSigs(def, rc.approvals, t.txId, td, def.transferPolicy).then(function (q) {
+                      if (!q.satisfied) return fail('the transfer policy was not satisfied by valid issuer approvals');
+                      return digestOf({ v: 'domain-atlas-mi-state/1', assetId: def.assetId, version: i, owner: t.toOwner, previous: prev }).then(function (sd) {
+                        if (sd !== rc.stateDigest) return fail('state digest mismatch');
+                        owner = t.toOwner; prev = rc.stateDigest;
+                      });
+                    });
+                  });
+                });
+              });
+            });
+          });
+          return chain.then(function () {
+            out.chainValid = out.problems.length === 0;
+            if (out.chainValid) { out.version = evid.length - 1; out.owner = owner; out.stateDigest = prev; }
+            return out;
+          });
+        });
+      }).catch(function () { out.problems.push('the document is malformed'); return out; });
+    } catch (e) { out.problems.push('the document is malformed'); return Promise.resolve(out); }
+  }
+  // the registry's signed, nonce-bound state attestation, checked here against the key inside the asset
+  function checkAttestation(asset, att, nonce, bv) {
+    var def = asset.definition;
+    var reg = def.issuers.filter(function (i) { return i.domain === def.stateAuthority.domain; })[0];
+    if (!att || !att.object) return Promise.resolve({ status: 'not-checked', text: 'The registry returned no signed state attestation.' });
+    return verifySig(reg.publicKey, att.signature, att.object).then(function (ok) {
+      var o = att.object;
+      if (!ok) return { status: 'unverified', text: 'The attestation is not signed by the registry key recorded in the asset.' };
+      if (nonce && o.nonce !== nonce) return { status: 'unverified', text: 'The attestation answers a different challenge.' };
+      if (Math.abs(Date.now() - o.asOfMs) > 120000) return { status: 'unverified', text: 'The attestation is not fresh.' };
+      if (o.assetId !== def.assetId || o.definitionDigest !== asset.definitionDigest) return { status: 'unverified', text: 'The attestation is for a different asset.' };
+      if (!bv.chainValid) return { status: 'unverified', text: 'The ownership history in this copy does not verify.' };
+      if (bv.version === o.version && bv.owner === o.owner && bv.stateDigest === o.stateDigest) return { status: 'current', text: 'The registry signed, just now, that version ' + o.version + ' is current, and this copy is at that version.', owner: o.owner };
+      if (bv.version < o.version) return { status: 'stale', text: 'Ownership has moved on: the registry is at version ' + o.version + ' and this copy is at ' + bv.version + '.', owner: o.owner };
+      return { status: 'diverged', text: 'This copy claims a state the registry does not know about.' };
+    });
+  }
+
+  // ---- identities
+  function genIdentity(name) {
+    return subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']).then(function (kp) {
+      return Promise.all([subtle.exportKey('raw', kp.publicKey), subtle.exportKey('jwk', kp.privateKey)]).then(function (r) {
+        var pub = b64u(r[0]);
+        return keyIdOf(pub).then(function (kid) { S.ids[name] = { name: name, pub: pub, keyId: kid, jwk: r[1], key: kp.privateKey }; });
+      });
+    });
+  }
+  function importIdentity(rec) {
+    return subtle.importKey('jwk', rec.jwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']).then(function (k) { return keyIdOf(rec.pub).then(function (kid) { S.ids[rec.name] = { name: rec.name, pub: rec.pub, keyId: kid, jwk: rec.jwk, key: k }; }); });
+  }
+  function persistIds() { store('mi.ids', Object.keys(S.ids).map(function (n) { var i = S.ids[n]; return { name: n, pub: i.pub, jwk: i.jwk }; })); }
+  function signObj(identity, obj) { return subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.key, enc.encode(canonicalize(obj))).then(b64u); }
+  function ensureIdentities() {
+    var saved = load('mi.ids') || [];
+    return saved.reduce(function (p, r) { return p.then(function () { return importIdentity(r); }); }, Promise.resolve()).then(function () {
+      return ['alice', 'bob', 'carol'].reduce(function (p, n) { return p.then(function () { return S.ids[n] ? null : genIdentity(n); }); }, Promise.resolve());
+    }).then(persistIds);
+  }
+  function nameOfKey(pub) { var n = Object.keys(S.ids).filter(function (k) { return S.ids[k].pub === pub; })[0]; return n || null; }
+  function drawIdentities() {
+    var tb = $('identTable').querySelector('tbody'); clear(tb);
+    var owner = S.view && S.view.live ? S.view.live.owner : null;
+    Object.keys(S.ids).forEach(function (n) {
+      var i = S.ids[n];
+      tb.appendChild(el('tr', {}, [el('td', { text: n }), el('td', { class: 'mono', text: i.keyId }), el('td', { text: owner && owner === i.pub ? 'current owner of the open asset' : '' }), el('td', {})]));
+    });
+    var sel = $('newOwner'); clear(sel);
+    Object.keys(S.ids).forEach(function (n) { if (!owner || S.ids[n].pub !== owner) sel.appendChild(el('option', { value: n, text: n + ' (' + short(S.ids[n].keyId, 8) + ')' })); });
+  }
+
+  // ---- API
+  function api(op, o) {
+    o = o || {};
+    var url = API + '?op=' + op + (o.query ? '&' + o.query : '');
+    var init = o.body !== undefined ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o.body) } : { headers: {} };
+    return fetch(url, init).then(function (r) { return r.json().catch(function () { return { error: 'unreadable response' }; }).then(function (b) { if (!r.ok) { var e = new Error(b.error || ('HTTP ' + r.status)); e.status = r.status; e.body = b; throw e; } return b; }); });
+  }
+  function authBody(extra) { var b = { sid: S.session.sid, token: S.session.token }; Object.keys(extra || {}).forEach(function (k) { b[k] = extra[k]; }); return b; }
+  function fail(e) { note(e.message || String(e), false); }
+  var busy = false;
+  function guard(fn) { return function () { if (busy) return; busy = true; note(''); var done = function () { busy = false; }; return Promise.resolve().then(fn).then(function (r) { done(); return r; }, function (e) { done(); fail(e); }); }; }
+
+  // ---- session and asset actions
+  function startSession(reset) {
+    return api('public-start', { body: {} }).then(function (s) { S.session = s; store('mi.session', s); if (reset === true) { S.assetId = null; S.view = null; S.txv = null; store('mi.asset', null); } drawSession(); render(); note('A new test session started. It expires at ' + when(s.expiresAtMs) + '.', true); });
+  }
+  function drawSession() {
+    var t = $('sessionInfo');
+    t.textContent = S.session ? 'Session ' + S.session.sid + ' expires at ' + when(S.session.expiresAtMs) + '. Limits: ' + S.session.limits.maxAssetsPerSession + ' assets and ' + S.session.limits.maxTransfersPerSession + ' transfers per session.' : 'No session yet: starting one is automatic when you create an asset.';
+  }
+  function ensureSession() { return S.session && S.session.expiresAtMs > Date.now() + 5000 ? Promise.resolve() : startSession(false); }
+  function createAsset() {
+    return ensureSession().then(function () {
+      return api('public-asset-create', { body: authBody({ requestId: 'req-' + uuid().slice(0, 18), ownerPublicKey: S.ids.alice.pub, label: $('assetLabel').value.trim() }) });
+    }).then(function (v) { S.assetId = v.asset.definition.assetId; store('mi.asset', S.assetId); S.tx = null; store('mi.tx', null); return refresh(); });
+  }
+  function refresh() {
+    if (!S.assetId) return Promise.resolve();
+    var nonce = crypto.getRandomValues(new Uint8Array(16)); var nh = hex(nonce); S.nonce = nh;
+    return api('asset', { query: 'id=' + encodeURIComponent(S.assetId) + '&nonce=' + nh }).then(function (v) {
+      S.view = v;
+      return verifyPortable(v.asset).then(function (bv) { S.bv = bv; return checkAttestation(v.asset, v.attestation, v.role === 'state-authority' ? nh : null, bv); }).then(function (att) { S.att = att; });
+    }).then(function () {
+      var pending = S.view.transfers.filter(function (t) { return t.status === 'pending'; })[0];
+      var latest = S.view.transfers.length ? S.view.transfers[S.view.transfers.length - 1] : null;
+      var pick = S.tx && S.view.transfers.some(function (t) { return t.txId === S.tx; }) ? S.tx : (pending ? pending.txId : (latest ? latest.txId : null));
+      S.tx = pick; store('mi.tx', pick);
+      return pick ? api('tx', { query: 'id=' + pick }).then(function (t) { S.txv = t; return digestOf(t.payload).then(function (d) { S.txDigestOk = d === t.digest; }); }) : (S.txv = null);
+    }).then(render);
+  }
+  function approveIssue(domain) {
+    return api('public-issue-approve', { body: authBody({ assetId: S.assetId, domain: domain }) }).then(function (r) { note(domain + (r.decision === 'approve' ? ' validated the asset independently and signed.' : ' rejected the asset.'), r.decision === 'approve'); return refresh(); });
+  }
+  function propose() {
+    var v = S.view, id = S.ids[$('newOwner').value];
+    var cur = Object.keys(S.ids).map(function (n) { return S.ids[n]; }).filter(function (i) { return v.live && i.pub === v.live.owner; })[0];
+    if (!cur) { note('No identity in this browser holds the current owner key, so nobody here can authorize a transfer.', false); return; }
+    return ensureSession().then(function () {
+      var now = Date.now();
+      var payload = { v: 'domain-atlas-mi-transfer/1', txId: uuid(), assetId: v.asset.definition.assetId, definitionDigest: v.asset.definitionDigest, registry: v.asset.definition.stateAuthority.domain, fromOwner: cur.pub, toOwner: id.pub, baseVersion: v.live.version, baseStateDigest: v.live.stateDigest, createdAtMs: now, expiresAtMs: now + Math.max(3, Math.min(240, S.session.limits.transferTtlSeconds - 2)) * 1000, session: S.session.sid };
+      return digestOf(payload).then(function (d) {
+        var authObj = { v: 'domain-atlas-mi-owner-auth/1', txId: payload.txId, transferDigest: d, owner: cur.keyId, signedAtMs: Date.now() };
+        return signObj(cur, authObj).then(function (sig) { return api('public-transfer-propose', { body: authBody({ payload: payload, ownerAuthorization: authObj, ownerSignature: sig }) }); });
+      });
+    }).then(function (t) { S.tx = t.txId; store('mi.tx', S.tx); note('The current owner signed the transfer in this browser and the registry accepted the proposal.', true); return refresh(); });
+  }
+  function approveTransfer(domain) {
+    return api('public-transfer-approve', { body: authBody({ txId: S.tx, domain: domain }) }).then(function (r) { note(domain + (r.decision === 'approve' ? ' fetched the transfer, verified it independently and signed.' : ' rejected the transfer.'), r.decision === 'approve'); return refresh(); });
+  }
+
+  // ---- rendering
+  function badge(text, cls) { return el('span', { class: 'badge ' + cls, text: text }); }
+  function renderLevels(target, bv, serverOwn, att, role) {
+    var ib = $(target.issuance); clear(ib);
+    if (bv && bv.issuanceVerified) {
+      var pol = S.view.asset.definition.issuancePolicy;
+      ib.appendChild(badge('Original issuance verified', 'good'));
+      ib.appendChild(el('div', { class: 'muted', text: 'Checked in this browser: ' + bv.issuance.approved.join(', ') + ' signed the identical definition digest with the keys recorded in the asset (' + pol.threshold + ' of ' + pol.roster.length + ' required).' }));
+    } else {
+      ib.appendChild(badge('Original issuance NOT verified', 'bad'));
+      ib.appendChild(el('div', { class: 'muted', text: bv && bv.problems.length ? bv.problems.join('; ') : 'The issuance policy is not satisfied by valid signatures.' }));
+    }
+    var ob = $(target.ownership); clear(ob);
+    var st = att ? att.status : 'not-checked';
+    var map = { current: ['Current ownership verified with the registry', 'good'], stale: ['Out of date: ownership has moved on', 'warn'], diverged: ['Does not match the registry', 'bad'], unverified: ['Current ownership NOT verified', 'bad'], 'not-checked': ['Current ownership not checked', 'neutral'], unreachable: ['Registry unreachable: current ownership unknown', 'warn'], 'unknown-to-registry': ['This registry holds no such asset', 'warn'] };
+    var m = map[st] || map['not-checked'];
+    ob.appendChild(badge(m[0], m[1]));
+    var txt = att && att.text ? att.text : (bv && bv.chainValid ? 'The signed ownership history in this file ends at version ' + bv.version + '. A file cannot prove that is still the latest state.' : 'The ownership history does not verify.');
+    ob.appendChild(el('div', { class: 'muted', text: txt }));
+  }
+  function render() {
+    var v = S.view;
+    show('assetPanel', !!v); show('transferPanel', !!v);
+    $('btnExport').disabled = !v;
+    drawIdentities();
+    if (!v) { return; }
+    var d = v.asset.definition;
+    $('assetTitle').textContent = d.name;
+    $('aId').textContent = d.assetId;
+    $('aClass').textContent = d.class + ' — serial ' + d.metadata.serial + (d.metadata.label ? ', label "' + d.metadata.label + '"' : '') + ', test only';
+    $('aDigest').textContent = v.asset.definitionDigest;
+    var sb = $('aStatus'); clear(sb); sb.appendChild(badge(v.status, v.status === 'issued' ? 'issued' : (v.status === 'pending' ? 'pending' : 'bad')));
+    if (v.failReason) sb.appendChild(el('span', { class: 'muted', text: ' ' + v.failReason }));
+    if (v.role === 'approver') sb.appendChild(el('span', { class: 'muted', text: ' (relayed from ' + v.relayedFrom + ' and re-verified under this domain\'s own pinned keys; trust check: ' + (v.trust && v.trust.ok ? 'matches' : 'MISMATCH — ' + (v.trust && v.trust.problem)) + ')' }));
+    var ob = $('aOwner'); clear(ob);
+    if (v.live) { var nm = nameOfKey(v.live.owner); ob.appendChild(document.createTextNode((nm ? nm + ' — ' : '') + 'version ' + v.live.version + ', key ')); ob.appendChild(el('span', { class: 'mono', text: short(v.live.owner, 20) + '…' })); }
+    else ob.textContent = 'none yet: ownership exists only after the issuance policy is satisfied';
+    renderLevels({ issuance: 'lvlIssuanceBody', ownership: 'lvlOwnershipBody' }, S.bv, null, S.att, v.role);
+
+    // issuers and quorum
+    var ip = d.issuancePolicy, signed = (S.bv && S.bv.issuance) ? S.bv.issuance.approved : [];
+    $('issueQuorum').textContent = signed.length + '/' + ip.threshold;
+    $('issueFill').style.width = Math.min(100, signed.length / ip.threshold * 100) + '%';
+    $('issueFill').className = 'fill' + (v.status === 'issued' ? ' done' : '');
+    $('issueNote').textContent = 'Roster of ' + ip.roster.length + '; ' + ip.threshold + ' signatures needed; mandatory: ' + ip.mandatory.join(', ') + '. Roster membership is not a signature: only the domains that signed count.';
+    var cards = $('issuerCards'); clear(cards);
+    var rejected = {}; (v.rejections || []).forEach(function (r) { rejected[r.domain] = true; });
+    d.issuers.forEach(function (i) {
+      var did = signed.indexOf(i.domain) >= 0;
+      var c = el('div', { class: 'card' }, [el('h3', { text: i.domain })]);
+      c.appendChild(el('div', { class: 'muted', text: 'key id ' + i.keyId }));
+      c.appendChild(el('div', { class: 'muted', text: 'capabilities: ' + i.discovery.capabilities.join(', ') }));
+      c.appendChild(el('div', { class: 'muted', text: 'manifest: ' + i.discovery.manifest }));
+      c.appendChild(el('div', {}, [badge(did ? 'signed' : (rejected[i.domain] ? 'rejected' : 'no signature'), did ? 'good' : (rejected[i.domain] ? 'bad' : 'neutral'), ), document.createTextNode(' '), ip.mandatory.indexOf(i.domain) >= 0 ? badge('mandatory', 'neutral') : document.createTextNode('')]));
+      if (v.status === 'pending' && !did && !rejected[i.domain] && S.session && v.role === 'state-authority') {
+        var b = el('button', { text: 'Ask ' + i.domain + ' to approve', 'data-issue': i.domain }); b.addEventListener('click', guard(function () { return approveIssue(i.domain); })); c.appendChild(el('div', { class: 'row' }, [b]));
+      }
+      if (v.role === 'approver' && v.thisDomainSigned && i.domain === S.health.domain) c.appendChild(el('div', { class: 'muted', text: 'This domain\'s own signing record: ' + v.thisDomainSigned.decision }));
+      cards.appendChild(c);
+    });
+    var pt = $('policyTable'); clear(pt);
+    function prow(k, val) { pt.appendChild(el('tr', {}, [el('th', { text: k }), el('td', { text: val })])); }
+    prow('Issuance policy', ip.threshold + ' of ' + ip.roster.length + ' (' + ip.roster.join(', ') + '); mandatory: ' + ip.mandatory.join(', '));
+    prow('Transfer policy', d.transferPolicy.threshold + ' of ' + d.transferPolicy.roster.length + '; mandatory: ' + d.transferPolicy.mandatory.join(', ') + '; the current owner must also sign');
+    prow('Ownership authority', d.stateAuthority.domain + ' (key ' + d.stateAuthority.keyId + ', capability ' + d.stateAuthority.capability + ')');
+    prow('Original owner', short(d.originalOwner.keyId, 16) + '…');
+    var dt = $('discTable').querySelector('tbody'); clear(dt);
+    (v.discovery || []).forEach(function (x) {
+      dt.appendChild(el('tr', {}, [el('td', { text: x.domain }), el('td', {}, [badge(x.ok ? 'verified' : x.status, x.ok ? 'good' : 'bad'), document.createTextNode(x.reason ? ' ' + x.reason : '')]), el('td', { text: x.seq || '' }), el('td', { text: x.keyStatus || '' }),
+        el('td', { class: 'mono', text: x.services ? Object.keys(x.services).map(function (c) { return c + ' → ' + x.services[c]; }).join('\n') : '' })]));
+    });
+
+    // transfer
+    var tx = S.txv, canPropose = v.role === 'state-authority' && v.status === 'issued' && (!tx || tx.status !== 'pending');
+    var curName = v.live ? nameOfKey(v.live.owner) : null;
+    show('xferForm', v.role === 'state-authority');
+    $('btnPropose').disabled = !canPropose || !curName;
+    $('xferNote').textContent = v.role !== 'state-authority' ? 'Transfers are proposed at ' + v.relayedFrom + '. This domain independently validates and signs when asked.' : (v.status !== 'issued' ? 'The asset must be fully issued before it can be transferred.' : (!curName ? 'None of the identities in this browser holds the current owner key, so no transfer can be authorized from here.' : 'Current owner: ' + curName + '. Only this key can authorize a transfer; an admin token would not help (there is none).'));
+    show('xferBox', !!tx);
+    if (tx) {
+      var pol = d.transferPolicy, ev = tx.evaluation;
+      $('xQuorum').textContent = ev.approved.length + '/' + pol.threshold;
+      $('xFill').style.width = Math.min(100, ev.approved.length / pol.threshold * 100) + '%';
+      $('xFill').className = 'fill' + (tx.status === 'executed' ? ' done' : '');
+      $('xNote').textContent = 'Policy ' + pol.threshold + ' of ' + pol.roster.length + '; mandatory ' + pol.mandatory.join(', ') + (ev.missingMandatory.length ? '; waiting for ' + ev.missingMandatory.join(', ') : '');
+      var sbd = $('xStatus'); sbd.textContent = tx.status; sbd.className = 'badge ' + (tx.status === 'executed' ? 'executed' : (tx.status === 'pending' ? 'pending' : 'failed'));
+      $('xId').textContent = tx.txId; $('xDigest').textContent = tx.digest;
+      $('xDigestOk').textContent = S.txDigestOk ? 'matches' : 'MISMATCH'; $('xDigestOk').className = S.txDigestOk ? 'ok' : 'no';
+      var oa = $('xOwnerAuth'); clear(oa);
+      oa.appendChild(document.createTextNode('signed by ' + (nameOfKey(tx.payload.fromOwner) || 'owner key ' + short(tx.payload.fromOwner, 12)) + ' — server check: '));
+      oa.appendChild(el('span', { class: tx.ownerAuthorization.verified ? 'ok' : 'no', text: tx.ownerAuthorization.verified ? 'verified' : 'invalid' }));
+      verifySig(tx.payload.fromOwner, tx.ownerAuthorization.signature, tx.ownerAuthorization.object).then(function (ok) { oa.appendChild(document.createTextNode(' — this browser: ')); oa.appendChild(el('span', { class: ok ? 'ok' : 'no', text: ok ? 'verified' : 'invalid' })); });
+      var xc = $('xCards'); clear(xc);
+      d.issuers.forEach(function (i) {
+        var ap = (tx.approvals || []).filter(function (a) { return a.domain === i.domain; })[0];
+        var c = el('div', { class: 'card' }, [el('h3', { text: i.domain })]);
+        c.appendChild(badge(ap ? ap.decision : 'no decision', ap ? (ap.decision === 'approve' ? 'good' : 'bad') : 'neutral'));
+        if (ap) { c.appendChild(el('div', { class: 'muted', text: 'signed digest ' + short(ap.approval.payloadDigest, 16) + '… ' + (ap.approval.payloadDigest === tx.digest ? '(identical to the transfer digest)' : '(DIFFERENT digest)') })); var sp = el('div', { class: 'muted', text: 'signature: checking in this browser…' }); c.appendChild(sp); verifySig(i.publicKey, ap.signature, ap.approval).then(function (ok) { sp.textContent = 'signature: ' + (ok ? 'verified in this browser against the key in the asset' : 'DOES NOT VERIFY'); }); }
+        if (tx.status === 'pending' && !ap && v.role === 'state-authority') { var b = el('button', { text: 'Ask ' + i.domain + ' to approve', 'data-transfer': i.domain }); b.addEventListener('click', guard(function () { return approveTransfer(i.domain); })); c.appendChild(el('div', { class: 'row' }, [b])); }
+        xc.appendChild(c);
+      });
+      var rc = $('xReceipt'); clear(rc);
+      if (tx.receipt) {
+        var r = tx.receipt.receipt;
+        rc.appendChild(el('div', {}, [badge('executed', 'executed'), document.createTextNode(' version ' + r.fromVersion + ' → ' + r.toVersion + ' at ' + when(r.executedAtMs) + '; new owner ' + (nameOfKey(r.transfer.toOwner) || short(r.transfer.toOwner, 12)))]));
+        var rs = el('div', { class: 'muted', text: 'registry signature: checking…' }); rc.appendChild(rs);
+        var reg = d.issuers.filter(function (i) { return i.domain === d.stateAuthority.domain; })[0];
+        verifySig(reg.publicKey, tx.receipt.signature, r).then(function (ok) { rs.textContent = 'registry signature on the receipt: ' + (ok ? 'verified in this browser' : 'DOES NOT VERIFY') + '; approvals carried: ' + r.approvals.map(function (a) { return a.approver; }).join(', '); });
+        rc.appendChild(el('div', { class: 'muted', text: 'This receipt can be retrieved and verified from either domain: ask ' + d.issuers.map(function (i) { return i.domain; }).join(' or ') + '.' }));
+      } else if (tx.status !== 'pending') { rc.textContent = 'No receipt: the transfer ended as ' + tx.status + (tx.failReason ? ' (' + tx.failReason + ')' : '') + '.'; }
+      else rc.textContent = 'No receipt yet: the transfer has not executed.';
+    }
+    var lg = $('log'); clear(lg);
+    (v.events || []).concat(S.txv && S.txv.events ? S.txv.events : []).sort(function (a, b) { return a.atMs - b.atMs || a.id - b.id; }).forEach(function (e, idx, arr) {
+      if (idx && arr[idx - 1].id === e.id && arr[idx - 1].ref === e.ref) return;
+      var cls = /reject|refus|fail|expire|blocked/.test(e.kind) ? 'bad' : (/executed|issued|approv|accepted|signed|quorum/.test(e.kind) ? 'good' : '');
+      lg.appendChild(el('div', { class: cls, text: when(e.atMs) + '  ' + e.kind + (e.domain ? ' [' + e.domain + ']' : '') + '  ' + e.detail }));
+    });
+    $('rawAsset').textContent = JSON.stringify(v.asset, null, 2);
+  }
+
+  // ---- import / export
+  function exportAsset() {
+    var blob = new Blob([JSON.stringify(S.view.asset, null, 2)], { type: 'application/json' });
+    var a = el('a', { href: URL.createObjectURL(blob), download: 'joint-explorer-certificate-' + S.view.asset.definition.metadata.serial + '.json' });
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  function importVerify() {
+    var text = $('impText').value;
+    if (text.length > 65536) { note('That file is larger than the 64 KB import limit.', false); return; }
+    var asset; try { asset = JSON.parse(text); } catch (e) { note('That is not valid JSON.', false); return; }
+    S.imported = asset;
+    return verifyPortable(asset).then(function (bv) {
+      return api('verify', { body: { asset: asset, online: true } }).then(function (sv) {
+        show('impResult', true);
+        var ib = $('impIssuance'); clear(ib);
+        if (bv.issuanceVerified) { ib.appendChild(badge('Original issuance verified', 'good')); ib.appendChild(el('div', { class: 'muted', text: 'Signed by ' + bv.issuance.approved.join(', ') + ' (roster: ' + asset.definition.issuancePolicy.roster.join(', ') + '). Checked in this browser.' })); }
+        else { ib.appendChild(badge('Original issuance NOT verified', 'bad')); ib.appendChild(el('div', { class: 'muted', text: bv.problems.join('; ') || 'The issuance policy is not satisfied.' })); }
+        var co = sv.currentOwnership || {}, ob = $('impOwnership'); clear(ob);
+        var map = { current: ['Current ownership verified with the registry', 'good'], stale: ['Out of date: ownership has moved on', 'warn'], diverged: ['Does not match the registry', 'bad'], unverified: ['Current ownership NOT verified', 'bad'], 'not-checked': ['Current ownership not checked', 'neutral'], unreachable: ['Registry unreachable: current ownership unknown', 'warn'], 'unknown-to-registry': ['This registry holds no such asset', 'warn'] };
+        var m = map[co.status] || map['not-checked'];
+        ob.appendChild(badge(m[0], m[1]));
+        ob.appendChild(el('div', { class: 'muted', text: (co.reason || '') + (co.status === 'current' ? ' Version ' + co.currentVersion + '.' : '') + (bv.chainValid ? ' The file\'s own history ends at version ' + bv.version + '.' : '') }));
+        var tb = $('impTable'); clear(tb);
+        function r(k, val) { tb.appendChild(el('tr', {}, [el('th', { text: k }), el('td', { text: val })])); }
+        var d = asset.definition;
+        r('Asset', d.name + ' (' + d.assetId + ')');
+        r('Issuance policy', d.issuancePolicy.threshold + ' of ' + d.issuancePolicy.roster.length + ', mandatory ' + d.issuancePolicy.mandatory.join(', '));
+        r('Transfer policy', d.transferPolicy.threshold + ' of ' + d.transferPolicy.roster.length + ', mandatory ' + d.transferPolicy.mandatory.join(', '));
+        r('Ownership authority', d.stateAuthority.domain);
+        r('Trust at ' + S.health.domain, sv.trust ? (sv.trust.ok ? 'matches this domain\'s pinned roster, keys and policies' : 'not pinned here: ' + (sv.trust.note || sv.trust.problem)) : 'n/a');
+        var dt = $('impDisc').querySelector('tbody'); clear(dt);
+        (sv.discovery || []).forEach(function (x) { dt.appendChild(el('tr', {}, [el('td', { text: x.domain }), el('td', {}, [badge(x.ok ? 'verified' : x.status, x.ok ? 'good' : 'bad'), document.createTextNode(x.reason ? ' ' + x.reason : '')]), el('td', { class: 'mono', text: x.services ? Object.keys(x.services).map(function (c) { return c + ' → ' + x.services[c]; }).join('\n') : '' })])); });
+        show('btnUseImported', !!(co.status === 'current' || co.status === 'stale'));
+        note('Imported asset checked.', true);
+      });
+    });
+  }
+
+  function boot() {
+    S.session = load('mi.session'); S.assetId = load('mi.asset'); S.tx = load('mi.tx');
+    return api('health').then(function (h) {
+      S.health = h;
+      if (!h.enabled) { show('disabled', true); $('whoami').textContent = 'Multi-issuer lab: disabled on this domain.'; $('disabledWhy').textContent = (h.reasons || []).join('; '); return; }
+      $('whoami').textContent = 'This domain: ' + h.domain + ' (' + (h.role === 'state-authority' ? 'issuer and ownership registry' : 'issuer; ownership registry is ' + h.stateAuthority) + ', key ' + h.keyId + ').';
+      $('policyLine').textContent = 'Roster: ' + h.roster.join(', ') + '. Issuance ' + h.issuance.threshold + '-of-' + h.roster.length + ' (mandatory ' + h.issuance.mandatory.join(', ') + '), transfer ' + h.transfer.threshold + '-of-' + h.roster.length + ' (mandatory ' + h.transfer.mandatory.join(', ') + ').';
+      show('app', true);
+      var visitor = h.role === 'state-authority' && h.publicDemo;
+      show('visitor', visitor);
+      show('approverNotice', !visitor);
+      if (!visitor) { $('registryName').textContent = h.stateAuthority; $('registryLink').href = 'https://' + h.stateAuthority + '/multi-issuer.html'; }
+      return ensureIdentities().then(function () {
+        drawSession(); drawIdentities();
+        $('btnSession').addEventListener('click', guard(function () { return startSession(true); }));
+        $('btnCreate').addEventListener('click', guard(createAsset));
+        $('btnOpen').addEventListener('click', guard(function () { var id = $('assetId').value.trim(); if (!/^[0-9a-f-]{36}$/.test(id)) { note('That is not an asset id.', false); return; } S.assetId = id; store('mi.asset', id); S.tx = null; return refresh(); }));
+        $('btnCheck').addEventListener('click', guard(refresh));
+        $('btnPropose').addEventListener('click', guard(propose));
+        $('btnExport').addEventListener('click', exportAsset);
+        $('btnImport').addEventListener('click', guard(importVerify));
+        $('btnUseImported').addEventListener('click', guard(function () { S.assetId = S.imported.definition.assetId; store('mi.asset', S.assetId); S.tx = null; return refresh(); }));
+        $('impFile').addEventListener('change', function () { var f = this.files[0]; if (!f) return; if (f.size > 65536) { note('That file is larger than the 64 KB import limit.', false); return; } f.text().then(function (t) { $('impText').value = t; }); });
+        $('btnIdExport').addEventListener('click', function () {
+          var blob = new Blob([JSON.stringify(Object.keys(S.ids).map(function (n) { return { name: n, pub: S.ids[n].pub, jwk: S.ids[n].jwk }; }), null, 2)], { type: 'application/json' });
+          var a = el('a', { href: URL.createObjectURL(blob), download: 'multi-issuer-test-identities.json' }); document.body.appendChild(a); a.click(); a.remove();
+        });
+        $('idFile').addEventListener('change', function () { var f = this.files[0]; if (!f) return; f.text().then(function (t) { var recs = JSON.parse(t); return recs.reduce(function (p, r) { return p.then(function () { return importIdentity(r); }); }, Promise.resolve()); }).then(function () { persistIds(); drawIdentities(); render(); note('Identities imported into this tab.', true); }, function () { note('Could not read that identity file.', false); }); });
+        if (S.assetId) { $('assetId').value = S.assetId; return refresh().catch(function () { S.assetId = null; store('mi.asset', null); }); }
+      });
+    });
+  }
+  boot().catch(function (e) { $('whoami').textContent = 'Could not reach the lab: ' + (e.message || e); });
+  window.__mi = S;
+})();
+</script>
+</body>
+</html>

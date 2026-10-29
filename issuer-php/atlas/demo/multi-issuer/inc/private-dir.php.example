@@ -1,0 +1,5 @@
+<?php
+// Copy to private-dir.php (not this example) and return the ABSOLUTE path of the private
+// directory, which must be OUTSIDE the web root (for example the folder above public_html).
+// Use a directory of its own: it holds this lab's signing key, config and database only.
+return "/home/CPANELUSER/mi-private";

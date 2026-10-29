@@ -28,9 +28,10 @@ below passes.
   3-of-3 or 3-of-4 need only config changes on every domain).
 - This is **not** atomic settlement across two independent ledgers. There is one ledger, owned by one
   domain, authorized by several. A cross-ledger design would need a separate prepare/commit/recovery protocol.
-- Both domains run on one hosting account, which weakens real-world independence: PHP running as
-  that account can read both private directories. The cryptography keeps the keys separate; the hosting does
-  not. For genuinely independent domains, use separate hosting accounts.
+- The two domains are hosted on different servers, each with its own hosting account, credentials and
+  private directory, so neither can read the other's key. That independence is a property of the deployment,
+  not of this code: confirm it separately (see the independence checklist in `multi-issuer-deployment.md`)
+  and never copy one domain's private directory to the other.
 
 ## Files
 
@@ -75,7 +76,7 @@ php ~/public_html/atlas/demo/txlab/tools/txlab-admin.php keygen --dir ~/txlab-pr
 php ~/public_html/atlas/demo/txlab/tools/txlab-admin.php keygen --dir ~/txlab-private-atlas --domain domain-atlas.co.za
 ```
 
-(If both sites share one account, run each command with that site's own docroot path.)
+(Run each command on its own domain's server, against that server's own document root.)
 
 **Without a server command line:** on your PC, with Node,
 
