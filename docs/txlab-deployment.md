@@ -36,12 +36,13 @@ New files only (nothing existing is overwritten):
 
 | Source in the repo | Upload to `evtec.co.za` | Upload to `domain-atlas.co.za` |
 | --- | --- | --- |
-| `issuer-php/txlab/api.php` | `txlab/api.php` | `txlab/api.php` |
-| `issuer-php/txlab/inc/txlab.php` | `txlab/inc/txlab.php` | `txlab/inc/txlab.php` |
-| `issuer-php/txlab/inc/.htaccess` | `txlab/inc/.htaccess` | `txlab/inc/.htaccess` |
-| `issuer-php/txlab/inc/private-dir.php.example` | save as `txlab/inc/private-dir.php` (edit the path) | same, with that domain's own path |
-| `issuer-php/txlab/tools/*` (optional, only if you can run PHP on the server) | `txlab/tools/` (with its `.htaccess`) | same |
+| `issuer-php/atlas/demo/txlab/api.php` | `atlas/demo/txlab/api.php` | `atlas/demo/txlab/api.php` |
+| `issuer-php/atlas/demo/txlab/inc/txlab.php` | `atlas/demo/txlab/inc/txlab.php` | `atlas/demo/txlab/inc/txlab.php` |
+| `issuer-php/atlas/demo/txlab/inc/.htaccess` | `atlas/demo/txlab/inc/.htaccess` | `atlas/demo/txlab/inc/.htaccess` |
+| `issuer-php/atlas/demo/txlab/inc/private-dir.php.example` | save as `atlas/demo/txlab/inc/private-dir.php` (edit the path) | same, with that domain's own path |
+| `issuer-php/atlas/demo/txlab/tools/*` (optional, only if you can run PHP on the server) | `atlas/demo/txlab/tools/` (with its `.htaccess`) | same |
 | `demo-domain-a/txlab.html` | `txlab.html` (site root) | |
+| `demo-domain-a/index.html` (adds one callout linking the lab, like the other demos) | `index.html` (site root; replaces the existing index) | |
 | `demo-domain-b/txlab.html` | | `txlab.html` (site root) |
 
 The two `txlab.html` files are identical. The lab also needs the existing, unchanged `lib/crypto.php`
@@ -67,8 +68,8 @@ Never reuse the issuer's key. Generate a fresh one for each domain.
 **With a PHP command line (cPanel Terminal or SSH), on the server:**
 
 ```
-php ~/public_html/txlab/tools/txlab-admin.php keygen --dir ~/txlab-private-evtec --domain evtec.co.za
-php ~/public_html/txlab/tools/txlab-admin.php keygen --dir ~/txlab-private-atlas --domain domain-atlas.co.za
+php ~/public_html/atlas/demo/txlab/tools/txlab-admin.php keygen --dir ~/txlab-private-evtec --domain evtec.co.za
+php ~/public_html/atlas/demo/txlab/tools/txlab-admin.php keygen --dir ~/txlab-private-atlas --domain domain-atlas.co.za
 ```
 
 (If both sites share one account, run each command with that site's own docroot path.)
@@ -76,8 +77,8 @@ php ~/public_html/txlab/tools/txlab-admin.php keygen --dir ~/txlab-private-atlas
 **Without a server command line:** on your PC, with Node,
 
 ```
-node issuer-php/txlab/tools/txlab-setup.js keygen --dir txlab-private-evtec --domain evtec.co.za
-node issuer-php/txlab/tools/txlab-setup.js keygen --dir txlab-private-atlas --domain domain-atlas.co.za
+node issuer-php/atlas/demo/txlab/tools/txlab-setup.js keygen --dir txlab-private-evtec --domain evtec.co.za
+node issuer-php/atlas/demo/txlab/tools/txlab-setup.js keygen --dir txlab-private-atlas --domain domain-atlas.co.za
 ```
 
 then upload each folder to its domain's private location (outside the web root) and set `signing-key.pem` to
@@ -91,7 +92,7 @@ shown once.
 
 Public keys are not secret, but they must be copied exactly and checked. Copy `evtec.co.za`'s public key into
 `domain-atlas.co.za`'s configuration and the other way round. As you own both sites, compare the printed strings
-by eye in both places. After enabling, `https://DOMAIN/txlab/api.php?op=peers` confirms each side sees the other and that the key
+by eye in both places. After enabling, `https://DOMAIN/atlas/demo/txlab/api.php?op=peers` confirms each side sees the other and that the key
 it published matches the pinned one.
 
 ## 4. Write the configuration (outside the web root)
@@ -101,11 +102,11 @@ The same roster on both domains; only `--domain` and `--dir` differ.
 ```
 php txlab-admin.php config --dir ~/txlab-private-evtec --domain evtec.co.za --settlement evtec.co.za \
   --threshold 2 --mandatory evtec.co.za \
-  --roster "evtec.co.za=<EVTEC_PUBLIC_KEY>@https://evtec.co.za/txlab/api.php,domain-atlas.co.za=<ATLAS_PUBLIC_KEY>@https://domain-atlas.co.za/txlab/api.php"
+  --roster "evtec.co.za=<EVTEC_PUBLIC_KEY>@https://evtec.co.za/atlas/demo/txlab/api.php,domain-atlas.co.za=<ATLAS_PUBLIC_KEY>@https://domain-atlas.co.za/atlas/demo/txlab/api.php"
 
 php txlab-admin.php config --dir ~/txlab-private-atlas --domain domain-atlas.co.za --settlement evtec.co.za \
   --threshold 2 --mandatory evtec.co.za \
-  --roster "evtec.co.za=<EVTEC_PUBLIC_KEY>@https://evtec.co.za/txlab/api.php,domain-atlas.co.za=<ATLAS_PUBLIC_KEY>@https://domain-atlas.co.za/txlab/api.php"
+  --roster "evtec.co.za=<EVTEC_PUBLIC_KEY>@https://evtec.co.za/atlas/demo/txlab/api.php,domain-atlas.co.za=<ATLAS_PUBLIC_KEY>@https://domain-atlas.co.za/atlas/demo/txlab/api.php"
 ```
 
 (`txlab-setup.js config ...` takes the same options.) The files are written **disabled**. Do not add
@@ -114,8 +115,8 @@ php txlab-admin.php config --dir ~/txlab-private-atlas --domain domain-atlas.co.
 To add a third domain later, add it to `--roster` on every domain, raise `--threshold` if wanted, and re-run
 `config`. Existing transactions keep the policy they were created with.
 
-Then tell the web code where the private directory is: copy `txlab/inc/private-dir.php.example` to
-`txlab/inc/private-dir.php` on each domain and set the absolute path, for example
+Then tell the web code where the private directory is: copy `atlas/demo/txlab/inc/private-dir.php.example` to
+`atlas/demo/txlab/inc/private-dir.php` on each domain and set the absolute path, for example
 `return "/home/CPANELUSER/txlab-private-evtec";`.
 
 Permissions: private directory 700 and writable by the PHP account (the SQLite database and its journal files are
@@ -136,21 +137,21 @@ the lab refuses all other operations.
 
 ## 6. Verify isolation from the existing functionality
 
-1. Compare the file listing before and after: only `txlab/` and `txlab.html` are new, and `lib/` gained nothing.
+1. Compare the file listing before and after: only `atlas/demo/txlab/` and `txlab.html` (plus the index link on `evtec.co.za`) are new, and `lib/` gained nothing.
 2. Open your existing pages and confirm they behave as before: the Reserve Bank demo, the trading station, the wallet.
 3. The lab never touches `.well-known`, `lib/issuer-private-key.pem`, `lib/atlas-*-store.json` or any issuer state. Its only
    state is `txlab.sqlite` (plus its journal files) in the private directory.
 4. Secrets are not served: these should answer 403 or 404, never file contents.
-   `https://DOMAIN/txlab/inc/txlab.php`, `https://DOMAIN/txlab/inc/private-dir.php`, `https://DOMAIN/txlab/tools/txlab-admin.php`.
+   `https://DOMAIN/atlas/demo/txlab/inc/txlab.php`, `https://DOMAIN/atlas/demo/txlab/inc/private-dir.php`, `https://DOMAIN/atlas/demo/txlab/tools/txlab-admin.php`.
 5. No response of `api.php` contains the token, its hash or the private key (the test suite checks this).
 
 ## 7. Live two-domain smoke test
 
 Open these (health first):
 
-1. `https://evtec.co.za/txlab/api.php?op=health` and `https://domain-atlas.co.za/txlab/api.php?op=health`:
+1. `https://evtec.co.za/atlas/demo/txlab/api.php?op=health` and `https://domain-atlas.co.za/atlas/demo/txlab/api.php?op=health`:
    both `"enabled": true`; evtec.co.za is the `settlement-authority`.
-2. `https://evtec.co.za/txlab/api.php?op=peers` and the same on domain-atlas.co.za: peer reachable, `keyMatches: true`.
+2. `https://evtec.co.za/atlas/demo/txlab/api.php?op=peers` and the same on domain-atlas.co.za: peer reachable, `keyMatches: true`.
 3. `https://evtec.co.za/txlab.html`: unlock with evtec.co.za's token, choose alice to bob, 30, **Submit transaction**. Status
    pending, quorum 0/2.
 4. `https://domain-atlas.co.za/txlab.html#tx=<the transaction id>`: the same transaction and digest appear. Unlock with
@@ -168,7 +169,7 @@ neighbour over HTTPS; the lab then stays pending or reports an explicit peer-una
   operations return 503 at once; delete the file to re-enable.
 - Reset the balances and history (needs a command line, by design not exposed on the web):
   `php txlab-admin.php reset --dir ~/txlab-private-evtec --yes` on the settlement domain.
-- Remove: delete `txlab/`, `txlab.html` and the private directory. Nothing else was changed.
+- Remove: delete `atlas/demo/txlab/`, `txlab.html` and the private directory. Nothing else was changed.
 
 ## What each domain can and cannot do
 

@@ -102,4 +102,4 @@ issuer-server/holdings/
 issuer-server/txn/
 
 # per-domain pointer to the transaction lab private directory (never commit)
-issuer-php/txlab/inc/private-dir.php
+issuer-php/atlas/demo/txlab/inc/private-dir.php

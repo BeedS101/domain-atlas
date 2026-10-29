@@ -157,6 +157,18 @@
   </div>
 
   <div class="callout">
+    <h2>...and a transfer only happens once independent domains each sign off on it</h2>
+    <p>A test transfer of 30 credits from Alice to Bob is put to two separately keyed
+       domains. Each fetches the same transaction, checks it against its own policy and
+       signs it with its own key; one signature alone never moves a balance, and a domain
+       that owns the ledger state must always be one of the signers. Each approval, rejection
+       and the final execution shows up as a separate event, with evidence you can verify in
+       the browser. Test balances only, no wallet.
+       <a href="/txlab.html">Try the multi-domain transaction authorization lab →</a>
+    </p>
+  </div>
+
+  <div class="callout">
     <h2>...and a single ordinary page can point at one exact spot</h2>
     <p>Two plain pages, each with one extra <code>&lt;link rel="spatial"&gt;</code> tag in
        its head naming a specific place inside a world this domain already declared —

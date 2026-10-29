@@ -1,5 +1,5 @@
 // Two-domain (and three-domain) HTTP test for the Multi-Domain Transaction Authorization Lab
-// (issuer-php/txlab). Every domain is a separate `php -S` server with its own docroot, its own
+// (issuer-php/atlas/demo/txlab). Every domain is a separate `php -S` server with its own docroot, its own
 // signing key, admin token, configuration and SQLite state; the docroot holds only the lab files
 // plus lib/crypto.php, so the test also proves the lab depends on nothing else. All requests are
 // real HTTP, all signatures are verified here with Web Crypto against the public keys.
@@ -16,7 +16,7 @@ const crypto = require('crypto');
 const net = require('net');
 
 const REPO = path.resolve(__dirname, '..');
-const TXLAB_SRC = path.join(REPO, 'issuer-php', 'txlab');
+const TXLAB_SRC = path.join(REPO, 'issuer-php', 'atlas', 'demo', 'txlab');
 const CRYPTO_SRC = path.join(REPO, 'issuer-php', 'lib', 'crypto.php');
 const TOOL = path.join(TXLAB_SRC, 'tools', 'txlab-admin.php');
 const subtle = crypto.webcrypto.subtle;
@@ -72,14 +72,14 @@ function copyDir(src, dst) {
 function makeInstance(label, port, opts) {
   const id = ids[opts.identity];
   const docroot = path.join(ROOT, label, 'public_html');
-  copyDir(TXLAB_SRC, path.join(docroot, 'txlab'));
+  copyDir(TXLAB_SRC, path.join(docroot, 'atlas', 'demo', 'txlab'));
   fs.mkdirSync(path.join(docroot, 'lib'), { recursive: true });
   fs.copyFileSync(CRYPTO_SRC, path.join(docroot, 'lib', 'crypto.php'));
   const privDir = opts.privDir || path.join(ROOT, label, 'private');
   fs.mkdirSync(privDir, { recursive: true, mode: 0o700 });
   for (const f of ['signing-key.pem', 'public-key.txt', 'admin-token.sha256']) fs.copyFileSync(path.join(id.dir, f), path.join(privDir, f));
   fs.chmodSync(path.join(privDir, 'signing-key.pem'), opts.keyMode || 0o600);
-  const roster = opts.roster.map((r) => ids[r.identity].domain + '=' + ids[r.identity].pub + '@http://127.0.0.1:' + r.port + '/txlab/api.php').join(',');
+  const roster = opts.roster.map((r) => ids[r.identity].domain + '=' + ids[r.identity].pub + '@http://127.0.0.1:' + r.port + '/atlas/demo/txlab/api.php').join(',');
   const args = [TOOL, 'config', '--dir', privDir, '--domain', id.domain, '--settlement', opts.settlement, '--threshold', String(opts.threshold),
     '--mandatory', opts.mandatory.join(','), '--roster', roster, '--allow-insecure-http', '--ttl', String(opts.ttl || 900)];
   if (opts.enabled !== false) args.push('--enable');
@@ -113,7 +113,7 @@ async function stop(label) {
 
 async function call(label, op, o) {
   o = o || {};
-  const url = inst[label].base + '/txlab/api.php?op=' + op + (o.id ? '&id=' + encodeURIComponent(o.id) : '');
+  const url = inst[label].base + '/atlas/demo/txlab/api.php?op=' + op + (o.id ? '&id=' + encodeURIComponent(o.id) : '');
   const init = o.body !== undefined ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o.body) } : {};
   const r = await fetch(url, init);
   let body = null;
@@ -171,7 +171,7 @@ async function main() {
     const wrongDecide = await call('B', 'decide', { body: { adminToken: ids.a.token, id: '00000000-0000-4000-8000-000000000000', decision: 'approve' } });
     assert(noTok.status === 401 && wrongTok.status === 401, 'create without or with a wrong admin token is refused');
     assert(wrongDecide.status === 401, 'B refuses A\'s admin token (tokens are per domain)');
-    const getCreate = await fetch(inst.A.base + '/txlab/api.php?op=create');
+    const getCreate = await fetch(inst.A.base + '/atlas/demo/txlab/api.php?op=create');
     assert(getCreate.status === 405, 'create is POST only');
     const st = await state('A');
     assert(st.transactions.length === 0 && st.balances.alice === 10000 && st.balances.bob === 0, 'nothing was created');
@@ -491,7 +491,7 @@ async function main() {
       assert(!fs.existsSync(path.join(inst[l].docroot, '.well-known')), l + ' created no .well-known files');
     }
     assert(fs.readdirSync(inst.A.privDir).includes('txlab.sqlite'), 'state lives only in the private directory');
-    const leak = await fetch(inst.A.base + '/txlab/inc/txlab.php');
+    const leak = await fetch(inst.A.base + '/atlas/demo/txlab/inc/txlab.php');
     const body = await leak.text();
     assert(!/signing-key|BEGIN EC PRIVATE KEY|adminTokenHash/.test(body), 'no secret appears in anything served');
     const allText = JSON.stringify([(await call('A', 'state')).body, (await call('A', 'roster')).body, await tx('A', tx1)]);

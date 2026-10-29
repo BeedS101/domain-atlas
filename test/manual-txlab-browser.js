@@ -14,7 +14,7 @@ const net = require('net');
 const { chromium } = require('playwright');
 
 const REPO = path.resolve(__dirname, '..');
-const TXLAB_SRC = path.join(REPO, 'issuer-php', 'txlab');
+const TXLAB_SRC = path.join(REPO, 'issuer-php', 'atlas', 'demo', 'txlab');
 const TOOL = path.join(TXLAB_SRC, 'tools', 'txlab-admin.php');
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'txlab-browser-'));
 const SHOTS = process.env.TXLAB_SHOTS || ROOT;
@@ -37,7 +37,7 @@ function copyDir(src, dst) {
 function makeDomain(name, domain, port, pubs, tokens, page) {
   const root = path.join(ROOT, name);
   const docroot = path.join(root, 'public_html');
-  copyDir(TXLAB_SRC, path.join(docroot, 'txlab'));
+  copyDir(TXLAB_SRC, path.join(docroot, 'atlas', 'demo', 'txlab'));
   fs.mkdirSync(path.join(docroot, 'lib'), { recursive: true });
   fs.copyFileSync(path.join(REPO, 'issuer-php', 'lib', 'crypto.php'), path.join(docroot, 'lib', 'crypto.php'));
   fs.copyFileSync(page, path.join(docroot, 'txlab.html'));
@@ -54,6 +54,7 @@ async function waitPort(port) {
 }
 
 async function main() {
+  assert(fs.readFileSync(path.join(REPO, 'demo-domain-a', 'txlab.html')).equals(fs.readFileSync(path.join(REPO, 'demo-domain-b', 'txlab.html'))), 'the lab page is identical on both demo domains');
   const a = makeDomain('a', 'a.test', PA, null, null, path.join(REPO, 'demo-domain-a', 'txlab.html'));
   const b = makeDomain('b', 'b.test', PB, null, null, path.join(REPO, 'demo-domain-b', 'txlab.html'));
   const out = {};
@@ -61,7 +62,7 @@ async function main() {
     const o = php([TOOL, 'keygen', '--dir', d.priv, '--domain', d.domain]);
     out[d.name] = { pub: /public key:\s+(\S+)/.exec(o)[1], token: /admin token:\s+(\S+)/.exec(o)[1] };
   }
-  const roster = 'a.test=' + out.a.pub + '@http://127.0.0.1:' + PA + '/txlab/api.php,b.test=' + out.b.pub + '@http://127.0.0.1:' + PB + '/txlab/api.php';
+  const roster = 'a.test=' + out.a.pub + '@http://127.0.0.1:' + PA + '/atlas/demo/txlab/api.php,b.test=' + out.b.pub + '@http://127.0.0.1:' + PB + '/atlas/demo/txlab/api.php';
   for (const d of [a, b]) php([TOOL, 'config', '--dir', d.priv, '--domain', d.domain, '--settlement', 'a.test', '--threshold', '2', '--mandatory', 'a.test', '--roster', roster, '--allow-insecure-http', '--enable']);
   for (const d of [a, b]) {
     procs.push(spawn('php', ['-S', '127.0.0.1:' + d.port, '-t', d.docroot], { env: { ...process.env, TXLAB_PRIVATE_DIR: d.priv, PHP_CLI_SERVER_WORKERS: '6' }, stdio: 'ignore' }));
