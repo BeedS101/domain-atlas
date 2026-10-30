@@ -9,6 +9,7 @@ $tests=[
   'asset-studio-challenge-concurrency.php',
   'asset-studio-mint-attempts.php',
   'asset-studio-attempt-concurrency.php',
+  'asset-studio-legacy-issue-gate.php',
 ];
 $php=PHP_BINARY;
 $failed=[];
