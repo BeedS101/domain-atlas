@@ -22,3 +22,12 @@ $x=$proof;$x['signerRole']='unknown';ok(!$check($x)['ok'],'invalid signer');
 $x=$proof;$x['signedPayload']['payload']['expiresAt']=$now+301;
 ok(!$check($x,['nonce'=>$c['nonce'],'expiresAt'=>$now+301])['ok'],'bounded expiry');
 echo "Asset Studio mint proof preflight tests passed\n";
+
+$called=0;
+$accept=function($signed,$envelope)use(&$called,$proof){$called++;return $signed===$proof['signedPayload'] && $envelope===$proof;};
+ok(atlas_studio_verify_mint_envelope($proof,$c,'https://domain-atlas.co.za',str_repeat('a',64),$accept,$now)['ok'],'verified envelope accepted');
+ok($called===1,'verifier invoked');
+$reject=fn($signed,$envelope)=>false;
+ok(!atlas_studio_verify_mint_envelope($proof,$c,'https://domain-atlas.co.za',str_repeat('a',64),$reject,$now)['ok'],'invalid signature rejected');
+$called=0;$bad=$proof;$bad['signedPayload']['origin']='https://other.example';
+ok(!atlas_studio_verify_mint_envelope($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$accept,$now)['ok'] && $called===0,'bad proof skips verifier');
