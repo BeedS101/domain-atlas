@@ -26,7 +26,7 @@ foreach ($tests as $name) {
 echo "\nAsset Studio: $passed/".count($tests)." tests passed; ".count($skipped)." skipped; ".count($failed)." failed\n";
 if ($skipped) fwrite(STDERR,"Skipped (NOT verified): ".implode(", ",$skipped)."\n");
 if ($failed || $skipped) {
-  fwrite(STDERR,"Failed: ".implode(', ',$failed)."\n");
+  if ($failed) fwrite(STDERR,"Failed: ".implode(', ',$failed)."\n");
   exit(1);
 }
 echo "Note: these test isolated helpers only; real issuer signing and wallet minting are NOT tested.\n";
