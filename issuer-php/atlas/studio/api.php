@@ -17,8 +17,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && ($_GET['op'] ?? '') === 'va
   $raw=file_get_contents('php://input', false, null, 0, 4097);
   if ($raw===false || strlen($raw)>4096) studio_reply(413,['ok'=>false,'error'=>'too-large']);
   $design=json_decode($raw,true);
-  require_once __DIR__.'/inc/design-validator.php';
-  $result=atlas_studio_validate_design($design);
+  require_once __DIR__.'/inc/design-fingerprint.php';
+  $result=atlas_studio_design_fingerprint($design);
   studio_reply($result['ok'] ? 200 : 400, $result);
 }
 studio_reply(403,['ok'=>false,'error'=>'minting-not-enabled']);
