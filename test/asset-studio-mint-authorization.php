@@ -2,11 +2,13 @@
 require_once __DIR__.'/../issuer-php/atlas/studio/inc/mint-authorization.php';
 function ok($yes,$name){if(!$yes){fwrite(STDERR,"FAIL: $name\n");exit(1);}}
 $now=1760000000;
-$c=['nonce'=>str_repeat('b',64),'expiresAt'=>$now+90];
+$c=['nonce'=>str_repeat('b',64),'expiresAt'=>$now+90,'designDigest'=>str_repeat('a',64),'recipient'=>'owner-public-key'];
 $p=['purpose'=>'atlas.studio.mint/1','nonce'=>$c['nonce'],'designDigest'=>str_repeat('a',64),'recipient'=>'owner-public-key','expiresAt'=>$c['expiresAt']];
 $proof=['signedPayload'=>['ctx'=>'atlas.bridge.sign/1','origin'=>'https://domain-atlas.co.za','payload'=>$p],'publicKey'=>'owner-public-key','signerRole'=>'raw-ecdsa'];
 $check=fn($v,$c2=$c)=>atlas_studio_check_mint_proof($v,$c2,'https://domain-atlas.co.za',str_repeat('a',64),$now);
 ok($check($proof)['ok'],'valid proof shape');
+$bad=$c;$bad['recipient']='other';ok(!$check($proof,$bad)['ok'],'challenge recipient binding');
+$bad=$c;$bad['designDigest']=str_repeat('f',64);ok(!$check($proof,$bad)['ok'],'challenge design binding');
 foreach ([
   'wrong origin'=>['origin'=>'https://evtec.co.za'],
   'wrong ctx'=>['ctx'=>'something-else'],
