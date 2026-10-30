@@ -15,7 +15,15 @@ function atlas_studio_new_challenge($root, $designDigest, $recipient, $now = nul
   if (!$fp) throw new RuntimeException('challenge-create-failed');
   try {
     @chmod($path,0600);
-    if (fwrite($fp,json_encode($value,JSON_THROW_ON_ERROR))===false || !fflush($fp)) throw new RuntimeException('challenge-write-failed');
+    $json=json_encode($value,JSON_THROW_ON_ERROR);
+    $written=0;
+    while ($written < strlen($json)) {
+      $n=fwrite($fp,substr($json,$written));
+      if ($n===false || $n===0) throw new RuntimeException('challenge-write-failed');
+      $written+=$n;
+    }
+    if (!fflush($fp)) throw new RuntimeException('challenge-write-failed');
+    if (function_exists('fsync') && !fsync($fp)) throw new RuntimeException('challenge-sync-failed');
   } catch (Throwable $e) {
     fclose($fp);@unlink($path);throw $e;
   }
@@ -69,7 +77,15 @@ function atlas_studio_consume_challenge($root,$nonce,$designDigest,$recipient,$n
     $v['state']='consumed';
     rewind($fp);
     $json=json_encode($v,JSON_THROW_ON_ERROR);
-    if (!ftruncate($fp,0) || fwrite($fp,$json)!==strlen($json) || !fflush($fp)) throw new RuntimeException('challenge-consume-failed');
+    if (!ftruncate($fp,0)) throw new RuntimeException('challenge-consume-failed');
+    $written=0;
+    while ($written < strlen($json)) {
+      $n=fwrite($fp,substr($json,$written));
+      if ($n===false || $n===0) throw new RuntimeException('challenge-consume-failed');
+      $written+=$n;
+    }
+    if (!fflush($fp)) throw new RuntimeException('challenge-consume-failed');
+    if (function_exists('fsync') && !fsync($fp)) throw new RuntimeException('challenge-sync-failed');
     return true;
   } finally {flock($fp,LOCK_UN);fclose($fp);}
 }
