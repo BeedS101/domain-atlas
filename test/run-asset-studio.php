@@ -13,14 +13,19 @@ $tests=[
 ];
 $php=PHP_BINARY;
 $failed=[];
+$skipped=[];
+$passed=0;
 foreach ($tests as $name) {
   echo "\n== $name ==\n";
   $args=escapeshellarg($php).' '.escapeshellarg(__DIR__.DIRECTORY_SEPARATOR.$name);
   passthru($args,$status);
-  if ($status !== 0) $failed[]=$name;
+  if ($status === 0) $passed++;
+  elseif ($status === 77) $skipped[]=$name;
+  else $failed[]=$name;
 }
-echo "\nAsset Studio: ".(count($tests)-count($failed))."/".count($tests)." tests passed\n";
-if ($failed) {
+echo "\nAsset Studio: $passed/".count($tests)." tests passed; ".count($skipped)." skipped; ".count($failed)." failed\n";
+if ($skipped) fwrite(STDERR,"Skipped (NOT verified): ".implode(", ",$skipped)."\n");
+if ($failed || $skipped) {
   fwrite(STDERR,"Failed: ".implode(', ',$failed)."\n");
   exit(1);
 }
