@@ -3,7 +3,7 @@
   "templates": [
     {
       "id": "trophy",
-      "label": "Gopher Trophy",
+      "label": "Achievement Trophy",
       "finishes": [
         "gold",
         "silver",
