@@ -3,6 +3,7 @@
 $tests=[
   'asset-studio-design-validator.php',
   'asset-studio-design-fingerprint.php',
+  'asset-studio-authorize-design.php',
   'asset-studio-storage.php',
   'asset-studio-issuance-plan.php',
   'asset-studio-mint-authorization.php',
