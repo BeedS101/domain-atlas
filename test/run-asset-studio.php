@@ -6,6 +6,7 @@ $tests=[
   'asset-studio-issuance-plan.php',
   'asset-studio-mint-authorization.php',
   'asset-studio-challenges.php',
+  'asset-studio-challenge-concurrency.php',
 ];
 $php=PHP_BINARY;
 $failed=[];
