@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Minimal hand-rolled IMAP client, PHP port of issuer-server/lib-imap.js —
 // same zero-dependency philosophy as lib/smtp.php. Supports exactly what
 // SPEC.md §13.3's inbound polling needs: connect (plain or TLS), LOGIN,

@@ -97,7 +97,7 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     assertTrue(originShown === lab.origin, 'prompt shows the page origin, got ' + originShown);
     assertTrue((await frame.locator('#purposeText').innerText()) === 'atlas.studio.mint/1', 'prompt shows the purpose');
     const box = await frame.locator('#payloadBox').innerText();
-    assertTrue(box.includes('Mint a free demo trophy (gold): Walkthrough Trophy. No value.'), 'prompt shows the issuer-computed summary: ' + box);
+    assertTrue(box.includes('Mint a free demo trophy (gold) named "Walkthrough Trophy". It has no value and is bound to this wallet: it cannot be transferred or traded.'), 'prompt shows the issuer-computed summary: ' + box);
     assertTrue(box.includes(identity.publicKey), 'prompt shows the recipient key');
     await frame.locator('#denyBtn').click();
     await studio.waitForFunction(() => /declined|timed out/.test(document.getElementById('message').textContent), null, { timeout: 15000 });

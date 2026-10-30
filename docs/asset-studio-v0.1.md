@@ -17,7 +17,7 @@ The credential carries the approved design in `asset.properties` (`atlas.studio.
 
 ## Idempotency and crash safety
 
-Studio does not keep a second ledger. A mint is one transaction in the issuer's existing journal and replay store (`lib/replacement.php`), under the request id `studio-mint-<nonce>`:
+Studio does not keep a second ledger. A mint is one transaction in the issuer's existing journal and replay store (`lib/replacement.php`), under the request id `studio:mint:<nonce>`. The colons put it outside what the general `requestId` field accepts (letters, digits, `-`, `_`), so no other route can read or poison a Studio replay record:
 
 - Requests for one nonce are serialized by the request-id lease.
 - The credential is signed in memory, then committed by writing the transaction journal entry (the commit point), then the replay record is stored and the journal entry removed.
@@ -27,7 +27,7 @@ Studio does not keep a second ledger. A mint is one transaction in the issuer's 
 
 ## Closing the other issuance routes
 
-The catalog entry sets `restrictedIssuance: 'studio'`. `mint_asset_by_class()` (the shared choke point used by issue, mint, purchase, mail gifts, ticket sending, split, consolidate and convert) refuses it, and `atlas/asset/issue.php` returns `403 studio-authorization-required` before taking any lease. The Node issuer refuses it at the same points. Studio calls `issue_asset()` directly, only from `inc/studio-mint.php`, after authorization. Admin `reissue` and `clawback` copy an existing credential and remain operator-only.
+The catalog entry sets `restrictedIssuance: 'studio'`. `mint_asset_by_class()` (the shared choke point used by issue, mint, purchase, mail gifts, ticket sending, split, consolidate and convert) refuses it, and `atlas/asset/issue.php` returns `403 studio-authorization-required` before taking any lease. The Node issuer refuses it at the same points. Studio calls `issue_asset()` directly, only from `inc/studio-mint.php`, after authorization. Admin `reissue` and `admin/class-patch` refuse the class with `403 studio-authorization-required` (a tradeScope or property patch would unbind the item or rewrite what the owner approved; a class patch is applied to every holder at their next wallet check-in, and a patch stored earlier is ignored for this class). Clearing a patch stays allowed. `clawback` re-signs the asset unchanged for a new owner and remains the operator-only recovery path. Owner-signed intents (`asset/transfer`, `transfer-to-email`, `transfer-to-file`, `world/drop`, `trade/submit`) are refused by the bound policy; `redeem` (the owner giving the item up) is allowed. The `inc/` helpers refuse direct web requests (`inc/.htaccess`, plus a guard at the top of each helper and of `lib/*.php`).
 
 ## Operator configuration
 
@@ -37,7 +37,13 @@ Minting is on only when `<ATLAS_STUDIO_STORAGE_ROOT>/studio-config.json` exists,
 { "mintEnabled": true, "domain": "host[:port]", "origins": ["https://host"] }
 ```
 
-`domain` must equal the request's host. `origins` (default `https://<domain>`) are the only page origins whose wallet signatures are accepted; `http` origins are accepted only for localhost. Optional integer limits: `challengesPerIpPerHour` (30), `mintsPerIpPerHour` (10), `maxMintsPerRecipientPerDay` (3), `maxMintsPerDay` (200), `maxOutstandingChallenges` (500). Any problem with the file turns minting off.
+`domain` must equal the request's `Host` header exactly and be canonical: lower case, no trailing dot, no leading-zero port (otherwise minting stays off with `domain-mismatch`). Credentials embed the request's host, so differently spelled Host headers must not produce differently spelled issuers or model URLs. `origins` (default `https://<domain>`) are the only page origins whose wallet signatures are accepted; `http` origins are accepted only for localhost.
+
+Optional integer limits: `challengesPerIpPerHour` (30), `mintsPerIpPerHour` (10), `maxMintsPerRecipientPerDay` (3), `maxMintsPerActorPerDay` (10), `maxMintsPerDay` (200), `maxOutstandingChallenges` (500). An "actor" is an IPv4 address or an IPv6 /64; the hourly limits also apply to the enclosing IPv6 /48 at 8 times the per-actor value, so rotating /64s inside one allocation does not multiply the allowance. `maxMintsPerActorPerDay` stops one actor from using up `maxMintsPerDay`. The per-recipient quota counts a key once whichever accepted spelling (raw point or SPKI) it arrives in. Rate-limit counter files expire with their window and are pruned in bounded batches; at 20000 counters, new actors are refused (fail closed) rather than growing the folder.
+
+Optional `webauthnRpIds` (a list of 1 to 4 relying-party ids) pins WebAuthn assertions to those ids by checking the authenticator's `rpIdHash`. It is off by default, and raw-ECDSA identities are not affected.
+
+Replay retention (`ATLAS_REPLAY_TTL_HOURS`, default 168) must be at least 48 hours, which covers the challenge lifetime, the 24-hour challenge retention and the recovery window. A smaller value keeps minting off with `replay-retention-too-short` instead of running with a weaker exactly-once guarantee. Any problem with the file turns minting off.
 
 The storage root must be outside the document root, owned by the PHP account, with `drafts`, `uploads-quarantine`, `mint-receipts`, `tmp` and `rate` subdirectories (see `asset-studio-storage.md`). The issuer's private state directory (`ATLAS_PRIVATE_DIR`) is separate and must be writable too.
 
@@ -68,17 +74,24 @@ Automated version: `xvfb-run -a node test/manual-studio-wallet-flow.js` drives t
 
 ## Tests
 
-- `php test/run-asset-studio.php` runs the PHP unit tests (validation, fingerprint, storage, plan, proof binding with injected time, quota windows and challenge store) and the integration suite.
+- `php test/run-asset-studio.php` runs the PHP unit tests (validation, fingerprint, storage, plan, proof binding with injected time, quota windows, challenge store, multi-process challenge-cap race, rate limits and pruning, replay namespace, key normalisation and approval text) and the integration suite.
 - `node test/asset-studio-integration.js [name filter]` starts real PHP issuers with fresh keys and signs with real ECDSA and WebAuthn-style assertions. It covers rejected and forged signatures, other keys, origin and context mismatches, altered designs, hostile JSON types, replay, concurrency, quotas, SIGKILL and fault-injected crashes at every commit step, restart persistence, bypass attempts on the general routes (PHP and Node), the trade catalog and no-leak checks.
 - `xvfb-run -a node test/manual-studio-wallet-flow.js` is the real-extension browser test.
+- `xvfb-run -a node test/manual-bridge-foreign-manifest.js` checks in a real browser that a page cannot borrow wallet bridge permissions from a manifest on another origin.
+- `node test/manual-studio-restricted-parity.js` checks that the Node and PHP issuers both refuse to mint, reissue or patch the Studio class.
+
+## Durability
+
+Every Studio file write is: write to a temporary file in the same directory, `fsync` the file, rename over the target, then `fsync` the directory (`atlas_write_file_atomic()` in `lib/store.php` and `atlas_studio_fsync_dir()` / `atlas_studio_replace_file()` in `inc/storage.php`). A test records the system calls (with `strace`) and checks that order. The challenge and attempt files are replaced the same way, not truncated in place, and crash tests stop the process between writing the temporary file and renaming it.
+
+What this does and does not show. It gives crash-of-the-PHP-process safety, and a reasonable best effort against an operating-system crash on a local POSIX file system. It is not a power-loss guarantee: that also depends on the disk's write cache, the file system's mount options, and any virtualisation or network storage underneath, none of which is tested here. Limits: directory `fsync` needs PHP 8.1 or later (`fsync()` does not exist earlier) and a POSIX platform; on older PHP or on Windows the file and directory flushes are skipped and the rename is still atomic but not known to be durable. The older file-export and claim writers in `lib/store.php` (`write_file_exports`, `write_file_claims`) were not changed.
 
 ## Known gaps
 
-- `verify_envelope()` does not check the WebAuthn `rpIdHash` or the `clientDataJSON.origin`; Studio checks the type, user presence and the signed bridge origin only.
-- The outstanding-challenge cap counts files without a lock, so a burst can overshoot it slightly. Challenge and attempt files are pruned on use (24 hours / 30 days).
+- `verify_envelope()` does not check the WebAuthn `rpIdHash` or the `clientDataJSON.origin`. Studio checks the type, user presence and the signed bridge origin, and can pin `rpIdHash` with `webauthnRpIds`. Without the pin any passkey whose signature verifies is accepted, which is fine for a no-value item bound to that key but is an assumption to know about.
 - There is no operator reconciliation tool for attempts left `claimed` after a crash that was never retried; they only occupy a quota slot until they age out. Issuer replay records follow the issuer's existing retention.
 - Key rotation: a credential names the issuer key that signed it; Studio does nothing special for rotated keys.
-- Admin `reissue` can edit properties of an existing credential, including the `atlas.studio.*` ones; that is an existing operator capability.
 - Profanity filtering uses the existing handle-oriented blocklist; it is not a moderation system. Uploads and drafts are not implemented.
-- Quotas and rate limits use the connecting address only; behind a proxy, all visitors share one address.
+- Quotas and rate limits use the connecting address only; behind a proxy, all visitors share one address. Per-actor and IPv6 grouping follow the address PHP sees.
+- Durability is as described above; it is not proven against power loss.
 - 3D model URLs are `https`; see above.

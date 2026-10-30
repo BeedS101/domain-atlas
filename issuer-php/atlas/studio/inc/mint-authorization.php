@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Studio mint proof checks: what the visitor's wallet signed, bound to the issuer's own challenge.
 //
 // The wallet signs { ctx: 'atlas.bridge.sign/1', origin, payload } (SPEC.md §3.8.1) where payload is the
@@ -35,6 +36,18 @@ function atlas_studio_webauthn_presence($proof) {
   $data=json_decode($rawClient,true);
   return is_array($data) && ($data['type'] ?? null)==='webauthn.get'
     && (ord($rawAuth[32]) & 0x01)!==0;
+}
+
+// Optional pin on the WebAuthn relying party. verify_envelope() does not look at the authenticator's rpIdHash
+// or the client-data origin, so by default any credential whose signature verifies is accepted; the wallet's
+// passkeys are scoped to the wallet, not to this issuer. When `webauthnRpIds` is configured, the rpIdHash must
+// be the SHA-256 of one of those ids. Raw-ECDSA identities are unaffected. null means no pin.
+function atlas_studio_webauthn_rp_ok($proof, $rpIds) {
+  if ($rpIds === null || ($proof['signerRole'] ?? null) !== 'webauthn') return true;
+  $rawAuth = is_string($proof['authenticatorData'] ?? null) ? atlas_studio_b64url_exact($proof['authenticatorData']) : null;
+  if ($rawAuth === null || strlen($rawAuth) < 37 || !is_array($rpIds)) return false;
+  foreach ($rpIds as $id) if (is_string($id) && hash_equals(hash('sha256', $id, true), substr($rawAuth, 0, 32))) return true;
+  return false;
 }
 
 // Binding checks. $allowedOrigins are the exact origins this issuer's configuration names; $summary is

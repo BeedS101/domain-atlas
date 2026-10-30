@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Domain Atlas — PHP issuer: shared request handling + the same signing/
 // verification logic issuer-server/server.js has, ported function-for-
 // function. Each file under atlas/ requires this, then does its own small
@@ -639,6 +640,8 @@ function apply_class_patch_if_stale($privateKey, $publicKeyB64url, $credential) 
   if (!is_array($credential) || ($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0') return null;
   if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) return null;
   if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !== atlas_domain()) return null;
+  // Restricted classes are never rewritten by a class patch, even one stored before the class was restricted.
+  if (!empty(ATLAS_ASSET_CATALOG[$credential['asset']['class'] ?? '']['restrictedIssuance'])) return null;
   $patch = class_patch_of($credential['asset']['class']);
   if (!$patch || !is_credential_stale_against_class_patch($credential, $patch)) return null;
   if (is_revoked($credential['id'])) return null; // already handled by atlas/mail/check.php's own revocation check — defensive only

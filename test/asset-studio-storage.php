@@ -32,3 +32,21 @@ try {
   foreach (['drafts','uploads-quarantine','mint-receipts','tmp'] as $name) rmdir($base.'/private/'.$name);
   rmdir($base.'/private');rmdir($base.'/web');rmdir($base);
 }
+
+// Atomic replacement and directory sync (T1)
+require_once __DIR__ . '/studio-test-lib.php';
+$d = sys_get_temp_dir() . '/studio-replace-' . bin2hex(random_bytes(4));
+mkdir($d, 0700);
+$f = $d . '/rec.json';
+file_put_contents($f, '{"v":1}');
+atlas_studio_replace_file($f, ['v' => 2], 4096, 'x');
+studio_check(json_decode(file_get_contents($f), true) === ['v' => 2], 'record replaced');
+studio_check(count(glob($d . '/*.tmp')) === 0, 'no temp file left behind');
+studio_check((fileperms($f) & 077) === 0, 'replacement is private');
+$threw = false;
+try { atlas_studio_replace_file($f, ['v' => str_repeat('x', 5000)], 100, 'too-big'); } catch (RuntimeException $e) { $threw = true; }
+studio_check($threw && json_decode(file_get_contents($f), true) === ['v' => 2] && count(glob($d . '/*.tmp')) === 0, 'an oversized record is refused and the old one stays');
+studio_check(atlas_studio_fsync_dir($d) === (function_exists('fsync') && DIRECTORY_SEPARATOR !== '\\'), 'directory sync is requested where the platform supports it');
+studio_check(atlas_studio_fsync_dir($d . '/missing') === false, 'a missing directory is reported, not fatal');
+unlink($f); rmdir($d);
+echo "Asset Studio atomic replace tests passed\n";

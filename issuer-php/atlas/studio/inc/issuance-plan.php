@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Asset Studio demo collectible mapping. Pure: builds the plan and the signed asset body from a
 // validated design; it does not sign, store or consume anything.
 // The client never chooses the asset class, issuer, model path, quantity or trade policy.
@@ -13,7 +14,9 @@ const ATLAS_STUDIO_MINT_PURPOSE = 'atlas.studio.mint/1';
 // the page cannot describe one design and sign another; the issuer recomputes it from the design
 // it fingerprints and rejects a signed payload whose summary differs.
 function atlas_studio_summary($design) {
-  return 'Mint a free demo ' . $design['template'] . ' (' . $design['finish'] . '): ' . $design['name'] . '. No value.';
+  $name = json_encode($design['name'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+  return 'Mint a free demo ' . $design['template'] . ' (' . $design['finish'] . ') named ' . $name
+    . '. It has no value and is bound to this wallet: it cannot be transferred or traded.';
 }
 
 function atlas_studio_issuance_plan($submitted, $ownerPublicKey) {

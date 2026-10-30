@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Domain Atlas — PHP issuer: configuration, key storage, revocation ledger.
 //
 // Mirrors issuer-server/server.js's three overridable settings, but PHP has
@@ -2870,9 +2871,26 @@ function atlas_write_file_atomic($file, $text, $newMode = 0644) {
     if ($file === atlas_revocations_file()) atlas_fault_point('txn:revoke-tmp-written');
     if (!@rename($tmp, $file)) throw new Exception('could not replace ' . $name . '; the existing file was not changed', 503);
     $ok = true;
+    atlas_fsync_dir($dir);
   } finally {
     if (!$ok && file_exists($tmp)) @unlink($tmp);
   }
+}
+
+// Asks the OS to put a directory's entries (a file just renamed into place, created or removed) on stable
+// storage. The data fsync above makes the file's content durable; this makes its NAME durable, without
+// which a power loss can bring back the old file or lose the new one even though the rename returned.
+// Best effort and honest about its limits: it needs PHP 8.1+ (fsync()) and a POSIX system (a directory cannot
+// be opened on Windows), and it can only ask: whether the bytes reach the platter is up to the file system,
+// the disk cache and any virtualisation or network storage underneath. Returns whether the request was made.
+// A false result is never an error: the rename already happened and the process-crash guarantees hold.
+function atlas_fsync_dir($dir) {
+  if (!function_exists('fsync') || DIRECTORY_SEPARATOR === '\\') return false;
+  $h = @fopen($dir, 'r');
+  if (!$h) return false;
+  $done = @fsync($h) === true;
+  fclose($h);
+  return $done;
 }
 
 // Test-only: ATLAS_TEST_CRASH_AT=<point> makes the request stop dead right

@@ -8,12 +8,13 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const os = require('os');
-const { StudioLab, makeIdentity, signBridge, canonicalize, b64u, DESIGN, REPO } = require('./studio-lab');
+const { StudioLab, makeIdentity, signBridge, signPayload, canonicalize, b64u, DESIGN, REPO } = require('./studio-lab');
+const { adminAuth } = require('../tools/lib/admin-auth');
 
 const FILTER = process.argv[2] || '';
 const results = { pass: 0, fail: 0, failed: [] };
 const labs = [];
-const HIGH = { challengesPerIpPerHour: 10000, mintsPerIpPerHour: 10000, maxMintsPerRecipientPerDay: 1000, maxMintsPerDay: 100000, maxOutstandingChallenges: 5000 };
+const HIGH = { challengesPerIpPerHour: 10000, mintsPerIpPerHour: 10000, maxMintsPerRecipientPerDay: 1000, maxMintsPerActorPerDay: 10000, maxMintsPerDay: 100000, maxOutstandingChallenges: 5000 };
 
 async function test(name, fn) {
   if (FILTER && name.indexOf(FILTER) === -1) return;
@@ -119,6 +120,178 @@ async function credentialVerifies(l, cred) {
     assert.equal((await asA({ mintEnabled: true, domain: 'a.test', origins: ['http://a.test'] })).json.mintEnabled, false, 'http origin on a public host');
     assert.equal((await asA({ mintEnabled: true, domain: 'a.test', origins: ['https://a.test'] })).json.mintEnabled, true, 'https origin on a public host');
     assert.equal((await asA({ mintEnabled: true, domain: 'a.test' })).json.mintEnabled, true, 'default origin is https://domain');
+  });
+
+  await test('T2: unsafe replay retention keeps minting off; safe values enable it', async () => {
+    // A stored result must outlive the longest window in which a retry can still ask for it.
+    for (const [hours, enabled] of [['0.0006', false], ['1', false], ['24', false], ['47.9', false], ['48', true], ['168', true], ['abc', true], ['', true]]) {
+      const l = await lab({ mint: true, config: HIGH, env: { ATLAS_REPLAY_TTL_HOURS: hours } });
+      assert.equal((await l.status()).json.mintEnabled, enabled, 'ATLAS_REPLAY_TTL_HOURS=' + JSON.stringify(hours));
+      if (!enabled) {
+        const id = makeIdentity('raw-ecdsa');
+        assert.equal((await l.api('challenge', { design: DESIGN, recipient: id.publicKeyB64 })).status, 403);
+        assert.equal(replays(l).length, 0);
+      }
+    }
+  });
+
+  await test('L3: only the canonical lowercase host enables minting, and issued URLs use it', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const cfgFile = path.join(l.studio, 'studio-config.json');
+    const at = (host, cfg) => { fs.writeFileSync(cfgFile, JSON.stringify(Object.assign({ mintEnabled: true, origins: ['https://a.test'] }, cfg))); return l.get('/atlas/studio/api.php?op=status', { Host: host }); };
+    assert.equal((await at('a.test', { domain: 'a.test' })).json.mintEnabled, true, 'canonical host enables');
+    assert.equal((await at('A.TEST', { domain: 'a.test' })).json.mintEnabled, false, 'upper-case Host header');
+    assert.equal((await at('a.test', { domain: 'A.TEST' })).json.mintEnabled, false, 'upper-case configured domain');
+    assert.equal((await at('A.TEST', { domain: 'A.TEST' })).json.mintEnabled, false, 'upper-case on both sides');
+    assert.equal((await at('a.test.', { domain: 'a.test.' })).json.mintEnabled, false, 'trailing-dot host');
+    assert.equal((await at('a.test:443', { domain: 'a.test:443' })).json.mintEnabled, true, 'explicit port stays valid');
+    assert.equal((await at('a.test:0443', { domain: 'a.test:0443' })).json.mintEnabled, false, 'non-canonical port spelling');
+    assert.equal((await at('a.test', { domain: 'a.test/x' })).json.mintEnabled, false, 'path in domain');
+  });
+
+  await test('T5: optional WebAuthn relying-party pin (default off; configured pin is enforced)', async () => {
+    const wa = makeIdentity('webauthn'), raw = makeIdentity('raw-ecdsa');
+    // The lab's simulated authenticator reports rpIdHash = SHA-256("rp").
+    let l = await lab({ mint: true, config: HIGH });
+    assert.equal((await l.mintAs(wa, DESIGN)).mint.status, 200, 'no pin: accepted');
+    l = await lab({ mint: true, config: Object.assign({}, HIGH, { webauthnRpIds: ['rp'] }) });
+    assert.equal((await l.mintAs(wa, DESIGN)).mint.status, 200, 'matching pin: accepted');
+    assert.equal((await l.mintAs(raw, DESIGN)).mint.status, 200, 'raw identities are not subject to the pin');
+    l = await lab({ mint: true, config: Object.assign({}, HIGH, { webauthnRpIds: ['other.test'] }) });
+    const r = await l.mintAs(wa, DESIGN);
+    assert.equal(r.mint.status, 403, 'wrong rp: ' + r.mint.text);
+    assert.equal(replays(l).length, 0, 'nothing issued');
+    for (const bad of [[], 'rp', [5], ['RP'], ['a b'], ['rp', 'a', 'b', 'c', 'd'], { a: 'rp' }]) {
+      l = await lab({ mint: true, config: Object.assign({}, HIGH, { webauthnRpIds: bad }) });
+      assert.equal((await l.status()).json.mintEnabled, false, 'bad pin ' + JSON.stringify(bad));
+    }
+  });
+
+  await test('L-helpers: private PHP helpers refuse direct web requests', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const before = fs.existsSync(path.join(l.docroot, 'lib', 'issuer-private-key.pem'));
+    for (const dir of ['atlas/studio/inc', 'lib']) {
+      for (const f of fs.readdirSync(path.join(l.docroot, dir)).filter((x) => x.endsWith('.php'))) {
+        const r = await l.get('/' + dir + '/' + f);
+        assert.ok(r.status === 403 || r.status === 404, dir + '/' + f + ' answered ' + r.status);
+        assert.ok(!/<\?php/.test(r.text), 'no source');
+      }
+    }
+    assert.equal(fs.existsSync(path.join(l.docroot, 'lib', 'issuer-private-key.pem')), before, 'requesting helpers must not create the issuer key');
+    assert.ok(fs.readFileSync(path.join(REPO, 'issuer-php', 'atlas', 'studio', 'inc', '.htaccess'), 'utf8').includes('Require all denied'), 'inc/.htaccess denies web access');
+  });
+
+  // The owner of a Studio credential, signing real intents, still cannot move it to anyone else, and an
+  // administrator cannot loosen or rewrite it. Every refusal must leave the original live and issue nothing.
+  const revokedIds = (l) => readJson(path.join(l.docroot, '.well-known', 'atlas-revocations.json')).revoked.map((r) => r.id);
+  async function boundLab(role) {
+    const l = await lab({ mint: true, config: HIGH });
+    const owner = makeIdentity(role), other = makeIdentity('raw-ecdsa'), admin = makeIdentity('raw-ecdsa');
+    fs.writeFileSync(path.join(l.docroot, 'lib', 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [
+      { publicKey: admin.publicKeyB64, addedAt: new Date().toISOString() }, { publicKey: owner.publicKeyB64, addedAt: new Date().toISOString() }] }));
+    fs.mkdirSync(path.join(l.docroot, '.well-known'), { recursive: true });
+    fs.writeFileSync(path.join(l.docroot, '.well-known', 'spatial.json'), JSON.stringify({ fileTransfer: {}, worlds: [{ id: 'lobby' }] }));
+    fs.writeFileSync(path.join(l.docroot, 'lib', 'atlas-email-tickets-config.json'), JSON.stringify({ smtpHost: '127.0.0.1', smtpPort: 1, smtpSecure: 'none', fromAddress: 'issuer@a.test' }));
+    const minted = await l.mintAs(owner, DESIGN);
+    assert.equal(minted.mint.status, 200, minted.mint.text);
+    return { l, owner, other, admin, cred: minted.mint.json.credential };
+  }
+  const intentOf = (id, payload) => ({ payload, proof: signPayload(id, payload) });
+  const adminCall = (l, admin, route, payload) => {
+    const p = Object.assign({}, payload, { adminAuth: adminAuth(l.host, route) });
+    return l.postRaw(route, { payload: p, proof: signPayload(admin, p) });
+  };
+  for (const role of ['raw-ecdsa', 'webauthn']) {
+    await test('owner-bound (' + role + '): the real owner cannot send, mail, export, drop or trade the credential', async () => {
+      const { l, owner, other, cred } = await boundLab(role);
+      const now = new Date().toISOString();
+      const calls = [
+        ['asset/transfer', { credential: cred, recipientPublicKey: other.publicKeyB64, intent: intentOf(owner, { action: 'transfer', credentialId: cred.id, recipientPublicKey: other.publicKeyB64, issuedAt: now }) }],
+        ['asset/transfer-to-email', { credential: cred, recipientEmail: 'friend@a.test', intent: intentOf(owner, { action: 'transfer-to-email', credentialId: cred.id, recipientEmail: 'friend@a.test', issuedAt: now }) }],
+        ['asset/transfer-to-file', { credential: cred, intent: intentOf(owner, { action: 'transfer-to-file', credentialId: cred.id, issuedAt: now }) }],
+        ['world/drop', { credential: cred, world: 'lobby', position: { x: 0, y: 0, z: 0 }, intent: intentOf(owner, { action: 'drop', credentialId: cred.id, world: 'lobby', issuedAt: now }) }],
+      ];
+      for (const [route, body] of calls) {
+        const r = await l.postRaw('/atlas/' + route, body);
+        assert.equal(r.status, 400, route + ': ' + r.text);
+        assert.match(r.json.error, /bound to its owner/, route + ' must refuse for the bound policy, not for another reason: ' + r.text);
+      }
+      // Offering it in a trade: the owner holds a Trading Station membership and signs a real offer.
+      const mem = await l.postRaw('/atlas/asset/issue', { ownerPublicKey: owner.publicKeyB64, assetClass: 'atlas.tradingstation.membership', quantity: 1 });
+      assert.equal(mem.status, 200, mem.text);
+      const offer = { class: cred.asset.class, quantity: 1 };
+      const trade = await l.postRaw('/atlas/trade/submit', { membership: mem.json, balance: cred,
+        intent: intentOf(owner, { action: 'trade', offer, want: { class: 'atlas.element.gold', quantity: 1 }, expiresAt: new Date(Date.now() + 600000).toISOString(), issuedAt: now }) });
+      assert.equal(trade.status, 400, trade.text);
+      assert.match(trade.json.error, /bound/i, 'trade: ' + trade.text);
+      // Nothing moved: original still live and unrevoked, no other credential exists for the recipient or a file.
+      assert.ok(!revokedIds(l).includes(cred.id), 'original is not revoked');
+      assert.equal(replays(l).length, 1, 'only the original mint is on record');
+      const pending = path.join(l.docroot, 'lib');
+      for (const f of fs.readdirSync(pending)) assert.ok(!/file-export|delivery|pending-trades|world-drops/.test(f) || !fs.readFileSync(path.join(pending, f), 'utf8').includes(cred.id), 'no export/delivery/trade/drop record names the credential: ' + f);
+    });
+  }
+
+  await test('owner-bound: the owner may redeem (give it up entirely); nobody else can, and a replay does nothing', async () => {
+    const { l, owner, other, cred } = await boundLab('raw-ecdsa');
+    const now = new Date().toISOString();
+    const stranger = await l.postRaw('/atlas/asset/redeem', { credential: cred, intent: intentOf(other, { action: 'redeem', credentialId: cred.id, issuedAt: now }) });
+    assert.equal(stranger.status, 400, 'a non-owner cannot redeem: ' + stranger.text);
+    assert.ok(!revokedIds(l).includes(cred.id));
+    const mine = await l.postRaw('/atlas/asset/redeem', { credential: cred, intent: intentOf(owner, { action: 'redeem', credentialId: cred.id, issuedAt: now }) });
+    assert.equal(mine.status, 200, mine.text);
+    assert.ok(revokedIds(l).includes(cred.id), 'redeemed credential is revoked');
+    const again = await l.postRaw('/atlas/asset/redeem', { credential: cred, intent: intentOf(owner, { action: 'redeem', credentialId: cred.id, issuedAt: now }) });
+    assert.equal(again.status, 400, 'a second redeem is refused');
+  });
+
+  await test('owner-bound: a stolen copy of the credential and a forged intent move nothing', async () => {
+    const { l, owner, other, cred } = await boundLab('raw-ecdsa');
+    const now = new Date().toISOString();
+    // The attacker signs an intent for the credential with their own key: not the owner.
+    const r = await l.postRaw('/atlas/asset/transfer', { credential: cred, recipientPublicKey: other.publicKeyB64, intent: intentOf(other, { action: 'transfer', credentialId: cred.id, recipientPublicKey: other.publicKeyB64, issuedAt: now }) });
+    assert.equal(r.status, 400, r.text);
+    // The owner's bridge signature for the mint cannot be replayed as a transfer intent.
+    const ch = await chal(l, owner);
+    const bridge = signBridge(owner, l.origin, ch.signRequest);
+    const replayed = await l.postRaw('/atlas/asset/transfer', { credential: cred, recipientPublicKey: other.publicKeyB64, intent: { payload: bridge.signedPayload, proof: bridge } });
+    assert.equal(replayed.status, 400, replayed.text);
+    assert.ok(!revokedIds(l).includes(cred.id));
+  });
+
+  await test('privileged reissue: an administrator cannot loosen the scope or rewrite a Studio credential; clawback keeps it bound', async () => {
+    const { l, owner, other, admin, cred } = await boundLab('raw-ecdsa');
+    const attempts = [{ tradeScope: 'local' }, { properties: { 'atlas.studio.name': 'Forged' } }, { tradeScope: 'local', properties: { 'atlas.studio.designDigest': 'f'.repeat(64) } }];
+    for (const patch of attempts) {
+      const r = await adminCall(l, admin, '/atlas/asset/reissue', Object.assign({ credential: cred }, patch));
+      assert.equal(r.status, 403, JSON.stringify(patch) + ': ' + r.text);
+      assert.ok(!revokedIds(l).includes(cred.id), 'original untouched by ' + JSON.stringify(patch));
+    }
+    // The bulk path must not reach Studio credentials either: a class patch is applied to every holder's
+    // credential the next time their wallet checks in.
+    for (const patch of [{ tradeScope: 'local' }, { properties: { 'atlas.studio.name': 'Forged' } }]) {
+      const r = await adminCall(l, admin, '/atlas/admin/class-patch', Object.assign({ assetClass: cred.asset.class }, patch));
+      assert.equal(r.status, 403, 'class patch ' + JSON.stringify(patch) + ': ' + r.text);
+    }
+    const listed = await adminCall(l, admin, '/atlas/admin/class-patches', { action: 'list' });
+    assert.ok(!JSON.stringify(listed.json || {}).includes(cred.asset.class), 'no patch recorded for the Studio class');
+    // Clawback is the recovery path: it moves the credential to a new owner but must preserve the signed asset.
+    const claw = await adminCall(l, admin, '/atlas/clawback', { credential: cred, toPublicKey: other.publicKeyB64 });
+    assert.equal(claw.status, 200, claw.text);
+    const moved = claw.json.newCredential || claw.json.credential;
+    assert.deepEqual(moved.asset, cred.asset, 'clawback keeps the asset exactly, bound scope included');
+    assert.equal(moved.asset.tradeScope, 'bound');
+    assert.equal(moved.owner.publicKey, other.publicKeyB64);
+  });
+
+  await test('privileged reissue: a class patch stored earlier is never applied to a Studio credential at check-in', async () => {
+    const { l, owner, cred } = await boundLab('raw-ecdsa');
+    fs.writeFileSync(path.join(l.docroot, 'lib', 'atlas-class-patches-store.json'), JSON.stringify({ patches: { [cred.asset.class]: { tradeScope: 'local', properties: { 'atlas.studio.name': 'Forged' }, updatedAt: new Date().toISOString() } } }));
+    const payload = { action: 'mail-check', domain: l.host, credentialIds: [cred.id], issuedAt: new Date().toISOString(), nonce: crypto.randomBytes(18).toString('base64url') };
+    const r = await l.postRaw('/atlas/mail/check', { credentials: [cred], payload, proof: signPayload(owner, payload) });
+    assert.equal(r.status, 200, r.text);
+    assert.ok(!JSON.stringify(r.json).includes('class-patch'), 'no class-patch update was offered: ' + r.text);
+    assert.ok(!revokedIds(l).includes(cred.id), 'credential not superseded');
   });
 
   // ---------------------------------------------------------------- end to end
@@ -459,11 +632,86 @@ async function credentialVerifies(l, cred) {
     assert.equal(replays(l).length, 2);
   });
 
+  await test('M2: one address is held to its own daily share, so it cannot spend the global quota', async () => {
+    const l = await lab({ mint: true, config: Object.assign({}, HIGH, { maxMintsPerActorPerDay: 2, maxMintsPerDay: 5 }) });
+    const a = await l.mintAs(makeIdentity('raw-ecdsa'), DESIGN), b = await l.mintAs(makeIdentity('raw-ecdsa'), DESIGN);
+    assert.equal(a.mint.status + b.mint.status, 400);
+    const c = await l.mintAs(makeIdentity('raw-ecdsa'), DESIGN);
+    assert.equal(c.mint.status, 429);
+    assert.equal(c.mint.json.error, 'quota-actor');
+    assert.equal((await l.api('mint', a.body)).text, a.mint.text, 'a retry of a finished mint is unaffected');
+    assert.equal(replays(l).length, 2);
+    const stored = readJson(attemptPath(l, a.challenge.json.nonce));
+    assert.ok(/^[a-f0-9]{16}$/.test(stored.actor), 'the ledger stores a hashed actor id');
+    assert.ok(!JSON.stringify(stored).includes('127.0.0.1'), 'and never the address');
+  });
+
+  await test('M3: dead rate counters are pruned, live ones kept, and the directory stays bounded', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const dir = path.join(l.studio, 'rate');
+    const past = new Date(Date.now() - 7200 * 1000);
+    for (let i = 0; i < 60; i++) {
+      const f = path.join(dir, 'rate-' + crypto.createHash('sha1').update('stale' + i).digest('hex') + '.json');
+      fs.writeFileSync(f, JSON.stringify({ hits: [1] }));
+      fs.utimesSync(f, past, past);
+    }
+    const live = path.join(dir, 'rate-' + crypto.createHash('sha1').update('live').digest('hex') + '.json');
+    fs.writeFileSync(live, JSON.stringify({ hits: [Math.floor(Date.now() / 1000)] }));
+    fs.utimesSync(live, new Date(Date.now() + 3000 * 1000), new Date(Date.now() + 3000 * 1000));
+    assert.equal((await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 })).status, 200);
+    const names = fs.readdirSync(dir).filter((n) => /^rate-/.test(n));
+    assert.ok(!names.some((n) => fs.statSync(path.join(dir, n)).mtimeMs < Date.now() - 1000), 'no dead counters remain: ' + names.length);
+    assert.ok(fs.existsSync(live), 'a live counter is kept');
+    assert.ok(names.length <= 4, 'only the request\'s own counters remain: ' + names.length);
+  });
+
   await test('outstanding challenges are capped', async () => {
     const l = await lab({ mint: true, config: Object.assign({}, HIGH, { maxOutstandingChallenges: 3 }) });
     const codes = [];
     for (let i = 0; i < 5; i++) codes.push((await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 })).status);
     assert.deepEqual(codes, [200, 200, 200, 503, 503]);
+  });
+
+  await test('M1: expired and completed challenges do not count toward the outstanding cap', async () => {
+    const l = await lab({ mint: true, config: Object.assign({}, HIGH, { maxOutstandingChallenges: 3 }) });
+    const ids = [makeIdentity('raw-ecdsa'), makeIdentity('raw-ecdsa'), makeIdentity('raw-ecdsa')];
+    const chs = [];
+    for (const id of ids) chs.push(await chal(l, id, DESIGN));
+    assert.equal((await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 })).status, 503, 'cap reached by live challenges');
+    // One completes (a finished mint), one expires; both stop counting at once.
+    const done = await l.api('mint', bodyFor(chs[0], proofFor(l, ids[0], chs[0])));
+    assert.equal(done.status, 200, done.text);
+    const stored = readJson(challengePath(l, chs[1].nonce));
+    stored.expiresAt = Math.floor(Date.now() / 1000) - 10;
+    fs.writeFileSync(challengePath(l, chs[1].nonce), JSON.stringify(stored));
+    const old = new Date(Date.now() - 400 * 1000);
+    fs.utimesSync(challengePath(l, chs[1].nonce), old, old);
+    const a = await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 });
+    assert.equal(a.status, 200, 'completed challenge freed a slot: ' + a.text);
+    const b = await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 });
+    assert.equal(b.status, 200, 'expired challenge freed a slot: ' + b.text);
+    assert.equal((await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 })).status, 503, 'but the cap still holds for live ones');
+  });
+
+  await test('M1: the cap holds exactly under simultaneous challenge requests', async () => {
+    const l = await lab({ mint: true, config: Object.assign({}, HIGH, { maxOutstandingChallenges: 4 }), workers: 8 });
+    const out = await Promise.all(Array.from({ length: 16 }, () => l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 })));
+    assert.equal(out.filter((r) => r.status === 200).length, 4, out.map((r) => r.status).join(','));
+    assert.equal(l.studioFiles('tmp').filter((n) => /^mint-challenge/.test(n)).length, 4);
+  });
+
+  await test('M1: abandoned challenges are removed soon after expiry, those tied to an attempt are kept', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const id = makeIdentity('raw-ecdsa');
+    const abandoned = await chal(l, id, DESIGN);
+    const minted = await l.mintAs(id, DESIGN);
+    assert.equal(minted.mint.status, 200);
+    const age = new Date(Date.now() - 1000 * 1000);
+    for (const n of [abandoned.nonce, minted.challenge.json.nonce]) fs.utimesSync(challengePath(l, n), age, age);
+    await chal(l, id, DESIGN); // any new challenge triggers pruning
+    assert.ok(!fs.existsSync(challengePath(l, abandoned.nonce)), 'unclaimed expired challenge pruned');
+    assert.ok(fs.existsSync(challengePath(l, minted.challenge.json.nonce)), 'a challenge with an attempt record is kept for retries');
+    assert.equal((await l.api('mint', minted.body)).text, minted.mint.text, 'its retry still works');
   });
 
   // ---------------------------------------------------------------- crash recovery
@@ -509,6 +757,54 @@ async function credentialVerifies(l, cred) {
       const second = await l2.mintAs(id, DESIGN);
       assert.equal(second.mint.status, 429, 'the crashed attempt counted once toward the recipient quota');
       assert.equal(replays(l2).length, 1);
+    });
+  }
+
+  await test('T1: the issuer fsyncs the file, renames it, then fsyncs the directory (strace; skipped without strace or PHP 8.1+)', async () => {
+    const have = spawnSync('strace', ['-V'], { encoding: 'utf8' });
+    const php81 = spawnSync('php', ['-r', 'exit(function_exists("fsync")?0:1);']);
+    if (have.error || have.status !== 0 || php81.status !== 0) { console.log('     (skipped: needs strace and PHP 8.1+)'); return; }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-strace-'));
+    const script = path.join(dir, 'w.php');
+    fs.writeFileSync(script, "<?php $_SERVER['HTTP_HOST']='localhost'; require '" + path.join(REPO, 'issuer-php', 'lib', 'bootstrap.php') + "';\natlas_write_file_atomic('" + dir + "/x.json', '{\"a\":1}', 0600);\n");
+    const log = path.join(dir, 'st.log');
+    const r = spawnSync('strace', ['-f', '-e', 'trace=fsync,fdatasync,rename,openat', '-o', log, 'php', script], { env: Object.assign({}, process.env, { ATLAS_PRIVATE_DIR: dir }), encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const lines = fs.readFileSync(log, 'utf8').split('\n');
+    const idx = (re) => lines.findIndex((x) => re.test(x));
+    const tmpOpen = idx(/openat\(.*x\.json\.[0-9a-f]{12}\.tmp.*O_EXCL/);
+    const dataSync = tmpOpen + lines.slice(tmpOpen).findIndex((x) => /fsync\(\d+\)\s+= 0/.test(x));
+    const rename = idx(/rename\(.*x\.json\.[0-9a-f]{12}\.tmp.*x\.json"\)\s+= 0/);
+    const dirOpen = rename + lines.slice(rename).findIndex((x) => /openat\(.*"[^"]*studio-strace-[^"/]*", O_RDONLY\)\s+= \d+/.test(x));
+    const dirSync = dirOpen + lines.slice(dirOpen).findIndex((x) => /fsync\(\d+\)\s+= 0/.test(x));
+    assert.ok(tmpOpen >= 0 && dataSync > tmpOpen && rename > dataSync && dirOpen > rename && dirSync > dirOpen, 'order: file fsync < rename < directory fsync\n' + lines.filter((x) => /fsync|rename|studio-strace/.test(x)).join('\n'));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  for (const point of ['studio:attempt-tmp-written', 'studio:challenge-tmp-written']) {
+    await test('T1: crash while replacing a bookkeeping record (' + point + ') leaves the old record intact and the mint retrievable', async () => {
+      const l = await lab({ mint: true, config: HIGH, crashAt: point });
+      const id = makeIdentity('raw-ecdsa');
+      const ch = await chal(l, id, DESIGN);
+      const body = bodyFor(ch, proofFor(l, id, ch));
+      try { await l.api('mint', body); } catch (e) { /* the server stops mid-request */ }
+      await l.hardStop();
+      assert.equal(replays(l).length + journals(l).length, 1, 'the credential was committed before the crash');
+      // The record being replaced is whole (never truncated) and still parses; the half-written copy is a separate temp file.
+      const chFile = readJson(challengePath(l, ch.nonce));
+      assert.equal(chFile.nonce, ch.nonce);
+      const attFile = readJson(attemptPath(l, ch.nonce));
+      assert.equal(attFile.nonce, ch.nonce);
+      assert.ok(['issued', 'completed'].includes(chFile.state) && ['claimed', 'minted'].includes(attFile.state));
+      const l2 = await StudioLab.start({ reuse: l });
+      labs.push(l2);
+      let r = null;
+      for (let i = 0; i < 3 && (!r || r.status === 503); i++) r = await l2.api('mint', body);
+      assert.equal(r.status, 200, r.text);
+      assert.equal(replays(l2).length, 1);
+      assert.equal(readJson(attemptPath(l2, ch.nonce)).state, 'minted');
+      assert.equal(readJson(challengePath(l2, ch.nonce)).state, 'completed');
+      assert.equal((await l2.api('mint', body)).text, r.text);
     });
   }
 

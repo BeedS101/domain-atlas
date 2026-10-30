@@ -57,11 +57,11 @@ try {
   // A browser sends Origin on cross-site requests; one that is not a configured page origin is refused.
   // There are no CORS headers, so other sites cannot read responses either.
   if (isset($_SERVER['HTTP_ORIGIN']) && !in_array($_SERVER['HTTP_ORIGIN'], $cfg['origins'], true)) studio_reply(403, ['ok'=>false,'error'=>'origin-not-allowed']);
-  $ip = isset($_SERVER['REMOTE_ADDR']) && is_string($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : 'unknown';
-  if (!atlas_studio_rate_hit($root, 'call:'.$ip, 120, 60)) studio_reply(429, ['ok'=>false,'error'=>'rate-limited']);
+  $actor = atlas_studio_actor($_SERVER['REMOTE_ADDR'] ?? null);
+  if (!atlas_studio_rate_check($root, 'call', $actor, 120, 60)) studio_reply(429, ['ok'=>false,'error'=>'rate-limited']);
 
   $body = studio_read_json($op === 'mint' ? 16384 : 4096);
-  list($status, $reply) = $op === 'mint' ? atlas_studio_mint($root, $cfg, $body, $ip) : atlas_studio_issue_challenge($root, $cfg, $body, $ip);
+  list($status, $reply) = $op === 'mint' ? atlas_studio_mint($root, $cfg, $body, $actor) : atlas_studio_issue_challenge($root, $cfg, $body, $actor);
   studio_reply($status, $reply);
 } catch (Throwable $e) {
   error_log('studio: '.get_class($e).': '.$e->getMessage());

@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // EXPERIMENTAL issuer-signed ledger-account references (domain-atlas-ledger-account/1.0).
 // Off unless lib/atlas-ledger-issuance-config.json says {"enabled": true}. Mirrors
 // issuer-server/lib-ledger-issuance.js; both answer POST /atlas/ledger/account-credential.

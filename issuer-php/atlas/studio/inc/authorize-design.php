@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Studio authorization: bind a submitted design to the issuer's stored challenge and to a wallet
 // proof verified by the issuer's own verifier. Does not consume a challenge or issue anything.
 require_once __DIR__.'/design-fingerprint.php';

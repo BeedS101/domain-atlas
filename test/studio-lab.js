@@ -66,6 +66,21 @@ function signBridge(identity, origin, payload, opts) {
   return { signerRole: 'webauthn', publicKey: identity.publicKeyB64, signature: b64u(sig), clientDataJSON: b64u(clientData), authenticatorData: b64u(authData), signedPayload };
 }
 
+// Signs an arbitrary protocol payload as the identity (the envelope the issuer's verify_envelope() reads):
+// what the wallet's own signWithSelf() produces for an owner-authorized intent.
+function signPayload(identity, payload) {
+  if (identity.role === 'raw-ecdsa') {
+    const sig = crypto.sign('sha256', Buffer.from(canonicalize(payload)), { key: identity.privateKey, dsaEncoding: 'ieee-p1363' });
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKeyB64, signature: b64u(sig) };
+  }
+  const hash = crypto.createHash('sha256').update(canonicalize(payload)).digest();
+  const clientData = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge: b64u(hash), origin: 'http://wallet.test' }));
+  const authData = Buffer.concat([crypto.createHash('sha256').update('rp').digest(), Buffer.from([0x05]), Buffer.alloc(4)]);
+  const signed = Buffer.concat([authData, crypto.createHash('sha256').update(clientData).digest()]);
+  const sig = crypto.sign('sha256', signed, { key: identity.privateKey });
+  return { signerRole: 'webauthn', publicKey: identity.publicKeyB64, signature: b64u(sig), clientDataJSON: b64u(clientData), authenticatorData: b64u(authData) };
+}
+
 function request(port, method, urlPath, body, headers) {
   return new Promise((resolve, reject) => {
     const data = body === undefined ? null : (typeof body === 'string' ? body : JSON.stringify(body));
@@ -90,7 +105,7 @@ function request(port, method, urlPath, body, headers) {
 class StudioLab {
   // opts.mint: write a studio-config.json that enables minting (default false: the shipped default).
   // opts.config: extra settings merged into that file. opts.crashAt: ATLAS_TEST_CRASH_AT for the server.
-  // opts.port: fixed port instead of a free one.
+  // opts.port: fixed port instead of a free one. opts.env: extra environment for the PHP server.
   static async start(opts) {
     opts = opts || {};
     const lab = new StudioLab();
@@ -116,7 +131,7 @@ class StudioLab {
     if (!opts.reuse) lab.writeConfig(opts);
     lab.env = Object.assign({}, process.env, {
       ATLAS_PRIVATE_DIR: lab.private, ATLAS_STUDIO_STORAGE_ROOT: lab.studio, PHP_CLI_SERVER_WORKERS: String(opts.workers || 4),
-    }, opts.crashAt ? { ATLAS_TEST_CRASH_AT: opts.crashAt } : {});
+    }, opts.crashAt ? { ATLAS_TEST_CRASH_AT: opts.crashAt } : {}, opts.env || {});
     await lab.listen();
     return lab;
   }
@@ -170,4 +185,4 @@ class StudioLab {
 
 const DESIGN = { schema: 'atlas.asset-studio.design/0.1', template: 'trophy', name: 'First Light', description: 'Awarded for the first walk through the lobby.', finish: 'gold' };
 
-module.exports = { StudioLab, makeIdentity, signBridge, canonicalize, b64u, request, DESIGN, REPO };
+module.exports = { StudioLab, makeIdentity, signBridge, signPayload, canonicalize, b64u, request, DESIGN, REPO };

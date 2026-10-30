@@ -2,7 +2,29 @@
 
 **Branch:** `feature/asset-studio-v0.1` in `BeedS101/domain-atlas`.
 
-**Status / release decision: NO-GO for public minting until this audit is done.** The mint pipeline is implemented and tested end to end against a real PHP issuer and the real wallet extension, but it ships **disabled**: it turns on only when a private `studio-config.json` enables it. Nothing here has been deployed, merged to `main`, or run with a production key. Read `asset-studio-v0.1.md` first for the design.
+**Status / release decision: NO-GO for public minting until the remediation below has been independently rechecked.** The mint pipeline is implemented and tested end to end against a real PHP issuer and the real wallet extension, but it ships **disabled**: it turns on only when a private `studio-config.json` enables it. Nothing here has been deployed, merged to `main`, or run with a production key. Read `asset-studio-v0.1.md` first for the design.
+
+## Remediation after the first independent audit (no Critical or High findings; four Medium)
+
+Needs an independent recheck. Each fix has a regression test; where the old behaviour could be exercised, the test was shown to fail on it first.
+
+- **M1** The outstanding-challenge cap counts only live challenges (expired and completed ones no longer count), and counting plus creation run under one lock (`inc/challenges.php`). Test: `test/asset-studio-challenge-race.php` (multi-process; overshoots on the old code), plus integration tests.
+- **M4** `extension/content.js` grants wallet bridge permissions only from a manifest on the page's own origin; `SPEC.md` §3.8 says so. Legitimate cross-domain world discovery is unchanged (it never needed bridge permissions). Test: `test/manual-bridge-foreign-manifest.js` (real extension).
+- **M2** Rate limits key on an IPv4 address or an IPv6 /64, with an additional /48 group limit; `maxMintsPerActorPerDay` limits one actor's share of the daily quota (`inc/storage.php`, `inc/mint-attempts.php`). Test: `test/asset-studio-rate-limits.php`.
+- **M3** Rate-limit counter files expire with their window, are pruned in bounded batches, and are capped (fail closed). Same test.
+- **T2** Minting stays off when replay retention is shorter than 48 hours.
+- **T1** Directory `fsync` after atomic renames; challenge and attempt rewrites are atomic replacements. See "Durability" in `asset-studio-v0.1.md` for what this does not prove.
+- **Replay namespace:** Studio request id is `studio:mint:<nonce>`, which general routes cannot send (`test/asset-studio-hardening.php`).
+- **Key normalisation:** the per-recipient quota keys on the fingerprint of the P-256 point, not its spelling.
+- **Host canonicalisation:** only a canonical lower-case host enables minting; issued URLs use it.
+- **Approval text:** the signing prompt quotes the name and states that the item is free, has no value and cannot be transferred or traded.
+- **WebAuthn RP assumption:** optional `webauthnRpIds` pin (off by default).
+- **Privileged reissue paths:** `asset/reissue` and `admin/class-patch` refuse the Studio class in PHP and Node, and a class patch stored earlier is not applied at check-in. Both were open before: an administrator could turn a bound credential into a transferable one.
+- **Private helper exposure:** `inc/` helpers and `lib/*.php` refuse direct web requests; `inc/.htaccess` denies access.
+- **PHP/Node consistency:** PHP and Node refuse the class on the same paths (`test/manual-studio-restricted-parity.js`).
+- Owner-bound tests now use real owner-signed intents on `asset/transfer`, `transfer-to-email`, `transfer-to-file`, `world/drop` and `trade/submit` (refused by the bound policy, nothing revoked or issued), `redeem` (allowed for the owner only), a forged intent, and a replayed bridge signature.
+
+Remaining risks: not proven against power loss; WebAuthn is not RP-pinned unless configured; address-based limits behind a shared proxy; no reconciliation tool for abandoned attempts.
 
 ## Reviewer instructions
 
@@ -11,7 +33,7 @@ Please conduct a **read-only adversarial audit** of this branch. Do not enable m
 ## What changed relative to the earlier prototype
 
 - `inc/studio-mint.php` (new) orchestrates challenge and mint. `api.php` exposes `validate`, `status`, `challenge`, `mint`.
-- Issuance is one transaction in the issuer's existing journal/replay store (`lib/replacement.php`), request id `studio-mint-<nonce>`. There is no separate Studio ledger. The attempt ledger only enforces quotas and records outcomes.
+- Issuance is one transaction in the issuer's existing journal/replay store (`lib/replacement.php`), request id `studio:mint:<nonce>`. There is no separate Studio ledger. The attempt ledger only enforces quotas and records outcomes.
 - The Studio class is `restrictedIssuance`: `mint_asset_by_class()` refuses it, `atlas/asset/issue.php` returns 403 before any lease, and the Node issuer (`issuer-server/server.js`) refuses it on the same routes. Studio calls `issue_asset()` itself.
 - `inc/mint-authorization.php` now checks the WebAuthn assertion type and user-presence flag, requires an exact payload shape, only accepts origins from the issuer's configuration, and treats anything but `true` from the verifier as a failure.
 - `inc/keys.php` validates recipient and proof keys with OpenSSL (P-256 only; raw 65-byte point or SPKI), so a point off the curve or a different curve is refused.
@@ -57,7 +79,7 @@ Please conduct a **read-only adversarial audit** of this branch. Do not enable m
 
 ## Known gaps to weigh
 
-See "Known gaps" in `asset-studio-v0.1.md`. In particular: `verify_envelope()` does not bind WebAuthn assertions to an RP ID or origin; there is no operator reconciliation tool for abandoned attempts; the outstanding-challenge cap is approximate under bursts; quotas key on the connecting address only; admin `reissue` can edit Studio properties; moderation is the existing handle filter. Two existing suites fail the same way on the unmodified branch point and are unrelated (`manual-trade-submit-php.js` step 3 and `manual-clawback-php.js` step 1b expect `split`, which is disabled by design; `manual-trading-catalog.js` expects 121 classes and the catalog has 134).
+See "Known gaps" in `asset-studio-v0.1.md`. In particular: `verify_envelope()` does not bind WebAuthn assertions to an RP ID or origin; there is no operator reconciliation tool for abandoned attempts; quotas key on the connecting address (IPv6 /64 and /48) only; moderation is the existing handle filter. Two existing suites fail the same way on the unmodified branch point and are unrelated (`manual-trade-submit-php.js` step 3 and `manual-clawback-php.js` step 1b expect `split`, which is disabled by design; `manual-trading-catalog.js` expects 121 classes and the catalog has 134).
 
 ## Reviewer deliverables
 

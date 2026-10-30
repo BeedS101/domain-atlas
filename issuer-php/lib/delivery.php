@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Durable, idempotent delivery of a credential to a recipient over a
 // transport the issuer cannot confirm (today: email). PHP counterpart of
 // issuer-server/lib-delivery.js; the state machine, the safety properties

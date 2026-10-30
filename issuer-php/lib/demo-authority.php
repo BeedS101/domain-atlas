@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Authorization for the self-serve /atlas/demo/* routes. Two separate kinds:
 //
 // Owner consent: the credential's current owner signs a request about their

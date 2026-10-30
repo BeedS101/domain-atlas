@@ -6,7 +6,7 @@ require_once __DIR__ . '/../issuer-php/atlas/studio/inc/challenges.php';
 require_once __DIR__ . '/../issuer-php/atlas/studio/inc/mint-attempts.php';
 $root = studio_tmp_root();
 $t0 = time(); // file mtimes are real, so injected times stay near the present
-$limits = ['perRecipient' => 2, 'global' => 3, 'windowSeconds' => 86400];
+$limits = ['perRecipient' => 2, 'perActor' => 100, 'global' => 3, 'windowSeconds' => 86400];
 $digest = str_repeat('d', 64);
 $A = studio_raw_key(); $B = studio_raw_key(); $C = studio_raw_key();
 $n = function ($i) { return str_pad(dechex($i), 64, '0', STR_PAD_LEFT); };
@@ -39,10 +39,10 @@ studio_check($r['ok'] && $r['state'] === 'minted' && $r['credentialId'] === 'urn
 // Corrupt or oversized records fail closed.
 $dir = atlas_studio_storage_bucket($root, 'mint-receipts');
 file_put_contents("$dir/attempt-" . $n(7) . '.json', '{"version":2');
-$r = atlas_studio_claim_attempt($root, $n(7), $digest, $A, ['perRecipient' => 50, 'global' => 50, 'windowSeconds' => 86400], $t0 + 90000);
+$r = atlas_studio_claim_attempt($root, $n(7), $digest, $A, ['perRecipient' => 50, 'perActor' => 50, 'global' => 50, 'windowSeconds' => 86400], $t0 + 90000);
 studio_check(!$r['ok'] && $r['error'] === 'attempt-unreadable', 'truncated record fails closed');
 file_put_contents("$dir/attempt-" . $n(8) . '.json', str_repeat('x', 9000));
-$r = atlas_studio_claim_attempt($root, $n(8), $digest, $A, ['perRecipient' => 50, 'global' => 50, 'windowSeconds' => 86400], $t0 + 90000);
+$r = atlas_studio_claim_attempt($root, $n(8), $digest, $A, ['perRecipient' => 50, 'perActor' => 50, 'global' => 50, 'windowSeconds' => 86400], $t0 + 90000);
 studio_check(!$r['ok'], 'oversized record fails closed');
 foreach (['', 'zz', str_repeat('A', 64), 5, null, "../x"] as $bad) {
   $threw = false;
@@ -67,11 +67,15 @@ $d2 = atlas_studio_new_challenge($root, $digest, $A, $t0, 3);
 studio_check(!atlas_studio_transition_challenge($root, $d2['nonce'], 'issued', 'completed', str_repeat('f', 64), $A), 'transition needs the same design');
 studio_check(!atlas_studio_transition_challenge($root, $d2['nonce'], 'issued', 'completed', $digest, $B), 'transition needs the same recipient');
 atlas_studio_new_challenge($root, $digest, $A, $t0, 3);
+atlas_studio_new_challenge($root, $digest, $A, $t0, 3); // $c is completed, so three are live now
 $threw = false;
 try { atlas_studio_new_challenge($root, $digest, $A, $t0, 3); } catch (RuntimeException $e) { $threw = $e->getMessage() === 'too-many-challenges'; }
-studio_check($threw, 'outstanding challenge cap');
-// Old challenges are pruned, which frees the cap.
+studio_check($threw, 'outstanding challenge cap counts live challenges only');
+// An expired challenge stops counting at once.
 $tmp = atlas_studio_storage_bucket($root, 'tmp');
+$exp = atlas_studio_new_challenge($root, $digest, $A, $t0 - 1000, 99);
+studio_check(is_array(atlas_studio_new_challenge($root, $digest, $A, $t0 + ATLAS_STUDIO_CHALLENGE_TTL + 1, 99)), 'creation after expiry works');
+// Old challenges are pruned, which frees the cap.
 foreach (glob("$tmp/mint-challenge-*.json") as $f) touch($f, $t0 - 1000);
 studio_check(is_array(atlas_studio_new_challenge($root, $digest, $A, $t0 + ATLAS_STUDIO_CHALLENGE_RETAIN_SECONDS + 10, 3)), 'old challenges pruned');
 studio_check(count(glob("$tmp/mint-challenge-*.json")) === 1, 'only the new challenge remains');

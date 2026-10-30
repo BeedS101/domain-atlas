@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Server-owned model mapping. Never accept modelPath or thumbnailPath from a design: the template
 // picks the entry and nothing else does. These are visual references only, not proof of ownership
 // and not authority to mint. Issuance checks that both files exist on this site (see below).

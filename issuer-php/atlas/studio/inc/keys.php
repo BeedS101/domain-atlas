@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Public-key checks for Studio recipients and proof keys.
 // An owner key is accepted only in the spellings the wallet and issuer already use, and only when
 // it parses as a real NIST P-256 key: either the 65-byte uncompressed point (87 characters of
@@ -35,4 +36,14 @@ function atlas_studio_p256_key_kind($s) {
 
 function atlas_studio_recipient_ok($s) {
   return atlas_studio_p256_key_kind($s) !== null;
+}
+
+// Hex SHA-256 of the 65-byte uncompressed point, whichever accepted spelling the key arrived in; null
+// for anything that is not a valid P-256 key. Two spellings of one key are one recipient for quotas.
+function atlas_studio_key_fingerprint($s) {
+  $kind = atlas_studio_p256_key_kind($s);
+  if ($kind === null) return null;
+  $bin = atlas_studio_b64url_exact($s);
+  $point = $kind === 'raw' ? $bin : substr($bin, -65);
+  return hash('sha256', $point);
 }

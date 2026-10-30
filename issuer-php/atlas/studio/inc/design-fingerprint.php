@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Hash the VALIDATED design, not arbitrary client JSON.
 // Reuse the issuer's canonical JSON rules so field order cannot change the digest.
 // This helper does not authorize a mint or consume a challenge.

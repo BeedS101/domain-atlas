@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // SPEC.md §13.3's inbound half — PHP port of issuer-server/server.js's
 // sendPlainReply()/verpReturnPathFor()/extractBouncedTicketId()/
 // processEmailTicketForward()/processInboundBounce()/

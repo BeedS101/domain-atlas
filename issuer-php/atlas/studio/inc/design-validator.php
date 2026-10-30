@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Asset Studio design validation. Does not issue assets or touch issuer keys.
 // Reuses the PHP issuer's handle profanity list and normalizer for every visitor-supplied
 // string that ends up in a signed credential (name and description).
