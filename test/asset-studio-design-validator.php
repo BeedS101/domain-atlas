@@ -15,4 +15,13 @@ foreach (["Bad\x01Name","Bad\x7FName"] as $name) {
   $x=$valid;$x['name']=$name;
   check(!atlas_studio_validate_design($x)['ok'],'reject control character in name');
 }
+foreach (['Fuck Trophy','Sh1t-Badge','@sshole Portal Key'] as $blockedName) {
+  $x=$valid;$x['name']=$blockedName;
+  $result=atlas_studio_validate_design($x);
+  check(!$result['ok'] && $result['error']==='inappropriate-name','reject profanity in '. $blockedName);
+}
+foreach (['Gopher Trophy','Classic Badge','Assistant Key'] as $safeName) {
+  $x=$valid;$x['name']=$safeName;
+  check(atlas_studio_validate_design($x)['ok'],'allow safe name '.$safeName);
+}
 echo "Asset Studio design-validator tests passed\n";
