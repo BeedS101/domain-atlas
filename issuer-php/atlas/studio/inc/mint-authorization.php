@@ -24,3 +24,21 @@ function atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $des
     return ['ok'=>false,'error'=>'proof-mismatch'];
   return ['ok'=>true,'signedPayload'=>$signed,'recipient'=>$p['recipient']];
 }
+
+
+// Combines the Studio-specific binding check with the existing issuer's
+// cryptographic verifier. The caller must supply a server-loaded challenge,
+// verified origin and digest; this does not consume or issue anything.
+// The verifier should be PHP issuer verify_envelope(..., ..., true).
+function atlas_studio_verify_mint_envelope($proof, $challenge, $expectedOrigin, $designDigest, $verifier, $now = null) {
+  $check = atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $designDigest, $now);
+  if (!$check['ok']) return $check;
+  if (!is_callable($verifier)) return ['ok'=>false,'error'=>'verifier-unavailable'];
+  // Explicitly pass the bridge-signed payload, which is what the wallet signed.
+  try {
+    if (!$verifier($check['signedPayload'], $proof)) return ['ok'=>false,'error'=>'invalid-signature'];
+  } catch (Throwable $e) {
+    return ['ok'=>false,'error'=>'invalid-signature'];
+  }
+  return ['ok'=>true,'recipient'=>$check['recipient']];
+}
