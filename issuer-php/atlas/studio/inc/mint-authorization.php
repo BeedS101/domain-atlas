@@ -11,6 +11,18 @@ function atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $des
   $p=$signed['payload'] ?? null;
   if (!is_array($p) || count($p)!==5 || array_diff(array_keys($p),['purpose','nonce','designDigest','recipient','expiresAt']))
     return ['ok'=>false,'error'=>'invalid-payload-shape'];
+  // Reject hostile JSON types before comparisons. In particular, PHP casting an
+  // array to a string in hash_equals() emits warnings and must never happen.
+  foreach (['nonce','designDigest','recipient'] as $field) {
+    if (!is_string($p[$field] ?? null) || !is_string($challenge[$field] ?? null))
+      return ['ok'=>false,'error'=>'invalid-proof-types'];
+  }
+  if (!is_string($designDigest) || !preg_match('/^[a-f0-9]{64}$/D', $designDigest) ||
+      !preg_match('/^[a-f0-9]{64}$/D', $p['nonce']) ||
+      !preg_match('/^[a-f0-9]{64}$/D', $p['designDigest']) ||
+      !is_string($expectedOrigin) || !preg_match('#^https://[^/]+$#D', $expectedOrigin) ||
+      !is_string($proof['publicKey'] ?? null))
+    return ['ok'=>false,'error'=>'invalid-proof-types'];
   if (($p['purpose'] ?? null)!=='atlas.studio.mint/1' ||
       !hash_equals((string)($challenge['nonce'] ?? ''),(string)($p['nonce'] ?? '')) ||
       !hash_equals((string)$designDigest,(string)($p['designDigest'] ?? '')) ||
