@@ -36,6 +36,11 @@ Examine the interaction between Studio, PHP issuer, wallet bridge and existing i
 7. **Wallet delivery:** Ensure the issuer signs first, the website may only offer a complete authentic credential, wallet validates it independently, and queue/claim does not treat a preview as ownership.
 8. **Tests:** Run all PHP helper tests and integration tests in an isolated environment. Include malformed JSON types, concurrency and SIGKILL cases, legitimate wallet bridge signing, malicious signers, browser denial, replay, restart, and revoked/suspended credentials where applicable.
 
+## Confirmed verifier concern from source review
+
+- `issuer-php/lib/bootstrap.php` provides `verify_envelope()`, which checks WebAuthn challenge/signature but does **not** by itself require `clientDataJSON.type === 'webauthn.get'` or the authenticator user-presence flag. Its existing `verify_mail_envelope()` wrapper does both before delegating. A future Studio mint route must require the stronger checks for WebAuthn assertions, and test missing user presence, wrong type, and valid signatures. This is a code-review finding, not a demonstrated exploit.
+- Full PHP suite execution is still outstanding: the current sandbox has PHP installed but could not clone GitHub because DNS resolution of github.com failed. Do not claim the suite passed.
+
 ## Known gaps to verify, not assumptions of readiness
 
 - The dedicated Studio mint endpoint **does not exist yet**. There is no proven issuer catalog integration, authorization to issue, rate limiting, durable mint outcome journal or wallet offer flow.
