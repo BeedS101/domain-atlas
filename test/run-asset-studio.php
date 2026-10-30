@@ -12,6 +12,7 @@ $tests=[
   'asset-studio-mint-attempts.php',
   'asset-studio-attempt-concurrency.php',
   'asset-studio-legacy-issue-gate.php',
+  'asset-studio-cross-issuer-gate.php',
   'asset-studio-mint-disabled.php',
 ];
 $php=PHP_BINARY;
