@@ -3,6 +3,7 @@
 // Use only behind a dedicated, authenticated issuer route after security review.
 // The client never chooses the asset class, issuer, model path, quantity or trade policy.
 require_once __DIR__ . '/design-validator.php';
+require_once __DIR__ . '/model-catalog.php';
 
 function atlas_studio_issuance_plan($submitted, $ownerPublicKey) {
   $validated = atlas_studio_validate_design($submitted);
@@ -12,6 +13,8 @@ function atlas_studio_issuance_plan($submitted, $ownerPublicKey) {
   if (!is_string($ownerPublicKey) || strlen($ownerPublicKey) < 20 || strlen($ownerPublicKey) > 2048)
     return ['ok'=>false, 'error'=>'invalid-recipient-key'];
   $d=$validated['design'];
+  $model=atlas_studio_model_for_template($d['template']);
+  if ($model===null) return ['ok'=>false,'error'=>'model-not-approved'];
   return [
     'ok'=>true,
     // Not a catalog class and NOT authorised by general /atlas/asset/issue.
@@ -21,6 +24,7 @@ function atlas_studio_issuance_plan($submitted, $ownerPublicKey) {
     'recipient'=>$ownerPublicKey,
     'nonFungible'=>true,
     'requiredTradeScope'=>'bound',
+    'model'=>$model,
     'properties'=>[
       'atlas.studio.template'=>$d['template'],
       'atlas.studio.name'=>$d['name'],
