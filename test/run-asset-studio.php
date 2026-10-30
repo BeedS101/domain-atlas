@@ -2,6 +2,7 @@
 // Local-only Asset Studio test runner: php test/run-asset-studio.php
 $tests=[
   'asset-studio-design-validator.php',
+  'asset-studio-design-fingerprint.php',
   'asset-studio-storage.php',
   'asset-studio-issuance-plan.php',
   'asset-studio-mint-authorization.php',
