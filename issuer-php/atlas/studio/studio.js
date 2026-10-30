@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 const c=$('preview'), ctx=c.getContext('2d');
 const colors={gold:['#ffde76','#8d5e14'],silver:['#d9eaf4','#647d93'],bronze:['#e8ac72','#8c4c2d']};
-const titles={trophy:'Gopher Trophy',badge:'Explorer Badge',key:'Portal Key'};
+const titles={trophy:'Achievement Trophy',badge:'Explorer Badge',key:'Portal Key'};
 function design(){return {schema:'atlas.asset-studio.design/0.1',template:$('template').value,name:$('assetName').value.trim().slice(0,64),description:$('description').value.trim().slice(0,240),finish:$('finish').value};}
 function paint(){
  const d=design(),[light,dark]=colors[d.finish];ctx.clearRect(0,0,c.width,c.height);
