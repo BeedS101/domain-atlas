@@ -9,7 +9,7 @@ function atlas_studio_validate_design($input) {
   if (!in_array($input['finish'] ?? null,['gold','silver','bronze'],true)) return ['ok'=>false,'error'=>'invalid-finish'];
   foreach (['name'=>64,'description'=>240] as $field=>$max) {
     $value=$input[$field] ?? null;
-    if (!is_string($value) || trim($value)==='' || strlen($value)>$max || preg_match('/[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]/', $value)) return ['ok'=>false,'error'=>'invalid-'.$field];
+    if (!is_string($value) || trim($value)==='' || strlen($value)>$max || preg_match('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', $value)) return ['ok'=>false,'error'=>'invalid-'.$field];
   }
   return ['ok'=>true,'design'=>[
     'schema'=>'atlas.asset-studio.design/0.1',
