@@ -68,7 +68,9 @@ function atlas_studio_consume_challenge($root,$nonce,$designDigest,$recipient,$n
   if (!$fp) return false;
   try {
     if (!flock($fp,LOCK_EX)) return false;
-    $v=json_decode(stream_get_contents($fp),true);
+    $raw=stream_get_contents($fp,4097);
+    if ($raw===false || strlen($raw)>4096) return false;
+    $v=json_decode($raw,true);
     if (!is_array($v) || ($v['state']??null)!=='issued' ||
         ($v['nonce']??null)!==$nonce ||
         ($v['designDigest']??null)!==$designDigest ||
