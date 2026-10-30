@@ -14,6 +14,8 @@ function atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $des
   if (($p['purpose'] ?? null)!=='atlas.studio.mint/1' ||
       !hash_equals((string)($challenge['nonce'] ?? ''),(string)($p['nonce'] ?? '')) ||
       !hash_equals((string)$designDigest,(string)($p['designDigest'] ?? '')) ||
+      ($challenge['designDigest'] ?? null)!==$designDigest ||
+      ($challenge['recipient'] ?? null)!==($p['recipient'] ?? null) ||
       ($p['expiresAt'] ?? null)!==($challenge['expiresAt'] ?? null) ||
       !is_int($p['expiresAt']) || $p['expiresAt'] < $now || $p['expiresAt'] > $now + 300 ||
       !is_string($p['recipient']) || $p['recipient'] === '' ||
