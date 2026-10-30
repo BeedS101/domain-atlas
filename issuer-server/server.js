@@ -6078,6 +6078,14 @@ async function main() {
         const issueBody = JSON.parse((await readBody(req)) || '{}');
         const { ownerPublicKey, assetClass, quantity, existingBalances } = issueBody;
         if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
+        // Studio collectibles require a dedicated owner-authorized issuance path.
+        // Keep this ahead of the general catalogue lookup and issuer mutation.
+        if (assetClass === 'atlas.demo.studio.collectible') {
+          return sendJson(res, 403, {
+            error: 'Studio collectibles require authorized Studio issuance',
+            code: 'studio-authorization-required',
+          });
+        }
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
           // This list used to enumerate every known class by
