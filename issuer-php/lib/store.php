@@ -2141,6 +2141,19 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'com.example.issuedFor' => 'assembly voting rights',
     ],
   ],
+  // Asset Studio demo collectibles (atlas/studio/): free, no-value, non-fungible and bound to the
+  // owner key. 'restrictedIssuance' => 'studio' means no general path may mint this class:
+  // mint_asset_by_class() refuses it, so only atlas/studio/'s own wallet-authorized flow signs one.
+  // The model and thumbnail here are the fallback; the Studio route signs the template's own
+  // issuer-approved model (atlas/studio/inc/model-catalog.php).
+  'atlas.demo.studio.collectible' => [
+    'name' => 'Studio Demo Collectible', 'modelPath' => '/assets/badge.glb', 'thumbnailPath' => '/assets/badge.png',
+    'fungible' => false, 'presentation' => 'collectible', 'tradeScope' => 'bound',
+    'restrictedIssuance' => 'studio',
+    'properties' => [
+      'atlas.demo.noValue' => 'true',
+    ],
+  ],
   // Oracle-triggered payout demo (oracle-demo.html): a flight-delay
   // insurance policy, bound like the governance membership above — a
   // personal claim on its own holder's eligibility, not something to

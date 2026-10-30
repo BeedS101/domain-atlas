@@ -1,17 +1,21 @@
 <?php
-// Pure Studio authorization preflight: bind a submitted validated design
-// to the issuer's exact stored challenge and an independently verified
-// wallet proof. Does not consume, issue, register, or return credentials.
+// Studio authorization: bind a submitted design to the issuer's stored challenge and to a wallet
+// proof verified by the issuer's own verifier. Does not consume a challenge or issue anything.
 require_once __DIR__.'/design-fingerprint.php';
 require_once __DIR__.'/mint-authorization.php';
 
-function atlas_studio_authorize_design_proof($design,$proof,$challenge,$expectedOrigin,$verifier,$now=null) {
+// $retry skips the freshness test and also accepts a 'completed' challenge: it is for answering a repeat
+// of a mint that may already have committed, where the original expiry has passed. The same design,
+// recipient and signature must still match either way. A NEW credential is signed only when the caller
+// has also confirmed the challenge is unexpired and still 'issued'.
+function atlas_studio_authorize_design_proof($design,$proof,$challenge,$allowedOrigins,$verifier,$now=null,$retry=false) {
   $fp=atlas_studio_design_fingerprint($design);
   if (!$fp['ok']) return $fp;
-  if (!is_array($challenge) || ($challenge['state'] ?? null)!=='issued')
+  $states=$retry ? ['issued','completed'] : ['issued'];
+  if (!is_array($challenge) || !in_array($challenge['state'] ?? null,$states,true))
     return ['ok'=>false,'error'=>'challenge-not-issued'];
   $verified=atlas_studio_verify_mint_envelope(
-    $proof,$challenge,$expectedOrigin,$fp['designDigest'],$verifier,$now
+    $proof,$challenge,$allowedOrigins,$fp['designDigest'],atlas_studio_summary($fp['design']),$verifier,$now,!$retry
   );
   if (!$verified['ok']) return $verified;
   return ['ok'=>true,'recipient'=>$verified['recipient'],

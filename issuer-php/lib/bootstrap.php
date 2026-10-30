@@ -774,6 +774,12 @@ function oracle_attestation_payload_of($credential) {
 function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cls, $quantity, $supersedes, $initialProperties = null, $deferHoldings = false) {
   if (!isset(ATLAS_ASSET_CATALOG[$cls])) throw new Exception('unknown asset class: ' . $cls);
   $catalogEntry = ATLAS_ASSET_CATALOG[$cls];
+  // A class with 'restrictedIssuance' is minted only by its own authorized flow (atlas/studio/),
+  // which signs through issue_asset() directly. Every catalog path that lands here (issue, admin
+  // mint, gifts, purchases, approvals, drops) refuses it, whatever the caller was authorized for.
+  if (!empty($catalogEntry['restrictedIssuance'])) {
+    throw new Exception('this class can only be issued through its own authorized flow: ' . $cls, 403);
+  }
 
   // Cap/serial tracking only applies to genuinely NEW supply
   // ($supersedes === null — see reserve_supply()'s comment in store.php),

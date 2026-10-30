@@ -24,7 +24,73 @@ function paint(){
 $('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];paint()});
 $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(JSON.stringify(design(),null,2));$('message').textContent='Design copied.'}catch{$('message').textContent='Clipboard unavailable; select the JSON below.'}});
 $('download').addEventListener('click',()=>{const blob=new Blob([JSON.stringify(design(),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='atlas-asset-design.json';a.click();URL.revokeObjectURL(url);$('message').textContent='Design downloaded (not a minted asset).'});
-(async()=>{if(!window.atlasWallet?.getIdentity){$('walletStatus').textContent='Domain Atlas wallet bridge not detected.';return}try{const r=await window.atlasWallet.getIdentity();$('walletStatus').textContent=r?.allowed&&r?.publicKey?'Wallet identity available.':r?.allowed?'No active wallet identity.':'Wallet access not enabled for this page.'}catch{$('walletStatus').textContent='Wallet connection unavailable.'}})();
+let walletKey=null,mintEnabled=false,minting=false;
+function refreshMintButton(){$('mint').disabled=minting||!(walletKey&&mintEnabled);$('mint').title=walletKey?(mintEnabled?'':'Minting is not enabled on this issuer'):'Connect a Domain Atlas wallet identity first';}
+async function postJson(op,body){
+  const response=await fetch('api.php?op='+op,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body)});
+  let json=null;try{json=await response.json()}catch{}
+  return {status:response.status,json};
+}
+// The bridge can answer 'not allowed' simply because the extension had not attached yet when the page
+// loaded, so a missing identity is re-checked a few times and again whenever the tab regains focus.
+let checking=false;
+async function checkWallet(){
+ if(checking||walletKey)return;checking=true;
+ try{
+  if(!window.atlasWallet?.getIdentity){$('walletStatus').textContent='Domain Atlas wallet bridge not detected.';return}
+  for(let attempt=0;attempt<4&&!walletKey;attempt++){
+   try{const r=await window.atlasWallet.getIdentity();walletKey=r?.allowed&&r?.publicKey?r.publicKey:null;$('walletStatus').textContent=walletKey?'Wallet identity available.':r?.allowed?'No active wallet identity.':'Wallet access not enabled for this page.';if(r?.allowed)break}
+   catch{$('walletStatus').textContent='Wallet connection unavailable.'}
+   if(!walletKey)await new Promise(ok=>setTimeout(ok,1200));
+  }
+ }finally{checking=false;refreshMintButton()}
+}
+async function checkIssuer(){
+ try{if(location.protocol!=='file:'){const s=await (await fetch('api.php?op=status',{cache:'no-store'})).json();mintEnabled=s.mintEnabled===true}}catch{}
+ refreshMintButton();
+}
+window.addEventListener('focus',checkWallet);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkWallet()});
+checkIssuer();checkWallet();
+
+// Mint to the wallet: the issuer hands out a short-lived challenge for exactly this design and wallet key,
+// the wallet shows the request and signs it only if the visitor approves, the issuer verifies that signature
+// and signs the credential, and the wallet's own offer flow receives it. Nothing here can change what is
+// signed: the request to sign comes from the issuer and the credential is checked before it is offered.
+async function mintToWallet(){
+  if(minting)return;minting=true;refreshMintButton();
+  const say=t=>{$('message').textContent=t};
+  try{
+    say('Asking the issuer for a mint challenge…');
+    const ch=await postJson('challenge',{design:design(),recipient:walletKey});
+    if(ch.status!==200||!ch.json?.ok)return say('The issuer refused the design: '+String(ch.json?.error||ch.status));
+    say('Approve the request in your Domain Atlas wallet. It shows exactly what will be minted.');
+    const sig=await window.atlasWallet.requestSignature(ch.json.signRequest);
+    if(!sig||sig.allowed!==true)return say('This page is not permitted to request mint signatures from your wallet.');
+    if(!sig.result)return say('The signature request was declined or timed out. Nothing was minted.');
+    say('Wallet approved. Asking the issuer to mint…');
+    const body={design:ch.json.design,nonce:ch.json.nonce,proof:sig.result};
+    let res=null;
+    for(let attempt=0;attempt<3&&!res;attempt++){
+      try{
+        const r=await postJson('mint',body);
+        if(r.status===503||r.status===502||r.status===504){await new Promise(ok=>setTimeout(ok,1500));continue}
+        res=r;
+      }catch{await new Promise(ok=>setTimeout(ok,1500))}
+    }
+    // The same request can be repeated safely: the issuer answers a repeat with the original credential.
+    if(!res)return say('The issuer did not answer. Your request is safe to repeat: press Mint again within two minutes to retrieve the result.');
+    if(res.status!==200||!res.json?.ok)return say('Mint refused: '+String(res.json?.error||res.status));
+    const cred=res.json.credential;
+    if(!cred||cred.credential!=='domain-atlas-asset/1.0'||cred.asset?.class!=='atlas.demo.studio.collectible'||cred.owner?.publicKey!==walletKey||!cred.signature)return say('The issuer returned something that is not your credential, so it was not offered to the wallet.');
+    const offer=await window.atlasWallet.offerAsset(cred);
+    if(!offer||offer.allowed!==true)return say('Minted, but this page is not permitted to offer that asset class to your wallet.');
+    if(!offer.result)return say('Minted, but the wallet offer was declined or timed out. Press Mint again to retrieve it.');
+    say(offer.result.claimed?'Added to your wallet. The wallet verified the issuer signature.':'Offered to your wallet. Open its pending offers and Claim it: the wallet checks the issuer signature itself before adding it.');
+  }catch(error){say('Mint failed: '+String(error?.message||'network error'))}
+  finally{minting=false;refreshMintButton()}
+}
+$('mint').addEventListener('click',mintToWallet);
 paint();
 
 $('validate').addEventListener('click',async()=>{

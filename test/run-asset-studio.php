@@ -1,35 +1,27 @@
 <?php
-// Local-only Asset Studio test runner: php test/run-asset-studio.php
-$tests=[
+// Asset Studio test runner: php test/run-asset-studio.php
+// PHP unit tests (pure functions, injected time) followed by the integration suite, which starts real
+// PHP issuers and signs with real keys. Any failing, skipped or missing test makes the run fail.
+$unit = [
   'asset-studio-design-validator.php',
   'asset-studio-design-fingerprint.php',
-  'asset-studio-authorize-design.php',
   'asset-studio-storage.php',
   'asset-studio-issuance-plan.php',
-  'asset-studio-mint-authorization.php',
-  'asset-studio-challenges.php',
-  'asset-studio-challenge-concurrency.php',
-  'asset-studio-mint-attempts.php',
-  'asset-studio-attempt-concurrency.php',
-  'asset-studio-legacy-issue-gate.php',
-  'asset-studio-mint-disabled.php',
+  'asset-studio-mint-binding.php',
+  'asset-studio-attempt-ledger.php',
 ];
-$php=PHP_BINARY;
-$failed=[];
-$skipped=[];
-$passed=0;
-foreach ($tests as $name) {
+$failed = [];
+$passed = 0;
+foreach ($unit as $name) {
   echo "\n== $name ==\n";
-  $args=escapeshellarg($php).' '.escapeshellarg(__DIR__.DIRECTORY_SEPARATOR.$name);
-  passthru($args,$status);
-  if ($status === 0) $passed++;
-  elseif ($status === 77) $skipped[]=$name;
-  else $failed[]=$name;
+  $file = __DIR__ . DIRECTORY_SEPARATOR . $name;
+  if (!is_file($file)) { $failed[] = "$name (missing)"; continue; }
+  passthru(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($file), $status);
+  if ($status === 0) $passed++; else $failed[] = $name;
 }
-echo "\nAsset Studio: $passed/".count($tests)." tests passed; ".count($skipped)." skipped; ".count($failed)." failed\n";
-if ($skipped) fwrite(STDERR,"Skipped (NOT verified): ".implode(", ",$skipped)."\n");
-if ($failed || $skipped) {
-  if ($failed) fwrite(STDERR,"Failed: ".implode(', ',$failed)."\n");
-  exit(1);
-}
-echo "Note: these test isolated helpers only; real issuer signing and wallet minting are NOT tested.\n";
+echo "\n== asset-studio-integration.js ==\n";
+passthru('node ' . escapeshellarg(__DIR__ . DIRECTORY_SEPARATOR . 'asset-studio-integration.js'), $status);
+if ($status === 0) $passed++; else $failed[] = 'asset-studio-integration.js';
+$total = count($unit) + 1;
+echo "\nAsset Studio: $passed/$total test files passed; " . count($failed) . " failed\n";
+if ($failed) { fwrite(STDERR, 'Failed: ' . implode(', ', $failed) . "\n"); exit(1); }

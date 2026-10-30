@@ -1545,6 +1545,11 @@ const DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
 const DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
 const DEMO_RESERVE_CLASS = 'atlas.currency.reserve';
 
+// Classes only their own authorized issuance flow may mint. Asset Studio collectibles are issued by the
+// PHP issuer's Studio route after a wallet-signed mint request; every general path (issue, mint, gifts,
+// purchases, approvals) refuses them. mintAssetByClass() is the single choke point for catalog minting.
+const RESTRICTED_ISSUANCE_CLASSES = new Set(['atlas.demo.studio.collectible']);
+
 // Demo-only classes the demo clawback routes act on, and only when the
 // credential carries a demo authority. Real currencies are never on this list.
 const DEMO_CLAWBACK_FUNDS_CLASS = 'atlas.demo.clawback.funds';
@@ -5067,6 +5072,11 @@ async function main() {
   // every other call site leaves it undefined, which merges nothing and
   // changes no existing behavior at all.
   async function mintAssetByClass(ownerPublicKey, cls, quantity, supersedes, initialProperties, deferHoldings) {
+    if (RESTRICTED_ISSUANCE_CLASSES.has(cls)) {
+      const err = new Error('this class can only be issued through its own authorized flow: ' + cls);
+      err.statusCode = 403;
+      throw err;
+    }
     const catalogEntry = ASSET_CATALOG[cls];
     if (!catalogEntry) throw new Error('unknown asset class: ' + cls);
 
@@ -6078,6 +6088,14 @@ async function main() {
         const issueBody = JSON.parse((await readBody(req)) || '{}');
         const { ownerPublicKey, assetClass, quantity, existingBalances } = issueBody;
         if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
+        // Restricted classes (Studio collectibles) have a dedicated owner-authorized issuance path.
+        // Keep this ahead of the general catalogue lookup and any issuer mutation.
+        if (RESTRICTED_ISSUANCE_CLASSES.has(assetClass)) {
+          return sendJson(res, 403, {
+            error: 'Studio collectibles require authorized Studio issuance',
+            code: 'studio-authorization-required',
+          });
+        }
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
           // This list used to enumerate every known class by

@@ -1,6 +1,6 @@
 # Asset Studio storage isolation (design baseline)
 
-**Status:** Layout specification only. The current Studio does not save uploads or mint credentials.
+**Status:** Layout specification, now in use for the mint pipeline (`drafts`, `uploads-quarantine`, `mint-receipts`, `tmp`, `rate`). Studio mints credentials only when `studio-config.json` in this root enables it (see `asset-studio-v0.1.md`); drafts and uploads are still not implemented.
 
 ## Two independent storage concerns
 

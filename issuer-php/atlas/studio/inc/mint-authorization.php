@@ -1,74 +1,98 @@
 <?php
-// Studio proof preflight. Pure validation; NO signature or issuance occurs here.
-// The caller must verify the cryptographic envelope with verify_envelope($signedPayload, $proof, true)
-// and consume the challenge atomically before minting.
-// WebAuthn authorization requires an assertion and authenticator user presence.
-// This is preflight only; cryptographic verification still must follow.
+// Studio mint proof checks: what the visitor's wallet signed, bound to the issuer's own challenge.
+//
+// The wallet signs { ctx: 'atlas.bridge.sign/1', origin, payload } (SPEC.md §3.8.1) where payload is the
+// exact request the issuer handed out with the challenge. Binding checks (this file, pure) come first and
+// the cryptographic check (the issuer's verify_envelope(), passed in as $verifier) follows. Neither
+// consumes a challenge or issues anything.
+require_once __DIR__.'/keys.php';
+require_once __DIR__.'/issuance-plan.php';
+
+const ATLAS_STUDIO_CHALLENGE_TTL = 120;
+
+// The payload the wallet is asked to sign. Fixed shape; nothing the page adds can ride along.
+function atlas_studio_sign_request($challenge, $summary) {
+  return [
+    'purpose'=>ATLAS_STUDIO_MINT_PURPOSE,
+    'nonce'=>$challenge['nonce'],
+    'designDigest'=>$challenge['designDigest'],
+    'recipient'=>$challenge['recipient'],
+    'expiresAt'=>$challenge['expiresAt'],
+    'summary'=>$summary,
+  ];
+}
+
+// A WebAuthn assertion counts only with clientDataJSON.type 'webauthn.get' and the authenticator's
+// user-present flag set; verify_envelope() itself checks neither. Raw-ECDSA identities are unaffected.
 function atlas_studio_webauthn_presence($proof) {
   if (($proof['signerRole'] ?? null) !== 'webauthn') return true;
   $client=$proof['clientDataJSON'] ?? null;
   $auth=$proof['authenticatorData'] ?? null;
   if (!is_string($client) || !is_string($auth)) return false;
-  $decode=static function($encoded) {
-    if (!preg_match('/^[A-Za-z0-9_-]+$/D',$encoded)) return false;
-    return base64_decode(strtr($encoded,'-_','+/') . str_repeat('=',(4-strlen($encoded)%4)%4),true);
-  };
-  $rawClient=$decode($client);
-  $rawAuth=$decode($auth);
-  if ($rawClient===false || $rawAuth===false || strlen($rawAuth)<37) return false;
+  $rawClient=atlas_studio_b64url_exact($client);
+  $rawAuth=atlas_studio_b64url_exact($auth);
+  if ($rawClient===null || $rawAuth===null || strlen($rawAuth)<37) return false;
   $data=json_decode($rawClient,true);
   return is_array($data) && ($data['type'] ?? null)==='webauthn.get'
     && (ord($rawAuth[32]) & 0x01)!==0;
 }
 
-function atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $designDigest, $now = null) {
+// Binding checks. $allowedOrigins are the exact origins this issuer's configuration names; $summary is
+// recomputed by the issuer from the validated design. $requireFresh is false only when answering a retry
+// for a mint that already completed, where the original expiry has legitimately passed.
+function atlas_studio_check_mint_proof($proof, $challenge, $allowedOrigins, $designDigest, $summary, $now = null, $requireFresh = true) {
   $now = $now ?? time();
   if (!is_array($proof) || !is_array($challenge)) return ['ok'=>false,'error'=>'invalid-proof'];
+  $allowedFields=['signerRole','publicKey','signature','clientDataJSON','authenticatorData','signedPayload'];
+  if (array_diff(array_keys($proof),$allowedFields)) return ['ok'=>false,'error'=>'invalid-proof'];
   $signed=$proof['signedPayload'] ?? null;
-  if (!is_array($signed) || ($signed['ctx'] ?? null)!=='atlas.bridge.sign/1' || ($signed['origin'] ?? null)!==$expectedOrigin)
+  if (!is_array($signed) || ($signed['ctx'] ?? null)!=='atlas.bridge.sign/1' ||
+      !is_string($signed['origin'] ?? null) || !is_array($allowedOrigins) || !in_array($signed['origin'],$allowedOrigins,true) ||
+      count($signed)!==3)
     return ['ok'=>false,'error'=>'wrong-signing-context'];
   $p=$signed['payload'] ?? null;
-  if (!is_array($p) || count($p)!==5 || array_diff(array_keys($p),['purpose','nonce','designDigest','recipient','expiresAt']))
+  $shape=['purpose','nonce','designDigest','recipient','expiresAt','summary'];
+  if (!is_array($p) || count($p)!==count($shape) || array_diff(array_keys($p),$shape))
     return ['ok'=>false,'error'=>'invalid-payload-shape'];
-  // Reject hostile JSON types before comparisons. In particular, PHP casting an
-  // array to a string in hash_equals() emits warnings and must never happen.
-  foreach (['nonce','designDigest','recipient'] as $field) {
-    if (!is_string($p[$field] ?? null) || !is_string($challenge[$field] ?? null))
-      return ['ok'=>false,'error'=>'invalid-proof-types'];
+  // Reject hostile JSON types before any comparison.
+  foreach (['purpose','nonce','designDigest','recipient','summary'] as $field) {
+    if (!is_string($p[$field])) return ['ok'=>false,'error'=>'invalid-proof-types'];
   }
-  if (!is_string($designDigest) || !preg_match('/^[a-f0-9]{64}$/D', $designDigest) ||
-      !preg_match('/^[a-f0-9]{64}$/D', $p['nonce']) ||
-      !preg_match('/^[a-f0-9]{64}$/D', $p['designDigest']) ||
-      !is_string($expectedOrigin) || !preg_match('#^https://[^/]+$#D', $expectedOrigin) ||
-      !is_string($proof['publicKey'] ?? null))
+  foreach (['nonce','designDigest','recipient'] as $field) {
+    if (!is_string($challenge[$field] ?? null)) return ['ok'=>false,'error'=>'invalid-proof-types'];
+  }
+  if (!is_int($p['expiresAt']) || !is_string($designDigest) || !is_string($summary) ||
+      !preg_match('/^[a-f0-9]{64}$/D', $designDigest) || !preg_match('/^[a-f0-9]{64}$/D', $p['nonce']) ||
+      !preg_match('/^[a-f0-9]{64}$/D', $p['designDigest']) || !is_string($proof['publicKey'] ?? null))
     return ['ok'=>false,'error'=>'invalid-proof-types'];
-  if (($p['purpose'] ?? null)!=='atlas.studio.mint/1' ||
-      !hash_equals((string)($challenge['nonce'] ?? ''),(string)($p['nonce'] ?? '')) ||
-      !hash_equals((string)$designDigest,(string)($p['designDigest'] ?? '')) ||
-      ($challenge['designDigest'] ?? null)!==$designDigest ||
-      ($challenge['recipient'] ?? null)!==($p['recipient'] ?? null) ||
-      ($p['expiresAt'] ?? null)!==($challenge['expiresAt'] ?? null) ||
-      !is_int($p['expiresAt']) || $p['expiresAt'] < $now || $p['expiresAt'] > $now + 300 ||
-      !is_string($p['recipient']) || $p['recipient'] === '' ||
-      ($p['recipient'] ?? null) !== ($proof['publicKey'] ?? null) ||
-      !in_array($proof['signerRole'] ?? null,['raw-ecdsa','webauthn'],true))
+  $role=$proof['signerRole'] ?? null;
+  $kind=atlas_studio_p256_key_kind($proof['publicKey']);
+  if (($role==='raw-ecdsa' && $kind!=='raw') || ($role==='webauthn' && $kind!=='spki'))
+    return ['ok'=>false,'error'=>'invalid-proof-key'];
+  if ($p['purpose']!==ATLAS_STUDIO_MINT_PURPOSE ||
+      !hash_equals($challenge['nonce'],$p['nonce']) ||
+      !hash_equals($designDigest,$p['designDigest']) ||
+      !hash_equals($challenge['designDigest'],$designDigest) ||
+      !hash_equals($challenge['recipient'],$p['recipient']) ||
+      !hash_equals($p['recipient'],$proof['publicKey']) ||
+      !hash_equals($summary,$p['summary']) ||
+      ($challenge['expiresAt'] ?? null)!==$p['expiresAt'] ||
+      !in_array($role,['raw-ecdsa','webauthn'],true))
     return ['ok'=>false,'error'=>'proof-mismatch'];
+  if ($requireFresh && ($p['expiresAt'] < $now || $p['expiresAt'] > $now + ATLAS_STUDIO_CHALLENGE_TTL))
+    return ['ok'=>false,'error'=>'challenge-expired'];
   return ['ok'=>true,'signedPayload'=>$signed,'recipient'=>$p['recipient']];
 }
 
-
-// Combines the Studio-specific binding check with the existing issuer's
-// cryptographic verifier. The caller must supply a server-loaded challenge,
-// verified origin and digest; this does not consume or issue anything.
-// The verifier should be PHP issuer verify_envelope(..., ..., true).
-function atlas_studio_verify_mint_envelope($proof, $challenge, $expectedOrigin, $designDigest, $verifier, $now = null) {
-  $check = atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $designDigest, $now);
+// Binding checks, WebAuthn presence, then the cryptographic verifier (the issuer's
+// verify_envelope($signed, $proof, true) in production).
+function atlas_studio_verify_mint_envelope($proof, $challenge, $allowedOrigins, $designDigest, $summary, $verifier, $now = null, $requireFresh = true) {
+  $check = atlas_studio_check_mint_proof($proof, $challenge, $allowedOrigins, $designDigest, $summary, $now, $requireFresh);
   if (!$check['ok']) return $check;
   if (!atlas_studio_webauthn_presence($proof)) return ['ok'=>false,'error'=>'webauthn-presence-required'];
   if (!is_callable($verifier)) return ['ok'=>false,'error'=>'verifier-unavailable'];
-  // Explicitly pass the bridge-signed payload, which is what the wallet signed.
   try {
-    if (!$verifier($check['signedPayload'], $proof)) return ['ok'=>false,'error'=>'invalid-signature'];
+    if ($verifier($check['signedPayload'], $proof) !== true) return ['ok'=>false,'error'=>'invalid-signature'];
   } catch (Throwable $e) {
     return ['ok'=>false,'error'=>'invalid-signature'];
   }

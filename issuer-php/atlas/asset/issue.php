@@ -57,11 +57,10 @@ if (!isset(ATLAS_ASSET_CATALOG[$assetClass])) {
   send_json(400, ['error' => 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ATLAS_ASSET_CATALOG_BASE in issuer-php/lib/store.php (plus issuer-php/lib/elements-catalog.php) for the full list.']);
 }
 
-// Asset Studio collectibles require their own owner-authorized issuance flow.
-// Block this class even if it is added to the shared catalogue later: the
-// legacy general issue route does not verify a Studio wallet mint challenge.
-// Keep this gate before request leases, supply reservation or signing.
-if ($assetClass === 'atlas.demo.studio.collectible') {
+// A class marked 'restrictedIssuance' (Asset Studio collectibles) is minted only by its own
+// wallet-authorized route; this general route never issues it. Checked before any request lease,
+// supply reservation or signing, and mint_asset_by_class() refuses it again.
+if (!empty(ATLAS_ASSET_CATALOG[$assetClass]['restrictedIssuance'])) {
   send_json(403, [
     'error' => 'Studio collectibles require authorized Studio issuance',
     'code' => 'studio-authorization-required'
