@@ -23,6 +23,33 @@ function atlas_studio_new_challenge($root, $designDigest, $recipient, $now = nul
   return ['nonce'=>$nonce,'expiresAt'=>$value['expiresAt']];
 }
 
+
+// Read an issued challenge under a shared lock. The signed response must later
+// be verified and consumed with the exact same digest and recipient.
+function atlas_studio_read_challenge($root, $nonce, $now = null) {
+  $now = $now ?? time();
+  if (!is_string($nonce) || !preg_match('/^[a-f0-9]{64}$/D', $nonce)) return null;
+  $dir = atlas_studio_storage_bucket($root, 'tmp');
+  $fp = @fopen($dir.'/mint-challenge-'.$nonce.'.json', 'r');
+  if (!$fp) return null;
+  try {
+    if (!flock($fp, LOCK_SH)) return null;
+    $raw = stream_get_contents($fp, 4097);
+    if ($raw === false || strlen($raw) > 4096) return null;
+    $challenge = json_decode($raw, true);
+    if (!is_array($challenge) || ($challenge['nonce'] ?? null) !== $nonce ||
+        ($challenge['state'] ?? null) !== 'issued' ||
+        !is_string($challenge['designDigest'] ?? null) ||
+        !is_string($challenge['recipient'] ?? null) ||
+        !is_int($challenge['expiresAt'] ?? null) ||
+        $challenge['expiresAt'] < $now) return null;
+    return $challenge;
+  } finally {
+    flock($fp, LOCK_UN);
+    fclose($fp);
+  }
+}
+
 // Consume only AFTER cryptographic verification. Lock + update before issuing.
 // A crash after consumption fails closed. Idempotent mint recovery is future work.
 function atlas_studio_consume_challenge($root,$nonce,$designDigest,$recipient,$now=null) {
