@@ -40,6 +40,7 @@ Examine the interaction between Studio, PHP issuer, wallet bridge and existing i
 
 - The dedicated Studio mint endpoint **does not exist yet**. There is no proven issuer catalog integration, authorization to issue, rate limiting, durable mint outcome journal or wallet offer flow.
 - `atlas_studio_verify_mint_envelope()` accepts a verifier callback, but no route currently supplies the real PHP issuer verifier or checks `verify_envelope(..., ..., true)` in an end-to-end flow.
+- An isolated `inc/mint-attempts.php` prototype now records a single pending-reconciliation attempt per challenge nonce; it deliberately does not retry issuance or atomically integrate with issuer holdings, and needs audit, recovery design and real testing.
 - The challenge store marks a nonce consumed but is not an issuance transaction. A crash after nonce consumption can permanently lose the mint result.
 - The Studio preview works from a local file. PHP validation only works on a PHP-served page.
 - Studio private storage helper paths require precreated private directories and remain disconnected from the API.
