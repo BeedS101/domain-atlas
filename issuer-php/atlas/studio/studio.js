@@ -26,3 +26,24 @@ $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.write
 $('download').addEventListener('click',()=>{const blob=new Blob([JSON.stringify(design(),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='atlas-asset-design.json';a.click();URL.revokeObjectURL(url);$('message').textContent='Design downloaded (not a minted asset).'});
 (async()=>{if(!window.atlasWallet?.getIdentity){$('walletStatus').textContent='Domain Atlas wallet bridge not detected.';return}try{const r=await window.atlasWallet.getIdentity();$('walletStatus').textContent=r?.allowed&&r?.publicKey?'Wallet identity available.':r?.allowed?'No active wallet identity.':'Wallet access not enabled for this page.'}catch{$('walletStatus').textContent='Wallet connection unavailable.'}})();
 paint();
+
+$('validate').addEventListener('click',async()=>{
+  const button=$('validate');button.disabled=true;
+  $('message').textContent='Checking design with PHP…';
+  try {
+    if(location.protocol==='file:') throw new Error('PHP validation needs the hosted Studio page. Local file previews still work.');
+    const response=await fetch('api.php?op=validate',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',cache:'no-store',
+      body:JSON.stringify(design())
+    });
+    const result=await response.json();
+    if(result.ok && response.ok){
+      $('message').textContent='PHP design validation passed. This is a design preview, not a minted asset.';
+    } else {
+      $('message').textContent='Design rejected: '+String(result.error||'validation-failed');
+    }
+  } catch(error) {
+    $('message').textContent='Validation unavailable: '+String(error.message||'network error');
+  } finally {button.disabled=false;}
+});
