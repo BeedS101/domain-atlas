@@ -2,6 +2,25 @@
 // Studio proof preflight. Pure validation; NO signature or issuance occurs here.
 // The caller must verify the cryptographic envelope with verify_envelope($signedPayload, $proof, true)
 // and consume the challenge atomically before minting.
+// WebAuthn authorization requires an assertion and authenticator user presence.
+// This is preflight only; cryptographic verification still must follow.
+function atlas_studio_webauthn_presence($proof) {
+  if (($proof['signerRole'] ?? null) !== 'webauthn') return true;
+  $client=$proof['clientDataJSON'] ?? null;
+  $auth=$proof['authenticatorData'] ?? null;
+  if (!is_string($client) || !is_string($auth)) return false;
+  $decode=static function($encoded) {
+    if (!preg_match('/^[A-Za-z0-9_-]+$/D',$encoded)) return false;
+    return base64_decode(strtr($encoded,'-_','+/') . str_repeat('=',(4-strlen($encoded)%4)%4),true);
+  };
+  $rawClient=$decode($client);
+  $rawAuth=$decode($auth);
+  if ($rawClient===false || $rawAuth===false || strlen($rawAuth)<37) return false;
+  $data=json_decode($rawClient,true);
+  return is_array($data) && ($data['type'] ?? null)==='webauthn.get'
+    && (ord($rawAuth[32]) & 0x01)!==0;
+}
+
 function atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $designDigest, $now = null) {
   $now = $now ?? time();
   if (!is_array($proof) || !is_array($challenge)) return ['ok'=>false,'error'=>'invalid-proof'];
@@ -45,6 +64,7 @@ function atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $des
 function atlas_studio_verify_mint_envelope($proof, $challenge, $expectedOrigin, $designDigest, $verifier, $now = null) {
   $check = atlas_studio_check_mint_proof($proof, $challenge, $expectedOrigin, $designDigest, $now);
   if (!$check['ok']) return $check;
+  if (!atlas_studio_webauthn_presence($proof)) return ['ok'=>false,'error'=>'webauthn-presence-required'];
   if (!is_callable($verifier)) return ['ok'=>false,'error'=>'verifier-unavailable'];
   // Explicitly pass the bridge-signed payload, which is what the wallet signed.
   try {
