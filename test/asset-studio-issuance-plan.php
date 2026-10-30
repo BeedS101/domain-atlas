@@ -8,6 +8,14 @@ studio_check($plan['ok'],'accept validated design');
 studio_check($plan['requiredClass']==='atlas.demo.studio.collectible','fixed demo class');
 studio_check($plan['requiredTradeScope']==='bound' && $plan['quantity']===1,'fixed bound collectible');
 studio_check($plan['properties']['atlas.studio.name']==='Gopher Trophy','carry chosen name');
+studio_check($plan['model']['modelPath']==='/assets/trophy.glb','approved trophy model');
+foreach (['trophy'=>'/assets/trophy.glb','badge'=>'/assets/badge.glb','key'=>'/assets/compass.glb'] as $template=>$model) {
+  $d=$design;$d['template']=$template;
+  $p=atlas_studio_issuance_plan($d,$owner);
+  studio_check($p['ok'] && $p['model']['modelPath']===$model,'approved model '.$template);
+}
+studio_check(atlas_studio_model_for_template('untrusted')===null,'reject unknown model');
+
 foreach (['assetClass'=>'atlas.element.gold','quantity'=>10000,'tradeScope'=>'global','issuer'=>'evtec.co.za','capabilities'=>['admin']] as $key=>$v) {
   $attempt=$design;$attempt[$key]=$v;
   studio_check(!atlas_studio_issuance_plan($attempt,$owner)['ok'],'reject '.$key);
