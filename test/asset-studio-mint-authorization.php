@@ -20,7 +20,7 @@ $x=$proof;$x['publicKey']='someone-else';ok(!$check($x)['ok'],'recipient binding
 $x=$proof;$x['signedPayload']['payload']['extra']='privileged';ok(!$check($x)['ok'],'no extra properties');
 $x=$proof;$x['signerRole']='unknown';ok(!$check($x)['ok'],'invalid signer');
 $x=$proof;$x['signedPayload']['payload']['expiresAt']=$now+301;
-ok(!$check($x,['nonce'=>$c['nonce'],'expiresAt'=>$now+301])['ok'],'bounded expiry');
+ok(!$check($x,['nonce'=>$c['nonce'],'expiresAt'=>$now+301,'designDigest'=>$c['designDigest'],'recipient'=>$c['recipient']])['ok'],'bounded expiry');
 echo "Asset Studio mint proof preflight tests passed\n";
 
 $called=0;
