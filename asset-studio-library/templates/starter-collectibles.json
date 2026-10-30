@@ -1,0 +1,33 @@
+{
+  "schema": "atlas.asset-studio.templates/0.1",
+  "templates": [
+    {
+      "id": "trophy",
+      "label": "Gopher Trophy",
+      "finishes": [
+        "gold",
+        "silver",
+        "bronze"
+      ]
+    },
+    {
+      "id": "badge",
+      "label": "Explorer Badge",
+      "finishes": [
+        "gold",
+        "silver",
+        "bronze"
+      ]
+    },
+    {
+      "id": "key",
+      "label": "Portal Key",
+      "finishes": [
+        "gold",
+        "silver",
+        "bronze"
+      ]
+    }
+  ],
+  "notes": "Design presets only; not mint permissions or issuer catalog entries."
+}
