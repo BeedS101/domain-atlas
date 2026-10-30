@@ -40,3 +40,26 @@ foreach (['nonce','designDigest','recipient'] as $field) {
 }
 $bad=$proof;$bad['publicKey']=['not'=>'a string'];
 ok(!atlas_studio_check_mint_proof($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$now)['ok'],'reject malformed proof key');
+
+
+$web=$proof;
+$web['signerRole']='webauthn';
+$encode=fn($v)=>rtrim(strtr(base64_encode($v),'+/','-_'),'=');
+$client=['type'=>'webauthn.get','challenge'=>'test-only'];
+$auth=str_repeat("\0",37);
+$auth[32]=chr(0x01);
+$web['clientDataJSON']=$encode(json_encode($client));
+$web['authenticatorData']=$encode($auth);
+$called=0;
+$countVerifier=function()use(&$called){$called++;return true;};
+ok(atlas_studio_verify_mint_envelope($web,$c,'https://domain-atlas.co.za',str_repeat('a',64),$countVerifier,$now)['ok'] && $called===1,'present WebAuthn assertion reaches verifier (mock only)');
+$bad=$web;$bad['clientDataJSON']=$encode(json_encode(['type'=>'webauthn.create']));
+$called=0;
+ok(!atlas_studio_verify_mint_envelope($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$countVerifier,$now)['ok'] && $called===0,'wrong WebAuthn operation rejected');
+$bad=$web;$auth[32]=chr(0x00);$bad['authenticatorData']=$encode($auth);
+$called=0;
+ok(!atlas_studio_verify_mint_envelope($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$countVerifier,$now)['ok'] && $called===0,'WebAuthn absent user presence rejected');
+$bad=$web;$bad['authenticatorData']=$encode('short');
+ok(!atlas_studio_verify_mint_envelope($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$countVerifier,$now)['ok'],'short authenticator data rejected');
+$bad=$web;$bad['clientDataJSON']='!!!';
+ok(!atlas_studio_verify_mint_envelope($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$countVerifier,$now)['ok'],'malformed base64 rejected');
