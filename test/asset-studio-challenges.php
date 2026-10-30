@@ -34,6 +34,13 @@ try {
  t(atlas_studio_read_challenge($base,$invalid['nonce'],$now)===null,'unknown challenge state fails closed');
  t(!atlas_studio_consume_challenge($base,$invalid['nonce'],$digest,$owner,$now),'unknown state cannot consume');
 
+ // Oversized private record must fail closed without unbounded reads.
+ $large=atlas_studio_new_challenge($base,$digest,$owner,$now);
+ $largePath=$base.'/tmp/mint-challenge-'.$large['nonce'].'.json';
+ file_put_contents($largePath,str_repeat('A',8192));
+ t(atlas_studio_read_challenge($base,$large['nonce'],$now)===null,'oversized challenge read rejected');
+ t(!atlas_studio_consume_challenge($base,$large['nonce'],$digest,$owner,$now),'oversized challenge consume rejected');
+
  echo "Asset Studio challenge-store tests passed\n";
 } finally {
  foreach (glob($base.'/tmp/*') ?: [] as $f) unlink($f);
