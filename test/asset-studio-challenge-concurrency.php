@@ -2,7 +2,7 @@
 // Run only on CLI. Launch two separate PHP workers against one challenge.
 require_once __DIR__.'/../issuer-php/atlas/studio/inc/challenges.php';
 if (PHP_SAPI !== 'cli') { fwrite(STDERR,"CLI only\n"); exit(2); }
-if (!function_exists('proc_open')) { echo "SKIP: proc_open unavailable (concurrency unverified)\n"; exit(0); }
+if (!function_exists('proc_open')) { fwrite(STDERR,"SKIP: proc_open unavailable (concurrency unverified)\n"); exit(77); }
 $base=sys_get_temp_dir().'/studio-race-'.bin2hex(random_bytes(8));
 mkdir($base,0700);mkdir($base.'/tmp',0700);
 try {
