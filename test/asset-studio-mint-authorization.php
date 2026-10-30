@@ -31,3 +31,12 @@ $reject=fn($signed,$envelope)=>false;
 ok(!atlas_studio_verify_mint_envelope($proof,$c,'https://domain-atlas.co.za',str_repeat('a',64),$reject,$now)['ok'],'invalid signature rejected');
 $called=0;$bad=$proof;$bad['signedPayload']['origin']='https://other.example';
 ok(!atlas_studio_verify_mint_envelope($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$accept,$now)['ok'] && $called===0,'bad proof skips verifier');
+
+foreach (['nonce','designDigest','recipient'] as $field) {
+  $bad=$proof;$bad['signedPayload']['payload'][$field]=['malicious'=>'array'];
+  ok(!atlas_studio_check_mint_proof($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$now)['ok'],'reject array '.$field);
+  $badChallenge=$c;$badChallenge[$field]=['malicious'=>'array'];
+  ok(!atlas_studio_check_mint_proof($proof,$badChallenge,'https://domain-atlas.co.za',str_repeat('a',64),$now)['ok'],'reject array challenge '.$field);
+}
+$bad=$proof;$bad['publicKey']=['not'=>'a string'];
+ok(!atlas_studio_check_mint_proof($bad,$c,'https://domain-atlas.co.za',str_repeat('a',64),$now)['ok'],'reject malformed proof key');
