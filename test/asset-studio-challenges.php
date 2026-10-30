@@ -19,6 +19,21 @@ try {
  $expired=atlas_studio_new_challenge($base,$digest,$owner,$now);
  t(!atlas_studio_consume_challenge($base,$expired['nonce'],$digest,$owner,$now+121),'expired refused');
  t(!atlas_studio_consume_challenge($base,'../bad',$digest,$owner,$now),'path traversal refused');
+
+ // Simulate an interrupted or damaged disk write. Neither read nor consume
+ // must treat a truncated challenge as an issued authorization.
+ $damaged=atlas_studio_new_challenge($base,$digest,$owner,$now);
+ $damagedPath=$base.'/tmp/mint-challenge-'.$damaged['nonce'].'.json';
+ file_put_contents($damagedPath,'{"nonce":"'.substr($damaged['nonce'],0,5));
+ t(atlas_studio_read_challenge($base,$damaged['nonce'],$now)===null,'truncated record fails closed on read');
+ t(!atlas_studio_consume_challenge($base,$damaged['nonce'],$digest,$owner,$now),'truncated record fails closed on consume');
+ // Recreate a malformed-but-parseable object with an invalid state.
+ $invalid=atlas_studio_new_challenge($base,$digest,$owner,$now);
+ $invalidPath=$base.'/tmp/mint-challenge-'.$invalid['nonce'].'.json';
+ file_put_contents($invalidPath,json_encode(['nonce'=>$invalid['nonce'],'state'=>'minted','expiresAt'=>$now+120,'designDigest'=>$digest,'recipient'=>$owner]));
+ t(atlas_studio_read_challenge($base,$invalid['nonce'],$now)===null,'unknown challenge state fails closed');
+ t(!atlas_studio_consume_challenge($base,$invalid['nonce'],$digest,$owner,$now),'unknown state cannot consume');
+
  echo "Asset Studio challenge-store tests passed\n";
 } finally {
  foreach (glob($base.'/tmp/*') ?: [] as $f) unlink($f);
