@@ -82,8 +82,9 @@ function get(url) {
     const design = { schema: 'atlas.asset-studio.design/0.1', template: p['atlas.studio.template'], name: p['atlas.studio.name'], description: p['atlas.studio.description'], finish: p['atlas.studio.finish'] };
     const digest = crypto.createHash('sha256').update(canonicalize(design)).digest('hex');
     check('design digest matches the design fields', digest === p['atlas.studio.designDigest'], 'sha256 ' + digest.slice(0, 16) + '…');
-    check('model and thumbnail are on the issuer domain', typeof a.model === 'string' && typeof a.thumbnail === 'string'
-      && a.model.startsWith('https://' + cred.issuer.domain + '/assets/') && a.thumbnail.startsWith('https://' + cred.issuer.domain + '/assets/'));
+    check('model and thumbnail are Studio\'s own files on the issuer domain (/assets/studio/)', typeof a.model === 'string' && typeof a.thumbnail === 'string'
+      && new RegExp('^https://' + cred.issuer.domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/assets/studio/(trophy|badge|key)\\.glb$').test(a.model)
+      && new RegExp('^https://' + cred.issuer.domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/assets/studio/(trophy|badge|key)\\.png$').test(a.thumbnail));
     console.log('NOTE ' + JSON.stringify({ name: a.name, template: p['atlas.studio.template'], finish: p['atlas.studio.finish'], owner: cred.owner && cred.owner.publicKey && cred.owner.publicKey.slice(0, 16) + '…', issuedAt: cred.issuedAt }));
   } else {
     console.log('NOTE class is ' + a.class + ', not an Asset Studio collectible; only the signature checks apply');

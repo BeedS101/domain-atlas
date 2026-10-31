@@ -33,8 +33,14 @@ const issuer = (rel) => FILES.push(['issuer-php/' + rel, rel]);
 ].forEach((f) => issuer('lib/' + f + '.php'));
 ['atlas/asset/issue.php', 'atlas/asset/reissue.php', 'atlas/admin/class-patch.php'].forEach(issuer);
 
-// New: approved model and thumbnail files for the badge and key templates (the trophy ones already exist).
-['badge.glb', 'badge.png', 'key.glb', 'key.png'].forEach((f) => FILES.push(['demo-domain-a/assets/' + f, 'assets/' + f]));
+// New: Studio's own model collection, assets/studio/{trophy,badge,key}.{glb,png}. The site's own models in
+// assets/ (including assets/badge.* and assets/trophy.*) are never part of the package.
+['trophy', 'badge', 'key'].forEach((t) => ['glb', 'png'].forEach((e) => FILES.push(['demo-domain-a/assets/studio/' + t + '.' + e, 'assets/studio/' + t + '.' + e])));
+
+// Every asset file in the package must sit in assets/studio/, never directly in assets/.
+for (const [, dest] of FILES) {
+  if (dest.startsWith('assets/') && !/^assets\/studio\/(trophy|badge|key)\.(glb|png)$/.test(dest)) { console.error('refusing a model outside assets/studio/: ' + dest); process.exit(1); }
+}
 
 const STATE = /(^|\/)(atlas-[^/]*\.(json|txt)|[^/]*\.pem|[^/]*private[^/]*|[^/]*config[^/]*\.json|\.salt|replay|journal|holdings)(\/|$)/i;
 let bad = 0;

@@ -22,9 +22,11 @@
 //    use only the per-material baseColorFactor and need no UVs (gltf-mini.js
 //    supports base-colour textures too; see its header comment).
 //
-// Usage: node tools/make-demo-item-models.js
-// Regenerates demo-domain-a/assets/{compass,ring,trophy}.{glb,png} in
-// place. Requires Playwright + the sandboxed Chromium build for the
+// Usage: node tools/make-demo-item-models.js [name ...]
+// Regenerates demo-domain-a/assets/{compass,ring,trophy}.{glb,png} and Asset Studio's own collection,
+// demo-domain-a/assets/studio/{trophy,badge,key}.{glb,png}, in place (only the named models when names are
+// given: compass, ring, trophy, studio/trophy, studio/badge, studio/key, or studio for all three). It never
+// writes /assets/badge.* or /assets/key.*: a site's own badge models live there. Requires Playwright + the sandboxed Chromium build for the
 // thumbnail-rendering step (reuses gltf-mini.js's own previewModel(), the
 // same renderer the wallet's Asset Viewer uses, so a thumbnail is always
 // pixel-faithful to what the model actually looks like in-app).
@@ -356,6 +358,26 @@ function buildTrophy() {
   return mesh;
 }
 
+function buildBadge() {
+  const mesh = createMeshBuilder();
+  // A hexagonal medal: dark backing plate, gold rim, blue gem at the centre.
+  mesh.addPart(cylinder(0.95, 0.95, 0.14, 6), TROPHY_BLACK, {});
+  mesh.addPart(torus(0.82, 0.09, 6, 8), GOLD, { translate: [0, 0.08, 0] });
+  mesh.addPart(octahedron(1), GEM_BLUE, { scale: [0.38, 0.14, 0.38], translate: [0, 0.14, 0] });
+  mesh.addPart(cylinder(0.12, 0.12, 0.08, 10), GOLD, { translate: [0, 0.17, 0] });
+  return mesh;
+}
+
+function buildKey() {
+  const mesh = createMeshBuilder();
+  // A flat skeleton key lying along X: ring bow, shaft and two teeth.
+  mesh.addPart(torus(0.34, 0.08, 14, 8), GOLD, { translate: [-0.62, 0, 0] });
+  mesh.addPart(cylinder(0.07, 0.07, 1.1, 8), GOLD, { rotateZ: 90, translate: [0.1, 0, 0] });
+  mesh.addPart(box(0.07, 0.07, 0.2), GOLD, { translate: [0.5, 0, 0.14] });
+  mesh.addPart(box(0.07, 0.07, 0.13), GOLD, { translate: [0.3, 0, 0.1] });
+  return mesh;
+}
+
 // ---------- thumbnail rendering (Playwright + gltf-mini.js's own previewModel) ----------
 
 async function renderThumbnail(glbBuffer, outPngPath) {
@@ -405,11 +427,20 @@ async function renderThumbnail(glbBuffer, outPngPath) {
 // ---------- main ----------
 
 async function main() {
-  const items = [
-    { name: 'compass', mesh: buildCompass() },
-    { name: 'ring', mesh: buildRing() },
-    { name: 'trophy', mesh: buildTrophy() }
+  // `file` is relative to assets/. Studio's models are a separate collection in assets/studio/.
+  const all = [
+    { file: 'compass', mesh: buildCompass },
+    { file: 'ring', mesh: buildRing },
+    { file: 'trophy', mesh: buildTrophy },
+    { file: 'studio/trophy', mesh: buildTrophy },
+    { file: 'studio/badge', mesh: buildBadge },
+    { file: 'studio/key', mesh: buildKey }
   ];
+  // Optional names on the command line limit the run, so adding a model does not rewrite the others.
+  const only = process.argv.slice(2);
+  const wanted = (i) => !only.length || only.includes(i.file) || (only.includes('studio') && i.file.startsWith('studio/'));
+  const items = all.filter(wanted).map((i) => ({ name: i.file, mesh: i.mesh() }));
+  for (const item of items) fs.mkdirSync(path.dirname(path.join(ASSETS_DIR, item.name)), { recursive: true });
 
   for (const item of items) {
     const glb = buildGLBFromMesh(item.mesh);
@@ -430,4 +461,4 @@ if (require.main === module) {
   main().catch((err) => { console.error(err); process.exitCode = 1; });
 }
 
-module.exports = { buildCompass, buildRing, buildTrophy, buildGLBFromMesh, cylinder, box, torus, octahedron };
+module.exports = { buildCompass, buildRing, buildTrophy, buildBadge, buildKey, buildGLBFromMesh, cylinder, box, torus, octahedron };

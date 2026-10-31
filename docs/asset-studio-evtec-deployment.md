@@ -2,7 +2,7 @@
 
 This puts Asset Studio on a live PHP issuer that already runs the Domain Atlas demos. Studio ships with minting **off**; you switch it on yourself in step 6. Throughout, `evtec.co.za` stands for the domain and `CPUSER` for the cPanel account name.
 
-What is added: the Studio page and its API (`atlas/studio/`), a one-line "include-only" guard in the shared issuer libraries, the refusal of the Studio class on the general issue/reissue/class-patch routes, and the badge and key model files. What is **not** touched: the issuer private key, holdings, journals, replay records, `lib/atlas-*.json`, `lib/atlas-private-dir.txt`, `.well-known/*` key and revocation files, the txlab and multi-issuer labs and their private folders. The package contains only source files (39), and `tools/studio-deploy-package.js` refuses to include anything that looks like state.
+What is added: the Studio page and its API (`atlas/studio/`), a one-line "include-only" guard in the shared issuer libraries, the refusal of the Studio class on the general issue/reissue/class-patch routes, and Studio's own model collection in `assets/studio/`. What is **not** touched: the issuer private key, holdings, journals, replay records, `lib/atlas-*.json`, `lib/atlas-private-dir.txt`, `.well-known/*` key and revocation files, the txlab and multi-issuer labs and their private folders. The package contains only source files (41), and `tools/studio-deploy-package.js` refuses to include anything that looks like state.
 
 Studio records a mint in the issuer's existing journal and replay store (the same private folder the issuer already uses) and keeps its own rate counters and mint records in a new private folder. Nothing existing is replaced or moved.
 
@@ -56,10 +56,10 @@ lib/bootstrap.php  crypto.php  delivery.php  demo-authority.php  elements-catalo
 lib/imap.php  ledger-issuance.php  ledger-receipts.php  mime-parse.php  replacement.php
 lib/sign-manifest.php  smtp.php  store.php  transfer-policy.php
 atlas/asset/issue.php  atlas/asset/reissue.php  atlas/admin/class-patch.php
-assets/badge.glb  badge.png  key.glb  key.png
+assets/studio/trophy.glb  trophy.png  badge.glb  badge.png  key.glb  key.png
 ```
 
-`assets/trophy.glb` and `trophy.png` already exist on the site. Check that they do (step 5 does).
+Studio's six models go in their own folder, `assets/studio/`. The site's existing models in `assets/` (including `assets/badge.*` and `assets/trophy.*`) are not in the zip and are not touched: extracting it cannot overwrite them, and Studio never reads them.
 
 ## 4. Tell Studio where its private folder is
 
@@ -100,7 +100,7 @@ From a PC with Node (the repository checkout):
 node tools/studio-live-check.js https://evtec.co.za
 ```
 
-It reads only. Expect all PASS and `minting is off`. It checks the Studio files, the status endpoint, the validator, the six model files, that `inc/` and `lib/` files are not readable over the web, that the manifest has the `studio` world, and that the issuer key and trade catalog answer. Fix any FAIL before going on. You can also look by hand: `https://evtec.co.za/atlas/studio/index.html` shows the page, and `https://evtec.co.za/atlas/studio/api.php?op=status` shows `{"ok":true,"mintEnabled":false}`.
+It reads only. Expect all PASS and `minting is off`. It checks the Studio files, the status endpoint, the validator, the six model files under `/assets/studio/`, that `inc/` and `lib/` files are not readable over the web, that the manifest has the `studio` world, and that the issuer key and trade catalog answer. Fix any FAIL before going on. You can also look by hand: `https://evtec.co.za/atlas/studio/index.html` shows the page, and `https://evtec.co.za/atlas/studio/api.php?op=status` shows `{"ok":true,"mintEnabled":false}`.
 
 For the other demos, run the existing probe, which changes nothing: `node tools/demo-auth-live-check.js https://evtec.co.za`. Then click through your usual demos (login, bank, trading, txlab, multi-issuer) once.
 

@@ -67,10 +67,10 @@ const json = (r) => { try { return JSON.parse(r.body.toString('utf8')); } catch 
   const unknown = await request('GET', '/atlas/studio/api.php?op=nonsense');
   check('unknown operation is refused', unknown.status === 404);
 
-  // 3. Approved models.
+  // 3. Studio's own models (assets/studio/). The site's other models in assets/ are not Studio's and are not checked.
   for (const [name, magic] of [['trophy.glb', 'glTF'], ['badge.glb', 'glTF'], ['key.glb', 'glTF'], ['trophy.png', '\x89PNG'], ['badge.png', '\x89PNG'], ['key.png', '\x89PNG']]) {
-    const r = await request('GET', '/assets/' + name);
-    check('/assets/' + name, r.status === 200 && r.body.length > 16 && r.body.subarray(0, magic.length).toString('latin1') === magic, 'HTTP ' + r.status + ', ' + r.body.length + ' bytes');
+    const r = await request('GET', '/assets/studio/' + name);
+    check('/assets/studio/' + name, r.status === 200 && r.body.length > 16 && r.body.subarray(0, magic.length).toString('latin1') === magic, 'HTTP ' + r.status + ', ' + r.body.length + ' bytes');
   }
 
   // 4. Private files must not be readable over the web.
