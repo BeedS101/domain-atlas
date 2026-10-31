@@ -139,93 +139,89 @@ function atlas_studio_actor($remoteAddr) {
 }
 
 const ATLAS_STUDIO_RATE_GROUP_FACTOR = 8;
-const ATLAS_STUDIO_RATE_MAX_FILES = 20000;
+// Rate counters live in a fixed table: ATLAS_STUDIO_RATE_SLOTS files, each holding at most
+// ATLAS_STUDIO_RATE_SLOT_ENTRIES counters, so storage is bounded whatever addresses arrive. A test may define the
+// slot count first to exercise collisions.
+if (!defined('ATLAS_STUDIO_RATE_SLOTS')) define('ATLAS_STUDIO_RATE_SLOTS', 4096);
+const ATLAS_STUDIO_RATE_SLOT_ENTRIES = 8;
+const ATLAS_STUDIO_RATE_SLOT_MAX_BYTES = 16777216;
 
 // Counts a hit for the actor and, when it has one, its group (limited at ATLAS_STUDIO_RATE_GROUP_FACTOR
-// times the actor limit). False when either is over its limit; the actor is only charged if the group allows.
+// times the actor limit). False when either is over its limit. The actor is charged first, so a /64 that keeps
+// hammering after it is limited never uses up the /48 allowance of its neighbours; the group is charged only for
+// requests the actor was allowed to make. The two counters live in different slot files and are never locked
+// together, so there is no lock ordering to get wrong.
 function atlas_studio_rate_check($root, $name, $actor, $limit, $windowSeconds, $now = null) {
   $now = $now ?? time();
+  if (!atlas_studio_rate_hit($root, $name.':'.$actor['key'], $limit, $windowSeconds, $now)) return false;
   if ($actor['group'] !== null && !atlas_studio_rate_hit($root, $name.':'.$actor['group'], $limit * ATLAS_STUDIO_RATE_GROUP_FACTOR, $windowSeconds, $now)) return false;
-  return atlas_studio_rate_hit($root, $name.':'.$actor['key'], $limit, $windowSeconds, $now);
+  return true;
 }
 
-// Sliding-window counter per key. The file's mtime is set to the moment its last hit stops mattering, so
-// atlas_studio_prune_rate() can drop dead counters by mtime alone. A key that has no file yet is refused once
-// the directory is full (fail closed), so flooding with fresh keys cannot grow the directory without bound.
+// A per-installation secret that decides which slot a key lands in, so a visitor cannot choose addresses that
+// collide with someone else's counter. Created once (link() makes the creation atomic between processes).
+function atlas_studio_rate_salt($dir) {
+  static $cache = [];
+  if (isset($cache[$dir])) return $cache[$dir];
+  $file = $dir . '/.salt';
+  for ($try = 0; $try < 3; $try++) {
+    $salt = @file_get_contents($file, false, null, 0, 33);
+    if (is_string($salt) && strlen($salt) === 32) return $cache[$dir] = $salt;
+    $tmp = $dir . '/.salt.' . bin2hex(random_bytes(6)) . '.tmp';
+    if (@file_put_contents($tmp, random_bytes(32)) === 32) {
+      @chmod($tmp, 0600);
+      if (!@link($tmp, $file) && !file_exists($file)) @rename($tmp, $file);
+      @unlink($tmp);
+    }
+  }
+  throw new RuntimeException('studio-rate-unavailable');
+}
+
+// Sliding-window counter per key, kept in the key's slot file as { id: { exp, hits } }. `exp` is when the last
+// hit stops mattering, so expired counters are dropped whenever their slot is rewritten and nothing needs a
+// separate cleanup pass or a directory listing. Each slot is serialized by its own flock. When a slot already
+// holds ATLAS_STUDIO_RATE_SLOT_ENTRIES live counters, a new key takes the place of the least-used one (fewest
+// hits, then soonest to expire): a flood of fresh keys can only push out other low-count keys, a counter that has
+// reached its limit is the last to go, and a new visitor is never refused for lack of room.
 function atlas_studio_rate_hit($root, $key, $limit, $windowSeconds, $now = null) {
   $now = $now ?? time();
   $dir = atlas_studio_storage_bucket($root, 'rate');
-  atlas_studio_prune_rate($dir, $now);
-  $file = $dir . '/rate-' . substr(hash('sha256', $key), 0, 40) . '.json';
-  $isNew = !file_exists($file);
-  if ($isNew && atlas_studio_rate_file_count($dir) >= ATLAS_STUDIO_RATE_MAX_FILES) return false;
+  $h = hash_hmac('sha256', $key, atlas_studio_rate_salt($dir));
+  $slot = hexdec(substr($h, 0, 8)) % ATLAS_STUDIO_RATE_SLOTS;
+  $id = substr($h, 8, 24);
+  $file = sprintf('%s/rate-slot-%04x.json', $dir, $slot);
   $handle = @fopen($file, 'c+');
   if (!$handle) throw new RuntimeException('studio-rate-unavailable');
   try {
     if (!flock($handle, LOCK_EX)) throw new RuntimeException('studio-rate-unavailable');
     @chmod($file, 0600);
-    $raw = stream_get_contents($handle, 65537);
-    $hits = [];
-    $doc = $raw === '' || $raw === false ? null : json_decode($raw, true);
-    if (is_array($doc) && isset($doc['hits']) && is_array($doc['hits'])) {
-      foreach ($doc['hits'] as $t) if (is_int($t) && $t > $now - $windowSeconds) $hits[] = $t;
+    $raw = stream_get_contents($handle, ATLAS_STUDIO_RATE_SLOT_MAX_BYTES + 1);
+    $doc = ($raw === '' || $raw === false || strlen($raw) > ATLAS_STUDIO_RATE_SLOT_MAX_BYTES) ? null : json_decode($raw, true);
+    $entries = [];
+    if (is_array($doc) && isset($doc['e']) && is_array($doc['e'])) {
+      foreach ($doc['e'] as $eid => $e) {
+        if (is_string($eid) && is_array($e) && isset($e['exp'], $e['hits']) && is_int($e['exp']) && $e['exp'] > $now && is_array($e['hits'])) $entries[$eid] = $e;
+      }
     }
+    $hits = [];
+    if (isset($entries[$id])) foreach ($entries[$id]['hits'] as $t) if (is_int($t) && $t > $now - $windowSeconds) $hits[] = $t;
     if (count($hits) >= $limit) return false;
     $hits[] = $now;
-    atlas_studio_rewrite($handle, ['hits' => $hits], 65536, 'studio-rate-write-failed');
-    @touch($file, $now + $windowSeconds);
-    if ($isNew) atlas_studio_rate_file_count($dir, 1);
+    unset($entries[$id]);
+    while (count($entries) >= ATLAS_STUDIO_RATE_SLOT_ENTRIES) {
+      $victim = null; $vn = null; $ve = null;
+      foreach ($entries as $eid => $e) {
+        $n = count($e['hits']);
+        if ($victim === null || $n < $vn || ($n === $vn && $e['exp'] < $ve)) { $victim = $eid; $vn = $n; $ve = $e['exp']; }
+      }
+      unset($entries[$victim]);
+    }
+    $entries[$id] = ['exp' => $now + $windowSeconds, 'hits' => $hits];
+    atlas_studio_rewrite($handle, ['e' => $entries], ATLAS_STUDIO_RATE_SLOT_MAX_BYTES, 'studio-rate-write-failed');
     return true;
   } finally {
     flock($handle, LOCK_UN);
     fclose($handle);
-  }
-}
-
-// Remaining-file count kept in the prune marker so a hit does not have to list the directory.
-function atlas_studio_rate_file_count($dir, $add = 0) {
-  $marker = $dir . '/.prune';
-  $n = 0;
-  $doc = json_decode((string) @file_get_contents($marker, false, null, 0, 256), true);
-  if (is_array($doc) && isset($doc['count']) && is_int($doc['count'])) $n = $doc['count'];
-  if ($add && is_array($doc)) {
-    $mtime = (int) @filemtime($marker); // the marker's mtime is the last prune time; adding a count must not reset it
-    $doc['count'] = $n + $add;
-    @file_put_contents($marker, json_encode($doc), LOCK_EX);
-    @chmod($marker, 0600);
-    if ($mtime > 0) @touch($marker, $mtime);
-    return $n + $add;
-  }
-  return $n;
-}
-
-// Bounded cleanup of dead rate counters, at most once a minute (marker mtime) and at most $limit files a pass.
-// A counter is dead once its mtime (set to its last hit's expiry) is in the past.
-function atlas_studio_prune_rate($dir, $now, $limit = 500) {
-  $marker = $dir . '/.prune';
-  $m = @fopen($marker, 'c+');
-  if (!$m) return 0;
-  try {
-    if (!flock($m, LOCK_EX | LOCK_NB)) return 0;
-    @chmod($marker, 0600);
-    $fresh = (int) (fstat($m)['size'] ?? 0) === 0; // a marker nobody has written yet: never pruned
-    $last = (int) @filemtime($marker);
-    if (!$fresh && $now - $last < 60 && $now >= $last) return 0;
-    $removed = 0; $remaining = 0;
-    foreach ((array) @scandir($dir) as $name) {
-      if (!preg_match('/^rate-[a-f0-9]{40}\.json$/D', $name)) continue;
-      $file = $dir . '/' . $name;
-      if (is_link($file) || !is_file($file)) continue;
-      if ($removed < $limit && (int) @filemtime($file) < $now && @unlink($file)) { $removed++; continue; }
-      $remaining++;
-    }
-    ftruncate($m, 0); rewind($m);
-    fwrite($m, json_encode(['count' => $remaining, 'at' => $now]));
-    @touch($marker, $now);
-    return $removed;
-  } finally {
-    flock($m, LOCK_UN);
-    fclose($m);
   }
 }
 

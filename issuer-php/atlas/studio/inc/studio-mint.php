@@ -35,6 +35,7 @@ function atlas_studio_config_defaults() {
     'mintsPerIpPerHour'=>[10,1,10000],
     'maxMintsPerRecipientPerDay'=>[3,1,1000],
     'maxMintsPerActorPerDay'=>[10,1,10000],
+    'maxMintsPerNetworkPerDay'=>[40,1,10000],
     'maxMintsPerDay'=>[200,1,100000],
     'maxOutstandingChallenges'=>[500,1,5000],
   ];
@@ -78,6 +79,11 @@ function atlas_studio_config($root) {
     if (!is_int($v) || $v < $spec[1] || $v > $spec[2]) return $off('bad-limit-'.$k);
     $cfg[$k] = $v;
   }
+  // The share of maxMintsPerDay kept for actors with no attempt yet today (default one fifth). Must leave room
+  // for established actors, so it is below the daily limit.
+  $reserve = array_key_exists('newActorReserve', $c) ? $c['newActorReserve'] : intdiv($cfg['maxMintsPerDay'], 5);
+  if (!is_int($reserve) || $reserve < 0 || $reserve >= $cfg['maxMintsPerDay']) return $off('bad-limit-newActorReserve');
+  $cfg['newActorReserve'] = $reserve;
   return $cfg;
 }
 
@@ -172,9 +178,10 @@ function atlas_studio_mint($root, $cfg, $body, $actor, $now = null) {
   if (!atlas_studio_model_available(atlas_docroot(), $plan['model'])) return atlas_studio_err(503, 'model-unavailable');
   if (!atlas_studio_rate_check($root, 'mint', $actor, $cfg['mintsPerIpPerHour'], 3600, $now)) return atlas_studio_err(429, 'rate-limited');
   $claim = atlas_studio_claim_attempt($root, $nonce, $digest, $recipient,
-    ['perRecipient'=>$cfg['maxMintsPerRecipientPerDay'],'perActor'=>$cfg['maxMintsPerActorPerDay'],'global'=>$cfg['maxMintsPerDay'],'windowSeconds'=>86400], $now, $actor['key']);
+    ['perRecipient'=>$cfg['maxMintsPerRecipientPerDay'],'perActor'=>$cfg['maxMintsPerActorPerDay'],'perGroup'=>$cfg['maxMintsPerNetworkPerDay'],
+     'global'=>$cfg['maxMintsPerDay'],'reserve'=>$cfg['newActorReserve'],'windowSeconds'=>86400], $now, $actor['key'], $actor['group']);
   if (!$claim['ok']) {
-    $quota = in_array($claim['error'], ['quota-recipient','quota-actor','quota-global'], true);
+    $quota = in_array($claim['error'], ['quota-recipient','quota-actor','quota-group','quota-reserved','quota-global'], true);
     return atlas_studio_err($quota ? 429 : 409, $claim['error']);
   }
   // An attempt recorded as minted with no stored result cannot be re-issued: report it, never re-sign.

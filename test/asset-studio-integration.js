@@ -646,23 +646,49 @@ async function credentialVerifies(l, cred) {
     assert.ok(!JSON.stringify(stored).includes('127.0.0.1'), 'and never the address');
   });
 
-  await test('M3: dead rate counters are pruned, live ones kept, and the directory stays bounded', async () => {
+  await test('R1: rate counters live in a fixed table of private slot files, whatever the traffic', async () => {
     const l = await lab({ mint: true, config: HIGH });
     const dir = path.join(l.studio, 'rate');
-    const past = new Date(Date.now() - 7200 * 1000);
-    for (let i = 0; i < 60; i++) {
-      const f = path.join(dir, 'rate-' + crypto.createHash('sha1').update('stale' + i).digest('hex') + '.json');
-      fs.writeFileSync(f, JSON.stringify({ hits: [1] }));
-      fs.utimesSync(f, past, past);
+    // Leave a pre-existing counter-shaped file alone; the table must not depend on directory contents.
+    for (let i = 0; i < 25; i++) assert.equal((await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 })).status, 200);
+    const names = fs.readdirSync(dir);
+    assert.ok(names.every((n) => /^rate-slot-[0-9a-f]{4}\.json$/.test(n) || n === '.salt'), 'only slot files and the salt: ' + names.join(','));
+    assert.ok(names.length <= 4097, 'bounded: ' + names.length);
+    assert.equal(fs.statSync(path.join(dir, '.salt')).size, 32, 'the slot salt is 32 random bytes');
+    // Many requests from one address do not create files per request.
+    const before = fs.readdirSync(dir).length;
+    for (let i = 0; i < 10; i++) await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 });
+    assert.ok(fs.readdirSync(dir).length <= before + 1, 'no growth per request');
+    assert.equal(replays(l).length, 0);
+  });
+
+  await test('R2: configuration of the network quota and the new-actor reserve fails closed', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const cfgFile = path.join(l.studio, 'studio-config.json');
+    const base = Object.assign({ mintEnabled: true, domain: l.host, origins: [l.origin] }, HIGH);
+    const on = async (extra) => { fs.writeFileSync(cfgFile, JSON.stringify(Object.assign({}, base, extra))); return (await l.status()).json.mintEnabled; };
+    assert.equal(await on({}), true, 'defaults are valid');
+    assert.equal(await on({ maxMintsPerNetworkPerDay: 5, newActorReserve: 3, maxMintsPerDay: 10 }), true);
+    assert.equal(await on({ newActorReserve: 0 }), true, 'no reserve is allowed');
+    for (const bad of [{ maxMintsPerNetworkPerDay: 0 }, { maxMintsPerNetworkPerDay: '5' }, { maxMintsPerNetworkPerDay: 10001 },
+      { newActorReserve: -1 }, { newActorReserve: '2' }, { newActorReserve: 1.5 }, { maxMintsPerDay: 10, newActorReserve: 10 }, { newActorReserve: 100000 }]) {
+      assert.equal(await on(bad), false, JSON.stringify(bad));
     }
-    const live = path.join(dir, 'rate-' + crypto.createHash('sha1').update('live').digest('hex') + '.json');
-    fs.writeFileSync(live, JSON.stringify({ hits: [Math.floor(Date.now() / 1000)] }));
-    fs.utimesSync(live, new Date(Date.now() + 3000 * 1000), new Date(Date.now() + 3000 * 1000));
-    assert.equal((await l.api('challenge', { design: DESIGN, recipient: makeIdentity('raw-ecdsa').publicKeyB64 })).status, 200);
-    const names = fs.readdirSync(dir).filter((n) => /^rate-/.test(n));
-    assert.ok(!names.some((n) => fs.statSync(path.join(dir, n)).mtimeMs < Date.now() - 1000), 'no dead counters remain: ' + names.length);
-    assert.ok(fs.existsSync(live), 'a live counter is kept');
-    assert.ok(names.length <= 4, 'only the request\'s own counters remain: ' + names.length);
+  });
+
+  await test('R2: an established address cannot take the new-actor reserve (end to end)', async () => {
+    // Loopback is one IPv4 actor. Daily limit 4 with 2 reserved: the first mint comes from a first-time actor,
+    // the second still fits below the unreserved line, the third would dip into the reserve and is refused.
+    const l = await lab({ mint: true, config: Object.assign({}, HIGH, { maxMintsPerDay: 4, newActorReserve: 2 }) });
+    const a = await l.mintAs(makeIdentity('raw-ecdsa'), DESIGN), b = await l.mintAs(makeIdentity('raw-ecdsa'), DESIGN);
+    assert.equal(a.mint.status + b.mint.status, 400);
+    const c = await l.mintAs(makeIdentity('raw-ecdsa'), DESIGN);
+    assert.equal(c.mint.status, 429);
+    assert.equal(c.mint.json.error, 'quota-reserved');
+    assert.equal(replays(l).length, 2, 'nothing issued for the refused mint');
+    assert.equal((await l.api('mint', a.body)).text, a.mint.text, 'a retry of a finished mint is unaffected');
+    const stored = readJson(attemptPath(l, a.challenge.json.nonce));
+    assert.ok(!JSON.stringify(stored).includes('127.0.0.1'), 'the ledger never stores the address');
   });
 
   await test('outstanding challenges are capped', async () => {

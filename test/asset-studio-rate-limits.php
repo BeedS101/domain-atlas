@@ -39,24 +39,33 @@ studio_check(atlas_studio_claim_attempt($root, $n(4), $d, studio_raw_key(), $lim
 studio_check(atlas_studio_claim_attempt($root, $n(1), $d, json_decode(file_get_contents(atlas_studio_storage_bucket($root, 'mint-receipts') . '/attempt-' . $n(1) . '.json'), true)['recipient'], $limits, $now, 'ip4:1.1.1.1')['existing'], 'a retry is not charged again');
 foreach (glob(atlas_studio_storage_bucket($root, 'mint-receipts') . '/attempt-*.json') as $f) studio_check(strpos(file_get_contents($f), '1.1.1.1') === false, 'ledger never stores the address');
 
-// Pruning: dead counters go, live ones stay, at most once a minute, bounded per pass
+// Counter table: a deliberately tiny table (one slot) in a child process, so every key collides.
+function slot_php($body) {
+  $code = 'define("ATLAS_STUDIO_RATE_SLOTS", 1); require ' . var_export(__DIR__ . '/../issuer-php/atlas/studio/inc/storage.php', true) . '; ' . $body;
+  return trim((string) shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($code)));
+}
 $root2 = studio_tmp_root();
+$r = var_export($root2, true);
 $dir = atlas_studio_storage_bucket($root2, 'rate');
-for ($i = 0; $i < 30; $i++) { $f = $dir . '/rate-' . substr(hash('sha256', "dead$i"), 0, 40) . '.json'; file_put_contents($f, '{"hits":[1]}'); touch($f, $now - 100); }
-$liveFile = $dir . '/rate-' . substr(hash('sha256', 'alive'), 0, 40) . '.json'; file_put_contents($liveFile, '{"hits":[1]}'); touch($liveFile, $now + 500);
-studio_check(atlas_studio_prune_rate($dir, $now, 10) === 10, 'a pass removes at most its limit');
-studio_check(atlas_studio_prune_rate($dir, $now, 10) === 0, 'and not again within a minute');
-studio_check(atlas_studio_prune_rate($dir, $now + 61, 500) === 20, 'the next pass finishes the job');
-studio_check(file_exists($liveFile) && count(glob($dir . '/rate-*.json')) === 1, 'the live counter is kept');
-$doc = json_decode(file_get_contents($dir . '/.prune'), true);
-studio_check($doc['count'] === 1, 'remaining count recorded');
+// Expired counters are dropped when their slot is next written, with no separate cleanup pass.
+slot_php("for (\$i = 0; \$i < 5; \$i++) atlas_studio_rate_hit($r, \"old\$i\", 5, 10, $now);");
+$doc = json_decode(file_get_contents($dir . '/rate-slot-0000.json'), true);
+studio_check(count($doc['e']) === 5, 'five live counters share the slot');
+slot_php("atlas_studio_rate_hit($r, 'fresh', 5, 10, " . ($now + 11) . ");");
+$doc = json_decode(file_get_contents($dir . '/rate-slot-0000.json'), true);
+studio_check(count($doc['e']) === 1, 'the expired ones are gone after the next write (' . count($doc['e']) . ' left)');
+studio_check(slot_php("echo atlas_studio_rate_hit($r, 'old0', 1, 10, " . ($now + 11) . ") ? 'yes' : 'no';") === 'yes', 'an expired counter starts over');
 
-// A full directory refuses new keys but still serves existing ones
+// A slot holds at most ATLAS_STUDIO_RATE_SLOT_ENTRIES counters. A new key takes the place of the least-used one, is
+// always served, and a counter that has reached its limit is the last to be pushed out.
 $root3 = studio_tmp_root();
+$r3 = var_export($root3, true);
 $dir3 = atlas_studio_storage_bucket($root3, 'rate');
-studio_check(atlas_studio_rate_hit($root3, 'known', 5, 3600, $now), 'first hit creates a counter');
-file_put_contents($dir3 . '/.prune', json_encode(['count' => ATLAS_STUDIO_RATE_MAX_FILES, 'at' => $now]));
-touch($dir3 . '/.prune', $now);
-studio_check(!atlas_studio_rate_hit($root3, 'new-key', 5, 3600, $now), 'a new key is refused when the directory is full');
-studio_check(atlas_studio_rate_hit($root3, 'known', 5, 3600, $now), 'an existing key still works');
+$out = slot_php("\$a = 0; for (\$i = 0; \$i < 3; \$i++) \$a += atlas_studio_rate_hit($r3, 'blocked', 3, 3600, $now) ? 1 : 0;"
+  . "\$served = 0; for (\$i = 0; \$i < 200; \$i++) \$served += atlas_studio_rate_hit($r3, \"new\$i\", 3, 3600, $now) ? 1 : 0;"
+  . "echo \$a, ',', \$served, ',', atlas_studio_rate_hit($r3, 'blocked', 3, 3600, $now) ? 'open' : 'limited';");
+studio_check($out === '3,200,limited', "new keys are always served and the limited key stays limited (got $out)");
+$doc = json_decode(file_get_contents($dir3 . '/rate-slot-0000.json'), true);
+studio_check(count($doc['e']) <= ATLAS_STUDIO_RATE_SLOT_ENTRIES, 'the slot never holds more than its entry cap (' . count($doc['e']) . ')');
+studio_check(count(glob($dir3 . '/rate-*.json')) === 1, 'storage is the one slot file');
 echo "Asset Studio rate limit tests passed\n";

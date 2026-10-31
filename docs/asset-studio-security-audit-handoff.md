@@ -11,7 +11,7 @@ Needs an independent recheck. Each fix has a regression test; where the old beha
 - **M1** The outstanding-challenge cap counts only live challenges (expired and completed ones no longer count), and counting plus creation run under one lock (`inc/challenges.php`). Test: `test/asset-studio-challenge-race.php` (multi-process; overshoots on the old code), plus integration tests.
 - **M4** `extension/content.js` grants wallet bridge permissions only from a manifest on the page's own origin; `SPEC.md` §3.8 says so. Legitimate cross-domain world discovery is unchanged (it never needed bridge permissions). Test: `test/manual-bridge-foreign-manifest.js` (real extension).
 - **M2** Rate limits key on an IPv4 address or an IPv6 /64, with an additional /48 group limit; `maxMintsPerActorPerDay` limits one actor's share of the daily quota (`inc/storage.php`, `inc/mint-attempts.php`). Test: `test/asset-studio-rate-limits.php`.
-- **M3** Rate-limit counter files expire with their window, are pruned in bounded batches, and are capped (fail closed). Same test.
+- **M3** Rate-limit counters were first pruned in bounded batches and capped; see R1 below, which replaced that design.
 - **T2** Minting stays off when replay retention is shorter than 48 hours.
 - **T1** Directory `fsync` after atomic renames; challenge and attempt rewrites are atomic replacements. See "Durability" in `asset-studio-v0.1.md` for what this does not prove.
 - **Replay namespace:** Studio request id is `studio:mint:<nonce>`, which general routes cannot send (`test/asset-studio-hardening.php`).
@@ -23,6 +23,11 @@ Needs an independent recheck. Each fix has a regression test; where the old beha
 - **Private helper exposure:** `inc/` helpers and `lib/*.php` refuse direct web requests; `inc/.htaccess` denies access.
 - **PHP/Node consistency:** PHP and Node refuse the class on the same paths (`test/manual-studio-restricted-parity.js`).
 - Owner-bound tests now use real owner-signed intents on `asset/transfer`, `transfer-to-email`, `transfer-to-file`, `world/drop` and `trade/submit` (refused by the bound policy, nothing revoked or issued), `redeem` (allowed for the owner only), a forged intent, and a replayed bridge signature.
+
+Follow-up after the remediation audit (R1, R2):
+
+- **R1** The 20000-file cap could be filled by rotating IPv6 networks, after which every new visitor got 429. Counters now live in a fixed table of 4096 slot files with a keyed (secret salt) hash, at most 8 counters per slot, and eviction of the least-used counter instead of refusal, so storage is bounded and a new visitor is never refused for lack of room. The /64 counter is charged before the /48 counter so one abusive /64 cannot burn its neighbours' allowance. Tests: `test/asset-studio-exhaustion.php` (12000 rotating /48s, parallel floods), `test/asset-studio-rate-limits.php` (expiry, eviction, collisions in a one-slot table), integration "R1".
+- **R2** A /48 rotating /64s could spend the whole daily quota. Added `maxMintsPerNetworkPerDay` (IPv6 /48) and `newActorReserve` (the last part of the daily limit is only for IPv4 addresses and /48s with no attempt yet today; refusals are `quota-group` and `quota-reserved`). Tests: `test/asset-studio-exhaustion.php`, integration "R2".
 
 Remaining risks: not proven against power loss; WebAuthn is not RP-pinned unless configured; address-based limits behind a shared proxy; no reconciliation tool for abandoned attempts.
 

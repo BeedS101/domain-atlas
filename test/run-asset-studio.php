@@ -12,6 +12,7 @@ $unit = [
   'asset-studio-challenge-race.php',
   'asset-studio-rate-limits.php',
   'asset-studio-hardening.php',
+  'asset-studio-exhaustion.php',
 ];
 $failed = [];
 $passed = 0;
