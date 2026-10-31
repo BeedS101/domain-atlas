@@ -1,0 +1,22 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Domain Atlas — Asset Studio</title><link rel="stylesheet" href="studio.css"><link rel="spatial" href="/.well-known/spatial.json#studio"><!-- atlas-site:head:start -->
+<style>
+.atlas-site-footer{box-sizing:border-box;clear:both;margin:3rem 0 0;padding:1rem 0 1.5rem;border-top:1px solid rgba(128,128,128,.4);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-align:center;color:inherit;opacity:.8}
+.atlas-site-footer p{margin:.2rem 0;font:inherit;color:inherit}
+.atlas-site-footer a{color:inherit;text-decoration:underline}
+.atlas-risk-notice{box-sizing:border-box;margin:0 0 1rem;padding:.6rem .9rem;border:1px solid rgba(214,158,46,.7);border-left-width:4px;border-radius:6px;background:rgba(214,158,46,.14);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:inherit;overflow-wrap:anywhere}
+.atlas-risk-notice a{color:inherit;font-weight:600;text-decoration:underline}
+</style>
+<!-- atlas-site:head:end -->
+</head><body>
+<!-- atlas-site:notice:start -->
+<aside class="atlas-risk-notice" role="note" aria-label="Experimental platform notice">
+  <strong>Experimental platform — use at your own risk.</strong> Assets, tokens, credits and credentials here are demonstrations with no monetary value and no promise of redemption. <a href="/terms/">Terms &amp; Conditions</a>
+</aside>
+<!-- atlas-site:notice:end -->
+<main><header><h1>Asset Studio <small>Preview v0.1</small></h1><p>Design a trophy, badge or key. Minting needs an issuer that has enabled it and a Domain Atlas wallet.</p></header><section class="layout"><form id="editor"><label for="template">Template</label><select id="template"><option value="trophy">Achievement Trophy</option><option value="badge">Explorer Badge</option><option value="key">Portal Key</option></select><label for="assetName">Asset name</label><input id="assetName" maxlength="64" value="Achievement Trophy"><label for="description">Description</label><textarea id="description" maxlength="240" rows="4">Awarded in recognition of outstanding achievement.</textarea><label for="finish">Finish</label><select id="finish"><option value="gold">Gold</option><option value="silver">Silver</option><option value="bronze">Bronze</option></select><div class="buttons"><button type="button" id="copy">Copy design JSON</button><button type="button" id="download">Download design</button><button type="button" id="validate">Validate with PHP</button><button type="button" id="mint" disabled>Mint to Wallet</button></div></form><section class="preview"><canvas id="preview" width="500" height="420" aria-label="Asset preview"></canvas><h2 id="previewName"></h2><p id="previewDescription"></p><p id="walletStatus">Checking wallet bridge…</p><pre id="json"></pre><p id="message" role="status"></p></section></section></main><script src="studio.js"></script><!-- atlas-site:footer:start -->
+<footer class="atlas-site-footer">
+  <p>© 2026 Bruno da Silva. All rights reserved.</p>
+  <p><a href="/terms/">Terms &amp; Conditions</a> | Experimental Platform — Use at Your Own Risk</p>
+</footer>
+<!-- atlas-site:footer:end -->
+</body></html>

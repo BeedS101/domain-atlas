@@ -1,0 +1,44 @@
+{
+  "termsPages": [
+    "demo-domain-a/terms/index.html",
+    "demo-domain-b/terms/index.html",
+    "issuer-php/terms/index.html"
+  ],
+  "notice": [
+    "demo-domain-a/index.html",
+    "demo-domain-a/attestation-demo.html",
+    "demo-domain-a/bank-demo.html",
+    "demo-domain-a/business-demo.html",
+    "demo-domain-a/cafeteria-demo.html",
+    "demo-domain-a/clawback-demo.html",
+    "demo-domain-a/federation-demo.html",
+    "demo-domain-a/governance-demo.html",
+    "demo-domain-a/login-demo.html",
+    "demo-domain-a/multi-issuer.html",
+    "demo-domain-a/oracle-demo.html",
+    "demo-domain-a/recall-demo.html",
+    "demo-domain-a/reserve-bank-demo.html",
+    "demo-domain-a/txlab.html",
+    "demo-domain-a/warranty-demo.html",
+    "demo-domain-b/index.html",
+    "demo-domain-b/email-ticket-demo.html",
+    "demo-domain-b/multi-issuer.html",
+    "demo-domain-b/txlab.html",
+    "demo-domain-b/wallet-bridge-demo.html",
+    "issuer-php/atlas/studio/index.html"
+  ],
+  "footerOnly": [
+    "demo-domain-a/blog-post.html",
+    "demo-domain-a/compass-listing.html",
+    "issuer-php/atlas-admin/index.html",
+    "issuer-server/admin-panel/index.html"
+  ],
+  "excluded": {
+    "extension/": "browser-extension UI, not a website",
+    "tools/scene-editor.html": "local developer tool",
+    "experiments/": "throwaway spikes",
+    "directory-server/index.html": "separate Node reference service with its own host and static server; not one of the demo domains",
+    "docs/": "repository documentation, not served",
+    "site-shared/": "fragments and templates the stamper reads, not served pages"
+  }
+}

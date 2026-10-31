@@ -63,8 +63,22 @@
   .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
   a { color: var(--accent); }
 </style>
+<!-- atlas-site:head:start -->
+<style>
+.atlas-site-footer{box-sizing:border-box;clear:both;margin:3rem 0 0;padding:1rem 0 1.5rem;border-top:1px solid rgba(128,128,128,.4);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-align:center;color:inherit;opacity:.8}
+.atlas-site-footer p{margin:.2rem 0;font:inherit;color:inherit}
+.atlas-site-footer a{color:inherit;text-decoration:underline}
+.atlas-risk-notice{box-sizing:border-box;margin:0 0 1rem;padding:.6rem .9rem;border:1px solid rgba(214,158,46,.7);border-left-width:4px;border-radius:6px;background:rgba(214,158,46,.14);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:inherit;overflow-wrap:anywhere}
+.atlas-risk-notice a{color:inherit;font-weight:600;text-decoration:underline}
+</style>
+<!-- atlas-site:head:end -->
 </head>
 <body>
+<!-- atlas-site:notice:start -->
+<aside class="atlas-risk-notice" role="note" aria-label="Experimental platform notice">
+  <strong>Experimental platform — use at your own risk.</strong> Assets, tokens, credits and credentials here are demonstrations with no monetary value and no promise of redemption. <a href="/terms/">Terms &amp; Conditions</a>
+</aside>
+<!-- atlas-site:notice:end -->
   <h1>Buy something with a balance</h1>
   <p class="tag">A worked example of SPEC.md §5.8 (purchasing) and §5.9 (fulfillment).</p>
   <p class="lede">
@@ -353,5 +367,11 @@
   document.getElementById('resetBtn').addEventListener('click', () => location.reload());
 })();
 </script>
+<!-- atlas-site:footer:start -->
+<footer class="atlas-site-footer">
+  <p>© 2026 Bruno da Silva. All rights reserved.</p>
+  <p><a href="/terms/">Terms &amp; Conditions</a> | Experimental Platform — Use at Your Own Risk</p>
+</footer>
+<!-- atlas-site:footer:end -->
 </body>
 </html>

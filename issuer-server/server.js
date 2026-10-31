@@ -1545,6 +1545,11 @@ const DEMO_ALPHA_DOLLAR_CLASS = 'atlas.currency.alpha';
 const DEMO_BETA_DOLLAR_CLASS = 'atlas.currency.beta';
 const DEMO_RESERVE_CLASS = 'atlas.currency.reserve';
 
+// Classes only their own authorized issuance flow may mint. Asset Studio collectibles are issued by the
+// PHP issuer's Studio route after a wallet-signed mint request; every general path (issue, mint, gifts,
+// purchases, approvals) refuses them. mintAssetByClass() is the single choke point for catalog minting.
+const RESTRICTED_ISSUANCE_CLASSES = new Set(['atlas.demo.studio.collectible']);
+
 // Demo-only classes the demo clawback routes act on, and only when the
 // credential carries a demo authority. Real currencies are never on this list.
 const DEMO_CLAWBACK_FUNDS_CLASS = 'atlas.demo.clawback.funds';
@@ -4754,7 +4759,16 @@ function sendJson(res, status, obj) {
 // client can rely on its Content-Length without downloading anything.
 function serveStatic(req, res) {
   let urlPath = decodeURIComponent(req.url.split('?')[0]);
-  if (urlPath === '/') urlPath = '/index.html';
+  // A directory path serves its index.html, as Apache and php -S do (so /terms/ works here too); a directory
+  // named without its trailing slash is redirected to the slash form first, again as Apache does.
+  if (urlPath.endsWith('/')) urlPath += 'index.html';
+  else if (!path.extname(urlPath)) {
+    const dirPath = path.join(DEMO_DOMAIN_A, urlPath);
+    if (dirPath.startsWith(DEMO_DOMAIN_A) && fs.existsSync(path.join(dirPath, 'index.html'))) {
+      res.writeHead(301, { Location: urlPath + '/' + (req.url.includes('?') ? '?' + req.url.split('?').slice(1).join('?') : '') });
+      return res.end();
+    }
+  }
   // SPEC.md §3.7: when domain identity pinning is enabled, this exact path
   // is served from the in-memory signed copy instead of the tracked file on
   // disk — bypassing the mtime/If-Modified-Since machinery below entirely,
@@ -5030,6 +5044,8 @@ async function main() {
     if (!credential || credential.credential !== 'domain-atlas-asset/1.0') return null;
     if (!credential.asset || credential.asset.fungible !== false) return null;
     if (!credential.issuer || credential.issuer.domain !== DOMAIN) return null;
+    // Restricted classes are never rewritten by a class patch, even one stored before the class was restricted.
+    if (RESTRICTED_ISSUANCE_CLASSES.has(credential.asset.class)) return null;
     const patch = classPatchOf(credential.asset.class);
     if (!patch || !isCredentialStaleAgainstClassPatch(credential, patch)) return null;
     if (await lockSpend(credential.id)) return null;
@@ -5067,6 +5083,11 @@ async function main() {
   // every other call site leaves it undefined, which merges nothing and
   // changes no existing behavior at all.
   async function mintAssetByClass(ownerPublicKey, cls, quantity, supersedes, initialProperties, deferHoldings) {
+    if (RESTRICTED_ISSUANCE_CLASSES.has(cls)) {
+      const err = new Error('this class can only be issued through its own authorized flow: ' + cls);
+      err.statusCode = 403;
+      throw err;
+    }
     const catalogEntry = ASSET_CATALOG[cls];
     if (!catalogEntry) throw new Error('unknown asset class: ' + cls);
 
@@ -6078,6 +6099,14 @@ async function main() {
         const issueBody = JSON.parse((await readBody(req)) || '{}');
         const { ownerPublicKey, assetClass, quantity, existingBalances } = issueBody;
         if (!ownerPublicKey) return sendJson(res, 400, { error: 'ownerPublicKey is required' });
+        // Restricted classes (Studio collectibles) have a dedicated owner-authorized issuance path.
+        // Keep this ahead of the general catalogue lookup and any issuer mutation.
+        if (RESTRICTED_ISSUANCE_CLASSES.has(assetClass)) {
+          return sendJson(res, 403, {
+            error: 'Studio collectibles require authorized Studio issuance',
+            code: 'studio-authorization-required',
+          });
+        }
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
           // This list used to enumerate every known class by
@@ -6188,6 +6217,9 @@ async function main() {
         if (auth.error) return sendAdminAuthFailure(res, auth);
         if (!mintPayload || !mintPayload.ownerPublicKey) return sendJson(res, 400, { error: 'payload.ownerPublicKey is required' });
         const { ownerPublicKey, assetClass, quantity, properties } = mintPayload;
+        if (RESTRICTED_ISSUANCE_CLASSES.has(assetClass)) {
+          return sendJson(res, 403, { error: 'Studio collectibles require authorized Studio issuance', code: 'studio-authorization-required' });
+        }
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) {
           return sendJson(res, 400, { error: 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ASSET_CATALOG in issuer-server/server.js (plus issuer-server/elements-catalog.js) for the full list.' });
@@ -7473,6 +7505,11 @@ async function main() {
         if (!credential.issuer || credential.issuer.domain !== DOMAIN) {
           return sendJson(res, 400, { error: 'credential was not issued by this domain' });
         }
+        if (credential.asset && RESTRICTED_ISSUANCE_CLASSES.has(credential.asset.class)) {
+          // Restricted classes (Studio collectibles) keep the asset their own flow signed: no tradeScope or
+          // property rewrite. Clawback, which re-signs the asset unchanged, is the recovery path.
+          return sendJson(res, 403, { error: 'this class can only be issued through its own authorized flow and cannot be reissued', code: 'studio-authorization-required' });
+        }
         if (!credential.asset || credential.asset.fungible !== false) {
           return sendJson(res, 400, { error: "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential" });
         }
@@ -7545,6 +7582,11 @@ async function main() {
         const auth = await requireAdminAuth(payload, proof, token, req);
         if (auth.error) return sendAdminAuthFailure(res, auth);
         const { assetClass, properties, tradeScope, clear } = payload || {};
+        // Restricted classes keep the asset their own flow signed; a patch reaches every holder at check-in.
+        // Clearing a patch stays allowed.
+        if (RESTRICTED_ISSUANCE_CLASSES.has(assetClass) && !clear) {
+          return sendJson(res, 403, { error: 'this class can only be issued through its own authorized flow and cannot be patched', code: 'studio-authorization-required' });
+        }
         const catalogEntry = ASSET_CATALOG[assetClass];
         if (!catalogEntry) return sendJson(res, 400, { error: 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ASSET_CATALOG in issuer-server/server.js for the full list.' });
         if (catalogEntry.fungible) {
