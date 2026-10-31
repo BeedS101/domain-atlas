@@ -1,0 +1,5 @@
+<?php
+// Copy to storage-root.php (not this example) and return the ABSOLUTE path of the Studio private directory,
+// which must be OUTSIDE the web root (for example the folder above public_html). Not needed when the
+// ATLAS_STUDIO_STORAGE_ROOT environment variable is set.
+return "/home/CPANELUSER/atlas-studio-data";
