@@ -80,6 +80,13 @@ if (!isset($credential['issuer']['domain']) || $credential['issuer']['domain'] !
 if (!isset($credential['asset']['fungible']) || $credential['asset']['fungible'] !== false) {
   send_json(400, ['error' => "reissue only applies to a non-fungible asset — a fungible class's properties/tradeScope are fixed per class (SPEC.md §5.1), not per credential"]);
 }
+// A restrictedIssuance class (Asset Studio collectibles) is signed only by its own authorized flow, and its
+// signed asset (owner-bound scope, design properties) must not be rewritten by this route either: a tradeScope
+// or property patch would let an administrator turn a bound item into a transferable one or change what the
+// owner approved. Clawback, which re-signs the asset unchanged, remains the recovery path.
+if (!empty(ATLAS_ASSET_CATALOG[$credential['asset']['class'] ?? '']['restrictedIssuance'])) {
+  send_json(403, ['error' => 'this class can only be issued through its own authorized flow and cannot be reissued', 'code' => 'studio-authorization-required']);
+}
 $busy = atlas_spend_lock($credential['id']);
 if ($busy !== null) send_json(409, ['error' => $busy]);
 if (is_revoked($credential['id'])) send_json(400, ['error' => 'credential is already revoked']);

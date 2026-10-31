@@ -461,7 +461,7 @@ async function credentialVerifies(l, cred) {
     const good = makeIdentity('raw-ecdsa');
     const p384 = crypto.generateKeyPairSync('ec', { namedCurve: 'secp384r1' }).publicKey.export({ type: 'spki', format: 'der' });
     const offCurve = Buffer.concat([Buffer.from([4]), crypto.randomBytes(64)]);
-    const bad = [good.publicKeyB64.slice(0, 80), good.publicKeyB64 + 'A', b64u(p384), b64u(offCurve), '', 'x', 5, null, [good.publicKeyB64], { k: 1 }, good.publicKeyB64 + '=', good.publicKeyB64.replace(/[-_]/, '+')];
+    const bad = [good.publicKeyB64.slice(0, 80), good.publicKeyB64 + 'A', b64u(p384), b64u(offCurve), '', 'x', 5, null, [good.publicKeyB64], { k: 1 }, good.publicKeyB64 + '=', '+' + good.publicKeyB64.slice(1)];
     for (const recipient of bad) {
       const r = await l.api('challenge', { design: DESIGN, recipient });
       assert.ok(r.status >= 400 && r.status < 500, JSON.stringify(recipient).slice(0, 40) + ' -> ' + r.status + r.text);

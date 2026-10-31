@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Safe retry and issuer-side holdings for fungible replacement. Mirrors the
 // "replacement results" and "holdings index" sections of
 // issuer-server/server.js.

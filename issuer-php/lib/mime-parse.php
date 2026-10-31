@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Minimal MIME parser for inbound mail, PHP port of
 // issuer-server/lib-mime-parse.js — the receiving-side counterpart to
 // lib/smtp.php's atlas_build_mime_message(). Parses exactly what

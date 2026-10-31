@@ -59,6 +59,13 @@ if ($clear) {
   send_json(200, ['assetClass' => $assetClass, 'patch' => null]);
 }
 
+// A restrictedIssuance class (Asset Studio collectibles) keeps the asset its own flow signed. A patch would be
+// applied to every holder's credential at their next check-in, so it could unbind the items or rewrite what
+// each owner approved. Clearing a patch stays allowed.
+if (!empty($catalogEntry['restrictedIssuance'])) {
+  send_json(403, ['error' => 'this class can only be issued through its own authorized flow and cannot be patched', 'code' => 'studio-authorization-required']);
+}
+
 if (!$hasProperties && !$hasTradeScope) {
   send_json(400, ['error' => 'at least one of properties (a patch onto asset.properties), tradeScope, or clear is required']);
 }

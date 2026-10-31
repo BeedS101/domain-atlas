@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // EXPERIMENTAL signed ledger balance receipts (chainblock-ledger38/signed-receipt-experimental).
 // Off unless lib/atlas-ledger-receipts-config.json says {"enabled": true}. Independent of the
 // credential-issuance switch and of its store: each has its own flag, replay nonces and limits.

@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Domain Atlas — SPEC.md §3.7 optional domain identity pinning, PHP side.
 //
 // issuer-server/server.js (Node) signs and caches the pinned manifest once,

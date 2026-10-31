@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Task #204 — generated file, do not hand-edit (re-run
 // tools/generate-elements-catalog.py instead). PHP mirror of
 // issuer-server/elements-catalog.js — see that file's own header comment

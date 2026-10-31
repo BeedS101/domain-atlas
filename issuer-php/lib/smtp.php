@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Hand-rolled SMTP client, PHP port of issuer-server/lib-smtp.js — same
 // zero-dependency philosophy this whole bundle already runs on (no
 // composer, nothing to install on a shared host), same protocol surface:

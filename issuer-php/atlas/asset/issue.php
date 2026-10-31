@@ -57,6 +57,16 @@ if (!isset(ATLAS_ASSET_CATALOG[$assetClass])) {
   send_json(400, ['error' => 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ATLAS_ASSET_CATALOG_BASE in issuer-php/lib/store.php (plus issuer-php/lib/elements-catalog.php) for the full list.']);
 }
 
+// A class marked 'restrictedIssuance' (Asset Studio collectibles) is minted only by its own
+// wallet-authorized route; this general route never issues it. Checked before any request lease,
+// supply reservation or signing, and mint_asset_by_class() refuses it again.
+if (!empty(ATLAS_ASSET_CATALOG[$assetClass]['restrictedIssuance'])) {
+  send_json(403, [
+    'error' => 'Studio collectibles require authorized Studio issuance',
+    'code' => 'studio-authorization-required'
+  ]);
+}
+
 // fungible: true — quantity is caller-chosen and must be a positive
 // integer. fungible: false — quantity is always exactly 1 (SPEC.md §5):
 // accept it omitted, or explicitly 1, but reject anything else rather

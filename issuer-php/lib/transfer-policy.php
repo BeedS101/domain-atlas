@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Transfer and delivery policy, evaluated before any custody change.
 // Mirrors issuer-server/lib-transfer-policy.js decision for decision; the
 // two are checked against the same vectors (test/vectors/transfer-policy.json).

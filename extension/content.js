@@ -89,6 +89,10 @@
       // §3.4.1-shaped field falls straight through to the domain default
       // outside a world context.
       const bridgeWorld = pageTarget ? manifest.worlds.find((w) => w.id === pageTarget.worldId) : null;
+      // A manifest grants bridge access only to pages on its own origin. A page may link a manifest hosted
+      // elsewhere for discovery (the Enter button above), but that domain never authorised this page to use
+      // the wallet, so a foreign manifest yields no bridge permission at all.
+      if (new URL(manifestUrl).origin !== location.origin) return { read: false, signPurposes: [], offerClasses: [] };
       return {
         read: effectiveWalletBridgeRead(manifest, bridgeWorld),
         signPurposes: effectiveWalletBridgeSignPurposes(manifest, bridgeWorld),
@@ -617,7 +621,7 @@
     }).catch(() => {});
   }
 
-  // ---------- hover-tooltip info panel (task #65) ----------
+  // ---------- hover-tooltip info panel ----------
   //
   // Detail for whichever world the button itself actually enters — the
   // manifest's own defaultWorld normally, or a more specific one a page's
@@ -653,26 +657,16 @@
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
-  // Task #151/#152 — same additions as viewer.js's own
-  // portalCapabilitySummary()/effectiveAcceptedItemClasses() (the in-world
-  // portal-hover tooltip), extended here too so this Enter button's own
-  // hover panel — the FIRST tooltip a visitor ever sees, before even
-  // entering — shows the same declared-but-previously-buried manifest
-  // data: chat (manifest.chat/world.chat, same two-level opt-in
-  // viewer.js's chatEnabledForWorld() checks — inlined here since this
-  // content script doesn't share that function), trading (a world a
-  // client can recognize as a trading venue by profile.genre, SPEC.md §7 —
-  // "trading-station" is this reference implementation's convention), and
-  // accepted item classes/trusted issuers (policy.acceptedItemClasses/
-  // policy.trustedIssuers — the exact fields task #151's wallet
-  // compatibility checkbox also reads, nothing new declared here either).
-  // acceptedItemClasses falls back to a domain-level manifest.acceptedItemClasses
-  // default (task #152) only when a world doesn't declare its own array at
-  // all — an explicit empty array on the world still means "recognizes
-  // nothing" and is never overridden by the domain default; a trailing
-  // ".*" entry (e.g. "atlas.element.*") is shown verbatim here since this
-  // is just a display list, not a match — see viewer.js's classMatchesAny()
-  // for where that pattern actually gets interpreted.
+  // Same summary as viewer.js's portalCapabilitySummary()/effectiveAcceptedItemClasses() (the in-world
+  // portal-hover tooltip), shown here too so the Enter button's hover panel, the first tooltip a visitor sees,
+  // lists the same declared manifest data: chat (manifest.chat / world.chat, either level enables it, as in
+  // viewer.js's chatEnabledForWorld(), inlined because this content script does not share that function),
+  // trading (a world whose profile.genre is "trading-station", this implementation's convention for SPEC.md
+  // §7 venues), and policy.acceptedItemClasses / policy.trustedIssuers.
+  // acceptedItemClasses falls back to the domain-level manifest.acceptedItemClasses (SPEC.md §3.4.1) only when
+  // the world declares no array of its own; an explicit empty array still means "recognizes nothing". A
+  // trailing ".*" entry (e.g. "atlas.element.*") is shown verbatim: this is a display list, not a match; see
+  // viewer.js's classMatchesAny() for where the pattern is interpreted.
   function effectiveAcceptedItemClasses(manifest, world) {
     const policy = world.policy || {};
     if (Array.isArray(policy.acceptedItemClasses)) return policy.acceptedItemClasses;

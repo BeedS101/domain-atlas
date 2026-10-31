@@ -1,0 +1,27 @@
+/* Asset Studio: visual language aligned with the Domain Atlas Alpha Node.
+   Neutral typography, cool blue accents, light surfaces, restrained borders.
+   No shared stylesheet dependency; works when previewed from a local file. */
+:root{color-scheme:light;--ink:#14212c;--muted:#607582;--accent:#2a5fa8;--accent-hover:#1e4c87;--line:#dfe6ea;--surface:#fff;--subtle:#fbfcfd;--focus:#2767bd}
+*{box-sizing:border-box}
+body{margin:0;background:#f4f7f9;color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:1160px;margin:0 auto;padding:32px 24px 60px}
+header{margin-bottom:26px}
+h1{font-size:clamp(1.7rem,3vw,2.1rem);line-height:1.25;letter-spacing:-.02em;margin:0 0 6px}
+h1 small{font-size:.85rem;font-weight:500;letter-spacing:0;color:var(--muted)}
+p{color:var(--muted);margin:0 0 14px}
+.layout{display:grid;grid-template-columns:minmax(290px,360px) minmax(0,1fr);gap:24px;align-items:start}
+form,.preview{padding:24px;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 3px 18px rgba(20,33,44,.035)}
+label{display:block;margin:16px 0 6px;font-weight:600;font-size:.92rem}
+input,select,textarea{width:100%;padding:10px 12px;background:#fff;border:1px solid #bbcbd6;border-radius:7px;color:var(--ink);font:inherit}
+input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+textarea{resize:vertical;min-height:96px}
+.buttons{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}
+button{border:1px solid #255694;border-radius:7px;background:var(--accent);color:#fff;padding:10px 14px;font:inherit;font-weight:600;cursor:pointer}
+button:hover:not(:disabled){background:var(--accent-hover)}
+button:disabled{border-color:#c8d2d9;background:#e9eef2;color:#637580;cursor:not-allowed}
+.preview{text-align:center;min-width:0}
+canvas{display:block;max-width:100%;height:auto;margin:0 auto;background:radial-gradient(circle at 50% 40%,#eef4f8,#dce8f1);border:1px solid var(--line);border-radius:10px}
+.preview h2{margin:18px 0 8px;font-size:1.3rem;line-height:1.35}
+pre{text-align:left;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.78rem;line-height:1.5;background:var(--subtle);border:1px solid var(--line);padding:14px;border-radius:8px}
+#message{min-height:1.5em}
+@media(max-width:800px){main{padding:22px 16px 42px}.layout{grid-template-columns:1fr}form,.preview{padding:20px}}
