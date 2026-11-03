@@ -53,9 +53,9 @@ function baselineLayout() {
   return root;
 }
 
-function build(hours) {
+function build(hours, extra) {
   const out = fs.mkdtempSync(path.join(tmp, 'build-'));
-  const log = execFileSync('node', [path.join(REPO, 'tools/site-doctor-build.js'), out, '--hours', String(hours || 72), '--allow-dirty'], { encoding: 'utf8' });
+  const log = execFileSync('node', [path.join(REPO, 'tools/site-doctor-build.js'), out, '--hours', String(hours || 72), '--allow-dirty'].concat(extra || []), { encoding: 'utf8' });
   const access = fs.readFileSync(path.join(out, 'ACCESS.txt'), 'utf8');
   const token = (access.match(/Token:\s+([0-9a-f-]{39})/) || [])[1];
   assert.ok(token, 'token in ACCESS.txt');
@@ -910,6 +910,174 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     assert.ok(/Last administrator activity: 2026-03-04/.test(find(r, 'admin-last').title), find(r, 'admin-last').title);
     assert.strictEqual(find(r, 'admin-stores').status, 'ok');
     assert.ok(!/BEARER-TOKEN-SECRET/.test(r.text));
+    f.srv.stop();
+  });
+
+  // ---- permission scan: code, private state, .well-known, groups ------------------------------------------
+  const IS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0;
+  const modeOf = (f) => fs.statSync(f).mode & 0o7777;
+  const permIds = (r) => r.json.checks.filter((c) => /^perm-/.test(c.id)).map((c) => c.id + ':' + c.status);
+  const normalise = (r) => {
+    // a tree as a cPanel upload leaves it: folders 0755, files 0644
+    const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isSymbolicLink()) continue; if (e.isDirectory()) { fs.chmodSync(f, 0o755); walk(f); } else fs.chmodSync(f, 0o644); } };
+    fs.chmodSync(r, 0o755); walk(r);
+  };
+
+  await check('permissions: a normal cPanel tree (0644 files, 0755 folders) and its tighter variants raise nothing', async () => {
+    if (process.platform === 'win32') return;
+    const f = await fresh();
+    normalise(f.root);
+    fs.mkdirSync(path.join(f.root, 'lib/holdings'), { recursive: true });
+    fs.writeFileSync(path.join(f.root, 'lib/holdings/a.json'), '{"held":{}}', { mode: 0o600 });
+    fs.writeFileSync(path.join(f.root, 'lib/issuer-private-key.pem'), 'K', { mode: 0o600 });
+    fs.writeFileSync(path.join(f.root, '.well-known/atlas-key.json'), '{}'); fs.chmodSync(path.join(f.root, '.well-known/atlas-key.json'), 0o644);
+    fs.writeFileSync(path.join(f.root, '.well-known/atlas-revocations.json'), '{"revoked":[]}'); fs.chmodSync(path.join(f.root, '.well-known/atlas-revocations.json'), 0o644);
+    let r = await f.call('health');
+    assert.deepStrictEqual(permIds(r), ['perm-scan:ok'], permIds(r).join(' '));
+    for (const [fm, dm] of [[0o640, 0o750], [0o600, 0o700]]) {
+      fs.chmodSync(path.join(f.root, 'lib/store.php'), fm); fs.chmodSync(path.join(f.root, 'atlas'), dm);
+      r = await f.call('health');
+      assert.deepStrictEqual(permIds(r), ['perm-scan:ok'], fm.toString(8) + ' ' + permIds(r).join(' '));
+    }
+    f.srv.stop();
+  });
+
+  await check('permissions: world-writable PHP, .htaccess, settings files and folders are found by path, with a suggested mode', async () => {
+    if (process.platform === 'win32') return;
+    const f = await fresh();
+    normalise(f.root);
+    fs.chmodSync(path.join(f.root, 'lib/store.php'), 0o666);
+    fs.chmodSync(path.join(f.root, 'atlas/asset/issue.php'), 0o777);
+    fs.chmodSync(path.join(f.root, 'lib/.htaccess'), 0o666);
+    fs.mkdirSync(path.join(f.root, 'atlas/call/lib'), { recursive: true });
+    fs.writeFileSync(path.join(f.root, 'atlas/call/lib/config.php'), '<?php return ["secret" => "CALL-CONFIG-SECRET"];'); fs.chmodSync(path.join(f.root, 'atlas/call/lib/config.php'), 0o666);
+    fs.mkdirSync(path.join(f.root, 'uploads'), { mode: 0o777 }); fs.chmodSync(path.join(f.root, 'uploads'), 0o777);
+    fs.writeFileSync(path.join(f.root, 'uploads/x.php'), '<?php // x'); fs.chmodSync(path.join(f.root, 'uploads/x.php'), 0o644);
+    fs.mkdirSync(path.join(f.root, 'sticky'), { mode: 0o755 }); fs.chmodSync(path.join(f.root, 'sticky'), 0o1777);
+    fs.writeFileSync(path.join(f.root, 'assets/own-model.glb'), 'm'); fs.chmodSync(path.join(f.root, 'assets/own-model.glb'), 0o666);
+    const outside = path.join(tmp, 'outside-writable.php'); fs.writeFileSync(outside, '<?php'); fs.chmodSync(outside, 0o666);
+    fs.symlinkSync(outside, path.join(f.root, 'atlas/link-to-writable.php'));
+    const before = ['lib/store.php', 'uploads', 'sticky'].map((p) => modeOf(path.join(f.root, p)));
+    const r = await f.call('health');
+    const code = find(r, 'perm-code'), dirs = find(r, 'perm-dirs');
+    assert.strictEqual(code.status, 'fail'); assert.strictEqual(dirs.status, 'fail');
+    assert.ok(/4 PHP/.test(code.title), code.title);
+    for (const p of ['lib/store.php (0666)', 'atlas/asset/issue.php (0777)', 'lib/.htaccess (0666)', 'atlas/call/lib/config.php (0666)']) assert.ok(code.detail.includes(p), p + ' in ' + code.detail);
+    assert.ok(/0644/.test(code.fix) && /0600/.test(code.fix));
+    assert.ok(dirs.detail.includes('uploads/ (0777)') && !dirs.detail.includes('sticky'), dirs.detail);
+    assert.ok(!code.detail.includes('link-to-writable') && !code.detail.includes('own-model.glb'), 'symlinks and non-code assets are not flagged');
+    assert.ok(/0755/.test(dirs.fix));
+    assert.ok(!/CALL-CONFIG-SECRET/.test(r.text), 'contents are never read');
+    assert.deepStrictEqual(['lib/store.php', 'uploads', 'sticky'].map((p) => modeOf(path.join(f.root, p))), before, 'modes are untouched');
+    assert.ok(!permIds(r).includes('perm-scan:ok'));
+    f.srv.stop();
+  });
+
+  await check('permissions: private state files are checked one by one, including an external private folder', async () => {
+    if (process.platform === 'win32') return;
+    const f = await fresh();
+    normalise(f.root);
+    const ext = fs.mkdtempSync(path.join(tmp, 'ext-private-')); fs.chmodSync(ext, 0o755);
+    fs.writeFileSync(path.join(f.root, 'lib/atlas-private-dir.txt'), ext);
+    for (const d of ['holdings', 'replay', 'txn']) { fs.mkdirSync(path.join(ext, d), { mode: 0o700 }); fs.chmodSync(path.join(ext, d), 0o700); fs.mkdirSync(path.join(f.root, 'lib', d), { recursive: true }); fs.chmodSync(path.join(f.root, 'lib', d), 0o755); }
+    const put = (rel, mode, content) => { const p = path.join(rel.startsWith('EXT/') ? ext : f.root, rel.replace(/^EXT\//, '')); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, content || 'STATE-CONTENT-SECRET'); fs.chmodSync(p, mode); };
+    put('EXT/holdings/ok.json', 0o600); put('EXT/replay/w.json', 0o666); put('EXT/txn/sub/r.json', 0o644);
+    put('lib/holdings/w2.json', 0o777); put('lib/replay/r2.json', 0o644); put('lib/txn/ok2.json', 0o600);
+    fs.chmodSync(path.join(f.root, 'lib/replay'), 0o777);
+    const r = await f.call('health');
+    const w = find(r, 'perm-state-writable'), rd = find(r, 'perm-state-readable');
+    assert.strictEqual(w.status, 'fail'); assert.strictEqual(rd.status, 'warn');
+    assert.ok(w.detail.includes('<private>/replay/w.json (0666)') && w.detail.includes('lib/holdings/w2.json (0777)') && w.detail.includes('lib/replay/ (0777)'), w.detail);
+    assert.ok(rd.detail.includes('<private>/txn/sub/r.json (0644)') && rd.detail.includes('lib/replay/r2.json (0644)') && !rd.detail.includes('ok.json') && !rd.detail.includes('ok2.json'), rd.detail);
+    assert.ok(/0600/.test(w.fix) && /0600/.test(rd.fix));
+    assert.ok(!/STATE-CONTENT-SECRET/.test(r.text));
+    f.srv.stop();
+  });
+
+  await check('permissions: a very large state folder is bounded, finishes quickly and says it did not look at everything', async () => {
+    if (process.platform === 'win32') return;
+    const f = await fresh();
+    normalise(f.root);
+    const dir = path.join(f.root, 'lib/replay'); fs.mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 7000; i++) fs.writeFileSync(path.join(dir, 'r' + i + '.json'), '{}', { mode: 0o600 });
+    const t0 = Date.now();
+    const r = await f.call('health');
+    assert.ok(Date.now() - t0 < 15000, 'took ' + (Date.now() - t0) + ' ms');
+    const lim = find(r, 'perm-limit');
+    assert.ok(lim && lim.status === 'info' && /more files than one check looks at/.test(lim.detail), JSON.stringify(lim));
+    f.srv.stop();
+  });
+
+  await check('permissions: .well-known files may be world-readable, but not world-writable', async () => {
+    if (process.platform === 'win32') return;
+    const f = await fresh();
+    normalise(f.root);
+    const wk = (n, m) => { const p = path.join(f.root, '.well-known', n); fs.writeFileSync(p, '{}'); fs.chmodSync(p, m); };
+    wk('atlas-key.json', 0o644); wk('spatial.json', 0o644); wk('atlas-revocations.json', 0o644); wk('atlas-suspensions.json', 0o664);
+    let r = await f.call('health');
+    assert.ok(!permIds(r).some((x) => /perm-wellknown|perm-secret|perm-state-readable/.test(x)), permIds(r).join(' '));
+    wk('atlas-revocations.json', 0o666);
+    r = await f.call('health');
+    const c = find(r, 'perm-wellknown');
+    assert.strictEqual(c.status, 'fail'); assert.ok(c.detail.includes('.well-known/atlas-revocations.json (0666)') && /un-revoke/.test(c.detail) && !/atlas-key\.json/.test(c.detail), c.detail);
+    assert.ok(/0644/.test(c.fix));
+    f.srv.stop();
+  });
+
+  await check('permissions: group write is accepted for this account\'s own group and warned about for another group', async () => {
+    if (process.platform === 'win32' || !IS_ROOT) return;
+    const f = await fresh();
+    normalise(f.root);
+    const own = fs.statSync(path.join(f.root, 'site-doctor.php')).gid;
+    const other = own === 4242 ? 4243 : 4242;
+    fs.chmodSync(path.join(f.root, 'lib/store.php'), 0o664);
+    fs.writeFileSync(path.join(f.root, '.well-known/atlas-suspensions.json'), '{}'); fs.chmodSync(path.join(f.root, '.well-known/atlas-suspensions.json'), 0o664);
+    fs.chmodSync(path.join(f.root, 'atlas/asset'), 0o775);
+    assert.deepStrictEqual(permIds(await f.call('health')), ['perm-scan:ok'], 'own group is trusted');
+    fs.chownSync(path.join(f.root, 'lib/store.php'), 0, other);
+    fs.chownSync(path.join(f.root, '.well-known/atlas-suspensions.json'), 0, other);
+    fs.chownSync(path.join(f.root, 'atlas/asset'), 0, other);
+    fs.writeFileSync(path.join(f.root, 'assets/plain.txt'), 'x'); fs.chmodSync(path.join(f.root, 'assets/plain.txt'), 0o664); fs.chownSync(path.join(f.root, 'assets/plain.txt'), 0, other);
+    fs.chmodSync(path.join(f.root, 'lib/bootstrap.php'), 0o640); // group-readable only: fine
+    const r = await f.call('health');
+    const g = find(r, 'perm-group');
+    assert.strictEqual(g.status, 'warn');
+    assert.ok(/^3 sensitive item/.test(g.title) && (g.title.includes('group id ' + other) || g.title.includes('group "')), g.title);
+    for (const p of ['lib/store.php (0664)', '.well-known/atlas-suspensions.json (0664)', 'atlas/asset/ (0775)']) assert.ok(g.detail.includes(p), p + ' in ' + g.detail);
+    assert.ok(!g.detail.includes('plain.txt'), 'an ordinary asset is not sensitive');
+    assert.ok(/chmod g-w/.test(g.fix) && /--trusted-groups/.test(g.fix));
+    f.srv.stop();
+  });
+
+  await check('permissions: a group named with --trusted-groups is accepted; bad group names are refused by the builder', async () => {
+    if (process.platform === 'win32' || !IS_ROOT) return;
+    const trusted = build(72, ['--trusted-groups', '4242, 5555']);
+    const hdr = JSON.parse(fs.readFileSync(trusted.php, 'utf8').split("<<<'ATLAS_DOCTOR_JSON'\n")[1].split('\nATLAS_DOCTOR_JSON')[0]);
+    assert.deepStrictEqual(hdr.trustedGroups, ['4242', '5555']);
+    const r0 = layout('a'); fs.copyFileSync(trusted.php, path.join(r0, 'site-doctor.php')); normalise(r0);
+    const s0 = await serve(r0);
+    const own = fs.statSync(path.join(r0, 'site-doctor.php')).gid;
+    fs.chmodSync(path.join(r0, 'lib/store.php'), 0o664); fs.chownSync(path.join(r0, 'lib/store.php'), 0, own === 4242 ? 4243 : 4242);
+    let r = await s0.call(trusted.token)('health');
+    if (own !== 4242) assert.deepStrictEqual(permIds(r), ['perm-scan:ok'], permIds(r).join(' '));
+    fs.chownSync(path.join(r0, 'lib/store.php'), 0, 4244);
+    r = await s0.call(trusted.token)('health');
+    assert.strictEqual(find(r, 'perm-group').status, 'warn', 'a group that is not on the list still warns');
+    s0.stop();
+    for (const bad of ['a b', 'x;rm', '../x', 'g'.repeat(65)]) {
+      assert.throws(() => execFileSync('node', [path.join(REPO, 'tools/site-doctor-build.js'), fs.mkdtempSync(path.join(tmp, 'badbuild-')), '--allow-dirty', '--trusted-groups', bad], { stdio: 'pipe' }), /trusted-groups/, bad);
+    }
+  });
+
+  await check('permissions: the doctor never changes a mode, moves or deletes anything while checking', async () => {
+    if (process.platform === 'win32') return;
+    const f = await fresh();
+    fs.chmodSync(path.join(f.root, 'lib/store.php'), 0o666);
+    fs.mkdirSync(path.join(f.root, 'lib/holdings'), { recursive: true }); fs.writeFileSync(path.join(f.root, 'lib/holdings/h.json'), '{}', { mode: 0o666 }); fs.chmodSync(path.join(f.root, 'lib/holdings/h.json'), 0o666);
+    const snapshot = () => { const out = []; const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); const st = fs.lstatSync(p); out.push(path.relative(f.root, p) + ' ' + (st.mode & 0o7777).toString(8) + ' ' + st.size + ' ' + st.mtimeMs); if (e.isDirectory()) walk(p); } }; walk(f.root); return out.sort().join('\n'); };
+    const before = snapshot();
+    await f.call('health'); await f.call('health'); await f.call('extras');
+    assert.strictEqual(snapshot(), before);
     f.srv.stop();
   });
 

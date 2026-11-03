@@ -46,6 +46,8 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
   // Housekeeping, permissions and administrator-side fixtures.
   for (let i = 0; i < 64; i++) fs.writeFileSync(path.join(root, 'lib/atlas-rid-lock-' + i + '.lock'), '');
   fs.chmodSync(path.join(root, 'lib/issuer-private-key.pem'), 0o644);
+  fs.chmodSync(path.join(root, 'atlas/asset/issue.php'), 0o666); // a world-writable PHP route
+  fs.mkdirSync(path.join(root, 'lib/replay'), { recursive: true }); fs.writeFileSync(path.join(root, 'lib/replay/r.json'), '{}'); fs.chmodSync(path.join(root, 'lib/replay/r.json'), 0o666);
   fs.writeFileSync(path.join(root, '.well-known/atlas-revocations.json'), JSON.stringify({ revoked: [{ id: 'urn:atlas:asset:REVOKED-ID-MARKER' }] }));
   fs.writeFileSync(path.join(root, '.well-known/atlas-suspensions.json'), JSON.stringify({ suspended: [{ id: 'urn:atlas:asset:SUSPENDED-ID-MARKER', expiresAt: '2020-01-01T00:00:00Z' }] }));
   // An old copy of an admin route that answers anyone: the doctor must flag it as open.
@@ -153,6 +155,10 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
     const pm = await page.locator('details', { hasText: 'File permissions and PHP limits' }).first().textContent();
     assert.ok(/readable by other accounts/.test(pm) && /issuer-private-key\.pem \(0644\)/.test(pm), pm.slice(0, 300));
     assert.ok(/memory_limit/.test(pm) && /upload_max_filesize/.test(pm));
+    assert.ok(/can be rewritten by any account/.test(pm) && /atlas\/asset\/issue\.php \(0666\)/.test(pm) && /0644/.test(pm), 'world-writable PHP is named with a suggested mode');
+    assert.ok(/private state file\(s\) or folder\(s\) can be changed/.test(pm) && /lib\/replay\/r\.json \(0666\)/.test(pm));
+    const todoText = await page.locator('details', { hasText: 'To do - fix-it checklist' }).first().textContent();
+    assert.ok(/rewritten by any account/.test(todoText), 'also in the checklist');
     const ad = await page.locator('details', { hasText: 'Administrator side' }).first().textContent();
     assert.ok(/No administrator keys are registered/.test(ad));
     assert.ok(/\/atlas\/admin\/suspensions[\s\S]*Refused without a sign-in \(HTTP 401\)/.test(ad), ad.slice(0, 600));

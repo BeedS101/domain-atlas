@@ -3,7 +3,7 @@
 // on that domain with this repository and reports what is missing, different or unexpected. It is read-only,
 // needs a one-time access token, stops working after a deadline and can delete itself.
 //
-//   node tools/site-doctor-build.js <out dir> [--hours 72] [--allow-dirty]
+//   node tools/site-doctor-build.js <out dir> [--hours 72] [--allow-dirty] [--trusted-groups name,name]
 //
 // Writes <out>/site-doctor.php (upload it; delete it when finished) and <out>/ACCESS.txt (the token; keep it
 // off the server). Only a SHA-256 of the token is embedded in the PHP file. Run from a clean checkout so the
@@ -32,10 +32,17 @@ const SOURCES = [['issuer-php', 'i'], ['demo-domain-a', 'a'], ['demo-domain-b', 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(n);
 const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
-const out = args.find((a, i) => !a.startsWith('--') && (i === 0 || !['--hours'].includes(args[i - 1])));
+const out = args.find((a, i) => !a.startsWith('--') && (i === 0 || !['--hours', '--trusted-groups'].includes(args[i - 1])));
 const hours = Number(opt('--hours', '72'));
+// Groups (names or numeric ids) whose write access to sensitive files the permission checks accept without a
+// warning. The account's own group and the PHP process's group are always accepted.
+const trustedGroups = opt('--trusted-groups', '').split(',').map((g) => g.trim()).filter(Boolean);
+if (trustedGroups.length > 16 || trustedGroups.some((g) => !/^[A-Za-z0-9._-]{1,64}$/.test(g))) {
+  console.error('--trusted-groups takes up to 16 group names or numeric ids, letters, digits, dot, dash and underscore only');
+  process.exit(2);
+}
 if (!out || !(hours > 0 && hours <= 24 * 30)) {
-  console.error('usage: node tools/site-doctor-build.js <out dir> [--hours 72] [--allow-dirty]');
+  console.error('usage: node tools/site-doctor-build.js <out dir> [--hours 72] [--allow-dirty] [--trusted-groups name,name]');
   process.exit(2);
 }
 
@@ -135,7 +142,7 @@ const features = JSON.parse(fs.readFileSync(FEATURES, 'utf8')).features;
 const rawToken = crypto.randomBytes(16).toString('hex');
 const token = rawToken.match(/.{4}/g).join('-');
 const expires = Math.floor(Date.now() / 1000) + Math.round(hours * 3600);
-const header = { v: 1, built: new Date().toISOString(), commit, clean: gitOk && !dirty.length, expires, tokenSha256: crypto.createHash('sha256').update(rawToken).digest('hex'), features };
+const header = { v: 1, built: new Date().toISOString(), commit, clean: gitOk && !dirty.length, expires, tokenSha256: crypto.createHash('sha256').update(rawToken).digest('hex'), features, trustedGroups };
 const json = JSON.stringify(header).slice(0, -1) + ',"entries":[\n' + list.map((e) => JSON.stringify([e.p, e.h, e.n, e.g, e.f, e.tags])).join(',\n') + '\n]}';
 if (json.includes('ATLAS_DOCTOR_JSON')) { console.error('manifest contains the heredoc marker'); process.exit(1); }
 

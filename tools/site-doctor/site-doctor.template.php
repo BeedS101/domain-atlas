@@ -558,7 +558,159 @@ function doctor_private_base($root) {
   return is_string($c) ? rtrim(trim($c), '/\\') : '';
 }
 
-function doctor_health($root, $host) {
+// ---- permission scan ----------------------------------------------------------------------------------------
+// Looks at modes only (never opens a file), skips symlinks, and stops at a time and entry limit so a huge state
+// folder cannot cause a timeout. What counts as a problem:
+//   - any file or folder that every account on the server can write (a PHP file, .htaccess or settings file can
+//     be rewritten to run someone else's code; a state file can be edited to forge a balance or un-revoke a
+//     credential; a folder lets them add files);
+//   - a key, settings file or private state file that every account can read;
+//   - group-writable items whose group is not one this account trusts.
+// Public files under .well-known are meant to be readable, so for them only write access matters. Ordinary
+// hosting modes (files 0644, folders 0755, PHP files 0644 or 0640, group-readable) are never reported.
+
+function doctor_perm_kind($rel) {
+  $b = basename($rel);
+  if (preg_match('#(^|/)\.well-known/#', $rel)) return 'wk';
+  if (preg_match('#(^|/)(replay|holdings|txn|state)/#', $rel)) return 'state';
+  // A route that happens to be called config.php is code; the settings files named config.php live in a lib/ folder.
+  if (preg_match('/^config\.php(\.off|\.bak)?$/i', $b) && basename(dirname($rel)) === 'lib') return 'secret';
+  if (preg_match('/\.pem$|-config\.json$|^\.salt$/i', $b) || preg_match('/^atlas-admin-.*\.json$/', $b)) return 'secret';
+  if (preg_match('/\.(php|phtml|php[3-8])$/i', $b)) return 'code';
+  if ($b === '.htaccess' || $b === '.user.ini' || $b === 'php.ini') return 'conf';
+  return null;
+}
+
+// One bounded walk below $start (an absolute folder); $label is its name in the report. Appends risky entries to
+// $out as [kind, relPath, mode, gid]; a folder is [ 'dir', relPath, mode, gid, holdsCode, inStateFolder ].
+function doctor_perm_walk($start, $label, $skipAbs, $deadline, &$left, &$out, &$seen, &$partial, $forceState) {
+  $skipNames = ['cgi-bin' => 1, '.git' => 1, 'node_modules' => 1, 'acme-challenge' => 1, 'pki-validation' => 1, '.cagefs' => 1, '.tmp' => 1];
+  $stack = [[$start, $label, 0]];
+  while ($stack) {
+    list($dir, $rel, $depth) = array_pop($stack);
+    $names = @scandir($dir);
+    if ($names === false) continue;
+    $hasCode = false;
+    foreach ($names as $name) {
+      if ($name === '.' || $name === '..') continue;
+      if ($left <= 0 || microtime(true) > $deadline) { $partial = true; break 2; }
+      $left--;
+      $full = $dir . '/' . $name;
+      $r = $rel === '' ? $name : $rel . '/' . $name;
+      if (is_link($full)) continue;
+      if (is_dir($full)) {
+        if ($depth >= 12 || isset($skipNames[$name]) || isset($skipAbs[$full])) continue;
+        $stack[] = [$full, $r, $depth + 1];
+        continue;
+      }
+      $m = @fileperms($full);
+      if ($m === false) continue;
+      $m &= 0777;
+      $seen['files']++;
+      $kind = $forceState ? 'state' : doctor_perm_kind($r);
+      if ($kind === null) continue;
+      if ($kind === 'code' || $kind === 'conf' || $kind === 'secret') $hasCode = true;
+      if (($m & 0002) || ($m & 0020) || (($m & 0004) && ($kind === 'secret' || $kind === 'state') && $name !== '.htaccess')) {
+        $g = @filegroup($full);
+        $out[] = [$kind, $r, $m, $g === false ? -1 : $g];
+      }
+    }
+    $seen['dirs']++;
+    $dm = @fileperms($dir);
+    if ($dm !== false && $rel !== '') {
+      $dm &= 01777;
+      // A sticky shared folder (like /tmp) only lets an account change its own files, so its world bit is not a risk.
+      if ($dm & 01000) $dm &= ~0002;
+      if (($dm & 0002) || ($dm & 0020)) {
+        $g = @filegroup($dir);
+        $out[] = ['dir', $rel, $dm & 0777, $g === false ? -1 : $g, $hasCode, $forceState];
+      }
+    }
+  }
+}
+
+function doctor_gname($gid) {
+  if ($gid < 0) return 'an unknown group';
+  if (function_exists('posix_getgrgid')) { $g = @posix_getgrgid($gid); if (is_array($g) && isset($g['name'])) return 'group "' . $g['name'] . '"'; }
+  return 'group id ' . $gid;
+}
+
+// Group ids whose write access is accepted: this account's own group (the doctor file's), the PHP process's
+// group, and any the doctor was built to trust.
+function doctor_trusted_gids($names) {
+  $ok = []; $unresolved = [];
+  $own = @filegroup(__FILE__);
+  if ($own !== false) $ok[$own] = true;
+  if (function_exists('posix_getegid')) $ok[posix_getegid()] = true;
+  foreach ($names as $t) {
+    $t = (string)$t;
+    if (preg_match('/^\d+$/', $t)) { $ok[(int)$t] = true; continue; }
+    $g = function_exists('posix_getgrnam') ? @posix_getgrnam($t) : false;
+    if (is_array($g) && isset($g['gid'])) $ok[$g['gid']] = true; else $unresolved[] = $t;
+  }
+  return [$ok, $unresolved];
+}
+
+function doctor_perm_list($items) {
+  $lines = [];
+  foreach (array_slice($items, 0, 8) as $i) $lines[] = $i[0] . ' (' . $i[1] . ')';
+  return implode(', ', $lines) . (count($items) > 8 ? ', and ' . (count($items) - 8) . ' more' : '');
+}
+
+// $reported: absolute paths the checks before this already report on, so nothing is said twice.
+function doctor_perm_checks($root, $base, $reported, $trustedNames, $add) {
+  $out = []; $seen = ['files' => 0, 'dirs' => 0]; $partial = false; $statePartial = false;
+  $stateSeen = ['files' => 0, 'dirs' => 0];
+  // Private state first, with its own allowance, so a large web root cannot starve it.
+  $stateDirs = [];
+  foreach (['holdings', 'replay', 'txn'] as $n) { $stateDirs[$root . '/lib/' . $n] = 'lib/' . $n; if ($base !== '') $stateDirs[$base . '/' . $n] = '<private>/' . $n; }
+  $stateLeft = 6000; $stateDeadline = microtime(true) + 3.0; $stateOut = [];
+  foreach ($stateDirs as $abs => $label) {
+    if (!is_dir($abs) || is_link($abs)) continue;
+    doctor_perm_walk($abs, $label, [], $stateDeadline, $stateLeft, $stateOut, $stateSeen, $statePartial, true);
+    $m = @fileperms($abs);
+    if ($m !== false && (($m & 0002) || ($m & 0020))) { $g = @filegroup($abs); $stateOut[] = ['dir', $label, $m & 0777, $g === false ? -1 : $g, false, true]; }
+  }
+  $left = 40000; $deadline = microtime(true) + 5.0;
+  doctor_perm_walk($root, '', $stateDirs, $deadline, $left, $out, $seen, $partial, false);
+  list($trusted, $unresolved) = doctor_trusted_gids($trustedNames);
+
+  $w = ['code' => [], 'dir' => [], 'state' => [], 'wk' => []]; $readable = ['secret' => [], 'state' => []]; $groupHits = [];
+  foreach (array_merge($stateOut, $out) as $e) {
+    $kind = $e[0]; $rel = $e[1]; $m = $e[2]; $gid = $e[3];
+    $inState = $kind === 'dir' && !empty($e[5]);
+    if (!$inState && isset($reported[$root . '/' . $rel])) continue;
+    $ms = doctor_modestr($m);
+    if ($inState) $bucket = 'state';
+    elseif ($kind === 'dir') $bucket = 'dir';
+    elseif ($kind === 'conf' || $kind === 'secret') $bucket = 'code';
+    else $bucket = $kind;
+    $label = (strlen($rel) > 150 ? substr($rel, 0, 147) . '...' : $rel) . ($kind === 'dir' ? '/' : '');
+    if ($m & 0002) { $w[$bucket][] = [$label, $ms]; continue; }
+    if (($m & 0004) && ($kind === 'secret' || $kind === 'state')) $readable[$kind][] = [$label, $ms];
+    if (($m & 0020) && $gid >= 0 && !isset($trusted[$gid])) {
+      $sensitive = $kind !== 'dir' || $inState || !empty($e[4]) || preg_match('#(^|/)(lib|\.well-known)$#', $rel);
+      if ($sensitive) $groupHits[$gid][] = [$label, $ms];
+    }
+  }
+  $problems = 0;
+  if ($w['code']) { $problems++; $add('permissions', 'perm-code', 'fail', count($w['code']) . ' PHP, .htaccess or settings file(s) can be rewritten by any account on this server', doctor_perm_list($w['code']) . '. Anyone who can write to a PHP file can make your site run their code.', 'Set PHP files and .htaccess to 0644 (0640 also works), and settings files that hold secrets to 0600, in your file manager.'); }
+  if ($w['dir']) { $problems++; $add('permissions', 'perm-dirs', 'fail', count($w['dir']) . ' folder(s) can be written by any account on this server', doctor_perm_list($w['dir']) . '. Anyone who can write to a folder can add a PHP file to it.', 'Set them to 0755 (0750 also works) in your file manager.'); }
+  if ($w['state']) { $problems++; $add('permissions', 'perm-state-writable', 'fail', count($w['state']) . ' private state file(s) or folder(s) can be changed by any account on this server', doctor_perm_list($w['state']) . '. Holdings, replay and transaction records decide who owns what; editing them can forge a balance.', 'Set files to 0600 and folders to 0700 (0755 also works) in your file manager.'); }
+  if ($w['wk']) { $problems++; $add('permissions', 'perm-wellknown', 'fail', count($w['wk']) . ' file(s) in .well-known can be rewritten by any account on this server', doctor_perm_list($w['wk']) . '. These publish your issuer key, manifest and revocation list; changing the revocation list would un-revoke credentials.', 'Set them to 0644 (readable by everyone is correct here; writable only by you).'); }
+  if ($readable['state']) { $problems++; $add('permissions', 'perm-state-readable', 'warn', count($readable['state']) . ' private state file(s) are readable by other accounts', doctor_perm_list($readable['state']) . '. The issuer itself writes these as 0600; 0644 means they were changed or copied.', 'Set them to 0600 in your file manager.'); }
+  if ($readable['secret']) { $problems++; $add('permissions', 'perm-secret-readable', 'warn', count($readable['secret']) . ' key or settings file(s) are readable by other accounts', doctor_perm_list($readable['secret']) . '. On shared hosting other accounts on the same server may be able to read them.', 'Set them to 0600 (0640 if your host needs the group) in your file manager.'); }
+  foreach ($groupHits as $gid => $items) {
+    $problems++;
+    $g = function_exists('posix_getgrgid') ? @posix_getgrgid($gid) : false;
+    $add('permissions', 'perm-group', 'warn', count($items) . ' sensitive item(s) are writable by ' . doctor_gname($gid) . ', which is not this account\'s own group', doctor_perm_list($items) . '. Group write is fine when only you are in the group; here the group is neither this account\'s group nor the PHP process\'s group, so other accounts may be in it.', 'Remove group write (chmod g-w: 0644 for files, 0755 for folders, 0600 for secrets), or if you trust the group, rebuild the doctor with --trusted-groups ' . (is_array($g) && isset($g['name']) ? $g['name'] : $gid) . '.');
+  }
+  if ($unresolved) $add('permissions', 'perm-group-names', 'info', 'Trusted group(s) could not be looked up here: ' . implode(', ', $unresolved), 'This server does not offer group name lookups, so only numeric ids and this account\'s own group can be trusted.', 'Rebuild the doctor with the numeric group id in --trusted-groups.');
+  if (!$problems) $add('permissions', 'perm-scan', 'ok', 'PHP code, .htaccess, settings, private state and .well-known have no unsafe permissions', ($seen['files'] + $stateSeen['files']) . ' file(s) and ' . ($seen['dirs'] + $stateSeen['dirs']) . ' folder(s) looked at, including ' . $stateSeen['files'] . ' private state file(s). Public files in .well-known may be readable by everyone; that is intended.');
+  if ($partial || $statePartial) $add('permissions', 'perm-limit', 'info', 'The permission scan stopped at its time or size limit', ($statePartial ? 'The private state folders hold more files than one check looks at (' . $stateSeen['files'] . ' looked at). ' : '') . ($partial ? 'The web root is large; ' . $seen['files'] . ' files were looked at. ' : '') . 'The report says so rather than guessing; clear out old files and run it again if you need full coverage.');
+}
+
+function doctor_health($root, $host, $trustedGroups = []) {
   $checks = [];
   $add = function ($group, $id, $status, $title, $detail = '', $fix = '') use (&$checks) {
     $checks[] = ['group' => $group, 'id' => $id, 'status' => $status, 'title' => $title, 'detail' => $detail, 'fix' => $fix];
@@ -684,6 +836,10 @@ function doctor_health($root, $host) {
     if ($worldWritable) $add('permissions', 'modes-writable', 'fail', count($worldWritable) . ' file(s) or folder(s) can be changed by any account on this server', implode(', ', array_slice($worldWritable, 0, 8)) . (count($worldWritable) > 8 ? ', and ' . (count($worldWritable) - 8) . ' more' : ''), 'Set folders to 0755 and files to 0644 or tighter (0600 for keys and settings) in your file manager.');
     if ($secret) $add('permissions', 'modes-readable', 'warn', count($secret) . ' key or settings file(s) are readable by other accounts', implode(', ', array_slice($secret, 0, 8)) . (count($secret) > 8 ? ', and ' . (count($secret) - 8) . ' more' : '') . '. On shared hosting other accounts on the same server may be able to read them.', 'Set them to 0600 (or 0640 if your host needs the group) in your file manager. Do not change the folder modes.');
     if (!$worldWritable && !$secret) $add('permissions', 'modes', 'ok', 'Keys, settings and private folders are not open to other accounts', count($files) . ' file(s) and ' . count($watch) . ' folder(s) looked at.');
+    $reported = [];
+    foreach ($files as $f) $reported[$f] = true;
+    foreach ($watch as $d) $reported[$d] = true;
+    doctor_perm_checks($root, $base, $reported, is_array($trustedGroups) ? $trustedGroups : [], $add);
   }
 
   // -- permissions: PHP limits
@@ -783,7 +939,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
   if ($action === 'health') {
     $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
-    $h = doctor_health($DOCTOR_ROOT, $host);
+    $h = doctor_health($DOCTOR_ROOT, $host, isset($DOCTOR['trustedGroups']) && is_array($DOCTOR['trustedGroups']) ? array_slice($DOCTOR['trustedGroups'], 0, 16) : []);
     $h['ok'] = true;
     doctor_json($h);
   }
