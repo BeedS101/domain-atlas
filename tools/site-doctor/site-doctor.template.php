@@ -566,7 +566,8 @@ function doctor_private_base($root) {
 //     credential; a folder lets them add files);
 //   - a key, settings file or private state file that every account can read;
 //   - group-writable items whose group is not one this account trusts.
-// Public files under .well-known are meant to be readable, so for them only write access matters. Ordinary
+// Public files under .well-known are meant to be readable, so for them only write access matters. The
+// .htaccess and index.html placeholders that keep a folder from being listed are meant to be readable too. Ordinary
 // hosting modes (files 0644, folders 0755, PHP files 0644 or 0640, group-readable) are never reported.
 
 function doctor_perm_kind($rel) {
@@ -610,7 +611,7 @@ function doctor_perm_walk($start, $label, $skipAbs, $deadline, &$left, &$out, &$
       $kind = $forceState ? 'state' : doctor_perm_kind($r);
       if ($kind === null) continue;
       if ($kind === 'code' || $kind === 'conf' || $kind === 'secret') $hasCode = true;
-      if (($m & 0002) || ($m & 0020) || (($m & 0004) && ($kind === 'secret' || $kind === 'state') && $name !== '.htaccess')) {
+      if (($m & 0002) || ($m & 0020) || (($m & 0004) && ($kind === 'secret' || $kind === 'state') && !preg_match('/^(\.htaccess|index\.html?)$/i', $name))) {
         $g = @filegroup($full);
         $out[] = [$kind, $r, $m, $g === false ? -1 : $g];
       }

@@ -982,13 +982,14 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     for (const d of ['holdings', 'replay', 'txn']) { fs.mkdirSync(path.join(ext, d), { mode: 0o700 }); fs.chmodSync(path.join(ext, d), 0o700); fs.mkdirSync(path.join(f.root, 'lib', d), { recursive: true }); fs.chmodSync(path.join(f.root, 'lib', d), 0o755); }
     const put = (rel, mode, content) => { const p = path.join(rel.startsWith('EXT/') ? ext : f.root, rel.replace(/^EXT\//, '')); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, content || 'STATE-CONTENT-SECRET'); fs.chmodSync(p, mode); };
     put('EXT/holdings/ok.json', 0o600); put('EXT/replay/w.json', 0o666); put('EXT/txn/sub/r.json', 0o644);
+    put('EXT/holdings/index.html', 0o644, '<html></html>'); put('lib/replay/index.html', 0o644, '');
     put('lib/holdings/w2.json', 0o777); put('lib/replay/r2.json', 0o644); put('lib/txn/ok2.json', 0o600);
     fs.chmodSync(path.join(f.root, 'lib/replay'), 0o777);
     const r = await f.call('health');
     const w = find(r, 'perm-state-writable'), rd = find(r, 'perm-state-readable');
     assert.strictEqual(w.status, 'fail'); assert.strictEqual(rd.status, 'warn');
     assert.ok(w.detail.includes('<private>/replay/w.json (0666)') && w.detail.includes('lib/holdings/w2.json (0777)') && w.detail.includes('lib/replay/ (0777)'), w.detail);
-    assert.ok(rd.detail.includes('<private>/txn/sub/r.json (0644)') && rd.detail.includes('lib/replay/r2.json (0644)') && !rd.detail.includes('ok.json') && !rd.detail.includes('ok2.json'), rd.detail);
+    assert.ok(rd.detail.includes('<private>/txn/sub/r.json (0644)') && rd.detail.includes('lib/replay/r2.json (0644)') && !rd.detail.includes('ok.json') && !rd.detail.includes('ok2.json') && !rd.detail.includes('index.html'), rd.detail);
     assert.ok(/0600/.test(w.fix) && /0600/.test(rd.fix));
     assert.ok(!/STATE-CONTENT-SECRET/.test(r.text));
     f.srv.stop();
