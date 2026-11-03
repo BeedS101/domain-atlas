@@ -565,6 +565,204 @@ function doctor_features($root, $features, $host) {
   return $out;
 }
 
+// ---- manifest ----------------------------------------------------------------------------------------------
+// Reads this domain's own .well-known/spatial.json (public by design) and reports its worlds, the effective
+// policy of each (a world's own value wins, the manifest's top level fills in: SPEC 3.4.1), and the mistakes that
+// are certain: broken references, a missing scene file, an unreadable manifest. Everything else is shown as
+// information. Strings are clipped, lists are capped, and nothing in it is executed or fetched from the network.
+
+function doctor_val($v) {
+  if ($v === true) return 'yes';
+  if ($v === false) return 'no';
+  if ($v === null) return 'not set';
+  if (is_int($v) || is_float($v)) return (string)$v;
+  if (is_string($v)) return doctor_clip($v, 60);
+  if (is_array($v)) {
+    if (!doctor_is_list($v)) return 'an object';
+    if (!$v) return 'none';
+    $names = [];
+    foreach (array_slice($v, 0, 8) as $x) $names[] = is_string($x) ? doctor_clip($x, 50) : '(invalid)';
+    return count($v) . ': ' . implode(', ', $names) . (count($v) > 8 ? ', ...' : '');
+  }
+  return '(invalid)';
+}
+
+function doctor_scene_path($root, $scene) {
+  if (!is_string($scene) || $scene === '' || strlen($scene) > 300) return [null, 'none'];
+  if (preg_match('#^[a-z][a-z0-9+.-]*:#i', $scene) || strpos($scene, '//') === 0) return [null, 'external'];
+  $p = preg_replace('/[?#].*$/', '', $scene);
+  if ($p === '' || strpos($p, "\0") !== false || preg_match('#(^|/)\.\.(/|$)#', $p)) return [null, 'bad'];
+  return [$root . '/' . ltrim($p, '/'), 'local'];
+}
+
+function doctor_manifest($root, $host) {
+  $res = ['state' => 'ok', 'size' => 0, 'anchor' => 'none', 'top' => [], 'worlds' => [], 'problems' => []];
+  $path = $root . '/.well-known/spatial.json';
+  $P = function ($level, $text) use (&$res) { if (count($res['problems']) < 80) $res['problems'][] = [$level, $text]; };
+  if (is_link($path) || !is_file($path)) { $res['state'] = 'missing'; $P('warn', 'There is no .well-known/spatial.json, so this domain declares no space (fine if that is intended).'); return $res; }
+  $res['size'] = (int)@filesize($path);
+  $raw = doctor_small_file($path, 2097152);
+  if ($raw === false) { $res['state'] = 'unreadable'; $P('fail', '.well-known/spatial.json could not be read' . ($res['size'] > 2097152 ? ' (it is larger than 2 MB)' : '') . '.'); return $res; }
+  $m = json_decode($raw, true);
+  if (!is_array($m) || doctor_is_list($m)) { $res['state'] = 'invalid'; $P('fail', '.well-known/spatial.json is not a valid JSON object (' . doctor_clip(json_last_error_msg(), 80) . '). Clients ignore it.'); return $res; }
+  if ($res['size'] > 524288) $P('warn', 'The manifest is ' . round($res['size'] / 1024) . ' KB; every visitor and directory downloads it, so keep it small.');
+
+  // domain level
+  $domain = isset($m['domain']) && is_string($m['domain']) ? $m['domain'] : null;
+  $hasKey = isset($m['identityKey']) && is_string($m['identityKey']) && $m['identityKey'] !== '';
+  $res['anchor'] = $domain !== null && $hasKey ? 'domain, with a pinned identity key' : ($domain !== null ? 'domain' : ($hasKey ? 'identity key (no domain)' : 'none'));
+  if ($domain === null && !$hasKey) $P('fail', 'The manifest has neither "domain" nor "identityKey", so clients cannot tell who it belongs to.');
+  elseif ($domain !== null && $host !== '' && $domain !== $host) $P('warn', '"domain" is "' . doctor_clip($domain, 80) . '" but this site is served as "' . doctor_clip($host, 80) . '". A client that fetched this file from here may refuse it.');
+  if ($domain === null && $hasKey && empty($m['signature'])) $P('fail', 'A key-anchored manifest (identityKey, no domain) must carry a "signature". It is not verified here.');
+  if (isset($m['spec']) && (!is_string($m['spec']) || !preg_match('#^domain-atlas/\d+\.\d+$#', $m['spec']))) $P('warn', '"spec" should look like domain-atlas/1.0.');
+  $top = [];
+  $top[] = 'spec: ' . (isset($m['spec']) ? doctor_val($m['spec']) : 'not set');
+  $top[] = 'domain: ' . ($domain !== null ? doctor_clip($domain, 80) : 'not set') . '  (anchor: ' . $res['anchor'] . ')';
+  if (isset($m['owner']) && is_array($m['owner']) && isset($m['owner']['name'])) $top[] = 'owner: ' . doctor_val($m['owner']['name']);
+  $top[] = 'updated: ' . (isset($m['updated']) ? doctor_val($m['updated']) : 'not set');
+  $top[] = 'default world: ' . (isset($m['defaultWorld']) ? doctor_val($m['defaultWorld']) : 'not set');
+  $top[] = 'size: ' . round($res['size'] / 1024, 1) . ' KB';
+  foreach (['chat' => 'chat (domain-wide)', 'tradingStation' => 'trading station', 'calendar' => 'calendar (domain-wide)'] as $k => $label) if (array_key_exists($k, $m)) $top[] = $label . ': ' . doctor_val($m[$k]);
+  foreach (['acceptedItemClasses' => 'accepted item classes (default for every world)', 'walletBridge' => 'wallet bridge (default)', 'trustedIssuers' => 'trusted issuers (default)'] as $k => $label) if (array_key_exists($k, $m)) $top[] = $label . ': ' . ($k === 'walletBridge' && is_array($m[$k]) ? 'read ' . doctor_val(isset($m[$k]['read']) ? $m[$k]['read'] : null) : doctor_val($m[$k]));
+  if (isset($m['worldDropPolicy'])) $top[] = 'world drop policy: set';
+  if (isset($m['emailTickets']) && is_array($m['emailTickets'])) $top[] = 'email tickets: intake address ' . (!empty($m['emailTickets']['intakeAddress']) ? 'set' : 'not set');
+  if (array_key_exists('fileTransfer', $m)) $top[] = 'file transfer: ' . (is_array($m['fileTransfer']) && isset($m['fileTransfer']['classes']) && is_array($m['fileTransfer']['classes']) ? 'classes ' . doctor_val($m['fileTransfer']['classes']) : 'every eligible class');
+  $res['top'] = $top;
+
+  // cross-checks with what is installed on this domain
+  if (!empty($m['emailTickets']['intakeAddress']) && is_file($root . '/lib/email-tickets.php')) {
+    $e = doctor_feature_email_tickets($root, ['file' => 'lib/atlas-email-tickets-config.json'], $host);
+    if ($e[0] === 'off') $P('warn', 'The manifest advertises an email intake address, but email delivery is not configured here (lib/atlas-email-tickets-config.json). See Features.');
+    elseif (in_array('incoming (IMAP): off', $e[2], true)) $P('warn', 'The manifest advertises an email intake address, but IMAP (incoming) is not configured, so nothing reads that mailbox.');
+  }
+  if (array_key_exists('fileTransfer', $m) && !is_file($root . '/atlas/asset/transfer-to-file.php')) $P('warn', 'The manifest opts into "fileTransfer", but atlas/asset/transfer-to-file.php is not on this domain.');
+
+  // worlds
+  if (!isset($m['worlds']) || !is_array($m['worlds']) || !doctor_is_list($m['worlds'])) { $P('fail', '"worlds" must be a list (even for a single world).'); return $res; }
+  if (!$m['worlds']) $P('warn', '"worlds" is empty, so there is nothing to enter.');
+  $ids = []; $enterable = [];
+  foreach (array_slice($m['worlds'], 0, 200) as $i => $w) {
+    if (!is_array($w) || !isset($w['id']) || !is_string($w['id']) || $w['id'] === '') { $P('fail', 'World #' . ($i + 1) . ' has no text "id".'); continue; }
+    if (isset($ids[$w['id']])) $P('fail', 'Two worlds share the id "' . doctor_clip($w['id'], 60) . '"; links to it are ambiguous.');
+    if (preg_match('/[\s:#]/', $w['id'])) $P('warn', 'World id "' . doctor_clip($w['id'], 60) . '" contains a space, colon or #, which the page link syntax (#world:anchor) cannot express.');
+    $ids[$w['id']] = true;
+    $enterable[$w['id']] = isset($w['entry']) && is_array($w['entry']);
+  }
+  if (count($m['worlds']) > 200) $P('warn', 'Only the first 200 worlds were checked.');
+  if (isset($m['defaultWorld'])) {
+    if (!is_string($m['defaultWorld']) || !isset($ids[$m['defaultWorld']])) $P('fail', '"defaultWorld" names "' . doctor_clip(is_string($m['defaultWorld']) ? $m['defaultWorld'] : '(not text)', 60) . '", which is not in "worlds".');
+    elseif (!$enterable[$m['defaultWorld']]) $P('fail', '"defaultWorld" is a world with no "entry", which a client can never enter.');
+  } elseif (count($ids) > 1) $P('warn', 'There is more than one world and no "defaultWorld", so a plain visit has no obvious destination.');
+
+  $anyKey = is_file($root . '/.well-known/atlas-key.json');
+  foreach (array_slice($m['worlds'], 0, 200) as $i => $w) {
+    if (!is_array($w) || !isset($w['id']) || !is_string($w['id']) || $w['id'] === '') continue;
+    $id = doctor_clip($w['id'], 60);
+    $name = isset($w['name']) && is_string($w['name']) ? doctor_clip($w['name'], 80) : '';
+    $facts = []; $portals = [];
+    $wp = function ($level, $text) use ($P, $id) { $P($level, 'World "' . $id . '": ' . $text); };
+
+    // entry
+    $scene = 'none'; $playable = false;
+    if (isset($w['entry'])) {
+      if (!is_array($w['entry'])) $wp('warn', '"entry" is not an object.');
+      else {
+        $playable = true;
+        $sc = isset($w['entry']['scene']) ? $w['entry']['scene'] : null;
+        list($file, $kind) = doctor_scene_path($root, $sc);
+        if ($kind === 'none') { $wp('warn', '"entry.scene" is missing.'); $scene = 'no scene'; }
+        elseif ($kind === 'external') $scene = 'external: ' . doctor_clip($sc, 80);
+        elseif ($kind === 'bad') { $wp('warn', '"entry.scene" is not a usable path.'); $scene = 'bad path'; }
+        elseif (is_link($file) || !is_file($file)) { $wp('warn', 'the scene file ' . doctor_clip($sc, 100) . ' is not on this domain (fine only if a rewrite rule serves it).'); $scene = doctor_clip($sc, 100) . ' - MISSING'; }
+        else {
+          $scene = doctor_clip($sc, 100) . ' - ' . (int)@filesize($file) . ' bytes';
+          if (preg_match('/\.json$/i', $file)) {
+            list($ss, $sd) = doctor_json_doc($file, 1048576);
+            if ($ss === 'invalid') { $wp('warn', 'the scene file is not valid JSON.'); $scene .= ', NOT VALID JSON'; }
+            elseif ($ss === 'ok') { $n = isset($sd['objects']) && is_array($sd['objects']) ? count($sd['objects']) : 0; $a = isset($sd['anchors']) && is_array($sd['anchors']) ? count($sd['anchors']) : 0; $scene .= ', ' . $n . ' object(s), ' . $a . ' anchor(s)'; }
+          }
+        }
+        $r = isset($w['entry']['renderer']) ? $w['entry']['renderer'] : null;
+        if (!is_array($r) || !$r || !doctor_is_list($r)) $wp('warn', '"entry.renderer" should be a non-empty list.');
+        else $facts[] = 'renderers: ' . doctor_val($r);
+      }
+    } else $scene = 'no entry (policy only, not enterable)';
+    $facts[] = 'scene: ' . $scene;
+
+    // effective policy
+    $pol = isset($w['policy']) && is_array($w['policy']) ? $w['policy'] : [];
+    $eff = function ($key) use ($pol, $m) {
+      if (array_key_exists($key, $pol)) return [$pol[$key], ''];
+      if (array_key_exists($key, $m)) return [$m[$key], ' (domain default)'];
+      return [null, ''];
+    };
+    foreach (['guestAccess' => 'guest access', 'discoverable' => 'discoverable', 'identityRequired' => 'identity required', 'itemDropsAllowed' => 'item drops allowed', 'acceptedItemClasses' => 'accepted item classes', 'trustedIssuers' => 'trusted issuers'] as $k => $label) {
+      list($v, $src) = $eff($k);
+      if ($v === null && !array_key_exists($k, $pol) && !array_key_exists($k, $m)) { $facts[] = $label . ': not set'; continue; }
+      $facts[] = $label . ': ' . doctor_val($v) . $src;
+      if ($k === 'guestAccess' && !in_array($v, ['open', 'invite-only', 'private', 'closed'], true)) $wp('warn', '"guestAccess" must be open, invite-only, private or closed.');
+      if (in_array($k, ['discoverable', 'identityRequired', 'itemDropsAllowed'], true) && !is_bool($v)) $wp('warn', '"' . $k . '" must be true or false.');
+      if ($k === 'acceptedItemClasses') {
+        $bad = !is_array($v) || !doctor_is_list($v);
+        if (!$bad) foreach ($v as $c) if (!is_string($c) || $c === '') $bad = true;
+        if ($bad) $wp('warn', '"acceptedItemClasses" must be a list of class names.');
+      }
+      if ($k === 'trustedIssuers') {
+        $ok = $v === 'any' || $v === 'self' || (is_array($v) && doctor_is_list($v));
+        if (!$ok) $wp('warn', '"trustedIssuers" must be "any", "self" or a list of issuer domains.');
+        elseif ($v === 'self' && !$anyKey) $wp('warn', 'trusts only its own issuer, but this domain has no published issuer key (.well-known/atlas-key.json).');
+      }
+    }
+    list($wb, $wbSrc) = $eff('walletBridge');
+    if ($wb !== null) {
+      if (!is_array($wb) || (isset($wb['read']) && !is_bool($wb['read']))) $wp('warn', '"walletBridge" must look like {"read": true}.');
+      else $facts[] = 'wallet bridge: read ' . doctor_val(isset($wb['read']) ? $wb['read'] : null) . $wbSrc . (isset($wb['sign']) ? ', signing: ' . doctor_val($wb['sign']) : '');
+    }
+    $chat = !empty($w['chat']) || !empty($m['chat']);
+    $facts[] = 'chat: ' . ($chat ? 'on' : 'off') . '   calendar: ' . (!empty($w['calendar']) ? 'this world has its own' : 'none of its own');
+    if (isset($w['profile']) && is_array($w['profile'])) {
+      $pr = $w['profile'];
+      $cap = isset($pr['capabilities']) && is_array($pr['capabilities']) ? $pr['capabilities'] : [];
+      $parts = [];
+      foreach (['building', 'vehicles', 'combat', 'landOwnership'] as $k) if (array_key_exists($k, $cap)) $parts[] = $k . ' ' . doctor_val($cap[$k]);
+      $facts[] = 'profile: ' . (isset($pr['genre']) ? doctor_val($pr['genre']) : '?') . ', scale ' . (isset($pr['scale']) ? doctor_val($pr['scale']) : '?') . ($parts ? ' (' . implode(', ', $parts) . ')' : '');
+      if (isset($pr['scale']) && !in_array($pr['scale'], ['room', 'building', 'district', 'planet', 'system', 'galaxy'], true)) $wp('warn', 'profile "scale" is not one of room, building, district, planet, system, galaxy.');
+    }
+
+    // portals
+    if (isset($w['portals'])) {
+      if (!is_array($w['portals']) || !doctor_is_list($w['portals'])) $wp('warn', '"portals" must be a list.');
+      else foreach (array_slice($w['portals'], 0, 60) as $pi => $po) {
+        if (!is_array($po)) { $wp('warn', 'portal #' . ($pi + 1) . ' is not an object.'); continue; }
+        $kind = isset($po['kind']) && is_string($po['kind']) ? $po['kind'] : '';
+        $to = isset($po['to']) && is_string($po['to']) ? $po['to'] : '';
+        $label = isset($po['label']) && is_string($po['label']) ? doctor_clip($po['label'], 60) : '';
+        $state = 'ok';
+        if ($kind === 'world') {
+          if ($to === '' || !isset($ids[$to])) { $state = 'BROKEN: no world "' . doctor_clip($to, 40) . '"'; $wp('fail', 'portal "' . $label . '" leads to world "' . doctor_clip($to, 40) . '", which does not exist.'); }
+          elseif (!$enterable[$to]) { $state = 'leads to a world with no entry'; $wp('warn', 'portal "' . $label . '" leads to "' . doctor_clip($to, 40) . '", which has no "entry" and cannot be entered.'); }
+        } elseif ($kind === 'domain') {
+          $mf = isset($po['manifest']) && is_string($po['manifest']) ? $po['manifest'] : '';
+          $mh = $mf !== '' ? parse_url($mf) : false;
+          if ($to === '' || $mf === '') { $state = 'needs "to" and "manifest"'; $wp('warn', 'domain portal "' . $label . '" needs both "to" and "manifest".'); }
+          elseif (!is_array($mh) || !isset($mh['scheme'], $mh['host']) || !in_array($mh['scheme'], ['http', 'https'], true)) { $state = 'manifest is not a web address'; $wp('warn', 'domain portal "' . $label . '" has a "manifest" that is not an http(s) address.'); }
+          else {
+            $mhost = $mh['host'] . (isset($mh['port']) ? ':' . $mh['port'] : '');
+            if ($mhost !== $to) { $state = 'manifest host differs from "to"'; $wp('warn', 'domain portal "' . $label . '" names "' . doctor_clip($to, 60) . '" but its manifest is on "' . doctor_clip($mhost, 60) . '".'); }
+            elseif ($mh['scheme'] !== 'https') $state = 'plain http (blocked by strict clients)';
+          }
+        } elseif ($kind === 'key') {
+          if (empty($po['identityKey']) || empty($po['manifest'])) { $state = 'needs "identityKey" and "manifest"'; $wp('warn', 'key portal "' . $label . '" needs "identityKey" and "manifest".'); }
+        } else { $state = 'unknown kind'; $wp('warn', 'portal "' . $label . '" has an unknown kind "' . doctor_clip($kind, 20) . '" (use world, domain or key).'); }
+        $portals[] = ($kind === '' ? '?' : $kind) . ' -> ' . doctor_clip($kind === 'key' ? (isset($po['identityKey']) && is_string($po['identityKey']) ? substr($po['identityKey'], 0, 12) . '...' : '?') : $to, 60) . ($label !== '' ? '  "' . $label . '"' : '') . ($state === 'ok' ? '' : '  [' . $state . ']');
+      }
+      if (count($w['portals']) > 60) $portals[] = '... ' . (count($w['portals']) - 60) . ' more';
+    }
+    $res['worlds'][] = ['id' => $id, 'name' => $name, 'default' => isset($m['defaultWorld']) && $m['defaultWorld'] === $w['id'], 'playable' => $playable, 'facts' => $facts, 'portals' => $portals];
+  }
+  return $res;
+}
+
 // ---- request handling --------------------------------------------------------------------------------------
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -591,6 +789,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   if ($action === 'features') {
     $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
     doctor_json(['ok' => true, 'features' => doctor_features($DOCTOR_ROOT, isset($DOCTOR['features']) && is_array($DOCTOR['features']) ? $DOCTOR['features'] : [], $host)]);
+  }
+  if ($action === 'manifest') {
+    $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
+    doctor_json(['ok' => true, 'manifest' => doctor_manifest($DOCTOR_ROOT, $host)]);
   }
   if ($action === 'scan') {
     $site = isset($_POST['site']) && in_array($_POST['site'], ['a', 'b'], true) ? $_POST['site'] : 'none';
@@ -766,7 +968,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   var envCache = null;
   function full(first) {
     $('rerun').disabled = true; $('verdict').textContent = 'Checking…';
-    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], features: [], env: envCache };
+    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], features: [], manifest: null, env: envCache };
     var chain = Promise.resolve();
     if (first) {
       chain = chain.then(function () { step('Checking the server…'); return call('env'); }).then(function (env) {
@@ -799,7 +1001,8 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     }).then(function () { step('Looking for unexpected files…'); return call('extras'); })
       .then(function (x) { if (!x.ok) throw new Error(x.error || 'extras-failed'); st.extras = x; step('Checking what the web can read…'); return probes(); })
       .then(function (pr) { st.probes = pr; step('Reading the feature switches…'); return call('features'); })
-      .then(function (f) { if (!f.ok) throw new Error(f.error || 'features-failed'); st.features = f.features; });
+      .then(function (f) { if (!f.ok) throw new Error(f.error || 'features-failed'); st.features = f.features; step('Reading the manifest…'); return call('manifest'); })
+      .then(function (mf) { if (!mf.ok) throw new Error(mf.error || 'manifest-failed'); st.manifest = mf.manifest; });
     return chain.then(function () { state = st; render(); }).catch(function (e) {
       $('verdict').textContent = 'The check could not finish: ' + (e && e.message ? e.message : e);
       step('');
@@ -855,6 +1058,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     if (state.extras && state.extras.phpTotal) t.push(['warn', state.extras.phpTotal + ' PHP file(s) here are not in the repository.', 'Look at each one under "Unexpected files". An old copy of a route that was later removed has none of the newer security checks and should be deleted; your own files are fine.']);
     (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'fail' || c.status === 'warn') t.push([c.status, c.title, c.fix || c.detail]); });
     state.features.forEach(function (f) { if (f.state === 'problem') t.push(['warn', 'Feature needs attention: ' + f.label, f.reasons.join('; ')]); });
+    if (state.manifest) state.manifest.problems.forEach(function (p) { t.push([p[0], 'Manifest: ' + p[1], '']); });
     return t;
   }
 
@@ -900,9 +1104,37 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     });
     section('What the web can read', state.probes.some(function (p) { return p.exposed; }) ? 'fail' : 'ok', 'private helper files must not be served', false, pb);
 
+    section('Worlds and manifest', manifestWorst(), manifestSummary(), state.manifest.problems.length > 0, manifestBlocks());
+
     section('Features (what is switched on)', featureWorst(), featureSummary(), state.features.some(function (f) { return f.state === 'problem'; }), featureBlocks());
 
     section('Setup values (copy and paste)', 'info', 'for Asset Studio', false, setupBlocks(env.setup));
+  }
+
+  function manifestWorst() {
+    var ps = state.manifest.problems;
+    return ps.some(function (p) { return p[0] === 'fail'; }) ? 'fail' : (ps.length ? 'warn' : 'ok');
+  }
+  function manifestSummary() {
+    var m = state.manifest;
+    if (m.state !== 'ok') return m.state === 'missing' ? 'no manifest on this domain' : 'manifest ' + m.state;
+    return m.worlds.length + ' world(s), ' + m.problems.length + ' problem(s). Read-only: edit .well-known/spatial.json to change anything.';
+  }
+  function manifestBlocks() {
+    var m = state.manifest, out = [];
+    if (m.problems.length) {
+      var pl = el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Problems found (' + m.problems.length + ')' })]);
+      m.problems.forEach(function (p) { pl.appendChild(item(p[0], p[1])); });
+      out.push(pl);
+    } else if (m.state === 'ok') out.push(el('p', { text: 'No problems found. References between worlds, portals and scene files all resolve.' }));
+    if (m.top.length) { var u = el('ul', { 'class': 'muted' }); m.top.forEach(function (x) { u.appendChild(el('li', { text: x })); }); out.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'This domain' }), u])); }
+    m.worlds.forEach(function (w) {
+      var kids = [el('div', { 'class': 't' }, [w.name || w.id, w.name ? el('span', { 'class': 'muted', text: '  (' + w.id + ')' }) : null, w.default ? el('span', { 'class': 'muted', text: '  default world' }) : null, w.playable ? null : el('span', { 'class': 'muted', text: '  not enterable' })])];
+      var f = el('ul', { 'class': 'muted' }); w.facts.forEach(function (x) { f.appendChild(el('li', { text: x })); }); kids.push(f);
+      if (w.portals.length) { var pu = el('ul', { 'class': 'paths' }); w.portals.forEach(function (x) { pu.appendChild(el('li', { text: x })); }); kids.push(el('details', null, [el('summary', { text: 'Portals (' + w.portals.length + ')' }), pu])); }
+      out.push(el('div', { 'class': 'feat' }, kids));
+    });
+    return out;
   }
 
   var FSTATE = { on: ['ok', 'ON'], off: ['off', 'off'], problem: ['warn', '!'], absent: ['na', 'n/a'] };
@@ -965,6 +1197,9 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     lines.push('', 'MISSING (' + state.missing.length + ')'); state.missing.forEach(function (x) { lines.push('  ' + x.path); });
     lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : '')); });
     lines.push('', 'WEB EXPOSURE'); state.probes.forEach(function (p) { lines.push('  ' + (p.exposed ? 'EXPOSED ' : 'ok      ') + p.path + ' (HTTP ' + p.status + ')'); });
+    lines.push('', 'MANIFEST (' + state.manifest.state + ', ' + state.manifest.worlds.length + ' world(s))');
+    state.manifest.problems.forEach(function (p) { lines.push('  [' + p[0] + '] ' + p[1]); });
+    state.manifest.worlds.forEach(function (w) { lines.push('  world ' + w.id + (w.default ? ' (default)' : '') + (w.playable ? '' : ' (not enterable)')); w.facts.forEach(function (x) { lines.push('        ' + x); }); w.portals.forEach(function (x) { lines.push('        portal ' + x); }); });
     lines.push('', 'FEATURES'); state.features.forEach(function (f) {
       lines.push('  [' + f.state + '] ' + f.label + (f.reasons.length ? ' - ' + f.reasons.join('; ') : ''));
       f.facts.forEach(function (x) { lines.push('        ' + x); });

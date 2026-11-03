@@ -34,10 +34,15 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
   fs.writeFileSync(path.join(root, 'assets/badge.glb'), 'site own model');
   fs.writeFileSync(path.join(root, 'lib/issuer-private-key.pem'), 'PEM-SECRET-MARKER');
   // Feature switches: one on (email, with a password that must never be shown), one misconfigured (wrong host).
+  const port = await freePort();
+  // Manifest with this host as its domain and one portal that leads nowhere.
+  const spatial = JSON.parse(fs.readFileSync(path.join(root, '.well-known/spatial.json'), 'utf8'));
+  spatial.domain = '127.0.0.1:' + port;
+  spatial.worlds[0].portals.push({ kind: 'world', to: 'ghost', label: 'Into the void' });
+  fs.writeFileSync(path.join(root, '.well-known/spatial.json'), JSON.stringify(spatial));
   fs.writeFileSync(path.join(root, 'lib/atlas-email-tickets-config.json'), JSON.stringify({ smtpHost: 'smtp.example.net', smtpUser: 'u', smtpPass: 'MAIL-PASS-MARKER', fromAddress: 'from-marker@example.net' }));
   fs.writeFileSync(path.join(root, 'lib/atlas-ledger-issuance-config.json'), JSON.stringify({ enabled: true, domain: 'not-this-host.example' }));
 
-  const port = await freePort();
   const php = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root], { stdio: 'ignore' });
   for (let i = 0; i < 100; i++) { if (await new Promise((r) => { const s = net.connect(port, '127.0.0.1', () => { s.destroy(); r(true); }); s.on('error', () => r(false)); })) break; await new Promise((r) => setTimeout(r, 50)); }
   const url = 'http://127.0.0.1:' + port + '/site-doctor.php';
@@ -89,6 +94,18 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
     const text = await page.locator('details', { hasText: 'What the web can read' }).textContent();
     assert.ok(/\/lib\/store\.php/.test(text) && /Not readable/.test(text));
     assert.ok(!/can be read over the web/.test(text.replace('private helper files must not be served', '')), 'nothing flagged as exposed except the planted key, which the dev server serves');
+  });
+
+  await check('the Worlds and manifest section lists worlds and policy, and shows broken references', async () => {
+    const sec = page.locator('details', { hasText: 'Worlds and manifest' });
+    assert.ok(await sec.getAttribute('open') !== null, 'opens by itself when there are problems');
+    const text = await sec.textContent();
+    assert.ok(/Example Plaza/.test(text) && /default world/.test(text) && /guest access: open/.test(text));
+    assert.ok(/Problems found/.test(text) && /leads to world "ghost", which does not exist/.test(text));
+    assert.ok(/BROKEN: no world "ghost"/.test(text));
+    const todo = await page.locator('details', { hasText: 'To do' }).first().textContent();
+    assert.ok(/Manifest: .*ghost/.test(todo));
+    if (shotDir) { await sec.scrollIntoViewIfNeeded(); await page.screenshot({ path: path.join(shotDir, 'doctor-manifest.png'), fullPage: true }); }
   });
 
   await check('the Features section shows what is on, off and misconfigured, how to switch, and no secrets', async () => {

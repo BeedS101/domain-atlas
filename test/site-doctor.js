@@ -582,6 +582,161 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     for (const p of PLANTED) assert.ok(!r.text.includes(p), p);
   });
 
+  // ---- manifest inspector (read-only) ---------------------------------------------------------------------------
+  const spatialPath = path.join(root, '.well-known/spatial.json');
+  const baseManifest = fs.readFileSync(spatialPath, 'utf8');
+  const withManifest = async (edit) => {
+    const j = JSON.parse(baseManifest); j.domain = srv.host;
+    const r = edit(j); fs.writeFileSync(spatialPath, typeof r === 'string' ? r : JSON.stringify(j));
+    const res = await call('manifest');
+    assert.strictEqual(res.json.ok, true, res.text.slice(0, 200));
+    return res.json.manifest;
+  };
+  const probs = (m) => m.problems.map((p) => p[0] + ': ' + p[1]);
+  const has = (m, re, level) => m.problems.some((p) => re.test(p[1]) && (!level || p[0] === level));
+
+  await check('manifest: a wrong token is refused; a healthy manifest lists its worlds, effective policy and portals', async () => {
+    assert.strictEqual((await bad('manifest')).status, 403);
+    const keyDoc = path.join(root, '.well-known/atlas-key.json');
+    const keyKept = fs.existsSync(keyDoc) ? fs.readFileSync(keyDoc) : null;
+    if (keyKept) fs.unlinkSync(keyDoc);
+    const m = await withManifest(() => {});
+    if (keyKept) fs.writeFileSync(keyDoc, keyKept);
+    assert.strictEqual(m.state, 'ok');
+    assert.strictEqual(m.anchor, 'domain');
+    assert.deepStrictEqual(m.worlds.map((w) => w.id), JSON.parse(baseManifest).worlds.map((w) => w.id));
+    const plaza = m.worlds.find((w) => w.id === 'plaza');
+    assert.ok(plaza.default && plaza.playable);
+    assert.ok(plaza.facts.some((f) => /^scene: \/spatial\/plaza\/scene\.json - \d+ bytes, \d+ object\(s\), 2 anchor/.test(f)), plaza.facts.join(' | '));
+    assert.ok(plaza.facts.includes('guest access: open') && plaza.facts.includes('identity required: no'));
+    assert.ok(plaza.portals.some((x) => /^world -> museum/.test(x) && !/\[/.test(x)));
+    assert.ok(plaza.portals.some((x) => /^key -> /.test(x)));
+    // real, specific findings on the sample site: no mail config, and "self" issuers without a published key
+    assert.ok(has(m, /email intake address/, 'warn'), probs(m).join(' | '));
+    assert.ok(has(m, /World "museum": trusts only its own issuer/, 'warn'));
+    assert.ok(!has(m, /domain" is/), 'domain matches the host');
+    assert.ok(!probs(m).some((x) => x.startsWith('fail')), probs(m).join(' | '));
+  });
+
+  await check('manifest: a domain that is not this host is flagged; a key-anchored manifest needs a signature', async () => {
+    fs.writeFileSync(spatialPath, baseManifest);
+    let res = await call('manifest');
+    assert.ok(has(res.json.manifest, /"domain" is "localhost:8001" but this site is served as/, 'warn'));
+    let m = await withManifest((j) => { delete j.domain; j.identityKey = 'KEY'; });
+    assert.ok(/identity key/.test(m.anchor) && has(m, /must carry a "signature"/, 'fail'));
+    m = await withManifest((j) => { j.identityKey = 'KEY'; });
+    assert.strictEqual(m.anchor, 'domain, with a pinned identity key');
+    m = await withManifest((j) => { delete j.domain; });
+    assert.ok(has(m, /neither "domain" nor "identityKey"/, 'fail'));
+  });
+
+  await check('manifest: broken JSON, a missing file, a non-list "worlds" and an empty list are each reported plainly', async () => {
+    let m = await withManifest(() => '{ "domain": ');
+    assert.strictEqual(m.state, 'invalid'); assert.ok(has(m, /not a valid JSON object/, 'fail')); assert.deepStrictEqual(m.worlds, []);
+    m = await withManifest(() => '[1,2]');
+    assert.strictEqual(m.state, 'invalid');
+    fs.unlinkSync(spatialPath);
+    m = (await call('manifest')).json.manifest;
+    assert.strictEqual(m.state, 'missing'); assert.ok(has(m, /declares no space/, 'warn'));
+    m = await withManifest((j) => { j.worlds = { plaza: {} }; });
+    assert.ok(has(m, /"worlds" must be a list/, 'fail'));
+    m = await withManifest((j) => { j.worlds = []; });
+    assert.ok(has(m, /"worlds" is empty/, 'warn'));
+  });
+
+  await check('manifest: duplicate ids, a bad defaultWorld and world references that do not resolve are found', async () => {
+    let m = await withManifest((j) => { j.worlds.push({ id: 'plaza', name: 'dup', entry: { scene: '/x.json', renderer: ['gltf'] } }); });
+    assert.ok(has(m, /share the id "plaza"/, 'fail'));
+    m = await withManifest((j) => { j.defaultWorld = 'nowhere'; });
+    assert.ok(has(m, /"defaultWorld" names "nowhere"/, 'fail'));
+    m = await withManifest((j) => { delete j.defaultWorld; });
+    assert.ok(has(m, /no "defaultWorld"/, 'warn'));
+    m = await withManifest((j) => { j.worlds.push({ id: 'checkout', policy: { walletBridge: { read: true } } }); j.defaultWorld = 'checkout'; });
+    assert.ok(has(m, /"defaultWorld" is a world with no "entry"/, 'fail'));
+    assert.strictEqual(m.worlds.find((w) => w.id === 'checkout').playable, false);
+    m = await withManifest((j) => { j.worlds[0].portals.push({ kind: 'world', to: 'ghost', label: 'Into the void' }); });
+    assert.ok(has(m, /portal "Into the void" leads to world "ghost", which does not exist/, 'fail'));
+    assert.ok(m.worlds[0].portals.some((x) => /BROKEN: no world "ghost"/.test(x)));
+    m = await withManifest((j) => { j.worlds.push({ id: 'policy-only', policy: {} }); j.worlds[0].portals.push({ kind: 'world', to: 'policy-only', label: 'Nowhere' }); });
+    assert.ok(has(m, /portal "Nowhere" leads to "policy-only", which has no "entry"/, 'warn'));
+    m = await withManifest((j) => { j.worlds.push({ id: 'bad id:1', entry: { scene: '/spatial/plaza/scene.json', renderer: ['procedural-v1'] } }); });
+    assert.ok(has(m, /contains a space, colon or #/, 'warn'));
+  });
+
+  await check('manifest: other portal kinds are checked for the fields they need', async () => {
+    const m = await withManifest((j) => {
+      j.worlds[0].portals = [
+        { kind: 'domain', to: 'a.example', label: 'no manifest' },
+        { kind: 'domain', to: 'a.example', manifest: 'ftp://a.example/x', label: 'ftp' },
+        { kind: 'domain', to: 'a.example', manifest: 'https://b.example/.well-known/spatial.json', label: 'other host' },
+        { kind: 'domain', to: 'a.example', manifest: 'https://a.example/.well-known/spatial.json', label: 'fine' },
+        { kind: 'key', label: 'keyless' }, { kind: 'teleport', label: 'odd' }, 'not an object'
+      ];
+    });
+    for (const re of [/domain portal "no manifest" needs both/, /domain portal "ftp" has a "manifest" that is not an http/, /domain portal "other host" names "a\.example" but its manifest is on "b\.example"/, /key portal "keyless" needs/, /portal "odd" has an unknown kind "teleport"/, /portal #7 is not an object/]) assert.ok(has(m, re, 'warn'), String(re));
+    assert.ok(!has(m, /portal "fine"/));
+  });
+
+  await check('manifest: scene files are checked on disk (missing, bad path, invalid JSON, external are told apart)', async () => {
+    const own = path.join(root, 'spatial/custom'); fs.mkdirSync(own, { recursive: true });
+    fs.writeFileSync(path.join(own, 'broken.json'), '{ not json');
+    fs.writeFileSync(path.join(own, 'model.glb'), 'glb');
+    const world = (id, scene) => ({ id, entry: { scene, renderer: ['procedural-v1'] }, policy: {} });
+    const m = await withManifest((j) => { j.worlds.push(world('w-missing', '/spatial/custom/nope.json'), world('w-broken', '/spatial/custom/broken.json'), world('w-glb', '/spatial/custom/model.glb?v=2'), world('w-ext', 'https://cdn.example/scene.json'), world('w-up', '/../../etc/passwd'), { id: 'w-none', entry: { renderer: ['gltf'] } }); });
+    assert.ok(has(m, /World "w-missing": the scene file \/spatial\/custom\/nope\.json is not on this domain/, 'warn'));
+    assert.ok(has(m, /World "w-broken": the scene file is not valid JSON/, 'warn'));
+    assert.ok(has(m, /World "w-up": "entry\.scene" is not a usable path/, 'warn'));
+    assert.ok(has(m, /World "w-none": "entry\.scene" is missing/, 'warn'));
+    const f = (id) => m.worlds.find((w) => w.id === id).facts.join(' | ');
+    assert.ok(/scene: \/spatial\/custom\/model\.glb\?v=2 - 3 bytes/.test(f('w-glb')) && !has(m, /World "w-glb"/));
+    assert.ok(/scene: external: https:\/\/cdn\.example/.test(f('w-ext')) && !has(m, /World "w-ext"/));
+    assert.ok(/MISSING/.test(f('w-missing')) && /NOT VALID JSON/.test(f('w-broken')));
+    assert.ok(!JSON.stringify(m).includes('root:'), 'nothing from /etc/passwd or a file system path is returned');
+  });
+
+  await check('manifest: effective policy follows the domain default; bad policy values are flagged', async () => {
+    let m = await withManifest((j) => {
+      j.acceptedItemClasses = ['atlas.default'];
+      j.walletBridge = { read: true };
+      j.worlds[1].policy = { guestAccess: 'invite-only' };
+      j.worlds[2].policy = { acceptedItemClasses: [], walletBridge: { read: false } };
+    });
+    const facts = (i) => m.worlds[i].facts.join(' | ');
+    assert.ok(/accepted item classes: 1: atlas\.default \(domain default\)/.test(facts(1)), facts(1));
+    assert.ok(/guest access: invite-only/.test(facts(1)) && /wallet bridge: read yes \(domain default\)/.test(facts(1)));
+    assert.ok(/accepted item classes: none(?! \()/.test(facts(2)), 'an explicit empty list wins over the default: ' + facts(2));
+    assert.ok(/wallet bridge: read no(?! \()/.test(facts(2)));
+    m = await withManifest((j) => { Object.assign(j.worlds[0].policy, { guestAccess: 'whenever', discoverable: 'yes', identityRequired: 1, acceptedItemClasses: [1, 2], trustedIssuers: 'friends', walletBridge: { read: 'yes' } }); j.worlds[0].profile.scale = 'continent'; });
+    for (const re of [/"guestAccess" must be open/, /"discoverable" must be true or false/, /"identityRequired" must be true or false/, /"acceptedItemClasses" must be a list of class names/, /"trustedIssuers" must be "any"/, /"walletBridge" must look like/, /profile "scale" is not one of/]) assert.ok(has(m, re, 'warn'), String(re));
+  });
+
+  await check('manifest: the intake address and file-transfer opt-in are cross-checked with what is installed', async () => {
+    fs.writeFileSync(path.join(root, 'lib/atlas-email-tickets-config.json'), JSON.stringify({ smtpHost: 'smtp.example.net', fromAddress: 'f@example.net' }));
+    let m = await withManifest(() => {});
+    assert.ok(has(m, /IMAP \(incoming\) is not configured/, 'warn') && !has(m, /email delivery is not configured/));
+    assert.ok(fs.existsSync(path.join(root, '.well-known/atlas-key.json')) && !has(m, /trusts only its own issuer/), 'a published issuer key satisfies "self"');
+    fs.writeFileSync(path.join(root, 'lib/atlas-email-tickets-config.json'), JSON.stringify({ smtpHost: 'smtp.example.net', fromAddress: 'f@example.net', imapHost: 'imap.example.net' }));
+    m = await withManifest(() => {});
+    assert.ok(!has(m, /intake address/));
+    fs.unlinkSync(path.join(root, 'lib/atlas-email-tickets-config.json'));
+    const t = path.join(root, 'atlas/asset/transfer-to-file.php'); const keepT = fs.readFileSync(t); fs.unlinkSync(t);
+    m = await withManifest(() => {});
+    assert.ok(has(m, /opts into "fileTransfer", but atlas\/asset\/transfer-to-file\.php is not on this domain/, 'warn'));
+    fs.writeFileSync(t, keepT);
+  });
+
+  await check('manifest: a huge manifest is reported without being parsed, and long or hostile text is clipped and returned as data', async () => {
+    fs.writeFileSync(spatialPath, '{"domain":"' + srv.host + '","worlds":[],"pad":"' + 'x'.repeat(2200000) + '"}');
+    let r = await call('manifest');
+    assert.strictEqual(r.json.manifest.state, 'unreadable'); assert.ok(/larger than 2 MB/.test(r.json.manifest.problems[0][1]));
+    const m = await withManifest((j) => { j.worlds[0].name = '<img src=x onerror=alert(1)>' + 'N'.repeat(500); j.worlds[0].portals[0].label = 'L'.repeat(500); });
+    assert.ok(m.worlds[0].name.length <= 80 && m.worlds[0].name.startsWith('<img src=x'));
+    assert.ok(m.worlds[0].portals[0].length < 200);
+    assert.ok(r.text.length < 5000);
+  });
+
+  fs.writeFileSync(spatialPath, baseManifest);
+
   await check('no response ever contained private-state contents or the token', () => {
     const joined = everything.join('\n');
     assert.ok(!joined.includes('SECRET-MARKER-9f3a7c'));
