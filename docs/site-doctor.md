@@ -24,7 +24,7 @@ A new build gives a new token and a new deadline, and describes the commit you b
 
 1. Upload `site-doctor.php` into the web root of the domain (the folder that contains `atlas/` and `lib/`).
 2. Open `https://YOUR-DOMAIN/site-doctor.php` and paste the token.
-3. Tell it what the domain serves (issuer only, demo site A or demo site B; it guesses from the files). Read the report.
+3. Tell it what the domain serves (issuer only, demo site A or demo site B) and whether the Call and Presence services are installed; it guesses from the files. Read the report.
 4. Fix what it lists, press **Check again**, repeat.
 5. Press **Delete this file** (or delete `site-doctor.php` in your file manager). Do not leave it on the server.
 
@@ -38,11 +38,12 @@ A new build gives a new token and a new deadline, and describes the commit you b
 - *Different pages* may be edits you made on purpose; the doctor only tells you.
 - *Different on purpose*: `.well-known/spatial.json` differs on every live site by design (it carries your own worlds and the Studio policy world).
 - Text files are compared with Windows line endings (CRLF) folded to Unix ones, so a file uploaded from a Windows checkout does not show as different.
-- Optional files (the `README.txt`, the dev router, `txlab/` and the demo sites' own models) are not reported as missing.
+- Optional files (`.example` templates, `README.txt`, the dev router, `tools/`, `txlab/` and the demo sites' own models) are not reported as missing.
+- The Call service (`call-php`) and Presence service (`presence-php`) are compared only when ticked.
 
 **Server and setup** checks the PHP version and extensions, HTTPS, whether `lib/` and `.well-known/` are writable, that `lib/.htaccess` is present, that a published issuer key has its revocation list, the manifest's `studio` world, and Asset Studio's private storage: outside the web root, writable, the five sub-folders present, and `studio-config.json` naming exactly this host.
 
-**Unexpected files** lists files that are not in the repository. Your own models and pages are normal here; it is for awareness. Private state (keys, holdings, replay records, config, `storage-root.php`) is listed by name, mode and size only and is never opened.
+**Unexpected files** lists files that are not in the repository. Your own models and pages are normal here. Unknown PHP files get their own list and a to-do item, because an old copy of a route that was later removed from the repository has none of the newer security checks. Folders with many unknown files are shown as one line (`folder/ [N files]`). Private state (keys, holdings, replay records, service `state/` folders, config files, `storage-root.php`) is listed by name, mode and size only, one line per state folder, and is never opened.
 
 **What the web can read** is checked by your browser: the helper includes and the private-key path must not be served. A file that answers with PHP source or a key is reported as exposed.
 

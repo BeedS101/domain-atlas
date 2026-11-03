@@ -93,8 +93,10 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
 
   await check('manifest: has studio-mint.php, the Studio models and no state-like paths', () => {
     const paths = manifest.entries.map((e) => e[0]);
-    for (const p of ['atlas/studio/inc/studio-mint.php', 'assets/studio/badge.glb', 'lib/store.php', '.well-known/spatial.json']) assert.ok(paths.includes(p), p);
-    const state = paths.filter((p) => /(^|\/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|\.salt|storage-root\.php|private-dir\.php|replay|holdings|txn)(\/|$)/.test(p));
+    for (const p of ['atlas/studio/inc/studio-mint.php', 'assets/studio/badge.glb', 'lib/store.php', '.well-known/spatial.json', 'atlas/call/info.php', 'presence/status.php']) assert.ok(paths.includes(p), p);
+    const example = manifest.entries.filter((e) => /\.example$/.test(e[0]) && !e[4].includes('o')).map((e) => e[0]);
+    assert.deepStrictEqual(example, [], '.example files are optional');
+    const state = paths.filter((p) => /(^|\/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|\.salt|storage-root\.php|private-dir\.php|replay|holdings|txn)(\/|$)/.test(p) || /(^|\/)(state|config\.php)(\/|$)/.test(p));
     assert.deepStrictEqual(state, []);
     assert.ok(!phpSrc.includes(built.token) && !phpSrc.includes(built.token.replace(/-/g, '')), 'token itself is not embedded');
     const bad = manifest.entries.filter((e) => e[5] === '' || !/^[0-9a-f]{64}$/.test(e[1]));
@@ -244,7 +246,8 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     fs.writeFileSync(path.join(root, 'lib/atlas-holdings-store.json'), JSON.stringify({ secret: SECRET }));
     fs.mkdirSync(path.join(root, 'lib/replay'), { recursive: true });
     fs.writeFileSync(path.join(root, 'lib/replay/r1.json'), SECRET);
-    fs.writeFileSync(path.join(root, 'atlas/studio/inc/storage-root.php'), '<?php return "/nonexistent/' + SECRET + '";');
+    // storage-root.php holds a folder path (which the readiness check reports), not a secret: it is only listed by name here.
+    fs.writeFileSync(path.join(root, 'atlas/studio/inc/storage-root.php'), '<?php return "/nonexistent/studio-data";');
     fs.writeFileSync(path.join(root, 'error_log'), 'warning ' + SECRET);
     fs.writeFileSync(path.join(root, 'evil <img src=x onerror=alert(1)>.txt'), 'x');
     const r = await call('extras');
@@ -257,6 +260,45 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     assert.deepStrictEqual(r.json.host, ['error_log']);
     assert.ok(!r.text.includes('site-doctor.php') && !r.json.other.includes('site-doctor.php'), 'the doctor does not list itself');
     assert.strictEqual(r.json.partial, false);
+  });
+
+  await check('unknown PHP files get their own list; big state and unknown folders collapse to one line', async () => {
+    fs.mkdirSync(path.join(root, 'atlas/asset'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'atlas/asset/trade.php'), '<?php // an old route');
+    fs.mkdirSync(path.join(root, 'atlas/call/lib/state/nonces/1'), { recursive: true });
+    for (let i = 0; i < 25; i++) fs.writeFileSync(path.join(root, 'atlas/call/lib/state/nonces/1/' + i + '.dat'), 'STATE-BYTES-' + i);
+    fs.writeFileSync(path.join(root, 'atlas/call/lib/config.php.off'), '<?php return ["secret" => "CALL-SECRET-1"];');
+    fs.mkdirSync(path.join(root, 'bulk'), { recursive: true });
+    for (let i = 0; i < 30; i++) fs.writeFileSync(path.join(root, 'bulk/f' + i + '.txt'), 'x');
+    const r = await call('extras');
+    assert.ok(r.json.php.includes('atlas/asset/trade.php'), 'the old route is listed as unknown PHP');
+    assert.ok(!r.json.other.includes('atlas/asset/trade.php'));
+    assert.ok(r.json.state.some((s) => s[0] === 'atlas/call/lib/state/' && s[3] === 'dir' && s[2] === 25), JSON.stringify(r.json.state.filter((s) => /state/.test(s[0]))));
+    assert.ok(r.json.state.some((s) => s[0] === 'atlas/call/lib/config.php.off' && !s[3]), 'disabled call config is private state');
+    assert.ok(!r.json.other.some((o) => o.startsWith('atlas/call/lib/state/')), 'state files are not listed as unknown');
+    assert.ok(r.json.other.includes('bulk/ [30 files]') && !r.json.other.some((o) => /^bulk\/f/.test(o)));
+    assert.strictEqual(r.json.otherTotal >= 30, true);
+    assert.ok(!r.text.includes('STATE-BYTES') && !r.text.includes('CALL-SECRET-1'));
+  });
+
+  await check('Call and Presence are checked only when selected, and a missing Call file is reported', async () => {
+    const none = await call('scan', { site: 'a' });
+    const withCall = await call('scan', { site: 'a', mods: 'c' });
+    assert.strictEqual(withCall.json.total - none.json.total, manifest.entries.filter((e) => e[5].includes('c')).length);
+    const missing = issue(withCall);
+    assert.ok(missing.includes('atlas/call/info.php missing'), missing.slice(0, 4).join(' | '));
+    assert.ok(!issue(none).some((m) => m.startsWith('atlas/call/')));
+    const both = await call('scan', { site: 'a', mods: 'cp' });
+    assert.ok(issue(both).includes('presence/status.php missing'));
+    const env = await call('env');
+    assert.strictEqual(env.json.detectedMods, '');
+    fs.mkdirSync(path.join(root, 'atlas/call'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'atlas/call/info.php'), '<?php');
+    assert.strictEqual((await call('env')).json.detectedMods, 'c');
+    fs.unlinkSync(path.join(root, 'atlas/call/info.php'));
+    // optional repository files (examples, READMEs) are never "missing"
+    const lab = await call('scan', { site: 'a', mods: 'c' });
+    assert.ok(!issue(lab).some((m) => /\.example missing/.test(m)));
   });
 
   // ---- readiness checks ---------------------------------------------------------------------------------------

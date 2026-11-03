@@ -9,7 +9,8 @@
 // off the server). Only a SHA-256 of the token is embedded in the PHP file. Run from a clean checkout so the
 // manifest describes committed files; --allow-dirty overrides that.
 //
-// Manifest: every tracked file of issuer-php/ (tag i), demo-domain-a/ (tag a) and demo-domain-b/ (tag b),
+// Manifest: every tracked file of issuer-php/ (tag i), demo-domain-a/ (tag a), demo-domain-b/ (tag b) and the
+// optional Call (call-php/, tag c) and Presence (presence-php/, tag p) services,
 // as paths relative to a web root, with a SHA-256 of the content (text files with CRLF folded to LF, so a
 // Windows checkout compares equal) and a group: c code, p page/config, a asset. State is never listed.
 'use strict';
@@ -22,7 +23,7 @@ const { FILES: STUDIO_FILES } = require('./lib/studio-files');
 const ROOT = path.resolve(__dirname, '..');
 const TEMPLATE = path.join(__dirname, 'site-doctor', 'site-doctor.template.php');
 const MARKER = '/*@@DOCTOR_CONFIG@@*/';
-const SOURCES = [['issuer-php', 'i'], ['demo-domain-a', 'a'], ['demo-domain-b', 'b']];
+const SOURCES = [['issuer-php', 'i'], ['demo-domain-a', 'a'], ['demo-domain-b', 'b'], ['call-php', 'c'], ['presence-php', 'p']];
 
 const args = process.argv.slice(2);
 const flag = (n) => args.includes(n);
@@ -36,7 +37,7 @@ if (!out || !(hours > 0 && hours <= 24 * 30)) {
 
 // Files that only exist as local state or private configuration; never in a manifest even if a fallback
 // directory walk finds them (git-tracked lists never contain them).
-const STATE = /(^|\/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|replay|holdings|txn|storage-root\.php|private-dir\.php|error_log)(\/|$)/i;
+const STATE = /(^|\/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|replay|holdings|txn|state|storage-root\.php|private-dir\.php|config\.php|error_log)(\/|$)/i;
 const TEXT_EXT = new Set(['php', 'html', 'htm', 'js', 'css', 'json', 'md', 'txt', 'svg', 'xml', 'example']);
 const isTextName = (rel) => /(^|\/)\.htaccess$/.test(rel) || TEXT_EXT.has(path.extname(rel).slice(1).toLowerCase());
 const isText = (rel, buf) => isTextName(rel) && !buf.subarray(0, 8000).includes(0);
@@ -77,13 +78,13 @@ else if (dirty.length && !flag('--allow-dirty')) {
 // Group: c code (a wrong or missing file breaks the issuer), p page or configuration, a asset.
 const groupOf = (rel) => (/(^|\/)\.htaccess$/.test(rel) || /\.(php|example)$/.test(rel) ? 'c' : (rel.startsWith('assets/') || /\.(glb|png|jpg|jpeg|gif|ico|woff2?)$/i.test(rel) ? 'a' : 'p'));
 // Present on a typical deployment only sometimes: absence is not a problem.
-const isOptional = (rel) => rel === 'README.txt' || rel === 'test-router.php' || rel === 'lib/atlas-cli.php' || rel.startsWith('txlab/')
+const isOptional = (rel) => rel === 'README.txt' || rel === 'test-router.php' || rel === 'lib/atlas-cli.php' || rel.startsWith('txlab/') || rel.startsWith('tools/') || /\.example$/.test(rel)
   || (rel.startsWith('assets/') && !rel.startsWith('assets/studio/'));
 // Site-specific by design (each live site's manifest differs from the repository's development one).
 const expectDiffers = (rel) => rel === '.well-known/spatial.json';
 
 const entries = new Map(); // path + '\0' + sha -> entry
-const sizes = { i: 0, a: 0, b: 0 };
+const sizes = { i: 0, a: 0, b: 0, c: 0, p: 0 };
 function add(rel, tag, buf) {
   const text = isText(rel, buf);
   const data = text ? Buffer.from(buf.toString('utf8').replace(/\r\n/g, '\n'), 'utf8') : buf;
@@ -145,7 +146,7 @@ fs.writeFileSync(path.join(path.resolve(out), 'ACCESS.txt'), [
 ].join('\r\n'));
 
 const count = (t) => list.filter((e) => e.tags.includes(t)).length;
-console.log('site-doctor.php written: ' + list.length + ' manifest entries (issuer ' + count('i') + ', site A ' + count('a') + ', site B ' + count('b') + '), commit ' + commit);
+console.log('site-doctor.php written: ' + list.length + ' manifest entries (issuer ' + count('i') + ', site A ' + count('a') + ', site B ' + count('b') + ', call ' + count('c') + ', presence ' + count('p') + '), commit ' + commit);
 console.log('output: ' + phpFile);
 console.log('token:  ' + token);
 console.log('valid until ' + until);

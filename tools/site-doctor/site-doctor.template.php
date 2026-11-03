@@ -52,9 +52,10 @@ function doctor_is_text_name($rel) {
   return in_array(strtolower(pathinfo($rel, PATHINFO_EXTENSION)), ['php', 'html', 'htm', 'js', 'css', 'json', 'md', 'txt', 'svg', 'xml', 'example'], true);
 }
 
-// Entries that apply to the selected site: the issuer's files, plus those of one demo site.
-function doctor_applicable($entries, $site) {
-  $want = 'i' . ($site === 'a' ? 'a' : ($site === 'b' ? 'b' : ''));
+// Entries that apply to the selection: the issuer's files, those of one demo site and the optional services
+// (c Call, p Presence).
+function doctor_applicable($entries, $site, $mods) {
+  $want = 'i' . ($site === 'a' ? 'a' : ($site === 'b' ? 'b' : '')) . $mods;
   $out = [];
   foreach ($entries as $e) if (strpbrk($e[5], $want) !== false) $out[] = $e;
   return $out;
@@ -86,17 +87,31 @@ function doctor_check_entry($root, $e) {
 
 // Private state: matched by name only, never opened.
 function doctor_is_state($rel) {
-  return (bool)preg_match('#(^|/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|storage-root\.php|private-dir\.php|atlas-private-dir\.txt|studio-config\.json|[^/]*config[^/]*\.json)$#i', $rel)
-    || (bool)preg_match('#(^|/)(replay|holdings|txn)/#', $rel);
+  return (bool)preg_match('#(^|/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|storage-root\.php|private-dir\.php|atlas-private-dir\.txt|studio-config\.json|[^/]*config[^/]*\.json|config\.php(\.off|\.bak)?)$#i', $rel)
+    || (bool)preg_match('#(^|/)(replay|holdings|txn|state)/#', $rel);
 }
 function doctor_is_host_file($rel) {
   return (bool)preg_match('#(^|/)(error_log|php\.ini|\.user\.ini|\.htaccess|\.ftpquota|cgi-bin|\.well-known/(acme-challenge|pki-validation)/.*)$#', $rel);
 }
 
+// Lists of many files in one folder are summarised as "folder/ [N files]".
+function doctor_collapse($paths, $limit) {
+  $byDir = [];
+  foreach ($paths as $r) { $d = dirname($r); $byDir[$d === '.' ? '' : $d][] = $r; }
+  $out = [];
+  foreach ($byDir as $d => $list) {
+    if (count($list) > $limit) $out[] = ($d === '' ? '' : $d . '/') . ' [' . count($list) . ' files]';
+    else foreach ($list as $r) $out[] = $r;
+  }
+  sort($out);
+  return $out;
+}
+
 function doctor_extras($root, $known, $self, $budget) {
   $t0 = microtime(true);
   $skipDirs = ['cgi-bin' => 1, '.git' => 1, 'node_modules' => 1, '.well-known/acme-challenge' => 1, '.well-known/pki-validation' => 1, '.cagefs' => 1, '.tmp' => 1];
-  $res = ['state' => [], 'host' => [], 'other' => [], 'otherTotal' => 0, 'scanned' => 0, 'partial' => false];
+  $scanned = 0; $partial = false;
+  $state = []; $host = []; $other = []; $php = [];
   $stack = [['', 0]];
   while ($stack) {
     list($rel, $depth) = array_pop($stack);
@@ -107,9 +122,9 @@ function doctor_extras($root, $known, $self, $budget) {
       if ($name === '.' || $name === '..') continue;
       $r = $rel === '' ? $name : $rel . '/' . $name;
       $full = $root . '/' . $r;
-      if (microtime(true) - $t0 > $budget || $res['scanned'] > 40000) { $res['partial'] = true; break 2; }
+      if (microtime(true) - $t0 > $budget || $scanned > 40000) { $partial = true; break 2; }
       if (is_link($full)) {
-        if (!isset($known[$r])) { $res['otherTotal']++; if (count($res['other']) < 400) $res['other'][] = $r . ' (symlink)'; }
+        if (!isset($known[$r])) $other[] = $r . ' (symlink)';
         continue;
       }
       if (is_dir($full)) {
@@ -117,21 +132,33 @@ function doctor_extras($root, $known, $self, $budget) {
         $stack[] = [$r, $depth + 1];
         continue;
       }
-      $res['scanned']++;
+      $scanned++;
       if (isset($known[$r]) || $r === $self) continue;
       if (doctor_is_state($r)) {
         $mode = @fileperms($full);
-        $res['state'][] = [$r, $mode === false ? '' : substr(sprintf('%o', $mode), -4), (int)@filesize($full)];
+        $state[] = [$r, $mode === false ? '' : substr(sprintf('%o', $mode), -4), (int)@filesize($full)];
       } elseif (doctor_is_host_file($r)) {
-        $res['host'][] = $r;
+        $host[] = $r;
+      } elseif (preg_match('/\.(php|phtml|php[3-8])$/i', $r)) {
+        $php[] = $r;
       } else {
-        $res['otherTotal']++;
-        if (count($res['other']) < 400) $res['other'][] = $r;
+        $other[] = $r;
       }
     }
   }
-  sort($res['other']);
-  return $res;
+  // Private state: one line per state folder when it holds more than a few files.
+  $groups = []; $single = [];
+  foreach ($state as $s) {
+    if (preg_match('#^(.*?(?:^|/)(?:replay|holdings|txn|state)/)#', $s[0], $m)) $groups[$m[1]][] = $s; else $single[] = $s;
+  }
+  foreach ($groups as $key => $list) {
+    if (count($list) > 3) $single[] = [$key, '', count($list), 'dir']; else foreach ($list as $s) $single[] = $s;
+  }
+  usort($single, function ($x, $y) { return strcmp($x[0], $y[0]); });
+  sort($php);
+  sort($host);
+  return ['state' => $single, 'host' => $host, 'other' => doctor_collapse($other, 10), 'otherTotal' => count($other),
+    'php' => array_slice($php, 0, 300), 'phpTotal' => count($php), 'scanned' => $scanned, 'partial' => $partial];
 }
 
 function doctor_https() {
@@ -267,7 +294,8 @@ function doctor_env($root) {
   return ['checks' => $checks, 'setup' => $setup, 'facts' => [
     'phpVersion' => PHP_VERSION, 'sapi' => PHP_SAPI, 'os' => PHP_OS, 'host' => $host, 'maxExecutionTime' => (string)ini_get('max_execution_time'), 'memoryLimit' => (string)ini_get('memory_limit'),
     'webRoot' => $root, 'home' => $parent],
-    'detected' => is_file($root . '/bank-demo.html') ? 'a' : (is_file($root . '/wallet-bridge-demo.html') ? 'b' : 'none')];
+    'detected' => is_file($root . '/bank-demo.html') ? 'a' : (is_file($root . '/wallet-bridge-demo.html') ? 'b' : 'none'),
+    'detectedMods' => (is_file($root . '/atlas/call/info.php') ? 'c' : '') . (is_file($root . '/presence/status.php') ? 'p' : '')];
 }
 
 // ---- request handling --------------------------------------------------------------------------------------
@@ -295,7 +323,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
   if ($action === 'scan') {
     $site = isset($_POST['site']) && in_array($_POST['site'], ['a', 'b'], true) ? $_POST['site'] : 'none';
-    $list = doctor_applicable($DOCTOR['entries'], $site);
+    $mods = preg_replace('/[^cp]/', '', isset($_POST['mods']) ? (string)$_POST['mods'] : '');
+    $list = doctor_applicable($DOCTOR['entries'], $site, $mods);
     $cursor = max(0, (int)(isset($_POST['cursor']) ? $_POST['cursor'] : 0));
     $t0 = microtime(true);
     $results = []; $counts = [];
@@ -385,6 +414,11 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
       <label><input type="radio" name="site" value="none"> Issuer only</label>
       <label><input type="radio" name="site" value="a"> Demo site A</label>
       <label><input type="radio" name="site" value="b"> Demo site B</label>
+    </div>
+    <div class="row">
+      <span>Also installed here:</span>
+      <label><input type="checkbox" name="mod" value="c"> Call service</label>
+      <label><input type="checkbox" name="mod" value="p"> Presence service</label>
       <button class="secondary" id="rerun">Check again</button>
     </div>
   </div>
@@ -414,7 +448,9 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   var PROBES = [
     ['/lib/store.php', 'issuer library'], ['/lib/bootstrap.php', 'issuer library'], ['/lib/issuer-private-key.pem', 'issuer private key'],
     ['/lib/.htaccess', 'lib access rules'], ['/atlas/studio/inc/studio-mint.php', 'Studio helper'], ['/atlas/studio/inc/storage.php', 'Studio helper'],
-    ['/atlas/studio/inc/storage-root.php', 'Studio storage setting'], ['/atlas/demo/txlab/inc/private-dir.php', 'Transaction Lab setting']
+    ['/atlas/studio/inc/storage-root.php', 'Studio storage setting'], ['/atlas/demo/txlab/inc/private-dir.php', 'Transaction Lab setting'],
+    ['/atlas/call/lib/config.php', 'Call service settings'], ['/atlas/call/lib/config.php.off', 'Call service settings (disabled copy)'],
+    ['/atlas/call/lib/state/meta.json', 'Call service state'], ['/presence/lib/store.php', 'Presence library']
   ];
 
   function el(tag, attrs, kids) {
@@ -445,6 +481,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   function step(msg) { $('progress').textContent = msg; }
 
   function currentSite() { var r = document.querySelector('input[name=site]:checked'); return r ? r.value : 'none'; }
+  function currentMods() { return Array.prototype.map.call(document.querySelectorAll('input[name=mod]:checked'), function (c) { return c.value; }).join(''); }
 
   var envCache = null;
   function full(first) {
@@ -456,12 +493,13 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
         if (!env.ok) { var e = new Error(env.error || 'failed'); e.status = env.httpStatus; throw e; }
         envCache = env; st.env = env;
         var r = document.querySelector('input[name=site][value=' + env.detected + ']'); if (r) r.checked = true;
+        Array.prototype.forEach.call(document.querySelectorAll('input[name=mod]'), function (c) { c.checked = env.detectedMods.indexOf(c.value) >= 0; });
       });
     }
     chain = chain.then(function () {
       var site = currentSite();
       function more(cursor) {
-        return call('scan', { site: site, cursor: String(cursor) }).then(function (j) {
+        return call('scan', { site: site, mods: currentMods(), cursor: String(cursor) }).then(function (j) {
           if (!j.ok) throw new Error(j.error || 'scan-failed');
           st.total = j.total;
           Object.keys(j.counts).forEach(function (k) { st.counts[k] = (st.counts[k] || 0) + j.counts[k]; });
@@ -533,6 +571,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     if (pageDiffers.length) t.push(['warn', pageDiffers.length + ' page/config file(s) differ from the repository.', 'Fine if you edited them on purpose; otherwise re-upload.']);
     state.odd.forEach(function (o) { t.push(['warn', 'Not a regular file: ' + o.path + ' (' + o.what + ')', 'Replace it with the repository file.']); });
     state.probes.forEach(function (p) { if (p.exposed) t.push(['fail', 'Readable over the web: ' + p.path, 'Block it (check the .htaccess in that folder is uploaded and honoured) and treat any secret in it as exposed.']); });
+    if (state.extras && state.extras.phpTotal) t.push(['warn', state.extras.phpTotal + ' PHP file(s) here are not in the repository.', 'Look at each one under "Unexpected files". An old copy of a route that was later removed has none of the newer security checks and should be deleted; your own files are fine.']);
     (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'fail' || c.status === 'warn') t.push([c.status, c.title, c.fix || c.detail]); });
     return t;
   }
@@ -567,11 +606,12 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
 
     var x = state.extras, xb = [];
     xb.push(el('p', { 'class': 'muted', text: 'Files here that are not in the repository. Your own models, pages and hosting files are normal; this is only for awareness.' }));
-    if (x.other.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Unknown files (' + x.otherTotal + (x.otherTotal > x.other.length ? ', first ' + x.other.length + ' shown' : '') + ')' }), pathList(x.other)]));
-    if (x.state.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Private state - listed by name only, never opened (' + x.state.length + ')' }), pathList(x.state.map(function (s) { return s[0] + '  [mode ' + s[1] + ', ' + s[2] + ' bytes]'; }))]));
+    if (x.php.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Unknown PHP files - review these (' + x.phpTotal + ')' }), el('div', { 'class': 'd', text: 'Code that is not in the repository: your own, or an old route that was later removed.' }), pathList(x.php)]));
+    if (x.other.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Other unknown files (' + x.otherTotal + ')' }), pathList(x.other)]));
+    if (x.state.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Private state - listed by name only, never opened (' + x.state.length + ')' }), pathList(x.state.map(stateLine))]));
     if (x.host.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Hosting files (' + x.host.length + ')' }), pathList(x.host)]));
     if (x.partial) xb.push(el('p', { 'class': 'notice', text: 'The scan stopped early (time or size limit), so this list is incomplete.' }));
-    section('Unexpected files', 'info', x.scanned + ' files scanned', false, xb);
+    section('Unexpected files', x.phpTotal ? 'warn' : 'info', x.scanned + ' files scanned', x.phpTotal > 0, xb);
 
     var pb = state.probes.map(function (p) {
       return item(p.exposed ? 'fail' : 'ok', p.path, p.exposed ? 'The ' + p.what + ' can be read over the web.' : 'Not readable (' + (p.status ? 'HTTP ' + p.status : 'no response') + (p.empty ? ', empty page' : '') + ').');
@@ -580,6 +620,8 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
 
     section('Setup values (copy and paste)', 'info', 'for Asset Studio', false, setupBlocks(env.setup));
   }
+
+  function stateLine(s) { return s[3] === 'dir' ? s[0] + '  [' + s[2] + ' files]' : s[0] + '  [mode ' + s[1] + ', ' + s[2] + ' bytes]'; }
 
   function setupBlocks(s) {
     var q = function (v) { return JSON.stringify(v, null, 2); };
@@ -611,7 +653,9 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     lines.push('', 'MISSING (' + state.missing.length + ')'); state.missing.forEach(function (x) { lines.push('  ' + x.path); });
     lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path); });
     lines.push('', 'WEB EXPOSURE'); state.probes.forEach(function (p) { lines.push('  ' + (p.exposed ? 'EXPOSED ' : 'ok      ') + p.path + ' (HTTP ' + p.status + ')'); });
-    lines.push('', 'UNKNOWN FILES (' + state.extras.otherTotal + ')'); state.extras.other.slice(0, 100).forEach(function (x) { lines.push('  ' + x); });
+    lines.push('', 'UNKNOWN PHP FILES (' + state.extras.phpTotal + ')'); state.extras.php.forEach(function (x) { lines.push('  ' + x); });
+    lines.push('', 'OTHER UNKNOWN FILES (' + state.extras.otherTotal + ')'); state.extras.other.slice(0, 100).forEach(function (x) { lines.push('  ' + x); });
+    lines.push('', 'PRIVATE STATE (names only)'); state.extras.state.slice(0, 60).forEach(function (x) { lines.push('  ' + stateLine(x)); });
     return redact(lines.join('\n'));
   }
   function copy(text, done) {
@@ -644,7 +688,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   $('go').addEventListener('click', start);
   $('token').addEventListener('keydown', function (e) { if (e.key === 'Enter') start(); });
   $('rerun').addEventListener('click', function () { full(false); });
-  Array.prototype.forEach.call(document.querySelectorAll('input[name=site]'), function (r) { r.addEventListener('change', function () { full(false); }); });
+  Array.prototype.forEach.call(document.querySelectorAll('input[name=site], input[name=mod]'), function (r) { r.addEventListener('change', function () { full(false); }); });
   $('copy').addEventListener('click', function () { if (state) copy(report(), function (ok) { said(ok, 'Report'); }); });
   $('copyMissing').addEventListener('click', function () {
     if (!state) return;
