@@ -22,6 +22,8 @@ const { FILES: STUDIO_FILES } = require('./lib/studio-files');
 
 const ROOT = path.resolve(__dirname, '..');
 const TEMPLATE = path.join(__dirname, 'site-doctor', 'site-doctor.template.php');
+const FEATURES = path.join(__dirname, 'site-doctor', 'features.json');
+const FEATURE_TYPES = ['studio-config', 'json-enabled', 'email-tickets', 'manifest-field', 'moderation-issuer', 'presence-moderation', 'private-config-php', 'rename', 'private-dir-txt'];
 const MARKER = '/*@@DOCTOR_CONFIG@@*/';
 const SOURCES = [['issuer-php', 'i'], ['demo-domain-a', 'a'], ['demo-domain-b', 'b'], ['call-php', 'c'], ['presence-php', 'p']];
 
@@ -37,7 +39,7 @@ if (!out || !(hours > 0 && hours <= 24 * 30)) {
 
 // Files that only exist as local state or private configuration; never in a manifest even if a fallback
 // directory walk finds them (git-tracked lists never contain them).
-const STATE = /(^|\/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|replay|holdings|txn|state|storage-root\.php|private-dir\.php|config\.php|error_log)(\/|$)/i;
+const STATE = /(^|\/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|replay|holdings|txn|state|storage-root\.php|private-dir\.php|lib\/config\.php(\.off|\.bak)?|error_log)(\/|$)/i;
 const TEXT_EXT = new Set(['php', 'html', 'htm', 'js', 'css', 'json', 'md', 'txt', 'svg', 'xml', 'example']);
 const isTextName = (rel) => /(^|\/)\.htaccess$/.test(rel) || TEXT_EXT.has(path.extname(rel).slice(1).toLowerCase());
 const isText = (rel, buf) => isTextName(rel) && !buf.subarray(0, 8000).includes(0);
@@ -115,11 +117,23 @@ if (!viaGitAll) console.warn('note: git ls-files was not available; every file u
 const list = Array.from(entries.values()).sort((x, y) => (x.p < y.p ? -1 : x.p > y.p ? 1 : (x.tags < y.tags ? -1 : 1)));
 if (!list.some((e) => e.p === 'atlas/studio/inc/studio-mint.php')) { console.error('internal check failed: studio-mint.php is not in the manifest'); process.exit(1); }
 
+// Feature switches (read-only reports): validated here so a typo cannot ship in a built file.
+const features = JSON.parse(fs.readFileSync(FEATURES, 'utf8')).features;
+{
+  const ids = new Set();
+  for (const f of features) {
+    if (!/^[a-z0-9-]+$/.test(f.id) || ids.has(f.id)) { console.error('bad or duplicate feature id: ' + f.id); process.exit(1); }
+    ids.add(f.id);
+    if (!FEATURE_TYPES.includes(f.type)) { console.error('unknown feature type for ' + f.id + ': ' + f.type); process.exit(1); }
+    if (typeof f.label !== 'string' || !Array.isArray(f.needs) || typeof f.enable !== 'string' || typeof f.disable !== 'string') { console.error('incomplete feature: ' + f.id); process.exit(1); }
+  }
+}
+
 // The access token is shown once and only its hash is embedded.
 const rawToken = crypto.randomBytes(16).toString('hex');
 const token = rawToken.match(/.{4}/g).join('-');
 const expires = Math.floor(Date.now() / 1000) + Math.round(hours * 3600);
-const header = { v: 1, built: new Date().toISOString(), commit, clean: gitOk && !dirty.length, expires, tokenSha256: crypto.createHash('sha256').update(rawToken).digest('hex') };
+const header = { v: 1, built: new Date().toISOString(), commit, clean: gitOk && !dirty.length, expires, tokenSha256: crypto.createHash('sha256').update(rawToken).digest('hex'), features };
 const json = JSON.stringify(header).slice(0, -1) + ',"entries":[\n' + list.map((e) => JSON.stringify([e.p, e.h, e.n, e.g, e.f, e.tags])).join(',\n') + '\n]}';
 if (json.includes('ATLAS_DOCTOR_JSON')) { console.error('manifest contains the heredoc marker'); process.exit(1); }
 

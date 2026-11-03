@@ -96,8 +96,9 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     for (const p of ['atlas/studio/inc/studio-mint.php', 'assets/studio/badge.glb', 'lib/store.php', '.well-known/spatial.json', 'atlas/call/info.php', 'presence/status.php']) assert.ok(paths.includes(p), p);
     const example = manifest.entries.filter((e) => /\.example$/.test(e[0]) && !e[4].includes('o')).map((e) => e[0]);
     assert.deepStrictEqual(example, [], '.example files are optional');
-    const state = paths.filter((p) => /(^|\/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|\.salt|storage-root\.php|private-dir\.php|replay|holdings|txn)(\/|$)/.test(p) || /(^|\/)(state|config\.php)(\/|$)/.test(p));
+    const state = paths.filter((p) => /(^|\/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|\.salt|storage-root\.php|private-dir\.php|replay|holdings|txn)(\/|$)/.test(p) || /(^|\/)state(\/|$)/.test(p) || /(^|\/)lib\/config\.php(\.off|\.bak)?$/.test(p));
     assert.deepStrictEqual(state, []);
+    assert.ok(paths.includes('atlas/admin/moderation/config.php'), 'a route that is called config.php is compared, not treated as private state');
     assert.ok(!phpSrc.includes(built.token) && !phpSrc.includes(built.token.replace(/-/g, '')), 'token itself is not embedded');
     const bad = manifest.entries.filter((e) => e[5] === '' || !/^[0-9a-f]{64}$/.test(e[1]));
     assert.deepStrictEqual(bad, []);
@@ -365,10 +366,227 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     assert.strictEqual(status(await call('env'), 'issuer'), 'ok');
   });
 
+  // ---- feature switches (read-only) ---------------------------------------------------------------------------
+  const PLANTED = ['PLANTED-SMTP-PASS-1', 'PLANTED-IMAP-PASS-2', 'PLANTED-ADMIN-HASH-3', 'PLANTED-TURN-SECRET-4', 'PLANTED-EXTRA-KEY-5', 'planted-from@secret.example', 'PLANTED-SMTP-USER-6', 'PLANTED-REVOKED-MOD-7'];
+  const feats = async () => { const r = await call('features'); assert.strictEqual(r.json.ok, true, r.text.slice(0, 200)); return Object.fromEntries(r.json.features.map((f) => [f.id, f])); };
+  const put = (rel, data) => { const f = path.join(root, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, typeof data === 'string' ? data : JSON.stringify(data)); };
+  const drop = (rel) => fs.rmSync(path.join(root, rel), { force: true });
+  const phpConfig = (obj) => execFileSync('php', ['-r', 'echo "<?php\n// lab config\nreturn " . var_export(json_decode($argv[1], true), true) . ";\n";', JSON.stringify(obj)], { encoding: 'utf8' });
+  const storeDir = () => { const m = fs.readFileSync(path.join(root, 'atlas/studio/inc/storage-root.php'), 'utf8').match(/return "(.*)";/); return JSON.parse('"' + m[1] + '"'); };
+
+  await check('features: a wrong token is refused; the list covers every switch with how to change it', async () => {
+    assert.strictEqual((await bad('features')).status, 403);
+    const f = await feats();
+    assert.deepStrictEqual(Object.keys(f).sort(), manifest.features.map((x) => x.id).sort());
+    for (const x of Object.values(f)) {
+      assert.ok(['on', 'off', 'problem', 'absent'].includes(x.state), x.id + ' ' + x.state);
+      assert.ok(x.enable.length > 10 && x.disable.length > 10 && x.label && Array.isArray(x.reasons) && Array.isArray(x.facts), x.id);
+      assert.deepStrictEqual(Object.keys(x).sort(), ['about', 'disable', 'enable', 'facts', 'group', 'id', 'label', 'reasons', 'state']);
+    }
+    assert.strictEqual(f['studio-mint'].state, 'off');
+    assert.strictEqual(f['presence-moderation'].state, 'absent', 'presence files are not on this domain');
+    assert.strictEqual(f['call-service'].state, 'absent');
+  });
+
+  await check('features: Studio minting follows studio-config.json, and flags a wrong domain or origin', async () => {
+    const cfg = path.join(storeDir(), 'studio-config.json');
+    const write = (o) => fs.writeFileSync(cfg, typeof o === 'string' ? o : JSON.stringify(o));
+    write({ mintEnabled: true, domain: srv.host, origins: ['https://' + srv.host], apiKey: 'PLANTED-EXTRA-KEY-5' });
+    let x = (await feats())['studio-mint'];
+    assert.strictEqual(x.state, 'on', JSON.stringify(x));
+    assert.ok(x.facts.some((l) => l.startsWith('domain: ')));
+    write({ mintEnabled: true, domain: 'example.org', origins: ['https://example.org'] });
+    x = (await feats())['studio-mint'];
+    assert.strictEqual(x.state, 'problem');
+    assert.ok(x.reasons.some((r) => /domain-mismatch/.test(r)) && x.reasons.some((r) => /bad-origins/.test(r)));
+    write('{ not json');
+    assert.strictEqual((await feats())['studio-mint'].state, 'problem');
+    write({ mintEnabled: 'yes', domain: srv.host });
+    assert.strictEqual((await feats())['studio-mint'].state, 'off', 'only the boolean true switches it on');
+    write({ mintEnabled: false, domain: srv.host, origins: ['http://' + srv.host] });
+    assert.strictEqual((await feats())['studio-mint'].state, 'off');
+  });
+
+  await check('features: JSON switches (ledger) are off until the file says enabled, and must name this host', async () => {
+    const rel = 'lib/atlas-ledger-issuance-config.json';
+    assert.strictEqual((await feats())['ledger-issuance'].state, 'off');
+    put(rel, { enabled: true, domain: srv.host, perClientPerMinute: 5, secret: 'PLANTED-EXTRA-KEY-5' });
+    let x = (await feats())['ledger-issuance'];
+    assert.strictEqual(x.state, 'on');
+    assert.ok(x.facts.includes('perClientPerMinute: 5') && !x.facts.some((l) => /secret|PLANTED/.test(l)), 'only whitelisted fields are shown');
+    put(rel, { enabled: true, domain: 'example.org' });
+    assert.strictEqual((await feats())['ledger-issuance'].state, 'problem');
+    put(rel, { enabled: 'true', domain: srv.host });
+    assert.strictEqual((await feats())['ledger-issuance'].state, 'off');
+    put(rel, '{ oops');
+    assert.strictEqual((await feats())['ledger-issuance'].state, 'problem');
+    assert.strictEqual((await feats())['ledger-receipts'].state, 'off', 'receipts are an independent switch');
+    drop(rel);
+  });
+
+  await check('features: email tickets report servers and "login set", never passwords, user names or the from address', async () => {
+    const rel = 'lib/atlas-email-tickets-config.json';
+    put(rel, { smtpHost: 'smtp.example.net', smtpPort: 465, smtpSecure: 'ssl', smtpUser: 'PLANTED-SMTP-USER-6', smtpPass: 'PLANTED-SMTP-PASS-1', fromAddress: 'planted-from@secret.example', imapHost: 'imap.example.net', imapUser: 'u', imapPass: 'PLANTED-IMAP-PASS-2' });
+    let x = (await feats())['email-tickets'];
+    assert.strictEqual(x.state, 'on', JSON.stringify(x));
+    const text = x.facts.join('\n');
+    assert.ok(/smtp\.example\.net:465/.test(text) && /outgoing login: set/.test(text) && /imap\.example\.net:993/.test(text));
+    for (const p of PLANTED) assert.ok(!JSON.stringify(x).includes(p), p);
+    put(rel, { smtpHost: 'smtp.example.net', smtpPass: 'PLANTED-SMTP-PASS-1' });
+    x = (await feats())['email-tickets'];
+    assert.strictEqual(x.state, 'problem');
+    assert.ok(/fromAddress/.test(x.reasons.join(' ')));
+    put(rel, {});
+    assert.strictEqual((await feats())['email-tickets'].state, 'off');
+    drop(rel);
+    assert.strictEqual((await feats())['email-tickets'].state, 'off');
+  });
+
+  await check('features: the file-transfer opt-in is read from the manifest', async () => {
+    const spatial = path.join(root, '.well-known/spatial.json');
+    const keepJson = fs.readFileSync(spatial, 'utf8');
+    const j = JSON.parse(keepJson);
+    assert.deepStrictEqual(j.fileTransfer, { classes: ['atlas.wearable.ring'] }, 'the sample manifest opts in');
+    assert.strictEqual((await feats())['file-transfer'].state, 'on');
+    delete j.fileTransfer;
+    fs.writeFileSync(spatial, JSON.stringify(j));
+    assert.strictEqual((await feats())['file-transfer'].state, 'off');
+    j.fileTransfer = {};
+    fs.writeFileSync(spatial, JSON.stringify(j));
+    let x = (await feats())['file-transfer'];
+    assert.strictEqual(x.state, 'on'); assert.ok(/every eligible class/.test(x.facts.join(' ')));
+    j.fileTransfer = { classes: ['a.b', 'c.d'] };
+    fs.writeFileSync(spatial, JSON.stringify(j));
+    x = (await feats())['file-transfer'];
+    assert.ok(x.state === 'on' && /classes \(2\): a\.b, c\.d/.test(x.facts.join(' ')));
+    j.fileTransfer = [1, 2];
+    fs.writeFileSync(spatial, JSON.stringify(j));
+    assert.strictEqual((await feats())['file-transfer'].state, 'problem');
+    fs.writeFileSync(spatial, keepJson);
+  });
+
+  await check('features: moderation on the issuer and on the presence service', async () => {
+    put('lib/atlas-moderation-config.json', { domain: srv.host, audiences: ['https://presence.example.net'] });
+    let x = (await feats())['moderation-issuer'];
+    assert.strictEqual(x.state, 'on', JSON.stringify(x));
+    assert.ok(x.facts.join(' ').includes('https://presence.example.net'));
+    put('lib/atlas-moderation-config.json', { domain: 'example.org', audiences: ['https://presence.example.net'] });
+    assert.strictEqual((await feats())['moderation-issuer'].state, 'problem');
+    put('lib/atlas-moderation-config.json', { domain: srv.host, audiences: ['not a url'] });
+    assert.strictEqual((await feats())['moderation-issuer'].state, 'problem');
+    drop('lib/atlas-moderation-config.json');
+    assert.strictEqual((await feats())['moderation-issuer'].state, 'off');
+
+    put('presence/status.php', '<?php');
+    const rel = 'presence/lib/atlas-presence-moderation-config.json';
+    assert.strictEqual((await feats())['presence-moderation'].state, 'off');
+    put(rel, { audience: 'https://presence.example.net', domains: { 'issuer.example.net': { key: 'k' } }, revokedModerators: ['PLANTED-REVOKED-MOD-7'] });
+    x = (await feats())['presence-moderation'];
+    assert.strictEqual(x.state, 'on', JSON.stringify(x));
+    assert.ok(x.facts.some((l) => l === 'revoked moderators: 1') && !JSON.stringify(x).includes('PLANTED'));
+    put(rel, { enabled: false, audience: 'https://presence.example.net', domains: {} });
+    assert.strictEqual((await feats())['presence-moderation'].state, 'off');
+    put(rel, { enabled: 'no' });
+    assert.strictEqual((await feats())['presence-moderation'].state, 'problem');
+    put(rel, '{ nope');
+    assert.strictEqual((await feats())['presence-moderation'].state, 'problem');
+    drop(rel); drop('presence/status.php');
+  });
+
+  await check('features: lab switches follow the private folder, the DISABLED file and config.php, and never show the admin token hash', async () => {
+    const priv = fs.mkdtempSync(path.join(tmp, 'lab-'));
+    const pointer = 'atlas/demo/txlab/inc/private-dir.php';
+    assert.strictEqual((await feats()).txlab.state, 'off', 'no pointer file');
+    put(pointer, '<?php return "/nonexistent/lab-private";');
+    let x = (await feats()).txlab;
+    assert.ok(x.state === 'problem' && /does not exist/.test(x.reasons.join(' ')), JSON.stringify(x));
+    put(pointer, '<?php return ' + JSON.stringify(priv) + ';');
+    assert.ok(/config\.php is missing/.test((await feats()).txlab.reasons.join(' ')));
+    const config = (extra) => fs.writeFileSync(path.join(priv, 'config.php'), phpConfig(Object.assign({ enabled: true, domain: srv.host, adminTokenHash: 'PLANTED-ADMIN-HASH-3', publicDemo: { enabled: true } }, extra || {})));
+    config();
+    x = (await feats()).txlab;
+    assert.strictEqual(x.state, 'on', JSON.stringify(x));
+    assert.ok(x.facts.includes('public demo for visitors: on') && !JSON.stringify(x).includes('PLANTED'));
+    fs.writeFileSync(path.join(priv, 'DISABLED'), '');
+    x = (await feats()).txlab;
+    assert.ok(x.state === 'off' && /DISABLED/.test(x.reasons.join(' ')));
+    fs.unlinkSync(path.join(priv, 'DISABLED'));
+    config({ enabled: false });
+    assert.strictEqual((await feats()).txlab.state, 'off');
+    config({ domain: 'example.org' });
+    assert.strictEqual((await feats()).txlab.state, 'problem');
+    config({ allowInsecureHttp: true });
+    x = (await feats()).txlab;
+    assert.ok(x.state === 'problem' && /allowInsecureHttp/.test(x.reasons.join(' ')));
+    fs.writeFileSync(path.join(priv, 'config.php'), '<?php return ["enabled"=>true];');
+    assert.strictEqual((await feats()).txlab.state, 'problem', 'a hand-edited file is reported, not guessed');
+    // a private folder inside the web root is a problem even when everything else is right
+    const inside = path.join(root, 'lab-inside');
+    fs.mkdirSync(inside);
+    fs.writeFileSync(path.join(inside, 'config.php'), phpConfig({ enabled: true, domain: srv.host, adminTokenHash: 'PLANTED-ADMIN-HASH-3' }));
+    put(pointer, '<?php return ' + JSON.stringify(inside) + ';');
+    x = (await feats()).txlab;
+    assert.ok(x.state === 'problem' && /inside the web root/.test(x.reasons.join(' ')));
+    // the second lab is independent and reads its own pointer
+    assert.strictEqual((await feats())['multi-issuer'].state, 'off');
+    drop(pointer); fs.rmSync(inside, { recursive: true });
+  });
+
+  await check('features: Call is switched by renaming config.php, and its secrets are never output', async () => {
+    put('atlas/call/info.php', '<?php');
+    drop('atlas/call/lib/config.php.off');
+    const on = 'atlas/call/lib/config.php', off = on + '.off';
+    assert.ok(/not configured/.test((await feats())['call-service'].reasons.join(' ')));
+    assert.strictEqual((await feats())['call-service'].state, 'off');
+    const body = (o) => '<?php\nreturn ' + o + ';\n';
+    put(off, body("[\n  'domain' => 'example.com',\n  'turnSecret' => 'PLANTED-TURN-SECRET-4',\n]"));
+    let x = (await feats())['call-service'];
+    assert.ok(x.state === 'off' && /switched off/.test(x.reasons.join(' ')), JSON.stringify(x));
+    fs.renameSync(path.join(root, off), path.join(root, on));
+    x = (await feats())['call-service'];
+    assert.ok(x.state === 'problem' && /example\.com placeholder/.test(x.reasons.join(' ')), JSON.stringify(x));
+    put(on, body("[\n  'domain' => '" + srv.host + "',\n  'origin' => 'https://" + srv.host + "',\n  'issuerKeys' => [ 'PLANTED-EXTRA-KEY-5' ],\n  'turnUrls' => [ 'turn:t.example.net' ],\n  'turnSecret' => 'PLANTED-TURN-SECRET-4',\n]"));
+    x = (await feats())['call-service'];
+    assert.strictEqual(x.state, 'on', JSON.stringify(x));
+    assert.ok(x.facts.includes('TURN relay: configured') && x.facts.includes('issuer key: set'));
+    assert.ok(!JSON.stringify(x).includes('PLANTED'));
+    drop(on); drop('atlas/call/info.php');
+  });
+
+  await check('features: the issuer private state folder must be absolute, existing, writable and outside the web root', async () => {
+    const rel = 'lib/atlas-private-dir.txt';
+    assert.strictEqual((await feats())['private-state-dir'].state, 'off');
+    put(rel, 'relative/path\n');
+    assert.strictEqual((await feats())['private-state-dir'].state, 'problem');
+    put(rel, '/nonexistent/state-dir\n');
+    assert.strictEqual((await feats())['private-state-dir'].state, 'problem');
+    put(rel, path.join(root, 'lib') + '\n');
+    assert.ok(/inside the web root/.test((await feats())['private-state-dir'].reasons.join(' ')));
+    const good = fs.mkdtempSync(path.join(tmp, 'state-'));
+    put(rel, good + '\n');
+    assert.strictEqual((await feats())['private-state-dir'].state, 'on');
+    drop(rel);
+  });
+
+  await check('features: a feature whose files are not installed is "absent", not a failure', async () => {
+    const f = path.join(root, 'lib/ledger-receipts.php');
+    const keepLib = fs.readFileSync(f);
+    fs.unlinkSync(f);
+    assert.strictEqual((await feats())['ledger-receipts'].state, 'absent');
+    fs.writeFileSync(f, keepLib);
+  });
+
+  await check('features: the response is the same size class regardless of how many secrets are planted (no raw config echoed)', async () => {
+    const r = await call('features');
+    assert.ok(r.text.length < 20000, String(r.text.length));
+    for (const p of PLANTED) assert.ok(!r.text.includes(p), p);
+  });
+
   await check('no response ever contained private-state contents or the token', () => {
     const joined = everything.join('\n');
     assert.ok(!joined.includes('SECRET-MARKER-9f3a7c'));
     assert.ok(!joined.includes('BEGIN EC PRIVATE KEY'));
+    for (const p of PLANTED) assert.ok(!joined.includes(p), 'a planted secret reached a response: ' + p);
     assert.ok(!joined.includes(built.token.replace(/-/g, '')));
   });
 

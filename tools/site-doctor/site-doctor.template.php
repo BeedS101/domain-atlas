@@ -87,7 +87,7 @@ function doctor_check_entry($root, $e) {
 
 // Private state: matched by name only, never opened.
 function doctor_is_state($rel) {
-  return (bool)preg_match('#(^|/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|storage-root\.php|private-dir\.php|atlas-private-dir\.txt|studio-config\.json|[^/]*config[^/]*\.json|config\.php(\.off|\.bak)?)$#i', $rel)
+  return (bool)preg_match('#(^|/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|storage-root\.php|private-dir\.php|atlas-private-dir\.txt|studio-config\.json|[^/]*config[^/]*\.json|lib/config\.php(\.off|\.bak)?)$#i', $rel)
     || (bool)preg_match('#(^|/)(replay|holdings|txn|state)/#', $rel);
 }
 function doctor_is_host_file($rel) {
@@ -318,6 +318,253 @@ function doctor_env($root) {
     'detectedMods' => (is_file($root . '/atlas/call/info.php') ? 'c' : '') . (is_file($root . '/presence/status.php') ? 'p' : '')];
 }
 
+// ---- feature switches (read-only) ------------------------------------------------------------------------
+//
+// Each feature in the embedded registry is switched by a setting in a file or by renaming a file. A reader
+// per feature type reports on / off / problem / absent, plus a short list of facts. Only the fields a reader
+// names are ever put in the output; passwords, tokens, keys and every other value stay unread by the output.
+// Nothing is executed: PHP config files are matched with patterns, never included.
+
+function doctor_clip($v, $n = 120) {
+  $v = preg_replace('/[\x00-\x1f\x7f]+/', ' ', (string)$v);
+  return strlen($v) > $n ? substr($v, 0, $n - 3) . '...' : $v;
+}
+
+// Small regular file: its contents, null when absent, false when unreadable or too large. Never follows symlinks.
+function doctor_small_file($path, $max) {
+  if (is_link($path) || !is_file($path)) return null;
+  $c = @file_get_contents($path, false, null, 0, $max + 1);
+  return ($c === false || strlen($c) > $max) ? false : $c;
+}
+
+function doctor_json_doc($path, $max = 65536) {
+  $c = doctor_small_file($path, $max);
+  if ($c === null) return ['missing', null];
+  if ($c === false) return ['unreadable', null];
+  $d = json_decode($c, true);
+  return is_array($d) ? ['ok', $d] : ['invalid', null];
+}
+
+function doctor_origin_ok($s) {
+  return is_string($s) && strlen($s) <= 255 && preg_match('#^https?://(\[[0-9a-f:]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)(:\d{1,5})?$#', $s) === 1;
+}
+
+function doctor_is_list($a) { return is_array($a) && ($a === [] || array_keys($a) === range(0, count($a) - 1)); }
+
+function doctor_inside($path, $root) {
+  $p = realpath($path); $r = realpath($root);
+  if ($p === false || $r === false) return false;
+  $p = rtrim(str_replace('\\', '/', $p), '/') . '/'; $r = rtrim(str_replace('\\', '/', $r), '/') . '/';
+  return strpos($p, $r) === 0 || strpos($r, $p) === 0;
+}
+
+// The path in a `return "...";` pointer file, without running it.
+function doctor_pointer_path($file) {
+  $src = doctor_small_file($file, 4096);
+  if (!is_string($src) || !preg_match('/(?:^|<\?php)\s*return\s+(["\'])(.*?)\1\s*;/m', $src, $m) || $m[2] === '' || strpos($m[2], 'CPANELUSER') !== false) return null;
+  return $m[2];
+}
+
+function doctor_feature_studio_config($root, $f, $host) {
+  list($how, $dir) = doctor_studio_root($root);
+  if ($dir === null) return ['off', ['Studio storage is not configured, so minting stays off'], []];
+  $rr = is_dir($dir) ? realpath($dir) : false;
+  if ($rr === false) return ['problem', ['the Studio storage folder does not exist'], []];
+  list($st, $c) = doctor_json_doc($rr . '/studio-config.json', 8192);
+  if ($st === 'missing') return ['off', ['no studio-config.json in the storage folder'], []];
+  if ($st !== 'ok') return ['problem', ['studio-config.json is not valid JSON, so minting stays off'], []];
+  if (!isset($c['mintEnabled']) || $c['mintEnabled'] !== true) return ['off', ['"mintEnabled" is not true'], []];
+  $facts = []; $problems = [];
+  $domain = isset($c['domain']) && is_string($c['domain']) ? $c['domain'] : null;
+  if ($domain !== null) $facts[] = 'domain: ' . doctor_clip($domain, 80);
+  if ($domain !== $host) $problems[] = 'domain-mismatch: studio-config.json says "' . doctor_clip($domain === null ? '(none)' : $domain, 80) . '" but this host is "' . doctor_clip($host, 80) . '"; minting stays off';
+  $origins = isset($c['origins']) && is_array($c['origins']) ? $c['origins'] : ['https://' . (string)$domain];
+  $shown = [];
+  foreach (array_slice($origins, 0, 4) as $o) if (is_string($o)) $shown[] = doctor_clip($o, 80);
+  $facts[] = 'origins: ' . implode(', ', $shown);
+  if (!in_array('https://' . $host, $origins, true) && !in_array('http://' . $host, $origins, true)) $problems[] = 'bad-origins: "origins" does not include https://' . doctor_clip($host, 80);
+  if (!is_writable($rr)) $problems[] = 'the storage folder is not writable';
+  return [$problems ? 'problem' : 'on', $problems, $facts];
+}
+
+function doctor_feature_json_enabled($root, $f, $host) {
+  list($st, $d) = doctor_json_doc($root . '/' . $f['file']);
+  if ($st === 'missing') return ['off', ['no ' . $f['file'] . ' (off by default)'], []];
+  if ($st !== 'ok') return ['problem', [$f['file'] . ($st === 'invalid' ? ' is not valid JSON, so the feature stays off' : ' could not be read')], []];
+  if (!isset($d['enabled']) || $d['enabled'] !== true) return ['off', ['"enabled" is not true'], []];
+  $facts = []; $problems = [];
+  foreach ($f['show'] as $k) if (isset($d[$k]) && (is_string($d[$k]) || is_int($d[$k]))) $facts[] = $k . ': ' . doctor_clip($d[$k], 80);
+  $hk = isset($f['hostKey']) ? $f['hostKey'] : null;
+  if ($hk !== null) {
+    if (!isset($d[$hk]) || !is_string($d[$hk])) $problems[] = '"' . $hk . '" is missing';
+    elseif ($host !== '' && $d[$hk] !== $host) $problems[] = '"' . $hk . '" is not this host (' . doctor_clip($host, 80) . '), so the route refuses requests';
+  }
+  return [$problems ? 'problem' : 'on', $problems, $facts];
+}
+
+function doctor_feature_email_tickets($root, $f, $host) {
+  list($st, $d) = doctor_json_doc($root . '/' . $f['file']);
+  $intake = false;
+  list($ms, $m) = doctor_json_doc($root . '/.well-known/spatial.json', 1048576);
+  if ($ms === 'ok' && isset($m['emailTickets']['intakeAddress']) && $m['emailTickets']['intakeAddress'] !== '') $intake = true;
+  if ($st === 'missing') return ['off', ['no ' . $f['file'] . ' (email delivery is off)'], ['manifest intakeAddress: ' . ($intake ? 'set' : 'not set')]];
+  if ($st !== 'ok') return ['problem', [$f['file'] . ($st === 'invalid' ? ' is not valid JSON, so email delivery is off' : ' could not be read')], []];
+  $has = function ($k) use ($d) { return isset($d[$k]) && is_string($d[$k]) && $d[$k] !== ''; };
+  $port = function ($k, $def) use ($d) { return isset($d[$k]) && is_int($d[$k]) ? $d[$k] : $def; };
+  $smtp = $has('smtpHost'); $from = $has('fromAddress'); $imap = $has('imapHost');
+  $facts = [];
+  if ($smtp) $facts[] = 'outgoing server: ' . doctor_clip($d['smtpHost'], 80) . ':' . $port('smtpPort', 587) . ' ' . ($has('smtpSecure') ? doctor_clip($d['smtpSecure'], 12) : 'starttls');
+  $facts[] = 'outgoing login: ' . (($has('smtpUser') && $has('smtpPass')) ? 'set' : 'not set');
+  $facts[] = 'from address: ' . ($from ? 'set' : 'not set');
+  $facts[] = 'incoming (IMAP): ' . ($imap ? doctor_clip($d['imapHost'], 80) . ':' . $port('imapPort', 993) : 'off') . ($imap ? ', login ' . (($has('imapUser') && $has('imapPass')) ? 'set' : 'not set') : '');
+  $facts[] = 'manifest intakeAddress: ' . ($intake ? 'set' : 'not set');
+  $problems = [];
+  if ($smtp !== $from) $problems[] = 'smtpHost and fromAddress must both be set for email to send';
+  if ($imap && !$smtp) $problems[] = 'incoming mail is configured without outgoing mail';
+  return [($smtp && $from) ? ($problems ? 'problem' : 'on') : ($problems ? 'problem' : 'off'), $problems, $facts];
+}
+
+function doctor_feature_manifest_field($root, $f, $host) {
+  list($st, $m) = doctor_json_doc($root . '/.well-known/spatial.json', 1048576);
+  if ($st === 'missing') return ['off', ['.well-known/spatial.json is missing'], []];
+  if ($st !== 'ok') return ['problem', ['.well-known/spatial.json is not valid JSON'], []];
+  if (!isset($m[$f['field']])) return ['off', ['no "' . $f['field'] . '" field in the manifest'], []];
+  $v = $m[$f['field']];
+  if (!is_array($v) || ($v !== [] && doctor_is_list($v))) return ['problem', ['"' . $f['field'] . '" is present but is not an object, so it is ignored'], []];
+  $facts = [];
+  if (isset($v['classes']) && is_array($v['classes'])) {
+    $names = [];
+    foreach (array_slice($v['classes'], 0, 10) as $c) if (is_string($c)) $names[] = doctor_clip($c, 60);
+    $facts[] = 'classes (' . count($v['classes']) . '): ' . implode(', ', $names);
+  } else $facts[] = 'classes: every eligible class';
+  return ['on', [], $facts];
+}
+
+function doctor_feature_moderation_issuer($root, $f, $host) {
+  list($st, $d) = doctor_json_doc($root . '/' . $f['file']);
+  $env = getenv('ATLAS_MODERATION_AUDIENCES');
+  if ($st === 'missing' && $env === false) return ['off', ['no ' . $f['file'] . ' (no moderation grants)'], []];
+  if ($st !== 'ok' && $st !== 'missing') return ['problem', [$f['file'] . ($st === 'invalid' ? ' is not valid JSON' : ' could not be read')], []];
+  $d = is_array($d) ? $d : [];
+  $domain = isset($d['domain']) && is_string($d['domain']) && $d['domain'] !== '' ? $d['domain'] : null;
+  $aud = [];
+  if ($env !== false) { foreach (explode(',', $env) as $a) { $a = trim($a); if (doctor_origin_ok($a)) $aud[] = $a; } }
+  elseif (isset($d['audiences']) && is_array($d['audiences'])) { foreach ($d['audiences'] as $a) if (doctor_origin_ok($a)) $aud[] = $a; }
+  $facts = [];
+  if ($domain !== null) $facts[] = 'domain: ' . doctor_clip($domain, 80);
+  $facts[] = 'presence endpoints (' . count($aud) . '): ' . implode(', ', array_map(function ($a) { return doctor_clip($a, 80); }, array_slice($aud, 0, 4))) . ($env !== false ? ' (from the ATLAS_MODERATION_AUDIENCES environment variable)' : '');
+  $problems = [];
+  if ($domain !== null && $host !== '' && $domain !== $host) $problems[] = '"domain" is not this host, so the grant route refuses';
+  if (($domain === null) !== (count($aud) === 0)) $problems[] = $domain === null ? 'no "domain" is set' : 'no valid presence endpoint is listed in "audiences"';
+  if ($domain === null && !$aud) return ['off', ['no domain and no presence endpoints'], []];
+  return [$problems ? 'problem' : 'on', $problems, $facts];
+}
+
+function doctor_feature_presence_moderation($root, $f, $host) {
+  $env = getenv('PRESENCE_MODERATION_CONFIG');
+  $path = ($env !== false && $env !== '') ? $env : $root . '/' . $f['file'];
+  list($st, $d) = doctor_json_doc($path);
+  if ($st === 'missing') return ['off', ['no moderation config file'], []];
+  if ($st !== 'ok') return ['problem', ['the moderation config cannot be parsed, so moderation is disabled'], []];
+  if (array_key_exists('enabled', $d) && !is_bool($d['enabled'])) return ['problem', ['"enabled" must be true or false, so moderation is disabled'], []];
+  if (array_key_exists('enabled', $d) && $d['enabled'] === false) return ['off', ['"enabled" is false'], []];
+  $problems = [];
+  $aud = isset($d['audience']) ? $d['audience'] : null;
+  if (!doctor_origin_ok($aud)) $problems[] = '"audience" is missing or not a presence origin';
+  $domains = isset($d['domains']) && is_array($d['domains']) && ($d['domains'] === [] || !doctor_is_list($d['domains'])) ? $d['domains'] : null;
+  if ($domains === null) $problems[] = '"domains" is missing or not an object';
+  $facts = [];
+  if (doctor_origin_ok($aud)) $facts[] = 'audience: ' . doctor_clip($aud, 80);
+  if ($domains !== null) $facts[] = 'trusted domains (' . count($domains) . '): ' . implode(', ', array_map(function ($k) { return doctor_clip($k, 60); }, array_slice(array_keys($domains), 0, 6)));
+  foreach (['revokedModerators' => 'revoked moderators', 'revokedGrants' => 'revoked grants'] as $k => $label) if (isset($d[$k]) && is_array($d[$k])) $facts[] = $label . ': ' . count($d[$k]);
+  return [$problems ? 'problem' : 'on', $problems, $facts];
+}
+
+function doctor_feature_private_config_php($root, $f, $host) {
+  $env = getenv($f['env']);
+  $dir = ($env !== false && $env !== '') ? rtrim($env, '/\\') : doctor_pointer_path($root . '/' . $f['pointer']);
+  if ($dir === null || $dir === '') return ['off', ['no private folder configured (' . $f['pointer'] . ' is missing or still the example)'], []];
+  $dir = rtrim($dir, '/\\');
+  $facts = ['private folder: ' . doctor_clip($dir, 160)];
+  $problems = [];
+  if (!is_dir($dir)) $problems[] = 'the private folder does not exist';
+  elseif (!is_writable($dir)) $problems[] = 'the private folder is not writable';
+  elseif (doctor_inside($dir, $root)) $problems[] = 'the private folder is inside the web root';
+  if ($problems) return ['problem', $problems, $facts];
+  if (is_file($dir . '/DISABLED')) return ['off', ['switched off by the DISABLED file in the private folder'], $facts];
+  $c = doctor_small_file($dir . '/config.php', 16384);
+  if ($c === null) return ['off', ['config.php is missing in the private folder'], $facts];
+  if ($c === false) return ['problem', ['config.php could not be read'], $facts];
+  // The files are written by the lab's admin tool with var_export, so the top-level keys have a fixed shape.
+  if (!preg_match("/^  'enabled' => (true|false),/m", $c, $m)) return ['problem', ['cannot read the "enabled" setting: config.php was edited by hand or is in an unknown format'], $facts];
+  if ($m[1] !== 'true') return ['off', ['"enabled" is false in config.php'], $facts];
+  if (preg_match("/^  'domain' => '([^']*)'/m", $c, $dm)) {
+    $facts[] = 'domain: ' . doctor_clip($dm[1], 80);
+    if ($host !== '' && $dm[1] !== $host) $problems[] = '"domain" in config.php is not this host';
+  }
+  $public = preg_match("/'publicDemo' => \s*array \(\s*'enabled' => true/", $c) ? 'on' : 'off';
+  $facts[] = 'public demo for visitors: ' . $public;
+  if (preg_match("/'allowInsecureHttp' => true/", $c)) $problems[] = 'allowInsecureHttp is on (for tests only; never on a live domain)';
+  return [$problems ? 'problem' : 'on', $problems, $facts];
+}
+
+function doctor_feature_rename($root, $f, $host) {
+  $on = $root . '/' . $f['on']; $off = $root . '/' . $f['off'];
+  $hasOn = is_file($on); $hasOff = is_file($off);
+  if (!$hasOn) return ['off', [$hasOff ? 'switched off: ' . basename($f['off']) . ' exists and ' . basename($f['on']) . ' does not' : 'not configured: ' . basename($f['on']) . ' does not exist'], []];
+  $facts = []; $problems = [];
+  if ($hasOff) $facts[] = basename($f['off']) . ' is also present; ' . basename($f['on']) . ' is the one in use';
+  $c = doctor_small_file($on, 16384);
+  if (!is_string($c)) return ['problem', [basename($f['on']) . ' could not be read'], $facts];
+  $domain = preg_match("/^\s*'domain'\s*=>\s*'([^']*)'/m", $c, $m) ? $m[1] : null;
+  $origin = preg_match("/^\s*'origin'\s*=>\s*'([^']*)'/m", $c, $m) ? $m[1] : null;
+  if ($domain !== null) $facts[] = 'domain: ' . doctor_clip($domain, 80);
+  if ($origin !== null) $facts[] = 'origin: ' . doctor_clip($origin, 80);
+  if ($domain === 'example.com' || $origin === 'https://example.com') $problems[] = 'still has the example.com placeholder values';
+  elseif ($domain !== null && $host !== '' && $domain !== $host) $problems[] = '"domain" is not this host';
+  $facts[] = 'issuer key: ' . (preg_match("/^\s*'issuerKeys'\s*=>\s*\[\s*'/m", $c) ? 'set' : 'not set');
+  if (!preg_match("/^\s*'issuerKeys'\s*=>\s*\[\s*'/m", $c)) $problems[] = 'no issuer key is set, so membership checks cannot pass';
+  $facts[] = 'TURN relay: ' . (preg_match("/^\s*'turnUrls'\s*=>\s*\[\s*'/m", $c) ? 'configured' : 'none');
+  if (preg_match("/^\s*'stateDir'\s*=>\s*'([^']+)'/m", $c, $m)) $facts[] = 'state folder: ' . doctor_clip($m[1], 120) . (is_dir($m[1]) && doctor_inside($m[1], $root) ? ' (inside the web root)' : '');
+  else $facts[] = 'state folder: default, inside the web folder (blocked by .htaccess)';
+  return [$problems ? 'problem' : 'on', $problems, $facts];
+}
+
+function doctor_feature_private_dir_txt($root, $f, $host) {
+  $env = getenv($f['env']);
+  $how = 'environment variable ' . $f['env'];
+  $dir = ($env !== false && $env !== '') ? $env : null;
+  if ($dir === null) {
+    $c = doctor_small_file($root . '/' . $f['file'], 1024);
+    $dir = is_string($c) ? trim($c) : '';
+    $how = $f['file'];
+    if ($dir === '') return ['off', ['not set: replay records, holdings and journals live in lib/ (protected by lib/.htaccess)'], []];
+  }
+  $dir = rtrim($dir, '/\\');
+  $facts = ['folder: ' . doctor_clip($dir, 160), 'set in: ' . $how];
+  $problems = [];
+  if (!preg_match('#^(/|[A-Za-z]:[\\\\/])#', $dir)) $problems[] = 'the path must be absolute';
+  elseif (!is_dir($dir)) $problems[] = 'the folder does not exist, so the issuer answers 503';
+  elseif (!is_writable($dir)) $problems[] = 'the folder is not writable, so the issuer answers 503';
+  elseif (doctor_inside($dir, $root)) $problems[] = 'the folder is inside the web root';
+  return [$problems ? 'problem' : 'on', $problems, $facts];
+}
+
+function doctor_features($root, $features, $host) {
+  $out = [];
+  foreach ($features as $f) {
+    $installed = true;
+    foreach ($f['needs'] as $n) if (!is_file($root . '/' . $n)) $installed = false;
+    $res = ['id' => $f['id'], 'label' => $f['label'], 'group' => isset($f['group']) ? $f['group'] : '', 'about' => isset($f['about']) ? $f['about'] : '', 'enable' => $f['enable'], 'disable' => $f['disable']];
+    $reader = 'doctor_feature_' . str_replace('-', '_', $f['type']);
+    if (!$installed) { $res['state'] = 'absent'; $res['reasons'] = ['its files are not on this domain']; $res['facts'] = []; }
+    elseif (!function_exists($reader)) { $res['state'] = 'problem'; $res['reasons'] = ['no reader for type ' . $f['type']]; $res['facts'] = []; }
+    else { $r = $reader($root, $f, $host); $res['state'] = $r[0]; $res['reasons'] = $r[1]; $res['facts'] = $r[2]; }
+    $out[] = $res;
+  }
+  return $out;
+}
+
 // ---- request handling --------------------------------------------------------------------------------------
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -340,6 +587,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $env['ok'] = true;
     $env['meta'] = ['commit' => $DOCTOR['commit'], 'built' => $DOCTOR['built'], 'clean' => !empty($DOCTOR['clean']), 'entries' => count($DOCTOR['entries'])];
     doctor_json($env);
+  }
+  if ($action === 'features') {
+    $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
+    doctor_json(['ok' => true, 'features' => doctor_features($DOCTOR_ROOT, isset($DOCTOR['features']) && is_array($DOCTOR['features']) ? $DOCTOR['features'] : [], $host)]);
   }
   if ($action === 'scan') {
     $site = isset($_POST['site']) && in_array($_POST['site'], ['a', 'b'], true) ? $_POST['site'] : 'none';
@@ -405,6 +656,12 @@ button:disabled { opacity:.5; cursor:default; }
 .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
 .pill { display:inline-block; min-width:2.2em; padding:1px 9px; border-radius:99px; font-size:13px; text-align:center; color:#fff; }
 .pill.ok { background:var(--ok); } .pill.warn { background:var(--warn); } .pill.fail { background:var(--fail); } .pill.info { background:var(--info); }
+.pill.off { background:var(--muted); } .pill.na { background:transparent; color:var(--muted); border:1px solid var(--line); }
+.feat { padding:8px 0; border-top:1px solid var(--line); } .feat:first-child { border-top:0; }
+.feat .t { font-weight:600; } .feat .d { color:var(--muted); font-size:14px; }
+.feat ul { margin:4px 0 4px 0; padding-left:20px; font-size:14px; } .feat li { word-break:break-word; }
+.feat details > summary { cursor:pointer; color:var(--accent); font-size:14px; margin-top:4px; }
+.gh { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:14px 0 2px; }
 .item { padding:8px 0; border-top:1px solid var(--line); } .item:first-child { border-top:0; }
 .item .t { font-weight:600; } .item .d { color:var(--muted); font-size:14px; } .item .f { font-size:14px; margin-top:2px; }
 .item.ok .t { font-weight:400; }
@@ -509,7 +766,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   var envCache = null;
   function full(first) {
     $('rerun').disabled = true; $('verdict').textContent = 'Checking…';
-    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], env: envCache };
+    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], features: [], env: envCache };
     var chain = Promise.resolve();
     if (first) {
       chain = chain.then(function () { step('Checking the server…'); return call('env'); }).then(function (env) {
@@ -541,7 +798,8 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
       return more(0);
     }).then(function () { step('Looking for unexpected files…'); return call('extras'); })
       .then(function (x) { if (!x.ok) throw new Error(x.error || 'extras-failed'); st.extras = x; step('Checking what the web can read…'); return probes(); })
-      .then(function (pr) { st.probes = pr; });
+      .then(function (pr) { st.probes = pr; step('Reading the feature switches…'); return call('features'); })
+      .then(function (f) { if (!f.ok) throw new Error(f.error || 'features-failed'); st.features = f.features; });
     return chain.then(function () { state = st; render(); }).catch(function (e) {
       $('verdict').textContent = 'The check could not finish: ' + (e && e.message ? e.message : e);
       step('');
@@ -596,6 +854,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     state.probes.forEach(function (p) { if (p.exposed) t.push(['fail', 'Readable over the web: ' + p.path, 'Block it (check the .htaccess in that folder is uploaded and honoured) and treat any secret in it as exposed.']); });
     if (state.extras && state.extras.phpTotal) t.push(['warn', state.extras.phpTotal + ' PHP file(s) here are not in the repository.', 'Look at each one under "Unexpected files". An old copy of a route that was later removed has none of the newer security checks and should be deleted; your own files are fine.']);
     (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'fail' || c.status === 'warn') t.push([c.status, c.title, c.fix || c.detail]); });
+    state.features.forEach(function (f) { if (f.state === 'problem') t.push(['warn', 'Feature needs attention: ' + f.label, f.reasons.join('; ')]); });
     return t;
   }
 
@@ -641,7 +900,34 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     });
     section('What the web can read', state.probes.some(function (p) { return p.exposed; }) ? 'fail' : 'ok', 'private helper files must not be served', false, pb);
 
+    section('Features (what is switched on)', featureWorst(), featureSummary(), state.features.some(function (f) { return f.state === 'problem'; }), featureBlocks());
+
     section('Setup values (copy and paste)', 'info', 'for Asset Studio', false, setupBlocks(env.setup));
+  }
+
+  var FSTATE = { on: ['ok', 'ON'], off: ['off', 'off'], problem: ['warn', '!'], absent: ['na', 'n/a'] };
+  function featureWorst() { return state.features.some(function (f) { return f.state === 'problem'; }) ? 'warn' : 'info'; }
+  function featureSummary() {
+    var n = { on: 0, off: 0, problem: 0, absent: 0 };
+    state.features.forEach(function (f) { n[f.state] = (n[f.state] || 0) + 1; });
+    return n.on + ' on, ' + n.off + ' off' + (n.problem ? ', ' + n.problem + ' need attention' : '') + (n.absent ? ', ' + n.absent + ' not installed' : '') + '. Read-only: change them in files.';
+  }
+  function featureBlocks() {
+    var out = [el('p', { 'class': 'muted', text: 'Each switch is a setting in a file or a renamed file. The doctor only reads them and never prints passwords, tokens or keys. Open "How to switch" to see what to change.' })];
+    var last = null;
+    state.features.forEach(function (f) {
+      if (f.group !== last) { last = f.group; out.push(el('div', { 'class': 'gh', text: f.group })); }
+      var s = FSTATE[f.state] || FSTATE.problem;
+      var kids = [el('div', { 'class': 't' }, [el('span', { 'class': 'pill ' + s[0], text: s[1] }), ' ', f.label])];
+      if (f.reasons.length) { var u = el('ul'); f.reasons.forEach(function (r) { u.appendChild(el('li', { text: r })); }); kids.push(u); }
+      if (f.facts.length) { var v = el('ul', { 'class': 'muted' }); f.facts.forEach(function (r) { v.appendChild(el('li', { text: r })); }); kids.push(v); }
+      kids.push(el('details', null, [el('summary', { text: 'How to switch' }),
+        el('div', { 'class': 'd', text: f.about }),
+        el('div', { 'class': 'f' }, [el('strong', { text: 'Turn on: ' }), f.enable]),
+        el('div', { 'class': 'f' }, [el('strong', { text: 'Turn off: ' }), f.disable])]));
+      out.push(el('div', { 'class': 'feat' }, kids));
+    });
+    return out;
   }
 
   function phpLine(x) {
@@ -679,6 +965,10 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     lines.push('', 'MISSING (' + state.missing.length + ')'); state.missing.forEach(function (x) { lines.push('  ' + x.path); });
     lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : '')); });
     lines.push('', 'WEB EXPOSURE'); state.probes.forEach(function (p) { lines.push('  ' + (p.exposed ? 'EXPOSED ' : 'ok      ') + p.path + ' (HTTP ' + p.status + ')'); });
+    lines.push('', 'FEATURES'); state.features.forEach(function (f) {
+      lines.push('  [' + f.state + '] ' + f.label + (f.reasons.length ? ' - ' + f.reasons.join('; ') : ''));
+      f.facts.forEach(function (x) { lines.push('        ' + x); });
+    });
     lines.push('', 'UNKNOWN PHP FILES (' + state.extras.phpTotal + ')'); state.extras.php.forEach(function (x) { lines.push('  ' + phpLine(x)); });
     lines.push('', 'OTHER UNKNOWN FILES (' + state.extras.otherTotal + ')'); state.extras.other.slice(0, 100).forEach(function (x) { lines.push('  ' + x); });
     lines.push('', 'PRIVATE STATE (names only)'); state.extras.state.slice(0, 60).forEach(function (x) { lines.push('  ' + stateLine(x)); });

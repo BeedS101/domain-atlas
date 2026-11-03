@@ -47,6 +47,10 @@ A new build gives a new token and a new deadline, and describes the commit you b
 
 **What the web can read** is checked by your browser: the helper includes and the private-key path must not be served. A file that answers with PHP source or a key is reported as exposed.
 
+**Features (what is switched on)** reports each feature that is turned on or off by a setting in a file or by renaming a file: Asset Studio minting, ledger credentials and receipts, email-delivered tickets, transfer to file, moderation (issuer and presence side), the Transaction Lab and Multi-issuer lab, the Call service and the issuer's private state folder. Each shows a pill (ON, off, `!` for misconfigured, n/a when its files are not on this domain), the reasons, a few facts, and a "How to switch" note with exactly what to change to turn it on or off. A misconfigured feature (wrong host in a config, a private folder inside the web root, a config that cannot be parsed, a placeholder still in place) also appears under **To do**. The report is read-only: the doctor never flips a switch.
+
+What it shows is limited to an allow-list per feature: hosts, ports, domains, counts, and whether a login is "set". Passwords, tokens, key material, admin token hashes, mail user names and the from address are never read into the output. PHP config files are matched with patterns, never included or run. The list of features and their how-to text live in `tools/site-doctor/features.json`; the builder validates it, so a new switch is one entry there (using one of the existing reader types) plus a test.
+
 **Setup values** prints what to create for Asset Studio, filled in for this host: the private folder path, the `storage-root.php` line, a `studio-config.json` with minting off, and the `studio` world for the manifest. The doctor never creates them; you create them in your file manager and press **Check again**.
 
 **Copy report** puts a plain-text report on the clipboard with the web-root and home folder names replaced, suitable for pasting into a chat or an issue.
@@ -56,7 +60,7 @@ A new build gives a new token and a new deadline, and describes the commit you b
 - The token is 128 random bits; only its SHA-256 is in the file. A wrong token waits 1.5 seconds and returns nothing.
 - After the deadline it refuses every check. It can still delete itself with the token.
 - Until the token is entered, the page shows no paths, hashes or other manifest data.
-- It never prints file contents. It never opens private state files.
+- It never prints file contents. It never opens private state files. Feature switches are read through per-feature allow-lists, and the test suite plants fake passwords, tokens and keys in every config type and checks that none of them appears in any response.
 - It does not follow symlinks.
 - The page sets a strict content security policy, `no-store`, `noindex` and no-frame headers. File names are only ever inserted as text.
 - Without a built manifest (the unbuilt template) it refuses to run.

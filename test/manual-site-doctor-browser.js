@@ -33,6 +33,9 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
   fs.appendFileSync(path.join(root, 'lib/store.php'), '\n// edited\n');
   fs.writeFileSync(path.join(root, 'assets/badge.glb'), 'site own model');
   fs.writeFileSync(path.join(root, 'lib/issuer-private-key.pem'), 'PEM-SECRET-MARKER');
+  // Feature switches: one on (email, with a password that must never be shown), one misconfigured (wrong host).
+  fs.writeFileSync(path.join(root, 'lib/atlas-email-tickets-config.json'), JSON.stringify({ smtpHost: 'smtp.example.net', smtpUser: 'u', smtpPass: 'MAIL-PASS-MARKER', fromAddress: 'from-marker@example.net' }));
+  fs.writeFileSync(path.join(root, 'lib/atlas-ledger-issuance-config.json'), JSON.stringify({ enabled: true, domain: 'not-this-host.example' }));
 
   const port = await freePort();
   const php = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root], { stdio: 'ignore' });
@@ -88,6 +91,22 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
     assert.ok(!/can be read over the web/.test(text.replace('private helper files must not be served', '')), 'nothing flagged as exposed except the planted key, which the dev server serves');
   });
 
+  await check('the Features section shows what is on, off and misconfigured, how to switch, and no secrets', async () => {
+    const feat = page.locator('details', { hasText: 'Features (what is switched on)' });
+    assert.ok(await feat.getAttribute('open') !== null, 'opens by itself when a feature needs attention');
+    const text = await feat.textContent();
+    assert.ok(/Email-delivered tickets/.test(text) && /outgoing server: smtp\.example\.net/.test(text) && /outgoing login: set/.test(text));
+    assert.ok(/Ledger account credentials/.test(text) && /not this host/.test(text));
+    assert.ok(/Transfer to file/.test(text) && /Asset Studio minting/.test(text) && /Call service/.test(text));
+    assert.ok(/How to switch/.test(text) && /Turn on:/.test(text) && /Turn off:/.test(text));
+    assert.ok(!text.includes('MAIL-PASS-MARKER') && !text.includes('from-marker@example.net'));
+    const pills = await feat.locator('.feat .pill').allTextContents();
+    assert.ok(pills.includes('ON') && pills.includes('off') && pills.includes('!') && pills.includes('n/a'), pills.join(','));
+    const todo = await page.locator('details', { hasText: 'To do' }).first().textContent();
+    assert.ok(/Feature needs attention: Ledger account credentials/.test(todo));
+    if (shotDir) { await feat.scrollIntoViewIfNeeded(); await feat.locator('details').first().evaluate((d) => d.setAttribute('open', '')); await page.screenshot({ path: path.join(shotDir, 'doctor-features.png'), fullPage: true }); }
+  });
+
   await check('Check again keeps a single set of sections', async () => {
     const before = await page.locator('#sections > details').count();
     await page.click('#rerun');
@@ -103,7 +122,8 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
     const rep = await page.evaluate(() => navigator.clipboard.readText());
     assert.ok(/Site Doctor report/.test(rep) && /MISSING/.test(rep));
     assert.ok(!rep.includes(root) && !rep.includes(tmp), 'folder paths are redacted');
-    assert.ok(!rep.includes('PEM-SECRET-MARKER'));
+    assert.ok(!rep.includes('PEM-SECRET-MARKER') && !rep.includes('MAIL-PASS-MARKER') && !rep.includes('from-marker@example.net'));
+    assert.ok(/FEATURES/.test(rep) && /\[on\] Transfer to file/.test(rep) && /\[problem\] Ledger account credentials/.test(rep), rep.slice(0, 400));
   });
 
   await check('the phone-width layout has no horizontal scroll', async () => {
