@@ -1,6 +1,6 @@
 # Asset Studio v0.1 — independent security review handoff
 
-**Branch:** `feature/asset-studio-v0.1` in `BeedS101/domain-atlas`.
+**Code:** merged into `main` in `BeedS101/domain-atlas` (developed on `feature/asset-studio-v0.1`, which is no longer needed).
 
 **Status / release decision: NO-GO for public minting until the remediation below has been independently rechecked.** The mint pipeline is implemented and tested end to end against a real PHP issuer and the real wallet extension, but it ships **disabled**: it turns on only when a private `studio-config.json` enables it. Nothing here has been deployed, merged to `main`, or run with a production key. Read `asset-studio-v0.1.md` first for the design.
 
@@ -33,7 +33,7 @@ Remaining risks: not proven against power loss; WebAuthn is not RP-pinned unless
 
 ## Reviewer instructions
 
-Please conduct a **read-only adversarial audit** of this branch. Do not enable mint endpoints on a live domain, alter issuer keys, or merge to `main`. Use `node test/studio-local-issuer.js` for an isolated issuer. For each finding give the file and line, attack preconditions, impact, exploit outline, recommended fix and a regression-test idea, ranked critical/high/medium/low. State uncertainty explicitly. Passing tests are not evidence of security; try to break the design.
+Please conduct a **read-only adversarial audit** of this code. Do not enable mint endpoints on a live domain or alter issuer keys. Use `node test/studio-local-issuer.js` for an isolated issuer. For each finding give the file and line, attack preconditions, impact, exploit outline, recommended fix and a regression-test idea, ranked critical/high/medium/low. State uncertainty explicitly. Passing tests are not evidence of security; try to break the design.
 
 ## What changed relative to the earlier prototype
 

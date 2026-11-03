@@ -94,6 +94,8 @@ It has no `entry`, so it is never shown as a place to walk into. Save, then open
 
 ## 6. Check it (no minting yet)
 
+Optional first: if anything looks off, or you want to be sure the upload is complete, run the one-off site doctor (`docs/site-doctor.md`). It compares the files on the domain with the repository and lists exactly what is missing or different, then you delete it.
+
 From a PC with Node (the repository checkout):
 
 ```
@@ -118,7 +120,7 @@ Reload `.../api.php?op=status`: it should now say `"mintEnabled":true`. If it st
 
 ## 8. Real wallet test
 
-Use the wallet extension from this branch (`extension/`), because it contains the bridge changes: in Chrome, Extensions, Developer mode, reload the unpacked `extension/` folder, and create or unlock a wallet identity.
+Use the wallet extension from `main` (the `extension/` folder), because it contains the bridge changes: in Chrome, Extensions, Developer mode, reload the unpacked `extension/` folder, and create or unlock a wallet identity.
 
 1. Open `https://evtec.co.za/atlas/studio/index.html`. The line under the preview should read "Wallet identity available" and **Mint to Wallet** should enable. If it does not, the manifest (step 5) or the extension version is the usual cause.
 2. Pick Trophy, name it, press **Validate with PHP** (should pass), then **Mint to Wallet**.
