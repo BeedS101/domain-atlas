@@ -300,39 +300,11 @@
     {
       "model": "/assets/gallery/potted-plant.glb",
       "position": [
-        -18,
-        0,
-        13
-      ],
-      "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/potted-plant.glb",
-      "position": [
         18,
         0,
         -13
       ],
       "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/potted-plant.glb",
-      "position": [
-        18,
-        0,
-        13
-      ],
-      "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/globe-feature.glb",
-      "position": [
-        0,
-        0,
-        -1
-      ],
-      "rotationY": 0,
-      "scale": 2.1
     },
     {
       "model": "/assets/gallery/business-kiosk.glb",
@@ -369,7 +341,7 @@
       "position": [
         -18,
         0,
-        -6
+        -7
       ],
       "rotationY": 90,
       "scale": 1.4
@@ -379,17 +351,7 @@
       "position": [
         -18,
         0,
-        0
-      ],
-      "rotationY": 90,
-      "scale": 1.4
-    },
-    {
-      "model": "/assets/gallery/book-display.glb",
-      "position": [
-        -18,
-        0,
-        7
+        5
       ],
       "rotationY": 90,
       "scale": 1.4
@@ -575,51 +537,6 @@
       "rotationY": 0
     },
     {
-      "model": "/assets/gallery/potted-plant.glb",
-      "position": [
-        -5,
-        0,
-        8.5
-      ],
-      "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/potted-plant.glb",
-      "position": [
-        12,
-        0,
-        12
-      ],
-      "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/potted-plant.glb",
-      "position": [
-        6,
-        0,
-        9
-      ],
-      "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/wood-bench.glb",
-      "position": [
-        -5.5,
-        0,
-        12.5
-      ],
-      "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/wood-bench.glb",
-      "position": [
-        10,
-        0,
-        8
-      ],
-      "rotationY": 0
-    },
-    {
       "model": "/assets/portals/galleryPortal.glb",
       "position": [
         0,
@@ -685,15 +602,6 @@
       ],
       "rotationY": 0,
       "collision": false
-    },
-    {
-      "model": "/assets/gallery/lounge-coffee-table.glb",
-      "position": [
-        -10,
-        0,
-        10
-      ],
-      "rotationY": 0
     },
     {
       "model": "/assets/gallery/roof-truss-long.glb",
@@ -1104,12 +1012,53 @@
       "collision": false
     },
     {
-      "model": "/assets/gallery/globe-plinth-detail.glb",
+      "model": "/assets/gallery/polish/gallerySectionBusiness.glb",
+      "position": [
+        -20.38,
+        2.45,
+        -2.4
+      ],
+      "rotationY": 90,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/polish/gallerySectionCollectibles.glb",
+      "position": [
+        20.38,
+        2.45,
+        -2.4
+      ],
+      "rotationY": 270,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/polish/gallerySectionLounge.glb",
+      "position": [
+        -20.38,
+        2.45,
+        15
+      ],
+      "rotationY": 90,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/polish/galleryFloorOverlay.glb",
       "position": [
         0,
-        0,
+        0.012,
         0
       ],
+      "rotationY": 0,
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/polish/galleryGlobeAssembly.glb",
+      "position": [
+        13.5,
+        0,
+        11.5
+      ],
+      "rotationY": 0,
       "collision": false
     }
   ],
