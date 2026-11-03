@@ -6,7 +6,7 @@
 //   - the Workshop and the Gallery portal to each other as same-domain
 //     (kind "world") portals, and each portal has a marker in its scene;
 //   - the Gallery is a gltf-mini-v1 scene whose every model resolves to a real
-//     file under /assets/gallery/, with none of the old test-path leftovers;
+//     file under /assets/gallery/ (or its polish/ folder), with none of the old test-path leftovers;
 //   - the Gallery declares characterScale 1.4 and the Lobby 0.5;
 //   - the repo manifests keep their local demo addresses.
 
@@ -78,17 +78,24 @@ models.forEach((m) => {
     assert.strictEqual(fs.readFileSync(path.join(B, m.replace(/^\//, ''))).slice(0, 4).toString(), 'glTF', m + ' is not a GLB');
     return;
   }
-  assert(/^\/assets\/gallery\/[^/]+\.glb$/.test(m), 'Gallery model must be /assets/gallery/<file>.glb, got ' + m);
-  assert(fs.existsSync(path.join(GALLERY_DIR, path.basename(m))), 'Gallery model file is missing: ' + m);
-  assert.strictEqual(fs.readFileSync(path.join(GALLERY_DIR, path.basename(m))).slice(0, 4).toString(), 'glTF', m + ' is not a GLB');
+  // Models sit in /assets/gallery/ or, for the finishing pieces, one level down in /assets/gallery/polish/.
+  assert(/^\/assets\/gallery\/(polish\/)?[^/]+\.glb$/.test(m), 'Gallery model must be /assets/gallery/<file>.glb or /assets/gallery/polish/<file>.glb, got ' + m);
+  const file = path.join(B, m.replace(/^\//, ''));
+  assert(fs.existsSync(file), 'Gallery model file is missing: ' + m);
+  assert.strictEqual(fs.readFileSync(file).slice(0, 4).toString(), 'glTF', m + ' is not a GLB');
 });
 const text = fs.readFileSync(galleryPath, 'utf8');
 ['/assets/workshop/', 'normalized', 'architecture-v', 'gallery-v'].forEach((bad) => assert(!text.includes(bad), 'Gallery scene still mentions ' + bad));
-fs.readdirSync(GALLERY_DIR).forEach((f) => assert(f.endsWith('.glb'), 'unexpected file in assets/gallery: ' + f));
+fs.readdirSync(GALLERY_DIR, { withFileTypes: true }).forEach((e) => {
+  if (e.isDirectory()) {
+    assert.strictEqual(e.name, 'polish', 'unexpected folder in assets/gallery: ' + e.name);
+    fs.readdirSync(path.join(GALLERY_DIR, e.name)).forEach((f) => assert(f.endsWith('.glb'), 'unexpected file in assets/gallery/polish: ' + f));
+  } else assert(e.name.endsWith('.glb'), 'unexpected file in assets/gallery: ' + e.name);
+});
 const stray = [];
 (function walk(d) { fs.readdirSync(d, { withFileTypes: true }).forEach((e) => { if (e.isDirectory()) { if (/^(gallery-v\d|normalized|architecture-v\d)/.test(e.name)) stray.push(path.join(d, e.name)); walk(path.join(d, e.name)); } }); })(B);
 assert.deepStrictEqual(stray, [], 'old test asset folders must not be in the repo');
-pass('all ' + gallery.objects.length + ' Gallery objects (' + models.length + ' models) resolve to GLBs under /assets/gallery/ (plus the /assets/portals/ gate); no old test paths or folders');
+pass('all ' + gallery.objects.length + ' Gallery objects (' + models.length + ' models) resolve to GLBs under /assets/gallery/ and /assets/gallery/polish/ (plus the /assets/portals/ gate); no old test paths or folders');
 
 // ---- character scale owned by the scene ----
 assert.strictEqual(gallery.characterScale, 1.4, 'the Gallery declares characterScale 1.4');
