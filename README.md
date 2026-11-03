@@ -1625,6 +1625,28 @@ genuinely blocks a live-checked credential, a real unsuspend, and a real
 clawback landing a fresh credential in a new owner's hands, all driven
 through the actual page and its actual buttons, not the raw HTTP layer.
 
+The same panel section also lists what is suspended right now ("Currently
+suspended": id, reason, since, end time, a "revokes when it ends" badge,
+and per-row Unsuspend and "Use this id" buttons), read through the
+admin-gated `POST /atlas/admin/suspensions` (`{now, total, suspended}`,
+newest first, at most 500). It reads the list through the same code that
+enforces it, so an entry that has run out is lifted (or revoked, for "revoke
+when it ends") before the list is built and is never shown as active.
+A **Site status** section above Revoke shows what the server has switched on
+(`POST /atlas/admin/site-status`) from the same read-only readers the site
+doctor uses (`issuer-php/lib/site-features.php` and `site-features.json`;
+the Node server reports the features it has in `lib-site-status.js`), and
+gives an emergency off-switch (`POST /atlas/admin/site-pause`, `{feature}`)
+for the few features where one is safe: Studio minting, ledger credentials
+and receipts, and the Transaction and Multi-issuer labs. A pause only ever
+turns a feature off (it sets the one setting to false and keeps every other
+setting, the file's mode and an empty `{}`), refuses a file it cannot parse,
+never creates a file, and has no switch for credentials, renames or mail
+configuration; turning anything back on is done in the file, as the
+section's "How to switch" text says. Both panel copies carry the change.
+Tests: `test/admin-site-status.js node|php`, `test/admin-site-status-php.js`
+and, in a browser, `test/manual-admin-panel-site.js node|php`.
+
 ## A reserve bank, two commercial banks, and no wallet in sight
 
 `demo-domain-a/reserve-bank-demo.html` is the largest single-page demo on

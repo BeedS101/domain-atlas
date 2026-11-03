@@ -6,7 +6,9 @@
 // (SHA-256, text files with CRLF folded to LF), lists unexpected files, checks the server against what the issuer
 // needs, and prints the setup values to copy. It is read-only: nothing is created, changed or sent anywhere. The
 // only write is the "delete this file" action, which removes this file. File contents are never shown; private
-// state is reported by name, size and mode only and is never opened. PHP 7.2 compatible.
+// state is reported by name, size and mode. A few files are opened only to be counted or checked for valid JSON
+// (the revocation and suspension lists, holdings records, the administrator key list) and only counts and sizes
+// leave this file; the administrator session store is never opened. PHP 7.2 compatible.
 
 $DOCTOR = null;
 /*@@DOCTOR_CONFIG@@*/
@@ -166,11 +168,18 @@ function doctor_extras($root, $known, $self, $budget, $byBase) {
       }
     }
   }
-  // Private state: one line per state folder when it holds more than a few files.
-  $groups = []; $single = [];
+  // Private state: lock files become one line per folder (the issuer creates up to 64 empty ones per kind and
+  // they are meant to stay empty), and a state folder with more than a few files becomes one line.
+  $groups = []; $single = []; $locks = [];
   foreach ($state as $s) {
-    if (preg_match('#^(.*?(?:^|/)(?:replay|holdings|txn|state)/)#', $s[0], $m)) $groups[$m[1]][] = $s; else $single[] = $s;
+    if (preg_match('#(^|/)[^/]*(\.lock|-lock-[^/]*)$#i', $s[0])) {
+      $d = dirname($s[0]) === '.' ? '' : dirname($s[0]) . '/';
+      if (!isset($locks[$d])) $locks[$d] = [0, 0];
+      $locks[$d][0]++; $locks[$d][1] += $s[2];
+    }
+    elseif (preg_match('#^(.*?(?:^|/)(?:replay|holdings|txn|state)/)#', $s[0], $m)) $groups[$m[1]][] = $s; else $single[] = $s;
   }
+  foreach ($locks as $d => $l) $single[] = [$d . '*.lock', '', $l[0], 'locks', $l[1]];
   foreach ($groups as $key => $list) {
     if (count($list) > 3) $single[] = [$key, '', count($list), 'dir']; else foreach ($list as $s) $single[] = $s;
   }
@@ -185,18 +194,6 @@ function doctor_https() {
   if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') return true;
   if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') return true;
   return isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === 443;
-}
-
-// The configured Studio private folder without running storage-root.php: env var first, then the file's
-// `return "...";` line.
-function doctor_studio_root($root) {
-  $env = getenv('ATLAS_STUDIO_STORAGE_ROOT');
-  if (is_string($env) && $env !== '') return ['env', $env];
-  $file = $root . '/atlas/studio/inc/storage-root.php';
-  if (!is_file($file) || is_link($file)) return [null, null];
-  $src = @file_get_contents($file, false, null, 0, 4096);
-  if ($src !== false && preg_match('/(?:^|<\?php)\s*return\s+(["\'])(.*?)\1\s*;/m', $src, $m) && $m[2] !== '' && strpos($m[2], 'CPANELUSER') === false) return ['file', $m[2]];
-  return ['file-unreadable', null];
 }
 
 function doctor_env($root) {
@@ -271,7 +268,7 @@ function doctor_env($root) {
   $setup = ['host' => $host, 'suggestedRoot' => $parent . '/atlas-studio-data', 'buckets' => ['drafts', 'uploads-quarantine', 'mint-receipts', 'tmp', 'rate'], 'studioHere' => $studioHere, 'spatialWorld' => [
     'id' => 'studio', 'name' => 'Asset Studio', 'policy' => ['walletBridge' => ['read' => true, 'sign' => ['atlas.studio.mint/1'], 'offer' => ['atlas.demo.studio.collectible']]]]];
   if ($studioHere) {
-    list($how, $configured) = doctor_studio_root($root);
+    list($how, $configured) = atlas_sf_studio_root($root);
     $fixRoot = 'Create the folder ' . $setup['suggestedRoot'] . ' (outside the web root) with the five sub-folders listed under "Setup values", then point Studio at it.';
     if ($how === null) $add('studio-root', 'warn', 'Studio storage is not configured', 'Studio stays off until it has a private folder.', $fixRoot);
     elseif ($configured === null) $add('studio-root', 'warn', 'atlas/studio/inc/storage-root.php does not return a usable path', 'It still has the example value or an unreadable format.', $fixRoot);
@@ -318,252 +315,7 @@ function doctor_env($root) {
     'detectedMods' => (is_file($root . '/atlas/call/info.php') ? 'c' : '') . (is_file($root . '/presence/status.php') ? 'p' : '')];
 }
 
-// ---- feature switches (read-only) ------------------------------------------------------------------------
-//
-// Each feature in the embedded registry is switched by a setting in a file or by renaming a file. A reader
-// per feature type reports on / off / problem / absent, plus a short list of facts. Only the fields a reader
-// names are ever put in the output; passwords, tokens, keys and every other value stay unread by the output.
-// Nothing is executed: PHP config files are matched with patterns, never included.
-
-function doctor_clip($v, $n = 120) {
-  $v = preg_replace('/[\x00-\x1f\x7f]+/', ' ', (string)$v);
-  return strlen($v) > $n ? substr($v, 0, $n - 3) . '...' : $v;
-}
-
-// Small regular file: its contents, null when absent, false when unreadable or too large. Never follows symlinks.
-function doctor_small_file($path, $max) {
-  if (is_link($path) || !is_file($path)) return null;
-  $c = @file_get_contents($path, false, null, 0, $max + 1);
-  return ($c === false || strlen($c) > $max) ? false : $c;
-}
-
-function doctor_json_doc($path, $max = 65536) {
-  $c = doctor_small_file($path, $max);
-  if ($c === null) return ['missing', null];
-  if ($c === false) return ['unreadable', null];
-  $d = json_decode($c, true);
-  return is_array($d) ? ['ok', $d] : ['invalid', null];
-}
-
-function doctor_origin_ok($s) {
-  return is_string($s) && strlen($s) <= 255 && preg_match('#^https?://(\[[0-9a-f:]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?)(:\d{1,5})?$#', $s) === 1;
-}
-
-function doctor_is_list($a) { return is_array($a) && ($a === [] || array_keys($a) === range(0, count($a) - 1)); }
-
-function doctor_inside($path, $root) {
-  $p = realpath($path); $r = realpath($root);
-  if ($p === false || $r === false) return false;
-  $p = rtrim(str_replace('\\', '/', $p), '/') . '/'; $r = rtrim(str_replace('\\', '/', $r), '/') . '/';
-  return strpos($p, $r) === 0 || strpos($r, $p) === 0;
-}
-
-// The path in a `return "...";` pointer file, without running it.
-function doctor_pointer_path($file) {
-  $src = doctor_small_file($file, 4096);
-  if (!is_string($src) || !preg_match('/(?:^|<\?php)\s*return\s+(["\'])(.*?)\1\s*;/m', $src, $m) || $m[2] === '' || strpos($m[2], 'CPANELUSER') !== false) return null;
-  return $m[2];
-}
-
-function doctor_feature_studio_config($root, $f, $host) {
-  list($how, $dir) = doctor_studio_root($root);
-  if ($dir === null) return ['off', ['Studio storage is not configured, so minting stays off'], []];
-  $rr = is_dir($dir) ? realpath($dir) : false;
-  if ($rr === false) return ['problem', ['the Studio storage folder does not exist'], []];
-  list($st, $c) = doctor_json_doc($rr . '/studio-config.json', 8192);
-  if ($st === 'missing') return ['off', ['no studio-config.json in the storage folder'], []];
-  if ($st !== 'ok') return ['problem', ['studio-config.json is not valid JSON, so minting stays off'], []];
-  if (!isset($c['mintEnabled']) || $c['mintEnabled'] !== true) return ['off', ['"mintEnabled" is not true'], []];
-  $facts = []; $problems = [];
-  $domain = isset($c['domain']) && is_string($c['domain']) ? $c['domain'] : null;
-  if ($domain !== null) $facts[] = 'domain: ' . doctor_clip($domain, 80);
-  if ($domain !== $host) $problems[] = 'domain-mismatch: studio-config.json says "' . doctor_clip($domain === null ? '(none)' : $domain, 80) . '" but this host is "' . doctor_clip($host, 80) . '"; minting stays off';
-  $origins = isset($c['origins']) && is_array($c['origins']) ? $c['origins'] : ['https://' . (string)$domain];
-  $shown = [];
-  foreach (array_slice($origins, 0, 4) as $o) if (is_string($o)) $shown[] = doctor_clip($o, 80);
-  $facts[] = 'origins: ' . implode(', ', $shown);
-  if (!in_array('https://' . $host, $origins, true) && !in_array('http://' . $host, $origins, true)) $problems[] = 'bad-origins: "origins" does not include https://' . doctor_clip($host, 80);
-  if (!is_writable($rr)) $problems[] = 'the storage folder is not writable';
-  return [$problems ? 'problem' : 'on', $problems, $facts];
-}
-
-function doctor_feature_json_enabled($root, $f, $host) {
-  list($st, $d) = doctor_json_doc($root . '/' . $f['file']);
-  if ($st === 'missing') return ['off', ['no ' . $f['file'] . ' (off by default)'], []];
-  if ($st !== 'ok') return ['problem', [$f['file'] . ($st === 'invalid' ? ' is not valid JSON, so the feature stays off' : ' could not be read')], []];
-  if (!isset($d['enabled']) || $d['enabled'] !== true) return ['off', ['"enabled" is not true'], []];
-  $facts = []; $problems = [];
-  foreach ($f['show'] as $k) if (isset($d[$k]) && (is_string($d[$k]) || is_int($d[$k]))) $facts[] = $k . ': ' . doctor_clip($d[$k], 80);
-  $hk = isset($f['hostKey']) ? $f['hostKey'] : null;
-  if ($hk !== null) {
-    if (!isset($d[$hk]) || !is_string($d[$hk])) $problems[] = '"' . $hk . '" is missing';
-    elseif ($host !== '' && $d[$hk] !== $host) $problems[] = '"' . $hk . '" is not this host (' . doctor_clip($host, 80) . '), so the route refuses requests';
-  }
-  return [$problems ? 'problem' : 'on', $problems, $facts];
-}
-
-function doctor_feature_email_tickets($root, $f, $host) {
-  list($st, $d) = doctor_json_doc($root . '/' . $f['file']);
-  $intake = false;
-  list($ms, $m) = doctor_json_doc($root . '/.well-known/spatial.json', 1048576);
-  if ($ms === 'ok' && isset($m['emailTickets']['intakeAddress']) && $m['emailTickets']['intakeAddress'] !== '') $intake = true;
-  if ($st === 'missing') return ['off', ['no ' . $f['file'] . ' (email delivery is off)'], ['manifest intakeAddress: ' . ($intake ? 'set' : 'not set')]];
-  if ($st !== 'ok') return ['problem', [$f['file'] . ($st === 'invalid' ? ' is not valid JSON, so email delivery is off' : ' could not be read')], []];
-  $has = function ($k) use ($d) { return isset($d[$k]) && is_string($d[$k]) && $d[$k] !== ''; };
-  $port = function ($k, $def) use ($d) { return isset($d[$k]) && is_int($d[$k]) ? $d[$k] : $def; };
-  $smtp = $has('smtpHost'); $from = $has('fromAddress'); $imap = $has('imapHost');
-  $facts = [];
-  if ($smtp) $facts[] = 'outgoing server: ' . doctor_clip($d['smtpHost'], 80) . ':' . $port('smtpPort', 587) . ' ' . ($has('smtpSecure') ? doctor_clip($d['smtpSecure'], 12) : 'starttls');
-  $facts[] = 'outgoing login: ' . (($has('smtpUser') && $has('smtpPass')) ? 'set' : 'not set');
-  $facts[] = 'from address: ' . ($from ? 'set' : 'not set');
-  $facts[] = 'incoming (IMAP): ' . ($imap ? doctor_clip($d['imapHost'], 80) . ':' . $port('imapPort', 993) : 'off') . ($imap ? ', login ' . (($has('imapUser') && $has('imapPass')) ? 'set' : 'not set') : '');
-  $facts[] = 'manifest intakeAddress: ' . ($intake ? 'set' : 'not set');
-  $problems = [];
-  if ($smtp !== $from) $problems[] = 'smtpHost and fromAddress must both be set for email to send';
-  if ($imap && !$smtp) $problems[] = 'incoming mail is configured without outgoing mail';
-  return [($smtp && $from) ? ($problems ? 'problem' : 'on') : ($problems ? 'problem' : 'off'), $problems, $facts];
-}
-
-function doctor_feature_manifest_field($root, $f, $host) {
-  list($st, $m) = doctor_json_doc($root . '/.well-known/spatial.json', 1048576);
-  if ($st === 'missing') return ['off', ['.well-known/spatial.json is missing'], []];
-  if ($st !== 'ok') return ['problem', ['.well-known/spatial.json is not valid JSON'], []];
-  if (!isset($m[$f['field']])) return ['off', ['no "' . $f['field'] . '" field in the manifest'], []];
-  $v = $m[$f['field']];
-  if (!is_array($v) || ($v !== [] && doctor_is_list($v))) return ['problem', ['"' . $f['field'] . '" is present but is not an object, so it is ignored'], []];
-  $facts = [];
-  if (isset($v['classes']) && is_array($v['classes'])) {
-    $names = [];
-    foreach (array_slice($v['classes'], 0, 10) as $c) if (is_string($c)) $names[] = doctor_clip($c, 60);
-    $facts[] = 'classes (' . count($v['classes']) . '): ' . implode(', ', $names);
-  } else $facts[] = 'classes: every eligible class';
-  return ['on', [], $facts];
-}
-
-function doctor_feature_moderation_issuer($root, $f, $host) {
-  list($st, $d) = doctor_json_doc($root . '/' . $f['file']);
-  $env = getenv('ATLAS_MODERATION_AUDIENCES');
-  if ($st === 'missing' && $env === false) return ['off', ['no ' . $f['file'] . ' (no moderation grants)'], []];
-  if ($st !== 'ok' && $st !== 'missing') return ['problem', [$f['file'] . ($st === 'invalid' ? ' is not valid JSON' : ' could not be read')], []];
-  $d = is_array($d) ? $d : [];
-  $domain = isset($d['domain']) && is_string($d['domain']) && $d['domain'] !== '' ? $d['domain'] : null;
-  $aud = [];
-  if ($env !== false) { foreach (explode(',', $env) as $a) { $a = trim($a); if (doctor_origin_ok($a)) $aud[] = $a; } }
-  elseif (isset($d['audiences']) && is_array($d['audiences'])) { foreach ($d['audiences'] as $a) if (doctor_origin_ok($a)) $aud[] = $a; }
-  $facts = [];
-  if ($domain !== null) $facts[] = 'domain: ' . doctor_clip($domain, 80);
-  $facts[] = 'presence endpoints (' . count($aud) . '): ' . implode(', ', array_map(function ($a) { return doctor_clip($a, 80); }, array_slice($aud, 0, 4))) . ($env !== false ? ' (from the ATLAS_MODERATION_AUDIENCES environment variable)' : '');
-  $problems = [];
-  if ($domain !== null && $host !== '' && $domain !== $host) $problems[] = '"domain" is not this host, so the grant route refuses';
-  if (($domain === null) !== (count($aud) === 0)) $problems[] = $domain === null ? 'no "domain" is set' : 'no valid presence endpoint is listed in "audiences"';
-  if ($domain === null && !$aud) return ['off', ['no domain and no presence endpoints'], []];
-  return [$problems ? 'problem' : 'on', $problems, $facts];
-}
-
-function doctor_feature_presence_moderation($root, $f, $host) {
-  $env = getenv('PRESENCE_MODERATION_CONFIG');
-  $path = ($env !== false && $env !== '') ? $env : $root . '/' . $f['file'];
-  list($st, $d) = doctor_json_doc($path);
-  if ($st === 'missing') return ['off', ['no moderation config file'], []];
-  if ($st !== 'ok') return ['problem', ['the moderation config cannot be parsed, so moderation is disabled'], []];
-  if (array_key_exists('enabled', $d) && !is_bool($d['enabled'])) return ['problem', ['"enabled" must be true or false, so moderation is disabled'], []];
-  if (array_key_exists('enabled', $d) && $d['enabled'] === false) return ['off', ['"enabled" is false'], []];
-  $problems = [];
-  $aud = isset($d['audience']) ? $d['audience'] : null;
-  if (!doctor_origin_ok($aud)) $problems[] = '"audience" is missing or not a presence origin';
-  $domains = isset($d['domains']) && is_array($d['domains']) && ($d['domains'] === [] || !doctor_is_list($d['domains'])) ? $d['domains'] : null;
-  if ($domains === null) $problems[] = '"domains" is missing or not an object';
-  $facts = [];
-  if (doctor_origin_ok($aud)) $facts[] = 'audience: ' . doctor_clip($aud, 80);
-  if ($domains !== null) $facts[] = 'trusted domains (' . count($domains) . '): ' . implode(', ', array_map(function ($k) { return doctor_clip($k, 60); }, array_slice(array_keys($domains), 0, 6)));
-  foreach (['revokedModerators' => 'revoked moderators', 'revokedGrants' => 'revoked grants'] as $k => $label) if (isset($d[$k]) && is_array($d[$k])) $facts[] = $label . ': ' . count($d[$k]);
-  return [$problems ? 'problem' : 'on', $problems, $facts];
-}
-
-function doctor_feature_private_config_php($root, $f, $host) {
-  $env = getenv($f['env']);
-  $dir = ($env !== false && $env !== '') ? rtrim($env, '/\\') : doctor_pointer_path($root . '/' . $f['pointer']);
-  if ($dir === null || $dir === '') return ['off', ['no private folder configured (' . $f['pointer'] . ' is missing or still the example)'], []];
-  $dir = rtrim($dir, '/\\');
-  $facts = ['private folder: ' . doctor_clip($dir, 160)];
-  $problems = [];
-  if (!is_dir($dir)) $problems[] = 'the private folder does not exist';
-  elseif (!is_writable($dir)) $problems[] = 'the private folder is not writable';
-  elseif (doctor_inside($dir, $root)) $problems[] = 'the private folder is inside the web root';
-  if ($problems) return ['problem', $problems, $facts];
-  if (is_file($dir . '/DISABLED')) return ['off', ['switched off by the DISABLED file in the private folder'], $facts];
-  $c = doctor_small_file($dir . '/config.php', 16384);
-  if ($c === null) return ['off', ['config.php is missing in the private folder'], $facts];
-  if ($c === false) return ['problem', ['config.php could not be read'], $facts];
-  // The files are written by the lab's admin tool with var_export, so the top-level keys have a fixed shape.
-  if (!preg_match("/^  'enabled' => (true|false),/m", $c, $m)) return ['problem', ['cannot read the "enabled" setting: config.php was edited by hand or is in an unknown format'], $facts];
-  if ($m[1] !== 'true') return ['off', ['"enabled" is false in config.php'], $facts];
-  if (preg_match("/^  'domain' => '([^']*)'/m", $c, $dm)) {
-    $facts[] = 'domain: ' . doctor_clip($dm[1], 80);
-    if ($host !== '' && $dm[1] !== $host) $problems[] = '"domain" in config.php is not this host';
-  }
-  $public = preg_match("/'publicDemo' => \s*array \(\s*'enabled' => true/", $c) ? 'on' : 'off';
-  $facts[] = 'public demo for visitors: ' . $public;
-  if (preg_match("/'allowInsecureHttp' => true/", $c)) $problems[] = 'allowInsecureHttp is on (for tests only; never on a live domain)';
-  return [$problems ? 'problem' : 'on', $problems, $facts];
-}
-
-function doctor_feature_rename($root, $f, $host) {
-  $on = $root . '/' . $f['on']; $off = $root . '/' . $f['off'];
-  $hasOn = is_file($on); $hasOff = is_file($off);
-  if (!$hasOn) return ['off', [$hasOff ? 'switched off: ' . basename($f['off']) . ' exists and ' . basename($f['on']) . ' does not' : 'not configured: ' . basename($f['on']) . ' does not exist'], []];
-  $facts = []; $problems = [];
-  if ($hasOff) $facts[] = basename($f['off']) . ' is also present; ' . basename($f['on']) . ' is the one in use';
-  $c = doctor_small_file($on, 16384);
-  if (!is_string($c)) return ['problem', [basename($f['on']) . ' could not be read'], $facts];
-  $domain = preg_match("/^\s*'domain'\s*=>\s*'([^']*)'/m", $c, $m) ? $m[1] : null;
-  $origin = preg_match("/^\s*'origin'\s*=>\s*'([^']*)'/m", $c, $m) ? $m[1] : null;
-  if ($domain !== null) $facts[] = 'domain: ' . doctor_clip($domain, 80);
-  if ($origin !== null) $facts[] = 'origin: ' . doctor_clip($origin, 80);
-  if ($domain === 'example.com' || $origin === 'https://example.com') $problems[] = 'still has the example.com placeholder values';
-  elseif ($domain !== null && $host !== '' && $domain !== $host) $problems[] = '"domain" is not this host';
-  $facts[] = 'issuer key: ' . (preg_match("/^\s*'issuerKeys'\s*=>\s*\[\s*'/m", $c) ? 'set' : 'not set');
-  if (!preg_match("/^\s*'issuerKeys'\s*=>\s*\[\s*'/m", $c)) $problems[] = 'no issuer key is set, so membership checks cannot pass';
-  $facts[] = 'TURN relay: ' . (preg_match("/^\s*'turnUrls'\s*=>\s*\[\s*'/m", $c) ? 'configured' : 'none');
-  if (preg_match("/^\s*'stateDir'\s*=>\s*'([^']+)'/m", $c, $m)) $facts[] = 'state folder: ' . doctor_clip($m[1], 120) . (is_dir($m[1]) && doctor_inside($m[1], $root) ? ' (inside the web root)' : '');
-  else $facts[] = 'state folder: default, inside the web folder (blocked by .htaccess)';
-  return [$problems ? 'problem' : 'on', $problems, $facts];
-}
-
-function doctor_feature_private_dir_txt($root, $f, $host) {
-  $env = getenv($f['env']);
-  $how = 'environment variable ' . $f['env'];
-  $dir = ($env !== false && $env !== '') ? $env : null;
-  if ($dir === null) {
-    $c = doctor_small_file($root . '/' . $f['file'], 1024);
-    $dir = is_string($c) ? trim($c) : '';
-    $how = $f['file'];
-    if ($dir === '') return ['off', ['not set: replay records, holdings and journals live in lib/ (protected by lib/.htaccess)'], []];
-  }
-  $dir = rtrim($dir, '/\\');
-  $facts = ['folder: ' . doctor_clip($dir, 160), 'set in: ' . $how];
-  $problems = [];
-  if (!preg_match('#^(/|[A-Za-z]:[\\\\/])#', $dir)) $problems[] = 'the path must be absolute';
-  elseif (!is_dir($dir)) $problems[] = 'the folder does not exist, so the issuer answers 503';
-  elseif (!is_writable($dir)) $problems[] = 'the folder is not writable, so the issuer answers 503';
-  elseif (doctor_inside($dir, $root)) $problems[] = 'the folder is inside the web root';
-  return [$problems ? 'problem' : 'on', $problems, $facts];
-}
-
-function doctor_features($root, $features, $host) {
-  $out = [];
-  foreach ($features as $f) {
-    $installed = true;
-    foreach ($f['needs'] as $n) if (!is_file($root . '/' . $n)) $installed = false;
-    $res = ['id' => $f['id'], 'label' => $f['label'], 'group' => isset($f['group']) ? $f['group'] : '', 'about' => isset($f['about']) ? $f['about'] : '', 'enable' => $f['enable'], 'disable' => $f['disable']];
-    $reader = 'doctor_feature_' . str_replace('-', '_', $f['type']);
-    if (!$installed) { $res['state'] = 'absent'; $res['reasons'] = ['its files are not on this domain']; $res['facts'] = []; }
-    elseif (!function_exists($reader)) { $res['state'] = 'problem'; $res['reasons'] = ['no reader for type ' . $f['type']]; $res['facts'] = []; }
-    else { $r = $reader($root, $f, $host); $res['state'] = $r[0]; $res['reasons'] = $r[1]; $res['facts'] = $r[2]; }
-    $out[] = $res;
-  }
-  return $out;
-}
+/*@@SITE_FEATURES@@*/
 
 // ---- manifest ----------------------------------------------------------------------------------------------
 // Reads this domain's own .well-known/spatial.json (public by design) and reports its worlds, the effective
@@ -576,12 +328,12 @@ function doctor_val($v) {
   if ($v === false) return 'no';
   if ($v === null) return 'not set';
   if (is_int($v) || is_float($v)) return (string)$v;
-  if (is_string($v)) return doctor_clip($v, 60);
+  if (is_string($v)) return atlas_sf_clip($v, 60);
   if (is_array($v)) {
-    if (!doctor_is_list($v)) return 'an object';
+    if (!atlas_sf_is_list($v)) return 'an object';
     if (!$v) return 'none';
     $names = [];
-    foreach (array_slice($v, 0, 8) as $x) $names[] = is_string($x) ? doctor_clip($x, 50) : '(invalid)';
+    foreach (array_slice($v, 0, 8) as $x) $names[] = is_string($x) ? atlas_sf_clip($x, 50) : '(invalid)';
     return count($v) . ': ' . implode(', ', $names) . (count($v) > 8 ? ', ...' : '');
   }
   return '(invalid)';
@@ -601,10 +353,10 @@ function doctor_manifest($root, $host) {
   $P = function ($level, $text) use (&$res) { if (count($res['problems']) < 80) $res['problems'][] = [$level, $text]; };
   if (is_link($path) || !is_file($path)) { $res['state'] = 'missing'; $P('warn', 'There is no .well-known/spatial.json, so this domain declares no space (fine if that is intended).'); return $res; }
   $res['size'] = (int)@filesize($path);
-  $raw = doctor_small_file($path, 2097152);
+  $raw = atlas_sf_small_file($path, 2097152);
   if ($raw === false) { $res['state'] = 'unreadable'; $P('fail', '.well-known/spatial.json could not be read' . ($res['size'] > 2097152 ? ' (it is larger than 2 MB)' : '') . '.'); return $res; }
   $m = json_decode($raw, true);
-  if (!is_array($m) || doctor_is_list($m)) { $res['state'] = 'invalid'; $P('fail', '.well-known/spatial.json is not a valid JSON object (' . doctor_clip(json_last_error_msg(), 80) . '). Clients ignore it.'); return $res; }
+  if (!is_array($m) || atlas_sf_is_list($m)) { $res['state'] = 'invalid'; $P('fail', '.well-known/spatial.json is not a valid JSON object (' . atlas_sf_clip(json_last_error_msg(), 80) . '). Clients ignore it.'); return $res; }
   if ($res['size'] > 524288) $P('warn', 'The manifest is ' . round($res['size'] / 1024) . ' KB; every visitor and directory downloads it, so keep it small.');
 
   // domain level
@@ -612,12 +364,12 @@ function doctor_manifest($root, $host) {
   $hasKey = isset($m['identityKey']) && is_string($m['identityKey']) && $m['identityKey'] !== '';
   $res['anchor'] = $domain !== null && $hasKey ? 'domain, with a pinned identity key' : ($domain !== null ? 'domain' : ($hasKey ? 'identity key (no domain)' : 'none'));
   if ($domain === null && !$hasKey) $P('fail', 'The manifest has neither "domain" nor "identityKey", so clients cannot tell who it belongs to.');
-  elseif ($domain !== null && $host !== '' && $domain !== $host) $P('warn', '"domain" is "' . doctor_clip($domain, 80) . '" but this site is served as "' . doctor_clip($host, 80) . '". A client that fetched this file from here may refuse it.');
+  elseif ($domain !== null && $host !== '' && $domain !== $host) $P('warn', '"domain" is "' . atlas_sf_clip($domain, 80) . '" but this site is served as "' . atlas_sf_clip($host, 80) . '". A client that fetched this file from here may refuse it.');
   if ($domain === null && $hasKey && empty($m['signature'])) $P('fail', 'A key-anchored manifest (identityKey, no domain) must carry a "signature". It is not verified here.');
   if (isset($m['spec']) && (!is_string($m['spec']) || !preg_match('#^domain-atlas/\d+\.\d+$#', $m['spec']))) $P('warn', '"spec" should look like domain-atlas/1.0.');
   $top = [];
   $top[] = 'spec: ' . (isset($m['spec']) ? doctor_val($m['spec']) : 'not set');
-  $top[] = 'domain: ' . ($domain !== null ? doctor_clip($domain, 80) : 'not set') . '  (anchor: ' . $res['anchor'] . ')';
+  $top[] = 'domain: ' . ($domain !== null ? atlas_sf_clip($domain, 80) : 'not set') . '  (anchor: ' . $res['anchor'] . ')';
   if (isset($m['owner']) && is_array($m['owner']) && isset($m['owner']['name'])) $top[] = 'owner: ' . doctor_val($m['owner']['name']);
   $top[] = 'updated: ' . (isset($m['updated']) ? doctor_val($m['updated']) : 'not set');
   $top[] = 'default world: ' . (isset($m['defaultWorld']) ? doctor_val($m['defaultWorld']) : 'not set');
@@ -631,34 +383,34 @@ function doctor_manifest($root, $host) {
 
   // cross-checks with what is installed on this domain
   if (!empty($m['emailTickets']['intakeAddress']) && is_file($root . '/lib/email-tickets.php')) {
-    $e = doctor_feature_email_tickets($root, ['file' => 'lib/atlas-email-tickets-config.json'], $host);
+    $e = atlas_sf_feature_email_tickets($root, ['file' => 'lib/atlas-email-tickets-config.json'], $host);
     if ($e[0] === 'off') $P('warn', 'The manifest advertises an email intake address, but email delivery is not configured here (lib/atlas-email-tickets-config.json). See Features.');
     elseif (in_array('incoming (IMAP): off', $e[2], true)) $P('warn', 'The manifest advertises an email intake address, but IMAP (incoming) is not configured, so nothing reads that mailbox.');
   }
   if (array_key_exists('fileTransfer', $m) && !is_file($root . '/atlas/asset/transfer-to-file.php')) $P('warn', 'The manifest opts into "fileTransfer", but atlas/asset/transfer-to-file.php is not on this domain.');
 
   // worlds
-  if (!isset($m['worlds']) || !is_array($m['worlds']) || !doctor_is_list($m['worlds'])) { $P('fail', '"worlds" must be a list (even for a single world).'); return $res; }
+  if (!isset($m['worlds']) || !is_array($m['worlds']) || !atlas_sf_is_list($m['worlds'])) { $P('fail', '"worlds" must be a list (even for a single world).'); return $res; }
   if (!$m['worlds']) $P('warn', '"worlds" is empty, so there is nothing to enter.');
   $ids = []; $enterable = [];
   foreach (array_slice($m['worlds'], 0, 200) as $i => $w) {
     if (!is_array($w) || !isset($w['id']) || !is_string($w['id']) || $w['id'] === '') { $P('fail', 'World #' . ($i + 1) . ' has no text "id".'); continue; }
-    if (isset($ids[$w['id']])) $P('fail', 'Two worlds share the id "' . doctor_clip($w['id'], 60) . '"; links to it are ambiguous.');
-    if (preg_match('/[\s:#]/', $w['id'])) $P('warn', 'World id "' . doctor_clip($w['id'], 60) . '" contains a space, colon or #, which the page link syntax (#world:anchor) cannot express.');
+    if (isset($ids[$w['id']])) $P('fail', 'Two worlds share the id "' . atlas_sf_clip($w['id'], 60) . '"; links to it are ambiguous.');
+    if (preg_match('/[\s:#]/', $w['id'])) $P('warn', 'World id "' . atlas_sf_clip($w['id'], 60) . '" contains a space, colon or #, which the page link syntax (#world:anchor) cannot express.');
     $ids[$w['id']] = true;
     $enterable[$w['id']] = isset($w['entry']) && is_array($w['entry']);
   }
   if (count($m['worlds']) > 200) $P('warn', 'Only the first 200 worlds were checked.');
   if (isset($m['defaultWorld'])) {
-    if (!is_string($m['defaultWorld']) || !isset($ids[$m['defaultWorld']])) $P('fail', '"defaultWorld" names "' . doctor_clip(is_string($m['defaultWorld']) ? $m['defaultWorld'] : '(not text)', 60) . '", which is not in "worlds".');
+    if (!is_string($m['defaultWorld']) || !isset($ids[$m['defaultWorld']])) $P('fail', '"defaultWorld" names "' . atlas_sf_clip(is_string($m['defaultWorld']) ? $m['defaultWorld'] : '(not text)', 60) . '", which is not in "worlds".');
     elseif (!$enterable[$m['defaultWorld']]) $P('fail', '"defaultWorld" is a world with no "entry", which a client can never enter.');
   } elseif (count($ids) > 1) $P('warn', 'There is more than one world and no "defaultWorld", so a plain visit has no obvious destination.');
 
   $anyKey = is_file($root . '/.well-known/atlas-key.json');
   foreach (array_slice($m['worlds'], 0, 200) as $i => $w) {
     if (!is_array($w) || !isset($w['id']) || !is_string($w['id']) || $w['id'] === '') continue;
-    $id = doctor_clip($w['id'], 60);
-    $name = isset($w['name']) && is_string($w['name']) ? doctor_clip($w['name'], 80) : '';
+    $id = atlas_sf_clip($w['id'], 60);
+    $name = isset($w['name']) && is_string($w['name']) ? atlas_sf_clip($w['name'], 80) : '';
     $facts = []; $portals = [];
     $wp = function ($level, $text) use ($P, $id) { $P($level, 'World "' . $id . '": ' . $text); };
 
@@ -671,19 +423,19 @@ function doctor_manifest($root, $host) {
         $sc = isset($w['entry']['scene']) ? $w['entry']['scene'] : null;
         list($file, $kind) = doctor_scene_path($root, $sc);
         if ($kind === 'none') { $wp('warn', '"entry.scene" is missing.'); $scene = 'no scene'; }
-        elseif ($kind === 'external') $scene = 'external: ' . doctor_clip($sc, 80);
+        elseif ($kind === 'external') $scene = 'external: ' . atlas_sf_clip($sc, 80);
         elseif ($kind === 'bad') { $wp('warn', '"entry.scene" is not a usable path.'); $scene = 'bad path'; }
-        elseif (is_link($file) || !is_file($file)) { $wp('warn', 'the scene file ' . doctor_clip($sc, 100) . ' is not on this domain (fine only if a rewrite rule serves it).'); $scene = doctor_clip($sc, 100) . ' - MISSING'; }
+        elseif (is_link($file) || !is_file($file)) { $wp('warn', 'the scene file ' . atlas_sf_clip($sc, 100) . ' is not on this domain (fine only if a rewrite rule serves it).'); $scene = atlas_sf_clip($sc, 100) . ' - MISSING'; }
         else {
-          $scene = doctor_clip($sc, 100) . ' - ' . (int)@filesize($file) . ' bytes';
+          $scene = atlas_sf_clip($sc, 100) . ' - ' . (int)@filesize($file) . ' bytes';
           if (preg_match('/\.json$/i', $file)) {
-            list($ss, $sd) = doctor_json_doc($file, 1048576);
+            list($ss, $sd) = atlas_sf_json_doc($file, 1048576);
             if ($ss === 'invalid') { $wp('warn', 'the scene file is not valid JSON.'); $scene .= ', NOT VALID JSON'; }
             elseif ($ss === 'ok') { $n = isset($sd['objects']) && is_array($sd['objects']) ? count($sd['objects']) : 0; $a = isset($sd['anchors']) && is_array($sd['anchors']) ? count($sd['anchors']) : 0; $scene .= ', ' . $n . ' object(s), ' . $a . ' anchor(s)'; }
           }
         }
         $r = isset($w['entry']['renderer']) ? $w['entry']['renderer'] : null;
-        if (!is_array($r) || !$r || !doctor_is_list($r)) $wp('warn', '"entry.renderer" should be a non-empty list.');
+        if (!is_array($r) || !$r || !atlas_sf_is_list($r)) $wp('warn', '"entry.renderer" should be a non-empty list.');
         else $facts[] = 'renderers: ' . doctor_val($r);
       }
     } else $scene = 'no entry (policy only, not enterable)';
@@ -703,12 +455,12 @@ function doctor_manifest($root, $host) {
       if ($k === 'guestAccess' && !in_array($v, ['open', 'invite-only', 'private', 'closed'], true)) $wp('warn', '"guestAccess" must be open, invite-only, private or closed.');
       if (in_array($k, ['discoverable', 'identityRequired', 'itemDropsAllowed'], true) && !is_bool($v)) $wp('warn', '"' . $k . '" must be true or false.');
       if ($k === 'acceptedItemClasses') {
-        $bad = !is_array($v) || !doctor_is_list($v);
+        $bad = !is_array($v) || !atlas_sf_is_list($v);
         if (!$bad) foreach ($v as $c) if (!is_string($c) || $c === '') $bad = true;
         if ($bad) $wp('warn', '"acceptedItemClasses" must be a list of class names.');
       }
       if ($k === 'trustedIssuers') {
-        $ok = $v === 'any' || $v === 'self' || (is_array($v) && doctor_is_list($v));
+        $ok = $v === 'any' || $v === 'self' || (is_array($v) && atlas_sf_is_list($v));
         if (!$ok) $wp('warn', '"trustedIssuers" must be "any", "self" or a list of issuer domains.');
         elseif ($v === 'self' && !$anyKey) $wp('warn', 'trusts only its own issuer, but this domain has no published issuer key (.well-known/atlas-key.json).');
       }
@@ -731,16 +483,16 @@ function doctor_manifest($root, $host) {
 
     // portals
     if (isset($w['portals'])) {
-      if (!is_array($w['portals']) || !doctor_is_list($w['portals'])) $wp('warn', '"portals" must be a list.');
+      if (!is_array($w['portals']) || !atlas_sf_is_list($w['portals'])) $wp('warn', '"portals" must be a list.');
       else foreach (array_slice($w['portals'], 0, 60) as $pi => $po) {
         if (!is_array($po)) { $wp('warn', 'portal #' . ($pi + 1) . ' is not an object.'); continue; }
         $kind = isset($po['kind']) && is_string($po['kind']) ? $po['kind'] : '';
         $to = isset($po['to']) && is_string($po['to']) ? $po['to'] : '';
-        $label = isset($po['label']) && is_string($po['label']) ? doctor_clip($po['label'], 60) : '';
+        $label = isset($po['label']) && is_string($po['label']) ? atlas_sf_clip($po['label'], 60) : '';
         $state = 'ok';
         if ($kind === 'world') {
-          if ($to === '' || !isset($ids[$to])) { $state = 'BROKEN: no world "' . doctor_clip($to, 40) . '"'; $wp('fail', 'portal "' . $label . '" leads to world "' . doctor_clip($to, 40) . '", which does not exist.'); }
-          elseif (!$enterable[$to]) { $state = 'leads to a world with no entry'; $wp('warn', 'portal "' . $label . '" leads to "' . doctor_clip($to, 40) . '", which has no "entry" and cannot be entered.'); }
+          if ($to === '' || !isset($ids[$to])) { $state = 'BROKEN: no world "' . atlas_sf_clip($to, 40) . '"'; $wp('fail', 'portal "' . $label . '" leads to world "' . atlas_sf_clip($to, 40) . '", which does not exist.'); }
+          elseif (!$enterable[$to]) { $state = 'leads to a world with no entry'; $wp('warn', 'portal "' . $label . '" leads to "' . atlas_sf_clip($to, 40) . '", which has no "entry" and cannot be entered.'); }
         } elseif ($kind === 'domain') {
           $mf = isset($po['manifest']) && is_string($po['manifest']) ? $po['manifest'] : '';
           $mh = $mf !== '' ? parse_url($mf) : false;
@@ -748,19 +500,258 @@ function doctor_manifest($root, $host) {
           elseif (!is_array($mh) || !isset($mh['scheme'], $mh['host']) || !in_array($mh['scheme'], ['http', 'https'], true)) { $state = 'manifest is not a web address'; $wp('warn', 'domain portal "' . $label . '" has a "manifest" that is not an http(s) address.'); }
           else {
             $mhost = $mh['host'] . (isset($mh['port']) ? ':' . $mh['port'] : '');
-            if ($mhost !== $to) { $state = 'manifest host differs from "to"'; $wp('warn', 'domain portal "' . $label . '" names "' . doctor_clip($to, 60) . '" but its manifest is on "' . doctor_clip($mhost, 60) . '".'); }
+            if ($mhost !== $to) { $state = 'manifest host differs from "to"'; $wp('warn', 'domain portal "' . $label . '" names "' . atlas_sf_clip($to, 60) . '" but its manifest is on "' . atlas_sf_clip($mhost, 60) . '".'); }
             elseif ($mh['scheme'] !== 'https') $state = 'plain http (blocked by strict clients)';
           }
         } elseif ($kind === 'key') {
           if (empty($po['identityKey']) || empty($po['manifest'])) { $state = 'needs "identityKey" and "manifest"'; $wp('warn', 'key portal "' . $label . '" needs "identityKey" and "manifest".'); }
-        } else { $state = 'unknown kind'; $wp('warn', 'portal "' . $label . '" has an unknown kind "' . doctor_clip($kind, 20) . '" (use world, domain or key).'); }
-        $portals[] = ($kind === '' ? '?' : $kind) . ' -> ' . doctor_clip($kind === 'key' ? (isset($po['identityKey']) && is_string($po['identityKey']) ? substr($po['identityKey'], 0, 12) . '...' : '?') : $to, 60) . ($label !== '' ? '  "' . $label . '"' : '') . ($state === 'ok' ? '' : '  [' . $state . ']');
+        } else { $state = 'unknown kind'; $wp('warn', 'portal "' . $label . '" has an unknown kind "' . atlas_sf_clip($kind, 20) . '" (use world, domain or key).'); }
+        $portals[] = ($kind === '' ? '?' : $kind) . ' -> ' . atlas_sf_clip($kind === 'key' ? (isset($po['identityKey']) && is_string($po['identityKey']) ? substr($po['identityKey'], 0, 12) . '...' : '?') : $to, 60) . ($label !== '' ? '  "' . $label . '"' : '') . ($state === 'ok' ? '' : '  [' . $state . ']');
       }
       if (count($w['portals']) > 60) $portals[] = '... ' . (count($w['portals']) - 60) . ' more';
     }
     $res['worlds'][] = ['id' => $id, 'name' => $name, 'default' => isset($m['defaultWorld']) && $m['defaultWorld'] === $w['id'], 'playable' => $playable, 'facts' => $facts, 'portals' => $portals];
   }
   return $res;
+}
+
+// ---- housekeeping, permissions and administrator-side checks -----------------------------------------------
+// Every check here reads metadata (names, sizes, modes, dates) and a few JSON files to count or validate them.
+// Nothing from those files is shown except counts and sizes: no credential id, no key, no token. Files that hold
+// bearer tokens (the administrator session store) are never opened, only their modification date is read.
+
+function doctor_bytes($v) {
+  $v = trim((string)$v);
+  if ($v === '') return 0;
+  if ($v === '-1') return -1;
+  $n = (float)$v;
+  $u = strtolower(substr($v, -1));
+  if ($u === 'g') $n *= 1073741824; elseif ($u === 'm') $n *= 1048576; elseif ($u === 'k') $n *= 1024;
+  return (int)$n;
+}
+function doctor_size($n) {
+  if ($n >= 1048576) return round($n / 1048576, 1) . ' MB';
+  if ($n >= 1024) return round($n / 1024) . ' KB';
+  return (int)$n . ' bytes';
+}
+function doctor_mode($path) {
+  $m = @fileperms($path);
+  return $m === false ? null : ($m & 0777);
+}
+function doctor_modestr($m) { return sprintf('%04o', $m); }
+
+// A JSON file: [status, document, size]. Status is missing, unreadable, too-big (not parsed), invalid or ok.
+function doctor_json_file($path, $maxParse) {
+  if (is_link($path) || !is_file($path)) return ['missing', null, 0];
+  $size = (int)@filesize($path);
+  if ($size > $maxParse) return ['too-big', null, $size];
+  $c = @file_get_contents($path);
+  if ($c === false) return ['unreadable', null, $size];
+  $d = json_decode($c, true);
+  return [is_array($d) ? 'ok' : 'invalid', is_array($d) ? $d : null, $size];
+}
+
+function doctor_private_base($root) {
+  $env = getenv('ATLAS_PRIVATE_DIR');
+  if (is_string($env) && $env !== '') return rtrim($env, '/\\');
+  $c = atlas_sf_small_file($root . '/lib/atlas-private-dir.txt', 4096);
+  return is_string($c) ? rtrim(trim($c), '/\\') : '';
+}
+
+function doctor_health($root, $host) {
+  $checks = [];
+  $add = function ($group, $id, $status, $title, $detail = '', $fix = '') use (&$checks) {
+    $checks[] = ['group' => $group, 'id' => $id, 'status' => $status, 'title' => $title, 'detail' => $detail, 'fix' => $fix];
+  };
+  $now = time();
+  $lib = $root . '/lib';
+  $wk = $root . '/.well-known';
+  $isWin = DIRECTORY_SEPARATOR === '\\';
+
+  // -- housekeeping: the two public lists
+  list($st, $doc, $size) = doctor_json_file($wk . '/atlas-revocations.json', 6291456);
+  if ($st === 'invalid' || $st === 'unreadable') {
+    $add('housekeeping', 'revocations-json', 'fail', 'The revocation list cannot be read (' . $st . ')', 'The issuer refuses to run rather than treat it as empty.', 'Restore .well-known/atlas-revocations.json from a backup. Do not delete it.');
+  } elseif ($st === 'too-big') {
+    $add('housekeeping', 'revocations-size', 'warn', 'The revocation list is very large: ' . doctor_size($size), 'It is read in full on every credential check and every wallet download.', 'Ask before pruning: an entry may only be dropped once that credential has expired anyway.');
+  } elseif ($st === 'ok') {
+    $list = isset($doc['revoked']) && is_array($doc['revoked']) ? $doc['revoked'] : null;
+    if ($list === null) $add('housekeeping', 'revocations-json', 'fail', 'The revocation list has no "revoked" list', '', 'Restore .well-known/atlas-revocations.json from a backup.');
+    else {
+      $bad = 0; $seen = [];
+      foreach ($list as $e) {
+        $id = is_array($e) && isset($e['id']) && is_string($e['id']) ? $e['id'] : (is_string($e) ? $e : null);
+        if ($id === null) $bad++; else $seen[$id] = true;
+      }
+      $dups = count($list) - $bad - count($seen);
+      $detail = count($list) . ' entries, ' . doctor_size($size) . ($bad ? '; ' . $bad . ' entries have no id' : '') . ($dups > 0 ? '; ' . $dups . ' repeated' : '') . '.';
+      if ($size >= 1048576) $add('housekeeping', 'revocations-size', 'warn', 'The revocation list is large: ' . doctor_size($size), $detail . ' It is read in full on every credential check and every wallet download.', 'Ask before pruning: an entry may only be dropped once that credential has expired anyway.');
+      elseif ($bad) $add('housekeeping', 'revocations-json', 'warn', 'The revocation list has entries without an id', $detail, 'Check the file against a backup.');
+      else $add('housekeeping', 'revocations-json', 'ok', 'Revocation list is valid JSON', $detail);
+    }
+  }
+  list($st, $doc, $size) = doctor_json_file($wk . '/atlas-suspensions.json', 6291456);
+  if ($st === 'invalid' || $st === 'unreadable' || $st === 'too-big') {
+    $add('housekeeping', 'suspensions-json', 'fail', 'The suspension list cannot be read (' . $st . ')', 'Suspended credentials may not be enforced.', 'Restore .well-known/atlas-suspensions.json from a backup, or replace it with {"suspended": []} if nothing is suspended.');
+  } elseif ($st === 'ok') {
+    $list = isset($doc['suspended']) && is_array($doc['suspended']) ? $doc['suspended'] : null;
+    if ($list === null) $add('housekeeping', 'suspensions-json', 'fail', 'The suspension list has no "suspended" list', '', 'Restore it from a backup, or replace it with {"suspended": []} if nothing is suspended.');
+    else {
+      $bad = 0; $expired = 0; $oldest = 0;
+      foreach ($list as $e) {
+        if (!is_array($e) || !isset($e['id']) || !is_string($e['id'])) { $bad++; continue; }
+        $t = isset($e['expiresAt']) && is_string($e['expiresAt']) ? strtotime($e['expiresAt']) : false;
+        if ($t !== false && $t < $now) { $expired++; if ($oldest === 0 || $t < $oldest) $oldest = $t; }
+      }
+      $detail = count($list) . ' entries, ' . doctor_size($size) . ($bad ? '; ' . $bad . ' have no id' : '') . '.';
+      if ($bad) $add('housekeeping', 'suspensions-json', 'warn', 'The suspension list has entries without an id', $detail, 'Check the file against a backup.');
+      else $add('housekeeping', 'suspensions-json', 'ok', 'Suspension list is valid JSON', $detail);
+      if ($expired) {
+        $stale = $oldest !== 0 && $now - $oldest > 86400;
+        $add('housekeeping', 'suspensions-expired', $stale ? 'warn' : 'info', $expired . ' suspension(s) have run out but are still in the file',
+          'The issuer lifts them (or revokes them, for "revoke when it ends") the next time any credential is checked, so this is normal for a quiet site.' . ($stale ? ' The oldest ended ' . date('Y-m-d', $oldest) . ', so nothing has checked a credential since.' : ''),
+          'Open the admin panel\'s "Currently suspended" list: opening it resolves them.');
+      }
+    }
+  }
+
+  // -- housekeeping: holdings (counted and checked for valid JSON, never shown)
+  $base = doctor_private_base($root);
+  $hdir = ($base === '' ? $lib : $base) . '/holdings';
+  if (is_dir($hdir) && !is_link($hdir)) {
+    $t0 = microtime(true); $n = 0; $bad = 0; $big = 0; $total = 0; $checked = 0;
+    $names = @scandir($hdir);
+    foreach (is_array($names) ? $names : [] as $name) {
+      if ($name === '.' || $name === '..' || substr($name, -5) !== '.json') continue;
+      $f = $hdir . '/' . $name;
+      if (!is_file($f) || is_link($f)) continue;
+      $n++; $sz = (int)@filesize($f); $total += $sz;
+      if ($sz > 262144) { $big++; continue; }
+      if ($checked >= 2000 || microtime(true) - $t0 > 3.0) continue;
+      $checked++;
+      $d = json_decode((string)@file_get_contents($f), true);
+      if (!is_array($d) || !isset($d['held']) || !is_array($d['held'])) $bad++;
+    }
+    if ($bad) $add('housekeeping', 'holdings', 'fail', $bad . ' holdings record(s) are unreadable', 'The issuer refuses to guess a balance for those owners, so their issuing and replacement requests fail.', 'Restore those files in holdings/ from a backup. Do not delete them.');
+    elseif ($big) $add('housekeeping', 'holdings', 'warn', $big . ' holdings record(s) are over 256 KB', $n . ' records, ' . doctor_size($total) . ' in all.', 'An owner holding that many credentials is unusual; check it is not a loop.');
+    else $add('housekeeping', 'holdings', 'ok', 'Holdings records are valid JSON', $n . ' records, ' . doctor_size($total) . ' in all' . ($checked < $n ? ' (' . $checked . ' checked within the time limit)' : '') . '.');
+  }
+
+  // -- housekeeping: any single state file growing out of hand
+  $largest = [];
+  foreach ([$lib, $wk] as $d) {
+    $names = is_dir($d) ? @scandir($d) : false;
+    foreach (is_array($names) ? $names : [] as $name) {
+      $f = $d . '/' . $name;
+      if (is_file($f) && !is_link($f) && preg_match('/^atlas-.*\.json$/', $name)) $largest[] = [(int)@filesize($f), substr($f, strlen($root) + 1)];
+    }
+  }
+  rsort($largest);
+  if ($largest && $largest[0][0] >= 5242880) $add('housekeeping', 'big-state', 'warn', 'A state file is over 5 MB: ' . $largest[0][1] . ' (' . doctor_size($largest[0][0]) . ')', 'Every request that touches it reads the whole file.', 'Find out why it grew before deleting anything.');
+
+  // -- permissions
+  if ($isWin) {
+    $add('permissions', 'modes', 'info', 'File modes are not checked on Windows');
+  } else {
+    $secret = []; $worldWritable = [];
+    $watch = [];
+    foreach (['lib', 'lib/replay', 'lib/holdings', 'lib/txn', '.well-known'] as $d) $watch[] = $root . '/' . $d;
+    if ($base !== '') foreach (['replay', 'holdings', 'txn'] as $d) $watch[] = $base . '/' . $d;
+    list($how, $configured) = atlas_sf_studio_root($root);
+    if ($configured !== null && is_dir($configured)) { $watch[] = $configured; foreach (['drafts', 'uploads-quarantine', 'mint-receipts', 'tmp', 'rate'] as $d) $watch[] = $configured . '/' . $d; }
+    foreach ($watch as $d) {
+      if (!is_dir($d) || is_link($d)) continue;
+      $m = doctor_mode($d);
+      if ($m !== null && ($m & 0002)) $worldWritable[] = substr($d, 0, strlen($root) + 1) === $root . '/' ? substr($d, strlen($root) + 1) . '/' : $d . '/';
+    }
+    $files = [];
+    foreach ([$lib] as $d) {
+      $names = is_dir($d) ? @scandir($d) : false;
+      foreach (is_array($names) ? $names : [] as $name) {
+        $f = $d . '/' . $name;
+        if (!is_file($f) || is_link($f)) continue;
+        if (preg_match('/\.pem$|-config\.json$|^atlas-.*-store\.json$|^atlas-.*\.json$|^config\.php$|storage-root\.php$/', $name)) $files[] = $f;
+      }
+    }
+    if ($configured !== null && is_file($configured . '/studio-config.json')) $files[] = $configured . '/studio-config.json';
+    foreach ($files as $f) {
+      $m = doctor_mode($f);
+      if ($m === null) continue;
+      $rel = strpos($f, $root . '/') === 0 ? substr($f, strlen($root) + 1) : $f;
+      if ($m & 0002) $worldWritable[] = $rel . ' (' . doctor_modestr($m) . ')';
+      elseif ($m & 0004 && preg_match('/\.pem$|-config\.json$|admin-[a-z-]*\.json$|^config\.php$/', basename($f))) $secret[] = $rel . ' (' . doctor_modestr($m) . ')';
+    }
+    if ($worldWritable) $add('permissions', 'modes-writable', 'fail', count($worldWritable) . ' file(s) or folder(s) can be changed by any account on this server', implode(', ', array_slice($worldWritable, 0, 8)) . (count($worldWritable) > 8 ? ', and ' . (count($worldWritable) - 8) . ' more' : ''), 'Set folders to 0755 and files to 0644 or tighter (0600 for keys and settings) in your file manager.');
+    if ($secret) $add('permissions', 'modes-readable', 'warn', count($secret) . ' key or settings file(s) are readable by other accounts', implode(', ', array_slice($secret, 0, 8)) . (count($secret) > 8 ? ', and ' . (count($secret) - 8) . ' more' : '') . '. On shared hosting other accounts on the same server may be able to read them.', 'Set them to 0600 (or 0640 if your host needs the group) in your file manager. Do not change the folder modes.');
+    if (!$worldWritable && !$secret) $add('permissions', 'modes', 'ok', 'Keys, settings and private folders are not open to other accounts', count($files) . ' file(s) and ' . count($watch) . ' folder(s) looked at.');
+  }
+
+  // -- permissions: PHP limits
+  $mem = doctor_bytes(ini_get('memory_limit'));
+  if ($mem !== -1 && $mem > 0 && $mem < 67108864) $add('permissions', 'php-memory', 'warn', 'PHP memory_limit is ' . ini_get('memory_limit'), 'Large lists (revocations, holdings) are loaded into memory.', 'Raise it to 128M or more (cPanel: MultiPHP INI Editor).');
+  else $add('permissions', 'php-memory', 'ok', 'PHP memory_limit is ' . ini_get('memory_limit'));
+  $up = doctor_bytes(ini_get('upload_max_filesize')); $post = doctor_bytes(ini_get('post_max_size'));
+  if (!ini_get('file_uploads')) $add('permissions', 'php-uploads', 'warn', 'PHP file uploads are switched off', 'Asset Studio cannot receive models.', 'Set file_uploads to On.');
+  elseif (($up > 0 && $up < 2097152) || ($post > 0 && $post < 2097152)) $add('permissions', 'php-uploads', 'warn', 'PHP upload limits are small: upload_max_filesize ' . ini_get('upload_max_filesize') . ', post_max_size ' . ini_get('post_max_size'), 'Asset Studio uploads of models larger than this fail.', 'Raise both to 8M or more.');
+  else $add('permissions', 'php-uploads', 'ok', 'PHP upload limits: upload_max_filesize ' . ini_get('upload_max_filesize') . ', post_max_size ' . ini_get('post_max_size'));
+  if ($up > 0 && $post > 0 && $post < $up) $add('permissions', 'php-post', 'warn', 'post_max_size is smaller than upload_max_filesize', 'The larger upload limit can never be reached.', 'Make post_max_size at least as large as upload_max_filesize.');
+  $met = (int)ini_get('max_execution_time');
+  if ($met > 0 && $met < 20) $add('permissions', 'php-time', 'warn', 'PHP max_execution_time is ' . $met . ' seconds', 'Calls to other domains and large lists need a little longer.', 'Raise it to 30 or more.');
+  $ob = (string)ini_get('open_basedir');
+  if ($ob !== '') {
+    $allowed = array_filter(array_map(function ($p) { $r = @realpath(trim($p)); return $r === false ? null : rtrim(str_replace('\\', '/', $r), '/'); }, preg_split('#[:;]#', $ob)));
+    $outside = [];
+    foreach ([$base, $configured] as $p) {
+      if (!is_string($p) || $p === '') continue;
+      $rp = @realpath($p);
+      if ($rp === false) $rp = $p;
+      $rp = rtrim(str_replace('\\', '/', $rp), '/');
+      $okp = false;
+      foreach ($allowed as $a) if ($rp === $a || strpos($rp . '/', $a . '/') === 0) $okp = true;
+      if (!$okp) $outside[] = $p;
+    }
+    if ($outside) $add('permissions', 'open-basedir', 'fail', 'open_basedir blocks a private folder: ' . implode(', ', $outside), 'PHP may only reach: ' . $ob, 'Add that folder to open_basedir, or move the private folder inside the allowed paths.');
+    else $add('permissions', 'open-basedir', 'info', 'open_basedir is set', 'PHP may only reach: ' . $ob);
+  }
+  $tmp = sys_get_temp_dir();
+  if (!@is_writable($tmp)) $add('permissions', 'php-tmp', 'warn', 'PHP\'s temporary folder is not writable: ' . $tmp, 'Uploads pass through it before Studio sees them.', 'Set upload_tmp_dir to a writable folder.');
+  $sess = (string)ini_get('session.save_path');
+  if ($sess !== '' && strpos($sess, ';') === false && !@is_writable($sess)) $add('permissions', 'php-session', 'info', 'PHP\'s session folder is not writable: ' . $sess, 'The issuer keeps its own administrator sessions and does not use PHP sessions, so this only matters to other software on the domain.');
+
+  // -- administrator side
+  list($st, $doc, $size) = doctor_json_file($lib . '/atlas-admin-keys-store.json', 1048576);
+  if ($st === 'missing') $add('admin', 'admin-keys', 'warn', 'No administrator keys are registered', 'Without one, nobody can sign in to the admin panel. (Nothing is wrong if you do not use the panel.)', 'Create lib/atlas-admin-keys-store.json from the example in the admin docs, with the public key of your wallet.');
+  elseif ($st !== 'ok') $add('admin', 'admin-keys', 'fail', 'The administrator key list cannot be read (' . $st . ')', 'Nobody can sign in to the admin panel.', 'Fix the JSON in lib/atlas-admin-keys-store.json or restore it from a backup.');
+  else {
+    $keys = isset($doc['keys']) && is_array($doc['keys']) ? $doc['keys'] : [];
+    $admins = 0; $mods = 0; $off = 0; $odd = 0;
+    foreach ($keys as $k) {
+      if (!is_array($k) || !isset($k['publicKey']) || !is_string($k['publicKey']) || strlen($k['publicKey']) < 40) { $odd++; continue; }
+      if (array_key_exists('revoked', $k) && !in_array($k['revoked'], [false, null, 0, ''], true)) { $off++; continue; }
+      $role = isset($k['role']) ? $k['role'] : null;
+      if ($role === null || $role === 'admin') $admins++; elseif ($role === 'moderator') $mods++; else $odd++;
+    }
+    $detail = $admins . ' administrator(s), ' . $mods . ' moderator(s)' . ($off ? ', ' . $off . ' switched off' : '') . ($odd ? ', ' . $odd . ' entry/entries with an unusable key or role' : '') . '.';
+    if (!$admins) $add('admin', 'admin-keys', 'warn', 'No active administrator key', $detail . ' Only moderators can sign in.', 'Add an administrator public key to lib/atlas-admin-keys-store.json.');
+    elseif ($odd) $add('admin', 'admin-keys', 'warn', 'Some administrator list entries are unusable', $detail, 'An entry needs a "publicKey"; "role" is "admin" (or left out) or "moderator". A typo in "role" gives that key no rights at all.');
+    else $add('admin', 'admin-keys', 'ok', 'Administrator keys are registered', $detail);
+  }
+  $stores = ['atlas-admin-nonces-store.json', 'atlas-admin-sessions-store.json', 'atlas-admin-proof-nonces-store.json', 'atlas-admin-ratelimit-store.json'];
+  $locked = []; $last = 0;
+  foreach ($stores as $s) {
+    $f = $lib . '/' . $s;
+    if (file_exists($f)) {
+      if (!is_writable($f)) $locked[] = $s;
+      $mt = (int)@filemtime($f);
+      if ($mt > $last && $s !== 'atlas-admin-nonces-store.json') $last = $mt;
+    }
+  }
+  if ($locked) $add('admin', 'admin-stores', 'fail', 'Administrator state files are not writable: ' . implode(', ', $locked), 'Sign-in and signed requests fail while they cannot be written.', 'Make them writable by your hosting account (0600 or 0644, owned by it).');
+  elseif (is_dir($lib) && !is_writable($lib)) $add('admin', 'admin-stores', 'warn', 'lib/ is not writable, so administrator sessions cannot be stored', '', 'Make lib/ writable by your hosting account (0755).');
+  else $add('admin', 'admin-stores', 'ok', 'Administrator session and request state can be written');
+  if ($last) $add('admin', 'admin-last', 'info', 'Last administrator activity: ' . date('Y-m-d H:i', $last) . ' (server time)', $now - $last > 90 * 86400 ? 'That was over 90 days ago.' : '');
+  else $add('admin', 'admin-last', 'info', 'No administrator has signed in yet', 'No session store exists.');
+  return ['checks' => $checks];
 }
 
 // ---- request handling --------------------------------------------------------------------------------------
@@ -788,7 +779,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   }
   if ($action === 'features') {
     $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
-    doctor_json(['ok' => true, 'features' => doctor_features($DOCTOR_ROOT, isset($DOCTOR['features']) && is_array($DOCTOR['features']) ? $DOCTOR['features'] : [], $host)]);
+    doctor_json(['ok' => true, 'features' => atlas_sf_features($DOCTOR_ROOT, isset($DOCTOR['features']) && is_array($DOCTOR['features']) ? $DOCTOR['features'] : [], $host)]);
+  }
+  if ($action === 'health') {
+    $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
+    $h = doctor_health($DOCTOR_ROOT, $host);
+    $h['ok'] = true;
+    doctor_json($h);
   }
   if ($action === 'manifest') {
     $host = isset($_SERVER['HTTP_HOST']) ? (string)$_SERVER['HTTP_HOST'] : '';
@@ -910,6 +907,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     <p class="muted">Copy the report to share it (home and web-root folder names are replaced), then delete this file. Do not leave it on the server.</p>
     <div class="row">
       <button class="secondary" id="copy">Copy report</button>
+      <button class="secondary" id="saveReport">Download report</button>
       <button class="secondary" id="copyMissing">Copy list of files to upload</button>
       <button class="danger" id="del">Delete this file</button>
     </div>
@@ -968,7 +966,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   var envCache = null;
   function full(first) {
     $('rerun').disabled = true; $('verdict').textContent = 'Checking…';
-    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], features: [], manifest: null, env: envCache };
+    var st = { missing: [], differs: [], expected: [], odd: [], counts: {}, total: 0, extras: null, probes: [], adminProbes: [], health: [], features: [], manifest: null, env: envCache };
     var chain = Promise.resolve();
     if (first) {
       chain = chain.then(function () { step('Checking the server…'); return call('env'); }).then(function (env) {
@@ -1001,7 +999,9 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     }).then(function () { step('Looking for unexpected files…'); return call('extras'); })
       .then(function (x) { if (!x.ok) throw new Error(x.error || 'extras-failed'); st.extras = x; step('Checking what the web can read…'); return probes(); })
       .then(function (pr) { st.probes = pr; step('Reading the feature switches…'); return call('features'); })
-      .then(function (f) { if (!f.ok) throw new Error(f.error || 'features-failed'); st.features = f.features; step('Reading the manifest…'); return call('manifest'); })
+      .then(function (f) { if (!f.ok) throw new Error(f.error || 'features-failed'); st.features = f.features; step('Checking housekeeping, permissions and administrator state…'); return call('health'); })
+      .then(function (h) { if (!h.ok) throw new Error(h.error || 'health-failed'); st.health = h.checks; step('Checking that administrator routes refuse strangers…'); return adminProbes(); })
+      .then(function (ap) { st.adminProbes = ap; step('Reading the manifest…'); return call('manifest'); })
       .then(function (mf) { if (!mf.ok) throw new Error(mf.error || 'manifest-failed'); st.manifest = mf.manifest; });
     return chain.then(function () { state = st; render(); }).catch(function (e) {
       $('verdict').textContent = 'The check could not finish: ' + (e && e.message ? e.message : e);
@@ -1018,6 +1018,18 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
           return { path: p[0], what: p[1], exposed: leak, status: 200, empty: t.length === 0 };
         });
       }).catch(function () { return { path: p[0], what: p[1], exposed: false, status: 0 }; });
+    }));
+  }
+
+  // Administrator routes asked with no credentials at all: a stranger must be refused. Only routes that read are
+  // asked (never revoke, suspend or pause), the body is empty, and a request with no credentials is refused before
+  // the route does any work and is not counted as a failed sign-in.
+  var ADMIN_ROUTES = ['/atlas/admin/suspensions', '/atlas/admin/site-status', '/atlas/admin/visits', '/atlas/admin/session/whoami'];
+  function adminProbes() {
+    return Promise.all(ADMIN_ROUTES.map(function (p) {
+      return fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', cache: 'no-store', redirect: 'manual', credentials: 'omit' }).then(function (r) {
+        return { path: p, status: r.status, open: r.status >= 200 && r.status < 300, broken: r.status >= 500 };
+      }).catch(function () { return { path: p, status: 0, open: false, broken: false }; });
     }));
   }
 
@@ -1043,23 +1055,33 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     return out;
   }
 
+  // The fix-it checklist: every problem the checks found, most urgent first. The last number on each entry is
+  // its place in the order (exposed secrets, then anything that stops the issuer, then settings, then tidying).
   function todo() {
     var t = [];
     var codeMissing = state.missing.filter(function (x) { return x.group === 'c'; });
     var pageMissing = state.missing.filter(function (x) { return x.group === 'p'; });
     var codeDiffers = state.differs.filter(function (x) { return x.group === 'c'; });
-    if (codeMissing.length) t.push(['fail', 'Upload ' + codeMissing.length + ' missing code file(s). The issuer or Studio will not work without them.', 'See "Files compared with the repository".']);
-    if (codeDiffers.length) t.push(['fail', 'Re-upload ' + codeDiffers.length + ' code file(s) that differ from the repository.', 'An old or edited copy is the usual cause of "internal-error" responses.']);
-    if (pageMissing.length) t.push(['warn', 'Upload ' + pageMissing.length + ' missing page/config file(s).', '']);
+    state.probes.forEach(function (p) { if (p.exposed) t.push(['fail', 'Readable over the web: ' + p.path, 'Block it (check the .htaccess in that folder is uploaded and honoured) and treat any secret in it as exposed.', 0]); });
+    state.adminProbes.forEach(function (p) { if (p.open) t.push(['fail', 'Administrator route answers without a sign-in: ' + p.path + ' (HTTP ' + p.status + ')', 'Replace the PHP file or server.js from the repository: an old copy has none of the newer access checks.', 0]); });
+    (state.health || []).forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, c.group === 'permissions' ? 1 : 3]); });
+    if (codeMissing.length) t.push(['fail', 'Upload ' + codeMissing.length + ' missing code file(s). The issuer or Studio will not work without them.', 'See "Files compared with the repository".', 2]);
+    if (codeDiffers.length) t.push(['fail', 'Re-upload ' + codeDiffers.length + ' code file(s) that differ from the repository.', 'An old or edited copy is the usual cause of "internal-error" responses.', 2]);
+    (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'fail') t.push(['fail', c.title, c.fix || c.detail, 3]); });
+    (state.health || []).forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, c.group === 'permissions' ? 4 : 5]); });
+    (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'warn') t.push(['warn', c.title, c.fix || c.detail, 5]); });
+    state.adminProbes.forEach(function (p) { if (p.broken) t.push(['warn', 'Administrator route fails with a server error: ' + p.path + ' (HTTP ' + p.status + ')', 'Look at the PHP error log; the file is probably an old or damaged copy.', 5]); });
+    state.features.forEach(function (f) { if (f.state === 'problem') t.push(['warn', 'Feature needs attention: ' + f.label, f.reasons.join('; '), 6]); });
+    if (state.manifest) state.manifest.problems.forEach(function (p) { t.push([p[0], 'Manifest: ' + p[1], '', p[0] === 'fail' ? 3 : 6]); });
+    if (pageMissing.length) t.push(['warn', 'Upload ' + pageMissing.length + ' missing page/config file(s).', '', 7]);
     var pageDiffers = state.differs.filter(function (x) { return x.group === 'p'; });
-    if (pageDiffers.length) t.push(['warn', pageDiffers.length + ' page/config file(s) differ from the repository.', 'Fine if you edited them on purpose; otherwise re-upload.']);
-    state.odd.forEach(function (o) { t.push(['warn', 'Not a regular file: ' + o.path + ' (' + o.what + ')', 'Replace it with the repository file.']); });
-    state.probes.forEach(function (p) { if (p.exposed) t.push(['fail', 'Readable over the web: ' + p.path, 'Block it (check the .htaccess in that folder is uploaded and honoured) and treat any secret in it as exposed.']); });
-    if (state.extras && state.extras.phpTotal) t.push(['warn', state.extras.phpTotal + ' PHP file(s) here are not in the repository.', 'Look at each one under "Unexpected files". An old copy of a route that was later removed has none of the newer security checks and should be deleted; your own files are fine.']);
-    (state.env ? state.env.checks : []).forEach(function (c) { if (c.status === 'fail' || c.status === 'warn') t.push([c.status, c.title, c.fix || c.detail]); });
-    state.features.forEach(function (f) { if (f.state === 'problem') t.push(['warn', 'Feature needs attention: ' + f.label, f.reasons.join('; ')]); });
-    if (state.manifest) state.manifest.problems.forEach(function (p) { t.push([p[0], 'Manifest: ' + p[1], '']); });
-    return t;
+    if (pageDiffers.length) t.push(['warn', pageDiffers.length + ' page/config file(s) differ from the repository.', 'Fine if you edited them on purpose; otherwise re-upload.', 7]);
+    state.odd.forEach(function (o) { t.push(['warn', 'Not a regular file: ' + o.path + ' (' + o.what + ')', 'Replace it with the repository file.', 7]); });
+    if (state.extras && state.extras.phpTotal) t.push(['warn', state.extras.phpTotal + ' PHP file(s) here are not in the repository.', 'Look at each one under "Unexpected files". An old copy of a route that was later removed has none of the newer security checks and should be deleted; your own files are fine.', 8]);
+    return t.map(function (x, i) { return [x, i]; }).sort(function (a, b) {
+      var fa = a[0][0] === 'fail' ? 0 : 1, fb = b[0][0] === 'fail' ? 0 : 1;
+      return fa - fb || a[0][3] - b[0][3] || a[1] - b[1];
+    }).map(function (x) { return x[0]; });
   }
 
   function render() {
@@ -1075,8 +1097,10 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
 
     var kids = [];
     if (!problems.length) kids.push(el('p', { text: 'Nothing to do.' }));
-    problems.forEach(function (x) { kids.push(item(x[0], x[1], x[2])); });
-    section('To do', fails ? 'fail' : (warns ? 'warn' : 'ok'), problems.length ? problems.length + ' item(s)' : 'all clear', problems.length > 0, kids);
+    else kids.push(el('p', { 'class': 'muted', text: 'In this order: anything that exposes a secret first, then what stops the issuer working, then settings, then tidying. Fix from the top and press "Check again".' }));
+    problems.forEach(function (x, i) { kids.push(item(x[0], (i + 1) + '. ' + x[1], x[2])); });
+    if (problems.length) kids.push(el('div', { 'class': 'row' }, [(function () { var b = el('button', { 'class': 'secondary', id: 'saveReportInline', text: 'Save this report as a file' }); b.addEventListener('click', saveReport); return b; })()]));
+    section('To do - fix-it checklist', fails ? 'fail' : (warns ? 'warn' : 'ok'), problems.length ? problems.length + ' item(s)' : 'all clear', problems.length > 0, kids);
 
     var checks = env.checks.map(function (x) { return item(x.status, x.title, x.detail, x.fix); });
     var worst = env.checks.some(function (x) { return x.status === 'fail'; }) ? 'fail' : (env.checks.some(function (x) { return x.status === 'warn'; }) ? 'warn' : 'ok');
@@ -1104,6 +1128,17 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     });
     section('What the web can read', state.probes.some(function (p) { return p.exposed; }) ? 'fail' : 'ok', 'private helper files must not be served', false, pb);
 
+    [['housekeeping', 'Housekeeping and health', 'lists, holdings and state files'], ['permissions', 'File permissions and PHP limits', 'who can read the keys, what PHP allows']].forEach(function (g) {
+      var list = state.health.filter(function (c) { return c.group === g[0]; });
+      var w = worstOf(list);
+      section(g[1], w, g[2], w !== 'ok', list.length ? list.map(function (c) { return item(c.status, c.title, c.detail, c.fix); }) : [el('p', { text: 'Nothing to report.' })]);
+    });
+    var adminBody = state.health.filter(function (c) { return c.group === 'admin'; }).map(function (c) { return item(c.status, c.title, c.detail, c.fix); });
+    adminBody.push(el('div', { 'class': 'gh', text: 'Do the administrator routes refuse a stranger?' }));
+    state.adminProbes.forEach(function (p) { adminBody.push(adminProbeItem(p)); });
+    var adminList = state.health.filter(function (c) { return c.group === 'admin'; }).concat(state.adminProbes.map(function (p) { return { status: p.open ? 'fail' : (p.broken ? 'warn' : 'ok') }; }));
+    section('Administrator side', worstOf(adminList), 'roster, sign-in state and route protection', worstOf(adminList) !== 'ok', adminBody);
+
     section('Worlds and manifest', manifestWorst(), manifestSummary(), state.manifest.problems.length > 0, manifestBlocks());
 
     section('Features (what is switched on)', featureWorst(), featureSummary(), state.features.some(function (f) { return f.state === 'problem'; }), featureBlocks());
@@ -1111,6 +1146,15 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     section('Setup values (copy and paste)', 'info', 'for Asset Studio', false, setupBlocks(env.setup));
   }
 
+  function worstOf(list) {
+    return list.some(function (c) { return c.status === 'fail'; }) ? 'fail' : (list.some(function (c) { return c.status === 'warn'; }) ? 'warn' : 'ok');
+  }
+  function adminProbeItem(p) {
+    if (p.open) return item('fail', p.path, 'Answered HTTP ' + p.status + ' to a request with no sign-in. A stranger must get 401 or 403.', 'Replace this route with the repository copy.');
+    if (p.broken) return item('warn', p.path, 'Answered HTTP ' + p.status + ' (a server error) instead of refusing.', 'Look at the PHP error log.');
+    if (p.status === 404) return item('info', p.path, 'Not installed here (HTTP 404).');
+    return item('ok', p.path, 'Refused without a sign-in (HTTP ' + (p.status || 'no response') + ').');
+  }
   function manifestWorst() {
     var ps = state.manifest.problems;
     return ps.some(function (p) { return p[0] === 'fail'; }) ? 'fail' : (ps.length ? 'warn' : 'ok');
@@ -1165,7 +1209,10 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   function phpLine(x) {
     return x.p + '  [' + (x.date ? x.date + ', ' : '') + x.size + ' bytes]' + (x.like ? (x.same ? '  identical copy of ' + x.like + ' (misplaced duplicate)' : '  same name as ' + x.like + ' but different content') : '');
   }
-  function stateLine(s) { return s[3] === 'dir' ? s[0] + '  [' + s[2] + ' files]' : s[0] + '  [mode ' + s[1] + ', ' + s[2] + ' bytes]'; }
+  function stateLine(s) {
+    if (s[3] === 'locks') return s[0] + '  [' + s[2] + ' lock files, ' + (s[4] ? s[4] + ' bytes in total' : 'all empty') + ' - normal, they are created on demand]';
+    return s[3] === 'dir' ? s[0] + '  [' + s[2] + ' files]' : s[0] + '  [mode ' + s[1] + ', ' + s[2] + ' bytes]';
+  }
 
   function setupBlocks(s) {
     var q = function (v) { return JSON.stringify(v, null, 2); };
@@ -1192,7 +1239,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     lines.push('Site Doctor report - manifest commit ' + META.commit + ', host ' + env.facts.host + ', PHP ' + env.facts.phpVersion);
     lines.push($('verdict').textContent + '. ' + $('progress').textContent, '');
     var t = todo();
-    lines.push('TO DO'); if (!t.length) lines.push('  nothing'); t.forEach(function (x) { lines.push('  [' + x[0] + '] ' + x[1] + (x[2] ? ' - ' + x[2] : '')); });
+    lines.push('TO DO (most urgent first)'); if (!t.length) lines.push('  nothing'); t.forEach(function (x, i) { lines.push('  ' + (i + 1) + '. [' + x[0] + '] ' + x[1] + (x[2] ? ' - ' + x[2] : '')); });
     lines.push('', 'SERVER'); env.checks.forEach(function (x) { lines.push('  [' + x.status + '] ' + x.title + (x.detail ? ' - ' + x.detail : '')); });
     lines.push('', 'MISSING (' + state.missing.length + ')'); state.missing.forEach(function (x) { lines.push('  ' + x.path); });
     lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : '')); });
@@ -1200,6 +1247,11 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     lines.push('', 'MANIFEST (' + state.manifest.state + ', ' + state.manifest.worlds.length + ' world(s))');
     state.manifest.problems.forEach(function (p) { lines.push('  [' + p[0] + '] ' + p[1]); });
     state.manifest.worlds.forEach(function (w) { lines.push('  world ' + w.id + (w.default ? ' (default)' : '') + (w.playable ? '' : ' (not enterable)')); w.facts.forEach(function (x) { lines.push('        ' + x); }); w.portals.forEach(function (x) { lines.push('        portal ' + x); }); });
+    [['housekeeping', 'HOUSEKEEPING'], ['permissions', 'PERMISSIONS AND PHP LIMITS'], ['admin', 'ADMINISTRATOR SIDE']].forEach(function (g) {
+      lines.push('', g[1]);
+      state.health.filter(function (c) { return c.group === g[0]; }).forEach(function (c) { lines.push('  [' + c.status + '] ' + c.title + (c.detail ? ' - ' + c.detail : '')); });
+      if (g[0] === 'admin') state.adminProbes.forEach(function (p) { lines.push('  ' + (p.open ? 'OPEN    ' : 'refused ') + p.path + ' (HTTP ' + p.status + ')'); });
+    });
     lines.push('', 'FEATURES'); state.features.forEach(function (f) {
       lines.push('  [' + f.state + '] ' + f.label + (f.reasons.length ? ' - ' + f.reasons.join('; ') : ''));
       f.facts.forEach(function (x) { lines.push('        ' + x); });
@@ -1207,7 +1259,19 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     lines.push('', 'UNKNOWN PHP FILES (' + state.extras.phpTotal + ')'); state.extras.php.forEach(function (x) { lines.push('  ' + phpLine(x)); });
     lines.push('', 'OTHER UNKNOWN FILES (' + state.extras.otherTotal + ')'); state.extras.other.slice(0, 100).forEach(function (x) { lines.push('  ' + x); });
     lines.push('', 'PRIVATE STATE (names only)'); state.extras.state.slice(0, 60).forEach(function (x) { lines.push('  ' + stateLine(x)); });
+    if (state.extras.state.length > 60) lines.push('  ... and ' + (state.extras.state.length - 60) + ' more');
     return redact(lines.join('\n'));
+  }
+  // Saves the same text as "Copy report" to a file in the browser; nothing is uploaded anywhere.
+  function saveReport() {
+    if (!state) return;
+    var host = ((state.env && state.env.facts && state.env.facts.host) || 'site').replace(/[^a-z0-9.-]/gi, '_');
+    var name = 'site-doctor-report-' + host + '-' + new Date().toISOString().slice(0, 10) + '.txt';
+    var url = URL.createObjectURL(new Blob([report() + '\n'], { type: 'text/plain' }));
+    var a = el('a', { href: url, download: name });
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    $('doneMsg').textContent = 'Report saved as ' + name + '.';
   }
   function copy(text, done) {
     var fallback = function () { var ta = el('textarea', { text: text, style: 'position:fixed;left:-9999px' }); document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); done(true); } catch (e) { done(false); } document.body.removeChild(ta); };
@@ -1240,6 +1304,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
   $('token').addEventListener('keydown', function (e) { if (e.key === 'Enter') start(); });
   $('rerun').addEventListener('click', function () { full(false); });
   Array.prototype.forEach.call(document.querySelectorAll('input[name=site], input[name=mod]'), function (r) { r.addEventListener('change', function () { full(false); }); });
+  $('saveReport').addEventListener('click', saveReport);
   $('copy').addEventListener('click', function () { if (state) copy(report(), function (ok) { said(ok, 'Report'); }); });
   $('copyMissing').addEventListener('click', function () {
     if (!state) return;
@@ -1250,7 +1315,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     if (!window.confirm('Delete ' + META.self + ' from the server now?')) return;
     call('delete').then(function (j) {
       $('doneMsg').textContent = j.note || (j.ok ? 'Done.' : 'Not accepted.');
-      if (j.ok && j.deleted) { ['del', 'rerun', 'copy', 'copyMissing'].forEach(function (id) { $(id).disabled = true; }); }
+      if (j.ok && j.deleted) { ['del', 'rerun', 'copy', 'saveReport', 'copyMissing'].forEach(function (id) { $(id).disabled = true; }); }
     });
   });
 })();

@@ -43,7 +43,17 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
   fs.writeFileSync(path.join(root, 'lib/atlas-email-tickets-config.json'), JSON.stringify({ smtpHost: 'smtp.example.net', smtpUser: 'u', smtpPass: 'MAIL-PASS-MARKER', fromAddress: 'from-marker@example.net' }));
   fs.writeFileSync(path.join(root, 'lib/atlas-ledger-issuance-config.json'), JSON.stringify({ enabled: true, domain: 'not-this-host.example' }));
 
-  const php = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root], { stdio: 'ignore' });
+  // Housekeeping, permissions and administrator-side fixtures.
+  for (let i = 0; i < 64; i++) fs.writeFileSync(path.join(root, 'lib/atlas-rid-lock-' + i + '.lock'), '');
+  fs.chmodSync(path.join(root, 'lib/issuer-private-key.pem'), 0o644);
+  fs.writeFileSync(path.join(root, '.well-known/atlas-revocations.json'), JSON.stringify({ revoked: [{ id: 'urn:atlas:asset:REVOKED-ID-MARKER' }] }));
+  fs.writeFileSync(path.join(root, '.well-known/atlas-suspensions.json'), JSON.stringify({ suspended: [{ id: 'urn:atlas:asset:SUSPENDED-ID-MARKER', expiresAt: '2020-01-01T00:00:00Z' }] }));
+  // An old copy of an admin route that answers anyone: the doctor must flag it as open.
+  fs.writeFileSync(path.join(root, 'atlas/admin/visits.php'), '<?php header("Content-Type: application/json"); echo "{\\"days\\":{}}";');
+  // The built-in server needs a router to map /atlas/admin/x to atlas/admin/x.php like the hosting does.
+  const router = path.join(tmp, 'router.php');
+  fs.writeFileSync(router, '<?php $p = parse_url($_SERVER["REQUEST_URI"], PHP_URL_PATH); $f = $_SERVER["DOCUMENT_ROOT"] . rtrim($p, "/") . ".php"; if ($p !== "/" && !is_file($_SERVER["DOCUMENT_ROOT"] . $p) && is_file($f)) { require $f; return true; } return false;');
+  const php = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root, router], { stdio: 'ignore' });
   for (let i = 0; i < 100; i++) { if (await new Promise((r) => { const s = net.connect(port, '127.0.0.1', () => { s.destroy(); r(true); }); s.on('error', () => r(false)); })) break; await new Promise((r) => setTimeout(r, 50)); }
   const url = 'http://127.0.0.1:' + port + '/site-doctor.php';
 
@@ -52,7 +62,7 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
   const page = await ctx.newPage();
   const problems = [];
   // The exposure probes request private files on purpose; the browser logs each 404/403 as a resource error.
-  page.on('console', (m) => { if (['error', 'warning'].includes(m.type()) && !/Failed to load resource: the server responded with a status of (403|404)/.test(m.text())) problems.push(m.type() + ': ' + m.text()); });
+  page.on('console', (m) => { if (['error', 'warning'].includes(m.type()) && !/Failed to load resource: the server responded with a status of (401|403|404)/.test(m.text())) problems.push(m.type() + ': ' + m.text()); });
   page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
   let dialogText = null;
   page.on('dialog', async (d) => { dialogText = d.message(); await d.accept(); });
@@ -122,6 +132,51 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
     const todo = await page.locator('details', { hasText: 'To do' }).first().textContent();
     assert.ok(/Feature needs attention: Ledger account credentials/.test(todo));
     if (shotDir) { await feat.scrollIntoViewIfNeeded(); await feat.locator('details').first().evaluate((d) => d.setAttribute('open', '')); await page.screenshot({ path: path.join(shotDir, 'doctor-features.png'), fullPage: true }); }
+  });
+
+  await check('the checklist is numbered, most urgent first, and an open administrator route comes before missing code', async () => {
+    const todo = page.locator('details', { hasText: 'To do - fix-it checklist' }).first();
+    const items = await todo.locator('.item .t').allTextContents();
+    assert.ok(items.length >= 5 && /^\s*\S*\s*1\. /.test(items[0].trim()) || /1\. /.test(items[0]), items.slice(0, 3).join(' | '));
+    const idx = (re) => items.findIndex((t) => re.test(t));
+    const open = idx(/Administrator route answers without a sign-in: \/atlas\/admin\/visits/), missing = idx(/missing code file/);
+    assert.ok(open >= 0 && missing >= 0 && open < missing, 'open route at ' + open + ', missing code at ' + missing);
+    const levels = await todo.locator('.item .pill').allTextContents();
+    const firstWarn = levels.findIndex((l) => l === '!');
+    assert.ok(firstWarn < 0 || levels.slice(firstWarn).every((l) => l !== 'X'), 'every failure comes before every warning: ' + levels.join(''));
+  });
+
+  await check('the Housekeeping, Permissions and Administrator sections report what the fixtures planted', async () => {
+    const hk = await page.locator('details', { hasText: 'Housekeeping and health' }).first().textContent();
+    assert.ok(/Revocation list is valid JSON/.test(hk) && /1 entries/.test(hk));
+    assert.ok(/1 suspension\(s\) have run out/.test(hk) && /2020-01-01/.test(hk));
+    const pm = await page.locator('details', { hasText: 'File permissions and PHP limits' }).first().textContent();
+    assert.ok(/readable by other accounts/.test(pm) && /issuer-private-key\.pem \(0644\)/.test(pm), pm.slice(0, 300));
+    assert.ok(/memory_limit/.test(pm) && /upload_max_filesize/.test(pm));
+    const ad = await page.locator('details', { hasText: 'Administrator side' }).first().textContent();
+    assert.ok(/No administrator keys are registered/.test(ad));
+    assert.ok(/\/atlas\/admin\/suspensions[\s\S]*Refused without a sign-in \(HTTP 401\)/.test(ad), ad.slice(0, 600));
+    assert.ok(/\/atlas\/admin\/visits[\s\S]*Answered HTTP 200 to a request with no sign-in/.test(ad));
+    const all = await page.textContent('#sections');
+    assert.ok(!/REVOKED-ID-MARKER|SUSPENDED-ID-MARKER/.test(all), 'no credential id is shown');
+  });
+
+  await check('lock files are one line, not 64', async () => {
+    const un = await page.locator('details', { hasText: 'Unexpected files' }).first().textContent();
+    assert.ok(/lib\/\*\.lock {2}\[64 lock files, all empty/.test(un), un.slice(0, 500));
+    assert.ok(!/atlas-rid-lock-3\.lock/.test(un));
+  });
+
+  await check('Download report saves the text file, named for the host, with the numbered checklist and no secrets', async () => {
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#saveReport')]);
+    assert.ok(/^site-doctor-report-127\.0\.0\.1_\d+-\d{4}-\d\d-\d\d\.txt$/.test(dl.suggestedFilename()) || /^site-doctor-report-127\.0\.0\.1[^/]*\.txt$/.test(dl.suggestedFilename()), dl.suggestedFilename());
+    const text = fs.readFileSync(await dl.path(), 'utf8');
+    assert.ok(/TO DO \(most urgent first\)\n  1\. \[fail\]/.test(text), text.slice(0, 400));
+    assert.ok(/HOUSEKEEPING/.test(text) && /PERMISSIONS AND PHP LIMITS/.test(text) && /ADMINISTRATOR SIDE/.test(text) && /OPEN {4}\/atlas\/admin\/visits/.test(text));
+    assert.ok(!text.includes(root) && !text.includes(tmp) && !/PEM-SECRET-MARKER|MAIL-PASS-MARKER|REVOKED-ID-MARKER|SUSPENDED-ID-MARKER/.test(text));
+    assert.ok(/saved as site-doctor-report/.test(await page.textContent('#doneMsg')));
+    const [dl2] = await Promise.all([page.waitForEvent('download'), page.click('#saveReportInline')]);
+    assert.strictEqual(dl2.suggestedFilename(), dl.suggestedFilename());
   });
 
   await check('Check again keeps a single set of sections', async () => {

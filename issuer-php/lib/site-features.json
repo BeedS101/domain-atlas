@@ -1,0 +1,172 @@
+{
+  "version": 1,
+  "about": "Features that are switched on and off by a setting in a file, or by renaming a file. The site doctor and the admin panel's Site status section read these read-only and report each one's state; `type` selects the reader in lib/site-features.php, `needs` are files that must exist for the feature to be installed at all. `pause: true` marks the few features the admin panel may switch OFF (never on): only for the types studio-config, json-enabled and private-config-php. Only the fields a reader lists are ever reported; every other value in a config file (passwords, tokens, keys) is never output.",
+  "features": [
+    {
+      "id": "studio-mint",
+      "label": "Asset Studio minting",
+      "group": "Wallet and assets",
+      "type": "studio-config",
+      "needs": [
+        "atlas/studio/api.php",
+        "atlas/studio/inc/studio-mint.php"
+      ],
+      "about": "The Studio page and its validator work without this; minting needs it.",
+      "enable": "In the Studio private folder, set \"mintEnabled\": true in studio-config.json. \"domain\" must be exactly this host and \"origins\" must include https://<this host>.",
+      "disable": "Set \"mintEnabled\": false in studio-config.json. It applies to the next request.",
+      "pause": true
+    },
+    {
+      "id": "ledger-issuance",
+      "label": "Ledger account credentials (experimental)",
+      "group": "Wallet and assets",
+      "type": "json-enabled",
+      "file": "lib/atlas-ledger-issuance-config.json",
+      "show": [
+        "domain",
+        "perClientPerMinute",
+        "perOwnerPerHour",
+        "globalPerHour"
+      ],
+      "hostKey": "domain",
+      "needs": [
+        "lib/ledger-issuance.php"
+      ],
+      "about": "Off unless the file exists and says enabled.",
+      "enable": "Create lib/atlas-ledger-issuance-config.json containing {\"enabled\": true, \"domain\": \"<this host>\"}.",
+      "disable": "Set \"enabled\": false in that file, or delete it.",
+      "pause": true
+    },
+    {
+      "id": "ledger-receipts",
+      "label": "Signed ledger balance receipts (experimental)",
+      "group": "Wallet and assets",
+      "type": "json-enabled",
+      "file": "lib/atlas-ledger-receipts-config.json",
+      "show": [
+        "domain",
+        "perClientPerMinute",
+        "perOwnerPerHour",
+        "globalPerHour"
+      ],
+      "hostKey": "domain",
+      "needs": [
+        "lib/ledger-receipts.php"
+      ],
+      "about": "Off unless the file exists and says enabled. Independent of ledger account credentials.",
+      "enable": "Create lib/atlas-ledger-receipts-config.json containing {\"enabled\": true, \"domain\": \"<this host>\"}.",
+      "disable": "Set \"enabled\": false in that file, or delete it.",
+      "pause": true
+    },
+    {
+      "id": "email-tickets",
+      "label": "Email-delivered tickets",
+      "group": "Delivery",
+      "type": "email-tickets",
+      "file": "lib/atlas-email-tickets-config.json",
+      "needs": [
+        "lib/email-tickets.php"
+      ],
+      "about": "Outbound mail needs smtpHost and fromAddress. A missing imapHost turns inbound transfers off. The file holds mail passwords; the doctor only says whether a login is set.",
+      "enable": "Create lib/atlas-email-tickets-config.json with smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass and fromAddress (and imapHost, imapUser, imapPass for inbound).",
+      "disable": "Remove smtpHost from that file, or delete it."
+    },
+    {
+      "id": "file-transfer",
+      "label": "Transfer to file (export a credential to a file)",
+      "group": "Delivery",
+      "type": "manifest-field",
+      "field": "fileTransfer",
+      "needs": [
+        "atlas/asset/transfer-to-file.php"
+      ],
+      "about": "Opt-in in the domain manifest. An empty object allows every eligible class.",
+      "enable": "Add \"fileTransfer\": {} (every eligible class) or {\"classes\": [\"class.id\"]} at the top level of .well-known/spatial.json.",
+      "disable": "Remove the \"fileTransfer\" field from .well-known/spatial.json."
+    },
+    {
+      "id": "moderation-issuer",
+      "label": "Moderation grants (issuer side)",
+      "group": "Admin and moderation",
+      "type": "moderation-issuer",
+      "file": "lib/atlas-moderation-config.json",
+      "needs": [
+        "atlas/admin/moderation/grant.php"
+      ],
+      "about": "Needs a domain and at least one presence endpoint it may address grants to.",
+      "enable": "Create lib/atlas-moderation-config.json containing {\"domain\": \"<this host>\", \"audiences\": [\"https://<presence host>\"]}.",
+      "disable": "Empty the \"audiences\" list, or delete the file."
+    },
+    {
+      "id": "presence-moderation",
+      "label": "Moderation (presence service side)",
+      "group": "Admin and moderation",
+      "type": "presence-moderation",
+      "file": "presence/lib/atlas-presence-moderation-config.json",
+      "needs": [
+        "presence/status.php"
+      ],
+      "about": "Read on every request. A file that cannot be parsed disables moderation.",
+      "enable": "Create presence/lib/atlas-presence-moderation-config.json with \"audience\" and a \"domains\" object (see docs/moderation-setup.md).",
+      "disable": "Set \"enabled\": false in that file, or delete it."
+    },
+    {
+      "id": "txlab",
+      "label": "Transaction Lab",
+      "group": "Labs",
+      "type": "private-config-php",
+      "pointer": "atlas/demo/txlab/inc/private-dir.php",
+      "env": "TXLAB_PRIVATE_DIR",
+      "needs": [
+        "atlas/demo/txlab/inc/txlab.php"
+      ],
+      "about": "Off unless a private folder outside the web root has a valid config.php with enabled true and no DISABLED file. The public demo is a separate switch inside the same file.",
+      "enable": "Copy inc/private-dir.php.example to inc/private-dir.php, then run atlas/demo/txlab/tools/txlab-admin.php config ... --enable (see docs/txlab-deployment.md).",
+      "disable": "Create a file named DISABLED in the private folder (it applies at once), or set 'enabled' => false in config.php.",
+      "pause": true
+    },
+    {
+      "id": "multi-issuer",
+      "label": "Multi-issuer lab",
+      "group": "Labs",
+      "type": "private-config-php",
+      "pointer": "atlas/demo/multi-issuer/inc/private-dir.php",
+      "env": "MI_PRIVATE_DIR",
+      "needs": [
+        "atlas/demo/multi-issuer/inc/mi.php"
+      ],
+      "about": "Same pattern as the Transaction Lab: private folder, config.php with enabled true, a DISABLED file turns it off.",
+      "enable": "Copy inc/private-dir.php.example to inc/private-dir.php, then run atlas/demo/multi-issuer/tools/mi-admin.php config ... --enable (see docs/multi-issuer-deployment.md).",
+      "disable": "Create a file named DISABLED in the private folder, or set 'enabled' => false in config.php.",
+      "pause": true
+    },
+    {
+      "id": "call-service",
+      "label": "Call service (voice calls)",
+      "group": "Services",
+      "type": "rename",
+      "on": "atlas/call/lib/config.php",
+      "off": "atlas/call/lib/config.php.off",
+      "needs": [
+        "atlas/call/info.php"
+      ],
+      "about": "Until config.php exists the service answers \"calls-not-configured\". Renaming config.php to config.php.off switches it off and keeps the settings.",
+      "enable": "Rename atlas/call/lib/config.php.off to config.php (or copy config.example.php to config.php and fill it in).",
+      "disable": "Rename atlas/call/lib/config.php to config.php.off."
+    },
+    {
+      "id": "private-state-dir",
+      "label": "Issuer private state folder (outside the web root)",
+      "group": "Storage",
+      "type": "private-dir-txt",
+      "file": "lib/atlas-private-dir.txt",
+      "env": "ATLAS_PRIVATE_DIR",
+      "needs": [
+        "lib/store.php"
+      ],
+      "about": "Where replay records, holdings and transaction journals live. Without it they are in lib/ (protected by lib/.htaccess). Choose it before first use and do not change it afterwards.",
+      "enable": "Put the absolute path of an existing, writable folder outside the web root in lib/atlas-private-dir.txt, before the issuer is first used.",
+      "disable": "Do not remove it once the issuer has state: the code never falls back to lib/."
+    }
+  ]
+}

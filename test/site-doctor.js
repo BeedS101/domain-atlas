@@ -62,9 +62,9 @@ function build(hours) {
   return { out, php: path.join(out, 'site-doctor.php'), token, log };
 }
 
-async function serve(root) {
+async function serve(root, phpArgs) {
   const port = await freePort();
-  const child = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root], { stdio: 'ignore' });
+  const child = spawn('php', (phpArgs || []).concat(['-S', '127.0.0.1:' + port, '-t', root]), { stdio: 'ignore' });
   servers.push(child);
   for (let i = 0; i < 100; i++) {
     const ok = await new Promise((r) => { const s = net.connect(port, '127.0.0.1', () => { s.destroy(); r(true); }); s.on('error', () => r(false)); });
@@ -105,7 +105,9 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
   });
 
   await check('template is read-only by construction (no file writes, execution or includes) and PHP 7.2 compatible', () => {
-    const code = template.replace(/<<<'ATLAS_DOCTOR_PAGE'[\s\S]*?\nATLAS_DOCTOR_PAGE;/, '');
+    // The built file is what runs: the template plus the issuer's feature readers (lib/site-features.php).
+    const code = phpSrc.replace(/<<<'ATLAS_DOCTOR_JSON'[\s\S]*?\nATLAS_DOCTOR_JSON\n/, '').replace(/<<<'ATLAS_DOCTOR_PAGE'[\s\S]*?\nATLAS_DOCTOR_PAGE;/, '');
+    assert.ok(code.includes('function atlas_sf_feature_json_enabled'), 'the feature readers are spliced into the built file');
     const forbidden = /\b(file_put_contents|fopen|fwrite|fputs|mkdir|rmdir|rename|chmod|chown|touch|copy|tempnam|symlink|link|exec|shell_exec|system|passthru|popen|proc_open|eval|include|include_once|require|require_once|curl_init|fsockopen|mail|move_uploaded_file|ini_set|putenv|header_register_callback)\s*\(/;
     assert.strictEqual((code.match(forbidden) || [null])[0], null);
     assert.deepStrictEqual((code.match(/\bunlink\s*\(/g) || []).length, 1, 'unlink appears once (self-delete)');
@@ -381,7 +383,7 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     for (const x of Object.values(f)) {
       assert.ok(['on', 'off', 'problem', 'absent'].includes(x.state), x.id + ' ' + x.state);
       assert.ok(x.enable.length > 10 && x.disable.length > 10 && x.label && Array.isArray(x.reasons) && Array.isArray(x.facts), x.id);
-      assert.deepStrictEqual(Object.keys(x).sort(), ['about', 'disable', 'enable', 'facts', 'group', 'id', 'label', 'reasons', 'state']);
+      assert.deepStrictEqual(Object.keys(x).sort(), ['about', 'disable', 'enable', 'facts', 'group', 'id', 'label', 'pausable', 'reasons', 'state']);
     }
     assert.strictEqual(f['studio-mint'].state, 'off');
     assert.strictEqual(f['presence-moderation'].state, 'absent', 'presence files are not on this domain');
@@ -736,6 +738,180 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
   });
 
   fs.writeFileSync(spatialPath, baseManifest);
+
+  // ---- housekeeping, permissions and administrator-side checks ---------------------------------------------
+  const fresh = async (phpArgs) => {
+    const r = layout('a');
+    fs.copyFileSync(built.php, path.join(r, 'site-doctor.php'));
+    const s = await serve(r, phpArgs);
+    return { root: r, srv: s, call: s.call(built.token) };
+  };
+  const find = (res, id) => res.json.checks.find((c) => c.id === id);
+
+  await check('health: a wrong token is refused; a plain tree has no failures and every check has the same shape', async () => {
+    const f = await fresh();
+    assert.strictEqual((await f.srv.call('0000-0000-0000-0000-0000-0000-0000-0000')('health')).status, 403);
+    const r = await f.call('health');
+    assert.strictEqual(r.json.ok, true);
+    for (const c of r.json.checks) assert.ok(['housekeeping', 'permissions', 'admin'].includes(c.group) && ['ok', 'info', 'warn', 'fail'].includes(c.status) && c.id && c.title && typeof c.detail === 'string' && typeof c.fix === 'string', JSON.stringify(c));
+    assert.deepStrictEqual(r.json.checks.filter((c) => c.status === 'fail').map((c) => c.id), []);
+    f.srv.stop();
+  });
+
+  await check('extras: the 64 empty lock files per kind become one line per folder', async () => {
+    const f = await fresh();
+    for (let i = 0; i < 64; i++) { fs.writeFileSync(path.join(f.root, 'lib/atlas-rid-lock-' + i + '.lock'), ''); fs.writeFileSync(path.join(f.root, 'lib/atlas-claim-lock-' + i + '.lock'), ''); }
+    fs.writeFileSync(path.join(f.root, 'lib/atlas-revocations.lock'), '');
+    const r = await f.call('extras');
+    const locks = r.json.state.filter((s) => s[3] === 'locks');
+    assert.strictEqual(locks.length, 1, JSON.stringify(locks));
+    assert.deepStrictEqual([locks[0][0], locks[0][2], locks[0][4]], ['lib/*.lock', 129, 0]);
+    assert.ok(!r.json.state.some((s) => /\.lock$/.test(s[0]) && s[0] !== 'lib/*.lock'), 'no individual lock file is listed');
+    f.srv.stop();
+  });
+
+  await check('housekeeping: the revocation list is validated, counted, and a large one is flagged (ids never shown)', async () => {
+    const f = await fresh();
+    const rev = path.join(f.root, '.well-known/atlas-revocations.json');
+    fs.writeFileSync(rev, JSON.stringify({ revoked: [{ id: 'urn:atlas:asset:SECRET-ID-1' }, { id: 'urn:atlas:asset:SECRET-ID-1' }, { id: 'urn:atlas:asset:SECRET-ID-2' }, { reason: 'no id' }] }));
+    let r = await f.call('health');
+    let c = find(r, 'revocations-json');
+    assert.strictEqual(c.status, 'warn'); assert.ok(/1 entries have no id/.test(c.detail) && /1 repeated/.test(c.detail) && /4 entries/.test(c.detail), c.detail);
+    fs.writeFileSync(rev, JSON.stringify({ revoked: [{ id: 'urn:atlas:asset:SECRET-ID-3' }] }));
+    c = find(await f.call('health'), 'revocations-json');
+    assert.strictEqual(c.status, 'ok'); assert.ok(/1 entries/.test(c.detail));
+    const big = []; for (let i = 0; i < 9000; i++) big.push({ id: 'urn:atlas:asset:' + 'x'.repeat(100) + i, revokedAt: '2026-01-01T00:00:00Z', reason: 'issuer-request' });
+    fs.writeFileSync(rev, JSON.stringify({ revoked: big }));
+    c = find(await f.call('health'), 'revocations-size');
+    assert.strictEqual(c.status, 'warn'); assert.ok(/MB/.test(c.title), c.title);
+    fs.writeFileSync(rev, '{ "revoked": [');
+    c = find(await f.call('health'), 'revocations-json');
+    assert.strictEqual(c.status, 'fail'); assert.ok(/refuses to run/.test(c.detail));
+    fs.writeFileSync(rev, '{"other": []}');
+    assert.strictEqual(find(await f.call('health'), 'revocations-json').status, 'fail');
+    const all = (await f.call('health')).text;
+    assert.ok(!/SECRET-ID/.test(all));
+    f.srv.stop();
+  });
+
+  await check('housekeeping: suspensions are validated and expired-but-not-lifted entries are reported', async () => {
+    const f = await fresh();
+    const sus = path.join(f.root, '.well-known/atlas-suspensions.json');
+    const recent = new Date(Date.now() - 3600e3).toISOString(), old = '2020-01-01T00:00:00Z', future = new Date(Date.now() + 3600e3).toISOString();
+    fs.writeFileSync(sus, JSON.stringify({ suspended: [{ id: 'a', expiresAt: recent }, { id: 'b', expiresAt: future }, { id: 'c', expiresAt: null }] }));
+    let r = await f.call('health');
+    assert.strictEqual(find(r, 'suspensions-json').status, 'ok');
+    assert.strictEqual(find(r, 'suspensions-expired').status, 'info'); assert.ok(/^1 suspension/.test(find(r, 'suspensions-expired').title));
+    fs.writeFileSync(sus, JSON.stringify({ suspended: [{ id: 'a', expiresAt: old }, { id: 'a2', expiresAt: old }, { nope: 1 }] }));
+    r = await f.call('health');
+    assert.strictEqual(find(r, 'suspensions-expired').status, 'warn'); assert.ok(/2020-01-01/.test(find(r, 'suspensions-expired').detail));
+    assert.strictEqual(find(r, 'suspensions-json').status, 'warn');
+    fs.writeFileSync(sus, 'nonsense');
+    assert.strictEqual(find(await f.call('health'), 'suspensions-json').status, 'fail');
+    fs.writeFileSync(sus, '{"suspended": []}');
+    assert.ok(!find(await f.call('health'), 'suspensions-expired'));
+    f.srv.stop();
+  });
+
+  await check('housekeeping: holdings records are checked for valid JSON, counted, and never shown', async () => {
+    const f = await fresh();
+    const dir = path.join(f.root, 'lib/holdings');
+    fs.mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(dir, 'h' + i + '.json'), JSON.stringify({ held: { cls: [{ id: 'HOLDING-SECRET-' + i, q: 1 }] } }));
+    let c = find(await f.call('health'), 'holdings');
+    assert.strictEqual(c.status, 'ok'); assert.ok(/5 records/.test(c.detail));
+    fs.writeFileSync(path.join(dir, 'h6.json'), '{ broken');
+    fs.writeFileSync(path.join(dir, 'h7.json'), JSON.stringify({ nothing: true }));
+    const r = await f.call('health');
+    c = find(r, 'holdings');
+    assert.strictEqual(c.status, 'fail'); assert.ok(/^2 holdings/.test(c.title));
+    assert.ok(!/HOLDING-SECRET/.test(r.text));
+    f.srv.stop();
+  });
+
+  await check('permissions: world-writable folders and files fail, readable keys warn, and nothing is changed', async () => {
+    if (process.platform === 'win32') return;
+    const f = await fresh();
+    fs.writeFileSync(path.join(f.root, 'lib/issuer-private-key.pem'), 'PEM-SECRET-X');
+    fs.chmodSync(path.join(f.root, 'lib/issuer-private-key.pem'), 0o644);
+    fs.writeFileSync(path.join(f.root, 'lib/atlas-admin-keys-store.json'), '{"keys":[]}');
+    fs.chmodSync(path.join(f.root, 'lib/atlas-admin-keys-store.json'), 0o600);
+    let r = await f.call('health');
+    let c = find(r, 'modes-readable');
+    assert.strictEqual(c.status, 'warn'); assert.ok(/issuer-private-key\.pem \(0644\)/.test(c.detail) && !/admin-keys/.test(c.detail), c.detail);
+    fs.chmodSync(path.join(f.root, 'lib'), 0o777);
+    c = find(await f.call('health'), 'modes-writable');
+    assert.strictEqual(c.status, 'fail'); assert.ok(/lib\//.test(c.detail));
+    fs.chmodSync(path.join(f.root, 'lib'), 0o755);
+    fs.chmodSync(path.join(f.root, 'lib/issuer-private-key.pem'), 0o600);
+    r = await f.call('health');
+    assert.strictEqual(find(r, 'modes').status, 'ok');
+    assert.strictEqual(fs.statSync(path.join(f.root, 'lib/issuer-private-key.pem')).mode & 0o777, 0o600, 'the doctor changes no modes');
+    assert.ok(!/PEM-SECRET-X/.test(r.text));
+    f.srv.stop();
+  });
+
+  await check('permissions: PHP limits are judged (memory, uploads, post size) and plain values pass', async () => {
+    const good = await fresh(['-d', 'memory_limit=256M', '-d', 'upload_max_filesize=16M', '-d', 'post_max_size=20M']);
+    let r = await good.call('health');
+    assert.deepStrictEqual(['php-memory', 'php-uploads'].map((id) => find(r, id).status), ['ok', 'ok']);
+    good.srv.stop();
+    const tight = await fresh(['-d', 'memory_limit=32M', '-d', 'upload_max_filesize=1M', '-d', 'post_max_size=512K']);
+    r = await tight.call('health');
+    assert.strictEqual(find(r, 'php-memory').status, 'warn');
+    assert.strictEqual(find(r, 'php-uploads').status, 'warn');
+    assert.strictEqual(find(r, 'php-post').status, 'warn');
+    tight.srv.stop();
+    const unlimited = await fresh(['-d', 'memory_limit=-1']);
+    assert.strictEqual(find(await unlimited.call('health'), 'php-memory').status, 'ok');
+    unlimited.srv.stop();
+  });
+
+  await check('permissions: open_basedir that excludes a configured private folder is a failure', async () => {
+    const f = await fresh();
+    const outside = fs.mkdtempSync(path.join(tmp, 'private-'));
+    fs.writeFileSync(path.join(f.root, 'lib/atlas-private-dir.txt'), outside);
+    f.srv.stop();
+    const g = await serve(f.root, ['-d', 'open_basedir=' + f.root + ':/tmp/zzz-not-the-private-folder']);
+    const r = await g.call(built.token)('health');
+    const c = find(r, 'open-basedir');
+    assert.ok(c && c.status === 'fail' && c.title.includes(outside), JSON.stringify(c));
+    g.stop();
+  });
+
+  await check('admin side: the roster is validated and counted; keys are never shown', async () => {
+    const f = await fresh();
+    const roster = path.join(f.root, 'lib/atlas-admin-keys-store.json');
+    let c = find(await f.call('health'), 'admin-keys');
+    assert.strictEqual(c.status, 'warn'); assert.ok(/No administrator keys/.test(c.title));
+    fs.writeFileSync(roster, '{ nope');
+    assert.strictEqual(find(await f.call('health'), 'admin-keys').status, 'fail');
+    const K1 = 'ADMINKEY-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', K2 = 'MODKEY-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', K3 = 'OFFKEY-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+    fs.writeFileSync(roster, JSON.stringify({ keys: [{ publicKey: K1 }, { publicKey: K2, role: 'moderator' }, { publicKey: K3, revoked: true }] }));
+    let r = await f.call('health');
+    c = find(r, 'admin-keys');
+    assert.strictEqual(c.status, 'ok'); assert.ok(/1 administrator\(s\), 1 moderator\(s\), 1 switched off/.test(c.detail), c.detail);
+    assert.ok(!/ADMINKEY|MODKEY|OFFKEY/.test(r.text));
+    fs.writeFileSync(roster, JSON.stringify({ keys: [{ publicKey: K2, role: 'moderator' }] }));
+    assert.strictEqual(find(await f.call('health'), 'admin-keys').status, 'warn');
+    fs.writeFileSync(roster, JSON.stringify({ keys: [{ publicKey: K1 }, { publicKey: K2, role: 'moderater' }] }));
+    c = find(await f.call('health'), 'admin-keys');
+    assert.strictEqual(c.status, 'warn'); assert.ok(/role/.test(c.fix));
+    f.srv.stop();
+  });
+
+  await check('admin side: last activity comes from the session store date, and the session store is never opened', async () => {
+    const f = await fresh();
+    assert.ok(/No administrator has signed in/.test(find(await f.call('health'), 'admin-last').title));
+    const sessions = path.join(f.root, 'lib/atlas-admin-sessions-store.json');
+    fs.writeFileSync(sessions, JSON.stringify({ sessions: [{ token: 'BEARER-TOKEN-SECRET', publicKey: 'k' }] }));
+    const when = new Date('2026-03-04T10:20:00Z'); fs.utimesSync(sessions, when, when);
+    const r = await f.call('health');
+    assert.ok(/Last administrator activity: 2026-03-04/.test(find(r, 'admin-last').title), find(r, 'admin-last').title);
+    assert.strictEqual(find(r, 'admin-stores').status, 'ok');
+    assert.ok(!/BEARER-TOKEN-SECRET/.test(r.text));
+    f.srv.stop();
+  });
 
   await check('no response ever contained private-state contents or the token', () => {
     const joined = everything.join('\n');

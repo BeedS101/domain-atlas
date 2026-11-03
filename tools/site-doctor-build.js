@@ -22,9 +22,11 @@ const { FILES: STUDIO_FILES } = require('./lib/studio-files');
 
 const ROOT = path.resolve(__dirname, '..');
 const TEMPLATE = path.join(__dirname, 'site-doctor', 'site-doctor.template.php');
-const FEATURES = path.join(__dirname, 'site-doctor', 'features.json');
+const FEATURES = path.join(ROOT, 'issuer-php', 'lib', 'site-features.json');
+const FEATURE_READERS = path.join(ROOT, 'issuer-php', 'lib', 'site-features.php');
 const FEATURE_TYPES = ['studio-config', 'json-enabled', 'email-tickets', 'manifest-field', 'moderation-issuer', 'presence-moderation', 'private-config-php', 'rename', 'private-dir-txt'];
 const MARKER = '/*@@DOCTOR_CONFIG@@*/';
+const READERS_MARKER = '/*@@SITE_FEATURES@@*/';
 const SOURCES = [['issuer-php', 'i'], ['demo-domain-a', 'a'], ['demo-domain-b', 'b'], ['call-php', 'c'], ['presence-php', 'p']];
 
 const args = process.argv.slice(2);
@@ -139,7 +141,11 @@ if (json.includes('ATLAS_DOCTOR_JSON')) { console.error('manifest contains the h
 
 const template = fs.readFileSync(TEMPLATE, 'utf8');
 if (template.split(MARKER).length !== 2) { console.error('template must contain the marker exactly once: ' + MARKER); process.exit(1); }
-const php = template.replace(MARKER, () => '$DOCTOR = json_decode(<<<\'ATLAS_DOCTOR_JSON\'\n' + json + '\nATLAS_DOCTOR_JSON\n, true);');
+if (template.split(READERS_MARKER).length !== 2) { console.error('template must contain the marker exactly once: ' + READERS_MARKER); process.exit(1); }
+// The feature readers are the issuer's own library, spliced in so the doctor and the admin panel cannot disagree.
+const readers = fs.readFileSync(FEATURE_READERS, 'utf8');
+if (!readers.startsWith('<?php\n') || readers.includes('?>') || readers.includes('ATLAS_DOCTOR')) { console.error('lib/site-features.php must be one plain PHP block'); process.exit(1); }
+const php = template.replace(MARKER, () => '$DOCTOR = json_decode(<<<\'ATLAS_DOCTOR_JSON\'\n' + json + '\nATLAS_DOCTOR_JSON\n, true);').replace(READERS_MARKER, () => readers.slice('<?php\n'.length));
 
 fs.mkdirSync(path.resolve(out), { recursive: true });
 const phpFile = path.join(path.resolve(out), 'site-doctor.php');

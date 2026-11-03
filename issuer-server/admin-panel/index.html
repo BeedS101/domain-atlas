@@ -100,6 +100,36 @@
   .class-patch-list li:last-child { border-bottom: none; }
   .class-patch-list .class-patch-name { color: #d7e0e4; font-family: ui-monospace, monospace; }
   .class-patch-list li.empty { font-style: italic; color: #6c7d85; }
+  .susp-list { margin-top: 16px; }
+  .susp-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .susp-head h3, .site-status-head h3 { margin: 0; font-size: 13px; color: #d7e0e4; font-weight: 600; }
+  .susp-head button, .site-status-head button, .susp-row button, .site-feature button {
+    background: #2c3c44; color: #d7e0e4; border: 1px solid #3c4e57; border-radius: 6px;
+    padding: 4px 10px; cursor: pointer; font-size: 12px;
+  }
+  .susp-head button:hover, .site-status-head button:hover, .susp-row button:hover:not(:disabled), .site-feature button:hover:not(:disabled) { background: #3c4e57; }
+  .susp-head button:disabled, .site-status-head button:disabled, .susp-row button:disabled, .site-feature button:disabled { opacity: 0.6; cursor: default; }
+  .susp-row { padding: 8px 0; border-bottom: 1px solid #202f36; font-size: 12px; color: #9fb0b8; }
+  .susp-row:last-child { border-bottom: none; }
+  .susp-row .susp-id { color: #d7e0e4; font-family: ui-monospace, monospace; word-break: break-all; }
+  .susp-row .susp-meta { margin-top: 3px; }
+  .susp-row .susp-actions { margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .susp-empty { font-style: italic; color: #6c7d85; font-size: 12px; padding: 8px 0; }
+  .susp-note { font-size: 12px; color: #9fb0b8; margin: 6px 0 0; }
+  .tag { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 9px; border: 1px solid #3c4e57; color: #d7e0e4; margin-left: 6px; }
+  .tag.warn { border-color: #b8893a; color: #f2c98d; }
+  .tag.ok { border-color: #4d8a5b; color: #8fd19e; }
+  .tag.bad { border-color: #a65454; color: #e08a8a; }
+  .site-status-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .site-group { margin: 14px 0 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8cc4e6; }
+  .site-feature { padding: 8px 0; border-bottom: 1px solid #202f36; font-size: 12px; color: #9fb0b8; }
+  .site-feature .site-name { color: #d7e0e4; font-weight: 600; }
+  .site-feature ul { margin: 4px 0 0; padding-left: 18px; }
+  .site-feature .site-how { margin-top: 4px; color: #7f9199; }
+  .site-feature .site-actions { margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .site-feature .site-confirm { color: #f2c98d; }
+  .site-feature details { margin-top: 4px; }
+  .site-feature summary { cursor: pointer; color: #7f9199; }
   [hidden] { display: none !important; }
   section.panel.moderation { border-color: #4f7893; box-shadow: 0 0 0 1px #4f789333; }
   .mod-banner { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8cc4e6; margin-bottom: 6px; }
@@ -260,6 +290,16 @@
         </div>
       </section>
 
+      <section class="panel" id="siteStatusPanel">
+        <div class="site-status-head">
+          <h2>Site status</h2>
+          <button id="siteStatusRefreshBtn" type="button">Refresh</button>
+        </div>
+        <p class="hint">What this server has switched on, read from its own settings (POST /atlas/admin/site-status). Passwords and mail addresses are never shown. Where a feature can be paused, the button here is an emergency off-switch (POST /atlas/admin/site-pause): it only ever turns a feature off and keeps every other setting. Turning anything back on is done in the files, as described under each feature.</p>
+        <div id="siteStatusList"></div>
+        <div class="result" id="siteStatusResult"></div>
+      </section>
+
       <section class="panel">
         <h2>Revoke a credential</h2>
         <p class="hint">Immediately invalidates a credential by id (POST /atlas/revoke). Cannot be undone.</p>
@@ -291,6 +331,13 @@
           <button class="submit" id="unsuspendBtn" type="button">Unsuspend</button>
         </div>
         <div class="result" id="suspendResult"></div>
+        <div class="susp-list">
+          <div class="susp-head">
+            <h3>Currently suspended <span id="suspCount"></span></h3>
+            <button id="suspRefreshBtn" type="button">Refresh</button>
+          </div>
+          <div id="suspList"></div>
+        </div>
       </section>
 
       <section class="panel">
@@ -730,6 +777,8 @@
       refreshClassPatchClassOptions();
       refreshClassPatches();
       refreshTrustedTradePeers();
+      refreshSuspensions();
+      refreshSiteStatus();
       refreshMailDirectory();
       refreshCalendarWorldOptions();
       refreshCalendarEventOptions();
@@ -782,6 +831,7 @@
       try {
         const res = await postJson('/atlas/suspend', { payload: { id, reason: reason || undefined, expiresAt: expiresAt || undefined }, token: session.token });
         showResult(result, res.ok, res.ok ? 'Suspended.' : (res.body.error || 'Suspend failed.'));
+        if (res.ok) await refreshSuspensions();
       } finally {
         btn.disabled = false;
       }
@@ -796,10 +846,192 @@
       try {
         const res = await postJson('/atlas/unsuspend', { payload: { id }, token: session.token });
         showResult(result, res.ok, res.ok ? (res.body.wasSuspended ? 'Unsuspended.' : 'Nothing to unsuspend — it was not currently suspended.') : (res.body.error || 'Unsuspend failed.'));
+        if (res.ok) await refreshSuspensions();
       } finally {
         btn.disabled = false;
       }
     });
+
+    // ---------- currently suspended ----------
+    // The list comes from POST /atlas/admin/suspensions, which reads the
+    // suspensions file the same way enforcement does: an entry whose time
+    // has run out is resolved (lifted, or revoked for "revoke when it
+    // ends") before the list is built, so nothing shown here is already
+    // over. Every value is set with textContent; none of it is markup.
+    function suspTime(iso) {
+      const t = Date.parse(iso);
+      return Number.isFinite(t) ? new Date(t).toISOString().replace(/\.\d{3}Z$/, 'Z').replace('T', ' ') : String(iso || '');
+    }
+    function suspTag(text, cls) {
+      const span = document.createElement('span');
+      span.className = 'tag ' + cls;
+      span.textContent = text;
+      return span;
+    }
+    async function refreshSuspensions() {
+      const list = document.getElementById('suspList');
+      const count = document.getElementById('suspCount');
+      if (!list || !session) return;
+      const res = await postJson('/atlas/admin/suspensions', { payload: {}, token: session.token });
+      list.textContent = '';
+      if (!res.ok) {
+        count.textContent = '';
+        const note = document.createElement('div');
+        note.className = 'susp-empty';
+        note.textContent = 'Could not load the list' + (res.body && res.body.error ? ': ' + res.body.error : '.');
+        list.appendChild(note);
+        return;
+      }
+      const rows = res.body.suspended || [];
+      count.textContent = '(' + (res.body.total || 0) + ')';
+      if (!rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'susp-empty';
+        empty.textContent = 'Nothing is suspended right now.';
+        list.appendChild(empty);
+        return;
+      }
+      for (const row of rows) {
+        const el = document.createElement('div');
+        el.className = 'susp-row';
+        const idEl = document.createElement('div');
+        idEl.className = 'susp-id';
+        idEl.textContent = row.id;
+        const meta = document.createElement('div');
+        meta.className = 'susp-meta';
+        const when = row.expiresAt ? 'until ' + suspTime(row.expiresAt) : 'until lifted by an administrator';
+        meta.appendChild(document.createTextNode('Reason: ' + (row.reason || '(none)') + ' · since ' + suspTime(row.suspendedAt) + ' · ' + when));
+        if (row.expiresAt && row.onExpire === 'finalize') meta.appendChild(suspTag('revokes when it ends', 'bad'));
+        const actions = document.createElement('div');
+        actions.className = 'susp-actions';
+        const useBtn = document.createElement('button');
+        useBtn.type = 'button';
+        useBtn.textContent = 'Use this id';
+        useBtn.addEventListener('click', () => { document.getElementById('suspendId').value = row.id; });
+        const liftBtn = document.createElement('button');
+        liftBtn.type = 'button';
+        liftBtn.textContent = 'Unsuspend';
+        liftBtn.addEventListener('click', async () => {
+          liftBtn.disabled = true;
+          const result = document.getElementById('suspendResult');
+          try {
+            const r = await postJson('/atlas/unsuspend', { payload: { id: row.id }, token: session.token });
+            showResult(result, r.ok, r.ok ? (r.body.wasSuspended ? 'Unsuspended.' : 'It was no longer suspended.') : (r.body.error || 'Unsuspend failed.'));
+          } finally {
+            await refreshSuspensions();
+          }
+        });
+        actions.appendChild(useBtn);
+        actions.appendChild(liftBtn);
+        el.appendChild(idEl);
+        el.appendChild(meta);
+        el.appendChild(actions);
+        list.appendChild(el);
+      }
+      if (res.body.total > rows.length) {
+        const more = document.createElement('p');
+        more.className = 'susp-note';
+        more.textContent = 'Showing the newest ' + rows.length + ' of ' + res.body.total + '.';
+        list.appendChild(more);
+      }
+    }
+    document.getElementById('suspRefreshBtn').addEventListener('click', refreshSuspensions);
+
+    // ---------- site status ----------
+    // POST /atlas/admin/site-status describes each feature this server
+    // has (state, reasons, plain facts, how to switch it); the pause
+    // button exists only for the ones the server marks pausable and
+    // needs a second click, so a slip cannot switch a feature off.
+    const SITE_STATE = { on: ['ON', 'ok'], off: ['off', ''], problem: ['needs attention', 'bad'], absent: ['not installed', ''] };
+    let sitePendingPause = null;
+    async function refreshSiteStatus() {
+      const box = document.getElementById('siteStatusList');
+      if (!box || !session) return;
+      const res = await postJson('/atlas/admin/site-status', { payload: {}, token: session.token });
+      box.textContent = '';
+      if (!res.ok) {
+        const note = document.createElement('div');
+        note.className = 'susp-empty';
+        note.textContent = 'Could not load the site status' + (res.body && res.body.error ? ': ' + res.body.error : '.');
+        box.appendChild(note);
+        return;
+      }
+      let group = null;
+      for (const f of res.body.features || []) {
+        if (f.group !== group) {
+          group = f.group;
+          const h = document.createElement('div');
+          h.className = 'site-group';
+          h.textContent = group;
+          box.appendChild(h);
+        }
+        const el = document.createElement('div');
+        el.className = 'site-feature';
+        el.dataset.feature = f.id;
+        const title = document.createElement('div');
+        const name = document.createElement('span');
+        name.className = 'site-name';
+        name.textContent = f.label;
+        const st = SITE_STATE[f.state] || [String(f.state), ''];
+        title.appendChild(name);
+        title.appendChild(suspTag(st[0], st[1]));
+        el.appendChild(title);
+        const about = document.createElement('div');
+        about.textContent = f.about;
+        el.appendChild(about);
+        if ((f.reasons || []).length || (f.facts || []).length) {
+          const ul = document.createElement('ul');
+          for (const r of f.reasons || []) { const li = document.createElement('li'); li.textContent = r; li.style.color = '#e0b88a'; ul.appendChild(li); }
+          for (const t of f.facts || []) { const li = document.createElement('li'); li.textContent = t; ul.appendChild(li); }
+          el.appendChild(ul);
+        }
+        const how = document.createElement('details');
+        const sum = document.createElement('summary');
+        sum.textContent = 'How to switch it';
+        const on = document.createElement('div');
+        on.className = 'site-how';
+        on.textContent = 'On: ' + f.enable;
+        const off = document.createElement('div');
+        off.className = 'site-how';
+        off.textContent = 'Off: ' + f.disable;
+        how.appendChild(sum); how.appendChild(on); how.appendChild(off);
+        el.appendChild(how);
+        if (f.pausable && f.state === 'on') {
+          const actions = document.createElement('div');
+          actions.className = 'site-actions';
+          const pauseBtn = document.createElement('button');
+          pauseBtn.type = 'button';
+          pauseBtn.textContent = sitePendingPause === f.id ? 'Yes, switch it off' : 'Pause (switch off)';
+          actions.appendChild(pauseBtn);
+          if (sitePendingPause === f.id) {
+            const warn = document.createElement('span');
+            warn.className = 'site-confirm';
+            warn.textContent = 'This stops it for everyone until you switch it back on in the file.';
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.textContent = 'Cancel';
+            cancel.addEventListener('click', () => { sitePendingPause = null; refreshSiteStatus(); });
+            actions.appendChild(cancel);
+            actions.appendChild(warn);
+          }
+          pauseBtn.addEventListener('click', async () => {
+            if (sitePendingPause !== f.id) { sitePendingPause = f.id; refreshSiteStatus(); return; }
+            pauseBtn.disabled = true;
+            const result = document.getElementById('siteStatusResult');
+            sitePendingPause = null;
+            try {
+              const r = await postJson('/atlas/admin/site-pause', { payload: { feature: f.id }, token: session.token });
+              showResult(result, r.ok, r.ok ? (r.body.changed ? f.label + ' is now off.' : f.label + ' was already off.') : (r.body.error || 'Pause failed.'));
+            } finally {
+              await refreshSiteStatus();
+            }
+          });
+          el.appendChild(actions);
+        }
+        box.appendChild(el);
+      }
+    }
+    document.getElementById('siteStatusRefreshBtn').addEventListener('click', () => { sitePendingPause = null; refreshSiteStatus(); });
 
     // ---------- trusted trade peers ----------
     // Every domain currently trusted as a cross-domain Trading Station

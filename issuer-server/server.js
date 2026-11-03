@@ -59,6 +59,7 @@ const { parseMimeMessage } = require('./lib-mime-parse');
 const { evaluateTransferPolicy, evaluateDeliveryGate, evaluateMintForDelivery } = require('./lib-transfer-policy');
 const { createDeliveryEngine } = require('./lib-delivery');
 const { createLedgerIssuance } = require('./lib-ledger-issuance');
+const { createSiteStatus } = require('./lib-site-status');
 
 // All three of these are overridable by environment variable so the same
 // code runs unchanged in local dev (defaults below) and behind cPanel's
@@ -4886,6 +4887,12 @@ async function main() {
     canonicalize, sign, publicKey: publicKeyB64url
   });
 
+  // Read-only feature report and the OFF-only switch behind the admin panel's Site status section.
+  const siteStatus = createSiteStatus({
+    ledgerIssuance, ledgerConfigFile: LEDGER_ISSUANCE_CONFIG_FILE, emailConfig: EMAIL_TICKETS_CONFIG,
+    moderationAudiences, moderationConfigFile: MODERATION_CONFIG_FILE, writeFileAtomic
+  });
+
   await preparePinnedManifest(sign, publicKeyB64url);
 
   // Verifies an asset credential this issuer itself signed — used before
@@ -7732,6 +7739,48 @@ async function main() {
         suspend(payload.id, payload.reason || 'issuer-request', payload.expiresAt || null);
         console.log('Suspended', payload.id, 'by admin', auth.publicKey.slice(0, 16) + '...', payload.expiresAt ? ('until ' + payload.expiresAt) : '(indefinite)');
         return sendJson(res, 200, { ok: true });
+      }
+
+      // Admin-gated (requireAdminAuth): every credential currently suspended, newest first, so the admin
+      // panel can show what is frozen and lift one. Read through readSuspensions(), the path every other check
+      // uses, so an entry whose expiry has passed is resolved (lifted, or revoked for 'finalize') first and is
+      // never listed as active.
+      if (req.method === 'POST' && req.url === '/atlas/admin/suspensions') {
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
+        const all = readSuspensions().suspended
+          .filter((s) => s && typeof s.id === 'string')
+          .map((s) => ({
+            id: s.id.slice(0, 300),
+            reason: typeof s.reason === 'string' ? s.reason.slice(0, 200) : '',
+            suspendedAt: typeof s.suspendedAt === 'string' ? s.suspendedAt.slice(0, 40) : null,
+            expiresAt: typeof s.expiresAt === 'string' ? s.expiresAt.slice(0, 40) : null,
+            onExpire: s.onExpire === 'finalize' ? 'finalize' : 'lift'
+          }))
+          .sort((a, b) => String(b.suspendedAt).localeCompare(String(a.suspendedAt)));
+        return sendJson(res, 200, { now: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'), total: all.length, suspended: all.slice(0, 500) });
+      }
+
+      // Admin-gated (requireAdminAuth): which optional features are on, off or misconfigured, and how to turn
+      // each on or off. Read-only; only allow-listed values, never a password, token, key or mail address.
+      if (req.method === 'POST' && req.url === '/atlas/admin/site-status') {
+        const { payload, proof, token } = await readAdminJson(req);
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
+        return sendJson(res, 200, { features: siteStatus.features() });
+      }
+
+      // Admin-gated (requireAdminAuth): switches one pausable feature OFF, never on. See lib-site-status.js.
+      if (req.method === 'POST' && req.url === '/atlas/admin/site-pause') {
+        const { payload, proof, token } = await readAdminJson(req);
+        if (!payload || typeof payload.feature !== 'string' || !/^[a-z0-9-]{1,40}$/.test(payload.feature)) return sendJson(res, 400, { error: 'payload.feature is required', code: 'bad-request' });
+        const auth = await requireAdminAuth(payload, proof, token, req);
+        if (auth.error) return sendAdminAuthFailure(res, auth);
+        const r = siteStatus.pause(payload.feature);
+        if (!r.ok) return sendJson(res, r.status, { error: r.error, code: r.code });
+        console.log('Paused', payload.feature, 'by admin', auth.publicKey.slice(0, 16) + '...', r.changed ? '' : '(already off)');
+        return sendJson(res, 200, { ok: true, feature: payload.feature, changed: r.changed, state: r.state });
       }
 
       // Lifts a suspension early — a no-op (still 200, wasSuspended: false)
