@@ -107,7 +107,27 @@ function doctor_collapse($paths, $limit) {
   return $out;
 }
 
-function doctor_extras($root, $known, $self, $budget) {
+// For an unknown PHP file: size, date, and whether a repository file has the same name (a misplaced copy) and
+// the same content. The content is only hashed, never shown.
+function doctor_php_info($root, $r, $byBase) {
+  $full = $root . '/' . $r;
+  $t = @filemtime($full);
+  $info = ['p' => $r, 'size' => (int)@filesize($full), 'date' => $t ? date('Y-m-d', $t) : '', 'like' => null, 'same' => false];
+  $b = basename($r);
+  if (isset($byBase[$b])) {
+    $info['like'] = $byBase[$b][0][0];
+    if ($info['size'] <= 1048576) {
+      $c = @file_get_contents($full);
+      if ($c !== false) {
+        $h = hash('sha256', str_replace("\r\n", "\n", $c));
+        foreach ($byBase[$b] as $e) if (hash_equals($e[1], $h)) { $info['like'] = $e[0]; $info['same'] = true; break; }
+      }
+    }
+  }
+  return $info;
+}
+
+function doctor_extras($root, $known, $self, $budget, $byBase) {
   $t0 = microtime(true);
   $skipDirs = ['cgi-bin' => 1, '.git' => 1, 'node_modules' => 1, '.well-known/acme-challenge' => 1, '.well-known/pki-validation' => 1, '.cagefs' => 1, '.tmp' => 1];
   $scanned = 0; $partial = false;
@@ -158,7 +178,7 @@ function doctor_extras($root, $known, $self, $budget) {
   sort($php);
   sort($host);
   return ['state' => $single, 'host' => $host, 'other' => doctor_collapse($other, 10), 'otherTotal' => count($other),
-    'php' => array_slice($php, 0, 300), 'phpTotal' => count($php), 'scanned' => $scanned, 'partial' => $partial];
+    'php' => array_map(function ($r) use ($root, $byBase) { return doctor_php_info($root, $r, $byBase); }, array_slice($php, 0, 300)), 'phpTotal' => count($php), 'scanned' => $scanned, 'partial' => $partial];
 }
 
 function doctor_https() {
@@ -332,14 +352,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     for ($n = count($list); $i < $n && microtime(true) - $t0 < 6.0; $i++) {
       $st = doctor_check_entry($DOCTOR_ROOT, $list[$i]);
       $counts[$st] = (isset($counts[$st]) ? $counts[$st] : 0) + 1;
-      if ($st !== 'ok' && $st !== 'absent-optional') $results[] = [$list[$i][0], $st, $list[$i][3]];
+      if ($st !== 'ok' && $st !== 'absent-optional') {
+        $sz = $st === 'differs' || $st === 'expected-differs' ? @filesize($DOCTOR_ROOT . '/' . $list[$i][0]) : false;
+        $results[] = [$list[$i][0], $st, $list[$i][3], $sz === false ? null : $sz, (int)$list[$i][2]];
+      }
     }
     doctor_json(['ok' => true, 'total' => count($list), 'next' => $i < count($list) ? $i : null, 'results' => $results, 'counts' => $counts]);
   }
   if ($action === 'extras') {
-    $known = [];
-    foreach ($DOCTOR['entries'] as $e) $known[$e[0]] = true;
-    $r = doctor_extras($DOCTOR_ROOT, $known, $DOCTOR_SELF, 10.0);
+    $known = []; $byBase = [];
+    foreach ($DOCTOR['entries'] as $e) { $known[$e[0]] = true; $byBase[basename($e[0])][] = $e; }
+    $r = doctor_extras($DOCTOR_ROOT, $known, $DOCTOR_SELF, 10.0, $byBase);
     $r['ok'] = true;
     doctor_json($r);
   }
@@ -504,7 +527,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
           st.total = j.total;
           Object.keys(j.counts).forEach(function (k) { st.counts[k] = (st.counts[k] || 0) + j.counts[k]; });
           j.results.forEach(function (r) {
-            var o = { path: r[0], group: r[2] };
+            var o = { path: r[0], group: r[2], size: r[3], n: r[4] };
             if (r[1] === 'missing') st.missing.push(o);
             else if (r[1] === 'differs') st.differs.push(o);
             else if (r[1] === 'expected-differs') st.expected.push(o);
@@ -554,7 +577,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     ['c', 'p', 'a'].forEach(function (g) {
       var sub = list.filter(function (x) { return x.group === g; });
       if (!sub.length) return;
-      out.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: label + ' - ' + GROUP[g] + ' (' + sub.length + ')' }), pathList(sub.map(function (x) { return x.path + (x.what ? '  [' + x.what + ']' : ''); }))]));
+      out.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: label + ' - ' + GROUP[g] + ' (' + sub.length + ')' }), pathList(sub.map(function (x) { return x.path + (x.what ? '  [' + x.what + ']' : '') + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : ''); }))]));
     });
     return out;
   }
@@ -606,7 +629,7 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
 
     var x = state.extras, xb = [];
     xb.push(el('p', { 'class': 'muted', text: 'Files here that are not in the repository. Your own models, pages and hosting files are normal; this is only for awareness.' }));
-    if (x.php.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Unknown PHP files - review these (' + x.phpTotal + ')' }), el('div', { 'class': 'd', text: 'Code that is not in the repository: your own, or an old route that was later removed.' }), pathList(x.php)]));
+    if (x.php.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Unknown PHP files - review these (' + x.phpTotal + ')' }), el('div', { 'class': 'd', text: 'Code that is not in the repository: your own work, a copy uploaded to the wrong folder, or an old route. A copy with a different content than the repository file of the same name is the one to look at first.' }), pathList(x.php.map(phpLine))]));
     if (x.other.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Other unknown files (' + x.otherTotal + ')' }), pathList(x.other)]));
     if (x.state.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Private state - listed by name only, never opened (' + x.state.length + ')' }), pathList(x.state.map(stateLine))]));
     if (x.host.length) xb.push(el('div', { 'class': 'item' }, [el('div', { 'class': 't', text: 'Hosting files (' + x.host.length + ')' }), pathList(x.host)]));
@@ -621,6 +644,9 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     section('Setup values (copy and paste)', 'info', 'for Asset Studio', false, setupBlocks(env.setup));
   }
 
+  function phpLine(x) {
+    return x.p + '  [' + (x.date ? x.date + ', ' : '') + x.size + ' bytes]' + (x.like ? (x.same ? '  identical copy of ' + x.like + ' (misplaced duplicate)' : '  same name as ' + x.like + ' but different content') : '');
+  }
   function stateLine(s) { return s[3] === 'dir' ? s[0] + '  [' + s[2] + ' files]' : s[0] + '  [mode ' + s[1] + ', ' + s[2] + ' bytes]'; }
 
   function setupBlocks(s) {
@@ -651,9 +677,9 @@ ul.paths { margin:6px 0; padding-left:20px; columns:1; } ul.paths li { word-brea
     lines.push('TO DO'); if (!t.length) lines.push('  nothing'); t.forEach(function (x) { lines.push('  [' + x[0] + '] ' + x[1] + (x[2] ? ' - ' + x[2] : '')); });
     lines.push('', 'SERVER'); env.checks.forEach(function (x) { lines.push('  [' + x.status + '] ' + x.title + (x.detail ? ' - ' + x.detail : '')); });
     lines.push('', 'MISSING (' + state.missing.length + ')'); state.missing.forEach(function (x) { lines.push('  ' + x.path); });
-    lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path); });
+    lines.push('', 'DIFFERENT (' + state.differs.length + ')'); state.differs.forEach(function (x) { lines.push('  ' + x.path + (x.size !== null && x.size !== undefined ? '  [' + x.size + ' bytes here, ' + x.n + ' in the repository]' : '')); });
     lines.push('', 'WEB EXPOSURE'); state.probes.forEach(function (p) { lines.push('  ' + (p.exposed ? 'EXPOSED ' : 'ok      ') + p.path + ' (HTTP ' + p.status + ')'); });
-    lines.push('', 'UNKNOWN PHP FILES (' + state.extras.phpTotal + ')'); state.extras.php.forEach(function (x) { lines.push('  ' + x); });
+    lines.push('', 'UNKNOWN PHP FILES (' + state.extras.phpTotal + ')'); state.extras.php.forEach(function (x) { lines.push('  ' + phpLine(x)); });
     lines.push('', 'OTHER UNKNOWN FILES (' + state.extras.otherTotal + ')'); state.extras.other.slice(0, 100).forEach(function (x) { lines.push('  ' + x); });
     lines.push('', 'PRIVATE STATE (names only)'); state.extras.state.slice(0, 60).forEach(function (x) { lines.push('  ' + stateLine(x)); });
     return redact(lines.join('\n'));
