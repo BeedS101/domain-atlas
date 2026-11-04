@@ -48,7 +48,7 @@ const json = (r) => { try { return JSON.parse(r.body.toString('utf8')); } catch 
   const page = await request('GET', '/atlas/studio/index.html');
   check('Studio page loads', page.status === 200 && /Asset Studio/.test(page.body.toString('utf8')), 'HTTP ' + page.status + (page.error ? ' ' + page.error : ''));
   check('Studio page carries the Terms link and footer', /href="\/terms\/"/.test(page.body.toString('utf8')) && /Experimental Platform/.test(page.body.toString('utf8')));
-  for (const f of ['studio.js', 'studio.css']) {
+  for (const f of ['studio.js', 'studio.css', 'model-viewer.js']) {
     const r = await request('GET', '/atlas/studio/' + f);
     check(f + ' loads', r.status === 200 && r.body.length > 100, 'HTTP ' + r.status);
   }

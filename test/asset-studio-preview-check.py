@@ -1,6 +1,6 @@
 import pathlib
 root=pathlib.Path(__file__).resolve().parents[1]/'issuer-php/atlas/studio'
-for name in ['index.html','studio.js','studio.css','api.php']:
+for name in ['index.html','studio.js','studio.css','model-viewer.js','api.php']:
     assert (root/name).is_file(), name
 html=(root/'index.html').read_text()
 assert 'disabled' in html and 'Mint to Wallet' in html

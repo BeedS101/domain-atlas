@@ -5,7 +5,7 @@ const FILES = [];
 const issuer = (rel) => FILES.push(['issuer-php/' + rel, rel]);
 
 // New: the Studio application.
-['index.html', 'studio.css', 'studio.js', 'api.php',
+['index.html', 'studio.css', 'studio.js', 'model-viewer.js', 'api.php',
   'inc/.htaccess', 'inc/authorize-design.php', 'inc/challenges.php', 'inc/design-fingerprint.php', 'inc/design-validator.php',
   'inc/issuance-plan.php', 'inc/keys.php', 'inc/mint-attempts.php', 'inc/mint-authorization.php', 'inc/model-catalog.php',
   'inc/storage.php', 'inc/studio-mint.php', 'inc/storage-root.php.example',

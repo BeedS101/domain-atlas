@@ -2,7 +2,7 @@
 
 This puts Asset Studio on a live PHP issuer that already runs the Domain Atlas demos. Studio ships with minting **off**; you switch it on yourself in step 6. Throughout, `evtec.co.za` stands for the domain and `CPUSER` for the cPanel account name.
 
-What is added: the Studio page and its API (`atlas/studio/`), a one-line "include-only" guard in the shared issuer libraries, the refusal of the Studio class on the general issue/reissue/class-patch routes, and Studio's own model collection in `assets/studio/`. What is **not** touched: the issuer private key, holdings, journals, replay records, `lib/atlas-*.json`, `lib/atlas-private-dir.txt`, `.well-known/*` key and revocation files, the txlab and multi-issuer labs and their private folders. The package contains only source files (41), and `tools/studio-deploy-package.js` refuses to include anything that looks like state.
+What is added: the Studio page and its API (`atlas/studio/`), a one-line "include-only" guard in the shared issuer libraries, the refusal of the Studio class on the general issue/reissue/class-patch routes, and Studio's own model collection in `assets/studio/`. What is **not** touched: the issuer private key, holdings, journals, replay records, `lib/atlas-*.json`, `lib/atlas-private-dir.txt`, `.well-known/*` key and revocation files, the txlab and multi-issuer labs and their private folders. The package contains only source files (42), and `tools/studio-deploy-package.js` refuses to include anything that looks like state.
 
 Studio records a mint in the issuer's existing journal and replay store (the same private folder the issuer already uses) and keeps its own rate counters and mint records in a new private folder. Nothing existing is replaced or moved.
 
@@ -47,7 +47,7 @@ Folder permissions 0755 are fine on cPanel; they must be writable by your accoun
 The zip contains exactly these paths, relative to `public_html` (nothing else is written):
 
 ```
-atlas/studio/index.html, studio.css, studio.js, api.php
+atlas/studio/index.html, studio.css, studio.js, model-viewer.js, api.php
 atlas/studio/inc/.htaccess
 atlas/studio/inc/authorize-design.php  challenges.php  design-fingerprint.php  design-validator.php
 atlas/studio/inc/issuance-plan.php  keys.php  mint-attempts.php  mint-authorization.php

@@ -1,27 +1,103 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const c=$('preview'), ctx=c.getContext('2d');
-const colors={gold:['#ffde76','#8d5e14'],silver:['#d9eaf4','#647d93'],bronze:['#e8ac72','#8c4c2d']};
+if(!ctx.roundRect)ctx.roundRect=function(x,y,w,h){this.rect(x,y,w,h)};
+const palette={
+ gold:{light:'#ffe9a3',mid:'#f2bd3b',dark:'#8a5a12',glow:'rgba(255,196,64,.34)'},
+ silver:{light:'#f4f9fd',mid:'#c3d2de',dark:'#5d7387',glow:'rgba(170,200,235,.30)'},
+ bronze:{light:'#f6c79a',mid:'#cf8650',dark:'#7d3f20',glow:'rgba(232,132,70,.32)'}
+};
 const titles={trophy:'Achievement Trophy',badge:'Explorer Badge',key:'Portal Key'};
 function design(){return {schema:'atlas.asset-studio.design/0.1',template:$('template').value,name:$('assetName').value.trim().slice(0,64),description:$('description').value.trim().slice(0,240),finish:$('finish').value};}
-function paint(){
- const d=design(),[light,dark]=colors[d.finish];ctx.clearRect(0,0,c.width,c.height);
- ctx.save();ctx.translate(250,200);ctx.shadowColor='#0009';ctx.shadowBlur=25;ctx.fillStyle=dark;
+
+// ---- flat preview (also the fallback when WebGL or the model is unavailable) ----
+function metal(x0,y0,x1,y1,p){const g=ctx.createLinearGradient(x0,y0,x1,y1);g.addColorStop(0,p.dark);g.addColorStop(.28,p.mid);g.addColorStop(.46,p.light);g.addColorStop(.62,p.mid);g.addColorStop(1,p.dark);return g;}
+function sheen(path,alpha){ctx.save();ctx.globalAlpha=alpha;ctx.fillStyle='#fff';ctx.fill(path);ctx.restore();}
+function paintFlat(d){
+ const p=palette[d.finish]||palette.gold;ctx.clearRect(0,0,c.width,c.height);
+ ctx.save();ctx.translate(250,196);
+ const floor=ctx.createRadialGradient(0,150,4,0,150,150);floor.addColorStop(0,'rgba(0,0,0,.5)');floor.addColorStop(1,'rgba(0,0,0,0)');
+ ctx.save();ctx.translate(0,152);ctx.scale(1,.2);ctx.fillStyle=floor;ctx.beginPath();ctx.arc(0,0,150,0,Math.PI*2);ctx.fill();ctx.restore();
  if(d.template==='trophy'){
- ctx.fillRect(-18,65,36,70);ctx.fillRect(-85,125,170,22);ctx.fillStyle=light;
- ctx.beginPath();ctx.moveTo(-90,-120);ctx.lineTo(90,-120);ctx.lineTo(65,36);ctx.quadraticCurveTo(0,100,-65,36);ctx.closePath();ctx.fill();
- ctx.fillRect(-115,-110,25,80);ctx.fillRect(90,-110,25,80);ctx.fillStyle=dark;ctx.font='bold 76px serif';ctx.textAlign='center';ctx.fillText('★',0,-8);
+  ctx.fillStyle=metal(-95,0,95,0,p);ctx.beginPath();ctx.roundRect(-95,126,190,26,6);ctx.fill();
+  ctx.fillStyle=metal(-70,0,70,0,{...p,mid:p.dark,light:p.mid});ctx.beginPath();ctx.roundRect(-70,106,140,24,5);ctx.fill();
+  ctx.fillStyle=metal(-17,0,17,0,p);ctx.beginPath();ctx.moveTo(-17,104);ctx.quadraticCurveTo(-8,70,-26,52);ctx.lineTo(26,52);ctx.quadraticCurveTo(8,70,17,104);ctx.closePath();ctx.fill();
+  ctx.strokeStyle=metal(-130,0,130,0,p);ctx.lineWidth=15;ctx.lineCap='round';
+  ctx.beginPath();ctx.moveTo(-84,-96);ctx.bezierCurveTo(-148,-96,-142,-6,-68,14);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(84,-96);ctx.bezierCurveTo(148,-96,142,-6,68,14);ctx.stroke();
+  const cup=new Path2D();cup.moveTo(-96,-124);cup.lineTo(96,-124);cup.bezierCurveTo(96,-30,66,38,0,58);cup.bezierCurveTo(-66,38,-96,-30,-96,-124);cup.closePath();
+  ctx.fillStyle=metal(-96,0,96,0,p);ctx.fill(cup);
+  const rim=ctx.createLinearGradient(0,-124,0,-100);rim.addColorStop(0,p.light);rim.addColorStop(1,p.mid);ctx.fillStyle=rim;ctx.beginPath();ctx.roundRect(-100,-130,200,16,8);ctx.fill();
+  const streak=new Path2D();streak.moveTo(-70,-108);streak.lineTo(-48,-108);streak.bezierCurveTo(-52,-36,-36,6,-14,34);streak.bezierCurveTo(-52,12,-72,-40,-70,-108);streak.closePath();sheen(streak,.42);
+  const star=new Path2D();for(let i=0;i<10;i++){const a=i*Math.PI/5-Math.PI/2,r=i%2?17:40;star.lineTo(Math.cos(a)*r,-52+Math.sin(a)*r)}star.closePath();
+  const sg=ctx.createLinearGradient(0,-92,0,-12);sg.addColorStop(0,p.dark);sg.addColorStop(1,p.mid);ctx.fillStyle=sg;ctx.fill(star);ctx.strokeStyle=p.light;ctx.globalAlpha=.55;ctx.lineWidth=1.5;ctx.lineJoin='round';ctx.stroke(star);ctx.globalAlpha=1;
  } else if(d.template==='badge'){
- ctx.fillStyle=light;ctx.beginPath();for(let i=0;i<12;i++){const a=i*Math.PI/6-Math.PI/2,r=i%2?88:120;ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r)}ctx.closePath();ctx.fill();
- ctx.fillStyle=dark;ctx.beginPath();ctx.arc(0,0,75,0,Math.PI*2);ctx.fill();ctx.fillStyle=light;ctx.font='bold 84px serif';ctx.textAlign='center';ctx.fillText('✦',0,30);
+  ctx.translate(0,-6);
+  const burst=new Path2D();for(let i=0;i<32;i++){const a=i*Math.PI/16-Math.PI/2,r=i%2?104:126;burst.lineTo(Math.cos(a)*r,Math.sin(a)*r)}burst.closePath();
+  ctx.save();ctx.shadowColor='rgba(0,0,0,.45)';ctx.shadowBlur=22;ctx.shadowOffsetY=10;ctx.fillStyle=metal(-126,-126,126,126,p);ctx.fill(burst);ctx.restore();
+  ctx.fillStyle=metal(126,-126,-126,126,p);ctx.beginPath();ctx.arc(0,0,96,0,Math.PI*2);ctx.fill();
+  const face=ctx.createRadialGradient(-20,-28,6,0,0,82);face.addColorStop(0,'#2a3a52');face.addColorStop(1,'#0e1626');ctx.fillStyle=face;ctx.beginPath();ctx.arc(0,0,82,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle=p.mid;ctx.lineWidth=2.5;ctx.globalAlpha=.8;ctx.beginPath();ctx.arc(0,0,70,0,Math.PI*2);ctx.stroke();ctx.globalAlpha=1;
+  const star=new Path2D();for(let i=0;i<8;i++){const a=i*Math.PI/4-Math.PI/2,r=i%2?16:50;star.lineTo(Math.cos(a)*r,Math.sin(a)*r)}star.closePath();
+  ctx.fillStyle=metal(-50,-50,50,50,p);ctx.fill(star);
+  ctx.save();ctx.strokeStyle='rgba(255,255,255,.5)';ctx.lineWidth=4;ctx.lineCap='round';ctx.beginPath();ctx.arc(0,0,100,Math.PI*1.08,Math.PI*1.42);ctx.stroke();ctx.restore();
  } else {
- ctx.strokeStyle=light;ctx.lineWidth=26;ctx.beginPath();ctx.arc(-25,-45,65,0,Math.PI*2);ctx.moveTo(13,0);ctx.lineTo(105,106);ctx.stroke();
- ctx.fillStyle=light;ctx.fillRect(78,75,20,52);ctx.fillRect(102,92,20,36);
- }ctx.restore();
+  ctx.translate(-16,-20);ctx.rotate(-.5);
+  ctx.save();ctx.shadowColor='rgba(0,0,0,.45)';ctx.shadowBlur=18;ctx.shadowOffsetY=8;
+  ctx.strokeStyle=metal(-90,-90,90,90,p);ctx.lineWidth=30;ctx.beginPath();ctx.arc(0,-62,50,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle=metal(-14,0,14,0,p);ctx.beginPath();ctx.roundRect(-14,-14,28,176,9);ctx.fill();
+  ctx.beginPath();ctx.roundRect(14,98,44,18,5);ctx.roundRect(14,132,32,18,5);ctx.fill();ctx.restore();
+  ctx.strokeStyle='rgba(255,255,255,.45)';ctx.lineWidth=4;ctx.lineCap='round';ctx.beginPath();ctx.arc(0,-62,62,Math.PI*1.1,Math.PI*1.45);ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,.35)';ctx.fillRect(-9,2,4,150);
+ }
+ ctx.restore();
+}
+
+// ---- 3D preview ----
+const stage=$('stage'),viewer=(window.AtlasModelViewer&&location.protocol!=='file:')?window.AtlasModelViewer.create($('model')):null;
+let mode=viewer?'3d':'flat',modelState='idle',loadToken=0;
+function showMode(next){
+ mode=next;const three=mode==='3d'&&viewer&&modelState==='ready';
+ $('model').hidden=!three;c.hidden=three;stage.dataset.mode=three?'3d':'flat';
+ $('viewTabs').querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===(three?'3d':'flat'))));
+ $('rotateBtn').hidden=$('resetBtn').hidden=!three;$('stageHint').hidden=!three;
+}
+function stageNote(text){$('stageNote').textContent=text||'';$('stageNote').hidden=!text}
+async function loadModel(){
+ if(!viewer){modelState='unavailable';stageNote(location.protocol==='file:'?'3D preview needs the hosted Studio page.':'3D preview is not available in this browser.');showMode('flat');$('viewTabs').hidden=true;return}
+ const token=++loadToken,t=$('template').value;modelState='loading';stageNote('Loading 3D model…');
+ try{await viewer.load('/assets/studio/'+t+'.glb',{standUp:t!=='trophy'});if(token!==loadToken)return;viewer.setFinish($('finish').value);modelState='ready';stageNote('');showMode(mode==='flat'&&$('viewTabs').dataset.chosen==='flat'?'flat':'3d')}
+ catch(error){if(token!==loadToken)return;modelState='failed';stageNote('3D model unavailable; showing the flat preview.');showMode('flat')}
+}
+
+function syncPickers(d){
+ document.querySelectorAll('#templateTiles [data-value]').forEach(b=>{const on=b.dataset.value===d.template;b.setAttribute('aria-checked',String(on));b.tabIndex=on?0:-1});
+ document.querySelectorAll('#finishSwatches [data-value]').forEach(b=>{const on=b.dataset.value===d.finish;b.setAttribute('aria-checked',String(on));b.tabIndex=on?0:-1});
+ stage.style.setProperty('--glow',(palette[d.finish]||palette.gold).glow);
+ $('nameCount').textContent=$('assetName').value.length+'/64';$('descCount').textContent=$('description').value.length+'/240';
+}
+function paint(){
+ const d=design();paintFlat(d);syncPickers(d);
+ if(viewer&&modelState==='ready')viewer.setFinish(d.finish);
  $('previewName').textContent=d.name||titles[d.template];$('previewDescription').textContent=d.description;$('json').textContent=JSON.stringify(d,null,2);
 }
-['template','assetName','description','finish'].forEach(id=>$(id).addEventListener('input',paint));
-$('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];paint()});
+['assetName','description','finish'].forEach(id=>$(id).addEventListener('input',paint));
+$('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];paint();loadModel()});
+// The tile and swatch groups drive the underlying selects, which stay the source of the design values.
+function pick(groupId,selectId,value){const s=$(selectId);if(s.value===value)return;s.value=value;s.dispatchEvent(new Event(selectId==='template'?'change':'input',{bubbles:true}))}
+[['templateTiles','template'],['finishSwatches','finish']].forEach(([groupId,selectId])=>{
+ const group=$(groupId),items=()=>[...group.querySelectorAll('[data-value]')];
+ group.addEventListener('click',e=>{const b=e.target.closest('[data-value]');if(b){pick(groupId,selectId,b.dataset.value);b.focus()}});
+ group.addEventListener('keydown',e=>{
+  const list=items(),i=list.indexOf(document.activeElement);if(i<0)return;
+  const step={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];if(!step)return;
+  e.preventDefault();const next=list[(i+step+list.length)%list.length];pick(groupId,selectId,next.dataset.value);next.focus();
+ });
+});
+$('viewTabs').addEventListener('click',e=>{const b=e.target.closest('button[data-mode]');if(!b)return;$('viewTabs').dataset.chosen=b.dataset.mode;showMode(b.dataset.mode)});
+$('rotateBtn').addEventListener('click',()=>{if(!viewer)return;const on=!viewer.autoRotate;viewer.setAutoRotate(on);$('rotateBtn').setAttribute('aria-pressed',String(on))});
+$('resetBtn').addEventListener('click',()=>viewer&&viewer.resetView());
+if(viewer)$('rotateBtn').setAttribute('aria-pressed',String(viewer.autoRotate));
 $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(JSON.stringify(design(),null,2));$('message').textContent='Design copied.'}catch{$('message').textContent='Clipboard unavailable; select the JSON below.'}});
 $('download').addEventListener('click',()=>{const blob=new Blob([JSON.stringify(design(),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='atlas-asset-design.json';a.click();URL.revokeObjectURL(url);$('message').textContent='Design downloaded (not a minted asset).'});
 let walletKey=null,mintEnabled=false,minting=false;
@@ -92,6 +168,8 @@ async function mintToWallet(){
 }
 $('mint').addEventListener('click',mintToWallet);
 paint();
+showMode(mode);
+loadModel();
 
 $('validate').addEventListener('click',async()=>{
   const button=$('validate');button.disabled=true;
