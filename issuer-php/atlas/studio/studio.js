@@ -8,7 +8,44 @@ const palette={
  bronze:{light:'#f6c79a',mid:'#cf8650',dark:'#7d3f20',glow:'rgba(232,132,70,.32)'}
 };
 const titles={trophy:'Achievement Trophy',badge:'Explorer Badge',key:'Portal Key'};
-function design(){return {schema:'atlas.asset-studio.design/0.1',template:$('template').value,name:$('assetName').value.trim().slice(0,64),description:$('description').value.trim().slice(0,240),finish:$('finish').value};}
+// ---- creator options: ownership, expiry and labelled properties ----
+// Limits default to the issuer's; checkIssuer() replaces them with what api.php?op=status reports.
+const opts={giftable:true,expiryMin:3600,expiryMax:31536000,maxProps:6};
+const KEY_RE=/^[a-z][a-z0-9_]{0,23}$/,pad=n=>String(n).padStart(2,'0');
+const scopeValue=()=>document.querySelector('#scopePicker [aria-checked="true"]')?.dataset.value||'bound';
+const localInput=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+const fmtWhen=d=>d.toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'});
+// The window the page offers is a few minutes inside the issuer's, since the issuer re-checks at mint time.
+function expiryWindow(){const now=Date.now();return {lo:new Date(Math.ceil((now+(opts.expiryMin+300)*1000)/60000)*60000),hi:new Date(Math.floor((now+(opts.expiryMax-300)*1000)/60000)*60000)}}
+function expiryState(){
+ if(!$('expiryOn').checked)return {value:null,problem:''};
+ const raw=$('expiresAt').value,d=raw?new Date(raw):null;
+ if(!d||isNaN(d))return {value:null,problem:'Pick an expiry date and time, or untick Expires.'};
+ const w=expiryWindow();
+ if(d<w.lo)return {value:null,problem:'Expiry must be after '+fmtWhen(w.lo)+'.'};
+ if(d>w.hi)return {value:null,problem:'Expiry must be before '+fmtWhen(w.hi)+'.'};
+ return {value:d.toISOString().slice(0,16)+':00Z',problem:''};
+}
+function propState(){
+ const props={},problems=new Set(),seen=new Set();
+ document.querySelectorAll('#props .prop-row').forEach(r=>{
+  const k=r.querySelector('.pk').value.trim(),v=r.querySelector('.pv').value.trim();
+  if(!k&&!v)return;
+  if(!k||!v){problems.add('Each property needs both a name and a value.');return}
+  if(!KEY_RE.test(k)){problems.add('Property names start with a letter and use a-z, 0-9 and _ only.');return}
+  if(seen.has(k)){problems.add('Property name "'+k+'" is used twice.');return}
+  seen.add(k);props[k]=v;
+ });
+ return {props,problems:[...problems]};
+}
+function design(){
+ const d={schema:'atlas.asset-studio.design/0.1',template:$('template').value,name:$('assetName').value.trim().slice(0,64),description:$('description').value.trim().slice(0,240),finish:$('finish').value};
+ if(scopeValue()==='local')d.tradeScope='local';
+ const e=expiryState().value;if(e)d.expiresAt=e;
+ const p=propState().props;if(Object.keys(p).length)d.properties=p;
+ return d;
+}
+const formProblems=()=>[expiryState().problem,...propState().problems].filter(Boolean);
 
 // ---- flat preview (also the fallback when WebGL or the model is unavailable) ----
 function metal(x0,y0,x1,y1,p){const g=ctx.createLinearGradient(x0,y0,x1,y1);g.addColorStop(0,p.dark);g.addColorStop(.28,p.mid);g.addColorStop(.46,p.light);g.addColorStop(.62,p.mid);g.addColorStop(1,p.dark);return g;}
@@ -80,6 +117,33 @@ function paint(){
  const d=design();paintFlat(d);syncPickers(d);
  if(viewer&&modelState==='ready')viewer.setFinish(d.finish);
  $('previewName').textContent=d.name||titles[d.template];$('previewDescription').textContent=d.description;$('json').textContent=JSON.stringify(d,null,2);
+ renderFacts(d);
+ const problems=formProblems();$('formProblem').hidden=!problems.length;$('formProblem').textContent=problems[0]||'';
+ $('propCount').textContent=$('props').children.length+'/'+opts.maxProps;$('addProp').disabled=$('props').children.length>=opts.maxProps;
+ refreshMintButton();
+}
+function renderFacts(d){
+ const items=[['scope',d.tradeScope==='local'?'Giftable on this domain':'Locked to your wallet'],['expiry',d.expiresAt?'Expires '+fmtWhen(new Date(d.expiresAt)):'No expiry']];
+ Object.entries(d.properties||{}).forEach(([k,v])=>items.push(['prop',k.replace(/_/g,' ')+': '+v]));
+ $('facts').replaceChildren(...items.map(([kind,text])=>{const li=document.createElement('li');li.className='fact fact-'+kind;li.textContent=text;return li}));
+}
+function applyOptions(){
+ const gift=document.querySelector('#scopePicker [data-value="local"]');
+ gift.disabled=!opts.giftable;gift.title=opts.giftable?'':'This issuer has not enabled giftable assets';
+ if(!opts.giftable&&scopeValue()==='local')setScope('bound');
+ const w=expiryWindow();$('expiresAt').min=localInput(w.lo);$('expiresAt').max=localInput(w.hi);
+ $('expiryHint').textContent='Your local time. Earliest '+fmtWhen(w.lo)+', latest '+fmtWhen(w.hi)+'.';
+}
+function setScope(value){document.querySelectorAll('#scopePicker [data-value]').forEach(b=>{const on=b.dataset.value===value;b.setAttribute('aria-checked',String(on));b.tabIndex=on?0:-1});paint()}
+function addProp(k='',v=''){
+ if($('props').children.length>=opts.maxProps)return;
+ const row=document.createElement('div');row.className='prop-row';
+ row.innerHTML='<input class="pk" maxlength="24" placeholder="name" aria-label="Property name" autocomplete="off" spellcheck="false"><input class="pv" maxlength="64" placeholder="value" aria-label="Property value" autocomplete="off"><button type="button" class="prop-remove" aria-label="Remove property">\u00d7</button>';
+ const pk=row.querySelector('.pk'),pv=row.querySelector('.pv');pk.value=k;pv.value=v;
+ pk.addEventListener('input',()=>{pk.value=pk.value.toLowerCase().replace(/[\s-]+/g,'_').replace(/[^a-z0-9_]/g,'');paint()});
+ pv.addEventListener('input',paint);
+ row.querySelector('.prop-remove').addEventListener('click',()=>{row.remove();paint()});
+ $('props').append(row);paint();return pk;
 }
 ['assetName','description','finish'].forEach(id=>$(id).addEventListener('input',paint));
 $('template').addEventListener('change',()=>{$('assetName').value=titles[$('template').value];paint();loadModel()});
@@ -94,6 +158,18 @@ function pick(groupId,selectId,value){const s=$(selectId);if(s.value===value)ret
   e.preventDefault();const next=list[(i+step+list.length)%list.length];pick(groupId,selectId,next.dataset.value);next.focus();
  });
 });
+$('scopePicker').addEventListener('click',e=>{const b=e.target.closest('[data-value]');if(b&&!b.disabled){setScope(b.dataset.value);b.focus()}});
+$('scopePicker').addEventListener('keydown',e=>{
+ const list=[...document.querySelectorAll('#scopePicker [data-value]')].filter(b=>!b.disabled),i=list.indexOf(document.activeElement),step={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];
+ if(i<0||!step)return;e.preventDefault();const next=list[(i+step+list.length)%list.length];setScope(next.dataset.value);next.focus();
+});
+$('expiryOn').addEventListener('change',()=>{
+ const on=$('expiryOn').checked;$('expiresAt').disabled=!on;
+ if(on&&!$('expiresAt').value){const w=expiryWindow();$('expiresAt').value=localInput(new Date(Math.min(Math.max(Date.now()+7*86400e3,w.lo.getTime()),w.hi.getTime())))}
+ paint();
+});
+$('expiresAt').addEventListener('input',paint);
+$('addProp').addEventListener('click',()=>{const pk=addProp();if(pk)pk.focus()});
 $('viewTabs').addEventListener('click',e=>{const b=e.target.closest('button[data-mode]');if(!b)return;$('viewTabs').dataset.chosen=b.dataset.mode;showMode(b.dataset.mode)});
 $('rotateBtn').addEventListener('click',()=>{if(!viewer)return;const on=!viewer.autoRotate;viewer.setAutoRotate(on);$('rotateBtn').setAttribute('aria-pressed',String(on))});
 $('resetBtn').addEventListener('click',()=>viewer&&viewer.resetView());
@@ -101,7 +177,7 @@ if(viewer)$('rotateBtn').setAttribute('aria-pressed',String(viewer.autoRotate));
 $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(JSON.stringify(design(),null,2));$('message').textContent='Design copied.'}catch{$('message').textContent='Clipboard unavailable; select the JSON below.'}});
 $('download').addEventListener('click',()=>{const blob=new Blob([JSON.stringify(design(),null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='atlas-asset-design.json';a.click();URL.revokeObjectURL(url);$('message').textContent='Design downloaded (not a minted asset).'});
 let walletKey=null,mintEnabled=false,minting=false;
-function refreshMintButton(){$('mint').disabled=minting||!(walletKey&&mintEnabled);$('mint').title=walletKey?(mintEnabled?'':'Minting is not enabled on this issuer'):'Connect a Domain Atlas wallet identity first';}
+function refreshMintButton(){const bad=formProblems().length>0;$('mint').disabled=minting||bad||!(walletKey&&mintEnabled);$('mint').title=bad?'Fix the highlighted option first':walletKey?(mintEnabled?'':'Minting is not enabled on this issuer'):'Connect a Domain Atlas wallet identity first';}
 async function postJson(op,body){
   const response=await fetch('api.php?op='+op,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',cache:'no-store',body:JSON.stringify(body)});
   let json=null;try{json=await response.json()}catch{}
@@ -122,8 +198,8 @@ async function checkWallet(){
  }finally{checking=false;refreshMintButton()}
 }
 async function checkIssuer(){
- try{if(location.protocol!=='file:'){const s=await (await fetch('api.php?op=status',{cache:'no-store'})).json();mintEnabled=s.mintEnabled===true}}catch{}
- refreshMintButton();
+ try{if(location.protocol!=='file:'){const s=await (await fetch('api.php?op=status',{cache:'no-store'})).json();mintEnabled=s.mintEnabled===true;const o=s.options;if(o){opts.giftable=o.giftable!==false;if(Number.isInteger(o.expiryMinSeconds))opts.expiryMin=o.expiryMinSeconds;if(Number.isInteger(o.expiryMaxSeconds))opts.expiryMax=o.expiryMaxSeconds;if(Number.isInteger(o.maxProperties))opts.maxProps=o.maxProperties}}}catch{}
+ applyOptions();paint();
 }
 window.addEventListener('focus',checkWallet);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkWallet()});
@@ -134,6 +210,7 @@ checkIssuer();checkWallet();
 // and signs the credential, and the wallet's own offer flow receives it. Nothing here can change what is
 // signed: the request to sign comes from the issuer and the credential is checked before it is offered.
 async function mintToWallet(){
+  const problem=formProblems()[0];if(problem){$('message').textContent=problem;return}
   if(minting)return;minting=true;refreshMintButton();
   const say=t=>{$('message').textContent=t};
   try{
@@ -167,11 +244,12 @@ async function mintToWallet(){
   finally{minting=false;refreshMintButton()}
 }
 $('mint').addEventListener('click',mintToWallet);
-paint();
+applyOptions();paint();
 showMode(mode);
 loadModel();
 
 $('validate').addEventListener('click',async()=>{
+  const problem=formProblems()[0];if(problem){$('message').textContent=problem;return}
   const button=$('validate');button.disabled=true;
   $('message').textContent='Checking design with PHP…';
   try {

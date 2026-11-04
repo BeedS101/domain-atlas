@@ -1,7 +1,7 @@
 <?php
 // Asset Studio API.
 //   POST ?op=validate   design            -> validated design + canonical SHA-256 fingerprint (no state, always on)
-//   GET  ?op=status                       -> { mintEnabled }
+//   GET  ?op=status                       -> { mintEnabled, options: { giftable, expiryMinSeconds, expiryMaxSeconds, maxProperties } }
 //   POST ?op=challenge  design, recipient -> short-lived single-use mint challenge + the exact request to sign
 //   POST ?op=mint       design, nonce, proof -> one issuer-signed atlas.demo.studio.collectible credential
 // Minting is OFF unless the private studio-config.json enables it (see inc/studio-mint.php); challenge and
@@ -55,7 +55,11 @@ try {
   if ($cfg['enabled'] !== true && isset($cfg['reason']) && !in_array($cfg['reason'], ['mint-not-configured', 'mint-disabled'], true)) {
     error_log('studio: minting off: ' . $cfg['reason']);
   }
-  if ($op === 'status') studio_reply(200, ['ok'=>true,'mintEnabled'=>$cfg['enabled'] === true]);
+  if ($op === 'status') {
+    $lim = atlas_studio_limits($cfg);
+    studio_reply(200, ['ok'=>true,'mintEnabled'=>$cfg['enabled'] === true,
+      'options'=>['giftable'=>$lim['allowLocal'],'expiryMinSeconds'=>$lim['expiryMin'],'expiryMaxSeconds'=>$lim['expiryMax'],'maxProperties'=>ATLAS_STUDIO_MAX_PROPERTIES]]);
+  }
   if ($cfg['enabled'] !== true) studio_reply(403, ['ok'=>false,'error'=>'minting-not-enabled']);
 
   // A browser sends Origin on cross-site requests; one that is not a configured page origin is refused.

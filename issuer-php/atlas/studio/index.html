@@ -24,6 +24,10 @@
 <div class="field"><div class="label-row"><label for="description">Description</label><span class="count" id="descCount" aria-hidden="true"></span></div><textarea id="description" maxlength="240" rows="4">Awarded in recognition of outstanding achievement.</textarea></div>
 <div class="field"><span class="label" id="finishLabel">Finish</span><div class="swatches" id="finishSwatches" role="radiogroup" aria-labelledby="finishLabel"><button type="button" class="swatch swatch-gold" role="radio" aria-checked="true" data-value="gold" tabindex="0" aria-label="Gold" title="Gold"></button><button type="button" class="swatch swatch-silver" role="radio" aria-checked="false" data-value="silver" tabindex="-1" aria-label="Silver" title="Silver"></button><button type="button" class="swatch swatch-bronze" role="radio" aria-checked="false" data-value="bronze" tabindex="-1" aria-label="Bronze" title="Bronze"></button></div>
 <label for="finish" class="sr-only">Finish</label><select id="finish" class="sr-only" tabindex="-1"><option value="gold">Gold</option><option value="silver">Silver</option><option value="bronze">Bronze</option></select></div>
+<div class="field"><span class="label" id="scopeLabel">Ownership</span><div class="choice" id="scopePicker" role="radiogroup" aria-labelledby="scopeLabel"><button type="button" role="radio" aria-checked="true" data-value="bound" tabindex="0"><b>Locked to my wallet</b><small>Cannot be transferred or traded</small></button><button type="button" role="radio" aria-checked="false" data-value="local" tabindex="-1"><b>Giftable</b><small>Can be given to other wallets on this domain</small></button></div></div>
+<div class="field"><label class="check" for="expiryOn"><input type="checkbox" id="expiryOn"><span>Expires</span></label><input type="datetime-local" id="expiresAt" disabled aria-describedby="expiryHint"><p class="hint" id="expiryHint"></p></div>
+<div class="field"><div class="label-row"><span class="label" id="propsLabel">Properties</span><span class="count" id="propCount" aria-hidden="true"></span></div><div id="props" role="group" aria-labelledby="propsLabel"></div><button type="button" class="link" id="addProp">+ Add property</button><p class="hint">Short labels shown with the asset, such as rarity or edition.</p></div>
+<p class="form-problem" id="formProblem" role="alert" hidden></p>
 <div class="buttons"><button type="button" id="mint" class="primary" disabled>Mint to Wallet</button><button type="button" id="validate" class="secondary">Validate with PHP</button><button type="button" id="copy" class="secondary">Copy design JSON</button><button type="button" id="download" class="secondary">Download design</button></div>
 </form>
 <section class="preview" aria-label="Preview">
@@ -34,7 +38,7 @@
 <p class="stage-hint" id="stageHint" hidden>Drag to rotate · scroll or pinch to zoom</p>
 <p class="stage-note" id="stageNote" role="status" hidden></p>
 </div>
-<div class="caption"><h2 id="previewName"></h2><p id="previewDescription"></p></div>
+<div class="caption"><h2 id="previewName"></h2><p id="previewDescription"></p><ul class="facts" id="facts" aria-label="Asset details"></ul></div>
 <p id="walletStatus" class="wallet">Checking wallet bridge…</p>
 <p id="message" role="status"></p>
 <details class="json-box"><summary>Design JSON</summary><pre id="json"></pre></details>

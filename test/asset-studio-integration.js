@@ -956,6 +956,74 @@ async function credentialVerifies(l, cred) {
     assert.equal(replays(l).length, 1, 'still only the original credential');
   });
 
+  await test('creator options: a giftable, expiring design with properties mints exactly what was signed and can be gifted', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const st = await l.get('/atlas/studio/api.php?op=status');
+    assert.deepEqual(st.json.options, { giftable: true, expiryMinSeconds: 3600, expiryMaxSeconds: 31536000, maxProperties: 6 });
+    const expiresAt = new Date(Math.floor((Date.now() + 5 * 86400e3) / 60e3) * 60e3).toISOString().replace(/\.\d+Z$/, 'Z');
+    const design = Object.assign({}, DESIGN, { tradeScope: 'local', expiresAt, properties: { rarity: 'epic', edition: '1 of 5' } });
+    const id = makeIdentity('raw-ecdsa');
+    const r = await l.mintAs(id, design);
+    assert.equal(r.mint.status, 200, r.mint.text);
+    assert.match(r.challenge.json.signRequest.summary, /rarity "epic"/);
+    assert.match(r.challenge.json.signRequest.summary, /can be given to other wallets/);
+    const a = r.mint.json.credential.asset;
+    assert.equal(a.tradeScope, 'local');
+    assert.equal(a.expiresAt, expiresAt);
+    assert.equal(a.properties['atlas.studio.custom.rarity'], 'epic');
+    assert.equal(a.properties['atlas.studio.custom.edition'], '1 of 5');
+    assert.equal(a.properties['atlas.demo.noValue'], 'true');
+    assert.equal(a.fungible, false);
+    // The signed tradeScope is what the transfer route reads: this one is giftable, a plain one is not.
+    const to = makeIdentity('raw-ecdsa');
+    const gift = (cred, who) => {
+      const payload = { credentialId: cred.id, recipientPublicKey: to.publicKeyB64, action: 'transfer' };
+      return l.adminPost('/atlas/asset/transfer.php', { credential: cred, recipientPublicKey: to.publicKeyB64, intent: { payload, proof: signPayload(who, payload) } });
+    };
+    const sent = await gift(r.mint.json.credential, id);
+    assert.equal(sent.status, 200, sent.text);
+    assert.equal(sent.json.credential.owner.publicKey, to.publicKeyB64);
+    assert.equal(sent.json.credential.asset.expiresAt, expiresAt, 'the expiry travels with the asset');
+    assert.equal(sent.json.credential.asset.properties['atlas.studio.custom.rarity'], 'epic');
+    const plain = await l.mintAs(id, DESIGN);
+    const refused = await gift(plain.mint.json.credential, id);
+    assert.equal(refused.status, 400);
+    assert.match(refused.json.error, /bound/);
+  });
+
+  await test('creator options: the issuer limits (giftable switch, expiry window) are enforced at challenge and mint', async () => {
+    const off = await lab({ mint: true, config: Object.assign({ allowGiftable: false }, HIGH) });
+    assert.equal((await off.get('/atlas/studio/api.php?op=status')).json.options.giftable, false);
+    const idA = makeIdentity('raw-ecdsa');
+    const g = await off.mintAs(idA, Object.assign({}, DESIGN, { tradeScope: 'local' }));
+    assert.equal(g.challenge.status, 400);
+    assert.equal(g.challenge.json.error, 'giftable-not-allowed');
+    assert.equal((await off.mintAs(idA, Object.assign({}, DESIGN, { tradeScope: 'bound' }))).mint.status, 200, 'bound still works');
+    const l = await lab({ mint: true, config: Object.assign({ minExpirySeconds: 7200, maxExpirySeconds: 86400 * 10 }, HIGH) });
+    const when = (secs) => new Date(Math.floor((Date.now() + secs * 1000) / 60e3) * 60e3).toISOString().replace(/\.\d+Z$/, 'Z');
+    const id = makeIdentity('raw-ecdsa');
+    const soon = await l.mintAs(id, Object.assign({}, DESIGN, { expiresAt: when(3600) }));
+    assert.equal(soon.challenge.status, 400); assert.equal(soon.challenge.json.error, 'expiry-too-soon');
+    const far = await l.mintAs(id, Object.assign({}, DESIGN, { expiresAt: when(86400 * 11) }));
+    assert.equal(far.challenge.status, 400); assert.equal(far.challenge.json.error, 'expiry-too-far');
+    const past = await l.mintAs(id, Object.assign({}, DESIGN, { expiresAt: when(-86400) }));
+    assert.equal(past.challenge.json.error, 'expiry-too-soon');
+    const ok = await l.mintAs(id, Object.assign({}, DESIGN, { expiresAt: when(86400 * 3) }));
+    assert.equal(ok.mint.status, 200, ok.mint.text);
+    assert.ok(Date.parse(ok.mint.json.credential.asset.expiresAt) > Date.now());
+  });
+
+  await test('creator options: a design changed after signing is refused', async () => {
+    const l = await lab({ mint: true, config: HIGH });
+    const id = makeIdentity('raw-ecdsa');
+    for (const change of [{ tradeScope: 'local' }, { expiresAt: '2099-01-01T00:00:00Z' }, { properties: { rarity: 'mythic' } }]) {
+      const r = await l.mintAs(id, Object.assign({}, DESIGN, { properties: { rarity: 'rare' } }), (body) => { Object.assign(body.design, change); });
+      assert.equal(r.mint.status, 403, JSON.stringify(change) + ' -> ' + r.mint.text);
+      assert.ok(!/"signature"/.test(r.mint.text));
+    }
+    assert.equal(replays(l).length, 0, 'nothing was signed');
+  });
+
   await test('responses and Studio files leak no private paths, keys or other holders\' data', async () => {
     const l = await lab({ mint: true, config: HIGH });
     const id = makeIdentity('raw-ecdsa');

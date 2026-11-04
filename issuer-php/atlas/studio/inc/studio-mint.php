@@ -38,6 +38,18 @@ function atlas_studio_config_defaults() {
     'maxMintsPerNetworkPerDay'=>[40,1,10000],
     'maxMintsPerDay'=>[200,1,100000],
     'maxOutstandingChallenges'=>[500,1,5000],
+    'minExpirySeconds'=>[3600,60,31536000],
+    'maxExpirySeconds'=>[31536000,3600,157680000],
+  ];
+}
+
+// What a design may ask for, from the configuration: giftable assets on or off and the window an expiry
+// must fall in. Also the plan's $opts, so the page and the issuer read the same limits.
+function atlas_studio_limits($cfg) {
+  return [
+    'allowLocal'=>($cfg['allowGiftable'] ?? true) === true,
+    'expiryMin'=>$cfg['minExpirySeconds'] ?? 3600,
+    'expiryMax'=>$cfg['maxExpirySeconds'] ?? 31536000,
   ];
 }
 
@@ -79,6 +91,11 @@ function atlas_studio_config($root) {
     if (!is_int($v) || $v < $spec[1] || $v > $spec[2]) return $off('bad-limit-'.$k);
     $cfg[$k] = $v;
   }
+  if ($cfg['minExpirySeconds'] > $cfg['maxExpirySeconds']) return $off('bad-limit-expiry-window');
+  // Optional: whether a design may ask for the giftable ('local') trade scope. Default on.
+  $gift = array_key_exists('allowGiftable', $c) ? $c['allowGiftable'] : true;
+  if (!is_bool($gift)) return $off('bad-allowGiftable');
+  $cfg['allowGiftable'] = $gift;
   // The share of maxMintsPerDay kept for actors with no attempt yet today (default one fifth). Must leave room
   // for established actors, so it is below the daily limit.
   $reserve = array_key_exists('newActorReserve', $c) ? $c['newActorReserve'] : intdiv($cfg['maxMintsPerDay'], 5);
@@ -120,7 +137,7 @@ function atlas_studio_request_id($nonce) { return 'studio:mint:'.$nonce; }
 function atlas_studio_issue_challenge($root, $cfg, $body, $actor, $now = null) {
   $now = $now ?? time();
   if (!atlas_studio_body_ok($body, ['design','recipient'])) return atlas_studio_err(400, 'invalid-request');
-  $plan = atlas_studio_issuance_plan($body['design'], $body['recipient']);
+  $plan = atlas_studio_issuance_plan($body['design'], $body['recipient'], ['now'=>$now] + atlas_studio_limits($cfg));
   if (!$plan['ok']) return atlas_studio_err(400, $plan['error']);
   if (!atlas_studio_model_available(atlas_docroot(), $plan['model'])) return atlas_studio_err(503, 'model-unavailable');
   if (!atlas_studio_rate_check($root, 'challenge', $actor, $cfg['challengesPerIpPerHour'], 3600, $now)) return atlas_studio_err(429, 'rate-limited');
@@ -173,7 +190,7 @@ function atlas_studio_mint($root, $cfg, $body, $actor, $now = null) {
   $live = atlas_studio_read_challenge($root, $nonce);
   if ($live === null || $live['state'] !== 'issued') return atlas_studio_err(410, 'challenge-not-issued');
   if ($live['expiresAt'] < $now || $live['expiresAt'] > $now + ATLAS_STUDIO_CHALLENGE_TTL) return atlas_studio_err(410, 'challenge-expired');
-  $plan = atlas_studio_issuance_plan($body['design'], $recipient);
+  $plan = atlas_studio_issuance_plan($body['design'], $recipient, ['now'=>$now] + atlas_studio_limits($cfg));
   if (!$plan['ok']) return atlas_studio_err(400, $plan['error']);
   if (!atlas_studio_model_available(atlas_docroot(), $plan['model'])) return atlas_studio_err(503, 'model-unavailable');
   if (!atlas_studio_rate_check($root, 'mint', $actor, $cfg['mintsPerIpPerHour'], 3600, $now)) return atlas_studio_err(429, 'rate-limited');
