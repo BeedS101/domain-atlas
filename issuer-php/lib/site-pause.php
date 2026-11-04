@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Switches a feature OFF from the admin panel (POST /atlas/admin/site-pause). Never switches anything on:
 // turning a feature on needs settings (domains, origins, folders) an operator must choose, so that stays a file edit.
 //

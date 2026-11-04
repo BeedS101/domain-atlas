@@ -288,6 +288,7 @@ function cli_txn_list() {
     $text = @file_get_contents(atlas_txn_dir() . '/' . $name);
     $rec = json_decode((string) $text, true);
     if (!is_array($rec) || !isset($rec['txn'], $rec['key'], $rec['predecessors'], $rec['successors'])) {
+      if (!file_exists(atlas_txn_dir() . '/' . $name)) { echo substr($name, 0, 12) . "  already settled\n"; continue; }
       echo substr($name, 0, 12) . "  UNREADABLE (examine by hand; the issuer answers 503 for this request)\n";
       $exit = 1;
       continue;
@@ -317,6 +318,8 @@ function cli_txn_recover($force) {
   foreach ($names as $name) {
     $rec = json_decode((string) @file_get_contents($dir . '/' . $name), true);
     if (!is_array($rec) || !isset($rec['key']) || !is_string($rec['key'])) {
+      // A live request removes its entry when it finishes, possibly between the listing and this read.
+      if (!file_exists($dir . '/' . $name)) { echo substr($name, 0, 12) . "  already settled\n"; continue; }
       echo substr($name, 0, 12) . "  UNREADABLE - left as found\n";
       $exit = 1;
       continue;

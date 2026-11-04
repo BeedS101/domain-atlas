@@ -1,4 +1,7 @@
 <?php
+// Include-only. The guard also tests the file name because tools/site-doctor-build.js splices this file into site-doctor.php,
+// where __FILE__ is the doctor itself and must not refuse its own request.
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && basename(__FILE__) === 'site-features.php' && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; }
 // Read-only reports of which features are switched on, off or misconfigured on this domain.
 //
 // Shared by the site doctor (tools/site-doctor-build.js splices this file into the single-file doctor) and the

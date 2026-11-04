@@ -134,7 +134,7 @@ const CONTROL_ELEMENTS = ['atlas.element.beryllium', 'atlas.element.carbon'];
     for (const [label, base] of [['Node', NODE_BASE], ['PHP', PHP_BASE]]) {
       console.log('\n--- ' + label + ' backend ---');
       for (const toClass of [...BROKEN_ELEMENTS, ...CONTROL_ELEMENTS]) {
-        const gold = await issueGold(base, OWNER, 1000000);
+        const gold = await issueGold(base, OWNER, 500);
         const result = await convert(base, gold, toClass);
         const verdict = await verifyCredential(result.received, base);
         const tag = BROKEN_ELEMENTS.includes(toClass) ? '(previously broken on PHP)' : '(control)';
