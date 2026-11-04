@@ -39,6 +39,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { register, signSpend } = require('./lib/owner-auth');
 const { webcrypto } = require('crypto');
 const { subtle } = webcrypto;
 
@@ -63,7 +64,7 @@ function canonicalize(value) {
 async function genIdentity() {
   const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
-  return { kp, publicKey: b64url(raw) };
+  return register({ kp, publicKey: b64url(raw) });
 }
 async function signWithSelf(identity, payload) {
   const data = new TextEncoder().encode(canonicalize(payload));
@@ -83,7 +84,7 @@ async function issueAsset(ownerPublicKey, assetClass, quantity) {
   return res.body;
 }
 async function splitAsset(credential, sendAmount, toPublicKey) {
-  return postJson('/atlas/asset/split', { credential, sendAmount, toPublicKey });
+  return postJson('/atlas/asset/split', signSpend('/atlas/asset/split', { credential, sendAmount, toPublicKey }));
 }
 async function purchaseAsset(buyer, credential, purchasedClass, quantity) {
   const payload = { credentialId: credential.id, purchasedClass, quantity, action: 'purchase' };

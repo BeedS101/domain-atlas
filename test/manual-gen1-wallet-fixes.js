@@ -8,6 +8,7 @@
 // Run: xvfb-run -a node test/manual-gen1-wallet-fixes.js
 'use strict';
 const { spawn } = require('child_process');
+const { spendPayload } = require('./lib/owner-auth');
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
@@ -74,6 +75,12 @@ async function issue(owner, cls, qty) {
   const r = await fetch('http://localhost:' + ISSUER_PORT + '/atlas/asset/issue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ownerPublicKey: owner, assetClass: cls, quantity: qty, requestId: rid() }) });
   if (!r.ok) throw new Error('issue ' + r.status + ' ' + await r.text());
   return r.json();
+}
+// A split, consolidate or convert body with the owner intent signed by the wallet behind `W`.
+async function spendAs(W, route, body) {
+  const payload = spendPayload(route, body);
+  const proof = await W((p) => AtlasWallet.signWithSelf(p), payload);
+  return Object.assign({}, body, { intent: { payload, proof } });
 }
 async function post(p, body) {
   const r = await fetch('http://localhost:' + ISSUER_PORT + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -147,7 +154,7 @@ const exportFile = (creds) => ({ format: 'atlas-wallet-export/1.0', credentials:
     const sw = await newWallet('wfspent'); opened.push(sw);
     const group = [];
     for (let i = 0; i < 25; i++) group.push(await issue(sw.pub, IRON, 3));
-    const gone = await post('/atlas/asset/split', { credential: group[7], sendAmount: 1, toPublicKey: sw.pub, requestId: rid() });
+    const gone = await post('/atlas/asset/split', await spendAs(sw.W, '/atlas/asset/split', { credential: group[7], sendAmount: 1, toPublicKey: sw.pub, requestId: rid() }));
     check('spent: setup spent one balance at the issuer', gone.status === 200);
     await sw.W((f) => AtlasWallet.importWallet(f), exportFile(group));
     const swIron = await sw.W(([k, c]) => AtlasWallet.getWallet(k).then((w) => w.filter((e) => e.credential.asset.class === c).map((e) => ({ id: e.credential.id, q: e.credential.quantity, spent: !!e.spent || (e.lastVerdict && e.lastVerdict.status === 'revoked') }))), [sw.pub, IRON]);
@@ -167,7 +174,7 @@ const exportFile = (creds) => ({ format: 'atlas-wallet-export/1.0', credentials:
     for (let i = 0; i < 25; i++) g2.push(await issue(s2.pub, IRON, 3));
     proxy.state.mode = 'refuse'; proxy.state.match = /consolidate/;
     await s2.W((f) => AtlasWallet.importWallet(f), exportFile(g2));
-    const gone2 = await post('/atlas/asset/split', { credential: g2[3], sendAmount: 1, toPublicKey: s2.pub, requestId: rid() });
+    const gone2 = await post('/atlas/asset/split', await spendAs(s2.W, '/atlas/asset/split', { credential: g2[3], sendAmount: 1, toPublicKey: s2.pub, requestId: rid() }));
     proxy.state.mode = 'pass';
     await s2.W((k) => AtlasWallet.recoverPendingOperations(k), s2.pub);
     const rep2 = await s2.W((k) => AtlasWallet.autoConsolidateAssetWallet(k), s2.pub);

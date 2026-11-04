@@ -60,6 +60,7 @@
 // manual-*.js scripts.
 
 const { chromium } = require('playwright');
+const { newOwner, signSpend } = require('./lib/owner-auth');
 const path = require('path');
 const http = require('http');
 
@@ -221,9 +222,11 @@ async function joinTradingStationIfNeeded(frame) {
     console.log('PASS: A holds 20 iron, B holds 10 gold — each in their own wallet, no counterparty involved');
 
     console.log('STEP 2: task #160 sanity check — a bound credential (atlas.membership) cannot be traded at all');
-    const membershipCred = await postJson(8001, '/atlas/asset/issue', { ownerPublicKey: pkA, assetClass: 'atlas.membership' });
+    // Signed by a key the test holds: the wallet identities' keys are inside the extension.
+    const boundOwner = newOwner();
+    const membershipCred = await postJson(8001, '/atlas/asset/issue', { ownerPublicKey: boundOwner, assetClass: 'atlas.membership' });
     if (membershipCred.asset.tradeScope !== 'bound') throw new Error('Expected atlas.membership to carry tradeScope: bound, got: ' + JSON.stringify(membershipCred.asset));
-    const rejectedSplit = await postJson(8001, '/atlas/asset/split', { credential: membershipCred, sendAmount: 1, toPublicKey: pkA });
+    const rejectedSplit = await postJson(8001, '/atlas/asset/split', signSpend('/atlas/asset/split', { credential: membershipCred, sendAmount: 1, toPublicKey: boundOwner }));
     if (!rejectedSplit.error || !rejectedSplit.error.includes('bound')) throw new Error('Expected a bound credential to be rejected with a "bound" reason, got: ' + JSON.stringify(rejectedSplit));
     console.log('PASS: bound credential rejected ->', rejectedSplit.error);
 

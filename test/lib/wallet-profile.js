@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || '/home/claude/.npm-global/lib/node_modules/playwright');
+const { spendPayload } = require('./owner-auth');
 
 const EXT_PATH = path.resolve(__dirname, '..', '..', 'extension');
 const PASSWORD = 'crash-recovery-pw';
@@ -44,6 +45,14 @@ class Wallet {
       await this.resolveSw();
       return this.sw.evaluate(fn, arg);
     }
+  }
+  // `body` for split, consolidate or convert with the owner intent signed by this wallet (replaces an intent already there).
+  async spendBody(route, body) {
+    const plain = Object.assign({}, body);
+    delete plain.intent;
+    const payload = spendPayload(route, plain);
+    const proof = await this.W((p) => AtlasWallet.signWithSelf(p), payload);
+    return Object.assign(plain, { intent: { payload, proof } });
   }
   async create() { const r = await this.W((pw) => AtlasWallet.createIdentity(pw), PASSWORD); this.pub = r.publicKey; this.seed = r.seedPhrase; return this; }
   // Unlocks the wallet. The extension recovers pending operations by itself right after an unlock

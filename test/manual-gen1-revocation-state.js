@@ -8,6 +8,7 @@
 // Everything runs in temporary folders; nothing live is read or written.
 'use strict';
 const fs = require('fs');
+const { register } = require('./lib/owner-auth');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
@@ -46,7 +47,7 @@ function canonicalize(value) {
 }
 async function genIdentity() {
   const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  return { kp, publicKey: b64url(new Uint8Array(await subtle.exportKey('raw', kp.publicKey))) };
+  return register({ kp, publicKey: b64url(new Uint8Array(await subtle.exportKey('raw', kp.publicKey))) });
 }
 async function signed(id, payload) {
   const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, id.kp.privateKey, new TextEncoder().encode(canonicalize(payload))));

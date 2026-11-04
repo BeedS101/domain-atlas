@@ -253,8 +253,8 @@ const refused = (r) => r.status === 403 && r.body && r.body.code === 'demo-autho
       check('demo funds do not buy a currency', r.status >= 400, show(r));
       r = await post('/atlas/asset/purchase', { balance: back, credential: back, purchaseClass: 'atlas.element.gold' });
       check('demo funds do not buy gold', r.status >= 400, show(r));
-      r = await post('/atlas/convert', { credential: back, spendAmount: 100, toClass: 'atlas.element.gold' });
-      check('demo funds do not convert', r.status === 403, show(r));
+      r = await H.postSpend(BASE, '/atlas/convert', { credential: back, spendAmount: 100, toClass: 'atlas.element.gold' });
+      check('demo funds do not convert', r.status >= 400 && r.status < 500, show(r));
       check('the recovered funds are intact', !(await revokedIds()).has(back.id));
     }
   } catch (err) {

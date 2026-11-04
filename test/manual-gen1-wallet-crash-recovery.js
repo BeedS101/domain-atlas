@@ -131,7 +131,8 @@ async function main() {
       const same = await iss.api.post('/atlas/asset/consolidate', JSON.parse(sentBody));
       check('the lost request, sent again with the same request id, returns the same signed credential and revokes nothing more', same.status === 200 && same.body.id === succ.id && iss.revCount() === r.revBefore, [same.status, same.body && same.body.id, succ.id, iss.revCount(), r.revBefore]);
       const fresh = JSON.parse(sentBody); fresh.requestId = rid();
-      const second = await iss.api.post('/atlas/asset/consolidate', fresh);
+      const freshSigned = await w.spendBody('/atlas/asset/consolidate', fresh);
+      const second = await iss.api.post('/atlas/asset/consolidate', freshSigned);
       check('the same predecessors sent under a new request id are refused (no second successor)', second.status >= 400 && second.status < 500 && iss.revCount() === r.revBefore, [second.status, second.body, iss.revCount()]);
     });
 

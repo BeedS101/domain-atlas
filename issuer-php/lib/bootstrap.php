@@ -277,6 +277,37 @@ function verify_envelope($payload, $envelope, $allowBridge = false) {
   return false;
 }
 
+// Split, consolidate and convert spend credentials, and a credential is not a
+// secret: anyone holding a copy could spend it to their own key. Each request
+// therefore carries `intent: {payload, proof}`, the owner's signature over
+// exactly what the request does. The payload must equal $expected field for
+// field (canonical JSON, nothing extra), the proof must verify, and its signer
+// must own every presented credential. No expiry: the credentials are spent by
+// the operation, and a wallet retries an unanswered request with the same body
+// and request id. Called before atlas_begin_replacement so that a copied
+// credential and intent cannot fetch a stored result. Answers 403 itself and
+// returns the signer's public key when authorized. Mirrors server.js's
+// ownerIntentProblem().
+function atlas_require_owner_intent($body, $expected, $credentials) {
+  $intent = is_array($body) ? ($body['intent'] ?? null) : null;
+  if (!is_array($intent) || !is_array($intent['payload'] ?? null) || !is_array($intent['proof'] ?? null)) {
+    send_json(403, ['error' => 'This operation needs an intent signed by the owner of the credential.', 'code' => 'owner-authorization-required']);
+  }
+  if (canonicalize($intent['payload']) !== canonicalize($expected)) {
+    send_json(403, ['error' => 'The signed intent does not authorize exactly this request.', 'code' => 'owner-authorization-required']);
+  }
+  $signer = $intent['proof']['publicKey'] ?? null;
+  if (!is_string($signer) || !verify_envelope($intent['payload'], $intent['proof'])) {
+    send_json(403, ['error' => 'The intent signature does not check out.', 'code' => 'owner-signature-invalid']);
+  }
+  foreach ($credentials as $credential) {
+    if (($credential['owner']['publicKey'] ?? null) !== $signer) {
+      send_json(403, ['error' => 'The intent was not signed by the owner of this credential.', 'code' => 'not-owner', 'credentialId' => $credential['id'] ?? null]);
+    }
+  }
+  return $signer;
+}
+
 // ---------- Authenticated mail reads (SPEC.md §11.8) ----------
 // Mirrors issuer-server/server.js's authenticateMailRequest().
 

@@ -40,6 +40,7 @@
 // manual-*.js scripts (spins up its own isolated server instances).
 
 const { spawn } = require('child_process');
+const { newOwner, signSpend } = require('./lib/owner-auth');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -92,7 +93,7 @@ async function issueGold(base, owner, quantity) {
 async function convert(base, goldCredential, toClass) {
   const res = await fetch(base + '/atlas/convert', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ credential: goldCredential, spendAmount: goldCredential.quantity, toClass })
+    body: JSON.stringify(signSpend('/atlas/convert', { credential: goldCredential, spendAmount: goldCredential.quantity, toClass }))
   });
   if (!res.ok) throw new Error('convert to ' + toClass + ' failed: ' + await res.text());
   return res.json();
@@ -127,7 +128,7 @@ const CONTROL_ELEMENTS = ['atlas.element.beryllium', 'atlas.element.carbon'];
 
   const NODE_BASE = 'http://localhost:' + NODE_PORT;
   const PHP_BASE = 'http://localhost:' + PHP_PORT;
-  const OWNER = 'test-owner-sci-notation-signature';
+  const OWNER = newOwner();
 
   try {
     for (const [label, base] of [['Node', NODE_BASE], ['PHP', PHP_BASE]]) {

@@ -18,6 +18,7 @@ const crypto = webcrypto;
 const { subtle } = webcrypto;
 const { buildMimeMessage } = require('../../issuer-server/lib-smtp');
 const { withAdminAuth } = require('./admin-auth');
+const ownerAuth = require('./owner-auth');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
@@ -36,12 +37,17 @@ function canonicalize(value) {
 async function genIdentity() {
   const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
-  return { kp, publicKey: b64url(raw) };
+  return ownerAuth.register({ kp, publicKey: b64url(raw) });
 }
 async function signWithSelf(identity, payload) {
   const data = new TextEncoder().encode(canonicalize(payload));
   const sig = new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data));
   return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64url(sig) };
+}
+// postJson for split, consolidate and convert: signed by the owner of the presented credential
+// when that owner came from genIdentity.
+function postSpend(base, urlPath, body) {
+  return postJson(base, urlPath, ownerAuth.signSpend(urlPath, body));
 }
 async function postJson(base, urlPath, body) {
   const r = await fetch(base + urlPath, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
@@ -397,6 +403,6 @@ async function waitFor(fn, description, timeoutMs = 8000) {
 
 module.exports = {
   assert, b64url, canonicalize, genIdentity, signWithSelf, postJson, getJson, issueAsset, mailCheck, mailDelegation, mailCheckStatus, publicStatus,
-  transferToEmail, walletTransfer, claimFromFile, fileStatus, adminSend, adminPollNow, startFakeSmtp, startFakeImap, buildForwardMessage, imapEnvFor, attachmentOf, smtpEnvFor, startNodeIssuer,
+  transferToEmail, walletTransfer, claimFromFile, postSpend, fileStatus, adminSend, adminPollNow, startFakeSmtp, startFakeImap, buildForwardMessage, imapEnvFor, attachmentOf, smtpEnvFor, startNodeIssuer,
   startPhpIssuer, stopIssuer, tmpDir, writeAdminRoster, preparePhpBundle, readState, waitFor, ROOT
 };

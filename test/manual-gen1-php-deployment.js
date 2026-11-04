@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const http = require('http');
 const { spawn, spawnSync, execFileSync } = require('child_process');
 const { REPO, startPhp, startNode, api } = require('./lib/gen1-issuers');
+const { newOwner } = require('./lib/owner-auth');
 
 const WANT = process.argv.slice(2).filter((a) => !a.startsWith('-'));
 const run = (name) => WANT.length === 0 || WANT.includes(name);
@@ -32,7 +33,7 @@ function check(name, ok, detail) {
 }
 const skip = (name, why) => console.log(`SKIP ${name} :: ${why}`);
 let n = 0;
-const owner = (label) => 'TESTOWNER-' + label + '-' + (++n) + '-' + crypto.randomBytes(4).toString('hex');
+const owner = (label) => newOwner(label);
 const rid = () => crypto.randomBytes(18).toString('base64url');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');

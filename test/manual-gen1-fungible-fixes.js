@@ -9,6 +9,7 @@
 const fs = require('fs');
 const crypto = require('crypto');
 const { startNode, startPhp, api } = require('./lib/gen1-issuers');
+const { newOwner } = require('./lib/owner-auth');
 const fixture = require('./revocation-fixture');
 
 const WHICH = process.argv.find((a) => ['node', 'php', 'both'].includes(a)) || 'both';
@@ -26,7 +27,7 @@ function check(be, name, ok, detail) {
 }
 const note = (be, text, value) => { notes.push({ backend: be.kind, text, value }); console.log(`NOTE [${be.kind}] ${text} => ${JSON.stringify(value)}`); };
 let n = 0;
-const owner = (label) => 'TESTOWNER-' + label + '-' + (++n) + '-' + crypto.randomBytes(4).toString('hex');
+const owner = (label) => newOwner(label);
 const rid = () => crypto.randomBytes(18).toString('base64url');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const revokedSet = (A) => new Set((A.revocations() || []).map((r) => r.id));

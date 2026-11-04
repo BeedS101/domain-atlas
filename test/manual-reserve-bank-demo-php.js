@@ -22,6 +22,7 @@ const { cleanIssuerPhpState } = require('./lib/clean-issuer-php');
 const { webcrypto } = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { register, signSpend } = require('./lib/owner-auth');
 
 const { subtle } = webcrypto;
 const PORT = 8180; // isolated — distinct from every other manual-*.js/-php.js test's chosen port
@@ -58,7 +59,7 @@ function canonicalize(value) {
 async function genIdentity() {
   const pair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const rawPublic = await subtle.exportKey('raw', pair.publicKey);
-  return { privateKey: pair.privateKey, publicKey: b64url(rawPublic) };
+  return register({ privateKey: pair.privateKey, publicKey: b64url(rawPublic) });
 }
 async function signPayload(identity, payload) {
   const data = new TextEncoder().encode(canonicalize(payload));
@@ -81,7 +82,7 @@ async function issueAsset(ownerPublicKey, assetClass, quantity) {
   return res.body;
 }
 async function splitAsset(credential, sendAmount, toPublicKey) {
-  return post('/atlas/asset/split', { credential, sendAmount, toPublicKey });
+  return post('/atlas/asset/split', signSpend('/atlas/asset/split', { credential, sendAmount, toPublicKey }));
 }
 async function transferAsset(sender, credential, recipientPublicKey) {
   const payload = { credentialId: credential.id, recipientPublicKey, action: 'transfer' };

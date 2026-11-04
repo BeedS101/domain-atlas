@@ -2095,7 +2095,11 @@ const AtlasWallet = (() => {
     const owner = await identityOf(role);
     const done = await runIssuerOperation({
       owner: owner.publicKey, kind: 'convert', label: 'Convert', domain: credential.issuer.domain, path: '/atlas/convert',
-      body: { credential, spendAmount, toClass }, predecessors: [credential.id]
+      predecessors: [credential.id],
+      body: async (requestId) => {
+        const intentPayload = { action: 'convert', credentialId: credential.id, spendAmount, toClass, requestId, domain: credential.issuer.domain };
+        return { credential, spendAmount, toClass, intent: { payload: intentPayload, proof: await signAs(role, intentPayload) } };
+      }
     });
     const result = Object.assign({}, done.data);
     result.consolidation = await autoConsolidateAssetWallet(owner.publicKey);
@@ -2448,7 +2452,11 @@ const AtlasWallet = (() => {
     const done = await runIssuerOperation({
       owner: fromOwner.publicKey, toOwner: toOwner.publicKey, kind: 'split', label: 'Split',
       domain: credential.issuer.domain, path: '/atlas/asset/split',
-      body: { credential, sendAmount, toPublicKey: toOwner.publicKey }, predecessors: [credential.id]
+      predecessors: [credential.id],
+      body: async (requestId) => {
+        const intentPayload = { action: 'split', credentialId: credential.id, sendAmount, toPublicKey: toOwner.publicKey, requestId, domain: credential.issuer.domain };
+        return { credential, sendAmount, toPublicKey: toOwner.publicKey, intent: { payload: intentPayload, proof: await signAs(role, intentPayload) } };
+      }
     });
     const { sent, remainder } = done.data;
     if (remainder) await autoConsolidateAssetWallet(fromOwner.publicKey);
@@ -2472,7 +2480,11 @@ const AtlasWallet = (() => {
     if (credentials.length > MAX_CONSOLIDATE_BATCH) throw new Error('Merge at most ' + MAX_CONSOLIDATE_BATCH + ' balances in one request.');
     const done = await runIssuerOperation({
       owner: ownerPublicKey, kind: 'consolidate', label: 'Consolidate', domain: credentials[0].issuer.domain,
-      path: '/atlas/asset/consolidate', body: { credentials }, predecessors: credentials.map((c) => c.id)
+      path: '/atlas/asset/consolidate', predecessors: credentials.map((c) => c.id),
+      body: async (requestId) => {
+        const intentPayload = { action: 'consolidate', credentialIds: credentials.map((c) => c.id), requestId, domain: credentials[0].issuer.domain };
+        return { credentials, intent: { payload: intentPayload, proof: await signAs('self', intentPayload) } };
+      }
     });
     return done.data;
   }
@@ -2872,7 +2884,11 @@ const AtlasWallet = (() => {
     const done = await runIssuerOperation({
       owner: identity.publicKey, toOwner: identity.publicKey, kind: 'split', label: 'Split',
       domain: credential.issuer.domain, path: '/atlas/asset/split',
-      body: { credential, sendAmount: amount, toPublicKey: identity.publicKey }, predecessors: [credential.id]
+      predecessors: [credential.id],
+      body: async (requestId) => {
+        const intentPayload = { action: 'split', credentialId: credential.id, sendAmount: amount, toPublicKey: identity.publicKey, requestId, domain: credential.issuer.domain };
+        return { credential, sendAmount: amount, toPublicKey: identity.publicKey, intent: { payload: intentPayload, proof: await signWithSelf(intentPayload) } };
+      }
     });
     return done.data.sent;
   }

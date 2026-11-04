@@ -114,9 +114,15 @@ async function probe() {
   }
   r = await post('/atlas/demo/warranty/stamp-sale', { credential: fake('atlas.demo.warranty.certificate'), properties: {} });
   check('stamp-sale refuses the factory warranty class', r.status === 400 && /selfserve/.test(r.body.error || ''), show(r));
-  for (const route of ['/atlas/asset/split', '/atlas/asset/consolidate', '/atlas/convert']) {
-    r = await post(route, {});
-    check(route + ' is still disabled', r.status === 403 && r.body.code === 'owner-authorization-required', show(r));
+  // Without an intent signed by the owner, each of these refuses before it reads anything else.
+  const spendBodies = {
+    '/atlas/asset/split': { credential: fake('atlas.element.iron'), sendAmount: 1, toPublicKey: a.publicKey },
+    '/atlas/asset/consolidate': { credentials: [fake('atlas.element.iron'), { ...fake('atlas.element.iron'), id: 'urn:atlas:asset:00000000-0000-4000-8000-000000000001' }] },
+    '/atlas/convert': { credential: fake('atlas.element.iron'), spendAmount: 1, toClass: 'atlas.element.gold' }
+  };
+  for (const route of Object.keys(spendBodies)) {
+    r = await post(route, spendBodies[route]);
+    check(route + ' refuses a request with no signed owner intent', r.status === 403 && r.body.code === 'owner-authorization-required', show(r));
   }
 }
 

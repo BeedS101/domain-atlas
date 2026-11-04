@@ -50,6 +50,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { register, signSpend } = require('./lib/owner-auth');
 const { webcrypto } = require('crypto');
 const { withAdminAuth } = require('./lib/admin-auth');
 const { subtle } = webcrypto;
@@ -76,7 +77,7 @@ function canonicalize(value) {
 async function genIdentity() {
   const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const raw = new Uint8Array(await subtle.exportKey('raw', kp.publicKey));
-  return { kp, publicKey: b64url(raw) };
+  return register({ kp, publicKey: b64url(raw) });
 }
 async function signWithSelf(kp, publicKey, payload) {
   const data = new TextEncoder().encode(canonicalize(payload));
@@ -103,7 +104,7 @@ async function transfer(credential, ownerKp, ownerPublicKey, recipientPublicKey)
   return postJson('/atlas/asset/transfer', { credential, recipientPublicKey, intent: { payload: intentPayload, proof: intentProof } });
 }
 async function split(credential, sendAmount, toPublicKey) {
-  return postJson('/atlas/asset/split', { credential, sendAmount, toPublicKey });
+  return postJson('/atlas/asset/split', signSpend('/atlas/asset/split', { credential, sendAmount, toPublicKey }));
 }
 async function mailCheck(who, credentials) {
   const payload = { action: 'mail-check', domain: new URL(BASE).host, credentialIds: credentials.map((c) => c.id), issuedAt: new Date().toISOString(), nonce: b64url(webcrypto.getRandomValues(new Uint8Array(18))) };

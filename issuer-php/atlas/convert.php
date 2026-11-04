@@ -12,15 +12,11 @@
 // The rate always routes through the shared base-currency unit regardless
 // of which two classes are named, so any two rated classes convert
 // directly (iron -> silver works exactly the same way gold -> silver
-// does), not just base-currency pairs.
+// does), not just base-currency pairs. The request must carry the owner's
+// signed intent (atlas_require_owner_intent in lib/bootstrap.php).
 require_once __DIR__ . '/../lib/bootstrap.php';
 handle_preflight();
 require_post();
-// Disabled: the request carries no signature from the credential's owner, so
-// anyone holding a copy could convert someone else's balance. Refused until a
-// signed owner authorization is verified here. Mirrors issuer-server/server.js
-// (OWNER_AUTHORIZATION_REQUIRED).
-send_json(403, ['error' => 'This operation needs a signature from the owner of the credential, which this issuer does not check yet, so it is disabled.', 'code' => 'owner-authorization-required']);
 $kp = atlas_load_keys();
 
 try {
@@ -32,16 +28,20 @@ try {
 $credential = $body['credential'] ?? null;
 $spendAmount = $body['spendAmount'] ?? null;
 $toClass = $body['toClass'] ?? null;
-if (!$credential || !$toClass || !atlas_is_positive_int($spendAmount)) {
+if (!is_array($credential) || !$toClass || !atlas_is_positive_int($spendAmount)) {
   send_json(400, ['error' => 'credential, spendAmount, and toClass are required']);
 }
 $spendAmount = (int) $spendAmount;
 
 $requestId = atlas_parse_request_id($body);
+$signer = atlas_require_owner_intent($body, [
+  'action' => 'convert', 'credentialId' => $credential['id'] ?? null, 'spendAmount' => $spendAmount,
+  'toClass' => $toClass, 'requestId' => $requestId, 'domain' => $credential['issuer']['domain'] ?? null,
+], [$credential]);
 $convertParams = ['spendAmount' => $spendAmount, 'toClass' => $toClass];
 atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'convert', [$credential], $convertParams);
 
-$expectedOwner = $credential['owner']['publicKey'] ?? null;
+$expectedOwner = $signer;
 $fromClass = $credential['asset']['class'] ?? null;
 $problem = check_presented_asset($kp['publicKeyB64url'], $credential, $expectedOwner, $fromClass, $spendAmount);
 if ($problem) send_json(400, atlas_spend_problem_body($problem, $credential));

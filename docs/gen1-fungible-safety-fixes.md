@@ -168,9 +168,12 @@ works once the list is restored.
 4. **Conversion into a capped class is not capped.** Converting 450 Gold gives 9,000 Iron; the cap gates mining
    only. Converted-in holdings do count toward the cap afterwards (a further Iron mint is refused). Repeated
    mine-then-convert cycles remain the Gold-to-Platinum economy question that is postponed.
-5. **Spends are bearer.** Possession of the credential JSON is the only authorisation; there is no owner
-   signature on split, consolidate or convert. The replay store keeps bearer credentials (private, hashed file
-   names, 168 hours).
+5. **Owner-signed spends.** Split, consolidate and convert each carry `intent: {payload, proof}`, the owner's
+   signature over the operation, its parameters, the request id and the issuing domain. The issuer checks the
+   payload field for field, the signature, and that the signer owns every presented credential, before it looks
+   up a stored answer, so a copy of a credential (or of a request id) cannot spend it or fetch its answer.
+   There is no expiry: the credentials are spent by the operation, and a wallet retries an unanswered request
+   with the same body. The replay store keeps the stored answers (private, hashed file names, 168 hours).
 6. **Revocation growth and cost.** Every merge and spend still adds entries (about 98 per 500 g mined in 10 g
    clicks). 20,000 entries is the readers' limit. At 20,000 entries consolidate-20 takes about 0.4 s. The real fix
    is an indexed store or the ledger-authoritative design in the report's section 6.

@@ -18,6 +18,7 @@
 //   node test/manual-gen1-fungible-incident.js [node|php|both] [--quick]
 'use strict';
 const { spawn } = require('child_process');
+const ownerAuth = require('./lib/owner-auth');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -37,7 +38,7 @@ function finding(backend, id, text, value) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let keyCounter = 0;
-const newOwner = (label) => 'TESTOWNER-' + label + '-' + (++keyCounter) + '-' + Math.random().toString(36).slice(2, 10);
+const newOwner = (label) => ownerAuth.newOwner(label);
 
 // ---------- issuer backends ----------
 async function startNode(port) {
@@ -111,7 +112,7 @@ function api(be) {
     return { status: res.status, body: json, ms: Number(process.hrtime.bigint() - t0) / 1e6, bytes: text.length };
   };
   return {
-    post: (p, b) => call('POST', p, b),
+    post: (p, b) => call('POST', p, ownerAuth.signSpend(p, b)),
     get: (p) => call('GET', p),
     revocations: () => {
       try { return JSON.parse(fs.readFileSync(be.revFile, 'utf8')).revoked; } catch (e) { return null; }

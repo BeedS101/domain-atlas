@@ -262,7 +262,7 @@ async function main() {
       await w.clearFault();
       check('the consolidation is pending', (await w.pending()).length === 1 && (await w.pending())[0].state === 'pending', second);
       const [a, b] = await credentialsOf(w, IRON);
-      const spent = await iss.api.post('/atlas/asset/split', { credential: a, sendAmount: 1, toPublicKey: w.pub, requestId: crypto.randomBytes(18).toString('base64url') });
+      const spent = await iss.api.post('/atlas/asset/split', await w.spendBody('/atlas/asset/split', { credential: a, sendAmount: 1, toPublicKey: w.pub, requestId: crypto.randomBytes(18).toString('base64url') }));
       check('another request spends one predecessor at the issuer', spent.status === 200, spent.status);
       const rec = await w.recover();
       check('the retry is refused as revoked, but the other predecessor is not revoked, so nothing was committed: the entry ends as failed',

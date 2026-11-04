@@ -66,6 +66,7 @@ const { cleanIssuerPhpState } = require('./lib/clean-issuer-php');
 const { webcrypto } = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { register, signSpend } = require('./lib/owner-auth');
 
 const { subtle } = webcrypto;
 const PORT = 8096; // isolated port, distinct from manual-chat-php.js's 8097 and manual-presence-php.js's 8098
@@ -114,7 +115,7 @@ function canonicalize(value) {
 async function generateIdentity() {
   const pair = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const rawPublic = await subtle.exportKey('raw', pair.publicKey);
-  return { privateKey: pair.privateKey, publicKey: b64url(rawPublic) };
+  return register({ privateKey: pair.privateKey, publicKey: b64url(rawPublic) });
 }
 
 async function signPayload(identity, payload) {
@@ -200,7 +201,7 @@ async function mailCheckAs(identity, credential) {
     console.log('PASS: membership issued, bound, rostered, and welcomed ->', posterMembership.id);
 
     console.log('STEP 3: task #160 sanity check — a bound credential cannot be split (dedicated message, not the generic "not fungible" one)');
-    const rejectedSplit = await post('/atlas/asset/split', { credential: posterMembership, sendAmount: 1, toPublicKey: poster.publicKey });
+    const rejectedSplit = await post('/atlas/asset/split', signSpend('/atlas/asset/split', { credential: posterMembership, sendAmount: 1, toPublicKey: poster.publicKey }));
     if (rejectedSplit.status !== 400 || !rejectedSplit.body.error.includes('bound')) {
       throw new Error('Expected a bound credential to be rejected with a "bound" reason, got: ' + JSON.stringify(rejectedSplit.body));
     }
@@ -262,7 +263,7 @@ async function mailCheckAs(identity, credential) {
 
     console.log('STEP 9: regression check — an ordinary (non-bound, tradeScope: local) fungible split still works, now that check_presented_asset() and atlas_asset_catalog_entry() both changed to add the tradeScope field');
     if (settlementMail.attachedAsset.asset.tradeScope !== 'local') throw new Error('Expected the gold credential to carry tradeScope: local, got: ' + JSON.stringify(settlementMail.attachedAsset.asset));
-    const ordinarySplit = await post('/atlas/asset/split', { credential: settlementMail.attachedAsset, sendAmount: 2, toPublicKey: claimant.publicKey });
+    const ordinarySplit = await post('/atlas/asset/split', signSpend('/atlas/asset/split', { credential: settlementMail.attachedAsset, sendAmount: 2, toPublicKey: claimant.publicKey }));
     if (ordinarySplit.status !== 200 || !ordinarySplit.body.sent || ordinarySplit.body.sent.quantity !== 2 || !ordinarySplit.body.remainder || ordinarySplit.body.remainder.quantity !== 3) {
       throw new Error('Expected an ordinary 2/3 split of the 5-gold credential to still work, got: ' + JSON.stringify(ordinarySplit.body));
     }

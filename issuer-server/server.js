@@ -5792,16 +5792,40 @@ async function main() {
     return { held, adopt };
   }
 
-  // Split, consolidate and convert take a credential and its parameters but
-  // no signature from the credential's owner, and a credential is not a
-  // secret: anyone holding a copy could split it to their own key. These
-  // routes refuse every request, before reading the body, until a signed
-  // owner authorization is verified for them. The handlers' bodies are kept
-  // below the refusal for that work.
-  const OWNER_AUTHORIZATION_REQUIRED = {
-    error: 'This operation needs a signature from the owner of the credential, which this issuer does not check yet, so it is disabled.',
-    code: 'owner-authorization-required'
-  };
+  // Split, consolidate and convert spend credentials, and a credential is not
+  // a secret: anyone holding a copy could spend it to their own key. Each
+  // request therefore carries `intent: {payload, proof}`, the owner's
+  // signature over exactly what the request does. The payload must equal
+  // `expected` field for field (canonical JSON, nothing extra), the proof
+  // must verify, and its signer must own every presented credential. No
+  // expiry: the credentials are spent by the operation, and a wallet retries
+  // an unanswered request with the same body and request id. Runs before
+  // beginReplacement so that a copied credential and intent cannot fetch a
+  // stored result. Returns the refusal body, or null when authorized; the
+  // signer's public key is intent.proof.publicKey.
+  async function ownerIntentProblem(body, expected, credentials) {
+    const intent = body && body.intent;
+    const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+    if (!isObject(intent) || !isObject(intent.payload) || !isObject(intent.proof)) {
+      return { error: 'This operation needs an intent signed by the owner of the credential.', code: 'owner-authorization-required' };
+    }
+    if (canonicalize(intent.payload) !== canonicalize(expected)) {
+      return { error: 'The signed intent does not authorize exactly this request.', code: 'owner-authorization-required' };
+    }
+    let signatureOk = false;
+    try {
+      signatureOk = typeof intent.proof.publicKey === 'string' && await verifyEnvelope(intent.payload, intent.proof);
+    } catch (err) {
+      signatureOk = false;
+    }
+    if (!signatureOk) return { error: 'The intent signature does not check out.', code: 'owner-signature-invalid' };
+    for (const credential of credentials) {
+      if (!credential.owner || credential.owner.publicKey !== intent.proof.publicKey) {
+        return { error: 'The intent was not signed by the owner of this credential.', code: 'not-owner', credentialId: credential.id };
+      }
+    }
+    return null;
+  }
 
   // The 400 body for a presented credential that failed a check: `code` and
   // `credentialId` let a wallet drop one spent balance and retry the rest.
@@ -7977,16 +8001,18 @@ async function main() {
 
       // --- §5.4 splitting and consolidating fungible balances ---
       if (req.method === 'POST' && req.url === '/atlas/asset/split') {
-        // Disabled: see OWNER_AUTHORIZATION_REQUIRED.
-        return sendJson(res, 403, OWNER_AUTHORIZATION_REQUIRED);
         const splitBody = JSON.parse((await readBody(req)) || '{}');
         const { credential, sendAmount, toPublicKey } = splitBody;
         if (!credential || !toPublicKey || !Number.isInteger(sendAmount) || sendAmount <= 0) {
           return sendJson(res, 400, { error: 'credential, sendAmount, and toPublicKey are required' });
         }
         const requestId = parseRequestId(splitBody);
+        const splitRefusal = await ownerIntentProblem(splitBody, {
+          action: 'split', credentialId: credential.id, sendAmount, toPublicKey, requestId, domain: credential.issuer && credential.issuer.domain
+        }, [credential]);
+        if (splitRefusal) return sendJson(res, 403, splitRefusal);
         if (await beginReplacement(res, requestId, 'split', [credential], { sendAmount, toPublicKey })) return;
-        const expectedOwner = credential.owner && credential.owner.publicKey;
+        const expectedOwner = splitBody.intent.proof.publicKey;
         const expectedClass = credential.asset && credential.asset.class;
         const problem = await checkPresentedAsset(credential, expectedOwner, expectedClass, sendAmount);
         if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
@@ -8015,8 +8041,6 @@ async function main() {
       // of just one. checkPresentedAsset (below) rejects any credential
       // here that isn't fungible, same gate splitting and trading share.
       if (req.method === 'POST' && req.url === '/atlas/asset/consolidate') {
-        // Disabled: see OWNER_AUTHORIZATION_REQUIRED.
-        return sendJson(res, 403, OWNER_AUTHORIZATION_REQUIRED);
         const consolidateBody = JSON.parse((await readBody(req)) || '{}');
         const { credentials } = consolidateBody;
         if (!Array.isArray(credentials) || credentials.length < 2) {
@@ -8029,9 +8053,16 @@ async function main() {
         if (new Set(ids).size !== ids.length) {
           return sendJson(res, 400, { error: 'duplicate balance in consolidation request' });
         }
+        if (credentials.some((c) => !c || typeof c !== 'object')) {
+          return sendJson(res, 400, { error: 'credentials must be an array of at least two balances' });
+        }
         const requestId = parseRequestId(consolidateBody);
+        const consolidateRefusal = await ownerIntentProblem(consolidateBody, {
+          action: 'consolidate', credentialIds: ids, requestId, domain: credentials[0].issuer && credentials[0].issuer.domain
+        }, credentials);
+        if (consolidateRefusal) return sendJson(res, 403, consolidateRefusal);
         if (await beginReplacement(res, requestId, 'consolidate', credentials, {})) return;
-        const owner = credentials[0] && credentials[0].owner && credentials[0].owner.publicKey;
+        const owner = consolidateBody.intent.proof.publicKey;
         const cls = credentials[0] && credentials[0].asset && credentials[0].asset.class;
         for (const credential of credentials) {
           const problem = await checkPresentedAsset(credential, owner, cls, 1);
@@ -8067,16 +8098,18 @@ async function main() {
       // convert directly — iron -> silver works exactly the same way
       // gold -> silver does, not just base-currency pairs.
       if (req.method === 'POST' && req.url === '/atlas/convert') {
-        // Disabled: see OWNER_AUTHORIZATION_REQUIRED.
-        return sendJson(res, 403, OWNER_AUTHORIZATION_REQUIRED);
         const convertBody = JSON.parse((await readBody(req)) || '{}');
         const { credential, spendAmount, toClass } = convertBody;
         if (!credential || !toClass || !Number.isInteger(spendAmount) || spendAmount <= 0) {
           return sendJson(res, 400, { error: 'credential, spendAmount, and toClass are required' });
         }
         const requestId = parseRequestId(convertBody);
+        const convertRefusal = await ownerIntentProblem(convertBody, {
+          action: 'convert', credentialId: credential.id, spendAmount, toClass, requestId, domain: credential.issuer && credential.issuer.domain
+        }, [credential]);
+        if (convertRefusal) return sendJson(res, 403, convertRefusal);
         if (await beginReplacement(res, requestId, 'convert', [credential], { spendAmount, toClass })) return;
-        const expectedOwner = credential.owner && credential.owner.publicKey;
+        const expectedOwner = convertBody.intent.proof.publicKey;
         const fromClass = credential.asset && credential.asset.class;
         const problem = await checkPresentedAsset(credential, expectedOwner, fromClass, spendAmount);
         if (problem) return sendJson(res, 400, spendProblemBody(problem, credential));
@@ -8123,13 +8156,12 @@ async function main() {
       // GET /atlas/capabilities - which operations this issuer answers a repeated requestId for. A wallet
       // that finds an operation here may send it again with the same requestId after a lost answer; an
       // issuer that does not list it (or has no such route) creates a second result for a repeat, so the
-      // wallet does not repeat the request. Split, consolidate and convert are not listed while they are
-      // disabled (OWNER_AUTHORIZATION_REQUIRED).
+      // wallet does not repeat the request.
       if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/capabilities') {
         return sendJson(res, 200, {
           requestIds: {
             version: 1,
-            operations: ['issue', 'issue-unique', 'purchase', 'trade-claim', 'trade-claim-remainder'],
+            operations: ['issue', 'issue-unique', 'split', 'consolidate', 'convert', 'purchase', 'trade-claim', 'trade-claim-remainder'],
             retentionHours: REPLAY_TTL_MS / 3600000
           }
         });

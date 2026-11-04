@@ -7,15 +7,11 @@
 // it. Old balances are revoked ('consolidated') only after the new one is
 // successfully signed. Fungible only (SPEC.md §5.4/§5.4.1) —
 // check_presented_asset() below rejects a fungible:false credential with
-// a clear error.
+// a clear error. The request must carry the owner's signed intent
+// (atlas_require_owner_intent in lib/bootstrap.php).
 require_once __DIR__ . '/../../lib/bootstrap.php';
 handle_preflight();
 require_post();
-// Disabled: the request carries no signature from the credentials' owner, so
-// anyone holding copies could merge someone else's balances. Refused until a
-// signed owner authorization is verified here. Mirrors issuer-server/server.js
-// (OWNER_AUTHORIZATION_REQUIRED).
-send_json(403, ['error' => 'This operation needs a signature from the owner of the credential, which this issuer does not check yet, so it is disabled.', 'code' => 'owner-authorization-required']);
 $kp = atlas_load_keys();
 
 try {
@@ -37,10 +33,17 @@ if (count(array_unique($ids)) !== count($ids)) {
   send_json(400, ['error' => 'duplicate balance in consolidation request']);
 }
 
+foreach ($credentials as $c) {
+  if (!is_array($c)) send_json(400, ['error' => 'credentials must be an array of at least two balances']);
+}
 $requestId = atlas_parse_request_id($body);
+$signer = atlas_require_owner_intent($body, [
+  'action' => 'consolidate', 'credentialIds' => array_values($ids), 'requestId' => $requestId,
+  'domain' => $credentials[0]['issuer']['domain'] ?? null,
+], $credentials);
 atlas_begin_replacement($kp['publicKeyB64url'], $requestId, 'consolidate', $credentials, []);
 
-$owner = $credentials[0]['owner']['publicKey'] ?? null;
+$owner = $signer;
 $cls = $credentials[0]['asset']['class'] ?? null;
 foreach ($credentials as $credential) {
   $problem = check_presented_asset($kp['publicKeyB64url'], $credential, $owner, $cls, 1);

@@ -6,6 +6,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+const { signSpend } = require('./owner-auth');
+
 const REPO = path.resolve(__dirname, '..', '..');
 
 async function waitFor(log, proc, text, ms, name) {
@@ -141,7 +143,7 @@ function api(be) {
     return { status: res.status, body: json, ms: Number(process.hrtime.bigint() - t0) / 1e6 };
   };
   return {
-    post: (p, b) => call('POST', p, b),
+    post: (p, b) => call('POST', p, signSpend(p, b)),
     get: (p) => call('GET', p),
     revocations: () => { try { return JSON.parse(fs.readFileSync(be.revFile, 'utf8')).revoked; } catch (e) { return null; } },
     txnEntries: () => { try { return fs.readdirSync(be.txnDir).filter((f) => /\.json$/.test(f)); } catch (e) { return []; } },

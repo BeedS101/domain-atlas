@@ -388,11 +388,12 @@
   // page leans on for every one-way movement of a fungible balance: the
   // unique-item transfer endpoint (§5.6) explicitly refuses anything
   // fungible, and a fungible balance instead moves by splitting a chosen
-  // amount straight to a named recipient, same "possession of the current
-  // credential is what authorizes this" bearer model every other self-serve
-  // action on this site already uses.
-  async function splitAsset(credential, sendAmount, toPublicKey) {
-    return postJson('/atlas/asset/split', { credential, sendAmount, toPublicKey });
+  // amount straight to a named recipient. The request carries the owner's
+  // signed intent, so a copy of the credential cannot be split by anyone else.
+  async function splitAsset(owner, credential, sendAmount, toPublicKey) {
+    const payload = { action: 'split', credentialId: credential.id, sendAmount, toPublicKey, requestId: null, domain: credential.issuer.domain };
+    const proof = await signWithSelf(owner, payload);
+    return postJson('/atlas/asset/split', { credential, sendAmount, toPublicKey, intent: { payload, proof } });
   }
   async function purchaseAsset(buyer, credential, purchasedClass, quantity) {
     const payload = { credentialId: credential.id, purchasedClass, quantity, action: 'purchase' };
@@ -645,7 +646,7 @@
     const resultEl = document.getElementById('issuanceResult');
     btn.disabled = true;
     bankAlpha = await genIdentity();
-    const res = await splitAsset(bal.treasuryReserve, 40000, bankAlpha.publicKey);
+    const res = await splitAsset(treasury, bal.treasuryReserve, 40000, bankAlpha.publicKey);
     if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
     bal.bankAlphaReserve = res.body.sent;
     bal.treasuryReserve = res.body.remainder;
@@ -659,7 +660,7 @@
     const resultEl = document.getElementById('issuanceResult');
     btn.disabled = true;
     bankBeta = await genIdentity();
-    const res = await splitAsset(bal.treasuryReserve, 40000, bankBeta.publicKey);
+    const res = await splitAsset(treasury, bal.treasuryReserve, 40000, bankBeta.publicKey);
     if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
     bal.bankBetaReserve = res.body.sent;
     bal.treasuryReserve = res.body.remainder;
@@ -704,7 +705,7 @@
     const resultEl = document.getElementById('retailResult');
     btn.disabled = true;
     alice = await genIdentity();
-    const res = await splitAsset(bal.bankAlphaAlpha, 5000, alice.publicKey);
+    const res = await splitAsset(bankAlpha, bal.bankAlphaAlpha, 5000, alice.publicKey);
     if (!res.ok) { resultEl.innerHTML = '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
     bal.aliceAlpha = res.body.sent;
     bal.bankAlphaAlpha = res.body.remainder;
@@ -718,7 +719,7 @@
     const resultEl = document.getElementById('retailResult');
     btn.disabled = true;
     bob = await genIdentity();
-    const res = await splitAsset(bal.bankBetaBeta, 5000, bob.publicKey);
+    const res = await splitAsset(bankBeta, bal.bankBetaBeta, 5000, bob.publicKey);
     if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
     bal.bobBeta = res.body.sent;
     bal.bankBetaBeta = res.body.remainder;
@@ -732,7 +733,7 @@
     const resultEl = document.getElementById('retailResult');
     btn.disabled = true;
     charlie = await genIdentity();
-    const res = await splitAsset(bal.aliceAlpha, 1200, charlie.publicKey);
+    const res = await splitAsset(alice, bal.aliceAlpha, 1200, charlie.publicKey);
     if (!res.ok) { resultEl.innerHTML += '<div class="result err">' + errText(res) + '</div>'; btn.disabled = false; return; }
     bal.charlieAlpha = res.body.sent;
     bal.aliceAlpha = res.body.remainder;

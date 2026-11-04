@@ -57,6 +57,23 @@ async function post(path, body) {
   } catch (e) { return { status: 0, text: '', json: null, error: e.message }; }
 }
 const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+
+// Split and consolidate need a signature from the credential's owner, so the throw-away owner is a real key.
+function canonicalize(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(canonicalize).join(',') + ']';
+  return '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonicalize(v[k])).join(',') + '}';
+}
+function newOwnerKey() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = publicKey.export({ format: 'jwk' });
+  const raw = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]).toString('base64url');
+  return { publicKey: raw, privateKey };
+}
+function intentFor(owner, payload) {
+  const signature = crypto.sign('sha256', Buffer.from(canonicalize(payload)), { key: owner.privateKey, dsaEncoding: 'ieee-p1363' });
+  return { payload, proof: { signerRole: 'raw-ecdsa', publicKey: owner.publicKey, signature: signature.toString('base64url') } };
+}
 const rid = () => crypto.randomBytes(18).toString('base64url');
 
 // Anything a visitor must never be able to read. A 403 or 404 is the answer; 200 with a body that
@@ -118,7 +135,8 @@ async function readDocs() {
 
   if (flag('--mutating')) {
     console.log('\n-- spend smoke test (throw-away owner, Iron) --');
-    const owner = 'SMOKETEST-' + crypto.randomBytes(8).toString('hex');
+    const ownerKey = newOwnerKey();
+    const owner = ownerKey.publicKey;
     const cls = 'atlas.element.iron';
     const issueId = rid(), splitId = rid(), consolidateId = rid();
     const a = await post('/atlas/asset/issue', { ownerPublicKey: owner, assetClass: cls, quantity: 10, requestId: issueId });
@@ -126,16 +144,24 @@ async function readDocs() {
     if (!(a.status === 200 && a.json)) return finish();
     const a2 = await post('/atlas/asset/issue', { ownerPublicKey: owner, assetClass: cls, quantity: 10, requestId: issueId });
     line(a2.status === 200 && a2.text === a.text, 'repeating the issue returns the identical signed credential');
-    const s = await post('/atlas/asset/split', { credential: a.json, sendAmount: 4, toPublicKey: owner, requestId: splitId });
+    const splitReq = (credential, sendAmount, requestId) => ({
+      credential, sendAmount, toPublicKey: owner, requestId,
+      intent: intentFor(ownerKey, { action: 'split', credentialId: credential.id, sendAmount, toPublicKey: owner, requestId, domain: credential.issuer.domain })
+    });
+    const consolidateReq = (credentials, requestId) => ({
+      credentials, requestId,
+      intent: intentFor(ownerKey, { action: 'consolidate', credentialIds: credentials.map((c) => c.id), requestId, domain: credentials[0].issuer.domain })
+    });
+    const s = await post('/atlas/asset/split', splitReq(a.json, 4, splitId));
     line(s.status === 200 && s.json && s.json.sent && s.json.remainder, 'split 4 off', [s.status, s.text.slice(0, 160)]);
     if (!(s.status === 200 && s.json && s.json.sent)) return finish();
-    const s2 = await post('/atlas/asset/split', { credential: a.json, sendAmount: 4, toPublicKey: owner, requestId: splitId });
+    const s2 = await post('/atlas/asset/split', splitReq(a.json, 4, splitId));
     line(s2.status === 200 && s2.text === s.text, 'repeating the split returns the identical answer and spends nothing again');
-    const c = await post('/atlas/asset/consolidate', { credentials: [s.json.sent, s.json.remainder], requestId: consolidateId });
+    const c = await post('/atlas/asset/consolidate', consolidateReq([s.json.sent, s.json.remainder], consolidateId));
     line(c.status === 200 && c.json && c.json.quantity === 10, 'consolidate back to 10', [c.status, c.text.slice(0, 160)]);
-    const c2 = await post('/atlas/asset/consolidate', { credentials: [s.json.sent, s.json.remainder], requestId: consolidateId });
+    const c2 = await post('/atlas/asset/consolidate', consolidateReq([s.json.sent, s.json.remainder], consolidateId));
     line(c2.status === 200 && c2.text === c.text, 'repeating the consolidation returns the identical answer');
-    const spentAgain = await post('/atlas/asset/split', { credential: a.json, sendAmount: 1, toPublicKey: owner, requestId: rid() });
+    const spentAgain = await post('/atlas/asset/split', splitReq(a.json, 1, rid()));
     line(spentAgain.status >= 400 && spentAgain.status < 500, 'a spent credential is refused with a new request id', [spentAgain.status, spentAgain.text.slice(0, 120)]);
 
     const after = await readDocs();

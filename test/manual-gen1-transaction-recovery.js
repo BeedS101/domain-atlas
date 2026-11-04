@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { startNode, startPhp, api } = require('./lib/gen1-issuers');
+const { newOwner } = require('./lib/owner-auth');
 
 const WHICH = process.argv.find((a) => ['node', 'php', 'both'].includes(a)) || 'both';
 const QUICK = process.argv.includes('--quick');
@@ -27,7 +28,7 @@ function check(be, name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'} [${be.kind}] ${name}${!ok && detail !== undefined ? ' :: ' + (typeof detail === 'string' ? detail : JSON.stringify(detail)).slice(0, 600) : ''}`);
 }
 let n = 0;
-const owner = (label) => 'TESTOWNER-' + label + '-' + (++n) + '-' + crypto.randomBytes(4).toString('hex');
+const owner = (label) => newOwner(label);
 const rid = () => crypto.randomBytes(18).toString('base64url');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);

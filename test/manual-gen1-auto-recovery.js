@@ -13,6 +13,7 @@
 // control and PASSES when that version does not recover by itself.
 'use strict';
 const crypto = require('crypto');
+const { withSignedConsolidation } = require('./lib/owner-auth');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -197,7 +198,7 @@ function previousExtension() {
     if (src.status === 0 && !src.stdout.includes(MARKER)) {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-prev-ext-'));
       fs.cpSync(EXT_PATH, dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, 'wallet.js'), src.stdout);
+      fs.writeFileSync(path.join(dir, 'wallet.js'), withSignedConsolidation(src.stdout));
       previousExt = { dir, rev };
       return previousExt;
     }

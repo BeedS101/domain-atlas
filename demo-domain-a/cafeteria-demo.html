@@ -198,8 +198,10 @@
     if (!res.ok) throw new Error((res.body && res.body.error) || 'issue failed');
     return res.body;
   }
-  async function consolidateBalances(credentials) {
-    const res = await postJson('/atlas/asset/consolidate', { credentials });
+  async function consolidateBalances(owner, credentials) {
+    const payload = { action: 'consolidate', credentialIds: credentials.map((c) => c.id), requestId: null, domain: credentials[0].issuer.domain };
+    const proof = await signWithSelf(owner, payload);
+    const res = await postJson('/atlas/asset/consolidate', { credentials, intent: { payload, proof } });
     if (!res.ok) throw new Error((res.body && res.body.error) || 'consolidate failed');
     return res.body;
   }
@@ -352,7 +354,7 @@
     btn.disabled = true;
     try {
       const minted = await issueAsset(student.publicKey, BALANCE_CLASS, amount);
-      balance = balance ? await consolidateBalances([balance, minted]) : minted;
+      balance = balance ? await consolidateBalances(student, [balance, minted]) : minted;
       renderBalance();
       status.className = 'result ok';
       status.textContent = 'Topped up ' + amount + ' credits — balance now ' + balance.quantity + '.';

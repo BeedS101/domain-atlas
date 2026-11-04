@@ -3,6 +3,7 @@
 //   node test/manual-gen1-audit-tool.js
 'use strict';
 const { spawn, spawnSync } = require('child_process');
+const { newOwner, signSpend } = require('./lib/owner-auth');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -21,12 +22,12 @@ const check = (name, ok, detail) => { console.log((ok ? 'PASS ' : 'FAIL ') + nam
   let log = ''; proc.stdout.on('data', (d) => { log += d; }); proc.stderr.on('data', (d) => { log += d; });
   for (let i = 0; i < 300 && !log.includes('listening'); i++) await new Promise((r) => setTimeout(r, 50));
   const base = 'http://localhost:' + PORT;
-  const post = async (p, b) => { const r = await fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }); return { status: r.status, body: await r.json() }; };
+  const post = async (p, b) => { const r = await fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(signSpend(p, b)) }); return { status: r.status, body: await r.json() }; };
   const mint = async (owner, cls, q, held) => (await post('/atlas/asset/issue', { ownerPublicKey: owner, assetClass: cls, quantity: q, existingBalances: held })).body;
   const revFile = path.join(docroot, '.well-known', 'atlas-revocations.json');
   const keyFile = path.join(docroot, '.well-known', 'atlas-key.json');
   try {
-    const owner = 'TESTOWNER-audit';
+    const owner = newOwner();
     // 1. A normal consolidation: five 10 g stacks into 50 g. The old export still has the five.
     const five = []; for (let i = 0; i < 5; i++) five.push(await mint(owner, GOLD, 10, five));
     const oldExport = five.slice();

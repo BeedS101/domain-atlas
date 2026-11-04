@@ -64,6 +64,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { newOwner, signSpend } = require('./lib/owner-auth');
 
 const NODE_PORT = 8091; // isolated — distinct from every other manual-*.js test's chosen port
 const NODE_DOMAIN = 'localhost:' + NODE_PORT;
@@ -75,7 +76,7 @@ const PHP_BUNDLE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-convert-php-
 
 function post(base, urlPath, body) {
   return fetch(base + urlPath, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(signSpend(urlPath, body || {}))
   }).then(async (r) => ({ status: r.status, body: await r.json() }));
 }
 
@@ -116,7 +117,7 @@ async function issue(base, ownerPublicKey, assetClass, quantity, existingBalance
 
   try {
     // ---------- Node ----------
-    const OWNER = 'test-owner-currency-conversion-demo';
+    const OWNER = newOwner();
 
     console.log('STEP 1 (Node): converting an exact multiple leaves no remainder — 200 iron -> 10 gold at 20:1');
     const iron200 = await issue(NODE_BASE, OWNER, 'atlas.element.iron', 200);
@@ -171,7 +172,7 @@ async function issue(base, ownerPublicKey, assetClass, quantity, existingBalance
     console.log('PASS: rejected ->', overspend.body.error);
 
     console.log('STEP 9 (Node): the 500 holdingCap on iron blocks a further mint once an owner holds that much, and is independent per class');
-    const capOwner = 'test-owner-holding-cap-demo';
+    const capOwner = newOwner();
     const iron500 = await issue(NODE_BASE, capOwner, 'atlas.element.iron', 500);
     const overCap = await post(NODE_BASE, '/atlas/asset/issue', { ownerPublicKey: capOwner, assetClass: 'atlas.element.iron', quantity: 1, existingBalances: [iron500] });
     if (overCap.status !== 400 || !overCap.body.error.includes('cap: 500')) throw new Error('Expected the cap to block a further mint, got: ' + JSON.stringify(overCap.body));
@@ -192,7 +193,7 @@ async function issue(base, ownerPublicKey, assetClass, quantity, existingBalance
     console.log('PASS: converted into 9000 iron — the holdingCap only ever gates fresh /atlas/asset/issue mints, never split/convert/trade re-mints');
 
     // ---------- PHP parity ----------
-    const PHP_OWNER = 'test-owner-currency-conversion-php-demo';
+    const PHP_OWNER = newOwner();
 
     console.log('STEP 12 (PHP): same exact-multiple conversion — 200 iron -> 10 gold');
     const phpIron200 = await issue(PHP_BASE, PHP_OWNER, 'atlas.element.iron', 200);
@@ -223,7 +224,7 @@ async function issue(base, ownerPublicKey, assetClass, quantity, existingBalance
     console.log('PASS: rejected ->', phpTooSmall.body.error);
 
     console.log('STEP 16 (PHP): the 500 holdingCap on iron blocks a further mint, with or without presented balances');
-    const phpCapOwner = 'test-owner-holding-cap-php-demo';
+    const phpCapOwner = newOwner();
     const phpIron500 = await issue(PHP_BASE, phpCapOwner, 'atlas.element.iron', 500);
     const phpOverCap = await post(PHP_BASE, '/atlas/asset/issue', { ownerPublicKey: phpCapOwner, assetClass: 'atlas.element.iron', quantity: 1, existingBalances: [phpIron500] });
     if (phpOverCap.status !== 400 || !phpOverCap.body.error.includes('cap: 500')) throw new Error('Expected the cap to block a further mint, got: ' + JSON.stringify(phpOverCap.body));

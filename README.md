@@ -2078,6 +2078,13 @@ simplifications are worth naming plainly rather than leaving implicit:
   HTTP on localhost. A real deployment needs real HTTPS domains and a real
   access-controlled issuance flow — the point here was proving the
   credential mechanisms themselves work, not building a production issuer.
+  The exceptions that spend a presented credential are `/atlas/asset/split`,
+  `/atlas/asset/consolidate` and `/atlas/convert`: each needs an `intent`
+  (`{payload, proof}`) signed by the credential's owner over the operation,
+  its parameters, the request id and the issuing domain, and refuses a copy
+  of a credential (403 `owner-authorization-required`, `owner-signature-invalid`
+  or `not-owner`). The wallet and the demo pages sign these for the owner;
+  `test/manual-owner-unauthorized-mutations.js` covers the refusals.
 - **Admin-gated endpoints.** `/atlas/revoke`, `/atlas/mail/send`,
   `/atlas/asset/reissue`, and `/atlas/calendar`'s `POST` side are the four
   exceptions to the paragraph above — successive slices of what's meant to
