@@ -46,17 +46,26 @@ if ($problem) send_json(400, atlas_spend_problem_body($problem, $credential));
 $busy = atlas_lease('chest', $chestId . "\n" . $signer);
 if ($busy !== null) send_json(503, ['error' => $busy, 'code' => 'busy']);
 try {
-  if (atlas_chest_opened($chestId, $signer)) {
+  $reopen = !empty($chest['reopenWhenLost']);
+  if (!$reopen && atlas_chest_opened($chestId, $signer)) {
     send_json(409, ['error' => 'this wallet has already opened this chest', 'code' => 'chest-already-opened', 'chestId' => $chestId]);
   }
   $asset = atlas_asset_catalog_entry($chest['rewardClass']);
   if ($asset === null) send_json(500, ['error' => 'the chest reward is not available', 'code' => 'reward-unavailable']);
+  // Earlier rewards to this owner are retired in the same step, so a reopened chest never leaves two live copies.
+  $retired = $reopen ? atlas_chest_live_reward_ids($chestId, $signer) : [];
+  foreach ($retired as $oldId) {
+    $lockBusy = atlas_spend_lock($oldId);
+    if ($lockBusy !== null) send_json(503, ['error' => $lockBusy, 'code' => 'busy']);
+  }
+  $earlier = atlas_chest_marker_read($chestId, $signer);
+  $earlierIds = is_array($earlier['rewardIds'] ?? null) ? $earlier['rewardIds'] : [];
   $reward = issue_asset($kp['privateKey'], $kp['publicKeyB64url'], $signer, $asset, 1, null, true);
   atlas_fault_point('chest:signed');
-  atlas_chest_marker_write($chestId, $signer, $requestId, $credential['id']);
+  atlas_chest_marker_write($chestId, $signer, $requestId, $credential['id'], $reopen ? array_merge($earlierIds, [$reward['id']]) : [$reward['id']]);
   atlas_fault_point('chest:marked');
   $responseJson = atlas_commit_replacement(
-    $requestId, 'open-chest', [$credential['id']], 'consumed', $params, [$reward],
+    $requestId, 'open-chest', array_merge([$credential['id']], $retired), 'consumed', $params, [$reward],
     ['opened' => true, 'chestId' => $chestId, 'chestName' => $chest['name'], 'consumed' => $credential['id'], 'reward' => $reward]
   );
 } catch (Exception $e) {

@@ -2209,7 +2209,7 @@ const AtlasWallet = (() => {
       const res = await fetch(baseUrl(issuerDomain) + '/atlas/chest/status?chestId=' + encodeURIComponent(chestId) + '&owner=' + encodeURIComponent(owner.publicKey), { cache: 'no-store', signal: controller.signal });
       if (!res.ok) return null;
       const data = await res.json();
-      return data && typeof data.opened === 'boolean' ? { opened: data.opened, name: data.name || null, rewardClass: data.rewardClass || null } : null;
+      return data && typeof data.opened === 'boolean' ? { opened: data.opened, name: data.name || null, rewardClass: data.rewardClass || null, reopenWhenLost: data.reopenWhenLost === true } : null;
     } catch (err) {
       return null;
     } finally {

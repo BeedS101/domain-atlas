@@ -7,13 +7,17 @@ if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVE
 // "once" is recorded in a private marker file (chests/) written before the key is spent; the key's
 // revocation is the commit point, so a marker whose key was never revoked (a request that died before
 // committing) does not count as opened.
+//
+// A chest marked 'reopenWhenLost' may be opened again by the same owner (with another key): the wallet
+// checks that the reward is no longer held, and the issuer revokes every reward this chest earlier signed
+// to that owner, so at most one stays live. The marker keeps the ids of those rewards.
 
 const ATLAS_CHEST_KEY_CLASS = 'atlas.demo.studio.collectible';
 const ATLAS_CHEST_KEY_TEMPLATE = 'key';
 
 const ATLAS_CHEST_CATALOG = [
   'gallery-gem' => ['name' => 'Gem Chest', 'rewardClass' => 'atlas.gem.ruby'],
-  'gallery-pick' => ['name' => 'Tool Chest', 'rewardClass' => 'atlas.tool.pickaxe'],
+  'gallery-pick' => ['name' => 'Tool Chest', 'rewardClass' => 'atlas.tool.pickaxe', 'reopenWhenLost' => true],
 ];
 
 function atlas_chest_entry($chestId) {
@@ -25,7 +29,7 @@ function atlas_chest_marker_file($chestId, $ownerPublicKey) {
   return atlas_chest_marker_dir() . '/' . hash('sha256', $chestId . "\n" . $ownerPublicKey) . '.json';
 }
 
-// null when there is no marker; otherwise ['requestId', 'keyId', 'openedAt'].
+// null when there is no marker; otherwise ['requestId', 'keyId', 'openedAt', 'rewardIds' (may be missing)].
 function atlas_chest_marker_read($chestId, $ownerPublicKey) {
   $file = atlas_chest_marker_file($chestId, $ownerPublicKey);
   if (!is_file($file)) return null;
@@ -36,9 +40,9 @@ function atlas_chest_marker_read($chestId, $ownerPublicKey) {
   return $rec;
 }
 
-function atlas_chest_marker_write($chestId, $ownerPublicKey, $requestId, $keyId) {
+function atlas_chest_marker_write($chestId, $ownerPublicKey, $requestId, $keyId, $rewardIds) {
   atlas_private_subdir_ensure('chests');
-  $text = json_encode(['requestId' => $requestId, 'keyId' => $keyId, 'openedAt' => gmdate('Y-m-d\TH:i:s\Z')], JSON_UNESCAPED_SLASHES);
+  $text = json_encode(['requestId' => $requestId, 'keyId' => $keyId, 'openedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'rewardIds' => array_values($rewardIds)], JSON_UNESCAPED_SLASHES);
   if ($text === false) throw new Exception('could not encode the chest record', 503);
   atlas_write_file_atomic(atlas_chest_marker_file($chestId, $ownerPublicKey), $text, 0600);
 }
@@ -47,6 +51,16 @@ function atlas_chest_marker_write($chestId, $ownerPublicKey, $requestId, $keyId)
 function atlas_chest_opened($chestId, $ownerPublicKey) {
   $rec = atlas_chest_marker_read($chestId, $ownerPublicKey);
   return $rec !== null && is_revoked($rec['keyId']);
+}
+
+// Ids of rewards this chest signed to this owner that are not revoked yet.
+function atlas_chest_live_reward_ids($chestId, $ownerPublicKey) {
+  $rec = atlas_chest_marker_read($chestId, $ownerPublicKey);
+  $live = [];
+  foreach ((is_array($rec['rewardIds'] ?? null) ? $rec['rewardIds'] : []) as $id) {
+    if (is_string($id) && $id !== '' && !is_revoked($id)) $live[] = $id;
+  }
+  return $live;
 }
 
 // Admin recovery: forgets that this owner key opened this chest, so it can be opened again with another key.

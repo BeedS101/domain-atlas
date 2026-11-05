@@ -202,23 +202,55 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     };
     const owner = makeIdentity('raw-ecdsa');
     const first = await mintFor(l, owner);
-    assert.equal((await open(l, openBody(owner, first, 'gallery-pick'))).status, 200);
+    assert.equal((await open(l, openBody(owner, first, 'gallery-gem'))).status, 200);
     const second = await mintFor(l, owner);
-    assert.equal((await open(l, openBody(owner, second, 'gallery-pick'))).status, 409);
-    assert.equal((await reset(owner, 'gallery-pick', owner.publicKeyB64)).status, 401, 'a non-admin cannot reset');
-    const none = await reset(admin, 'gallery-gem', owner.publicKeyB64);
+    assert.equal((await open(l, openBody(owner, second, 'gallery-gem'))).status, 409);
+    assert.equal((await reset(owner, 'gallery-gem', owner.publicKeyB64)).status, 401, 'a non-admin cannot reset');
+    const none = await reset(admin, 'gallery-pick', owner.publicKeyB64);
     assert.equal(none.status, 200, none.text);
     assert.equal(none.json.wasOpened, false, 'a chest that was not opened is a no-op');
     assert.equal((await reset(admin, 'no-such-chest', owner.publicKeyB64)).status, 404);
-    const done = await reset(admin, 'gallery-pick', owner.publicKeyB64);
+    const done = await reset(admin, 'gallery-gem', owner.publicKeyB64);
     assert.equal(done.status, 200, done.text);
     assert.equal(done.json.wasOpened, true);
-    assert.equal((await l.get('/atlas/chest/status?chestId=gallery-pick&owner=' + encodeURIComponent(owner.publicKeyB64))).json.opened, false);
-    const again = await open(l, openBody(owner, second, 'gallery-pick'));
+    assert.equal((await l.get('/atlas/chest/status?chestId=gallery-gem&owner=' + encodeURIComponent(owner.publicKeyB64))).json.opened, false);
+    const again = await open(l, openBody(owner, second, 'gallery-gem'));
     assert.equal(again.status, 200, again.text);
-    assert.equal(again.json.reward.asset.class, 'atlas.tool.pickaxe');
+    assert.equal(again.json.reward.asset.class, 'atlas.gem.ruby');
     assert.ok(!revoked(l).includes(again.json.reward.id), 'the new reward is live');
     assert.ok(revoked(l).includes(first.id), 'the first key stayed spent');
+  });
+
+  await test('the tool chest can be opened again, retiring the earlier pick so only one stays live', async () => {
+    const l = await newLab();
+    const owner = makeIdentity('raw-ecdsa');
+    const status = () => l.get('/atlas/chest/status?chestId=gallery-pick&owner=' + encodeURIComponent(owner.publicKeyB64)).then((r) => r.json);
+    assert.equal((await status()).reopenWhenLost, true);
+    const k1 = await mintFor(l, owner), k2 = await mintFor(l, owner), k3 = await mintFor(l, owner);
+    const first = await open(l, openBody(owner, k1, 'gallery-pick'));
+    assert.equal(first.status, 200, first.text);
+    assert.equal((await status()).opened, true);
+    const second = await open(l, openBody(owner, k2, 'gallery-pick'));
+    assert.equal(second.status, 200, second.text);
+    assert.equal(second.json.reward.asset.class, 'atlas.tool.pickaxe');
+    assert.notEqual(second.json.reward.id, first.json.reward.id);
+    assert.ok(revoked(l).includes(first.json.reward.id), 'the earlier pick was retired');
+    assert.ok(!revoked(l).includes(second.json.reward.id), 'the new pick is live');
+    assert.ok(revoked(l).includes(k2.id), 'the second key was spent');
+    const third = await open(l, openBody(owner, k3, 'gallery-pick'));
+    assert.equal(third.status, 200, third.text);
+    assert.ok(revoked(l).includes(second.json.reward.id) && !revoked(l).includes(third.json.reward.id), 'only the latest pick is live');
+  });
+
+  await test('the gem chest still opens once per wallet', async () => {
+    const l = await newLab();
+    const owner = makeIdentity('raw-ecdsa');
+    assert.equal((await l.get('/atlas/chest/status?chestId=gallery-gem&owner=' + encodeURIComponent(owner.publicKeyB64))).json.reopenWhenLost, false);
+    const k1 = await mintFor(l, owner), k2 = await mintFor(l, owner);
+    assert.equal((await open(l, openBody(owner, k1, 'gallery-gem'))).status, 200);
+    const again = await open(l, openBody(owner, k2, 'gallery-gem'));
+    assert.equal(again.status, 409);
+    assert.ok(!revoked(l).includes(k2.id), 'the second key was not spent');
   });
 
   for (const l of labs) { await l.stop(); l.cleanup(); }

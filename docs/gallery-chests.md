@@ -21,9 +21,11 @@ A chest is an `interactables` entry in the world's `scene.json`:
 3. With a key, it asks for confirmation ("A key will be consumed to open the chest, do you want to continue?").
 4. On confirmation the wallet signs an `open-chest` intent and posts it to `POST /atlas/asset/open-chest` with a `requestId`. The issuer revokes the key (reason `consumed`), signs the reward and answers with both, as one journalled replacement.
 
-A chest opens once per wallet. The issuer records `{requestId, keyId, openedAt}` under a hash of chest and owner before it spends the key. A chest counts as opened only when that marker exists and its key is revoked, so a request that died before the key was spent does not lock the chest. Repeating a request with the same `requestId` returns the stored answer.
+A chest opens once per wallet, except a chest marked `reopenWhenLost` in the catalog (the tool chest). The issuer records `{requestId, keyId, openedAt}` under a hash of chest and owner before it spends the key. A chest counts as opened only when that marker exists and its key is revoked, so a request that died before the key was spent does not lock the chest. Repeating a request with the same `requestId` returns the stored answer.
 
-If an owner loses the reward (for example by deleting it from the wallet), an admin can run "Reset a chest" in the Admin Panel (`POST /atlas/chest/reset`, admin-gated). It removes the record that this owner key opened the chest; the owner then opens it again with a new key. The reward already issued stays valid and nothing is revoked.
+A `reopenWhenLost` chest can be opened again by the same owner with another key. The viewer checks that the wallet no longer holds the reward (a hidden one counts as held) and `GET /atlas/chest/status` reports `reopenWhenLost`. The issuer keeps the ids of every reward the chest signed to that owner and revokes any still live in the same step as the new one, so at most one pick is live per owner. A pick that was gifted away is already a different credential, so the pick is best made `bound` if a quest needs exactly one per player.
+
+For a chest that is not reopenable, if an owner loses the reward (for example by deleting it from the wallet), an admin can run "Reset a chest" in the Admin Panel (`POST /atlas/chest/reset`, admin-gated). It removes the record that this owner key opened the chest; the owner then opens it again with a new key. The reward already issued stays valid and nothing is revoked.
 
 ## Rewards
 

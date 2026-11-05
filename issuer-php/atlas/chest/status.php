@@ -16,4 +16,4 @@ try {
 } catch (Exception $e) {
   send_json(503, ['error' => $e->getMessage()]);
 }
-send_json(200, ['chestId' => $chestId, 'name' => $chest['name'], 'rewardClass' => $chest['rewardClass'], 'opened' => $opened]);
+send_json(200, ['chestId' => $chestId, 'name' => $chest['name'], 'rewardClass' => $chest['rewardClass'], 'opened' => $opened, 'reopenWhenLost' => !empty($chest['reopenWhenLost'])]);

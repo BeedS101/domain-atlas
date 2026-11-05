@@ -224,6 +224,18 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     await frame.waitForTimeout(300);
     assertTrue(await frame.evaluate(() => !document.getElementById('walletPanel').classList.contains('open')), 'panel stayed closed');
     console.log('PASS: ignored while typing');
+    console.log('STEP 12: the tool chest is reopenable once the pick is gone from the wallet');
+    await frame.evaluate(() => { window.__chestRun = handleInteractable(window.__chestMarkers.find((m) => m.chestId === 'gallery-pick')); });
+    await frame.evaluate(() => window.__chestRun);
+    assertTrue(/already have Mining Pick/.test(await frame.locator('#status').innerText()), 'holding the pick blocks a second one: ' + await frame.locator('#status').innerText());
+    assertTrue(await frame.locator('#chestModal.active').count() === 0, 'no prompt while the pick is held');
+    await walletPage.evaluate(async ({ o, id }) => AtlasWallet.deleteAsset(o, id), { o: identity.publicKey, id: pick.credential.id });
+    await frame.evaluate(() => { window.__chestRun = handleInteractable(window.__chestMarkers.find((m) => m.chestId === 'gallery-pick')); });
+    await frame.waitForSelector('#chestModal.active', { timeout: 40000 });
+    assertTrue(/locked/i.test(await frame.locator('#chestTitle').innerText()), 'with the pick gone and no key, the chest offers the Studio');
+    await frame.locator('#chestCancelBtn').click();
+    await frame.evaluate(() => window.__chestRun);
+    console.log('PASS: held pick blocks a second one; a lost pick lets the chest be looted again');
     ok = true;
   } finally {
     await context.close().catch(() => {});

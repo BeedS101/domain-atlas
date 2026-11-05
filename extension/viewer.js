@@ -12693,16 +12693,25 @@ async function handleInteractable(marker) {
       if (marker.class === 'atlas.membership') await refreshSubscribeButton();
     } else if (marker.action === 'open-chest') {
       // A chest is opened by spending one Asset Studio key from the chest's own domain; the issuer
-      // enforces one opening per wallet per chest, so the prompts here only avoid asking for a key that
-      // could not be used.
+      // enforces one opening per wallet per chest (unless the chest is reopenable), so the prompts here only
+      // avoid asking for a key that could not be used.
       const identity = await AtlasWallet.getIdentity();
       if (!identity) throw new Error('Create an identity first.');
       const domain = manifestDomainOf(currentManifest);
       const chestName = marker.chestName || 'chest';
       const status = await AtlasWallet.chestStatus('self', domain, marker.chestId);
       if (status && status.opened) {
-        statusEl.textContent = 'You have already opened this ' + chestName + '.';
-        return;
+        // A chest that can be reopened lets the owner loot it again once the reward is gone from the wallet
+        // (hidden counts as still held).
+        const held = status.reopenWhenLost && status.rewardClass
+          ? (await AtlasWallet.getWallet(identity.publicKey)).find((e) => e.credential.asset.class === status.rewardClass && e.credential.issuer.domain === domain)
+          : null;
+        if (!status.reopenWhenLost || held) {
+          statusEl.textContent = status.reopenWhenLost
+            ? 'You already have ' + held.credential.asset.name + (held.hidden ? ' (hidden in your wallet).' : '.')
+            : 'You have already opened this ' + chestName + '.';
+          return;
+        }
       }
       const keys = await AtlasWallet.findChestKeys('self', domain);
       if (!keys.length) {
