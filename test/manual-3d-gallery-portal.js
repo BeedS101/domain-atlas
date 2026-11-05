@@ -104,6 +104,11 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     const CENTRE = [0.2, 0.15, 0.8, 0.85];
 
     console.log('STEP 1: the real Gallery scene with the gate');
+    // The hall's own models carry textures, so the gate's four (stone, runes, plaque, portal surface) are
+    // measured as the difference from the same hall without the gate.
+    writeScene(withoutGate);
+    await enterGallery();
+    const hallTextures = await live();
     writeScene();
     requests.length = 0;
     await enterGallery();
@@ -120,14 +125,14 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     const gateRequests = requests.filter((u) => u.endsWith(GATE)).length;
     assert(gateRequests === 1, 'the gate GLB is requested once, got ' + gateRequests);
     const during = await live();
-    assert(during === 5, 'expected 5 live GL textures (fallback + stone, runes, plaque, portal surface), got ' + during);
+    assert(during === hallTextures + 4, 'expected the gate to add 4 live GL textures (stone, runes, plaque, portal surface) to the hall\'s ' + hallTextures + ', got ' + during);
     const blocked = await frame.evaluate(() => {
       const w = window.__atlasActive3D; const bad = [];
       for (let x = -2.8; x <= 2.801; x += 0.2) for (let z = -16.6; z <= -14.9; z += 0.1) if (w.isPositionBlocked(x, z)) bad.push([+x.toFixed(2), +z.toFixed(2)]);
       return bad;
     });
     assert(blocked.length === 0, 'no point of the gate (frame, opening, plinth) blocks movement, blocked: ' + JSON.stringify(blocked));
-    console.log('PASS: portal 0 is still "Back to the Neighbor Workshop" at [0,0,-16] (same-domain), scale 1.4; the gate GLB is fetched once with 5 live textures; the gate blocks nothing');
+    console.log('PASS: portal 0 is still "Back to the Neighbor Workshop" at [0,0,-16] (same-domain), scale 1.4; the gate GLB is fetched once and adds 4 live textures; the gate blocks nothing');
 
     console.log('STEP 2: from the front the gate renders with its textures');
     await setCamera(...FRONT);
@@ -139,7 +144,8 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     console.log('PASS: portal surface (' + gc.portal + ' px) and stone (' + gc.stone + ' px) render in the world');
 
     console.log('STEP 3: hideMarker hides only the placeholder ring and beacon');
-    writeScene((s) => { s.portalMarkers[0].hideMarker = false; });
+    // raised above the hall's floor slab, which would otherwise cover a ring drawn at y 0
+    writeScene((s) => { s.portalMarkers[0].hideMarker = false; s.portalMarkers[0].position = [0, 0.3, -16]; });
     await enterGallery();
     await setCamera(...FRONT);
     await sleep(1200);
@@ -181,7 +187,7 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     assert((await live()) === 0, 'the 2D Workshop holds no gate textures, live: ' + (await live()));
     await enterGallery();
     const again = await frame.evaluate(() => ({ kind: window.__atlasActive3D.getPortalTriggerKind(0), cam: [...window.__atlasActive3D.camera.pos] }));
-    assert(again.kind === 'same-domain' && Math.abs(again.cam[2] - 14) < 0.01, 'back in the Gallery at its spawn: ' + JSON.stringify(again));
+    assert(again.kind === 'same-domain' && Math.abs(again.cam[2]) < 0.01, 'back in the Gallery at its spawn: ' + JSON.stringify(again));
     await setCamera(...FRONT);
     await sleep(1200);
     const gc2 = await count(await grab(), CENTRE);
@@ -189,7 +195,7 @@ function assert(cond, msg) { if (!cond) throw new Error(msg); }
     console.log('PASS: Gallery re-entered at its spawn with the gate rendering again');
 
     console.log('STEP 7: destroying the world frees the gate\'s GPU textures');
-    assert((await live()) === 5, 'expected 5 live textures after re-entering, got ' + (await live()));
+    assert((await live()) === hallTextures + 4, 'expected ' + (hallTextures + 4) + ' live textures after re-entering, got ' + (await live()));
     await frame.evaluate(() => window.__atlasActive3D.destroy());
     assert((await live()) === 0, 'expected 0 live GL textures after destroy(), got ' + (await live()));
     console.log('PASS: 0 live GL textures after destroy()');

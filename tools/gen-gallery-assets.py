@@ -583,6 +583,23 @@ OVERRIDES = {
 }
 
 
+# Per model: colour -> emissive factor, so lamps and indicator strips glow (the renderer has one
+# directional light, so fixtures are lit by their own emission).
+EMISSIVE = {
+    'gallery-wall-sconce': {(0.14, 0.64, 0.63): (0.16, 0.52, 0.50), (0.91, 0.78, 0.52): (0.40, 0.32, 0.16)},
+    'gallery-wayfinding-beacon': {(0.40, 0.82, 0.80): (0.20, 0.58, 0.55)},
+    'gallery-exhibit-banner': {(0.14, 0.64, 0.63): (0.16, 0.50, 0.48)},
+}
+
+
+def emissive_for(model_name, color):
+    c = tuple(color[:3])
+    for k, v in EMISSIVE.get(model_name, {}).items():
+        if max(abs(a - b) for a, b in zip(c, k)) < 0.035:
+            return v
+    return None
+
+
 def classify(model_name, color):
     c = tuple(color[:3])
     for table in (OVERRIDES.get(model_name, {}),):
@@ -603,7 +620,7 @@ def texturize(name, src_path):
         kind = classify(name, color)
         ext = tris.reshape(-1, 3).max(axis=0) - tris.reshape(-1, 3).min(axis=0)
         grain = 2 if kind == 'roof' else (int(np.argmax(ext)) if kind in ('wood', 'brass', 'darkmetal') and ext.max() > 1.6 * np.median(ext) else None)
-        emissive = srcmat.get('emissiveFactor')
+        emissive = emissive_for(name, color) or srcmat.get('emissiveFactor')
         m = mat(kind, list(color[:3]) + [1.0], emissive=emissive, double=srcmat.get('doubleSided', True))
         prim = model.prim(m)
         mpt = TILE_M.get(kind, 1.0)
@@ -675,6 +692,41 @@ def build_floor():
 def build_runner():
     m = Model('gallery-runner')
     add_box(m, mat('runner'), (0, 0.0415, 0), (3.2, 0.011, 29.0), faces=('+y',))
+    return m
+
+
+def add_frustum(model, m, cx, cz, y0, y1, r0, r1, segs=14, side=True, cap_bottom=False, cap_top=False):
+    """Vertical cone frustum, radius r0 at y0 and r1 at y1, wound so the side faces outward."""
+    ang = [2 * math.pi * i / segs for i in range(segs)]
+    lo = [np.array([cx + r0 * math.cos(a), y0, cz + r0 * math.sin(a)]) for a in ang]
+    hi = [np.array([cx + r1 * math.cos(a), y1, cz + r1 * math.sin(a)]) for a in ang]
+    tris = []
+    for i in range(segs):
+        j = (i + 1) % segs
+        if side:
+            tris += [(lo[i], hi[i], hi[j]), (lo[i], hi[j], lo[j])]
+        if cap_bottom:
+            tris.append((lo[i], lo[j], np.array([cx, y0, cz])))
+        if cap_top:
+            tris.append((hi[j], hi[i], np.array([cx, y1, cz])))
+    add_poly(model, m, tris)
+
+
+PENDANT_TOP, PENDANT_DROP = 9.0, 3.0
+
+
+def build_pendant():
+    """A hanging lamp: rod from the roof, a brass cone shade and a glowing underside. Placed at y 0."""
+    m = Model('gallery-pendant')
+    bottom = PENDANT_TOP - PENDANT_DROP
+    dark = mat('darkmetal', (0.55, 0.58, 0.62))
+    brass = mat('brass', (1.0, 0.90, 0.62))
+    add_box(m, dark, (0, (PENDANT_TOP + bottom + 0.45) / 2, 0), (0.05, PENDANT_TOP - bottom - 0.45, 0.05), grain=1)
+    add_frustum(m, brass, 0, 0, bottom + 0.34, bottom + 0.44, 0.10, 0.08)
+    add_frustum(m, brass, 0, 0, bottom, bottom + 0.34, 0.50, 0.10)
+    add_frustum(m, mat(None, (1.0, 0.93, 0.74), emissive=(1.0, 0.80, 0.46)), 0, 0, bottom + 0.012, bottom + 0.012, 0.46, 0.46, side=False, cap_bottom=True)
+    add_frustum(m, mat(None, (1.0, 0.95, 0.80), emissive=(1.0, 0.86, 0.55)), 0, 0, bottom - 0.05, bottom + 0.10, 0.11, 0.17, cap_bottom=True)
+    add_frustum(m, brass, 0, 0, PENDANT_TOP - 0.12, PENDANT_TOP, 0.16, 0.16)
     return m
 
 
@@ -778,6 +830,7 @@ HAND = {
     'gallery-window-panel': (build_window_panel, OUT),
     'gallery-floor': (build_floor, OUT),
     'gallery-runner': (build_runner, OUT),
+    'gallery-pendant': (build_pendant, OUT),
     'reward-crate': (build_crate, OUT),
     'treasure-chest-gem': (lambda: build_chest('treasure-chest-gem', 'brass', (1.0, 0.86, 0.5), (1.0, 0.22, 0.30)), OUT),
     'treasure-chest-tools': (lambda: build_chest('treasure-chest-tools', 'darkmetal', (0.66, 0.72, 0.80), (0.20, 0.95, 0.90)), OUT),

@@ -9,20 +9,25 @@
     "color": "#494237"
   },
   "ambientLight": {
-    "intensity": 0.72
+    "intensity": 0.55
   },
   "directionalLight": {
     "direction": [
-      -0.5,
-      -1,
-      -0.35
+      -0.6,
+      -0.8,
+      -0.45
     ]
+  },
+  "fog": {
+    "color": "#d9c9a8",
+    "near": 30,
+    "far": 95
   },
   "camera": {
     "start": [
       0,
       1.6,
-      14
+      0
     ],
     "startYaw": 0
   },
@@ -397,20 +402,11 @@
       "rotationY": 0
     },
     {
-      "model": "/assets/gallery/potted-plant.glb",
-      "position": [
-        18,
-        0,
-        13
-      ],
-      "rotationY": 0
-    },
-    {
       "model": "/assets/gallery/globe-feature.glb",
       "position": [
+        11,
         0,
-        0,
-        -1
+        11
       ],
       "rotationY": 0,
       "scale": 2.1
@@ -448,9 +444,9 @@
     {
       "model": "/assets/gallery/book-display.glb",
       "position": [
-        -18,
+        -20.3,
         0,
-        -6
+        -4
       ],
       "rotationY": 90,
       "scale": 1.4
@@ -458,19 +454,9 @@
     {
       "model": "/assets/gallery/book-display.glb",
       "position": [
-        -18,
+        -20.3,
         0,
-        0
-      ],
-      "rotationY": 90,
-      "scale": 1.4
-    },
-    {
-      "model": "/assets/gallery/book-display.glb",
-      "position": [
-        -18,
-        0,
-        7
+        6
       ],
       "rotationY": 90,
       "scale": 1.4
@@ -665,38 +651,11 @@
       "rotationY": 0
     },
     {
-      "model": "/assets/gallery/potted-plant.glb",
-      "position": [
-        12,
-        0,
-        12
-      ],
-      "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/potted-plant.glb",
-      "position": [
-        6,
-        0,
-        9
-      ],
-      "rotationY": 0
-    },
-    {
       "model": "/assets/gallery/wood-bench.glb",
       "position": [
         -5.5,
         0,
         12.5
-      ],
-      "rotationY": 0
-    },
-    {
-      "model": "/assets/gallery/wood-bench.glb",
-      "position": [
-        10,
-        0,
-        8
       ],
       "rotationY": 0
     },
@@ -1187,11 +1146,71 @@
     {
       "model": "/assets/gallery/globe-plinth-detail.glb",
       "position": [
+        11,
         0,
+        12
+      ],
+      "collision": false
+    },
+    {
+      "model": "/assets/gallery/gallery-pendant.glb",
+      "position": [
+        -7,
+        0,
+        -9
+      ],
+      "rotationY": 0,
+      "solid": false
+    },
+    {
+      "model": "/assets/gallery/gallery-pendant.glb",
+      "position": [
+        -7,
         0,
         0
       ],
-      "collision": false
+      "rotationY": 0,
+      "solid": false
+    },
+    {
+      "model": "/assets/gallery/gallery-pendant.glb",
+      "position": [
+        -7,
+        0,
+        9
+      ],
+      "rotationY": 0,
+      "solid": false
+    },
+    {
+      "model": "/assets/gallery/gallery-pendant.glb",
+      "position": [
+        7,
+        0,
+        -9
+      ],
+      "rotationY": 0,
+      "solid": false
+    },
+    {
+      "model": "/assets/gallery/gallery-pendant.glb",
+      "position": [
+        7,
+        0,
+        0
+      ],
+      "rotationY": 0,
+      "solid": false
+    },
+    {
+      "model": "/assets/gallery/gallery-pendant.glb",
+      "position": [
+        7,
+        0,
+        9
+      ],
+      "rotationY": 0,
+      "solid": false
     }
   ],
   "portalMarkers": [

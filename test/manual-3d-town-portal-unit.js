@@ -57,9 +57,9 @@ const GATES = [
     entry: null,
     placed: { model: '/assets/portals/galleryPortal.glb', position: [0, 0, -15.8], rotationY: 0, scale: 3, solid: false },
     marker: { position: [0, 0, -16], radius: 2, portalIndex: 0, hideMarker: true },
-    camera: { start: [0, 1.6, 14], startYaw: 0 },
+    camera: { start: [0, 1.6, 0], startYaw: 0 },
     floor: { size: [46, 40], color: '#494237' },
-    characterScale: 1.4, objectCount: 115, interactables: null,
+    characterScale: 1.4, objectCount: 125, interactables: null,
     gateArea: { x: [-2.85, 2.85], z: [-16.6, -14.9] }, approach: { x: 0, z: [-14.9, -8] },
     grid: { x: [-23, 23], z: [-20, 20] }
   }
