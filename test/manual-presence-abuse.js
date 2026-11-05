@@ -213,7 +213,7 @@ const GOOD_NAMES = ['Alice', 'Bob', 'Model Citizen', 'Unofficial Joe', 'Badminto
 
     console.log('STEP 8: DA-002 shapes are unchanged');
     check(Object.keys(w2.body).sort().join(',') === 'id,publicId,roster', 'join response is exactly id, publicId, roster');
-    check(Object.keys(w2.body.roster[0]).sort().join(',') === 'hatColor,id,name,pantsColor,shirtColor,shoeColor,shoeScale,x,y,yaw,z', 'roster entries expose only id, name, pose and look');
+    check(Object.keys(w2.body.roster[0]).sort().join(',') === 'handModel,hatColor,id,name,pantsColor,shirtColor,shoeColor,shoeScale,x,y,yaw,z', 'roster entries expose only id, name, pose and look');
     check(JSON.stringify((await rq(ip(250), 'GET', '/presence/status?domain=wallets.example&world=hall')).body) === '{"count":2}', 'status is exactly a count');
     check(!seen.some((t) => /"publicKey"/.test(t)), 'no response carries a publicKey field');
 

@@ -590,12 +590,12 @@
      would otherwise show through) and its own left/right/top padding to
      visually line back up with #walletPanelContent's 16px inset below it. */
   #walletTabBar {
-    display: none; gap: 8px; padding: 16px 16px 10px;
+    display: none; gap: 5px; padding: 16px 10px 10px;
     position: sticky; top: 0; z-index: 1;
     background: rgba(14,22,27,0.97); border-bottom: 1px solid #2c3c44;
   }
   #walletTabBar.visible { display: flex; }
-  #walletTabBar button { flex: 1; }
+  #walletTabBar button { flex: 1 1 0; min-width: 0; padding-left: 4px; padding-right: 4px; font-size: 12px; }
   #walletTabBar button.active-tab { background: #1d2f38; border-color: #4a90a4; color: #fff6ef; }
 
   /* Scene asset download progress (#36) — an overlay centered on the 3D
@@ -870,6 +870,28 @@
      — same sizing/background treatment as the Asset Viewer's own model
      canvas above, just a bit taller since it frames a standing character
      rather than a small held item. */
+  /* Character window (wallet -> Character tab, or the C key in a world): the live character in the middle
+     with one block per equip slot either side; a clicked block lists what the wallet holds for that slot. */
+  .character-stage { display: grid; grid-template-columns: 66px 1fr 66px; gap: 8px; align-items: stretch; margin-top: 6px; }
+  .character-slots { display: flex; flex-direction: column; justify-content: center; gap: 10px; }
+  .character-slot {
+    display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 2px; width: 100%;
+    background: #16232a; border: 1px solid #2c3c44; border-radius: 8px; color: #a9b8bf; font-size: 11px; cursor: pointer;
+  }
+  .character-slot:hover, .character-slot:focus-visible { border-color: #4a90a4; color: #fff6ef; }
+  .character-slot.selected { border-color: #57a593; background: #1d2f38; color: #fff6ef; }
+  .character-slot .slot-name { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: #8aa0a9; }
+  .character-slot .slot-icon { width: 44px; height: 44px; border-radius: 6px; background: rgba(0,0,0,0.28); display: flex; align-items: center; justify-content: center; overflow: hidden; font-size: 20px; color: #4d6068; }
+  .character-slot .slot-icon img { width: 100%; height: 100%; object-fit: contain; }
+  .character-slot .slot-item { max-width: 62px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #characterWindowCanvas { display: block; width: 100%; height: auto; aspect-ratio: 368 / 600; border-radius: 8px; background: rgba(0,0,0,0.25); }
+  #characterSlotPanel { margin-top: 12px; padding: 10px; border: 1px solid #2c3c44; border-radius: 8px; background: rgba(0,0,0,0.18); }
+  .character-choice { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 6px 8px; background: #16232a; border: 1px solid #2c3c44; border-radius: 6px; color: #d7e0e4; cursor: pointer; }
+  .character-choice:hover, .character-choice:focus-visible { border-color: #4a90a4; }
+  .character-choice.equipped { border-color: #57a593; }
+  .character-choice .choice-thumb { width: 36px; height: 36px; border-radius: 4px; background: rgba(0,0,0,0.28); object-fit: contain; flex: none; }
+  .character-choice .choice-text { display: flex; flex-direction: column; min-width: 0; }
+  .character-choice .choice-meta { font-size: 11px; color: #8aa0a9; }
   #characterPreviewCanvas {
     display: block; margin-top: 10px; width: 100%; max-width: 220px; height: 220px;
     border-radius: 6px; background: rgba(0,0,0,0.25);
@@ -1522,6 +1544,7 @@
            own top-level tab once #144 Phase 1 grew it past what a
            collapsed section was really built for — see tradeScreen below. -->
       <button id="tradeTabBtn" type="button">Trade</button>
+      <button id="characterTabBtn" type="button">Character</button>
       <button id="settingsTabBtn" type="button">Settings</button>
     </div>
 
@@ -1640,6 +1663,31 @@
          more. Each future setting is meant to be its own .subhead block
          here, same shape as "Identity method" and "Backup" below, rather
          than growing the main wallet screen. -->
+    <!-- Character window: see viewer.js's "Character window" section. The slot blocks are buttons; a clicked one
+         fills #characterSlotPanel with the wallet items that fit it. -->
+    <div id="characterScreen" class="wallet-screen">
+      <div class="character-stage">
+        <div class="character-slots">
+          <button type="button" class="character-slot" data-slot="hat"><span class="slot-name">Hat</span><span class="slot-icon" aria-hidden="true">&#9650;</span><span class="slot-item">Empty</span></button>
+          <button type="button" class="character-slot" data-slot="outfit"><span class="slot-name">Outfit</span><span class="slot-icon" aria-hidden="true">&#9632;</span><span class="slot-item">Empty</span></button>
+          <button type="button" class="character-slot" data-slot="shoes"><span class="slot-name">Shoes</span><span class="slot-icon" aria-hidden="true">&#9644;</span><span class="slot-item">Empty</span></button>
+        </div>
+        <canvas id="characterWindowCanvas" width="368" height="600"></canvas>
+        <div class="character-slots">
+          <button type="button" class="character-slot" data-slot="hand"><span class="slot-name">Hand</span><span class="slot-icon" aria-hidden="true">&#9874;</span><span class="slot-item">Empty</span></button>
+        </div>
+      </div>
+      <div id="characterSlotPanel" hidden>
+        <div class="subhead" id="characterSlotTitle"></div>
+        <div id="characterSlotNote" class="empty-note"></div>
+        <div id="characterSlotList" class="item-list"></div>
+        <div class="btn-col" style="margin-top:8px;">
+          <button id="characterSlotUnequipBtn" type="button" class="btn-secondary">Take it off</button>
+        </div>
+      </div>
+      <div id="characterStatus" class="mono" role="status" aria-live="polite"></div>
+    </div>
+
     <div id="settingsScreen" class="wallet-screen">
       <h3>Settings</h3>
 

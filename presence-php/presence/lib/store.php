@@ -378,6 +378,12 @@ function presence_sanitize_color($v) {
   return is_string($v) ? substr($v, 0, PRESENCE_MAX_COLOR_LEN) : null;
 }
 
+// A held-item model URL: absolute http(s), bounded; anything else is dropped (see sanitizeHandModel in presence-server).
+const PRESENCE_MAX_HAND_MODEL_LEN = 400;
+function presence_sanitize_hand_model($v) {
+  return (is_string($v) && strlen($v) <= PRESENCE_MAX_HAND_MODEL_LEN && preg_match('#^https?://\S+$#i', $v)) ? $v : null;
+}
+
 function presence_sanitize_scale($v) {
   $n = is_numeric($v) ? (float) $v : null;
   return ($n !== null && $n > 0 && $n <= PRESENCE_MAX_SHOE_SCALE) ? $n : null;
@@ -429,7 +435,8 @@ function presence_roster_of($room, $exceptToken) {
       'pantsColor' => isset($member['pantsColor']) ? $member['pantsColor'] : null,
       'hatColor' => isset($member['hatColor']) ? $member['hatColor'] : null,
       'shoeColor' => isset($member['shoeColor']) ? $member['shoeColor'] : null,
-      'shoeScale' => isset($member['shoeScale']) ? $member['shoeScale'] : null
+      'shoeScale' => isset($member['shoeScale']) ? $member['shoeScale'] : null,
+      'handModel' => isset($member['handModel']) ? $member['handModel'] : null
     ];
   }
   return $roster;

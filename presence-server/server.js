@@ -458,6 +458,10 @@ function isFiniteNumber(n) { return typeof n === 'number' && Number.isFinite(n);
 // screen; the server never acts on them, so this just keeps a malformed
 // value from propagating.
 function sanitizeColor(v) { return typeof v === 'string' ? v.slice(0, MAX_COLOR_LEN) : null; }
+// A held-item model URL: absolute http(s), bounded; anything else is dropped. Clients load it under the
+// world-drop model limits, so this only has to keep junk and oversize strings off the wire.
+const MAX_HAND_MODEL_LEN = 400;
+function sanitizeHandModel(v) { return (typeof v === 'string' && v.length <= MAX_HAND_MODEL_LEN && /^https?:\/\/[^\s]+$/i.test(v)) ? v : null; }
 function sanitizeScale(v) {
   const n = Number(v);
   return (Number.isFinite(n) && n > 0 && n <= MAX_SHOE_SCALE) ? n : null;
@@ -492,7 +496,7 @@ function rosterOf(room, exceptConnId) {
     if (id === exceptConnId) return;
     roster.push({
       id: member.publicId, name: member.name, x: member.x, y: member.y, z: member.z, yaw: member.yaw,
-      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null, hatColor: member.hatColor || null, shoeColor: member.shoeColor || null, shoeScale: member.shoeScale || null
+      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null, hatColor: member.hatColor || null, shoeColor: member.shoeColor || null, shoeScale: member.shoeScale || null, handModel: member.handModel || null
     });
   });
   return roster;
@@ -566,7 +570,7 @@ function removeMember(connId) {
 
 // Shared move path: validates and applies a position update for a joined
 // connId, then broadcasts it. `look` ({shirtColor, pantsColor, hatColor,
-// shoeColor, shoeScale}) rides alongside position because an equipped look
+// shoeColor, shoeScale, handModel}) rides alongside position because an equipped look
 // can change mid-session; a move is the member's full current pose.
 function moveMember(connId, x, y, z, yaw, look) {
   const loc = connIndex.get(connId);
@@ -580,9 +584,10 @@ function moveMember(connId, x, y, z, yaw, look) {
   const hatColor = sanitizeColor(look && look.hatColor);
   const shoeColor = sanitizeColor(look && look.shoeColor);
   const shoeScale = sanitizeScale(look && look.shoeScale);
+  const handModel = sanitizeHandModel(look && look.handModel);
   member.x = x; member.y = y; member.z = z; member.yaw = yaw;
-  member.shirtColor = shirtColor; member.pantsColor = pantsColor; member.hatColor = hatColor; member.shoeColor = shoeColor; member.shoeScale = shoeScale;
-  broadcast(loc.room, connId, { type: 'moved', id: member.publicId, x, y, z, yaw, shirtColor, pantsColor, hatColor, shoeColor, shoeScale });
+  member.shirtColor = shirtColor; member.pantsColor = pantsColor; member.hatColor = hatColor; member.shoeColor = shoeColor; member.shoeScale = shoeScale; member.handModel = handModel;
+  broadcast(loc.room, connId, { type: 'moved', id: member.publicId, x, y, z, yaw, shirtColor, pantsColor, hatColor, shoeColor, shoeScale, handModel });
   return true;
 }
 
@@ -807,7 +812,7 @@ function handleConnection(socket, peerAddress) {
         const now = Date.now();
         if (now - lastMoveAt < MOVE_MIN_INTERVAL_MS) return;
         lastMoveAt = now;
-        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor, hatColor: msg.hatColor, shoeColor: msg.shoeColor, shoeScale: msg.shoeScale });
+        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor, hatColor: msg.hatColor, shoeColor: msg.shoeColor, shoeScale: msg.shoeScale, handModel: msg.handModel });
         return;
       }
 
@@ -1169,7 +1174,7 @@ const server = http.createServer(async (req, res) => {
       const member = loc.room.get(connId);
       if (!member || member.transport !== 'poll') return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin' });
       member.lastSeen = Date.now();
-      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor, hatColor: body.hatColor, shoeColor: body.shoeColor, shoeScale: body.shoeScale });
+      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor, hatColor: body.hatColor, shoeColor: body.shoeColor, shoeScale: body.shoeScale, handModel: body.handModel });
       return sendJson(res, 200, { roster: rosterOf(loc.room, connId) });
     }
 

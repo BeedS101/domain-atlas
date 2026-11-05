@@ -81,6 +81,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const pick = await open(l, openBody(owner, k2, 'gallery-pick'));
     assert.equal(pick.status, 200, pick.text);
     assert.equal(pick.json.reward.asset.class, 'atlas.tool.pickaxe');
+    assert.equal(pick.json.reward.asset.properties['atlas.avatar.handItem'], 'true');
     // another wallet can still open the gem chest
     const owner2 = makeIdentity('webauthn');
     const k3 = await mintFor(l, owner2);

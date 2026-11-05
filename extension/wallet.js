@@ -2944,6 +2944,62 @@ const AtlasWallet = (() => {
   // carved-off piece straight back into the remainder before dropItem() could
   // use it. The piece stays in the wallet until dropItem() removes it, so an
   // interrupted drop never loses it.
+  // ---------- avatar hand item (equipped appearance, fourth independent slot) ----------
+  //
+  // A held tool shown in the character's right hand (cosmetic: it changes no buffs). Same storage shape,
+  // revoked-credential fallback and trust level as the other equip slots. An asset is holdable when it carries
+  // the `atlas.avatar.handItem` property and has a model; the model's absolute URL is what gets drawn and,
+  // via presence, what other players load.
+  async function saveAvatarHand(ownerPublicKey, assetId) {
+    const { atlasAvatarHand } = await chrome.storage.local.get('atlasAvatarHand');
+    const all = atlasAvatarHand || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarHand', assetId);
+    await chrome.storage.local.set({ atlasAvatarHand: all });
+  }
+
+  async function getAvatarHandAssetId() {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const { atlasAvatarHand } = await chrome.storage.local.get('atlasAvatarHand');
+    return decryptAtRestAndMigrate(identity, 'avatarHand', (atlasAvatarHand || {})[identity.publicKey], null, (v) => saveAvatarHand(identity.publicKey, v));
+  }
+
+  async function setAvatarHand(assetId) {
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    await saveAvatarHand(identity.publicKey, assetId || null);
+    return assetId || null;
+  }
+
+  function avatarHandPropertiesFromAsset(asset) {
+    const props = (asset && asset.properties) || {};
+    const flag = props['atlas.avatar.handItem'];
+    if (!flag || flag === 'false' || typeof (asset && asset.model) !== 'string' || !/^https?:\/\//i.test(asset.model)) return null;
+    return { handModel: asset.model };
+  }
+
+  async function getAvatarHand() {
+    const identity = await getIdentity();
+    if (!identity) return null;
+    const assetId = await getAvatarHandAssetId();
+    if (!assetId) return null;
+    const wallet = await getWallet(identity.publicKey);
+    const entry = wallet.find((e) => e.credential.id === assetId);
+    return entry ? avatarHandPropertiesFromAsset(entry.credential.asset) : null; // no longer owned: graceful fallback to an empty hand
+  }
+
+  // Which equip slots an asset can go in: 'outfit', 'hat', 'shoes', 'hand'. Pure; the character window uses it
+  // to list what the wallet holds for a clicked slot.
+  function avatarSlotsOfAsset(asset) {
+    const slots = [];
+    if (avatarLookPropertiesFromAsset(asset)) slots.push('outfit');
+    if (avatarHatPropertiesFromAsset(asset)) slots.push('hat');
+    if (avatarShoePropertiesFromAsset(asset)) slots.push('shoes');
+    if (avatarHandPropertiesFromAsset(asset)) slots.push('hand');
+    return slots;
+  }
+
   async function splitForDrop(credential, amount) {
     const identity = await getIdentity();
     const done = await runIssuerOperation({
@@ -10374,6 +10430,7 @@ const AtlasWallet = (() => {
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
     getAvatarShoes, getAvatarShoesAssetId, setAvatarShoes, avatarShoePropertiesFromAsset,
+    getAvatarHand, getAvatarHandAssetId, setAvatarHand, avatarHandPropertiesFromAsset, avatarSlotsOfAsset,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,

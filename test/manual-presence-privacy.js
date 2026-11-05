@@ -94,11 +94,20 @@ function noKeyIn(label, value) {
     noKeyIn('join response', a.text);
     const b = await post('/presence/poll/join', { domain: 'example.com', world: 'lobby', name: 'Bob' });
     check(b.body.roster.length === 1 && b.body.roster[0].id === a.body.publicId && b.body.roster[0].name === 'Alice', 'a second joiner sees Alice by her publicId and name');
-    check(Object.keys(b.body.roster[0]).sort().join(',') === 'hatColor,id,name,pantsColor,shirtColor,shoeColor,shoeScale,x,y,yaw,z', 'roster entries expose only id, name, pose and look');
+    check(Object.keys(b.body.roster[0]).sort().join(',') === 'handModel,hatColor,id,name,pantsColor,shirtColor,shoeColor,shoeScale,x,y,yaw,z', 'roster entries expose only id, name, pose and look');
     noKeyIn('roster', b.text);
     const sync = await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5 });
     noKeyIn('sync response', sync.text);
     check(sync.body.roster.length === 1 && sync.body.signals === undefined, 'sync returns the roster only (no signals channel)');
+    // The held item is relayed only as an absolute http(s) URL of bounded length.
+    const held = 'https://example.com/assets/rewards/pickaxe.glb';
+    await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5, handModel: held });
+    check((await post('/presence/poll/sync', { id: a.body.id })).body.roster.find((m) => m.name === 'Bob').handModel === held, 'a valid held-item URL reaches the other member');
+    for (const bad of ['javascript:alert(1)', '/assets/pickaxe.glb', 'data:model/gltf-binary;base64,AAAA', 'https://example.com/' + 'a'.repeat(420), 42, {}]) {
+      await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5, handModel: bad });
+      check((await post('/presence/poll/sync', { id: a.body.id })).body.roster.find((m) => m.name === 'Bob').handModel == null, 'a held-item value of ' + JSON.stringify(bad).slice(0, 30) + ' is dropped');
+    }
+    await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5 });
     const st = await get('/presence/status?domain=example.com&world=lobby');
     check(st.status === 200 && JSON.stringify(st.body) === '{"count":2}', 'status is exactly a count');
     noKeyIn('status', st.text);

@@ -36,6 +36,7 @@ $result = with_presence_store_locked(function (&$doc) use ($id, $body) {
         $room[$id]['hatColor'] = presence_sanitize_color($body['hatColor'] ?? null);
         $room[$id]['shoeColor'] = presence_sanitize_color($body['shoeColor'] ?? null);
         $room[$id]['shoeScale'] = presence_sanitize_scale($body['shoeScale'] ?? null);
+        $room[$id]['handModel'] = presence_sanitize_hand_model($body['handModel'] ?? null);
       }
     }
     $roster = presence_roster_of($room, $id);

@@ -1537,6 +1537,25 @@
   // the head lands the eyes roughly inside the head box, so at camera
   // distance 0 (see cameraDistance in init()) the camera sits about where
   // a head would be without anything needing to be perfectly to-scale.
+  // A held tool is drawn in the right hand: the model's bounding box is scaled so its longest side is
+  // HAND_ITEM_LENGTH, gripped about 18% up from its lowest point (a handle at the bottom, a head at the top) and
+  // tilted forward. Returns the matrix from model space to the right arm's local space (the origin is the
+  // shoulder, the arm hangs along -y).
+  const HAND_ITEM_LENGTH = 0.8;
+  const HAND_ITEM_GRIP = 0.18;
+  const HAND_ITEM_TILT = 0.5; // radians, top of the item leaning forward
+  function handItemMatrix(character, bounds) {
+    const size = bounds.size;
+    const longest = Math.max(size[0], size[1], size[2]);
+    const k = Number.isFinite(longest) && longest > 0 ? HAND_ITEM_LENGTH / longest : 1;
+    const px = (bounds.min[0] + bounds.max[0]) / 2, pz = (bounds.min[2] + bounds.max[2]) / 2;
+    const py = bounds.min[1] + HAND_ITEM_GRIP * size[1];
+    return mat4Multiply(
+      mat4Translate(0, -character.armLen + 0.03, 0),
+      mat4Multiply(mat4RotateX(HAND_ITEM_TILT), mat4Multiply(mat4Scale(k), mat4Translate(-px, -py, -pz)))
+    );
+  }
+
   function buildCharacter(gl) {
     const TORSO_H = 0.50, TORSO_W = 0.36, TORSO_D = 0.20;
     const HEAD_SIZE = 0.32;
@@ -1554,7 +1573,7 @@
     const shirt = [0.24, 0.47, 0.40, 1];
     const { shoeL, shoeR } = buildShoePair(gl, 1);
     return {
-      hipY, shoulderY, headSize: HEAD_SIZE,
+      hipY, shoulderY, headSize: HEAD_SIZE, armLen: ARM_LEN,
       shoulderOffsetX: TORSO_W / 2 + ARM_W / 2 + 0.02,
       hipOffsetX: TORSO_W / 2 - LEG_W / 2 - 0.02,
       torso: buildBox(gl, TORSO_W, 0, TORSO_H, TORSO_D, shirt),
@@ -1760,6 +1779,9 @@
     // hover cursor hint lines up with what's actually drawn, rather than
     // with the drop's raw ground-level position.
     const ITEM_DROP_FLOAT_HEIGHT = 0.15;
+    // The height the drawn item's centre sits at: its own half height (the pivot is the bounding-box
+    // centre, so a tall model would otherwise sink into the floor) plus the float height as clearance.
+    const dropCentreHeight = (entry) => (entry.position[1] || 0) + ITEM_DROP_FLOAT_HEIGHT + (entry.halfHeight || 0);
     const ITEM_DROP_BOB_AMPLITUDE = 0.05;
 
     // Camera distance (mouse scroll wheel): one continuous zoom. 0 is the
@@ -1860,6 +1882,20 @@
     // (no change) so an unequipped or plain color-only shoe behaves exactly
     // as before this feature existed.
     let localAvatarShoeColor = hexToRgba01(opts.localAvatarShoes && opts.localAvatarShoes.shoeColor);
+    // The held item (hand slot): { handModel: absolute GLB URL } or null. Own and other players' models are
+    // loaded once each under the world-drop limits (loadDropModel), at most HAND_MODEL_MAX_URLS distinct URLs.
+    let localAvatarHandModel = (opts.localAvatarHand && opts.localAvatarHand.handModel) || null;
+    const HAND_MODEL_MAX_URLS = 8;
+    const handModels = new Map(); // url -> { model, matrix } | 'loading' | 'failed'
+    function ensureHandModel(url) {
+      if (handModels.has(url)) return;
+      if (handModels.size >= HAND_MODEL_MAX_URLS) return;
+      handModels.set(url, 'loading');
+      loadDropModel(url).then((model) => {
+        if (modelOwner.destroyed) return;
+        handModels.set(url, { model, matrix: handItemMatrix(character, model.bounds) });
+      }, () => { handModels.set(url, 'failed'); });
+    }
     let localAvatarShoeSpeedMultiplier = (opts.localAvatarShoes && opts.localAvatarShoes.speedMultiplier) || 1;
     let localAvatarShoeJumpMultiplier = (opts.localAvatarShoes && opts.localAvatarShoes.jumpMultiplier) || 1;
     let localAvatarShoeVisualScale = (opts.localAvatarShoes && opts.localAvatarShoes.visualScale) || 1;
@@ -2059,7 +2095,7 @@
         // is the drop's ground-level position, one ITEM_DROP_FLOAT_HEIGHT
         // below where the model is drawn, which put the hover hit area
         // noticeably below the visible, floating item.
-        const position = [entry.position[0], (entry.position[1] || 0) + ITEM_DROP_FLOAT_HEIGHT, entry.position[2]];
+        const position = [entry.position[0], dropCentreHeight(entry), entry.position[2]];
         list.push({ position, radius: hoverRadiusFor(entry.radius) });
       });
       return list;
@@ -2396,6 +2432,7 @@
       entry.scale = (Number.isFinite(maxDim) && maxDim > 0) ? (ITEM_MODEL_TARGET_SIZE / maxDim) : 1;
       const centers = [0, 1, 2].map((k) => (model.bounds.min[k] + model.bounds.max[k]) / 2);
       entry.pivot = centers.every(Number.isFinite) ? centers : [0, 0, 0];
+      entry.halfHeight = Number.isFinite(size[1]) && size[1] > 0 ? (size[1] * entry.scale) / 2 : 0;
       entry.source = source;
       entry.fallbackReason = reason || null;
       featureCounts = null;
@@ -2869,7 +2906,7 @@
         const bob = Math.sin(t * 0.0026 + entry.position[0]) * ITEM_DROP_BOB_AMPLITUDE;
         const spin = t * 0.0009;
         const placement = mat4Multiply(
-          mat4Translate(entry.position[0], (entry.position[1] || 0) + ITEM_DROP_FLOAT_HEIGHT + bob, entry.position[2]),
+          mat4Translate(entry.position[0], dropCentreHeight(entry) + bob, entry.position[2]),
           mat4RotateY(spin)
         );
         if (entry.primitives) {
@@ -2943,7 +2980,7 @@
       // would put the camera inside its torso and fill the screen with the
       // shirt colour. The upper body is skipped then; legs and shoes stay.
       const upperBodyAboveEye = cameraDistance <= HEAD_VISIBLE_DISTANCE && characterScale * character.shoulderY > standingEyeY - 0.1;
-      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale, hideUpperBody) => {
+      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale, hideUpperBody, handUrl) => {
         const shirtColor = colors && colors.shirtColor;
         const pantsColor = colors && colors.pantsColor;
         const drawPart = (localMatrix, part, colorOverride) => {
@@ -2956,7 +2993,18 @@
         if (!hideUpperBody) {
           drawPart(mat4Translate(0, character.hipY, 0), character.torso, shirtColor);
           drawPart(mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing)), character.armL);
-          drawPart(mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing)), character.armR);
+          const armRLocal = mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing));
+          drawPart(armRLocal, character.armR);
+          if (handUrl) {
+            ensureHandModel(handUrl);
+            const held = handModels.get(handUrl);
+            if (held && typeof held === 'object') {
+              const toHand = mat4Multiply(base, mat4Multiply(armRLocal, held.matrix));
+              held.model.primitives.forEach((prim) => {
+                bindAndDraw({ vao: prim.vao, color: prim.color, modelMatrix: mat4Multiply(toHand, prim.nodeMatrix) }, view, projection);
+              });
+            }
+          }
         }
         const legLLocal = mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing));
         const legRLocal = mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing));
@@ -2968,7 +3016,7 @@
           drawPart(legRLocal, shoePair.shoeR, shoeColor);
         }
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale, upperBodyAboveEye);
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale, upperBodyAboveEye, localAvatarHandModel);
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
@@ -2992,7 +3040,7 @@
         // player's arms/legs would turn to face the mirror of wherever
         // they're actually walking.
         const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4Multiply(mat4RotateY(-rp.yaw), mat4Scale(sceneCharacterScale)));
-        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor, rp.shoeColor, rp.shoeScale); // always show the head — this is never our own first-person view
+        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor, rp.shoeColor, rp.shoeScale, false, rp.handModel); // always show the head — this is never our own first-person view
       });
 
       rafId = requestAnimationFrame(frame);
@@ -3166,6 +3214,12 @@
         const entry = itemDropEntries.get(dropId);
         return entry && entry.primitives ? entry.pivot.slice() : null;
       },
+      // The height of the lowest point of a loaded drop's model above its drop
+      // position, without the bob; null while the drop is still a marker.
+      getItemDropBaseHeight: (dropId) => {
+        const entry = itemDropEntries.get(dropId);
+        return entry && entry.primitives ? dropCentreHeight(entry) - (entry.position[1] || 0) - entry.halfHeight : null;
+      },
       // SPEC.md §3.6.1 — same debug/test-hook convention as every getter
       // above: lets a test confirm a portal actually got the right
       // 'same-domain'/'cross-domain'/'key' look (see portalRingColor()/
@@ -3216,6 +3270,9 @@
         // above), not anything a remote client would need to simulate.
         const hasShoeScaleUpdate = 'shoeScale' in state;
         const shoeScale = hasShoeScaleUpdate ? (Number(state.shoeScale) || null) : null;
+        // The held item: an absolute http(s) URL or null. Checked here as well as by the presence server.
+        const hasHandUpdate = 'handModel' in state;
+        const handModel = (hasHandUpdate && typeof state.handModel === 'string' && /^https?:\/\/\S+$/i.test(state.handModel) && state.handModel.length <= 400) ? state.handModel : null;
         const existing = remotePlayers.get(id);
         if (existing) {
           existing.tx = x; existing.ty = y; existing.tz = z; existing.tyaw = yaw;
@@ -3223,8 +3280,9 @@
           if (hasHatUpdate) existing.hatColor = hatColor;
           if (hasShoeUpdate) existing.shoeColor = shoeColor;
           if (hasShoeScaleUpdate) existing.shoeScale = shoeScale;
+          if (hasHandUpdate) existing.handModel = handModel;
         } else {
-          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null, shoeColor: hasShoeUpdate ? shoeColor : null, shoeScale: hasShoeScaleUpdate ? shoeScale : null });
+          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null, shoeColor: hasShoeUpdate ? shoeColor : null, shoeScale: hasShoeScaleUpdate ? shoeScale : null, handModel: hasHandUpdate ? handModel : null });
         }
       },
       removeRemotePlayer: (id) => { remotePlayers.delete(id); },
@@ -3236,7 +3294,7 @@
       // interpolation is genuinely happening frame to frame.
       getRemotePlayerRenderState: (id) => {
         const rp = remotePlayers.get(id);
-        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null, shoeColor: rp.shoeColor || null, shoeScale: rp.shoeScale || null } : null;
+        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null, shoeColor: rp.shoeColor || null, shoeScale: rp.shoeScale || null, handModel: rp.handModel || null } : null;
       },
       // Live setter for this viewer's OWN equipped look (the wallet-card
       // equip/unequip action) — same "no scene reload needed" treatment as
@@ -3266,6 +3324,12 @@
         localAvatarShoeJumpMultiplier = (shoes && shoes.jumpMultiplier) || 1;
         localAvatarShoeVisualScale = (shoes && shoes.visualScale) || 1;
       },
+      // Live setter for the hand slot: { handModel: URL } or null to empty the hand.
+      setLocalAvatarHand: (hand) => { localAvatarHandModel = (hand && hand.handModel) || null; },
+      // Debug/test hooks: the local held-item URL, and whether its model has loaded ('loading' | 'ready' |
+      // 'failed' | null with nothing held).
+      getLocalAvatarHandModel: () => localAvatarHandModel,
+      getHandModelState: (url) => { const h = handModels.get(url); return h === undefined ? null : (typeof h === 'object' ? 'ready' : h); },
       // Debug/test hook — the actual resolved [r,g,b,a] colors currently
       // applied to the local character, or null for the default look.
       getLocalAvatarColors: () => localAvatarColors,
@@ -3599,6 +3663,20 @@
     // character.
     let shoeColor = hexToRgba01(opts.avatarShoes && opts.avatarShoes.shoeColor);
     let shoeScale = (opts.avatarShoes && opts.avatarShoes.visualScale) || 1;
+    // The held item: { handModel: URL } from wallet.js's getAvatarHand(). Its model is fetched under the same
+    // limits as a dropped item and uploaded to this preview's own context; a failed load leaves the hand empty.
+    let handUrl = null, held = null, handToken = 0;
+    function setHandModel(url) {
+      const token = ++handToken;
+      handUrl = url || null;
+      if (held) { try { releaseModelGpu(gl, held.model); } catch (e) { /* context may already be gone */ } held = null; }
+      if (!url) return;
+      buildModel(gl, url, undefined, undefined, DEFAULT_DROP_POLICY).then((model) => {
+        if (lost || token !== handToken) { try { releaseModelGpu(gl, model); } catch (e) { /* ignore */ } return; }
+        held = { model, matrix: handItemMatrix(character, model.bounds) };
+      }, (err) => { console.warn('hand model not shown in preview:', url, err && err.message); });
+    }
+    setHandModel(opts.avatarHand && opts.avatarHand.handModel);
 
     // Frame the whole standing character, same "fit to view" idea as
     // previewModel()'s bounding-radius camera, sized off the character's
@@ -3651,7 +3729,36 @@
       if (hatColor) drawPart(base, mat4Translate(0, character.shoulderY, 0), character.hat, hatColor, projection);
       drawPart(base, mat4Translate(0, character.hipY, 0), character.torso, colors && colors.shirtColor, projection);
       drawPart(base, mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), character.armL, null, projection);
-      drawPart(base, mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), character.armR, null, projection);
+      const armRLocal = mat4Translate(character.shoulderOffsetX, character.shoulderY, 0);
+      drawPart(base, armRLocal, character.armR, null, projection);
+      if (held) {
+        const toHand = mat4Multiply(base, mat4Multiply(armRLocal, held.matrix));
+        held.model.primitives.forEach((prim) => {
+          const v = prim.vao;
+          const model = mat4Multiply(toHand, prim.nodeMatrix);
+          gl.bindBuffer(gl.ARRAY_BUFFER, v.positionBuffer);
+          gl.enableVertexAttribArray(prog.attribs.position);
+          gl.vertexAttribPointer(prog.attribs.position, 3, gl.FLOAT, false, 0, 0);
+          if (v.normalBuffer) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, v.normalBuffer);
+            gl.enableVertexAttribArray(prog.attribs.normal);
+            gl.vertexAttribPointer(prog.attribs.normal, 3, gl.FLOAT, false, 0, 0);
+          } else {
+            gl.disableVertexAttribArray(prog.attribs.normal);
+            gl.vertexAttrib3f(prog.attribs.normal, 0, 1, 0);
+          }
+          bindMaterial(gl, prog, v);
+          gl.uniformMatrix4fv(prog.uniforms.model, false, model);
+          gl.uniformMatrix3fv(prog.uniforms.normalMatrix, false, mat3NormalFromMat4(model));
+          gl.uniform4fv(prog.uniforms.color, prim.color);
+          if (v.indexBuffer) {
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, v.indexBuffer);
+            gl.drawElements(gl.TRIANGLES, v.indexCount, v.indexType, 0);
+          } else {
+            gl.drawArrays(gl.TRIANGLES, 0, v.indexCount);
+          }
+        });
+      }
       const legLLocal = mat4Translate(-character.hipOffsetX, character.hipY, 0);
       const legRLocal = mat4Translate(character.hipOffsetX, character.hipY, 0);
       drawPart(base, legLLocal, character.legL, colors && colors.pantsColor, projection);
@@ -3680,6 +3787,8 @@
         shoeColor = hexToRgba01(shoes && shoes.shoeColor);
         shoeScale = (shoes && shoes.visualScale) || 1;
       },
+      // The hand slot: accepts { handModel: URL } or null for an empty hand.
+      setHand(hand) { setHandModel(hand && hand.handModel); },
       // Same live-update treatment for the Size slider, in case this panel
       // is open while it's dragged.
       setScale(s) { scale = clampCharacterScale(s); },
@@ -3689,10 +3798,13 @@
       getHatColor: () => hatColor,
       getShoeColor: () => shoeColor,
       getShoeVisualScale: () => shoeScale,
+      getHandModel: () => handUrl,
+      isHandModelLoaded: () => !!held,
       dispose() {
         if (lost) return;
         lost = true;
         if (rafId !== null) cancelAnimationFrame(rafId);
+        if (held) { releaseModelGpu(gl, held.model); held = null; }
         gl.deleteTexture(prog.fallbackTexture);
         adjustLiveTextures(gl, -1);
         const loseCtx = gl.getExtension('WEBGL_lose_context');

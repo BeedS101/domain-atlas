@@ -121,11 +121,12 @@ async function enterLobby(frame, anchorId) {
     const dropModel = 'http://' + DOMAIN + scene.objects.find((o) => /\/desk\.glb$/.test(o.model)).model;
     await frame.evaluate(([model, domain]) => window.__atlasActive3D.setItemDrops([{ dropId: 'pivot-test', position: [-3.5, 0, 3.0], radius: 0.9, model, domain, credential: { id: 'pivot-test-credential', issuer: { domain }, asset: { class: 'test.desk', name: 'Desk' } } }]), [dropModel, DOMAIN]);
     await waitFor(frame, () => window.__atlasActive3D.getItemDropRenderKind('pivot-test') === 'model', 'the dropped desk model to load', 3500);
-    const pivot = await frame.evaluate(() => window.__atlasActive3D.getItemDropPivot('pivot-test'));
+    const [pivot, base] = await frame.evaluate(() => [window.__atlasActive3D.getItemDropPivot('pivot-test'), window.__atlasActive3D.getItemDropBaseHeight('pivot-test')]); // one read: the drop poll may clear the drop
     const wantPivot = [0.357, 0.192, -0.184]; // desk.glb bounds x -0.01..0.724, y 0..0.384, z -0.38..0.012
     assert(pivot && wantPivot.every((v, i) => Math.abs(pivot[i] - v) < 0.01), 'Expected the drop pivot to be the model bounds center ' + JSON.stringify(wantPivot) + ', got ' + JSON.stringify(pivot));
+    assert(base !== null && base >= 0.1 && base <= 0.2, 'Expected the dropped model to rest just above the floor (not sunk into it), lowest point at ' + base);
     await frame.evaluate(() => window.__atlasActive3D.setItemDrops([]));
-    console.log('PASS: drop pivot is the bounds center');
+    console.log('PASS: drop pivot is the bounds center and the model rests above the floor');
 
     console.log('STEP 1: collision matches what is drawn');
     const wantBlocked = [

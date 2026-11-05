@@ -2169,7 +2169,7 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'name' => 'Mining Pick', 'modelPath' => '/assets/rewards/pickaxe.glb', 'thumbnailPath' => '/assets/rewards/pickaxe.png',
     'fungible' => false, 'presentation' => 'collectible', 'restrictedIssuance' => 'chest',
     'properties' => [
-      'atlas.rarity' => 'uncommon', 'com.example.kind' => 'tool',
+      'atlas.rarity' => 'uncommon', 'com.example.kind' => 'tool', 'atlas.avatar.handItem' => 'true',
     ],
   ],
   // Oracle-triggered payout demo (oracle-demo.html): a flight-delay

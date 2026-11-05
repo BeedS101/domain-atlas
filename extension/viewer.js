@@ -440,6 +440,9 @@ let localAvatarHatInfo = null;
 // wallet.js's getAvatarShoes() returns. Kept in sync by
 // applyAvatarShoesToScene().
 let localAvatarShoesInfo = null;
+// And for the fourth (hand) slot: { handModel: URL } from wallet.js's getAvatarHand(). Kept in sync by
+// applyAvatarHandToScene().
+let localAvatarHandInfo = null;
 
 // Settings -> Player character's live preview (MiniGLTF.previewCharacter())
 // — only exists while the Settings screen is actually open (see
@@ -461,24 +464,32 @@ function disposeCharacterPreview() {
 // and again whenever the equip/unequip wallet-card action changes it —
 // same "no scene reload needed" live-update treatment setCharacterScale
 // already gets.
-async function applyAvatarLookToScene() {
-  localAvatarLookHex = await AtlasWallet.getAvatarLook();
+async function applyAvatarLookToScene(resolved) {
+  localAvatarLookHex = resolved !== undefined ? resolved : await AtlasWallet.getAvatarLook();
   if (active3D && active3D.setLocalAvatarLook) active3D.setLocalAvatarLook(localAvatarLookHex);
   if (characterPreview && characterPreview.setLook) characterPreview.setLook(localAvatarLookHex);
 }
 
 // Same as applyAvatarLookToScene() above, for the separate hat slot.
-async function applyAvatarHatToScene() {
-  localAvatarHatInfo = await AtlasWallet.getAvatarHat();
+async function applyAvatarHatToScene(resolved) {
+  localAvatarHatInfo = resolved !== undefined ? resolved : await AtlasWallet.getAvatarHat();
   if (active3D && active3D.setLocalAvatarHat) active3D.setLocalAvatarHat(localAvatarHatInfo);
   if (characterPreview && characterPreview.setHat) characterPreview.setHat(localAvatarHatInfo);
 }
 
 // Same as applyAvatarHatToScene() above, for the third (shoes) slot.
-async function applyAvatarShoesToScene() {
-  localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
+async function applyAvatarShoesToScene(resolved) {
+  localAvatarShoesInfo = resolved !== undefined ? resolved : await AtlasWallet.getAvatarShoes();
   if (active3D && active3D.setLocalAvatarShoes) active3D.setLocalAvatarShoes(localAvatarShoesInfo);
   if (characterPreview && characterPreview.setShoes) characterPreview.setShoes(localAvatarShoesInfo);
+}
+
+// Same as applyAvatarShoesToScene() above, for the hand slot. Each apply function takes an already-resolved
+// value when the caller has the wallet entry in hand, which avoids another full wallet read.
+async function applyAvatarHandToScene(resolved) {
+  localAvatarHandInfo = resolved !== undefined ? resolved : await AtlasWallet.getAvatarHand();
+  if (active3D && active3D.setLocalAvatarHand) active3D.setLocalAvatarHand(localAvatarHandInfo);
+  if (characterPreview && characterPreview.setHand) characterPreview.setHand(localAvatarHandInfo);
 }
 
 function currentLocalPose() {
@@ -503,7 +514,9 @@ function currentLocalPose() {
     // remote client needs to know to render or simulate. A hat's buffs
     // don't change its geometry (unlike a shoe's visual scale), so there's
     // no hatScale to broadcast alongside hatColor.
-    shoeScale: (localAvatarShoesInfo && localAvatarShoesInfo.visualScale) || null
+    shoeScale: (localAvatarShoesInfo && localAvatarShoesInfo.visualScale) || null,
+    // The held item's model URL, which other players load under the world-drop limits.
+    handModel: (localAvatarHandInfo && localAvatarHandInfo.handModel) || null
   };
 }
 
@@ -1873,6 +1886,15 @@ const assetUpdatesBadge = document.getElementById('assetUpdatesBadge');
 const tradeTabBtn = document.getElementById('tradeTabBtn');
 const tradeScreen = document.getElementById('tradeScreen');
 const settingsTabBtn = document.getElementById('settingsTabBtn');
+const characterTabBtn = document.getElementById('characterTabBtn');
+const characterScreen = document.getElementById('characterScreen');
+let characterWindowCanvasEl = document.getElementById('characterWindowCanvas');
+const characterSlotPanelEl = document.getElementById('characterSlotPanel');
+const characterSlotTitleEl = document.getElementById('characterSlotTitle');
+const characterSlotNoteEl = document.getElementById('characterSlotNote');
+const characterSlotListEl = document.getElementById('characterSlotList');
+const characterSlotUnequipBtn = document.getElementById('characterSlotUnequipBtn');
+const characterStatusEl = document.getElementById('characterStatus');
 
 const mainWalletScreen = document.getElementById('mainWalletScreen');
 const walletIdentityEl = document.getElementById('walletIdentity');
@@ -2512,6 +2534,7 @@ async function enterWorld(worldId, anchorId) {
       localAvatarLookHex = await AtlasWallet.getAvatarLook();
       localAvatarHatInfo = await AtlasWallet.getAvatarHat();
       localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
+      localAvatarHandInfo = await AtlasWallet.getAvatarHand();
 
       active3D = MiniGLTF.init(scene3dCanvas, {
         // gltf-mini.js reads sceneData.camera.start once, at init time, as
@@ -2631,6 +2654,8 @@ async function enterWorld(worldId, anchorId) {
         // shoes object, not just a hex string (see localAvatarShoesInfo's
         // own comment above).
         localAvatarShoes: localAvatarShoesInfo,
+        // The held item (hand slot), seeded the same way.
+        localAvatarHand: localAvatarHandInfo,
         // Scene asset download progress (#36) — see updateSceneLoadProgress()
         // above and loadScene()'s own comment in gltf-mini.js for why this
         // counts unique models, not placed instances.
@@ -3753,18 +3778,19 @@ function showWalletScreen(id) {
   // Leaving Settings for any other screen — tear down the player-character
   // preview's WebGL context rather than leaving it rendering behind a
   // hidden panel. openSettings() below creates a fresh one on the way back.
-  if (id !== 'settingsScreen') disposeCharacterPreview();
+  if (id !== 'settingsScreen' && id !== 'characterScreen') disposeCharacterPreview();
   walletScreens.forEach((el) => el.classList.toggle('active', el.id === id));
   seedRevealBox.classList.remove('show');
   // Tabs only make sense between Wallet, Social, Trade, and Settings —
   // everything else (onboarding, unlock, create) has nothing to tab
   // between yet and keeps its own dedicated navigation.
-  const showTabs = id === 'mainWalletScreen' || id === 'socialScreen' || id === 'tradeScreen' || id === 'settingsScreen';
+  const showTabs = id === 'mainWalletScreen' || id === 'socialScreen' || id === 'tradeScreen' || id === 'settingsScreen' || id === 'characterScreen';
   if (walletTabBar) walletTabBar.classList.toggle('visible', showTabs);
   if (walletTabBtn) walletTabBtn.classList.toggle('active-tab', id === 'mainWalletScreen');
   if (socialTabBtn) socialTabBtn.classList.toggle('active-tab', id === 'socialScreen');
   if (tradeTabBtn) tradeTabBtn.classList.toggle('active-tab', id === 'tradeScreen');
   if (settingsTabBtn) settingsTabBtn.classList.toggle('active-tab', id === 'settingsScreen');
+  if (characterTabBtn) characterTabBtn.classList.toggle('active-tab', id === 'characterScreen');
 }
 
 // Social tab's own second level of tabbing (#61/#67): Mail / Contacts /
@@ -5427,33 +5453,12 @@ function renderAssetCard(entry, container, opts) {
     const loaded = opts.loadout.includes(entry.credential.id);
     actionsHtml += '<button data-action="toggle-load" data-id="' + entry.credential.id + '">' + (loaded ? 'Unload' : 'Load into this world') + '</button>';
   }
-  // Bruno's own catch after using this in the wild: the Drop control used
-  // to render unconditionally whenever a list was droppable at all, even
-  // for a tradeScope: 'bound' asset that the SERVER would reject the
-  // instant it was actually dropped (checkPresentedTransferableAsset()/
-  // check_presented_transferable_asset() already say so explicitly —
-  // "asset is bound to its owner and cannot be dropped for someone else
-  // to take"). That's correct enforcement, just surfaced late and
-  // confusingly — a control that's guaranteed to fail shouldn't be there
-  // to click in the first place. Checked here, not by removing
-  // opts.droppable upstream, since a bound asset still belongs in this
-  // same list and still needs its OTHER actions (Hide, etc.) — only the
-  // Drop control itself disappears for it.
+  // Drop is hidden for a tradeScope 'bound' asset: the server rejects dropping it, so the control would only
+  // ever fail. The item's other actions (Hide, etc.) are unaffected.
   if (!held && opts.droppable && entry.credential.asset.tradeScope !== 'bound') {
-    // Task #250 — dropping is no longer local-only, so how MUCH of a
-    // fungible stack leaves the wallet actually matters now: someone else
-    // can walk up and take exactly what's dropped, not "the whole balance,
-    // but only visible to me" the way self-only dropping made the question
-    // moot. A non-fungible item has nothing to ask (quantity is always 1),
-    // same "Drop here" as before. See beginDropPlacement()'s own comment
-    // for what happens with a partial amount (a split() call first).
-    // Defaults to 1, not the full balance — dropping is now genuinely
-    // shared/irreversible-by-mistake (SPEC.md §5.5), unlike this same
-    // input's old self-only meaning, so the safer default is "the least
-    // you could mean" rather than "assume you want to give away
-    // everything you're holding." max stays the full balance — nothing
-    // stops a deliberate whole-stack drop, this only changes what's
-    // pre-filled before you touch it.
+    // A drop is shared and cannot be taken back, so a fungible stack gets its own quantity input (default 1,
+    // max the full balance); a unique item has nothing to ask. A partial amount is split first, see
+    // beginDropPlacement().
     actionsHtml += fungible
       ? '<div class="drop-quantity-row">' +
         '<input type="number" class="drop-quantity-input" data-id="' + entry.credential.id + '" min="1" max="' + entry.credential.quantity + '" value="1">' +
@@ -5484,6 +5489,11 @@ function renderAssetCard(entry, container, opts) {
   if (!held && opts.avatarShoesEnabled && AtlasWallet.avatarShoePropertiesFromAsset(asset)) {
     const wearingTheseShoes = opts.equippedAvatarShoesAssetId === entry.credential.id;
     actionsHtml += '<button data-action="toggle-avatar-shoes" data-id="' + entry.credential.id + '" class="btn-secondary">' + (wearingTheseShoes ? 'Take off shoes' : 'Wear as my shoes') + '</button>';
+  }
+  // The hand slot: a holdable tool (asset property atlas.avatar.handItem) is shown in the character's right hand.
+  if (!held && opts.avatarHandEnabled && AtlasWallet.avatarHandPropertiesFromAsset(asset)) {
+    const holdingThis = opts.equippedAvatarHandAssetId === entry.credential.id;
+    actionsHtml += '<button data-action="toggle-avatar-hand" data-id="' + entry.credential.id + '" class="btn-secondary">' + (holdingThis ? 'Put away (stop holding)' : 'Hold in my hand') + '</button>';
   }
   // SPEC.md §13.5 — opens a dialog that either explains why this item can't
   // be saved to a file (the domain hasn't enabled it, wrong kind of item) or
@@ -5781,6 +5791,7 @@ async function refreshInventoryDisplay() {
   const equippedAvatarAssetId = await AtlasWallet.getAvatarLookAssetId();
   const equippedAvatarHatAssetId = await AtlasWallet.getAvatarHatAssetId();
   const equippedAvatarShoesAssetId = await AtlasWallet.getAvatarShoesAssetId();
+  const equippedAvatarHandAssetId = await AtlasWallet.getAvatarHandAssetId();
   const risky = combatOf(currentWorld) !== 'none';
   const selfWalletAll = identity ? await AtlasWallet.getWallet(identity.publicKey) : [];
 
@@ -5822,7 +5833,7 @@ async function refreshInventoryDisplay() {
   if (selfCollectibles.length === 0) {
     selfCollectiblesListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('collectible') ? 'Everything here is hidden or dropped somewhere — manage it below or in Settings.' : 'No collectibles yet.') + '</div>';
   } else {
-    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
+    renderAssetList(selfCollectibles, selfCollectiblesListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
   }
 
   // --- Documents ---
@@ -5831,7 +5842,7 @@ async function refreshInventoryDisplay() {
   if (selfDocuments.length === 0) {
     selfDocumentsListEl.innerHTML = '<div class="empty-note">' + (selfHasAny('document') ? 'Everything here is hidden — manage it in Settings.' : 'No documents yet.') + '</div>';
   } else {
-    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId });
+    renderAssetList(selfDocuments, selfDocumentsListEl, { loadable: risky, loadout, droppable: true, checkCompat: currentWorld, checkCompatManifest: currentManifest, avatarLookEnabled: true, fileExportEnabled: true, equippedAvatarAssetId, avatarHatEnabled: true, equippedAvatarHatAssetId, avatarShoesEnabled: true, equippedAvatarShoesAssetId, avatarHandEnabled: true, equippedAvatarHandAssetId });
   }
 
   const totalHeld = selfVisible.length;
@@ -6890,9 +6901,7 @@ characterScaleInputEl && characterScaleInputEl.addEventListener('input', async (
   if (characterPreview && characterPreview.setScale) characterPreview.setScale(scale);
 });
 
-// Task #209. 'change' (not 'input') is the right event for a checkbox —
-// unlike the character-scale slider above there's no meaningful
-// "mid-drag" state to react to continuously.
+// 'change' rather than 'input': a checkbox has no mid-drag state to react to.
 walletSoundEnabledInputEl && walletSoundEnabledInputEl.addEventListener('change', () => {
   AtlasWallet.setWalletSoundEnabled(walletSoundEnabledInputEl.checked);
 });
@@ -6904,6 +6913,238 @@ backFromSettingsBtn.addEventListener('click', routeWalletScreen);
 // button above, just reachable without the extra hop.
 walletTabBtn && walletTabBtn.addEventListener('click', routeWalletScreen);
 settingsTabBtn && settingsTabBtn.addEventListener('click', openSettings);
+
+// ---------- character window (Wallet -> Character tab, or the C key) ----------
+//
+// The live character in the middle with one block per equip slot either side. Clicking a block lists the
+// wallet items that fit that slot (AtlasWallet.avatarSlotsOfAsset); clicking one equips it, clicking the
+// equipped one again takes it off. The wallet-card buttons stay as shortcuts and share the same
+// get/set/apply functions, so both routes always agree.
+
+const CHARACTER_SLOTS = {
+  hat: {
+    label: 'Hat', empty: 'No hat on',
+    getId: () => AtlasWallet.getAvatarHatAssetId(), setId: (id) => AtlasWallet.setAvatarHat(id), apply: applyAvatarHatToScene,
+    meta: (asset) => { const p = AtlasWallet.avatarHatPropertiesFromAsset(asset); return p ? buffSummary(p.speedMultiplier, p.jumpMultiplier, p.interactRangeMultiplier) : ''; },
+    unequip: 'Take hat off'
+  },
+  outfit: {
+    label: 'Outfit', empty: 'Default outfit',
+    getId: () => AtlasWallet.getAvatarLookAssetId(), setId: (id) => AtlasWallet.setAvatarLook(id), apply: applyAvatarLookToScene,
+    meta: () => '',
+    unequip: 'Back to the default outfit'
+  },
+  shoes: {
+    label: 'Shoes', empty: 'No shoes on',
+    getId: () => AtlasWallet.getAvatarShoesAssetId(), setId: (id) => AtlasWallet.setAvatarShoes(id), apply: applyAvatarShoesToScene,
+    meta: (asset) => { const p = AtlasWallet.avatarShoePropertiesFromAsset(asset); return p ? buffSummary(p.speedMultiplier, p.jumpMultiplier, 1) : ''; },
+    unequip: 'Take shoes off'
+  },
+  hand: {
+    label: 'Hand', empty: 'Nothing in hand',
+    getId: () => AtlasWallet.getAvatarHandAssetId(), setId: (id) => AtlasWallet.setAvatarHand(id), apply: applyAvatarHandToScene,
+    meta: () => 'Shown in your right hand',
+    unequip: 'Put it away'
+  }
+};
+
+function buffSummary(speed, jump, reach) {
+  const parts = [];
+  if (speed && speed !== 1) parts.push('speed ×' + speed);
+  if (jump && jump !== 1) parts.push('jump ×' + jump);
+  if (reach && reach !== 1) parts.push('reach ×' + reach);
+  return parts.join(' · ');
+}
+
+let selectedCharacterSlot = null;
+
+async function readOwnWallet() {
+  const identity = await AtlasWallet.getIdentity();
+  return identity ? AtlasWallet.getWallet(identity.publicKey) : [];
+}
+
+// Wallet entries a slot can take: owned and settled (not tied to an unfinished transaction).
+function characterSlotCandidates(wallet, slot) {
+  return wallet.filter((e) => !e.pendingOutcome && AtlasWallet.avatarSlotsOfAsset(e.credential.asset).includes(slot));
+}
+
+// What each slot renders from a given asset, in the shape the apply functions take.
+const CHARACTER_SLOT_PROPS = {
+  hat: (asset) => AtlasWallet.avatarHatPropertiesFromAsset(asset),
+  outfit: (asset) => AtlasWallet.avatarLookPropertiesFromAsset(asset),
+  shoes: (asset) => AtlasWallet.avatarShoePropertiesFromAsset(asset),
+  hand: (asset) => AtlasWallet.avatarHandPropertiesFromAsset(asset)
+};
+
+// Redraws the four blocks (item name or the empty label, thumbnail when the item has one) and, when a slot is
+// selected, its item list. `wallet` and `equipped` ({slot: assetId|null}) are read once by the caller.
+let characterWindowState = null;
+
+async function refreshCharacterWindow(wallet, equipped) {
+  if (!characterScreen) return;
+  if (!wallet || !equipped) {
+    if (!characterWindowState) characterWindowState = { wallet: await readOwnWallet(), equipped: await readEquippedSlots() };
+    ({ wallet, equipped } = characterWindowState);
+  } else {
+    characterWindowState = { wallet, equipped };
+  }
+  for (const btn of characterScreen.querySelectorAll('.character-slot')) {
+    const slot = btn.dataset.slot;
+    const def = CHARACTER_SLOTS[slot];
+    const id = equipped[slot];
+    const entry = id ? wallet.find((e) => e.credential.id === id) : null;
+    const asset = entry && entry.credential.asset;
+    btn.classList.toggle('selected', slot === selectedCharacterSlot);
+    btn.querySelector('.slot-item').textContent = asset ? asset.name : def.empty;
+    btn.title = asset ? asset.name : def.empty;
+    const icon = btn.querySelector('.slot-icon');
+    if (!icon.dataset.glyph) icon.dataset.glyph = icon.textContent;
+    icon.textContent = '';
+    if (asset && asset.thumbnail) {
+      const img = document.createElement('img');
+      img.alt = '';
+      img.src = asset.thumbnail;
+      icon.appendChild(img);
+    } else {
+      icon.textContent = icon.dataset.glyph;
+    }
+  }
+  renderCharacterSlotPanel(wallet, equipped);
+}
+
+async function readEquippedSlots() {
+  const out = {};
+  for (const slot of Object.keys(CHARACTER_SLOTS)) out[slot] = await CHARACTER_SLOTS[slot].getId();
+  return out;
+}
+
+function renderCharacterSlotPanel(wallet, equipped) {
+  if (!characterSlotPanelEl) return;
+  const slot = selectedCharacterSlot;
+  if (!slot) { characterSlotPanelEl.hidden = true; return; }
+  const def = CHARACTER_SLOTS[slot];
+  const equippedId = equipped[slot];
+  const candidates = characterSlotCandidates(wallet, slot);
+  characterSlotPanelEl.hidden = false;
+  characterSlotTitleEl.textContent = def.label;
+  characterSlotNoteEl.textContent = candidates.length ? 'Choose what to equip.' : 'Nothing in your wallet fits this slot yet.';
+  characterSlotListEl.textContent = '';
+  for (const entry of candidates) {
+    const asset = entry.credential.asset;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'character-choice' + (entry.credential.id === equippedId ? ' equipped' : '');
+    btn.dataset.id = entry.credential.id;
+    if (asset.thumbnail) {
+      const img = document.createElement('img');
+      img.className = 'choice-thumb';
+      img.alt = '';
+      img.src = asset.thumbnail;
+      btn.appendChild(img);
+    } else {
+      const ph = document.createElement('span');
+      ph.className = 'choice-thumb';
+      btn.appendChild(ph);
+    }
+    const text = document.createElement('span');
+    text.className = 'choice-text';
+    const name = document.createElement('span');
+    name.textContent = asset.name + (entry.credential.id === equippedId ? ' (equipped)' : '');
+    text.appendChild(name);
+    const metaText = def.meta(asset);
+    if (metaText) {
+      const meta = document.createElement('span');
+      meta.className = 'choice-meta';
+      meta.textContent = metaText;
+      text.appendChild(meta);
+    }
+    btn.appendChild(text);
+    characterSlotListEl.appendChild(btn);
+  }
+  characterSlotUnequipBtn.textContent = def.unequip;
+  characterSlotUnequipBtn.hidden = !equippedId;
+}
+
+async function equipCharacterSlot(slot, assetId) {
+  const def = CHARACTER_SLOTS[slot];
+  const wallet = characterWindowState ? characterWindowState.wallet : await readOwnWallet();
+  const entry = assetId ? wallet.find((e) => e.credential.id === assetId) : null;
+  if (assetId && !entry) return;
+  await def.setId(assetId);
+  await def.apply(entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null);
+  if (characterStatusEl) characterStatusEl.textContent = assetId ? def.label + ' equipped.' : def.label + ' cleared.';
+  await refreshCharacterWindow(wallet, { ...(characterWindowState ? characterWindowState.equipped : await readEquippedSlots()), [slot]: assetId || null });
+  refreshInventoryDisplay().catch(() => {});
+}
+
+async function openCharacterScreen() {
+  if (!(await AtlasWallet.isUnlocked())) { await routeWalletScreen(); return; }
+  showWalletScreen('characterScreen');
+  if (characterStatusEl) characterStatusEl.textContent = '';
+  characterWindowState = null;
+  selectedCharacterSlot = null;
+  const wallet = await readOwnWallet();
+  const equipped = await readEquippedSlots();
+  const look = {};
+  for (const slot of Object.keys(CHARACTER_SLOTS)) {
+    const entry = equipped[slot] ? wallet.find((e) => e.credential.id === equipped[slot]) : null;
+    look[slot] = entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null;
+  }
+  await refreshCharacterWindow(wallet, equipped);
+  if (!characterWindowCanvasEl) return;
+  disposeCharacterPreview();
+  // A disposed preview leaves its canvas with a lost WebGL context, so each opening draws on a fresh canvas.
+  const freshCanvas = characterWindowCanvasEl.cloneNode(false);
+  characterWindowCanvasEl.replaceWith(freshCanvas);
+  characterWindowCanvasEl = freshCanvas;
+  try {
+    characterPreview = MiniGLTF.previewCharacter(characterWindowCanvasEl, {
+      characterScale: 1,
+      avatarLook: look.outfit,
+      avatarHat: look.hat,
+      avatarShoes: look.shoes,
+      avatarHand: look.hand
+    });
+    window.__atlasCharacterPreview = characterPreview;
+  } catch (err) {
+    console.warn('character window preview failed:', err && err.message);
+  }
+}
+
+characterTabBtn && characterTabBtn.addEventListener('click', openCharacterScreen);
+
+characterScreen && characterScreen.addEventListener('click', async (e) => {
+  const slotBtn = e.target.closest('.character-slot');
+  if (slotBtn) {
+    selectedCharacterSlot = selectedCharacterSlot === slotBtn.dataset.slot ? null : slotBtn.dataset.slot;
+    if (characterStatusEl) characterStatusEl.textContent = '';
+    await refreshCharacterWindow();
+    return;
+  }
+  const choice = e.target.closest('.character-choice');
+  if (choice && selectedCharacterSlot) {
+    const equippedId = characterWindowState ? characterWindowState.equipped[selectedCharacterSlot] : await CHARACTER_SLOTS[selectedCharacterSlot].getId();
+    await equipCharacterSlot(selectedCharacterSlot, equippedId === choice.dataset.id ? null : choice.dataset.id);
+  }
+});
+
+characterSlotUnequipBtn && characterSlotUnequipBtn.addEventListener('click', () => {
+  if (selectedCharacterSlot) equipCharacterSlot(selectedCharacterSlot, null);
+});
+
+// C opens the wallet panel on the Character screen (and closes the panel again when it is already there).
+// Ignored while typing and when a modifier is held.
+document.addEventListener('keydown', async (e) => {
+  if (e.code !== 'KeyC' || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  if (walletPanel.classList.contains('open') && characterScreen && characterScreen.classList.contains('active')) {
+    walletPanel.classList.remove('open');
+    return;
+  }
+  walletPanel.classList.add('open');
+  await openCharacterScreen();
+});
 
 // ---------- mail (Wallet -> Mail tab) ----------
 //
@@ -12301,11 +12542,8 @@ function assetActionHandler(listEl) {
       if (loadout.includes(id)) await AtlasWallet.unloadItem(id); else await AtlasWallet.loadItem(id);
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'drop') {
-      // Task #250 — a fungible balance's Drop button sits next to its own
-      // quantity input (renderAssetCard above) rather than always dropping
-      // the whole stack; a non-fungible item has no such input at all
-      // (quantity is definitionally 1), same "drop this exact credential,
-      // whole" as before.
+      // A fungible balance drops the quantity typed next to its button (renderAssetCard); a unique item has
+      // no such input and drops whole.
       if (btn.dataset.fungible) {
         const qtyInput = btn.parentElement.querySelector('.drop-quantity-input[data-id="' + id + '"]');
         const wallet = await AtlasWallet.getWallet(who.publicKey);
@@ -12339,6 +12577,11 @@ function assetActionHandler(listEl) {
       const currentlyEquippedShoes = await AtlasWallet.getAvatarShoesAssetId();
       await AtlasWallet.setAvatarShoes(currentlyEquippedShoes === id ? null : id);
       await applyAvatarShoesToScene();
+      await refreshInventoryDisplay();
+    } else if (btn.dataset.action === 'toggle-avatar-hand') {
+      const currentlyHeld = await AtlasWallet.getAvatarHandAssetId();
+      await AtlasWallet.setAvatarHand(currentlyHeld === id ? null : id);
+      await applyAvatarHandToScene();
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'consolidate-group') {
       const sepIndex = btn.dataset.key.indexOf('::');
