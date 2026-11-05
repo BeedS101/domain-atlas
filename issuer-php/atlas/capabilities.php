@@ -23,6 +23,7 @@ if ($has('asset/split.php', 'atlas_require_owner_intent')) $operations[] = 'spli
 if ($has('asset/consolidate.php', 'atlas_require_owner_intent')) $operations[] = 'consolidate';
 if ($has('convert.php', 'atlas_require_owner_intent')) $operations[] = 'convert';
 if ($has('asset/purchase.php', "'purchase', [\$credential]")) $operations[] = 'purchase';
+if ($has('asset/open-chest.php', 'atlas_commit_replacement')) $operations[] = 'open-chest';
 if ($has('trade/claim.php', 'atlas_store_claim_outcome')) $operations[] = 'trade-claim';
 if ($has('trade/claim.php', "'remainder' => \$bRemainder, 'code' => 'claim-incomplete'")) $operations[] = 'trade-claim-remainder';
 

@@ -8,6 +8,8 @@
 //   - the Gallery is a gltf-mini-v1 scene whose every model resolves to a real
 //     file under /assets/gallery/ (or its polish/ folder), with none of the old test-path leftovers;
 //   - the Gallery declares characterScale 1.4 and the Lobby 0.5;
+//   - every open-chest interactable names a chest the PHP issuer knows, with that chest's reward class,
+//     and the reward models and thumbnails exist on both demo domains;
 //   - the repo manifests keep their local demo addresses.
 
 const fs = require('fs');
@@ -102,6 +104,21 @@ assert.strictEqual(gallery.characterScale, 1.4, 'the Gallery declares characterS
 const lobby = readJson(path.join(REPO, 'demo-domain-a', 'spatial', 'lobby', 'scene.json'));
 assert.strictEqual(lobby.characterScale, 0.5, 'the Lobby declares characterScale 0.5');
 pass('Gallery characterScale 1.4, Lobby characterScale 0.5');
+
+// ---- chests ----
+const chestsPhp = fs.readFileSync(path.join(REPO, 'issuer-php', 'lib', 'chests.php'), 'utf8');
+const chestCatalog = {};
+chestsPhp.replace(/'([\w-]+)' => \['name' => '[^']*', 'rewardClass' => '([\w.]+)'\]/g, (m, id, cls) => { chestCatalog[id] = cls; return m; });
+const chestMarkers = gallery.interactables.filter((i) => i.action === 'open-chest');
+assert.deepStrictEqual(chestMarkers.map((i) => i.chestId).sort(), Object.keys(chestCatalog).sort(), 'the Gallery opens exactly the chests the issuer defines');
+chestMarkers.forEach((i) => {
+  assert.strictEqual(i.class, chestCatalog[i.chestId], i.chestId + ' declares its reward class');
+  assert(i.chestName && !i.oncePerUser, i.chestId + ' has a display name and does not hide itself');
+});
+['ruby', 'pickaxe'].forEach((n) => ['glb', 'png'].forEach((e) => ['demo-domain-a', 'demo-domain-b'].forEach((d) => {
+  assert(fs.existsSync(path.join(REPO, d, 'assets', 'rewards', n + '.' + e)), d + '/assets/rewards/' + n + '.' + e + ' exists');
+})));
+pass('the Gallery\'s ' + chestMarkers.length + ' chests match the issuer\'s chest catalog and the reward assets exist');
 
 // ---- demo addresses stay local ----
 [manifest, readJson(path.join(REPO, 'demo-domain-a', '.well-known', 'spatial.json'))].forEach((m) => {

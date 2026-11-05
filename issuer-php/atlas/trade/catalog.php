@@ -42,6 +42,7 @@ foreach (array_keys(ATLAS_ASSET_CATALOG) as $cls) {
   $entry = ATLAS_ASSET_CATALOG[$cls];
   $tradeScope = isset($entry['tradeScope']) ? $entry['tradeScope'] : 'local';
   if ($tradeScope === 'bound') continue;
+  if (!empty($entry['restrictedIssuance'])) continue;
   $resolved = atlas_asset_catalog_entry($cls);
   $row = [
     'class' => $cls,

@@ -62,6 +62,8 @@ What's in this folder
     asset/reissue.php        - POST /atlas/asset/reissue     (publish an updated version of an already-issued non-fungible asset — demo/admin use)
     asset/split.php          - POST /atlas/asset/split       (split a fungible balance)
     asset/consolidate.php    - POST /atlas/asset/consolidate (merge fungible balances)
+    asset/open-chest.php     - POST /atlas/asset/open-chest  (spend a key to open a gallery chest and receive its reward; once per wallet per chest)
+    chest/status.php         - GET  /atlas/chest/status?chestId=&owner=  (has this wallet already opened this chest?)
     trade/submit.php         - POST /atlas/trade/submit      (post an open listing — see "Trading Station" below)
     trade/listings.php       - GET  /atlas/trade/listings    (browse open listings — see "Trading Station" below)
     trade/claim.php          - POST /atlas/trade/claim       (fulfill a specific listing by id — see "Trading Station" below)
@@ -95,7 +97,7 @@ What's in this folder
     .htaccess                - makes the URLs above work without a .php
                                 extension, matching what the extension calls
   lib/
-    bootstrap.php, crypto.php, store.php, ledger-issuance.php, ledger-receipts.php  - shared code, not web routes
+    bootstrap.php, crypto.php, store.php, chests.php, ledger-issuance.php, ledger-receipts.php  - shared code, not web routes
     .htaccess                - blocks direct web access to this folder
                                 (this is where the private key file lives
                                 once it's generated)

@@ -1236,6 +1236,7 @@ const AtlasWallet = (() => {
   function repeatOperationOf(entry) {
     if (entry.kind === 'purchase') return 'purchase';
     if (entry.kind === 'claim') return 'trade-claim';
+    if (entry.kind === 'open-chest') return 'open-chest';
     if (entry.kind === 'mint' && entry.body && entry.body.quantity === undefined) return 'issue-unique';
     return null;
   }
@@ -1414,6 +1415,9 @@ const AtlasWallet = (() => {
     if (entry.kind === 'purchase') {
       return [{ owner: entry.owner, remove: entry.predecessors, add: [data.balance, data.purchased].filter(Boolean).map(entryOf) }];
     }
+    if (entry.kind === 'open-chest') {
+      return [{ owner: entry.owner, remove: entry.predecessors, add: [entryOf(data.reward)] }];
+    }
     throw new Error('unknown operation kind: ' + entry.kind);
   }
 
@@ -1436,6 +1440,11 @@ const AtlasWallet = (() => {
     if (entry.kind === 'convert') return good(data.received, entry.owner) && (!data.remainder || good(data.remainder, entry.owner));
     if (entry.kind === 'purchase') {
       return good(data.purchased, entry.owner) && data.purchased.asset.class === body.purchasedClass && (!data.balance || good(data.balance, entry.owner));
+    }
+    if (entry.kind === 'open-chest') {
+      const spent = body.credential && body.credential.id;
+      return data.opened === true && data.chestId === body.chestId && data.consumed === spent && good(data.reward, entry.owner)
+        && !!data.reward.asset.class && data.reward.asset.fungible === false;
     }
     if (entry.kind === 'claim') {
       const wanted = body.intent && body.intent.payload && body.intent.payload.want && body.intent.payload.want.class;
@@ -1865,7 +1874,7 @@ const AtlasWallet = (() => {
   const PENDING_OPS_BACKUP_FORMAT = 'atlas-pending-ops/1.0';
   const JOURNAL_PATHS = {
     mint: '/atlas/asset/issue', split: '/atlas/asset/split', consolidate: '/atlas/asset/consolidate', convert: '/atlas/convert',
-    purchase: '/atlas/asset/purchase', claim: '/atlas/trade/claim'
+    purchase: '/atlas/asset/purchase', claim: '/atlas/trade/claim', 'open-chest': '/atlas/asset/open-chest'
   };
 
   // The wallet list and the journal for one owner, from ONE storage read, so they describe the same
@@ -2172,6 +2181,62 @@ const AtlasWallet = (() => {
     await autoConsolidateAssetWallet(owner.publicKey);
     await logActivity('asset', 'Purchased ' + qty + ' ' + purchasedClass + ' from ' + issuerDomain);
     return result;
+  }
+
+  // Reward chests (issuer-php/atlas/asset/open-chest.php). A chest is opened by spending one Studio key
+  // issued by the chest's own domain; the owner-signed intent names the chest and the key, so only the
+  // key's owner can ask, and the issuer answers a repeated request id with the same stored result.
+  function isChestKey(credential, issuerDomain) {
+    const a = credential && credential.asset;
+    return !!(a && a.class === 'atlas.demo.studio.collectible' && a.properties && a.properties['atlas.studio.template'] === 'key'
+      && credential.issuer && credential.issuer.domain === issuerDomain
+      && !(typeof a.expiresAt === 'string' && Date.parse(a.expiresAt) <= Date.now()));
+  }
+
+  // Keys in this wallet that could open a chest of `issuerDomain` now (not held back by an unfinished request).
+  async function findChestKeys(role, issuerDomain) {
+    const owner = await identityOf(role);
+    const wallet = await getWallet(owner.publicKey);
+    return wallet.filter((e) => !isHeldBack(e)).map((e) => e.credential).filter((c) => isChestKey(c, issuerDomain));
+  }
+
+  // Whether this wallet's key has already opened the chest; null when the issuer cannot say.
+  async function chestStatus(role, issuerDomain, chestId) {
+    const owner = await identityOf(role);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CAPABILITY_TIMEOUT_MS);
+    try {
+      const res = await fetch(baseUrl(issuerDomain) + '/atlas/chest/status?chestId=' + encodeURIComponent(chestId) + '&owner=' + encodeURIComponent(owner.publicKey), { cache: 'no-store', signal: controller.signal });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data && typeof data.opened === 'boolean' ? { opened: data.opened, name: data.name || null, rewardClass: data.rewardClass || null } : null;
+    } catch (err) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Spends `keyCredential` to open `chestId`. Resolves { reward, consumed, chestName }; a chest this wallet
+  // already opened throws with code 'chest-already-opened' and the key is not spent.
+  async function openChest(role, issuerDomain, chestId, keyCredential) {
+    const owner = await identityOf(role);
+    await assertWalletWritable(owner.publicKey);
+    if (!isChestKey(keyCredential, issuerDomain)) throw new Error('That item cannot open this chest.');
+    await assertSettled(owner.publicKey, [keyCredential.id]);
+    const support = await issuerRepeatSupport(issuerDomain, 'open-chest');
+    if (support === 'unreachable') throw repeatSupportError('Open chest', issuerDomain);
+    if (support !== 'yes') throw new Error(issuerDomain + ' does not offer chests.');
+    const done = await runIssuerOperation({
+      owner: owner.publicKey, kind: 'open-chest', label: 'Open chest', domain: issuerDomain, path: '/atlas/asset/open-chest',
+      predecessors: [keyCredential.id],
+      body: async (requestId) => {
+        const intentPayload = { action: 'open-chest', chestId, credentialId: keyCredential.id, requestId, domain: keyCredential.issuer.domain };
+        return { credential: keyCredential, chestId, intent: { payload: intentPayload, proof: await signAs(role, intentPayload) } };
+      }
+    });
+    await logActivity('asset', 'Opened ' + (done.data.chestName || 'a chest') + ' at ' + issuerDomain + ' with a key and received ' + done.data.reward.asset.name);
+    return { reward: done.data.reward, consumed: done.data.consumed, chestName: done.data.chestName || null };
   }
 
   // The signed payload shape (SPEC.md §5): canonicalize({id, asset, owner,
@@ -10303,7 +10368,7 @@ const AtlasWallet = (() => {
     hasSyncedIdentityAvailable, restoreIdentityFromSync,
     getActivityLog, clearActivityLog,
     hideAsset, unhideAsset,
-    splitAsset, consolidateAsset, convertAsset, purchaseAsset,
+    splitAsset, consolidateAsset, convertAsset, purchaseAsset, openChest, findChestKeys, chestStatus, studioUrl: (domain) => baseUrl(domain) + '/atlas/studio/',
     autoConsolidateAssetWallet, recoverPendingOperations, retryPendingOperation, recoverAfterUnlock, getPendingOperations, getRecoveredOperations, getPendingOpsQuarantine, getConsolidationStatus,
     getLoadout, loadItem, unloadItem,
     getAvatarLook, getAvatarLookAssetId, setAvatarLook, avatarLookPropertiesFromAsset,

@@ -178,6 +178,15 @@
      above #presenceApprovalModal's 20 — because a trust decision about what
      you're about to enter should never be able to hide behind, or get
      dismissed incidentally along with, something else already open. */
+  /* Reward chest prompts (spend a key / go and make one). Above the chess table, below the trust prompts. */
+  #chestModal { display: none; position: fixed; inset: 0; z-index: 22; align-items: center; justify-content: center; background: rgba(8,13,16,0.78); }
+  #chestModal.active { display: flex; }
+  #chestBox {
+    background: rgba(20,31,38,0.98); border: 1px solid #2c3c44; border-radius: 10px;
+    padding: 18px 20px; max-width: 380px; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+  }
+  #chestBox .subhead { color: #57a593; margin-bottom: 8px; }
+  #chestBox p { font-size: 13px; line-height: 1.5; margin: 0 0 14px; }
   #keyAnchorModal { display: none; position: fixed; inset: 0; z-index: 25; align-items: center; justify-content: center; background: rgba(8,13,16,0.82); }
   #keyAnchorModal.active { display: flex; }
   #keyAnchorBox {
@@ -1198,6 +1207,16 @@
        viewer.js for what populates and opens this, and the CSS comment
        above for why it always renders at the stronger "real interstitial"
        tier rather than a dismissible banner. -->
+  <div id="chestModal" role="dialog" aria-modal="true" aria-labelledby="chestTitle">
+    <div id="chestBox">
+      <div class="subhead" id="chestTitle"></div>
+      <p id="chestMessage"></p>
+      <div class="btn-row">
+        <button id="chestCancelBtn" type="button" class="btn-secondary"></button>
+        <button id="chestConfirmBtn" type="button"></button>
+      </div>
+    </div>
+  </div>
   <div id="keyAnchorModal">
     <div id="keyAnchorBox">
       <div class="subhead">⚠ This space has no domain behind it</div>

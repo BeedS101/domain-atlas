@@ -27,8 +27,13 @@ const keyAnchorFingerprintEl = document.getElementById('keyAnchorFingerprint');
 const keyAnchorLabelLineEl = document.getElementById('keyAnchorLabelLine');
 const keyAnchorStayBtn = document.getElementById('keyAnchorStayBtn');
 const keyAnchorEnterBtn = document.getElementById('keyAnchorEnterBtn');
+const chestModalEl = document.getElementById('chestModal');
+const chestTitleEl = document.getElementById('chestTitle');
+const chestMessageEl = document.getElementById('chestMessage');
+const chestCancelBtn = document.getElementById('chestCancelBtn');
+const chestConfirmBtn = document.getElementById('chestConfirmBtn');
 
-// In-world chat (#105-109) — anchored bottom-left of the canvas, see the
+// In-world chat — anchored bottom-left of the canvas, see the
 // "in-world chat" section further below (right after presence) for the
 // connection logic these elements are driven by.
 const chatWidgetEl = document.getElementById('chatWidget');
@@ -2811,6 +2816,43 @@ function showKeyAnchoredDisclosure(portal, manifest) {
   });
 }
 
+// Reward chests: a two-button prompt that resolves true on the confirm button and false on cancel, Escape or a
+// click outside the box. With no prompt markup it resolves false, so nothing is spent without being asked.
+function askChestChoice({ title, message, confirmLabel, cancelLabel }) {
+  return new Promise((resolve) => {
+    if (!chestModalEl || !chestCancelBtn || !chestConfirmBtn) { resolve(false); return; }
+    chestTitleEl.textContent = title;
+    chestMessageEl.textContent = message;
+    chestConfirmBtn.textContent = confirmLabel;
+    chestCancelBtn.textContent = cancelLabel;
+    chestModalEl.classList.add('active');
+    const finish = (result) => {
+      chestModalEl.classList.remove('active');
+      chestConfirmBtn.removeEventListener('click', onConfirm);
+      chestCancelBtn.removeEventListener('click', onCancel);
+      chestModalEl.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey, true);
+      resolve(result);
+    };
+    const onConfirm = () => finish(true);
+    const onCancel = () => finish(false);
+    const onBackdrop = (e) => { if (e.target === chestModalEl) finish(false); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); finish(false); } };
+    chestConfirmBtn.addEventListener('click', onConfirm);
+    chestCancelBtn.addEventListener('click', onCancel);
+    chestModalEl.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey, true);
+    chestConfirmBtn.focus();
+  });
+}
+
+// The key a chest should take: one that expires soonest, else the oldest, so a spare is never spent ahead of
+// one that is about to lapse.
+function pickChestKey(keys) {
+  const expiry = (c) => (typeof c.asset.expiresAt === 'string' ? Date.parse(c.asset.expiresAt) : Infinity);
+  return keys.slice().sort((a, b) => (expiry(a) - expiry(b)) || (Date.parse(a.issuedAt) - Date.parse(b.issuedAt)))[0];
+}
+
 // --- isometric rendering (unchanged mechanics, world-agnostic) ---
 
 const SCALE = 26;
@@ -3004,7 +3046,7 @@ function drawInteractable(marker, originX, originY, pulse) {
   ctx.font = '9px system-ui, sans-serif';
   ctx.fillStyle = '#a9b8bf';
   ctx.fillText(
-    marker.action === 'open-chess' ? 'click to play' : marker.action === 'purchase' ? 'click to buy' : 'click to collect',
+    marker.action === 'open-chess' ? 'click to play' : marker.action === 'purchase' ? 'click to buy' : marker.action === 'open-chest' ? 'click to open' : 'click to collect',
     base.x, base.y + 22
   );
 
@@ -4536,8 +4578,8 @@ function renderPreviewerContent(items) {
         const note = item.marker.action === 'purchase' && info.purchase
           ? info.purchase.priceAmount + ' ' + info.purchase.priceClass +
             (typeof info.expiresInMinutes === 'number' ? ' · expires ' + info.expiresInMinutes + ' min after purchase' : '')
-          : 'Not collected yet';
-        const hint = item.marker.action === 'purchase' ? 'Click, or press E, to buy' : 'Click, or press E, to collect';
+          : (item.marker.action === 'open-chest' ? 'Locked: opens with a key from the Asset Studio' : 'Not collected yet');
+        const hint = item.marker.action === 'purchase' ? 'Click, or press E, to buy' : item.marker.action === 'open-chest' ? 'Click, or press E, to open' : 'Click, or press E, to collect';
         previewerBodyEl.innerHTML = renderPreviewerItemDetail(info.name, item.marker.class, item.domain, info.thumbnail, info.properties, note) +
           '<div class="previewer-collect-hint">' + hint + '</div>';
       }
@@ -4545,7 +4587,7 @@ function renderPreviewerContent(items) {
     return;
   }
 
-  // Multi-item list (task #227's own "close to 2 or more items" case) — a
+  // Multi-item list (two or more items in range) — a
   // compact row per item, thumbnail optional (whatever's already resolved
   // in previewerClassInfoCache; a still-loading one just shows its name).
   // Every entry here is, by construction, something openPreviewer()'s
@@ -12319,7 +12361,7 @@ assetActionHandler(selfCollectiblesListEl);
 assetActionHandler(selfDocumentsListEl);
 
 // Dispatch for a clicked in-scene interactable (see the "interactables"
-// note in enterWorld). Four actions exist today: "mint" (calls
+// note in enterWorld). Five actions exist today: "open-chest" (spend a Studio key for a reward, see AtlasWallet.openChest()), "mint" (calls
 // AtlasWallet.mintAsset() directly), "issue" (see just below), "purchase"
 // (the museum ticket stall's worked example: spend a fungible balance to
 // acquire a fresh asset via AtlasWallet.purchaseAsset(), the first time a
@@ -12406,6 +12448,48 @@ async function handleInteractable(marker) {
       // pickup (compass, ring, crate) doesn't pay for a wallet-panel DOM
       // lookup it has nothing to do with.
       if (marker.class === 'atlas.membership') await refreshSubscribeButton();
+    } else if (marker.action === 'open-chest') {
+      // A chest is opened by spending one Asset Studio key from the chest's own domain; the issuer
+      // enforces one opening per wallet per chest, so the prompts here only avoid asking for a key that
+      // could not be used.
+      const identity = await AtlasWallet.getIdentity();
+      if (!identity) throw new Error('Create an identity first.');
+      const domain = manifestDomainOf(currentManifest);
+      const chestName = marker.chestName || 'chest';
+      const status = await AtlasWallet.chestStatus('self', domain, marker.chestId);
+      if (status && status.opened) {
+        statusEl.textContent = 'You have already opened this ' + chestName + '.';
+        return;
+      }
+      const keys = await AtlasWallet.findChestKeys('self', domain);
+      if (!keys.length) {
+        const goToStudio = await askChestChoice({
+          title: 'This ' + chestName + ' is locked',
+          message: 'Opening it takes a key from the Asset Studio, and your wallet does not hold one. Would you like to go make keys now?',
+          confirmLabel: 'Make keys', cancelLabel: 'Not now'
+        });
+        if (goToStudio) {
+          window.open(AtlasWallet.studioUrl(domain), '_blank', 'noopener');
+          statusEl.textContent = 'Make a key in the Asset Studio, then come back and open the ' + chestName + '.';
+        } else {
+          statusEl.textContent = 'The ' + chestName + ' stays locked.';
+        }
+        return;
+      }
+      const key = pickChestKey(keys);
+      const proceed = await askChestChoice({
+        title: 'Open the ' + chestName + '?',
+        message: 'A key will be consumed to open the chest, do you want to continue?' + (keys.length > 1 ? ' You hold ' + keys.length + ' keys; one will be used.' : ''),
+        confirmLabel: 'Use a key', cancelLabel: 'Cancel'
+      });
+      if (!proceed) {
+        statusEl.textContent = 'The ' + chestName + ' stays closed; your key was not used.';
+        return;
+      }
+      statusEl.textContent = 'Opening the ' + chestName + '…';
+      const opened = await AtlasWallet.openChest('self', domain, marker.chestId, key);
+      await refreshInventoryDisplay();
+      statusEl.textContent = 'The ' + chestName + ' held ' + opened.reward.asset.name + '. One key was used.';
     } else if (marker.action === 'purchase') {
       // The museum ticket stall's own worked example (SPEC.md §5.8) — unlike
       // "mint"/"issue" above, this can genuinely fail for a reason the
@@ -12426,7 +12510,8 @@ async function handleInteractable(marker) {
   } catch (err) {
     statusEl.textContent = (marker.action === 'mint' ? 'Mint failed: '
       : marker.action === 'purchase' ? 'Purchase failed: '
-      : 'Collect failed: ') + err.message;
+      : marker.action === 'open-chest' ? (err && err.code === 'chest-already-opened' ? 'You have already opened this chest; your key was not used. ' : 'Chest not opened: ')
+      : 'Collect failed: ') + (err && err.code === 'chest-already-opened' ? '' : err.message);
   } finally {
     interactableBusyMarkers.delete(marker);
   }

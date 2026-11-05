@@ -2155,6 +2155,23 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'atlas.demo.noValue' => 'true',
     ],
   ],
+  // Rewards held in the gallery's chests (atlas/asset/open-chest.php). Non-fungible and giftable;
+  // 'restrictedIssuance' => 'chest' means only the chest route signs one, after it has consumed a
+  // Studio key, so mint_asset_by_class() and every general mint path refuse these classes.
+  'atlas.gem.ruby' => [
+    'name' => 'Ruby', 'modelPath' => '/assets/rewards/ruby.glb', 'thumbnailPath' => '/assets/rewards/ruby.png',
+    'fungible' => false, 'presentation' => 'collectible', 'restrictedIssuance' => 'chest',
+    'properties' => [
+      'atlas.rarity' => 'rare', 'com.example.kind' => 'gemstone', 'com.example.cut' => 'oval',
+    ],
+  ],
+  'atlas.tool.pickaxe' => [
+    'name' => 'Mining Pick', 'modelPath' => '/assets/rewards/pickaxe.glb', 'thumbnailPath' => '/assets/rewards/pickaxe.png',
+    'fungible' => false, 'presentation' => 'collectible', 'restrictedIssuance' => 'chest',
+    'properties' => [
+      'atlas.rarity' => 'uncommon', 'com.example.kind' => 'tool',
+    ],
+  ],
   // Oracle-triggered payout demo (oracle-demo.html): a flight-delay
   // insurance policy, bound like the governance membership above — a
   // personal claim on its own holder's eligibility, not something to
