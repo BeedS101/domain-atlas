@@ -64,6 +64,7 @@ What's in this folder
     asset/consolidate.php    - POST /atlas/asset/consolidate (merge fungible balances)
     asset/open-chest.php     - POST /atlas/asset/open-chest  (spend a key to open a gallery chest and receive its reward; once per wallet per chest)
     chest/status.php         - GET  /atlas/chest/status?chestId=&owner=  (has this wallet already opened this chest?)
+    chest/reset.php          - POST /atlas/chest/reset  (admin: forget that an owner opened a chest, so a lost reward can be won again)
     trade/submit.php         - POST /atlas/trade/submit      (post an open listing — see "Trading Station" below)
     trade/listings.php       - GET  /atlas/trade/listings    (browse open listings — see "Trading Station" below)
     trade/claim.php          - POST /atlas/trade/claim       (fulfill a specific listing by id — see "Trading Station" below)

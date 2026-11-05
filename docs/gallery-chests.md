@@ -23,6 +23,8 @@ A chest is an `interactables` entry in the world's `scene.json`:
 
 A chest opens once per wallet. The issuer records `{requestId, keyId, openedAt}` under a hash of chest and owner before it spends the key. A chest counts as opened only when that marker exists and its key is revoked, so a request that died before the key was spent does not lock the chest. Repeating a request with the same `requestId` returns the stored answer.
 
+If an owner loses the reward (for example by deleting it from the wallet), an admin can run "Reset a chest" in the Admin Panel (`POST /atlas/chest/reset`, admin-gated). It removes the record that this owner key opened the chest; the owner then opens it again with a new key. The reward already issued stays valid and nothing is revoked.
+
 ## Rewards
 
 `atlas.gem.ruby` and `atlas.tool.pickaxe` are non-fungible collectibles with `restrictedIssuance: 'chest'`: they cannot be minted through the Studio, the trade catalog or `mint_asset_by_class`, only by the chest route. The pickaxe is a collectible only.

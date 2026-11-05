@@ -192,6 +192,35 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     assert.equal(keys.filter((k) => revoked(l).includes(k.id)).length, 1, 'only one key was spent');
   });
 
+  await test('an admin can reset a chest so its owner can open it again with a new key', async () => {
+    const l = await newLab();
+    const admin = makeIdentity('raw-ecdsa');
+    fs.writeFileSync(path.join(l.docroot, 'lib', 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: admin.publicKeyB64, addedAt: new Date().toISOString() }] }));
+    const reset = (who, chestId, ownerKey) => {
+      const payload = { chestId, ownerPublicKey: ownerKey, adminAuth: { action: '/atlas/chest/reset', domain: l.host, issuedAt: new Date().toISOString(), nonce: crypto.randomBytes(12).toString('hex') } };
+      return l.postRaw('/atlas/chest/reset', { payload, proof: signPayload(who, payload) });
+    };
+    const owner = makeIdentity('raw-ecdsa');
+    const first = await mintFor(l, owner);
+    assert.equal((await open(l, openBody(owner, first, 'gallery-pick'))).status, 200);
+    const second = await mintFor(l, owner);
+    assert.equal((await open(l, openBody(owner, second, 'gallery-pick'))).status, 409);
+    assert.equal((await reset(owner, 'gallery-pick', owner.publicKeyB64)).status, 401, 'a non-admin cannot reset');
+    const none = await reset(admin, 'gallery-gem', owner.publicKeyB64);
+    assert.equal(none.status, 200, none.text);
+    assert.equal(none.json.wasOpened, false, 'a chest that was not opened is a no-op');
+    assert.equal((await reset(admin, 'no-such-chest', owner.publicKeyB64)).status, 404);
+    const done = await reset(admin, 'gallery-pick', owner.publicKeyB64);
+    assert.equal(done.status, 200, done.text);
+    assert.equal(done.json.wasOpened, true);
+    assert.equal((await l.get('/atlas/chest/status?chestId=gallery-pick&owner=' + encodeURIComponent(owner.publicKeyB64))).json.opened, false);
+    const again = await open(l, openBody(owner, second, 'gallery-pick'));
+    assert.equal(again.status, 200, again.text);
+    assert.equal(again.json.reward.asset.class, 'atlas.tool.pickaxe');
+    assert.ok(!revoked(l).includes(again.json.reward.id), 'the new reward is live');
+    assert.ok(revoked(l).includes(first.id), 'the first key stayed spent');
+  });
+
   for (const l of labs) { await l.stop(); l.cleanup(); }
   console.log('\n' + results.pass + ' passed, ' + results.fail + ' failed');
   process.exit(results.fail ? 1 : 0);

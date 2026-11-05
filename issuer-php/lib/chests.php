@@ -49,6 +49,16 @@ function atlas_chest_opened($chestId, $ownerPublicKey) {
   return $rec !== null && is_revoked($rec['keyId']);
 }
 
+// Admin recovery: forgets that this owner key opened this chest, so it can be opened again with another key.
+// The reward already issued is untouched (nothing is revoked). Returns whether a record existed. The caller
+// holds the chest lease.
+function atlas_chest_reset($chestId, $ownerPublicKey) {
+  $file = atlas_chest_marker_file($chestId, $ownerPublicKey);
+  if (!is_file($file)) return false;
+  if (!@unlink($file)) throw new Exception('the chest record could not be removed', 503);
+  return true;
+}
+
 // Why $credential cannot open a chest for $signer, or null. The caller holds the spend lock.
 function atlas_chest_key_problem($publicKeyB64url, $credential, $signer) {
   if (!is_array($credential) || ($credential['credential'] ?? null) !== 'domain-atlas-asset/1.0') return 'not an asset credential';

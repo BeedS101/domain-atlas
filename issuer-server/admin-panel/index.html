@@ -401,6 +401,17 @@
       </section>
 
       <section class="panel">
+        <h2>Reset a chest</h2>
+        <p class="hint">PHP issuer only (POST /atlas/chest/reset). For an owner who lost the reward from a chest, for example by deleting it from their wallet: forgets that their key opened the chest, so they can open it again with a new key. The reward already issued stays valid and nothing is revoked.</p>
+        <label for="chestResetOwnerPublicKey">Owner public key</label>
+        <input type="text" id="chestResetOwnerPublicKey" placeholder="base64url-encoded public key">
+        <label for="chestResetChestId">Chest</label>
+        <input type="text" id="chestResetChestId" placeholder="gallery-pick">
+        <button class="submit" id="chestResetBtn" type="button">Reset chest</button>
+        <div class="result" id="chestResetResult"></div>
+      </section>
+
+      <section class="panel">
         <h2>Reissue an asset</h2>
         <p class="hint">Rewrites an already-issued non-fungible credential's properties and/or tradeScope, superseding it with a new one (POST /atlas/asset/reissue). Paste the exact credential currently held. Properties merge onto what's already there — a key left out is untouched, and a key set to null is removed entirely rather than kept as a literal null.</p>
         <label for="reissueCredential">Credential JSON</label>
@@ -1198,6 +1209,23 @@
       try {
         const res = await postJson('/atlas/asset/mint', { payload: { ownerPublicKey, assetClass, quantity, properties }, token: session.token });
         showResult(result, res.ok, res.ok ? 'Minted -> ' + res.body.id : (res.body.error || 'Mint failed.'));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ---------- reset a chest ----------
+    document.getElementById('chestResetBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('chestResetBtn');
+      const result = document.getElementById('chestResetResult');
+      const ownerPublicKey = document.getElementById('chestResetOwnerPublicKey').value.trim();
+      const chestId = document.getElementById('chestResetChestId').value.trim();
+      if (!ownerPublicKey) return showResult(result, false, 'Owner public key is required.');
+      if (!chestId) return showResult(result, false, 'Chest is required.');
+      btn.disabled = true;
+      try {
+        const res = await postJson('/atlas/chest/reset', { payload: { ownerPublicKey, chestId }, token: session.token });
+        showResult(result, res.ok, res.ok ? (res.body.wasOpened ? 'Reset: this owner can open ' + chestId + ' again.' : 'That owner had not opened ' + chestId + '; nothing to reset.') : (res.body.error || 'Reset failed.'));
       } finally {
         btn.disabled = false;
       }
