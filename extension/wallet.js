@@ -2844,14 +2844,14 @@ const AtlasWallet = (() => {
     };
   }
 
-  async function getAvatarHat() {
+  async function getAvatarHat(ctx) {
     const identity = await getIdentity();
     if (!identity) return null;
     const assetId = await getAvatarHatAssetId();
     if (!assetId) return null;
     const wallet = await getWallet(identity.publicKey);
     const entry = wallet.find((e) => e.credential.id === assetId);
-    return entry ? avatarHatPropertiesFromAsset(entry.credential.asset) : null; // no longer owned — graceful fallback to no hat
+    return entry ? avatarHatPropertiesFromAsset((await resolveEquippedItem(entry, 'hat', ctx)).asset) : null; // no longer owned — graceful fallback to no hat
   }
 
   // ---------- avatar shoes (equipped appearance, third independent slot) ----------
@@ -2900,17 +2900,17 @@ const AtlasWallet = (() => {
     };
   }
 
-  async function getAvatarShoes() {
+  async function getAvatarShoes(ctx) {
     const identity = await getIdentity();
     if (!identity) return null;
     const assetId = await getAvatarShoesAssetId();
     if (!assetId) return null;
     const wallet = await getWallet(identity.publicKey);
     const entry = wallet.find((e) => e.credential.id === assetId);
-    return entry ? avatarShoePropertiesFromAsset(entry.credential.asset) : null; // no longer owned — graceful fallback to no shoes
+    return entry ? avatarShoePropertiesFromAsset((await resolveEquippedItem(entry, 'shoes', ctx)).asset) : null; // no longer owned — graceful fallback to no shoes
   }
 
-  // ---------- dropping items into a scene (shared — task #250) ----------
+  // ---------- dropping items into a scene (shared) ----------
   //
   // Until now this was local-only, self-only: nothing about ownership ever
   // moved, a dropped item just sat flagged in this same wallet, reclaimable
@@ -2978,7 +2978,7 @@ const AtlasWallet = (() => {
 
   function avatarHandPropertiesFromAsset(asset) {
     const props = (asset && asset.properties) || {};
-    const flag = props['atlas.avatar.handItem'];
+    const flag = props['atlas.avatar.handItem'] || (props['atlas.item.standard'] && props['atlas.avatar.slot'] === 'hand');
     if (!flag || flag === 'false' || typeof (asset && asset.model) !== 'string' || !/^https?:\/\//i.test(asset.model)) return null;
     return { handModel: asset.model };
   }
@@ -3030,6 +3030,13 @@ const AtlasWallet = (() => {
     if (AVATAR_COLOR_KINDS.includes(kind) && !/^#[0-9a-fA-F]{6}$/.test(String(props['atlas.avatar.color'] || ''))) return null;
     if (kind === 'offhand' && !/^https?:\/\//i.test(String((asset && asset.model) || ''))) return null;
     return kind;
+  }
+
+  // The multiplier a standard-conforming item carries under `key` (1 for any other item).
+  function standardMultiplierOf(asset, key) {
+    const props = asset && asset.properties;
+    if (!props || !Object.prototype.hasOwnProperty.call(props, 'atlas.item.standard')) return 1;
+    return clampAvatarMultiplier(props[key]);
   }
 
   function clampAvatarMultiplier(v) {
@@ -3098,6 +3105,13 @@ const AtlasWallet = (() => {
       out.jumpMultiplier *= clampAvatarMultiplier(props['atlas.avatar.jumpMultiplier']);
       out.interactRangeMultiplier *= clampAvatarMultiplier(props['atlas.avatar.interactRangeMultiplier']);
     }
+    // A standard outfit or held item may carry the generic multipliers too (the other slots read them above).
+    for (const id of ['outfit', 'hand']) {
+      const asset = slotAssets && slotAssets[id];
+      out.speedMultiplier *= standardMultiplierOf(asset, 'atlas.avatar.speedMultiplier');
+      out.jumpMultiplier *= standardMultiplierOf(asset, 'atlas.avatar.jumpMultiplier');
+      out.interactRangeMultiplier *= standardMultiplierOf(asset, 'atlas.avatar.interactRangeMultiplier');
+    }
     const factors = statMovementFactors(slotAssets);
     out.speedMultiplier = clampAvatarMultiplier(out.speedMultiplier * factors.speed);
     out.jumpMultiplier = clampAvatarMultiplier(out.jumpMultiplier * factors.jump);
@@ -3158,8 +3172,8 @@ const AtlasWallet = (() => {
     return assetId || null;
   }
 
-  // The equipped asset of every equipment slot, { slotId: asset | null }, owned items only.
-  async function getEquippedAvatarAssets() {
+  // The equipped wallet entry of every equipment slot, { slotId: entry | null }, owned items only.
+  async function getEquippedAvatarEntries() {
     const identity = await getIdentity();
     if (!identity) return {};
     const ids = Object.assign({
@@ -3167,22 +3181,220 @@ const AtlasWallet = (() => {
       shoes: await getAvatarShoesAssetId(), hand: await getAvatarHandAssetId()
     }, await getAvatarSlotIds());
     const wallet = Object.values(ids).some(Boolean) ? await getWallet(identity.publicKey) : [];
+    const entries = {};
+    for (const slot of Object.keys(ids)) entries[slot] = (ids[slot] && wallet.find((e) => e.credential.id === ids[slot])) || null;
+    return entries;
+  }
+
+  // The equipped asset of every equipment slot, { slotId: asset | null }, owned items only. These are the
+  // signed assets as issued; getEquipmentEffects() says which of their effects a world lets apply.
+  async function getEquippedAvatarAssets() {
+    const entries = await getEquippedAvatarEntries();
     const assets = {};
-    for (const slot of Object.keys(ids)) {
-      const entry = ids[slot] ? wallet.find((e) => e.credential.id === ids[slot]) : null;
-      assets[slot] = entry ? entry.credential.asset : null;
+    for (const slot of Object.keys(entries)) assets[slot] = entries[slot] ? entries[slot].credential.asset : null;
+    return assets;
+  }
+
+  // ---------- standard items: verification and world effects ----------
+  //
+  // An item whose signed properties carry `atlas.item.standard` (docs/item-standard-v0.1.md) is checked
+  // against the spec its own `atlas.item.specDigest` names, fetched from the issuing domain, before any of its
+  // effects apply; policy.itemEffects then says which of them the current world supports. Items without the
+  // marker are untouched. See item-effects.js for the world side.
+  //
+  // A spec is content-addressed (the digest is recomputed from what the issuer returns), so a cached copy never
+  // goes stale and is kept across sessions, bounded.
+  const ITEM_SPEC_CACHE_LIMIT = 200;
+  const ITEM_SPEC_RETRY_MS = 60 * 1000;
+  const itemSpecs = new Map(); // 'domain\u0000class\u0000digest' -> validated spec
+  const itemSpecInFlight = new Map();
+  const itemSpecFailures = new Map(); // key -> { at, result } for a fetch that could not be completed
+  let itemSpecsLoaded = null;
+  let itemEffectsContext = null;
+
+  function itemSpecKey(domain, cls, digest) { return domain + '\u0000' + cls + '\u0000' + digest; }
+
+  async function loadItemSpecs() {
+    if (!itemSpecsLoaded) {
+      itemSpecsLoaded = (async () => {
+        try {
+          const { atlasItemSpecs } = await chrome.storage.local.get('atlasItemSpecs');
+          if (atlasItemSpecs && typeof atlasItemSpecs === 'object') for (const k of Object.keys(atlasItemSpecs)) itemSpecs.set(k, atlasItemSpecs[k]);
+        } catch (err) { /* an unreadable cache is just an empty one */ }
+      })();
     }
+    return itemSpecsLoaded;
+  }
+
+  async function rememberItemSpec(key, spec) {
+    itemSpecs.delete(key);
+    itemSpecs.set(key, spec);
+    while (itemSpecs.size > ITEM_SPEC_CACHE_LIMIT) itemSpecs.delete(itemSpecs.keys().next().value);
+    try { await chrome.storage.local.set({ atlasItemSpecs: Object.fromEntries(itemSpecs) }); } catch (err) { /* memory copy still serves this session */ }
+  }
+
+  // { spec } on success; { verdict, reason } otherwise. 'invalid' means the issuer says it never signed that
+  // spec (or returned one that does not hash to the signed digest); 'unverified' means it could not be checked.
+  async function fetchItemSpec(domain, cls, digest, fungible) {
+    const std = AtlasItemStandard;
+    let res;
+    try {
+      res = await fetch(baseUrl(domain) + '/atlas/asset/class?class=' + encodeURIComponent(cls) + '&specDigest=' + digest);
+    } catch (err) {
+      return { verdict: 'unverified', reason: 'issuer-unreachable' };
+    }
+    let body = null;
+    try { body = await res.json(); } catch (err) { body = null; }
+    if (res.status === 404 && body && body.code === 'item-spec-unknown') return { verdict: 'invalid', reason: 'item-spec-unknown' };
+    if (!res.ok || !body || typeof body !== 'object') return { verdict: 'unverified', reason: 'issuer-no-spec' };
+    if (body.itemStandard !== std.STANDARD_VERSION || !body.itemSpec || typeof body.itemSpec !== 'object') return { verdict: 'unverified', reason: 'issuer-no-spec' };
+    if (std.itemSpecDigest(body.itemSpec) !== digest) return { verdict: 'invalid', reason: 'item-spec-digest-mismatch' };
+    const check = std.validateItemSpec(body.itemSpec, { classId: cls, issuerDomain: domain, fungible: typeof fungible === 'boolean' ? fungible : undefined });
+    if (!check.ok) return { verdict: 'invalid', reason: (check.errors[0] && check.errors[0].code) || 'item-spec-invalid' };
+    return { spec: body.itemSpec };
+  }
+
+  async function resolveItemSpec(domain, cls, digest, fungible) {
+    await loadItemSpecs();
+    const key = itemSpecKey(domain, cls, digest);
+    if (itemSpecs.has(key)) return { spec: itemSpecs.get(key) };
+    const failed = itemSpecFailures.get(key);
+    if (failed && Date.now() - failed.at < ITEM_SPEC_RETRY_MS) return failed.result;
+    if (!itemSpecInFlight.has(key)) {
+      const pending = fetchItemSpec(domain, cls, digest, fungible).then(async (result) => {
+        if (result.spec) { itemSpecFailures.delete(key); await rememberItemSpec(key, result.spec); }
+        else if (result.verdict === 'unverified') itemSpecFailures.set(key, { at: Date.now(), result });
+        return result;
+      }).finally(() => itemSpecInFlight.delete(key));
+      itemSpecInFlight.set(key, pending);
+    }
+    return itemSpecInFlight.get(key);
+  }
+
+  // Verifies one asset against the spec its signed digest names. { verdict: 'legacy' } for an asset without
+  // the standard's marker; otherwise { verdict: 'verified' | 'unverified' | 'invalid', reason }.
+  async function verifyStandardItem(asset, issuerDomain) {
+    const props = (asset && asset.properties) || {};
+    if (!Object.prototype.hasOwnProperty.call(props, 'atlas.item.standard')) return { verdict: 'legacy' };
+    if (typeof AtlasItemStandard === 'undefined') return { verdict: 'unverified', reason: 'validator-unavailable' };
+    const std = AtlasItemStandard;
+    if (props['atlas.item.standard'] !== std.STANDARD_VERSION) return { verdict: 'unverified', reason: 'version-unsupported' };
+    const digest = props['atlas.item.specDigest'];
+    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) return { verdict: 'invalid', reason: 'item-spec-digest-invalid' };
+    if (!issuerDomain || typeof asset.class !== 'string') return { verdict: 'invalid', reason: 'item-issuer-missing' };
+    const got = await resolveItemSpec(issuerDomain, asset.class, digest, asset.fungible);
+    if (!got.spec) return { verdict: got.verdict, reason: got.reason };
+    const result = std.validateItemProperties(got.spec, props, { model: asset.model });
+    if (!result.ok) return { verdict: 'invalid', reason: (result.errors[0] && result.errors[0].code) || 'item-properties-invalid' };
+    return { verdict: 'verified', reason: null };
+  }
+
+  // The world's item-effects context (AtlasItemEffects.worldContext), used by every effect-aware read below
+  // unless the caller passes its own. Null means no world: standard items' effects are withheld.
+  function setItemEffectsContext(ctx) { itemEffectsContext = ctx || null; }
+  function getItemEffectsContext() { return itemEffectsContext; }
+
+  // One equipped (or carried) wallet entry resolved against a world: { assetId, asset, report }, where `asset`
+  // is what the stat and movement arithmetic should see (withheld effects removed) and `report` is
+  // AtlasItemEffects.evaluate()'s account of every effect. Non-standard entries come back unchanged.
+  async function resolveEquippedItem(entry, slot, ctx) {
+    const asset = entry.credential.asset;
+    const assetId = entry.credential.id;
+    if (typeof AtlasItemEffects === 'undefined' || !AtlasItemEffects.isStandard(asset)) return { assetId, asset, report: { standard: false } };
+    const issuerDomain = entry.credential.issuer && entry.credential.issuer.domain;
+    let v = await verifyStandardItem(asset, issuerDomain);
+    if (v.verdict === 'verified' && entry.lastVerdict && entry.lastVerdict.valid === false) v = { verdict: 'invalid', reason: 'credential-invalid' };
+    const report = AtlasItemEffects.evaluate({ asset, issuerDomain, slot, assetId, verdict: v.verdict, verdictReason: v.reason }, ctx === undefined ? itemEffectsContext : ctx);
+    return { assetId, asset: AtlasItemEffects.effectiveAsset(asset, report, slot), report };
+  }
+
+  // { slotId: { assetId, asset, report } | null } for everything equipped.
+  async function resolveEquipment(ctx) {
+    const entries = await getEquippedAvatarEntries();
+    const out = {};
+    for (const slot of Object.keys(entries)) out[slot] = entries[slot] ? await resolveEquippedItem(entries[slot], slot, ctx) : null;
+    return out;
+  }
+
+  function effectiveSlotAssets(resolved) {
+    const assets = {};
+    for (const slot of Object.keys(resolved)) assets[slot] = resolved[slot] ? resolved[slot].asset : null;
     return assets;
   }
 
   // The renderer-ready extras for what this identity has equipped (owned items only), including the movement
-  // the character stats contribute.
-  async function getAvatarExtras() {
-    return avatarExtrasFromSlots(await getEquippedAvatarAssets());
+  // the character stats contribute. Standard items count only for the effects the world lets apply.
+  async function getAvatarExtras(ctx) {
+    return avatarExtrasFromSlots(effectiveSlotAssets(await resolveEquipment(ctx)));
   }
 
-  async function getAvatarStatSheet() {
-    return avatarStatSheet(await getEquippedAvatarAssets());
+  async function getAvatarStatSheet(ctx) {
+    return avatarStatSheet(effectiveSlotAssets(await resolveEquipment(ctx)));
+  }
+
+  // The active capabilities of a resolved equipment map, plus carried consumables and keys.
+  async function capabilitiesOf(resolved, effective) {
+    if (typeof AtlasItemEffects === 'undefined') return {};
+    const items = [];
+    const equippedIds = new Set();
+    for (const slot of Object.keys(resolved)) {
+      const r = resolved[slot];
+      if (!r) continue;
+      equippedIds.add(r.assetId);
+      items.push({ asset: r.asset, slot, assetId: r.assetId, report: r.report, source: 'equipped' });
+    }
+    const identity = await getIdentity();
+    const wallet = identity ? await getWallet(identity.publicKey) : [];
+    for (const entry of wallet) {
+      const asset = entry.credential.asset;
+      const category = asset && asset.properties && asset.properties['atlas.item.category'];
+      if (entry.hidden || equippedIds.has(entry.credential.id) || !AtlasItemEffects.isStandard(asset) || (category !== 'consumable' && category !== 'key')) continue;
+      const r = await resolveEquippedItem(entry, null, effective);
+      items.push({ asset: r.asset, slot: null, assetId: r.assetId, report: r.report, source: 'carried' });
+    }
+    return AtlasItemEffects.collectCapabilities(items);
+  }
+
+  // Everything the character window needs: the stat sheet, per equipped item which effects are active and why
+  // the rest are not, and the active capabilities. `items` lists every equipped slot that holds an item.
+  async function getEquipmentEffects(ctx) {
+    const resolved = await resolveEquipment(ctx);
+    const items = [];
+    for (const slot of Object.keys(resolved)) {
+      const r = resolved[slot];
+      if (!r) continue;
+      items.push({
+        slot, assetId: r.assetId, name: r.asset.name, class: r.asset.class, standard: !!r.report.standard,
+        verdict: r.report.standard ? r.report.verdict : 'legacy', verdictReason: r.report.verdictReason || null,
+        effects: r.report.standard ? r.report.effects.map((e) => ({ kind: e.kind, id: e.id, value: e.value, params: e.params, active: e.active, reason: e.reason })) : []
+      });
+    }
+    const effective = ctx === undefined ? itemEffectsContext : ctx;
+    return { sheet: avatarStatSheet(effectiveSlotAssets(resolved)), items, capabilities: await capabilitiesOf(resolved, effective) };
+  }
+
+  // The active capabilities, { capabilityId: [provider] } (compass, mine, dig, light, blast and unlock are the
+  // ones the standard defines). A provider is { id, assetId, slot, source, class, name, params, uses }.
+  // Tools and equipment provide a capability while equipped; consumables and keys while carried. Withheld
+  // capabilities (unverified item, or not enabled by the world) are absent.
+  async function getActiveCapabilities(ctx) {
+    return capabilitiesOf(await resolveEquipment(ctx), ctx === undefined ? itemEffectsContext : ctx);
+  }
+
+  async function getCapabilityProviders(capabilityId, ctx) {
+    return (await getActiveCapabilities(ctx))[capabilityId] || [];
+  }
+
+  // After a verified supersession the new credential takes over whatever slot the old one was equipped in.
+  async function repointEquipment(ownerPublicKey, oldId, newId) {
+    const identity = await getIdentity();
+    if (!identity || identity.publicKey !== ownerPublicKey) return;
+    const single = [[getAvatarLookAssetId, saveAvatarLook], [getAvatarHatAssetId, saveAvatarHat], [getAvatarShoesAssetId, saveAvatarShoes], [getAvatarHandAssetId, saveAvatarHand]];
+    for (const [read, write] of single) if ((await read()) === oldId) await write(ownerPublicKey, newId);
+    const map = await getAvatarSlotIds();
+    let changed = false;
+    for (const slot of AVATAR_EXTRA_SLOTS) if (map[slot] === oldId) { map[slot] = newId; changed = true; }
+    if (changed) await saveAvatarSlots(ownerPublicKey, map);
   }
 
   async function splitForDrop(credential, amount) {
@@ -8641,7 +8853,7 @@ const AtlasWallet = (() => {
   // replaced. A `newCredential` that fails any check is discarded — the
   // old (now-revoked) entry stays exactly as it was, no different from any
   // other verification failure this wallet already handles.
-  // Task #144 Phase 1 — the other half of what an `updates` array can mean
+  // The other half of what an `updates` array can mean
   // for this wallet, alongside processAssetUpdates above: not just "here's
   // what your credential turned into", but also, for THIS identity's own
   // locally-recorded submitted trades, "here's the sign one of them just
@@ -8678,6 +8890,7 @@ const AtlasWallet = (() => {
     const notices = await getAssetUpdateNotices(ownerPublicKey);
     let walletChanged = false;
     let noticesChanged = false;
+    const repoints = [];
 
     for (const update of updates) {
       const idx = wallet.findIndex((e) => e.credential.id === update.id);
@@ -8698,6 +8911,7 @@ const AtlasWallet = (() => {
         const oldEntry = wallet[idx];
         wallet.splice(idx, 1, { credential: newCredential, lastVerdict: verdict, ...(oldEntry.hidden ? { hidden: true } : {}) });
         await unloadItem(update.id); // the old id can no longer be in any world's loadout
+        repoints.push([update.id, newCredential.id]);
         walletChanged = true;
         noticesChanged = true;
         notices.push({
@@ -8747,6 +8961,8 @@ const AtlasWallet = (() => {
     }
 
     if (walletChanged) await saveWallet(ownerPublicKey, wallet);
+    // Equipment follows the item: a slot holding the superseded credential now holds its replacement.
+    for (const [oldId, newId] of repoints) await repointEquipment(ownerPublicKey, oldId, newId);
     if (noticesChanged) await saveAssetUpdateNotices(ownerPublicKey, notices);
   }
 
@@ -10616,7 +10832,8 @@ const AtlasWallet = (() => {
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
     getAvatarShoes, getAvatarShoesAssetId, setAvatarShoes, avatarShoePropertiesFromAsset,
     getAvatarHand, getAvatarHandAssetId, setAvatarHand, avatarHandPropertiesFromAsset, avatarSlotsOfAsset,
-    getAvatarSlotIds, getAvatarSlotAssetId, setAvatarSlot, getAvatarExtras, avatarExtrasFromSlots, avatarExtraKindOfAsset, AVATAR_STATS, avatarStatSheet, getAvatarStatSheet, getEquippedAvatarAssets,
+    getAvatarSlotIds, getAvatarSlotAssetId, setAvatarSlot, getAvatarExtras, avatarExtrasFromSlots, avatarExtraKindOfAsset, AVATAR_STATS, avatarStatSheet, getAvatarStatSheet, getEquippedAvatarAssets, getEquippedAvatarEntries,
+    verifyStandardItem, setItemEffectsContext, getItemEffectsContext, getEquipmentEffects, getActiveCapabilities, getCapabilityProviders,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,

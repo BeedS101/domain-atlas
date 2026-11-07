@@ -502,6 +502,53 @@ async function applyAvatarExtrasToScene(resolved) {
   if (characterPreview && characterPreview.setExtras) characterPreview.setExtras(localAvatarExtrasInfo);
 }
 
+// What the current world lets equipped standard items do (policy.itemEffects, with the accepted-classes and
+// trusted-issuers filters). Set on every world entry, which every portal goes through, so equipment in
+// both the 2D and 3D worlds follows the world the character is standing in.
+function setWorldItemEffects(manifest, world) {
+  const ctx = manifest && world && typeof AtlasItemEffects !== 'undefined'
+    ? AtlasItemEffects.worldContext(manifest, world, manifestDomainOf(manifest) || null)
+    : null;
+  AtlasWallet.setItemEffectsContext(ctx);
+  window.dispatchEvent(new CustomEvent('atlas-item-effects-changed', { detail: { worldId: world ? world.id : null } }));
+}
+
+// Re-reads everything that depends on equipped items' effects and pushes it to the scene.
+async function reapplyEquipment() {
+  await applyAvatarHatToScene();
+  await applyAvatarShoesToScene();
+  await applyAvatarExtrasToScene();
+  window.dispatchEvent(new CustomEvent('atlas-item-effects-changed', { detail: { worldId: currentWorld ? currentWorld.id : null } }));
+}
+
+// Equipment references are rewritten when a credential is superseded (wallet.js repointEquipment), and the
+// equipment itself can be changed from another page. Either way the scene and an open character window
+// re-read what is equipped.
+const EQUIPMENT_STORAGE_KEYS = ['atlasAvatarLook', 'atlasAvatarHat', 'atlasAvatarShoes', 'atlasAvatarHand', 'atlasAvatarSlots'];
+let equipmentReapplyTimer = null;
+let characterEquipsInFlight = 0; // the window's own equip applies its changes itself, in order
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !EQUIPMENT_STORAGE_KEYS.some((k) => k in changes)) return;
+  clearTimeout(equipmentReapplyTimer);
+  equipmentReapplyTimer = setTimeout(async () => {
+    if (characterEquipsInFlight > 0) return;
+    try {
+      await reapplyEquipment();
+    } catch (err) { /* the next change or world entry re-reads it */ }
+  }, 150);
+});
+
+// The capability interface, for anything that acts on what the character can do (compass, mine, dig, light,
+// blast, unlock). Reads are always current; `onChange` fires when the world or the equipment changes.
+window.AtlasCapabilities = {
+  active: () => AtlasWallet.getActiveCapabilities(),
+  providers: (capabilityId) => AtlasWallet.getCapabilityProviders(capabilityId),
+  onChange: (listener) => {
+    window.addEventListener('atlas-item-effects-changed', listener);
+    return () => window.removeEventListener('atlas-item-effects-changed', listener);
+  }
+};
+
 function currentLocalPose() {
   if (!active3D) return null;
   const pos = active3D.camera.pos;
@@ -2405,10 +2452,11 @@ async function joinPresenceAndChat(manifest, world) {
 
 async function enterWorld(worldId, anchorId) {
   portalHitboxes = [];
-  await refreshOwnedOncePerUserClassKeys(); // task #227 â€” fresh snapshot before this world's own hover/proximity checks can run against it
+  await refreshOwnedOncePerUserClassKeys(); // fresh snapshot before this world's own hover/proximity checks can run against it
   const manifest = currentManifest;
   const world = manifest.worlds.find((w) => w.id === worldId) || manifest.worlds[0];
   currentWorld = world;
+  setWorldItemEffects(manifest, world);
   await refreshRequestButton();
   await refreshSubscribeButton();
   await refreshPostOfficeJoinButton();
@@ -6999,7 +7047,7 @@ function buffSummary(speed, jump, reach) {
   return parts.join(' Â· ');
 }
 
-// { slotId: asset | null } for every slot of an equipped map, from a wallet.
+// { slotId: asset | null } for every slot of an equipped map, from a wallet; the assets as signed.
 function equippedAssetsOf(wallet, equipped) {
   const assets = {};
   for (const id of Object.keys(equipped)) {
@@ -7010,9 +7058,14 @@ function equippedAssetsOf(wallet, equipped) {
 }
 
 // The extras object (colours, off-hand model, movement multipliers including what the stats add) for a wallet
-// and an equipped map.
+// and an equipped map, taking every item as signed. Right for the preview, which draws appearance only (no
+// world policy withholds that), and for the scene while nothing equipped is a standard item.
 function extrasFromEquipped(wallet, equipped) {
   return AtlasWallet.avatarExtrasFromSlots(equippedAssetsOf(wallet, equipped));
+}
+
+function anyStandardEquipped(wallet, equipped) {
+  return typeof AtlasItemEffects !== 'undefined' && Object.values(equippedAssetsOf(wallet, equipped)).some((a) => a && AtlasItemEffects.isStandard(a));
 }
 
 let selectedCharacterSlot = null;
@@ -7038,6 +7091,14 @@ const CHARACTER_SLOT_PROPS = {
 // Redraws the four blocks (item name or the empty label, thumbnail when the item has one) and, when a slot is
 // selected, its item list. `wallet` and `equipped` ({slot: assetId|null}) are read once by the caller.
 let characterWindowState = null;
+let characterEffectsSeq = 0;
+
+// An open character window follows a change of world or equipment.
+window.addEventListener('atlas-item-effects-changed', (e) => {
+  if ((e.detail && e.detail.source === 'character-window') || !characterScreen || !characterScreen.classList.contains('active')) return;
+  characterWindowState = null;
+  refreshCharacterWindow().catch(() => {});
+});
 
 async function refreshCharacterWindow(wallet, equipped) {
   if (!characterScreen) return;
@@ -7069,7 +7130,20 @@ async function refreshCharacterWindow(wallet, equipped) {
     }
   }
   renderCharacterSlotPanel(wallet, equipped);
-  renderCharacterStats(wallet, equipped);
+  const state = characterWindowState;
+  const seq = ++characterEffectsSeq;
+  // With no standard item in the wallet nothing needs verifying, so the stats are drawn at once from what is
+  // equipped. Otherwise the effects need lookups at the issuer and arrive after the slots are drawn; a newer
+  // refresh wins.
+  if (!wallet.some((e) => typeof AtlasItemEffects !== 'undefined' && AtlasItemEffects.isStandard(e.credential.asset))) {
+    state.effects = { sheet: AtlasWallet.avatarStatSheet(equippedAssetsOf(wallet, equipped)), items: [], capabilities: {} };
+    renderCharacterStats(wallet, equipped, state.effects);
+    return;
+  }
+  const effects = await AtlasWallet.getEquipmentEffects();
+  if (seq !== characterEffectsSeq) return;
+  state.effects = effects;
+  renderCharacterStats(wallet, equipped, effects);
 }
 
 async function readEquippedSlots() {
@@ -7133,15 +7207,81 @@ const characterViewEl = document.getElementById('characterView');
 const characterStatsViewEl = document.getElementById('characterStatsView');
 const characterStatsListEl = document.getElementById('characterStatsList');
 const characterBuffListEl = document.getElementById('characterBuffList');
+const characterCapabilityListEl = document.getElementById('characterCapabilityList');
+const characterInactiveListEl = document.getElementById('characterInactiveList');
 let characterSubView = 'character';
 
 function formatMultiplier(v) {
   return 'Ã—' + (Math.round(v * 100) / 100).toString();
 }
 
-function renderCharacterStats(wallet, equipped) {
-  if (!characterStatsListEl || !characterBuffListEl) return;
-  const sheet = AtlasWallet.avatarStatSheet(equippedAssetsOf(wallet, equipped));
+// "Agility +5", "Speed ×1.2", "Mine tier 3": one declared effect as a short phrase.
+function describeItemEffect(e) {
+  if (e.kind === 'stat') {
+    const def = AtlasWallet.AVATAR_STATS.find((d) => d.id === e.id);
+    return (def ? def.label : e.id) + ' ' + (e.value > 0 ? '+' : '') + e.value;
+  }
+  if (e.kind === 'multiplier') {
+    return { speed: 'Speed', jump: 'Jump', interactRange: 'Reach' }[e.id] + ' ' + formatMultiplier(e.value);
+  }
+  const name = e.id.replace(/^.*\.cap\./, '');
+  const params = Object.keys(e.params || {}).map((k) => k + ' ' + e.params[k]).join(', ');
+  return name.charAt(0).toUpperCase() + name.slice(1) + (params ? ' (' + params + ')' : '');
+}
+
+// Capabilities the character has right now and effects of equipped standard items the current world does not
+// let apply, each with the reason.
+function renderCharacterEffects(effects) {
+  if (!characterCapabilityListEl || !characterInactiveListEl) return;
+  characterCapabilityListEl.textContent = '';
+  characterInactiveListEl.textContent = '';
+  const caps = (effects && effects.capabilities) || {};
+  const capRows = [];
+  for (const id of Object.keys(caps)) for (const p of caps[id]) capRows.push({ id, p });
+  if (!capRows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-note';
+    empty.textContent = 'No capabilities active here.';
+    characterCapabilityListEl.appendChild(empty);
+  }
+  for (const { id, p } of capRows) {
+    const li = document.createElement('div');
+    li.className = 'buff-row';
+    li.dataset.capability = id;
+    li.textContent = describeItemEffect({ kind: 'capability', id, params: p.params }) + ' · ' + p.name + (p.source === 'carried' ? ' (carried)' : '');
+    characterCapabilityListEl.appendChild(li);
+  }
+  const reasons = (typeof AtlasItemEffects !== 'undefined' && AtlasItemEffects.REASONS) || {};
+  let any = false;
+  for (const item of (effects && effects.items) || []) {
+    for (const e of item.effects) {
+      if (e.active) continue;
+      any = true;
+      const li = document.createElement('div');
+      li.className = 'buff-row inactive';
+      li.dataset.inactive = item.slot + ':' + e.kind + ':' + e.id;
+      li.dataset.reason = e.reason;
+      const what = document.createElement('span');
+      what.textContent = describeItemEffect(e) + ' · ' + item.name;
+      const why = document.createElement('span');
+      why.className = 'inactive-reason';
+      why.textContent = reasons[e.reason] || e.reason;
+      li.append(what, why);
+      characterInactiveListEl.appendChild(li);
+    }
+  }
+  if (!any) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-note';
+    empty.textContent = 'Everything equipped works in this world.';
+    characterInactiveListEl.appendChild(empty);
+  }
+}
+
+function renderCharacterStats(wallet, equipped, effects) {
+  if (!characterStatsListEl || !characterBuffListEl || !effects) return;
+  const sheet = effects.sheet;
+  renderCharacterEffects(effects);
   const effectLabel = { speed: 'speed', jump: 'jump height', reach: 'reach' };
   characterStatsListEl.textContent = '';
   for (const r of sheet.stats) {
@@ -7198,10 +7338,19 @@ function showCharacterSubView(which) {
     btn.classList.toggle('active-subtab', btn.dataset.view === characterSubView);
     btn.setAttribute('aria-selected', btn.dataset.view === characterSubView ? 'true' : 'false');
   }
-  if (characterSubView === 'stats' && characterWindowState) renderCharacterStats(characterWindowState.wallet, characterWindowState.equipped);
+  if (characterSubView === 'stats' && characterWindowState) renderCharacterStats(characterWindowState.wallet, characterWindowState.equipped, characterWindowState.effects);
 }
 
 async function equipCharacterSlot(slot, assetId) {
+  characterEquipsInFlight += 1;
+  try {
+    await equipCharacterSlotInner(slot, assetId);
+  } finally {
+    characterEquipsInFlight -= 1;
+  }
+}
+
+async function equipCharacterSlotInner(slot, assetId) {
   const def = CHARACTER_SLOTS[slot];
   const wallet = characterWindowState ? characterWindowState.wallet : await readOwnWallet();
   const entry = assetId ? wallet.find((e) => e.credential.id === assetId) : null;
@@ -7210,13 +7359,19 @@ async function equipCharacterSlot(slot, assetId) {
   // An item moves rather than sitting in two slots, and the hand and off hand never share one, so what
   // is equipped is read back rather than patched.
   const equipped = await readEquippedSlots();
-  if (def.extra) {
-    await applyAvatarExtrasToScene(extrasFromEquipped(wallet, equipped));
+  // Any equip can change the stat-derived movement, so the extras are always refreshed. While no standard
+  // item is equipped the values come straight from the wallet snapshot, as they always have. Otherwise each
+  // apply reads the wallet's effect-aware values, which may need a lookup at the issuer.
+  if (!anyStandardEquipped(wallet, equipped)) {
+    if (!def.extra) await def.apply(entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null);
     if (slot === 'offhand') await applyAvatarHandToScene();
+    await applyAvatarExtrasToScene(extrasFromEquipped(wallet, equipped));
   } else {
-    await def.apply(entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null);
-    if (slot === 'hand') await applyAvatarExtrasToScene(extrasFromEquipped(wallet, equipped));
+    if (!def.extra) await def.apply();
+    if (slot === 'offhand') await applyAvatarHandToScene();
+    await applyAvatarExtrasToScene();
   }
+  window.dispatchEvent(new CustomEvent('atlas-item-effects-changed', { detail: { worldId: currentWorld ? currentWorld.id : null, source: 'character-window' } }));
   if (characterStatusEl) characterStatusEl.textContent = assetId ? def.label + ' equipped.' : def.label + ' cleared.';
   await refreshCharacterWindow(wallet, equipped);
   refreshInventoryDisplay().catch(() => {});
@@ -12716,21 +12871,25 @@ function assetActionHandler(listEl) {
       const currentlyEquipped = await AtlasWallet.getAvatarLookAssetId();
       await AtlasWallet.setAvatarLook(currentlyEquipped === id ? null : id);
       await applyAvatarLookToScene();
+      await applyAvatarExtrasToScene(); // stat bonuses feed the movement extras
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'toggle-avatar-hat') {
       const currentlyEquippedHat = await AtlasWallet.getAvatarHatAssetId();
       await AtlasWallet.setAvatarHat(currentlyEquippedHat === id ? null : id);
       await applyAvatarHatToScene();
+      await applyAvatarExtrasToScene(); // stat bonuses feed the movement extras
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'toggle-avatar-shoes') {
       const currentlyEquippedShoes = await AtlasWallet.getAvatarShoesAssetId();
       await AtlasWallet.setAvatarShoes(currentlyEquippedShoes === id ? null : id);
       await applyAvatarShoesToScene();
+      await applyAvatarExtrasToScene(); // stat bonuses feed the movement extras
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'toggle-avatar-hand') {
       const currentlyHeld = await AtlasWallet.getAvatarHandAssetId();
       await AtlasWallet.setAvatarHand(currentlyHeld === id ? null : id);
       await applyAvatarHandToScene();
+      await applyAvatarExtrasToScene(); // stat bonuses feed the movement extras
       await refreshInventoryDisplay();
     } else if (btn.dataset.action === 'consolidate-group') {
       const sepIndex = btn.dataset.key.indexOf('::');

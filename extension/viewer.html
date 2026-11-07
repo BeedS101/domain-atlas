@@ -883,6 +883,8 @@
   .stat-value.up { color: #7bd1a6; }
   .stat-value.down { color: #e08a7b; }
   .buff-row { padding: 5px 8px; background: #16232a; border-radius: 4px; margin-top: 2px; font-size: 13px; }
+  .buff-row.inactive { display: flex; flex-direction: column; gap: 1px; color: #8aa0a9; }
+  .buff-row.inactive .inactive-reason { font-size: 11px; color: #e0b27b; }
   .character-stage { display: grid; grid-template-columns: 66px 1fr 66px; gap: 8px; align-items: stretch; margin-top: 6px; }
   .character-slots { display: flex; flex-direction: column; justify-content: center; gap: 6px; }
   .character-slots-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
@@ -1719,6 +1721,10 @@
         <div id="characterStatsList"></div>
         <div class="subhead" style="margin-top:12px;">Buffs from equipped items</div>
         <div id="characterBuffList"></div>
+        <div class="subhead" style="margin-top:12px;">Capabilities</div>
+        <div id="characterCapabilityList"></div>
+        <div class="subhead" style="margin-top:12px;">Not active in this world</div>
+        <div id="characterInactiveList"></div>
       </div>
       <div id="characterStatus" class="mono" role="status" aria-live="polite"></div>
     </div>
@@ -2976,7 +2982,9 @@
   <script src="ledger-labs29.js"></script>
   <script src="ledger-labs38.js"></script>
   <script src="ledger-open.js"></script>
-  <script src="wallet.js"></script>
+  <script src="item-standard.js"></script>
+  <script src="item-effects.js"></script>
+<script src="wallet.js"></script>
   <script src="gltf-mini.js"></script>
   <script src="gltf-mini-hud.js"></script>
   <script src="viewer.js"></script>

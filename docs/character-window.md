@@ -47,6 +47,16 @@ Any equipped item, in any of the thirteen slots, adds to a stat with the propert
 
 Stat properties are signed when an asset is issued, so only newly issued items carry them. The stats are local to the player's wallet; they are not sent over presence.
 
+### Item Standard items in the Stats view
+
+An item that carries `atlas.item.standard` (docs/item-standard-v0.1.md) adds its stat bonuses, multipliers and capabilities only where the current world lets it: the item must verify against its issuer's spec, pass the world's `acceptedItemClasses` and `trustedIssuers` when declared, and the effect must be listed in `policy.itemEffects`. Items that are not standard keep working exactly as before in every world.
+
+The Stats view therefore has three more parts. The totals and the buff list include only effects that apply. Capabilities lists what the character can do here (compass, mine, dig, light, blast, unlock), each with the item that provides it; a consumable or key counts while it is carried. Not active in this world lists every withheld effect of an equipped standard item with the reason: the item could not be checked or does not match its issuer's spec, the world does not support item effects, does not accept the class, does not trust the issuer, or does not enable that effect. The view updates when the character enters another world, including through a portal to another domain, and when equipment changes.
+
+Equipped references follow a verified credential supersession: when the issuer reissues an equipped item, the slot keeps holding the replacement.
+
+Test: `xvfb-run -a node test/manual-item-effects.js`; the policy and resolver logic has its own unit test, `node test/item-effects.js`.
+
 ## Hand item
 
 The hand slot is cosmetic: it changes nothing about gameplay. The model URL travels over presence as `handModel` (an absolute http(s) URL, at most 400 characters; anything else is dropped by the Node and PHP presence servers and again by the viewer). Other players load it under the same limits as dropped items (1 MB, 50k triangles, texture limits) and keep at most eight held models resident.

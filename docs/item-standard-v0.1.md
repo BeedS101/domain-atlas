@@ -131,7 +131,7 @@ A spec changed after issuance fails step 3, which is how a widened or extended s
 ## Rollout and compatibility
 
 - Existing hat, shoe and movement effects keep working exactly as today. They are not standard items.
-- Standard effects are opt-in per world. In a later phase a world enables them with `policy.itemEffects`, following the domain-default and per-world override rule (SPEC section 3.4.1). Without it, standard items still display and trade; their effects are ignored.
+- Standard effects are opt-in per world with `policy.itemEffects`, following the domain-default and per-world override rule (SPEC section 3.4.1). Without it, standard items still display and trade; their effects are ignored.
 - Issuance of a standard class is the issuer's choice; no existing class carries an `itemSpec` today.
 
 Known compatibility notes from the catalog lint: the shipped hats, outfits and shoes use legacy numeric multipliers and colour keys, and the PHP catalog also carries `atlas.avatar.handItem` on its pickaxe. All of these stay outside the standard. The only restriction on other classes is that admin mint, reissue and class patch no longer accept `atlas.item.*` or `atlas.cap.*` properties on them, so an unrelated class cannot be made to look standard-conforming.
@@ -154,6 +154,22 @@ This applies to a catalog class with an `itemSpec`, in both `issuer-server/serve
 
 **Spec history.** Every spec the issuer signs is recorded by class and digest before the asset is signed (`atlas-item-specs-store.json` in the issuer's state folder), and entries are only ever added. This file must be backed up with the other issuer state: it is the only record of a spec after the catalog entry changes. If it is unreadable the issuer refuses standard issuance (503) rather than replacing it.
 
+## Wallet and world integration
+
+**Recognition.** The wallet treats an equipped or carried item as standard when its signed properties carry `atlas.item.standard`. Everything else, existing hats, shoes, outfits and tools included, follows the code it always did and is never gated by `itemEffects`. The validator ships to the extension as `extension/item-standard.js`, a byte-identical copy of the issuer module (a test enforces this) that hashes with a built-in SHA-256 where Node's `crypto` is absent.
+
+**Verification.** `AtlasWallet.verifyStandardItem(asset, issuerDomain)` returns `verified`, `unverified` or `invalid` (and `legacy` for a non-standard asset). It fetches the spec the signed digest names from the issuing domain (`GET /atlas/asset/class?class=<class>&specDigest=<digest>`), recomputes the digest, runs `validateItemSpec` and then `validateItemProperties` on the item. `invalid` means the issuer says it never signed that spec, the served spec does not hash to the signed digest, or the item does not satisfy the spec. `unverified` means no answer could be had (issuer unreachable, no spec support, a newer standard version). A credential the wallet already holds as invalid is also `invalid`. Only `verified` items contribute effects. A verified spec is cached by issuer, class and digest (at most 200, kept in `chrome.storage.local`) and never expires, because the digest fixes its content; a failed lookup is not retried for a minute.
+
+**World policy.** `policy.itemEffects` (SPEC section 3.4.1) is `{ stats, multipliers, capabilities }`: `stats` and `multipliers` take a list or `"all"`, capabilities are listed by id. Absent, `false` or a non-object enables nothing. An effect applies when the item is verified, the world's `acceptedItemClasses` (if declared) match its class, `trustedIssuers` (if declared) admit its issuer, and the policy lists the effect. Appearance is never withheld. The reasons an effect can be withheld are `item-unverified`, `item-invalid`, `no-world`, `world-effects-off`, `class-not-accepted`, `issuer-not-trusted` and `effect-not-enabled`.
+
+**Numbers.** Applying an effect uses the existing arithmetic: stat bonuses add to the base stat, Agility, Strength and Dexterity move speed, jump and reach, and the multipliers of every equipped slot multiply together, kept between 0.25 and 3. A standard item's generic multiplier keys count in every slot; in the hat and shoe slots they are read as the slot's own keys (`atlas.avatar.hatSpeedMultiplier` and similar), which win if both are present.
+
+**Equipment slots.** A standard item in the `hand` slot with a model can be held (it need not carry `atlas.avatar.handItem`). Equipped item references follow a verified credential supersession: the slot that held the old credential holds its replacement.
+
+**Capability interface.** `AtlasWallet.getActiveCapabilities()` returns `{ capabilityId: [provider] }` for the capabilities that are active in the current world, and `getCapabilityProviders(id)` the providers of one. A provider is `{ id, assetId, slot, source, class, name, params, uses }`: tools and equipment provide while equipped (`source: 'equipped'`), consumables and keys while carried (`source: 'carried'`). Parameters are numbers for `tier` and `radius` and strings otherwise (a lock id stays a string). The viewer publishes the same reads as `AtlasCapabilities.active()` and `.providers(id)`, and `AtlasCapabilities.onChange(fn)` calls back when the world or the equipment changes. The compass, mine, dig, light, blast and unlock ids are `AtlasItemEffects.CAPABILITY_IDS`. Nothing consumes a capability yet: no mining, digging, blasting, unlocking or consumable spending exists, and nothing acts on a compass or a light.
+
+**Character window.** The Stats view lists the buffs from equipped items that are active, the capabilities the character has here, and under "Not active in this world" each withheld effect with its reason.
+
 ## Validation
 
 `validateItemSpec(itemSpec, ctx)` returns `{ok, errors}` for a class definition. `validateItemProperties(itemSpec, properties, ctx)` returns `{applies, ok, errors}` for one item; `applies` is false for items outside the standard. `lintCatalog(catalog)` checks a whole catalog, including random rolls. Errors are `{code, key}`.
@@ -173,10 +189,14 @@ Item errors: `item-spec-missing`, `item-property-type`, `item-property-limit`, `
 | `test/item-standard-runner.php` | PHP side of that test. |
 | `issuer-server/item-standard-issuer.js` | Node issuer integration: sealing, patch checks, spec history. |
 | `issuer-php/lib/item-standard-issuer.php` | PHP issuer integration. |
+| `extension/item-standard.js` | Browser copy of the validator, identical to the Node module. |
+| `extension/item-effects.js` | World policy, per-effect resolution and the capability list. |
+| `test/item-effects.js` | Unit checks for the policy, the filters, the reasons and the capability list. |
+| `test/manual-item-effects.js` | Real-browser check of the wallet, viewer and Stats window against a PHP issuer with injected standard classes (needs a display). |
 | `test/item-standard-issuer.js` | Runs one scenario against both issuers and requires identical outcomes. Test classes come from `test/fixtures/item-standard-issuer.json` and are injected into the running code by `test/lib/item-standard-inject.js` (Node) and a file in the copied PHP bundle; the repository has no standard class. |
 
-Run `node test/item-standard.js` (needs `php` on the path). The vectors include valid and invalid ring, compass and pickaxe definitions, a ring whose rolls exceed its spec, a pickaxe whose tier exceeds its spec, and foreign-issuer cases where the served spec was widened after signing.
+Run `node test/item-standard.js` (needs `php` on the path); it also replays the vectors through the browser copy. The vectors include valid and invalid ring, compass and pickaxe definitions, a ring whose rolls exceed its spec, a pickaxe whose tier exceeds its spec, and foreign-issuer cases where the served spec was widened after signing.
 
 ## Remaining work
 
-Wallet use of standard effects (verify the signed digest against the issuer's spec, apply stats and capabilities), `policy.itemEffects` with the domain-default rule, world capability handling, and an issuer action to move an asset to a newer spec.
+World behaviour for the capabilities (nothing yet acts on compass, mine, dig, light, blast or unlock), consumable spending, an action bar over the capability interface, and an issuer action to move an asset to a newer spec.

@@ -4,6 +4,8 @@
 //   1. every case gives the expected result in each language,
 //   2. the two languages agree on every case, including each error's key and each spec digest,
 //   3. the demo ring, compass and pickaxe definitions are accepted and their invalid variants are refused,
+//   3b. the browser copy (extension/item-standard.js, loaded without Node's crypto) is byte-identical to the
+//      Node module and agrees on every case and digest,
 //   4. the real Node and PHP catalogs lint clean: no existing class is claimed by the standard, none uses
 //      its reserved keys, and the legacy effect keys they carry are listed.
 // No server is started and nothing is written. Needs php on the PATH.
@@ -60,7 +62,7 @@ function resolveCatalog(def) {
 }
 const sortErrors = (list) => list.slice().sort((a, b) => (a.class + '|' + a.code + '|' + a.key).localeCompare(b.class + '|' + b.code + '|' + b.key));
 
-function runNode() {
+function runNode(std) {
   const res = { digests: [], specCases: [], itemCases: [], legacyCases: [], catalogs: {} };
   for (const d of vectors.digests) res.digests.push({ spec: d.spec, canonical: std.canonical(vectors.specs[d.spec]), sha256: std.itemSpecDigest(vectors.specs[d.spec]) });
   for (const c of vectors.specCases) {
@@ -133,8 +135,27 @@ function verify(label, res) {
 }
 
 console.log('SETUP: ' + vectors.specCases.length + ' spec cases, ' + vectors.itemCases.length + ' item cases, ' + vectors.legacyCases.length + ' outside-the-standard cases, ' + Object.keys(vectors.catalogs).length + ' catalogs');
-const node = runNode();
+const node = runNode(std);
 verify('Node', node);
+
+console.log('STEP: the browser copy is the same code and hashes without Node crypto');
+const extFile = path.join(ROOT, 'extension', 'item-standard.js');
+check(fs.readFileSync(extFile).equals(fs.readFileSync(path.join(ROOT, 'issuer-server', 'item-standard.js'))), 'extension/item-standard.js is byte-identical to issuer-server/item-standard.js');
+const browserCtx = vm.createContext({});
+browserCtx.self = browserCtx;
+vm.runInContext(fs.readFileSync(extFile, 'utf8'), browserCtx);
+const browserStd = browserCtx.AtlasItemStandard;
+check(!!browserStd && typeof browserStd.validateItemProperties === 'function', 'the browser copy defines AtlasItemStandard with no module system');
+const browser = runNode(browserStd);
+verify('Browser', browser);
+check(same(node, browser), 'Node and the browser copy agree on every case');
+const crypto = require('crypto');
+let hashOk = true;
+for (const n of [0, 1, 3, 55, 56, 57, 63, 64, 65, 119, 120, 128, 1000, 5000]) {
+  const text = 'x'.repeat(n);
+  if (browserStd.sha256Hex(text) !== crypto.createHash('sha256').update(text).digest('hex')) hashOk = false;
+}
+check(hashOk, 'the pure-JS SHA-256 matches Node crypto across block-boundary lengths');
 const php = runPhp('vectors');
 verify('PHP', php);
 
