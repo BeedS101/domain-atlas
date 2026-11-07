@@ -1,5 +1,5 @@
 <?php
-// GET /atlas/asset/class?class=<assetClass> — Task #213, mirrors
+// GET /atlas/asset/class?class=<assetClass> — mirrors
 // issuer-server/server.js's same route. Asset-class lookup for previewing a
 // class the caller does not (yet) hold a credential of at all: a scene's
 // hoverable stall/crate (demo-domain-a/spatial/lobby/scene.json's
@@ -42,6 +42,20 @@ if (!$cls) send_json(400, ['error' => 'class query parameter is required']);
 $resolved = atlas_asset_catalog_entry($cls);
 if ($resolved === null) send_json(404, ['error' => 'unknown assetClass']);
 
+// ?specDigest= returns the item spec a signed asset names, current or earlier, so a verifier can check it
+// against the digest in the credential.
+if (isset($_GET['specDigest'])) {
+  $wantedDigest = $_GET['specDigest'];
+  if (!is_string($wantedDigest) || !preg_match(ATLAS_ITEM_ISSUER_DIGEST_RE, $wantedDigest)) {
+    send_json(400, ['error' => 'specDigest must be 64 lowercase hex characters', 'code' => 'item-spec-digest-invalid']);
+  }
+  $currentSpec = atlas_item_issuer_describe_spec(ATLAS_ASSET_CATALOG[$cls]);
+  if ($currentSpec !== null && $currentSpec['itemSpecDigest'] === $wantedDigest) send_json(200, array_merge(['class' => $cls], $currentSpec, ['current' => true]));
+  $earlierSpec = atlas_item_issuer_spec_lookup($cls, $wantedDigest);
+  if ($earlierSpec === null) send_json(404, ['error' => 'unknown item spec for this class', 'code' => 'item-spec-unknown']);
+  send_json(200, ['class' => $cls, 'itemStandard' => ATLAS_ITEM_STANDARD_VERSION, 'itemSpec' => $earlierSpec, 'itemSpecDigest' => $wantedDigest, 'current' => false]);
+}
+
 // atlas_asset_catalog_entry() OMITS model/thumbnail entirely when a class
 // has neither (correct for the signed credential shape a real mint
 // produces — SPEC.md §5's "both optional" means absent, not null) — but
@@ -62,6 +76,8 @@ $resolved['thumbnail'] = $resolved['thumbnail'] ?? null;
 // ticket stall) show a live price/expiry without hardcoding either in
 // scene.json — see that route's own comment for the full reasoning.
 $rawEntry = ATLAS_ASSET_CATALOG[$cls];
+$describedSpec = atlas_item_issuer_describe_spec($rawEntry);
+if ($describedSpec !== null) $resolved = array_merge($resolved, $describedSpec);
 if (isset($rawEntry['purchase'])) $resolved['purchase'] = $rawEntry['purchase'];
 if (isset($rawEntry['expiresInMinutes'])) $resolved['expiresInMinutes'] = $rawEntry['expiresInMinutes'];
 

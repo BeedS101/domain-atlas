@@ -146,7 +146,7 @@ function cli_preflight($probe) {
   }
 
   echo "\n-- files from one version --\n";
-  foreach (['bootstrap.php', 'crypto.php', 'store.php', 'replacement.php', 'transfer-policy.php', 'elements-catalog.php', '.htaccess'] as $f) {
+  foreach (['bootstrap.php', 'crypto.php', 'store.php', 'replacement.php', 'transfer-policy.php', 'item-standard.php', 'item-standard-issuer.php', 'elements-catalog.php', '.htaccess'] as $f) {
     cli_line(is_file($lib . '/' . $f) ? 'PASS' : 'FAIL', 'lib/' . $f . (is_file($lib . '/' . $f) ? '' : ' is missing'));
   }
   cli_line(function_exists('atlas_commit_replacement') && function_exists('atlas_txn_sweep') && function_exists('atlas_private_subdir_ensure') ? 'PASS' : 'FAIL', 'lib/replacement.php is the transaction-journal version');

@@ -95,6 +95,13 @@ if (is_suspended($credential['id'])) send_json(400, ['error' => 'credential is c
 $sigOk = verify_own_credential_signature($kp['publicKeyB64url'], $credential, asset_payload_of($credential));
 if (!$sigOk) send_json(400, ['error' => "credential signature does not check out against this issuer's key"]);
 
+// A properties patch on a standard asset is checked against the spec its own digest names, before anything is
+// signed or revoked.
+if ($hasProperties) {
+  $itemCheck = atlas_item_issuer_check_patched_asset($credential['asset'], isset(ATLAS_ASSET_CATALOG[$credential['asset']['class'] ?? '']) ? ATLAS_ASSET_CATALOG[$credential['asset']['class']] : null, $properties);
+  if (!$itemCheck['ok']) atlas_item_issuer_send_failure($itemCheck);
+}
+
 $newAsset = $credential['asset'];
 if ($hasTradeScope) $newAsset['tradeScope'] = $tradeScope;
 if ($hasProperties) $newAsset['properties'] = merge_properties($newAsset['properties'] ?? [], $properties);

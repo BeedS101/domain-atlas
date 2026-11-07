@@ -60,6 +60,7 @@ const { evaluateTransferPolicy, evaluateDeliveryGate, evaluateMintForDelivery } 
 const { createDeliveryEngine } = require('./lib-delivery');
 const { createLedgerIssuance } = require('./lib-ledger-issuance');
 const { createSiteStatus } = require('./lib-site-status');
+const itemIssuer = require('./item-standard-issuer');
 
 // All three of these are overridable by environment variable so the same
 // code runs unchanged in local dev (defaults below) and behind cPanel's
@@ -109,6 +110,8 @@ const STATE_DIR = process.env.ATLAS_STATE_DIR
 // yet — cheap and idempotent to make sure it's there before anything below
 // tries to write into it.
 fs.mkdirSync(STATE_DIR, { recursive: true });
+// Every item spec this issuer has signed, by class and digest (see item-standard-issuer.js).
+const ITEM_SPEC_STORE = itemIssuer.createSpecStore(path.join(STATE_DIR, 'atlas-item-specs-store.json'));
 const KEY_FILE = path.join(STATE_DIR, 'issuer-private-key.jwk.json');
 const PUBLIC_KEY_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-key.json');
 const REVOCATIONS_FILE = path.join(DEMO_DOMAIN_A, '.well-known', 'atlas-revocations.json');
@@ -3598,6 +3601,16 @@ function reserveSupply(cls, quantity, maxSupply) {
   fs.writeFileSync(SERIAL_COUNTERS_FILE, JSON.stringify(doc, null, 2));
   return { ok: true, serial: current + quantity };
 }
+// Gives back a reservation whose mint failed before anything was signed, but only while the counter still
+// stands where that reservation left it. If another mint has reserved since, the unused serial stays a gap
+// (serials stay unique).
+function releaseSupply(cls, quantity, serial) {
+  const doc = readSerialCounters();
+  if ((doc.counters[cls] || 0) !== serial) return false;
+  doc.counters[cls] = serial - quantity;
+  fs.writeFileSync(SERIAL_COUNTERS_FILE, JSON.stringify(doc, null, 2));
+  return true;
+}
 
 // Task #250 fourth follow-up (Bruno's own request) — per-mint randomized
 // enchantments/stats for the Signet Ring, the first catalog class whose
@@ -5060,6 +5073,8 @@ async function main() {
     const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!sigOk) return null; // never act on anything that isn't genuinely this domain's own signed credential
 
+    // The patch must still satisfy the spec this credential was signed under; otherwise it is left alone.
+    if (patch.properties && !itemIssuer.checkPatchedAsset(ITEM_SPEC_STORE, credential.asset, ASSET_CATALOG[credential.asset.class], patch.properties).ok) return null;
     const newAsset = {
       ...credential.asset,
       ...(patch.tradeScope !== undefined ? { tradeScope: patch.tradeScope } : {}),
@@ -5098,6 +5113,38 @@ async function main() {
     const catalogEntry = ASSET_CATALOG[cls];
     if (!catalogEntry) throw new Error('unknown asset class: ' + cls);
 
+    // A caller's properties cannot set what the Item Standard derives for a standard class, nor use its
+    // namespaces on any other class.
+    const itemSpec = itemIssuer.specOf(catalogEntry);
+    const patchIssues = itemIssuer.patchProblems(itemSpec, initialProperties);
+    if (patchIssues.length) {
+      throw itemIssuer.toError({ status: 400, code: 'item-patch-reserved-key', errors: patchIssues, message: 'properties in the Item Standard namespaces cannot be set when minting ' + cls });
+    }
+
+    // A catalog entry's own `randomizeProperties`
+    // (see atlas.wearable.ring above, and its comment near RING_RARITY_TIERS
+    // for the full reasoning) gets one chance to override the class's static
+    // `properties`, same "genuinely new supply only" gate as the serial/cap
+    // reservation below — a reissue's own explicit `properties` patch
+    // (handled entirely by the /atlas/asset/reissue route, not here) is a
+    // completely separate mechanism and must never get re-rolled by this.
+    // Rolled before any supply is reserved, so a roll that fails the class's
+    // itemSpec leaves the counters as they were.
+    const baseProperties = catalogEntry.properties || {};
+    const randomizedProperties = supersedes === null && typeof catalogEntry.randomizeProperties === 'function'
+      ? catalogEntry.randomizeProperties()
+      : null;
+    const composeProperties = (serialProperties) => mergeProperties({
+      ...baseProperties,
+      ...(randomizedProperties || {}),
+      ...serialProperties
+    }, initialProperties);
+    const itemOpts = { model: catalogEntry.model, issuerDomain: DOMAIN };
+    if (itemSpec) {
+      const pre = itemIssuer.sealProperties(cls, catalogEntry, composeProperties({}), itemOpts);
+      if (!pre.ok) throw itemIssuer.toError(pre);
+    }
+
     // Cap/serial tracking only applies to genuinely NEW supply
     // (supersedes === null — see reserveSupply()'s comment above), and
     // only when this class opted in via `serialized` and/or `maxSupply`.
@@ -5115,23 +5162,21 @@ async function main() {
       }
       serial = reservation.serial;
     }
+    const giveBackSupply = () => { if (serial !== null) releaseSupply(cls, quantity, serial); };
 
-    // A catalog entry's own `randomizeProperties`
-    // (see atlas.wearable.ring above, and its comment near RING_RARITY_TIERS
-    // for the full reasoning) gets one chance to override the class's static
-    // `properties`, same "genuinely new supply only" gate as the serial/cap
-    // reservation just above — a reissue's own explicit `properties` patch
-    // (handled entirely by the /atlas/asset/reissue route, not here) is a
-    // completely separate mechanism and must never get re-rolled by this.
-    const baseProperties = catalogEntry.properties || {};
-    const randomizedProperties = supersedes === null && typeof catalogEntry.randomizeProperties === 'function'
-      ? catalogEntry.randomizeProperties()
-      : null;
-    const properties = mergeProperties({
-      ...baseProperties,
-      ...(randomizedProperties || {}),
-      ...(catalogEntry.serialized ? { 'atlas.serial': String(serial), 'atlas.editionSize': String(catalogEntry.maxSupply) } : {})
-    }, initialProperties);
+    let properties;
+    try {
+      properties = composeProperties(catalogEntry.serialized ? { 'atlas.serial': String(serial), 'atlas.editionSize': String(catalogEntry.maxSupply) } : {});
+      if (itemSpec) {
+        const sealed = itemIssuer.sealProperties(cls, catalogEntry, properties, itemOpts);
+        if (!sealed.ok) throw itemIssuer.toError(sealed);
+        properties = sealed.properties;
+        ITEM_SPEC_STORE.record(cls, itemSpec);
+      }
+    } catch (err) {
+      giveBackSupply();
+      throw err;
+    }
 
     const asset = {
       name: catalogEntry.name, class: cls, model: catalogEntry.model,
@@ -5164,7 +5209,12 @@ async function main() {
         ? { expiresAt: new Date(Date.now() + catalogEntry.expiresInMinutes * 60000).toISOString() }
         : {})
     };
-    return issueAsset(ownerPublicKey, asset, quantity, supersedes, deferHoldings);
+    try {
+      return await issueAsset(ownerPublicKey, asset, quantity, supersedes, deferHoldings);
+    } catch (err) {
+      giveBackSupply();
+      throw err;
+    }
   }
 
   // Start of a split, consolidate or convert: takes the spend locks for every
@@ -5245,11 +5295,12 @@ async function main() {
     if (isExpired(credential)) return 'asset has expired';
     const ok = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
     if (!ok) return 'asset signature does not check out';
+    const supersededSpec = itemIssuer.supersededSpecProblem(ASSET_CATALOG[credential.asset.class], credential.asset.properties);
+    if (supersededSpec) return supersededSpec;
     return null;
   }
 
-  // Task #250 fourth follow-up (Bruno's own request) — checkPresentedAsset's
-  // mirror for the OTHER half of SPEC.md §5.1's fungible/non-fungible
+  // checkPresentedAsset's mirror for the OTHER half of SPEC.md §5.1's fungible/non-fungible
   // split: same ownership/class/tradeScope/revocation/signature checks,
   // but requires fungible === false instead of true, and there is no
   // minQuantity to check at all — a non-fungible credential's quantity is
@@ -7550,6 +7601,12 @@ async function main() {
         const sigOk = await verifyOwnCredentialSignature(credential, assetPayloadOf(credential));
         if (!sigOk) return sendJson(res, 400, { error: 'credential signature does not check out against this issuer\'s key' });
 
+        // A properties patch on a standard asset is checked against the spec its own digest names, before
+        // anything is signed or revoked.
+        if (hasProperties) {
+          const itemCheck = itemIssuer.checkPatchedAsset(ITEM_SPEC_STORE, credential.asset, ASSET_CATALOG[credential.asset.class], properties);
+          if (!itemCheck.ok) return sendJson(res, itemCheck.status, { error: itemCheck.message, code: itemCheck.code, errors: itemCheck.errors });
+        }
         const newAsset = {
           ...credential.asset,
           ...(hasTradeScope ? { tradeScope } : {}),
@@ -7638,6 +7695,11 @@ async function main() {
         }
         if (hasTradeScope && tradeScope !== 'local' && tradeScope !== 'bound') {
           return sendJson(res, 400, { error: "tradeScope, when given, must be 'local' or 'bound'" });
+        }
+        if (hasProperties) {
+          const stored = classPatchOf(assetClass);
+          const itemCheck = itemIssuer.checkClassPatch(assetClass, catalogEntry, stored && stored.properties, properties, { model: catalogEntry.model, issuerDomain: DOMAIN });
+          if (!itemCheck.ok) return sendJson(res, itemCheck.status, { error: itemCheck.message, code: itemCheck.code, errors: itemCheck.errors });
         }
         const patch = setClassPatch(assetClass, { properties, tradeScope });
         console.log('Set class patch for', assetClass, '->', JSON.stringify(patch));
@@ -8196,10 +8258,22 @@ async function main() {
       // codebase's existing convention of putting every parameter in a
       // JSON body or a query string, never in the URL path itself.
       if (req.method === 'GET' && req.url.split('?')[0] === '/atlas/asset/class') {
-        const cls = new URLSearchParams(req.url.split('?')[1] || '').get('class');
+        const classQuery = new URLSearchParams(req.url.split('?')[1] || '');
+        const cls = classQuery.get('class');
         if (!cls) return sendJson(res, 400, { error: 'class query parameter is required' });
         const entry = ASSET_CATALOG[cls];
         if (!entry) return sendJson(res, 404, { error: 'unknown assetClass' });
+        // ?specDigest= returns the item spec a signed asset names, current or earlier, so a verifier can check
+        // it against the digest in the credential.
+        const wantedDigest = classQuery.get('specDigest');
+        if (wantedDigest !== null) {
+          if (!itemIssuer.DIGEST_RE.test(wantedDigest)) return sendJson(res, 400, { error: 'specDigest must be 64 lowercase hex characters', code: 'item-spec-digest-invalid' });
+          const current = itemIssuer.describeSpec(entry);
+          if (current && current.itemSpecDigest === wantedDigest) return sendJson(res, 200, { class: cls, ...current, current: true });
+          const earlier = ITEM_SPEC_STORE.lookup(cls, wantedDigest);
+          if (!earlier) return sendJson(res, 404, { error: 'unknown item spec for this class', code: 'item-spec-unknown' });
+          return sendJson(res, 200, { class: cls, itemStandard: '0.1', itemSpec: earlier, itemSpecDigest: wantedDigest, current: false });
+        }
         return sendJson(res, 200, {
           class: cls,
           name: entry.name,
@@ -8210,6 +8284,7 @@ async function main() {
           presentation: entry.presentation,
           tradeScope: entry.tradeScope || 'local',
           ...(entry.properties && Object.keys(entry.properties).length ? { properties: entry.properties } : {}),
+          ...(itemIssuer.describeSpec(entry) || {}),
           // A scene's own "purchase" interactable (see the museum ticket
           // stall's scene.json) never hardcodes a price — it just names the
           // class, the same "operator decides via the catalog, not the
@@ -10228,7 +10303,7 @@ async function main() {
       } else if (!err.statusCode || err.statusCode >= 500) {
         console.error(err);
       }
-      sendJson(res, err.statusCode || 500, { error: err.message });
+      sendJson(res, err.statusCode || 500, err.itemStandard ? { error: err.message, code: err.code, errors: err.errors } : { error: err.message });
     }
   }));
 

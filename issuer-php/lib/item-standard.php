@@ -1,4 +1,5 @@
 <?php
+if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVER['SCRIPT_FILENAME']) === __FILE__) { http_response_code(404); exit; } // include-only
 // Domain Atlas Item Standard v0.1 validator (docs/item-standard-v0.1.md). Pure functions, no I/O, and nothing
 // in the issuer requires this file yet. Mirrors issuer-server/item-standard.js rule for rule;
 // docs/item-standard-v0.1.json holds the vectors both are tested against (test/item-standard.js), so the two

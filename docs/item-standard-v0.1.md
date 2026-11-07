@@ -8,7 +8,7 @@ A common shape for items that carry gameplay meaning (rings, compasses, pickaxes
 
 A wallet or world never trusts an item for declaring a capability. It trusts the issuer's `itemSpec` for the class, checked as described under [Foreign worlds](#foreign-worlds-discovery-and-verification).
 
-Phase 1 (this document, the validators and the test vectors) changes nothing at runtime: issuance, wallets, demo manifests and existing assets are untouched. Nothing in the issuers calls the validators yet.
+Phase 1 added this document, the validators and the shared test vectors. Phase 2A, described under [Issuer integration](#issuer-integration), wires the validators into the Node and PHP issuers for classes that declare an `itemSpec`. Wallets, world gameplay, demo manifests and existing assets are not part of either phase yet, and no shipped class declares an `itemSpec`, so live issuance is unchanged.
 
 ## Scope
 
@@ -121,20 +121,38 @@ At most 32 properties; keys at most 64 characters; `atlas.*` string values at mo
 No registry is introduced. A world that receives an item from another domain uses what Domain Atlas already has:
 
 1. Verify the credential as today (signature, issuer key from the issuer's own domain, expiry, revocation).
-2. If the properties carry `atlas.item.standard`, fetch the class from the issuer with the existing class lookup (`GET /atlas/asset/class?class=`, SPEC section 5.1.2). Phase 2 extends that response with the class's `itemSpec`.
+2. If the properties carry `atlas.item.standard`, fetch the spec from the issuer with the existing class lookup (`GET /atlas/asset/class?class=<class>&specDigest=<signed digest>`, SPEC section 5.1.2). The response carries the `itemSpec` with that digest, whether it is the class's current spec or an earlier one.
 3. Recompute the digest of the served `itemSpec` and require it to equal the signed `atlas.item.specDigest`. The issuer's domain is the trust root, so nothing else is needed to know the spec is the issuer's.
 4. Run `validateItemSpec` and `validateItemProperties`. A failure makes the item inert for effects.
 5. Apply the world's own filters: `acceptedItemClasses`, `trustedIssuers` and, from Phase 2, `policy.itemEffects`.
 
-A spec changed after issuance fails step 3, which is how a widened or extended spec is caught. Issuers should keep retired specs retrievable by digest; an item whose spec cannot be fetched is inert rather than guessed at.
+A spec changed after issuance fails step 3, which is how a widened or extended spec is caught. Issuers keep every spec they have signed retrievable by digest; an item whose spec cannot be fetched is inert rather than guessed at.
 
 ## Rollout and compatibility
 
 - Existing hat, shoe and movement effects keep working exactly as today. They are not standard items.
-- Standard effects are opt-in per world. In Phase 2 a world enables them with `policy.itemEffects`, following the domain-default and per-world override rule (SPEC section 3.4.1). Without it, standard items still display and trade; their effects are ignored.
+- Standard effects are opt-in per world. In a later phase a world enables them with `policy.itemEffects`, following the domain-default and per-world override rule (SPEC section 3.4.1). Without it, standard items still display and trade; their effects are ignored.
 - Issuance of a standard class is the issuer's choice; no existing class carries an `itemSpec` today.
 
-Known compatibility notes from the catalog lint: the shipped hats, outfits and shoes use legacy numeric multipliers and colour keys, and the PHP catalog also carries `atlas.avatar.handItem` on its pickaxe. All of these stay outside the standard. Admin mint and class patch currently accept arbitrary properties; Phase 2 should run the validator there for standard items only.
+Known compatibility notes from the catalog lint: the shipped hats, outfits and shoes use legacy numeric multipliers and colour keys, and the PHP catalog also carries `atlas.avatar.handItem` on its pickaxe. All of these stay outside the standard. The only restriction on other classes is that admin mint, reissue and class patch no longer accept `atlas.item.*` or `atlas.cap.*` properties on them, so an unrelated class cannot be made to look standard-conforming.
+
+## Issuer integration
+
+This applies to a catalog class with an `itemSpec`, in both `issuer-server/server.js` and the PHP issuer. Everything else is unchanged.
+
+**Signing.** Minting a standard class builds the final property bag from the class's own properties, any random roll, the serial and any admin patch, removes every `atlas.item.*` key and `atlas.avatar.slot`, adds the derived properties, and runs `validateItemSpec` and `validateItemProperties` on the result. The issuer signs only a bag that passes. A failed check is a 400 `item-properties-invalid` with the error list (a class whose own `itemSpec` is invalid is a 500 `item-spec-invalid`). The check happens before a serial or supply is reserved, so a roll outside the spec reserves nothing; if signing fails after a serial was reserved, the serial is given back when no other mint has taken one since, and otherwise stays an unused gap so serials remain unique.
+
+**Caller properties.** Admin mint, reissue and class patch may not set a derived key (`atlas.item.*`, `atlas.avatar.slot`) on a standard class: 400 `item-patch-reserved-key`. Instance values (stat rolls, capability parameters) are accepted when they stay inside the spec. On a class without an `itemSpec` the same routes refuse non-null `atlas.item.*` and `atlas.cap.*` properties and accept everything else as before.
+
+**Reissue and class patch.** A properties patch on an already-issued asset is checked against the spec its own signed `atlas.item.specDigest` names, not the class's current one: the current spec if the digest matches, otherwise the recorded earlier spec. The result must pass `validateItemProperties`; a signed spec that is no longer on record gives 409 `item-spec-unavailable`. A class patch is also checked against the class's current spec when it is stored, and again against each holder's own spec when it reaches their credential; where it does not fit, that credential is left alone. All checks run before anything is signed, so a refused request does not touch supply, revocations, holdings or stored patches. Reissue keeps the asset on the spec it was signed under; moving an asset to a newer spec is a deliberate reissue by the issuer, which Phase 2A does not provide.
+
+**Fungible re-mints.** A balance of a standard class that was issued under an earlier spec is refused by split, consolidate, convert and purchase until the issuer reissues it, because those re-mint from the class's current definition and would otherwise sign today's spec onto older value.
+
+**Restricted classes.** `restrictedIssuance` classes (Studio collectibles, chest items) are refused by issue, admin mint, reissue and class patch exactly as before, whether or not they have an `itemSpec`; no spec history is recorded for them.
+
+**Class lookup.** `GET /atlas/asset/class?class=` adds `itemStandard`, `itemSpec` and `itemSpecDigest` for a standard class. With `&specDigest=<64 hex>` it returns that class's spec with that digest and `current: true|false`; an unknown digest is 404 `item-spec-unknown`, a malformed one 400 `item-spec-digest-invalid`, and a digest belonging to another class is not served.
+
+**Spec history.** Every spec the issuer signs is recorded by class and digest before the asset is signed (`atlas-item-specs-store.json` in the issuer's state folder), and entries are only ever added. This file must be backed up with the other issuer state: it is the only record of a spec after the catalog entry changes. If it is unreadable the issuer refuses standard issuance (503) rather than replacing it.
 
 ## Validation
 
@@ -153,9 +171,12 @@ Item errors: `item-spec-missing`, `item-property-type`, `item-property-limit`, `
 | `docs/item-standard-v0.1.json` | Shared vectors: specs, digests, 36 spec cases, 59 item cases, 6 outside-the-standard cases, two catalogs. |
 | `test/item-standard.js` | Replays the vectors through both validators, requires identical results, and lints the real catalogs. |
 | `test/item-standard-runner.php` | PHP side of that test. |
+| `issuer-server/item-standard-issuer.js` | Node issuer integration: sealing, patch checks, spec history. |
+| `issuer-php/lib/item-standard-issuer.php` | PHP issuer integration. |
+| `test/item-standard-issuer.js` | Runs one scenario against both issuers and requires identical outcomes. Test classes come from `test/fixtures/item-standard-issuer.json` and are injected into the running code by `test/lib/item-standard-inject.js` (Node) and a file in the copied PHP bundle; the repository has no standard class. |
 
 Run `node test/item-standard.js` (needs `php` on the path). The vectors include valid and invalid ring, compass and pickaxe definitions, a ring whose rolls exceed its spec, a pickaxe whose tier exceeds its spec, and foreign-issuer cases where the served spec was widened after signing.
 
-## Phase 2 (not done)
+## Remaining work
 
-Return `itemSpec` from the class lookup in Node and PHP; derive and sign the properties at issue time for classes with a spec; run the validator in admin mint and class patch for standard items; add `policy.itemEffects` with the domain-default rule; teach the wallet to verify and apply standard effects.
+Wallet use of standard effects (verify the signed digest against the issuer's spec, apply stats and capabilities), `policy.itemEffects` with the domain-default rule, world capability handling, and an issuer action to move an asset to a newer spec.

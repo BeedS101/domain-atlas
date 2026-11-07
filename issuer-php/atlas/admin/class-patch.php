@@ -76,5 +76,13 @@ if ($hasTradeScope && $tradeScope !== 'local' && $tradeScope !== 'bound') {
   send_json(400, ['error' => "tradeScope, when given, must be 'local' or 'bound'"]);
 }
 
+if ($hasProperties) {
+  $stored = class_patch_of($assetClass);
+  $resolvedEntry = atlas_asset_catalog_entry($assetClass);
+  $itemOpts = ['model' => isset($resolvedEntry['model']) ? $resolvedEntry['model'] : null, 'issuerDomain' => atlas_domain()];
+  $itemCheck = atlas_item_issuer_check_class_patch($assetClass, $catalogEntry, isset($stored['properties']) ? $stored['properties'] : null, $properties, $itemOpts);
+  if (!$itemCheck['ok']) atlas_item_issuer_send_failure($itemCheck);
+}
+
 $patch = set_class_patch($assetClass, $properties, $tradeScope);
 send_json(200, ['assetClass' => $assetClass, 'patch' => $patch]);

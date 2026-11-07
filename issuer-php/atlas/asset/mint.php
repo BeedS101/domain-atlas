@@ -46,6 +46,10 @@ if ($hasProperties && !is_array($properties)) {
 }
 
 $catalogEntry = ATLAS_ASSET_CATALOG[$assetClass];
+// A restrictedIssuance class (Asset Studio collectibles) is minted only by its own authorized flow.
+if (!empty($catalogEntry['restrictedIssuance'])) {
+  send_json(403, ['error' => 'Studio collectibles require authorized Studio issuance', 'code' => 'studio-authorization-required']);
+}
 if ($catalogEntry['fungible']) {
   $quantity = $quantity ?? 1;
   if (!atlas_is_positive_int($quantity)) {

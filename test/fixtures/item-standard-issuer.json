@@ -1,0 +1,206 @@
+{
+  "note": "Standard classes injected into copies of the issuers for test/item-standard-issuer.js only; no shipped catalog has them. variant2 replaces the named classes' itemSpec to model a spec edited after assets were signed.",
+  "classes": {
+    "atlas.wearable.ring.itemstd_luck": {
+      "name": "Test Luck Ring",
+      "fungible": false,
+      "presentation": "collectible",
+      "modelPath": "/assets/badge.glb",
+      "properties": {
+        "atlas.avatar.stat.luck": "1",
+        "atlas.rarity": "common"
+      },
+      "itemSpec": {
+        "category": "equipment",
+        "slot": "ring",
+        "stats": {
+          "luck": {
+            "min": "1",
+            "max": "3"
+          }
+        }
+      },
+      "randomize": "ring-rolls"
+    },
+    "atlas.wearable.ring.itemstd_flaky": {
+      "name": "Test Flaky Ring",
+      "fungible": false,
+      "presentation": "collectible",
+      "modelPath": "/assets/badge.glb",
+      "properties": {
+        "atlas.avatar.stat.luck": "1",
+        "atlas.rarity": "common"
+      },
+      "itemSpec": {
+        "category": "equipment",
+        "slot": "ring",
+        "stats": {
+          "luck": {
+            "min": "1",
+            "max": "3"
+          }
+        }
+      },
+      "randomize": "ring-flaky",
+      "serialized": true,
+      "maxSupply": 3
+    },
+    "atlas.tool.itemstd_compass": {
+      "name": "Test Compass",
+      "fungible": false,
+      "presentation": "collectible",
+      "modelPath": "/assets/badge.glb",
+      "properties": {},
+      "itemSpec": {
+        "category": "tool",
+        "slot": "trinket",
+        "capabilities": [
+          "atlas.cap.compass"
+        ]
+      }
+    },
+    "atlas.tool.itemstd_pickaxe": {
+      "name": "Test Pickaxe",
+      "fungible": false,
+      "presentation": "collectible",
+      "modelPath": "/assets/badge.glb",
+      "properties": {
+        "atlas.cap.mine.tier": "1"
+      },
+      "itemSpec": {
+        "category": "tool",
+        "slot": "hand",
+        "capabilities": [
+          "atlas.cap.mine"
+        ],
+        "capabilityParams": {
+          "atlas.cap.mine": {
+            "tier": {
+              "min": "1",
+              "max": "2"
+            }
+          }
+        }
+      }
+    },
+    "atlas.tool.itemstd_restricted": {
+      "name": "Test Restricted Tool",
+      "fungible": false,
+      "presentation": "collectible",
+      "modelPath": "/assets/badge.glb",
+      "properties": {},
+      "itemSpec": {
+        "category": "tool",
+        "slot": "trinket",
+        "capabilities": [
+          "atlas.cap.compass"
+        ]
+      },
+      "restrictedIssuance": "chest"
+    },
+    "atlas.consumable.itemstd_dynamite": {
+      "name": "Test Dynamite",
+      "fungible": false,
+      "presentation": "collectible",
+      "modelPath": "/assets/badge.glb",
+      "properties": {
+        "atlas.cap.blast.radius": "3"
+      },
+      "itemSpec": {
+        "category": "consumable",
+        "uses": "1",
+        "capabilities": [
+          "atlas.cap.blast"
+        ],
+        "capabilityParams": {
+          "atlas.cap.blast": {
+            "radius": {
+              "min": "2",
+              "max": "6"
+            }
+          }
+        }
+      }
+    },
+    "atlas.consumable.itemstd_fuse": {
+      "name": "Test Fuse",
+      "fungible": true,
+      "presentation": "collectible",
+      "modelPath": "/assets/badge.glb",
+      "properties": {
+        "atlas.cap.blast.radius": "3"
+      },
+      "itemSpec": {
+        "category": "consumable",
+        "uses": "1",
+        "capabilities": [
+          "atlas.cap.blast"
+        ],
+        "capabilityParams": {
+          "atlas.cap.blast": {
+            "radius": {
+              "min": "2",
+              "max": "6"
+            }
+          }
+        }
+      }
+    },
+    "atlas.tool.itemstd_numbered": {
+      "name": "Test Numbered Compass",
+      "fungible": false,
+      "presentation": "collectible",
+      "modelPath": "/assets/badge.glb",
+      "properties": {},
+      "itemSpec": {
+        "category": "tool",
+        "slot": "trinket",
+        "capabilities": [
+          "atlas.cap.compass"
+        ]
+      },
+      "serialized": true,
+      "maxSupply": 5
+    }
+  },
+  "variant2": {
+    "atlas.tool.itemstd_pickaxe": {
+      "itemSpec": {
+        "category": "tool",
+        "slot": "hand",
+        "capabilities": [
+          "atlas.cap.mine"
+        ],
+        "capabilityParams": {
+          "atlas.cap.mine": {
+            "tier": {
+              "min": "1",
+              "max": "3"
+            }
+          }
+        }
+      }
+    },
+    "atlas.consumable.itemstd_fuse": {
+      "itemSpec": {
+        "category": "consumable",
+        "uses": "1",
+        "capabilities": [
+          "atlas.cap.blast"
+        ],
+        "capabilityParams": {
+          "atlas.cap.blast": {
+            "radius": {
+              "min": "2",
+              "max": "10"
+            }
+          }
+        }
+      }
+    }
+  },
+  "rollers": {
+    "ring-rolls": "cycles common to legendary; luck is the tier number capped at 3",
+    "ring-flaky": "odd calls roll luck 9 (outside the spec), even calls roll luck 2"
+  }
+}

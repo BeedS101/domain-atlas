@@ -11,6 +11,7 @@ require_once __DIR__ . '/crypto.php';
 require_once __DIR__ . '/store.php';
 require_once __DIR__ . '/replacement.php';
 require_once __DIR__ . '/transfer-policy.php';
+require_once __DIR__ . '/item-standard-issuer.php';
 
 function cors_headers() {
   header('Access-Control-Allow-Origin: *');
@@ -51,7 +52,9 @@ set_exception_handler(function ($e) {
     cors_headers();
     no_store_headers();
   }
-  echo json_encode(['error' => $e->getMessage()]);
+  echo json_encode($e instanceof AtlasItemStandardException
+    ? ['error' => $e->getMessage(), 'code' => $e->itemCode, 'errors' => $e->itemErrors]
+    : ['error' => $e->getMessage()]);
   exit;
 });
 register_shutdown_function(function () {
@@ -679,6 +682,11 @@ function apply_class_patch_if_stale($privateKey, $publicKeyB64url, $credential) 
   $sigOk = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$sigOk) return null; // never act on anything that isn't genuinely this domain's own signed credential
 
+  // The patch must still satisfy the spec this credential was signed under; otherwise it is left alone.
+  if (isset($patch['properties'])) {
+    $itemCheck = atlas_item_issuer_check_patched_asset($credential['asset'], isset(ATLAS_ASSET_CATALOG[$credential['asset']['class']]) ? ATLAS_ASSET_CATALOG[$credential['asset']['class']] : null, $patch['properties']);
+    if (!$itemCheck['ok']) return null;
+  }
   $newAsset = $credential['asset'];
   if (isset($patch['tradeScope'])) $newAsset['tradeScope'] = $patch['tradeScope'];
   if (isset($patch['properties'])) $newAsset['properties'] = merge_properties($newAsset['properties'] ?? [], $patch['properties']);
@@ -815,14 +823,50 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
     throw new Exception('this class can only be issued through its own authorized flow: ' . $cls, 403);
   }
 
+  // A caller's properties cannot set what the Item Standard derives for a standard class, nor use its
+  // namespaces on any other class.
+  $itemSpec = atlas_item_issuer_spec_of($catalogEntry);
+  $patchIssues = atlas_item_issuer_patch_problems($itemSpec, $initialProperties);
+  if (count($patchIssues)) {
+    throw atlas_item_issuer_exception(atlas_item_issuer_failure(400, 'item-patch-reserved-key', $patchIssues, 'properties in the Item Standard namespaces cannot be set when minting ' . $cls));
+  }
+
+  $asset = atlas_asset_catalog_entry($cls);
+  if ($asset === null) throw new Exception('unknown asset class: ' . $cls);
+
+  // A catalog entry's own 'randomizeProperties'
+  // callable (see atlas.wearable.ring in store.php, and random_ring_
+  // properties()'s own comment there for the full reasoning) gets one
+  // chance to override the class's static 'properties', same "genuinely
+  // new supply only" gate as the serial/cap reservation below — a
+  // reissue's own explicit 'properties' patch is a completely separate
+  // mechanism (handled entirely by atlas/asset/reissue.php) and must never
+  // get re-rolled by this. Rolled before any supply is reserved, so a roll
+  // that fails the class's itemSpec leaves the counters as they were.
+  // Mirrors issuer-server/server.js's mintAssetByClass().
+  $baseProperties = isset($asset['properties']) ? $asset['properties'] : [];
+  if ($supersedes === null && isset($catalogEntry['randomizeProperties']) && is_callable($catalogEntry['randomizeProperties'])) {
+    $baseProperties = array_merge($baseProperties, call_user_func($catalogEntry['randomizeProperties']));
+  }
+  $serialized = !empty($catalogEntry['serialized']);
+  $maxSupply = isset($catalogEntry['maxSupply']) ? $catalogEntry['maxSupply'] : null;
+  $composeProperties = function ($serialProperties) use ($baseProperties, $initialProperties) {
+    $properties = array_merge($baseProperties, $serialProperties);
+    if ($initialProperties !== null) $properties = merge_properties($properties, $initialProperties);
+    return $properties;
+  };
+  $itemOpts = ['model' => isset($asset['model']) ? $asset['model'] : null, 'issuerDomain' => atlas_domain()];
+  if ($itemSpec !== null) {
+    $pre = atlas_item_issuer_seal($cls, $catalogEntry, $composeProperties([]), $itemOpts);
+    if (!$pre['ok']) throw atlas_item_issuer_exception($pre);
+  }
+
   // Cap/serial tracking only applies to genuinely NEW supply
   // ($supersedes === null — see reserve_supply()'s comment in store.php),
   // and only when this class opted in via 'serialized' and/or 'maxSupply'.
   // A split/consolidate/trade re-mint always passes a non-null
   // $supersedes, so it skips this entirely.
   $serial = null;
-  $serialized = !empty($catalogEntry['serialized']);
-  $maxSupply = isset($catalogEntry['maxSupply']) ? $catalogEntry['maxSupply'] : null;
   if ($supersedes === null && ($serialized || $maxSupply !== null)) {
     $reservation = reserve_supply($cls, $quantity, $maxSupply);
     if (!$reservation['ok']) {
@@ -835,44 +879,31 @@ function mint_asset_by_class($privateKey, $publicKeyB64url, $ownerPublicKey, $cl
     $serial = $reservation['serial'];
   }
 
-  $asset = atlas_asset_catalog_entry($cls);
-  if ($asset === null) throw new Exception('unknown asset class: ' . $cls);
-
-  // A catalog entry's own 'randomizeProperties'
-  // callable (see atlas.wearable.ring in store.php, and random_ring_
-  // properties()'s own comment there for the full reasoning) gets one
-  // chance to override the class's static 'properties', same "genuinely
-  // new supply only" gate as the serial/cap reservation just above — a
-  // reissue's own explicit 'properties' patch is a completely separate
-  // mechanism (handled entirely by atlas/asset/reissue.php) and must never
-  // get re-rolled by this. Mirrors issuer-server/server.js's
-  // mintAssetByClass().
-  if ($supersedes === null && isset($catalogEntry['randomizeProperties']) && is_callable($catalogEntry['randomizeProperties'])) {
-    $randomized = call_user_func($catalogEntry['randomizeProperties']);
-    $asset['properties'] = array_merge(isset($asset['properties']) ? $asset['properties'] : [], $randomized);
-  }
-
-  if ($serialized) {
-    $properties = isset($asset['properties']) ? $asset['properties'] : [];
-    $properties['atlas.serial'] = (string) $serial;
-    $properties['atlas.editionSize'] = (string) $maxSupply;
-    $asset['properties'] = $properties;
-  }
-  if ($initialProperties !== null) {
-    $mergedProperties = merge_properties(isset($asset['properties']) ? $asset['properties'] : [], $initialProperties);
-    if (!empty($mergedProperties)) $asset['properties'] = $mergedProperties;
+  try {
+    $serialProperties = $serialized ? ['atlas.serial' => (string) $serial, 'atlas.editionSize' => (string) $maxSupply] : [];
+    $properties = $composeProperties($serialProperties);
+    if ($itemSpec !== null) {
+      $sealed = atlas_item_issuer_seal($cls, $catalogEntry, $properties, $itemOpts);
+      if (!$sealed['ok']) throw atlas_item_issuer_exception($sealed);
+      $properties = $sealed['properties'];
+      atlas_item_issuer_spec_record($cls, $itemSpec);
+    }
+    if (!empty($properties)) $asset['properties'] = $properties;
     else unset($asset['properties']);
+    // SPEC.md §5.1 — a catalog entry that declares its own 'expiresInMinutes'
+    // gets a fresh, signed deadline computed from THIS mint's own clock,
+    // every time (a re-mint gets a brand new window too, never a
+    // continuation of an old one's countdown — same as every other
+    // asset-level field here). Never present at all for a class that doesn't
+    // opt in. Mirrors issuer-server/server.js's mintAssetByClass().
+    if (isset($catalogEntry['expiresInMinutes'])) {
+      $asset['expiresAt'] = gmdate('Y-m-d\TH:i:s\Z', time() + (int) round($catalogEntry['expiresInMinutes'] * 60));
+    }
+    return issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes, $deferHoldings);
+  } catch (Throwable $err) {
+    if ($serial !== null) release_supply($cls, $quantity, $serial);
+    throw $err;
   }
-  // SPEC.md §5.1 — a catalog entry that declares its own 'expiresInMinutes'
-  // gets a fresh, signed deadline computed from THIS mint's own clock,
-  // every time (a re-mint gets a brand new window too, never a
-  // continuation of an old one's countdown — same as every other
-  // asset-level field here). Never present at all for a class that doesn't
-  // opt in. Mirrors issuer-server/server.js's mintAssetByClass().
-  if (isset($catalogEntry['expiresInMinutes'])) {
-    $asset['expiresAt'] = gmdate('Y-m-d\TH:i:s\Z', time() + (int) round($catalogEntry['expiresInMinutes'] * 60));
-  }
-  return issue_asset($privateKey, $publicKeyB64url, $ownerPublicKey, $asset, $quantity, $supersedes, $deferHoldings);
 }
 
 // Validates an asset credential presented back to us for a split,
@@ -934,6 +965,11 @@ function check_presented_asset($publicKeyB64url, $credential, $expectedOwner, $e
   if (is_expired($credential)) return 'asset has expired';
   $ok = verify_own_credential_signature($publicKeyB64url, $credential, asset_payload_of($credential));
   if (!$ok) return 'asset signature does not check out';
+  $supersededSpec = atlas_item_issuer_superseded_spec_problem(
+    isset(ATLAS_ASSET_CATALOG[$credential['asset']['class']]) ? ATLAS_ASSET_CATALOG[$credential['asset']['class']] : null,
+    isset($credential['asset']['properties']) ? $credential['asset']['properties'] : null
+  );
+  if ($supersededSpec !== null) return $supersededSpec;
   return null;
 }
 

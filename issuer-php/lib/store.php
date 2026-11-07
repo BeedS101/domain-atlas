@@ -4990,6 +4990,28 @@ function reserve_supply($cls, $quantity, $maxSupply) {
   return ['ok' => true, 'serial' => $current + $quantity];
 }
 
+// Gives back a reservation whose mint failed before anything was signed, but only while the counter still
+// stands where that reservation left it. If another mint has reserved since, the unused serial stays a gap
+// (serials stay unique). Mirrors issuer-server/server.js's releaseSupply().
+function release_supply($cls, $quantity, $serial) {
+  $fh = fopen(atlas_serial_counters_file(), 'c+');
+  if ($fh === false) return false;
+  flock($fh, LOCK_EX);
+  $doc = json_decode(stream_get_contents($fh), true);
+  $released = false;
+  if (is_array($doc) && isset($doc['counters'][$cls]) && $doc['counters'][$cls] === $serial) {
+    $doc['counters'][$cls] = $serial - $quantity;
+    ftruncate($fh, 0);
+    rewind($fh);
+    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    fflush($fh);
+    $released = true;
+  }
+  flock($fh, LOCK_UN);
+  fclose($fh);
+  return $released;
+}
+
 // Task #250 fourth follow-up (Bruno's own request) — per-mint randomized
 // enchantments/stats for the Signet Ring. Mirrors issuer-server/server.js's
 // RING_RARITY_TIERS/RING_ENCHANTMENT_POOL/randomRingProperties() exactly in
