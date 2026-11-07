@@ -1,0 +1,1784 @@
+{
+  "standard": "0.1",
+  "note": "Shared by issuer-server/item-standard.js and issuer-php/lib/item-standard.php (test/item-standard.js runs both). Item properties are built from the derived properties of deriveFrom (default: spec), then set (null deletes), then pad extra com.example keys. A spec case or item case may patch its spec with specPatch (null deletes a key). Expected errors are the sorted unique codes.",
+  "specs": {
+    "ring": {
+      "category": "equipment",
+      "slot": "ring",
+      "stats": {
+        "luck": {
+          "min": "1",
+          "max": "3"
+        }
+      }
+    },
+    "compass": {
+      "category": "tool",
+      "slot": "trinket",
+      "capabilities": [
+        "atlas.cap.compass"
+      ]
+    },
+    "pickaxe": {
+      "category": "tool",
+      "slot": "hand",
+      "capabilities": [
+        "atlas.cap.mine"
+      ],
+      "capabilityParams": {
+        "atlas.cap.mine": {
+          "tier": {
+            "min": "1",
+            "max": "2"
+          }
+        }
+      }
+    },
+    "lantern": {
+      "category": "tool",
+      "slot": "offhand",
+      "capabilities": [
+        "atlas.cap.light"
+      ],
+      "capabilityParams": {
+        "atlas.cap.light": {
+          "radius": {
+            "min": "4",
+            "max": "12"
+          }
+        }
+      }
+    },
+    "dynamite": {
+      "category": "consumable",
+      "uses": "1",
+      "capabilities": [
+        "atlas.cap.blast"
+      ],
+      "capabilityParams": {
+        "atlas.cap.blast": {
+          "radius": {
+            "min": "2",
+            "max": "6"
+          }
+        }
+      }
+    },
+    "chestKey": {
+      "category": "key",
+      "capabilities": [
+        "atlas.cap.unlock"
+      ],
+      "capabilityParams": {
+        "atlas.cap.unlock": {
+          "lock": {
+            "values": [
+              "gallery-gem"
+            ]
+          }
+        }
+      }
+    },
+    "ore": {
+      "category": "material"
+    },
+    "hat": {
+      "category": "equipment",
+      "slot": "hat",
+      "multipliers": {
+        "speed": {
+          "min": "1",
+          "max": "1.2"
+        },
+        "jump": {
+          "min": "1",
+          "max": "1.2"
+        }
+      }
+    },
+    "gloves": {
+      "category": "equipment",
+      "slot": "gloves",
+      "stats": {
+        "agility": {
+          "min": "1",
+          "max": "4"
+        }
+      }
+    },
+    "grapple": {
+      "category": "tool",
+      "slot": "hand",
+      "capabilities": [
+        "com.example.cap.grapple"
+      ],
+      "capabilityParams": {
+        "com.example.cap.grapple": {
+          "reach": {
+            "min": "1",
+            "max": "30"
+          }
+        }
+      }
+    }
+  },
+  "specContexts": {
+    "ring": {
+      "fungible": false,
+      "presentation": "collectible",
+      "classId": "atlas.wearable.ring.luck_band"
+    },
+    "compass": {
+      "fungible": false,
+      "presentation": "collectible",
+      "classId": "atlas.tool.compass"
+    },
+    "pickaxe": {
+      "fungible": false,
+      "presentation": "collectible",
+      "classId": "atlas.tool.pickaxe"
+    },
+    "lantern": {
+      "fungible": false,
+      "presentation": "collectible",
+      "classId": "atlas.tool.lantern"
+    },
+    "dynamite": {
+      "fungible": true,
+      "presentation": "collectible",
+      "classId": "atlas.consumable.dynamite"
+    },
+    "chestKey": {
+      "fungible": false,
+      "presentation": "collectible",
+      "classId": "atlas.key.gallery_chest"
+    },
+    "ore": {
+      "fungible": true,
+      "presentation": "collectible",
+      "classId": "atlas.material.iron_ore"
+    },
+    "hat": {
+      "fungible": false,
+      "presentation": "collectible",
+      "classId": "atlas.avatar.hat.sunhat"
+    },
+    "gloves": {
+      "fungible": false,
+      "presentation": "collectible",
+      "classId": "atlas.wearable.gloves.work_gloves"
+    },
+    "grapple": {
+      "fungible": false,
+      "presentation": "collectible",
+      "classId": "com.example.tool.grapple",
+      "issuerDomain": "example.com"
+    }
+  },
+  "digests": [
+    {
+      "spec": "ring",
+      "canonical": "{\"category\":\"equipment\",\"slot\":\"ring\",\"stats\":{\"luck\":{\"max\":\"3\",\"min\":\"1\"}}}",
+      "sha256": "dc65ff909e77db72a82bfbf6278bb6ed5efaf306d96a5abea5f420327920346d"
+    },
+    {
+      "spec": "compass",
+      "canonical": "{\"capabilities\":[\"atlas.cap.compass\"],\"category\":\"tool\",\"slot\":\"trinket\"}",
+      "sha256": "1c4becddbafbd9ee1e750480b4a2b8f32b2b82ffcb4cb6b892621a582a24ca30"
+    },
+    {
+      "spec": "pickaxe",
+      "canonical": "{\"capabilities\":[\"atlas.cap.mine\"],\"capabilityParams\":{\"atlas.cap.mine\":{\"tier\":{\"max\":\"2\",\"min\":\"1\"}}},\"category\":\"tool\",\"slot\":\"hand\"}",
+      "sha256": "1ff2eecf2717bb72aa29848545decfefb70f8321edf8fbf0ef4f92934b7e68d1"
+    },
+    {
+      "spec": "lantern",
+      "canonical": "{\"capabilities\":[\"atlas.cap.light\"],\"capabilityParams\":{\"atlas.cap.light\":{\"radius\":{\"max\":\"12\",\"min\":\"4\"}}},\"category\":\"tool\",\"slot\":\"offhand\"}",
+      "sha256": "5591535d9b9bcd9e4679fe33dc3a13a4ec2fa4fd6bcab93ffc2e71949ff7d827"
+    },
+    {
+      "spec": "dynamite",
+      "canonical": "{\"capabilities\":[\"atlas.cap.blast\"],\"capabilityParams\":{\"atlas.cap.blast\":{\"radius\":{\"max\":\"6\",\"min\":\"2\"}}},\"category\":\"consumable\",\"uses\":\"1\"}",
+      "sha256": "c774b607ff3f33f4dd271dec3c2d6e88f7753f39521c9d6ee7005dc273f214ed"
+    },
+    {
+      "spec": "chestKey",
+      "canonical": "{\"capabilities\":[\"atlas.cap.unlock\"],\"capabilityParams\":{\"atlas.cap.unlock\":{\"lock\":{\"values\":[\"gallery-gem\"]}}},\"category\":\"key\"}",
+      "sha256": "21294aa7b5d731a74e2c3af67f2419b6992aadef6c77d389b5efcf5d8346d875"
+    },
+    {
+      "spec": "ore",
+      "canonical": "{\"category\":\"material\"}",
+      "sha256": "a091cb79d71aaaa6b9418cc6767ee17300d044ac8708eb019fc24c64a67a65d9"
+    },
+    {
+      "spec": "hat",
+      "canonical": "{\"category\":\"equipment\",\"multipliers\":{\"jump\":{\"max\":\"1.2\",\"min\":\"1\"},\"speed\":{\"max\":\"1.2\",\"min\":\"1\"}},\"slot\":\"hat\"}",
+      "sha256": "c2b88a92c74794e7ba4c22a150d45bfd9cdb36368d879e7d53349a5d5808a3e9"
+    },
+    {
+      "spec": "gloves",
+      "canonical": "{\"category\":\"equipment\",\"slot\":\"gloves\",\"stats\":{\"agility\":{\"max\":\"4\",\"min\":\"1\"}}}",
+      "sha256": "40cd9d9c8f18fb29042641cacfcba7db391cf84c3941dacad91e5a790730ee38"
+    },
+    {
+      "spec": "grapple",
+      "canonical": "{\"capabilities\":[\"com.example.cap.grapple\"],\"capabilityParams\":{\"com.example.cap.grapple\":{\"reach\":{\"max\":\"30\",\"min\":\"1\"}}},\"category\":\"tool\",\"slot\":\"hand\"}",
+      "sha256": "3edbc9ea96329f1b03d4ea8af2a974dd587d8671aa459163829e0c709f38cadd"
+    }
+  ],
+  "specCases": [
+    {
+      "name": "valid ring",
+      "spec": "ring",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid compass",
+      "spec": "compass",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.tool.compass"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid pickaxe",
+      "spec": "pickaxe",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.tool.pickaxe"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid lantern",
+      "spec": "lantern",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.tool.lantern"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid dynamite",
+      "spec": "dynamite",
+      "ctx": {
+        "fungible": true,
+        "presentation": "collectible",
+        "classId": "atlas.consumable.dynamite"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid chestKey",
+      "spec": "chestKey",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.key.gallery_chest"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid ore",
+      "spec": "ore",
+      "ctx": {
+        "fungible": true,
+        "presentation": "collectible",
+        "classId": "atlas.material.iron_ore"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid hat",
+      "spec": "hat",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.avatar.hat.sunhat"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid gloves",
+      "spec": "gloves",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.gloves.work_gloves"
+      },
+      "errors": []
+    },
+    {
+      "name": "valid grapple",
+      "spec": "grapple",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "com.example.tool.grapple",
+        "issuerDomain": "example.com"
+      },
+      "errors": []
+    },
+    {
+      "name": "equipment without a slot",
+      "spec": "ring",
+      "specPatch": {
+        "slot": null
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-class-slot-mismatch",
+        "itemspec-slot-required"
+      ]
+    },
+    {
+      "name": "unknown slot",
+      "spec": "ring",
+      "specPatch": {
+        "slot": "tail"
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-class-slot-mismatch",
+        "itemspec-slot-invalid"
+      ]
+    },
+    {
+      "name": "tool class given the equipment category",
+      "spec": "compass",
+      "specPatch": {
+        "category": "equipment"
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.tool.compass"
+      },
+      "errors": [
+        "itemspec-class-family-mismatch"
+      ]
+    },
+    {
+      "name": "tool in a slot tools may not use",
+      "spec": "pickaxe",
+      "specPatch": {
+        "slot": "ring"
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.tool.pickaxe"
+      },
+      "errors": [
+        "itemspec-slot-not-allowed"
+      ]
+    },
+    {
+      "name": "stat range beyond the global bound",
+      "spec": "ring",
+      "specPatch": {
+        "stats": {
+          "luck": {
+            "min": "1",
+            "max": "600"
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-stat-range-invalid"
+      ]
+    },
+    {
+      "name": "stat range reversed",
+      "spec": "ring",
+      "specPatch": {
+        "stats": {
+          "luck": {
+            "min": "3",
+            "max": "1"
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-stat-range-invalid"
+      ]
+    },
+    {
+      "name": "unknown stat",
+      "spec": "ring",
+      "specPatch": {
+        "stats": {
+          "mojo": {
+            "min": "1",
+            "max": "3"
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-stat-unknown"
+      ]
+    },
+    {
+      "name": "multiplier range below the bound",
+      "spec": "hat",
+      "specPatch": {
+        "multipliers": {
+          "speed": {
+            "min": "0.1",
+            "max": "1.2"
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.avatar.hat.sunhat"
+      },
+      "errors": [
+        "itemspec-multiplier-range-invalid"
+      ]
+    },
+    {
+      "name": "unknown multiplier",
+      "spec": "hat",
+      "specPatch": {
+        "multipliers": {
+          "swim": {
+            "min": "1",
+            "max": "1.2"
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.avatar.hat.sunhat"
+      },
+      "errors": [
+        "itemspec-multiplier-unknown"
+      ]
+    },
+    {
+      "name": "unknown atlas capability",
+      "spec": "compass",
+      "specPatch": {
+        "capabilities": [
+          "atlas.cap.fly"
+        ]
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.tool.compass"
+      },
+      "errors": [
+        "itemspec-capability-unknown"
+      ]
+    },
+    {
+      "name": "mine on equipment",
+      "spec": "ring",
+      "specPatch": {
+        "capabilities": [
+          "atlas.cap.mine"
+        ],
+        "capabilityParams": {
+          "atlas.cap.mine": {
+            "tier": {
+              "min": "1",
+              "max": "2"
+            }
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-capability-category-mismatch"
+      ]
+    },
+    {
+      "name": "mine without its tier range",
+      "spec": "pickaxe",
+      "specPatch": {
+        "capabilityParams": null
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.tool.pickaxe"
+      },
+      "errors": [
+        "itemspec-capability-param-invalid"
+      ]
+    },
+    {
+      "name": "tier range beyond the capability bound",
+      "spec": "pickaxe",
+      "specPatch": {
+        "capabilityParams": {
+          "atlas.cap.mine": {
+            "tier": {
+              "min": "1",
+              "max": "9"
+            }
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.tool.pickaxe"
+      },
+      "errors": [
+        "itemspec-capability-param-invalid"
+      ]
+    },
+    {
+      "name": "unlock with an invalid lock id",
+      "spec": "chestKey",
+      "specPatch": {
+        "capabilityParams": {
+          "atlas.cap.unlock": {
+            "lock": {
+              "values": [
+                "Gallery Gem"
+              ]
+            }
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.key.gallery_chest"
+      },
+      "errors": [
+        "itemspec-capability-param-invalid"
+      ]
+    },
+    {
+      "name": "stackable material marked non-stackable",
+      "spec": "ore",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.material.iron_ore"
+      },
+      "errors": [
+        "itemspec-category-fungible-mismatch"
+      ]
+    },
+    {
+      "name": "credential presented as a collectible",
+      "spec": "ring",
+      "specPatch": {
+        "category": "credential",
+        "slot": null,
+        "stats": null
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.membership.gold"
+      },
+      "errors": [
+        "itemspec-presentation-mismatch"
+      ]
+    },
+    {
+      "name": "tool class under the wearable family",
+      "spec": "compass",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.tool_x"
+      },
+      "errors": [
+        "itemspec-class-family-mismatch"
+      ]
+    },
+    {
+      "name": "wearable class names another slot",
+      "spec": "ring",
+      "specPatch": {
+        "slot": "trinket"
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-class-slot-mismatch"
+      ]
+    },
+    {
+      "name": "class name not in the grammar",
+      "spec": "ring",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "Atlas.Tool"
+      },
+      "errors": [
+        "itemspec-class-name-invalid"
+      ]
+    },
+    {
+      "name": "numbers in a spec",
+      "spec": "ring",
+      "specPatch": {
+        "stats": {
+          "luck": {
+            "min": 1,
+            "max": 3
+          }
+        }
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-invalid"
+      ]
+    },
+    {
+      "name": "empty stats object",
+      "spec": "ring",
+      "specPatch": {
+        "stats": {}
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-invalid"
+      ]
+    },
+    {
+      "name": "rarity is not a spec field",
+      "spec": "ring",
+      "specPatch": {
+        "rarity": "rare"
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-invalid"
+      ]
+    },
+    {
+      "name": "uses on a non-consumable",
+      "spec": "ring",
+      "specPatch": {
+        "uses": "1"
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-uses-invalid"
+      ]
+    },
+    {
+      "name": "foreign capability from another domain",
+      "spec": "grapple",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "com.example.tool.grapple",
+        "issuerDomain": "other.net"
+      },
+      "errors": [
+        "itemspec-capability-param-invalid",
+        "itemspec-capability-unknown"
+      ]
+    },
+    {
+      "name": "unknown category",
+      "spec": "ring",
+      "specPatch": {
+        "category": "weapon"
+      },
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-category-invalid",
+        "itemspec-slot-not-allowed"
+      ]
+    },
+    {
+      "name": "spec is not an object",
+      "itemSpec": "nope",
+      "ctx": {
+        "fungible": false,
+        "presentation": "collectible",
+        "classId": "atlas.wearable.ring.luck_band"
+      },
+      "errors": [
+        "itemspec-invalid"
+      ]
+    }
+  ],
+  "itemCases": [
+    {
+      "name": "ring: valid",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": "2",
+        "atlas.rarity": "common"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "ring: valid with a numeric luck",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": 2
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "ring: luck above the class limit",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": "5"
+      },
+      "applies": true,
+      "errors": [
+        "item-stat-out-of-range"
+      ]
+    },
+    {
+      "name": "ring: luck below the class limit",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": "0"
+      },
+      "applies": true,
+      "errors": [
+        "item-stat-out-of-range"
+      ]
+    },
+    {
+      "name": "ring: fractional luck",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": "2.5"
+      },
+      "applies": true,
+      "errors": [
+        "item-stat-value-invalid"
+      ]
+    },
+    {
+      "name": "ring: fractional numeric luck",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": 2.5
+      },
+      "applies": true,
+      "errors": [
+        "item-stat-value-invalid"
+      ]
+    },
+    {
+      "name": "ring: stat the class does not allow",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": "2",
+        "atlas.avatar.stat.defense": "1"
+      },
+      "applies": true,
+      "errors": [
+        "item-stat-not-allowed"
+      ]
+    },
+    {
+      "name": "ring: unknown stat",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.mojo": "1"
+      },
+      "applies": true,
+      "errors": [
+        "item-stat-unknown"
+      ]
+    },
+    {
+      "name": "ring: multiplier the class does not allow",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": "2",
+        "atlas.avatar.speedMultiplier": "1.1"
+      },
+      "applies": true,
+      "errors": [
+        "item-multiplier-not-allowed"
+      ]
+    },
+    {
+      "name": "ring: marker missing",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.item.standard": null,
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-marker-missing"
+      ]
+    },
+    {
+      "name": "ring: wrong marker version",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.item.standard": "0.2",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-marker-invalid"
+      ]
+    },
+    {
+      "name": "ring: digest of another spec",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.item.specDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-spec-digest-mismatch"
+      ]
+    },
+    {
+      "name": "ring: digest missing",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.item.specDigest": null,
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-spec-digest-missing"
+      ]
+    },
+    {
+      "name": "ring: slot differs from the class",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.slot": "trinket",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-slot-mismatch"
+      ]
+    },
+    {
+      "name": "ring: category differs from the class",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.item.category": "tool",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-category-mismatch"
+      ]
+    },
+    {
+      "name": "ring: unknown atlas.item key",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.item.foo": "x",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-reserved-key"
+      ]
+    },
+    {
+      "name": "ring: unknown atlas.avatar key",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.sparkle": "x",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-reserved-key"
+      ]
+    },
+    {
+      "name": "ring: invalid colour",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.color": "red",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-color-invalid"
+      ]
+    },
+    {
+      "name": "ring: unknown rarity",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.rarity": "epic",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-rarity-invalid"
+      ]
+    },
+    {
+      "name": "ring: capability the class does not list",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.item.capabilities": [
+          "atlas.cap.mine"
+        ],
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-capability-unauthorized"
+      ]
+    },
+    {
+      "name": "ring: more than 32 properties",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.luck": "2"
+      },
+      "pad": 30,
+      "applies": true,
+      "errors": [
+        "item-property-limit"
+      ]
+    },
+    {
+      "name": "ring: atlas string over 256 characters",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.serial": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-property-limit"
+      ]
+    },
+    {
+      "name": "ring: nested value under an atlas key",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "atlas.weight": {
+          "value": 1
+        },
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-property-type"
+      ]
+    },
+    {
+      "name": "ring: foreign value over 1024 characters",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "com.example.blob": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-property-limit"
+      ]
+    },
+    {
+      "name": "ring: nested foreign values stay allowed",
+      "spec": "ring",
+      "derive": true,
+      "set": {
+        "com.example.stats": {
+          "luck": 1,
+          "extra": {
+            "a": 1
+          }
+        },
+        "atlas.avatar.stat.luck": "2"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "ring: claims the marker but no class",
+      "spec": null,
+      "properties": {
+        "atlas.item.standard": "0.1"
+      },
+      "applies": true,
+      "errors": [
+        "item-spec-missing"
+      ]
+    },
+    {
+      "name": "compass: valid",
+      "spec": "compass",
+      "derive": true,
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "compass: carrying fewer capabilities than the class lists is valid",
+      "spec": "compass",
+      "derive": true,
+      "set": {
+        "atlas.item.capabilities": null
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "compass: parameter the capability does not have",
+      "spec": "compass",
+      "derive": true,
+      "set": {
+        "atlas.cap.compass.heading": "1"
+      },
+      "applies": true,
+      "errors": [
+        "item-reserved-key"
+      ]
+    },
+    {
+      "name": "compass: capability the class does not list",
+      "spec": "compass",
+      "derive": true,
+      "set": {
+        "atlas.item.capabilities": [
+          "atlas.cap.compass",
+          "atlas.cap.mine"
+        ]
+      },
+      "applies": true,
+      "errors": [
+        "item-capability-unauthorized"
+      ]
+    },
+    {
+      "name": "compass: wrong slot",
+      "spec": "compass",
+      "derive": true,
+      "set": {
+        "atlas.avatar.slot": "hand"
+      },
+      "applies": true,
+      "errors": [
+        "item-slot-mismatch"
+      ]
+    },
+    {
+      "name": "compass: capabilities not a list",
+      "spec": "compass",
+      "derive": true,
+      "set": {
+        "atlas.item.capabilities": "atlas.cap.compass"
+      },
+      "applies": true,
+      "errors": [
+        "item-property-type"
+      ]
+    },
+    {
+      "name": "pickaxe: valid",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": "1",
+        "atlas.rarity": "uncommon",
+        "atlas.avatar.handItem": "true"
+      },
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "pickaxe: valid with a numeric tier",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": 2
+      },
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "pickaxe: tier above the class limit",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": "3"
+      },
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": [
+        "item-capability-param-invalid"
+      ]
+    },
+    {
+      "name": "pickaxe: fractional tier",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": "1.5"
+      },
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": [
+        "item-capability-param-invalid"
+      ]
+    },
+    {
+      "name": "pickaxe: tier missing",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {},
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": [
+        "item-capability-param-invalid"
+      ]
+    },
+    {
+      "name": "pickaxe: no model for a hand item",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": "1"
+      },
+      "applies": true,
+      "errors": [
+        "item-model-required"
+      ]
+    },
+    {
+      "name": "pickaxe: model not an http(s) URL or path",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": "1"
+      },
+      "ctx": {
+        "model": "ftp://example.com/p.glb"
+      },
+      "applies": true,
+      "errors": [
+        "item-model-required"
+      ]
+    },
+    {
+      "name": "pickaxe: tier without the capability declared",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.item.capabilities": null,
+        "atlas.cap.mine.tier": "1"
+      },
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": [
+        "item-reserved-key"
+      ]
+    },
+    {
+      "name": "lantern: valid",
+      "spec": "lantern",
+      "derive": true,
+      "set": {
+        "atlas.cap.light.radius": "8"
+      },
+      "ctx": {
+        "model": "https://example.com/assets/lantern.glb"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "lantern: radius above the class limit",
+      "spec": "lantern",
+      "derive": true,
+      "set": {
+        "atlas.cap.light.radius": "30"
+      },
+      "ctx": {
+        "model": "https://example.com/assets/lantern.glb"
+      },
+      "applies": true,
+      "errors": [
+        "item-capability-param-invalid"
+      ]
+    },
+    {
+      "name": "dynamite: valid",
+      "spec": "dynamite",
+      "derive": true,
+      "set": {
+        "atlas.cap.blast.radius": "4"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "dynamite: wrong use count",
+      "spec": "dynamite",
+      "derive": true,
+      "set": {
+        "atlas.cap.blast.radius": "4",
+        "atlas.item.uses": "2"
+      },
+      "applies": true,
+      "errors": [
+        "item-uses-invalid"
+      ]
+    },
+    {
+      "name": "dynamite: use count missing",
+      "spec": "dynamite",
+      "derive": true,
+      "set": {
+        "atlas.cap.blast.radius": "4",
+        "atlas.item.uses": null
+      },
+      "applies": true,
+      "errors": [
+        "item-uses-invalid"
+      ]
+    },
+    {
+      "name": "chest key: valid",
+      "spec": "chestKey",
+      "derive": true,
+      "set": {
+        "atlas.cap.unlock.lock": "gallery-gem"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "chest key: lock the class does not name",
+      "spec": "chestKey",
+      "derive": true,
+      "set": {
+        "atlas.cap.unlock.lock": "vault"
+      },
+      "applies": true,
+      "errors": [
+        "item-capability-param-invalid"
+      ]
+    },
+    {
+      "name": "ore: valid",
+      "spec": "ore",
+      "derive": true,
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "ore: carries a slot",
+      "spec": "ore",
+      "derive": true,
+      "set": {
+        "atlas.avatar.slot": "ring"
+      },
+      "applies": true,
+      "errors": [
+        "item-slot-mismatch"
+      ]
+    },
+    {
+      "name": "ore: carries a use count",
+      "spec": "ore",
+      "derive": true,
+      "set": {
+        "atlas.item.uses": "1"
+      },
+      "applies": true,
+      "errors": [
+        "item-uses-invalid"
+      ]
+    },
+    {
+      "name": "hat: valid with an alias and a generic multiplier",
+      "spec": "hat",
+      "derive": true,
+      "set": {
+        "atlas.avatar.hatColor": "#aabbcc",
+        "atlas.avatar.hatSpeedMultiplier": "1.15",
+        "atlas.avatar.jumpMultiplier": 1.1
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "hat: speed above the class limit",
+      "spec": "hat",
+      "derive": true,
+      "set": {
+        "atlas.avatar.hatColor": "#aabbcc",
+        "atlas.avatar.hatSpeedMultiplier": "1.5"
+      },
+      "applies": true,
+      "errors": [
+        "item-multiplier-out-of-range"
+      ]
+    },
+    {
+      "name": "hat: colour missing",
+      "spec": "hat",
+      "derive": true,
+      "set": {
+        "atlas.avatar.hatSpeedMultiplier": "1.1"
+      },
+      "applies": true,
+      "errors": [
+        "item-color-invalid"
+      ]
+    },
+    {
+      "name": "hat: shoe alias on a hat",
+      "spec": "hat",
+      "derive": true,
+      "set": {
+        "atlas.avatar.hatColor": "#aabbcc",
+        "atlas.avatar.shoeSpeedMultiplier": "1.1"
+      },
+      "applies": true,
+      "errors": [
+        "item-multiplier-not-allowed"
+      ]
+    },
+    {
+      "name": "gloves: valid",
+      "spec": "gloves",
+      "derive": true,
+      "set": {
+        "atlas.avatar.color": "#c0392b",
+        "atlas.avatar.stat.agility": "3"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "gloves: colour missing",
+      "spec": "gloves",
+      "derive": true,
+      "set": {
+        "atlas.avatar.stat.agility": "3"
+      },
+      "applies": true,
+      "errors": [
+        "item-color-invalid"
+      ]
+    },
+    {
+      "name": "foreign: spec matches the signed digest",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": "2"
+      },
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": []
+    },
+    {
+      "name": "foreign: served spec widened after signing",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": "4"
+      },
+      "specPatch": {
+        "capabilityParams": {
+          "atlas.cap.mine": {
+            "tier": {
+              "min": "1",
+              "max": "5"
+            }
+          }
+        }
+      },
+      "deriveFrom": "pickaxe",
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": [
+        "item-spec-digest-mismatch"
+      ]
+    },
+    {
+      "name": "foreign: served spec gained a capability",
+      "spec": "pickaxe",
+      "derive": true,
+      "set": {
+        "atlas.cap.mine.tier": "1"
+      },
+      "specPatch": {
+        "capabilities": [
+          "atlas.cap.mine",
+          "atlas.cap.dig"
+        ],
+        "capabilityParams": {
+          "atlas.cap.mine": {
+            "tier": {
+              "min": "1",
+              "max": "2"
+            }
+          },
+          "atlas.cap.dig": {
+            "tier": {
+              "min": "1",
+              "max": "2"
+            }
+          }
+        }
+      },
+      "deriveFrom": "pickaxe",
+      "ctx": {
+        "model": "/assets/rewards/pickaxe.glb"
+      },
+      "applies": true,
+      "errors": [
+        "item-spec-digest-mismatch"
+      ]
+    }
+  ],
+  "legacyCases": [
+    {
+      "name": "existing hat: numeric multipliers",
+      "properties": {
+        "atlas.avatar.hatColor": "#5a8f3c",
+        "atlas.avatar.hatSpeedMultiplier": 1.15,
+        "atlas.avatar.hatJumpMultiplier": 1.1,
+        "atlas.avatar.hatInteractRangeMultiplier": 1.3
+      },
+      "applies": false,
+      "errors": []
+    },
+    {
+      "name": "existing pickaxe",
+      "properties": {
+        "atlas.rarity": "uncommon",
+        "com.example.kind": "tool",
+        "atlas.avatar.handItem": "true"
+      },
+      "applies": false,
+      "errors": []
+    },
+    {
+      "name": "existing ring: nested stats object",
+      "properties": {
+        "atlas.rarity": "rare",
+        "com.example.enchantments": [
+          "thorns",
+          "second wind"
+        ],
+        "com.example.stats": {
+          "luck": 7,
+          "defense": 4
+        }
+      },
+      "applies": false,
+      "errors": []
+    },
+    {
+      "name": "existing element: nested values",
+      "properties": {
+        "atlas.symbol": "Fe",
+        "atlas.atomicNumber": 26,
+        "atlas.weight": {
+          "value": 55.845,
+          "unit": "g/mol"
+        }
+      },
+      "applies": false,
+      "errors": []
+    },
+    {
+      "name": "unmarked item using the shipped slot properties",
+      "properties": {
+        "atlas.avatar.slot": "ring",
+        "atlas.avatar.stat.luck": "9999",
+        "atlas.avatar.speedMultiplier": "9"
+      },
+      "applies": false,
+      "errors": []
+    },
+    {
+      "name": "unmarked item with 40 properties",
+      "pad": 40,
+      "properties": {},
+      "applies": false,
+      "errors": []
+    }
+  ],
+  "rollers": {
+    "ring-good": "cycles common to legendary; luck is the tier number capped at 3",
+    "ring-bad": "cycles common to legendary; luck is the tier number, so legendary rolls 4"
+  },
+  "catalogs": {
+    "valid": {
+      "classes": {
+        "atlas.wearable.ring.luck_band": {
+          "name": "Demo",
+          "fungible": false,
+          "presentation": "collectible",
+          "modelPath": "/assets/ring.glb",
+          "properties": {
+            "atlas.avatar.stat.luck": "1",
+            "atlas.rarity": "common"
+          },
+          "itemSpec": "ring",
+          "randomize": "ring-good"
+        },
+        "atlas.tool.compass": {
+          "name": "Demo",
+          "fungible": false,
+          "presentation": "collectible",
+          "modelPath": "/assets/compass.glb",
+          "properties": {},
+          "itemSpec": "compass"
+        },
+        "atlas.tool.pickaxe": {
+          "name": "Demo",
+          "fungible": false,
+          "presentation": "collectible",
+          "modelPath": "/assets/rewards/pickaxe.glb",
+          "properties": {
+            "atlas.cap.mine.tier": "1",
+            "atlas.avatar.handItem": "true",
+            "atlas.rarity": "uncommon"
+          },
+          "restrictedIssuance": "chest",
+          "itemSpec": "pickaxe"
+        },
+        "atlas.avatar.hat.sunhat": {
+          "name": "Demo",
+          "fungible": false,
+          "presentation": "collectible",
+          "modelPath": "/assets/demo.glb",
+          "properties": {
+            "atlas.avatar.hatColor": "#5a8f3c",
+            "atlas.avatar.hatSpeedMultiplier": 1.12
+          }
+        },
+        "atlas.element.iron": {
+          "name": "Demo",
+          "fungible": true,
+          "presentation": "collectible",
+          "modelPath": "/assets/demo.glb",
+          "properties": {
+            "atlas.symbol": "Fe",
+            "atlas.weight": {
+              "value": 55.845,
+              "unit": "g/mol"
+            }
+          }
+        }
+      },
+      "expect": {
+        "checked": [
+          "atlas.tool.compass",
+          "atlas.tool.pickaxe",
+          "atlas.wearable.ring.luck_band"
+        ],
+        "skipped": 2,
+        "errors": [],
+        "legacy": {
+          "atlas.avatar.hat.sunhat": [
+            "atlas.avatar.hatColor",
+            "atlas.avatar.hatSpeedMultiplier"
+          ]
+        }
+      }
+    },
+    "invalid": {
+      "classes": {
+        "atlas.wearable.ring.bad_roll": {
+          "name": "Demo",
+          "fungible": false,
+          "presentation": "collectible",
+          "modelPath": "/assets/demo.glb",
+          "properties": {
+            "atlas.avatar.stat.luck": "1"
+          },
+          "itemSpec": "ring",
+          "randomize": "ring-bad"
+        },
+        "atlas.tool.nospec": {
+          "name": "Demo",
+          "fungible": false,
+          "presentation": "collectible",
+          "modelPath": "/assets/demo.glb",
+          "properties": {
+            "atlas.item.category": "tool"
+          }
+        },
+        "atlas.tool.nogear": {
+          "name": "Demo",
+          "fungible": false,
+          "presentation": "collectible",
+          "modelPath": "/assets/demo.glb",
+          "properties": {},
+          "itemSpec": {
+            "category": "equipment"
+          }
+        },
+        "atlas.tool.stray_param": {
+          "name": "Demo",
+          "fungible": false,
+          "presentation": "collectible",
+          "modelPath": "/assets/demo.glb",
+          "properties": {
+            "atlas.cap.compass.heading": "1"
+          },
+          "itemSpec": "compass"
+        }
+      },
+      "expect": {
+        "checked": [
+          "atlas.tool.nogear",
+          "atlas.tool.stray_param",
+          "atlas.wearable.ring.bad_roll"
+        ],
+        "skipped": 1,
+        "errors": [
+          {
+            "class": "atlas.tool.nogear",
+            "code": "itemspec-class-family-mismatch",
+            "key": "atlas.tool.nogear"
+          },
+          {
+            "class": "atlas.tool.nogear",
+            "code": "itemspec-slot-required",
+            "key": "slot"
+          },
+          {
+            "class": "atlas.tool.nospec",
+            "code": "catalog-reserved-key-without-itemspec",
+            "key": "atlas.item.category"
+          },
+          {
+            "class": "atlas.tool.stray_param",
+            "code": "item-reserved-key",
+            "key": "atlas.cap.compass.heading"
+          },
+          {
+            "class": "atlas.wearable.ring.bad_roll",
+            "code": "item-stat-out-of-range",
+            "key": "atlas.avatar.stat.luck"
+          }
+        ],
+        "legacy": {}
+      }
+    }
+  }
+}
