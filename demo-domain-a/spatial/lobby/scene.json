@@ -300,7 +300,8 @@
     { "model": "/assets/furniture/cardboardBoxClosed.glb", "position": [4, 0, 3.8], "rotationY": -15 }
   ],
   "portalMarkers": [
-    { "position": [0, 0, 4.7], "radius": 0.8, "portalIndex": 0, "hideMarker": true }
+    { "position": [0, 0, 4.7], "radius": 0.8, "portalIndex": 0, "hideMarker": true },
+    { "position": [-11.6, 0.02, -12.0], "radius": 0.9, "portalIndex": 1, "ringOnly": true }
   ],
   "interactables": [
     { "position": [0.3, 0, -0.8], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.trinket.pin", "oncePerUser": true },
@@ -313,6 +314,7 @@
     { "position": [4, 0, 3.8], "radius": 1.7, "label": "Open the crate", "action": "issue", "class": "atlas.avatar.shoes.sneakers", "oncePerUser": true }
   ],
   "anchors": [
-    { "id": "reading-nook", "position": [-3.9, 1.6, -0.8], "label": "Reading Nook" }
+    { "id": "reading-nook", "position": [-3.9, 1.6, -0.8], "label": "Reading Nook" },
+    { "id": "mine-entrance", "position": [-11.6, 1.6, -10.2], "yaw": 180, "label": "Mine Entrance" }
   ]
 }

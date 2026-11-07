@@ -143,6 +143,7 @@ window.addEventListener('unhandledrejection', (event) => {
 // one is ever active — entering a world tears down whichever was running
 // for the previous one. See enterWorld().
 let active3D = null;
+let activeSideView = null; // the side-view renderer's instance while a sideview-v1 world is shown
 let actionBar = null; // the action bar (action-bar.js), created when the first world has loaded
 
 // F3 toggles the developer HUD (gltf-mini-hud.js) for whichever 3D world is
@@ -467,9 +468,25 @@ function disposeCharacterPreview() {
 // and again whenever the equip/unequip wallet-card action changes it —
 // same "no scene reload needed" live-update treatment setCharacterScale
 // already gets.
+// The side-view character takes the same equipped colours the 3D one does: outfit, hat and shoes.
+function sideViewLook() {
+  const l = localAvatarLookHex || {};
+  return {
+    shirtColor: l.shirtColor, pantsColor: l.pantsColor,
+    hatColor: localAvatarHatInfo && localAvatarHatInfo.hatColor,
+    shoeColor: localAvatarShoesInfo && localAvatarShoesInfo.shoeColor
+  };
+}
+async function refreshSideViewLookSources() {
+  localAvatarLookHex = await AtlasWallet.getAvatarLook();
+  localAvatarHatInfo = await AtlasWallet.getAvatarHat();
+  localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
+}
+
 async function applyAvatarLookToScene(resolved) {
   localAvatarLookHex = resolved !== undefined ? resolved : await AtlasWallet.getAvatarLook();
   if (active3D && active3D.setLocalAvatarLook) active3D.setLocalAvatarLook(localAvatarLookHex);
+  if (activeSideView) activeSideView.setLook(sideViewLook());
   if (characterPreview && characterPreview.setLook) characterPreview.setLook(localAvatarLookHex);
 }
 
@@ -477,6 +494,7 @@ async function applyAvatarLookToScene(resolved) {
 async function applyAvatarHatToScene(resolved) {
   localAvatarHatInfo = resolved !== undefined ? resolved : await AtlasWallet.getAvatarHat();
   if (active3D && active3D.setLocalAvatarHat) active3D.setLocalAvatarHat(localAvatarHatInfo);
+  if (activeSideView) activeSideView.setLook(sideViewLook());
   if (characterPreview && characterPreview.setHat) characterPreview.setHat(localAvatarHatInfo);
 }
 
@@ -484,6 +502,7 @@ async function applyAvatarHatToScene(resolved) {
 async function applyAvatarShoesToScene(resolved) {
   localAvatarShoesInfo = resolved !== undefined ? resolved : await AtlasWallet.getAvatarShoes();
   if (active3D && active3D.setLocalAvatarShoes) active3D.setLocalAvatarShoes(localAvatarShoesInfo);
+  if (activeSideView) activeSideView.setLook(sideViewLook());
   if (characterPreview && characterPreview.setShoes) characterPreview.setShoes(localAvatarShoesInfo);
 }
 
@@ -2564,6 +2583,8 @@ async function enterWorld(worldId, anchorId) {
   await flushCameraDistance(); // a portal hop right after scrolling must still reopen at the latest zoom
   if (actionBar) actionBar.model.cancelAll(); // a held block or an open selector ends with the world
   if (active3D) { active3D.destroy(); active3D = null; refreshCharacterScaleControl(); }
+  if (activeSideView) { activeSideView.destroy(); activeSideView = null; }
+  window.__atlasSideView = null;
   refreshCompassHud(); // no 3D scene any more: hides the compass at once
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
   disconnectPresence(); // leaving whichever world was active before also means leaving its presence room
@@ -2583,7 +2604,7 @@ async function enterWorld(worldId, anchorId) {
   // just be written for a newer wallet than this one — so it gets a clear
   // "can't render this" message instead of silently falling through to the
   // 2D path and drawing something the world never intended.
-  const KNOWN_RENDERERS = ['gltf-mini-v1', 'procedural-v1'];
+  const KNOWN_RENDERERS = ['gltf-mini-v1', 'sideview-v1', 'procedural-v1'];
   const declaredRenderers = (world.entry.renderer && world.entry.renderer.length) ? world.entry.renderer : ['procedural-v1'];
   if (!declaredRenderers.some((r) => KNOWN_RENDERERS.includes(r))) {
     show3DCanvas(false);
@@ -2591,7 +2612,34 @@ async function enterWorld(worldId, anchorId) {
     return;
   }
   const is3D = declaredRenderers.includes('gltf-mini-v1');
+  const isSide = !is3D && declaredRenderers.includes('sideview-v1');
   show3DCanvas(is3D);
+
+  if (isSide) {
+    hintEl.style.display = 'none'; // the 2D click-a-portal hint does not apply to a walkable side view
+    try {
+      statusEl.textContent = 'Fetching scene...';
+      const sideRes = await fetch(currentOrigin + world.entry.scene, { cache: 'no-store' });
+      const sideScene = await sideRes.json();
+      if (typeof AtlasSideView === 'undefined') throw new Error('side-view renderer is not loaded');
+      if (sideScene.format !== 'sideview-v1') throw new Error('scene is not a sideview-v1 scene');
+      window.__atlasScene = { floor: { size: [10, 10], color: '#1b2830' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
+      await refreshSideViewLookSources();
+      activeSideView = AtlasSideView.create(canvas, sideScene, {
+        look: sideViewLook(),
+        isInputBlocked: actionBarBlocked,
+        onPortalEnter: (portalIndex) => followPortal(world.portals[portalIndex])
+      });
+      window.__atlasSideView = activeSideView;
+      statusEl.textContent = 'In sync with ' + manifestLabelOf(manifest) + ' - ' + world.id;
+      history.replaceState(null, '', '?manifest=' + encodeURIComponent(currentManifestUrl) + '&world=' + encodeURIComponent(world.id));
+      joinPresenceAndChat(manifest, world);
+      showActionBar();
+    } catch (err) {
+      statusEl.textContent = 'Could not load world: ' + err.message;
+    }
+    return;
+  }
 
   if (is3D) {
     try {
@@ -2650,7 +2698,7 @@ async function enterWorld(worldId, anchorId) {
         // keeps window.__atlasScene/history state above showing the
         // scene's real declared content untouched by which anchor (if any)
         // this particular visit happened to land through.
-        sceneData: anchor ? { ...sceneData, camera: { ...(sceneData.camera || {}), start: anchor.position } } : sceneData,
+        sceneData: anchor ? { ...sceneData, camera: { ...(sceneData.camera || {}), start: anchor.position, ...(Number.isFinite(anchor.yaw) ? { startYaw: anchor.yaw } : {}) } } : sceneData,
         resolveAssetUrl: (path) => currentOrigin + path,
         debugLabel: world.id, // shown by the F3 debug HUD
         // Bounds what a dropped item's model may cost in this world, and the
@@ -2848,12 +2896,11 @@ async function followPortal(portal) {
   if (!portal) return;
   if (portal.kind === 'world') {
     // Same-origin scene swap: reuse the already-cached manifest, no re-fetch.
-    // Task #63: gate checked here, before enterWorld() touches anything —
-    // loadManifest() below covers its own callers, but a same-world portal
-    // never goes through loadManifest() at all, so it needs its own check.
+    // The identity gate is checked here, before enterWorld() touches anything: loadManifest() covers its own
+    // callers, but a same-world portal never goes through it. `portal.anchor` names a point in the target world.
     const targetWorld = currentManifest.worlds.find((w) => w.id === portal.to);
     if (!(await ensureIdentityForEntry(currentManifest, targetWorld))) return;
-    await enterWorld(portal.to);
+    await enterWorld(portal.to, portal.anchor);
   } else if (portal.kind === 'domain') {
     // Crossing a real trust boundary: fetch the other domain's own manifest.
     await loadManifest(portal.manifest);
@@ -3241,6 +3288,7 @@ function unprojectGround(sx, sy, originX, originY) {
 }
 
 function render(t) {
+  if (activeSideView) { requestAnimationFrame(render); return; } // the side view draws on this canvas itself
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const originX = canvas.width / 2;
   const originY = canvas.height / 2 + 40;

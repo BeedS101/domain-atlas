@@ -152,10 +152,12 @@ GATES.forEach((G) => {
 
   // ---- 4. scene and manifest ----
   {
-    assert.deepStrictEqual(world.portals, G.portals, 'portal destination unchanged');
+    // A world may have gained portals after the gate's own (the Lobby's mine entrance); the gate's keep their place.
+    assert.deepStrictEqual(world.portals.slice(0, G.portals.length), G.portals, 'portal destination unchanged');
     if (G.entry) assert.deepStrictEqual(world.entry, G.entry);
-    assert.strictEqual(SCENE.portalMarkers.length, 1);
-    assert.deepStrictEqual(SCENE.portalMarkers[0], G.marker, 'portal marker position, radius and index kept; ring and beacon hidden for the gate');
+    const gateMarkers = SCENE.portalMarkers.filter((m) => m.portalIndex < G.portals.length);
+    assert.strictEqual(gateMarkers.length, 1);
+    assert.deepStrictEqual(gateMarkers[0], G.marker, 'portal marker position, radius and index kept; ring and beacon hidden for the gate');
     assert.strictEqual(SCENE.characterScale, G.characterScale);
     assert.deepStrictEqual(SCENE.camera, G.camera);
     assert.deepStrictEqual(SCENE.floor, G.floor);

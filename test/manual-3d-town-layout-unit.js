@@ -66,11 +66,16 @@ const interior = interiorNow.filter((o) => !interiorAdded.has(o.model)).map((o) 
   assert.strictEqual(interior.length, 110);
   assert.strictEqual(interiorNow.length, 112, 'plus the interior floor and the wall plaque');
   assert.strictEqual(sha(JSON.stringify(interior)), '674311223f2f4bb4ff3991102d5ea4d3126583f125b17d4f946d0426d7aadbeb', 'building, furniture, portal gate and crates are unchanged');
-  const fixed = { portalMarkers: scene.portalMarkers, interactables: scene.interactables, anchors: scene.anchors, camera: scene.camera, characterScale: scene.characterScale, ambientLight: scene.ambientLight, directionalLight: scene.directionalLight };
+  // The mine entrance (a second portal marker and the mine-entrance anchor, see docs/mining-burrow-v0.1.md) is checked below.
+  const originalMarkers = scene.portalMarkers.filter((m) => m.portalIndex === 0);
+  const originalAnchors = scene.anchors.filter((a) => a.id !== 'mine-entrance');
+  const fixed = { portalMarkers: originalMarkers, interactables: scene.interactables, anchors: originalAnchors, camera: scene.camera, characterScale: scene.characterScale, ambientLight: scene.ambientLight, directionalLight: scene.directionalLight };
   assert.strictEqual(sha(JSON.stringify(fixed)), 'b39020f9be20dfe3e1e2ee161059739c22c35e522fa4a28e8d58be898a131aeb', 'markers, interactables, anchors, spawn, lights and character scale are unchanged');
   assert.strictEqual(scene.characterScale, 0.5);
-  assert.deepStrictEqual(scene.portalMarkers, [{ position: [0, 0, 4.7], radius: 0.8, portalIndex: 0, hideMarker: true }]);
-  assert.deepStrictEqual(scene.anchors, [{ id: 'reading-nook', position: [-3.9, 1.6, -0.8], label: 'Reading Nook' }]);
+  assert.deepStrictEqual(originalMarkers, [{ position: [0, 0, 4.7], radius: 0.8, portalIndex: 0, hideMarker: true }]);
+  assert.deepStrictEqual(originalAnchors, [{ id: 'reading-nook', position: [-3.9, 1.6, -0.8], label: 'Reading Nook' }]);
+  assert.strictEqual(scene.portalMarkers.length, 2, 'the Plaza gate marker plus the mine entrance marker');
+  assert.strictEqual(scene.anchors.length, 2, 'the reading nook plus the mine entrance');
   assert.strictEqual(scene.interactables.length, 8);
   assert.deepStrictEqual(scene.camera, { start: [0, 1.6, 3.4], startYaw: 0 });
   const gate = scene.objects.filter((o) => o.model === '/assets/portals/townPortal.glb');
@@ -78,7 +83,8 @@ const interior = interiorNow.filter((o) => !interiorAdded.has(o.model)).map((o) 
   assert.strictEqual(sha(fs.readFileSync(path.join(DOMAIN_DIR, 'assets', 'portals', 'townPortal.glb'))), 'f6ebca8dedb6c24e041bb6df65c9621635e5a3d8df863d3fed30ec3ccb7a0d6f', 'the textured portal gate is unchanged');
   const manifest = JSON.parse(fs.readFileSync(path.join(DOMAIN_DIR, '.well-known', 'spatial.json'), 'utf8'));
   const lobby = manifest.worlds.find((w) => w.id === 'lobby');
-  assert.deepStrictEqual(lobby.portals, [{ kind: 'world', to: 'plaza', label: 'Back to the Plaza' }]);
+  assert.deepStrictEqual(lobby.portals[0], { kind: 'world', to: 'plaza', label: 'Back to the Plaza' }, 'the Plaza portal keeps its index and destination');
+  assert.strictEqual(lobby.portals.length, 2, 'plus the portal into the Mining Burrow');
   assert(/^localhost:\d+$/.test(manifest.domain), 'the manifest keeps its local demo address');
   pass('every pre-existing object, interactable, anchor, the portal marker and gate, spawn, lights and character scale 0.5 are unchanged (checked by fingerprint)');
 }

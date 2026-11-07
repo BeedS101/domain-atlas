@@ -76,8 +76,9 @@ check('the lobby does not admit it from another issuer', fx.admission(ctx, CLASS
 const other = JSON.parse(fs.readFileSync(path.join(ROOT, 'demo-domain-b', '.well-known', 'spatial.json'), 'utf8'));
 check('no world of the second demo domain enables item effects',
   !other.itemEffects && other.worlds.every((w) => !(w.policy && w.policy.itemEffects)));
+// The Mining Burrow copies the Lobby's policy on purpose so the capability stays active across the trip.
 check('no other world of the first demo domain enables the compass',
-  manifest.worlds.filter((w) => w.id !== 'lobby').every((w) => !(w.policy && w.policy.itemEffects)));
+  manifest.worlds.filter((w) => w.id !== 'lobby' && w.id !== 'mining-burrow').every((w) => !(w.policy && w.policy.itemEffects)));
 
 // HUD helpers.
 const dirs = [[[0, -1], 0, 'N'], [[1, -1], 45, 'NE'], [[1, 0], 90, 'E'], [[1, 1], 135, 'SE'], [[0, 1], 180, 'S'], [[-1, 1], 225, 'SW'], [[-1, 0], 270, 'W'], [[-1, -1], 315, 'NW']];

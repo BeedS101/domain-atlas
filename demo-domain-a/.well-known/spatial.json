@@ -148,7 +148,33 @@
         "capabilities": { "building": "none", "vehicles": false, "combat": "none", "landOwnership": false }
       },
       "portals": [
-        { "kind": "world", "to": "plaza", "label": "Back to the Plaza" }
+        { "kind": "world", "to": "plaza", "label": "Back to the Plaza" },
+        { "kind": "world", "to": "mining-burrow", "label": "Enter the Mining Burrow" }
+      ]
+    },
+    {
+      "id": "mining-burrow",
+      "name": "Mining Burrow",
+      "entry": {
+        "scene": "/spatial/mining-burrow/scene.json",
+        "renderer": ["sideview-v1"]
+      },
+      "policy": {
+        "guestAccess": "open",
+        "discoverable": true,
+        "identityRequired": false,
+        "itemDropsAllowed": false,
+        "acceptedItemClasses": ["atlas.tool.bronze_compass"],
+        "trustedIssuers": "self",
+        "itemEffects": { "capabilities": ["atlas.cap.compass"] }
+      },
+      "profile": {
+        "genre": "mine",
+        "scale": "room",
+        "capabilities": { "building": "none", "vehicles": false, "combat": "none", "landOwnership": false }
+      },
+      "portals": [
+        { "kind": "world", "to": "lobby", "anchor": "mine-entrance", "label": "Back to the village" }
       ]
     }
   ],

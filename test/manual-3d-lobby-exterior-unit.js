@@ -84,7 +84,8 @@ const ORIGINAL = (name) => {
   // before this pass (fingerprint of the whole file), which fixes every placement, solid flag and option.
   const interiorMap = (m) => { const w = /^\/assets\/lobby\/exterior\/(wall\w*)\.glb$/.exec(m); return w ? interiorTool.URL_DIR + w[1] + '.glb' : null; };
   const propMap = (m) => { const p = /^\/assets\/lobby\/exterior\/(\w+?)B?\.glb$/.exec(m); return p ? '/assets/outdoor/' + p[1] + '.glb' : m === '/assets/town/pineB.glb' ? '/assets/town/pine.glb' : null; };
-  const reverted = { ...scene, objects: scene.objects.map((o) => ({ ...o, model: interiorMap(o.model) || propMap(o.model) || o.model })) };
+  // The mine entrance marker and anchor came after that scene (docs/mining-burrow-v0.1.md); take them out before comparing.
+  const reverted = { ...scene, portalMarkers: scene.portalMarkers.filter((m) => m.portalIndex === 0), anchors: scene.anchors.filter((a) => a.id !== 'mine-entrance'), objects: scene.objects.map((o) => ({ ...o, model: interiorMap(o.model) || propMap(o.model) || o.model })) };
   assert.strictEqual(sha(JSON.stringify(reverted)), BEFORE_SCENE_SHA, 'scene.json differs from the previous scene by more than model URLs');
   const head = reverted;
   assert.strictEqual(scene.objects.length, 265, 'object count');
