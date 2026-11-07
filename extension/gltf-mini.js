@@ -1749,6 +1749,35 @@
     const character = buildCharacter(gl);
     let walkPhase = 0;
 
+    // Cosmetic action poses for the local character only (the action bar's strikes, kicks and block): extra
+    // forward-raise angles in radians on top of the walk swing. Nothing here is sent to other players and
+    // nothing reads it back as a game outcome.
+    const ACTION_MS = 320;
+    const ACTION_ANGLES = {
+      'strike-right': { armR: 1.5 }, 'strike-left': { armL: 1.5 },
+      'kick-right': { legR: 1.15 }, 'kick-left': { legL: 1.15 }
+    };
+    let actionAnim = null; // { name, start }
+    let blocking = false;
+    let blockAmount = 0;
+    let lastActionPose = { armL: 0, armR: 0, legL: 0, legR: 0 };
+    function actionPoseStep(dt) {
+      blockAmount += ((blocking ? 1 : 0) - blockAmount) * Math.min(1, dt * 14);
+      if (!blocking && blockAmount < 0.002) blockAmount = 0;
+      const pose = { armL: 1.35 * blockAmount, armR: 1.35 * blockAmount, legL: 0, legR: 0 };
+      if (actionAnim) {
+        const t = (performance.now() - actionAnim.start) / ACTION_MS;
+        if (t >= 1) actionAnim = null;
+        else {
+          const k = Math.sin(Math.PI * t);
+          const a = ACTION_ANGLES[actionAnim.name];
+          for (const part of Object.keys(a)) pose[part] = Math.max(pose[part], a[part] * k);
+        }
+      }
+      lastActionPose = pose;
+      return pose;
+    }
+
     // Shared fallback visual for a dropped item whose asset has no `model`
     // (or whose model failed to load — see setItemDrops() below) — one
     // small box built once and reused, repositioned per drop, rather than
@@ -2725,6 +2754,7 @@
       // scale/duration the difference isn't visible.
       if (isMoving) walkPhase += dt * (speed > 3 ? 11 : 8);
       const limbSwing = isMoving ? Math.sin(walkPhase) * 0.55 : 0;
+      const actionPose = actionPoseStep(dt);
 
       // Jump: a simple vertical arc layered on top of the standing eye
       // height. Space only starts a new jump while grounded (the
@@ -3004,7 +3034,8 @@
       // would put the camera inside its torso and fill the screen with the
       // shirt colour. The upper body is skipped then; legs and shoes stay.
       const upperBodyAboveEye = cameraDistance <= HEAD_VISIBLE_DISTANCE && characterScale * character.shoulderY > standingEyeY - 0.1;
-      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale, hideUpperBody, handUrl, extras) => {
+      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale, hideUpperBody, handUrl, extras, pose) => {
+        const lift = pose || { armL: 0, armR: 0, legL: 0, legR: 0 };
         const shirtColor = colors && colors.shirtColor;
         // A legs item overrides the outfit's trousers.
         const pantsColor = (extras && extras.legs) || (colors && colors.pantsColor);
@@ -3029,17 +3060,17 @@
         if (!hideUpperBody) {
           drawPart(mat4Translate(0, character.hipY, 0), character.torso, shirtColor);
           if (extras && extras.neck) drawPart(mat4Translate(0, character.shoulderY, 0), character.neck, extras.neck);
-          const armLLocal = mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing));
+          const armLLocal = mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing + lift.armL));
           drawPart(armLLocal, character.armL);
-          const armRLocal = mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing));
+          const armRLocal = mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing + lift.armR));
           drawPart(armRLocal, character.armR);
           if (extras && extras.gloves) { drawPart(armLLocal, character.gloveL, extras.gloves); drawPart(armRLocal, character.gloveR, extras.gloves); }
           if (extras && extras.shoulders) { drawPart(armLLocal, character.padL, extras.shoulders); drawPart(armRLocal, character.padR, extras.shoulders); }
           drawHeld(handUrl, armRLocal);
           drawHeld(extras && extras.offHand, armLLocal);
         }
-        const legLLocal = mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing));
-        const legRLocal = mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing));
+        const legLLocal = mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing + lift.legL));
+        const legRLocal = mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing + lift.legR));
         drawPart(legLLocal, character.legL, pantsColor);
         drawPart(legRLocal, character.legR, pantsColor);
         if (shoeColor) {
@@ -3048,7 +3079,7 @@
           drawPart(legRLocal, shoePair.shoeR, shoeColor);
         }
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale, upperBodyAboveEye, localAvatarHandModel, localAvatarExtras);
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale, upperBodyAboveEye, localAvatarHandModel, localAvatarExtras, actionPose);
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
@@ -3145,6 +3176,12 @@
       // turns to face its travel direction (see the characterYaw comment
       // above) without needing to read pixels back off the canvas.
       getCharacterYaw: () => characterYaw,
+      // Cosmetic action poses (see actionPoseStep above). playAction takes 'strike-right', 'strike-left',
+      // 'kick-right' or 'kick-left'; setBlocking holds both arms up until cleared. getActionPose is the
+      // last pose that was drawn, for tests.
+      playAction: (name) => { if (ACTION_ANGLES[name]) actionAnim = { name, start: performance.now() }; },
+      setBlocking: (on) => { blocking = !!on; },
+      getActionPose: () => Object.assign({}, lastActionPose),
       // The character's FLOOR-relative height (0 = standing on the ground,
       // negative while crouching, positive mid-jump) — see the comment
       // above characterBaseY's own declaration in frame(). This is what

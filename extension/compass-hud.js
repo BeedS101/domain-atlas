@@ -54,7 +54,7 @@
     style.textContent =
       '#atlasCompassHud{position:fixed;top:68px;right:14px;width:' + SIZE + 'px;height:' + SIZE + 'px;border-radius:50%;' +
       'background:rgba(20,31,38,0.82);border:2px solid #b0803a;box-shadow:0 2px 8px rgba(0,0,0,0.45);' +
-      'pointer-events:none;user-select:none;z-index:40;display:none;font:600 11px system-ui,sans-serif;color:#e8f0f2}' +
+      'pointer-events:none;user-select:none;z-index:6;display:none;font:600 11px system-ui,sans-serif;color:#e8f0f2}' +
       '#atlasCompassHud.active{display:block}' +
       '#atlasCompassHud .ch-pt{position:absolute;left:50%;top:50%;width:0;height:0;display:flex;align-items:center;justify-content:center}' +
       '#atlasCompassHud .ch-pt span{white-space:nowrap;opacity:0.72}' +

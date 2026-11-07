@@ -143,6 +143,7 @@ window.addEventListener('unhandledrejection', (event) => {
 // one is ever active — entering a world tears down whichever was running
 // for the previous one. See enterWorld().
 let active3D = null;
+let actionBar = null; // the action bar (action-bar.js), created when the first world has loaded
 
 // F3 toggles the developer HUD (gltf-mini-hud.js) for whichever 3D world is
 // running; it reads the renderer's getDebugInfo() and does nothing else.
@@ -2561,6 +2562,7 @@ async function enterWorld(worldId, anchorId) {
   // starts, same idea as window.__atlasScene just getting overwritten below
   // for the 2D path.
   await flushCameraDistance(); // a portal hop right after scrolling must still reopen at the latest zoom
+  if (actionBar) actionBar.model.cancelAll(); // a held block or an open selector ends with the world
   if (active3D) { active3D.destroy(); active3D = null; refreshCharacterScaleControl(); }
   refreshCompassHud(); // no 3D scene any more: hides the compass at once
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
@@ -2783,6 +2785,7 @@ async function enterWorld(worldId, anchorId) {
       // Presence and chat both join here for a 3D world; a 2D world does
       // the same in its own branch below.
       joinPresenceAndChat(manifest, world);
+      showActionBar();
     } catch (err) {
       hideSceneLoadProgress(); // a failed load shouldn't leave a stuck progress bar over the error message
       statusEl.textContent = 'Could not load world: ' + err.message;
@@ -2834,6 +2837,7 @@ async function enterWorld(worldId, anchorId) {
     // it just has no avatars to draw. Chat is gated on the world/domain
     // opting in, as in the 3D branch.
     joinPresenceAndChat(manifest, world);
+    showActionBar();
   } catch (err) {
     statusEl.textContent = 'Could not load world: ' + err.message;
     window.__atlasScene = { floor: { size: [10, 10], color: '#2a1a1a' }, objects: [], portalMarkers: [], itemMarkers: [], interactables: [] };
@@ -6541,6 +6545,88 @@ document.addEventListener('keydown', (e) => {
     routeWalletScreen();
   }
 });
+
+// ---------- action bar ----------
+//
+// Ten slots on 1-0 (action-bar.js), shown in every world, 2D or 3D. Keys 1-5 play cosmetic poses on the local
+// character (3D) and flash the slot; keys 6-8 choose which eligible wallet item a slot holds. Choosing never
+// equips, uses or spends anything, and a use request is only reported, never carried out. Nothing here is an
+// authoritative outcome.
+
+// Why a key press should be left alone: typing in a field, the wallet or Character window open, or a modal up.
+function actionBarBlocked(e) {
+  if (typeof AtlasActionBar === 'undefined') return true;
+  if (AtlasActionBar.isTypingTarget(e.target) || AtlasActionBar.isTypingTarget(document.activeElement)) return true;
+  if (walletPanel.classList.contains('open')) return true;
+  if (document.querySelector('#presenceApprovalModal.active, #chessModal.active, #chestModal.active, #keyAnchorModal.active, #bridgeOfferPreviewModal.active, dialog[open]')) return true;
+  return false;
+}
+
+// Eligible wallet items per selector slot: the left hand takes off-hand items, the right hand hand-slot items,
+// the potion slot standard consumables. Revoked, hidden and still-pending credentials are left out.
+let actionBarOptionsSeq = 0;
+async function refreshActionBarOptions() {
+  if (!actionBar) return;
+  const seq = ++actionBarOptionsSeq;
+  const lists = { 'item-left': [], 'item-right': [], potion: [] };
+  try {
+    const identity = await AtlasWallet.getIdentity();
+    if (identity) {
+      const wallet = await AtlasWallet.getWallet(identity.publicKey);
+      for (const entry of wallet) {
+        if (entry.hidden || entry.pendingOutcome) continue;
+        const asset = entry.credential.asset;
+        if (!asset || asset.fungible) continue;
+        const option = { id: entry.credential.id, label: asset.name || asset.class, sub: asset.class };
+        const slots = AtlasWallet.avatarSlotsOfAsset(asset);
+        if (slots.includes('offhand')) lists['item-left'].push(option);
+        if (slots.includes('hand')) lists['item-right'].push(option);
+        const props = asset.properties || {};
+        if (typeof AtlasItemEffects !== 'undefined' && AtlasItemEffects.isStandard(asset) && props['atlas.item.category'] === 'consumable') {
+          lists.potion.push(Object.assign({}, option, { sub: props['atlas.item.uses'] ? asset.class + ' (' + props['atlas.item.uses'] + ' use)' : asset.class }));
+        }
+      }
+    }
+  } catch (err) { /* an unreadable wallet just means no options */ }
+  if (seq !== actionBarOptionsSeq || !actionBar) return;
+  for (const id of Object.keys(lists)) actionBar.model.setOptions(id, lists[id]);
+}
+
+function handleActionBarEvent(ev) {
+  if (ev.type !== 'action' || !active3D) return;
+  if (ev.id === 'block') { if (active3D.setBlocking) active3D.setBlocking(ev.phase === 'start'); return; }
+  if (ev.phase === 'start' && active3D.playAction) active3D.playAction(ev.id);
+}
+
+function showActionBar() {
+  if (typeof AtlasActionBar === 'undefined') return;
+  if (!actionBar) {
+    actionBar = AtlasActionBar.create(document.body, { onEvent: handleActionBarEvent });
+    window.__atlasActionBar = actionBar;
+  }
+  actionBar.setVisible(true);
+  refreshActionBarOptions();
+}
+
+window.addEventListener('keydown', (e) => {
+  if (!actionBar || !actionBar.isVisible()) return;
+  const result = actionBar.model.handleKeyDown(e, actionBarBlocked(e));
+  if (result.prevent) { e.preventDefault(); e.stopImmediatePropagation(); }
+  const slot = AtlasActionBar.slotForCode(e.code);
+  if (result.handled && slot >= 0 && AtlasActionBar.SLOTS[slot].kind === 'selector') refreshActionBarOptions();
+}, true);
+window.addEventListener('keyup', (e) => { if (actionBar) actionBar.model.handleKeyUp(e); }, true);
+window.addEventListener('blur', () => { if (actionBar) actionBar.model.cancelAll(); });
+window.addEventListener('atlas-item-effects-changed', () => { refreshActionBarOptions(); });
+
+// The game layers step aside while the wallet or Character window is open.
+new MutationObserver(() => {
+  const open = walletPanel.classList.contains('open');
+  document.body.classList.toggle('wallet-open', open);
+  if (open && actionBar) actionBar.model.cancelAll();
+}).observe(walletPanel, { attributes: true, attributeFilter: ['class'] });
+document.body.classList.toggle('wallet-open', walletPanel.classList.contains('open'));
+
 
 chrome.storage.onChanged.addListener(async (changes, areaName) => {
   if (areaName === 'local' && changes.atlasPendingOps) refreshPendingOpsDisplay().catch(() => {});

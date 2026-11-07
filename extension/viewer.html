@@ -60,6 +60,8 @@
   #scene { display: block; margin-top: 56px; }
   #scene3d { display: none; position: fixed; top: 56px; left: 0; right: 0; bottom: 0; width: 100%; height: calc(100% - 56px); outline: none; touch-action: none; }
   #scene3d.active { display: block; }
+  /* Game layers step aside while the wallet or the Character window is open. */
+  body.wallet-open #actionBar, body.wallet-open #atlasCompassHud { display: none !important; }
   #scene3dHint {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     font-size: 12px; color: #a9b8bf; background: rgba(20,31,38,0.85);
@@ -2986,6 +2988,7 @@
   <script src="item-effects.js"></script>
 <script src="wallet.js"></script>
   <script src="compass-hud.js"></script>
+  <script src="action-bar.js"></script>
   <script src="gltf-mini.js"></script>
   <script src="gltf-mini-hud.js"></script>
   <script src="viewer.js"></script>
