@@ -184,6 +184,52 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol;
       await settle();
       console.log('PASS: z stopped at ' + s.pos[2].toFixed(2) + ' against the wall (face at -5.46)');
 
+      console.log('STEP 3b: outdoors, the drawn feet stay on the visible ground (paving 0.03 to 0.05, bare ground 0.015)');
+      const outdoor = async (label, x, z, lo, hi) => {
+        await place(x, z);
+        assertTrue(!(await frame.evaluate(({ x, z }) => window.__atlasActive3D.isPositionBlocked(x, z), { x, z })), label + ': the spot is free');
+        await sleep(1200);
+        const st = await state();
+        assertTrue(st.grounded && st.feetY === 0, label + ': support height is unchanged (feet at 0): ' + JSON.stringify(st));
+        assertTrue(st.modelBaseY >= lo && st.modelBaseY <= hi && near(st.modelBaseY, st.surfaceLift, 0.002), label + ': the model stands on the visible surface: base ' + st.modelBaseY + ' lift ' + st.surfaceLift);
+        assertTrue(near(st.floorY, st.modelBaseY, 1e-6) && near(st.pos[1], eyeStanding + st.modelBaseY, 1e-3), label + ': broadcast height and eye follow the drawn base');
+        const lift = st.surfaceLift;
+        // crouch: same base, squashed, feet never below the surface
+        await sampleStart();
+        await down('ControlLeft');
+        await sleep(900);
+        const c = await state();
+        m = await sampleStop();
+        assertTrue(c.crouched && near(c.modelSquash, 1.2 / 1.8, 0.01) && near(c.modelBaseY, lift, 0.002), label + ': crouched, still on the surface: ' + JSON.stringify(c));
+        assertTrue(m.minModelY >= lift - 0.002, label + ': the model never dipped below the surface while crouching (min ' + m.minModelY + ' vs ' + lift + ')');
+        await up('ControlLeft');
+        await sleep(700);
+        // jump: unchanged arc above the support height, lands back on the surface
+        await sampleStart();
+        await tap('Space', 250);
+        await sleep(1500);
+        m = await sampleStop();
+        const j = await state();
+        assertTrue(m.peak > 0.5 && m.peak < 0.65, label + ': jump peak (support height) is unchanged, got ' + m.peak.toFixed(3));
+        assertTrue(j.grounded && j.feetY === 0 && j.jumpsUsed === 0 && near(j.modelBaseY, lift, 0.002), label + ': landed back on the surface: ' + JSON.stringify(j));
+        assertTrue(m.minModelY >= lift - 0.002, label + ': never below the surface while jumping and landing');
+        console.log('PASS: ' + label + ': standing, crouching, jumping and landing all keep the model on the surface (' + lift.toFixed(3) + ')');
+      };
+      await outdoor('paving', 3.2, 8.8, 0.03, 0.06);
+      await outdoor('bare ground', -18, -8, 0.012, 0.02);
+      // walking from the paving onto the doormat and inside: the base follows the layers and never drops below them
+      await place(3.2, 9.4);
+      await sleep(1000);
+      await sampleStart();
+      await down('KeyW');
+      await until((v) => v.pos[2] < 3.6, 15000);
+      await up('KeyW');
+      m = await sampleStop();
+      s = await state();
+      assertTrue(m.minModelY >= 0 && m.minFloorY >= 0, 'walking in from outside never puts the model below the floor: ' + m.minModelY);
+      assertTrue(s.pos[2] < 4.5 && s.modelBaseY === 0 && s.surfaceLift === 0, 'back indoors the drawn base is the plain floor: ' + JSON.stringify(s));
+      console.log('PASS: walking from the paving indoors keeps the feet on the ground and ends at the plain floor');
+
       console.log('STEP 4: jumping over the portal marker still enters it');
       await place(0, 2.6);
       await down('KeyS');

@@ -1406,6 +1406,70 @@
     return true;
   }
 
+  // ---------- visible ground layers ----------
+  //
+  // Outdoor ground is made of thin non-solid layers (grass, paving, river banks) a few centimetres above y = 0,
+  // which is where support and collision put the feet. The character's feet and shoes are only a few centimetres
+  // tall once drawn, so a layer that high hides them, most visibly when a crouch squashes the model. The drawn
+  // model is therefore lifted to the visible surface; collision and support (body.feetY) are not touched.
+  // A layer lower than GROUND_LIFT_MIN is a floor texture that the sole already sits below, so nothing changes
+  // indoors. Only non-solid pieces that are flat and close to the floor count (GROUND_LAYER_MAX_Y); rugs and
+  // everything solid are left alone.
+  const GROUND_LIFT_MIN = 0.012;
+  const GROUND_LAYER_MAX_Y = 0.1;
+  const GROUND_LIFT_EASE = 30;
+
+  function isGroundLayer(item) {
+    const fp = item && item.footprint;
+    return !!fp && item.solid === false && fp.maxY >= GROUND_LIFT_MIN && fp.maxY <= GROUND_LAYER_MAX_Y && fp.minY > -GROUND_LAYER_MAX_Y;
+  }
+
+  // Appends the world-space triangles of primitives ({ positions, indices, nodeMatrix }) placed with `placement`
+  // (column-major 4x4) to `out`, with their x/z extent.
+  function collectGroundTriangles(prims, placement, out) {
+    let matrix = placement;
+    const vert = (pos, i) => {
+      const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
+      return [
+        matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+        matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+        matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14]
+      ];
+    };
+    for (const prim of prims) {
+      if (!prim.positions) continue;
+      matrix = prim.nodeMatrix ? mat4Multiply(placement, prim.nodeMatrix) : placement;
+      const count = prim.indices ? prim.indices.length : Math.floor(prim.positions.length / 3);
+      for (let t = 0; t + 2 < count; t += 3) {
+        const ia = prim.indices ? prim.indices[t] : t, ib = prim.indices ? prim.indices[t + 1] : t + 1, ic = prim.indices ? prim.indices[t + 2] : t + 2;
+        const a = vert(prim.positions, ia), b = vert(prim.positions, ib), c = vert(prim.positions, ic);
+        out.push({
+          ax: a[0], az: a[2], ay: a[1], bx: b[0], bz: b[2], by: b[1], cx: c[0], cz: c[2], cy: c[1],
+          minX: Math.min(a[0], b[0], c[0]), maxX: Math.max(a[0], b[0], c[0]),
+          minZ: Math.min(a[2], b[2], c[2]), maxZ: Math.max(a[2], b[2], c[2])
+        });
+      }
+    }
+    return out;
+  }
+
+  // Height of the highest ground-layer surface over (x, z): 0 when there is none or it is below GROUND_LIFT_MIN.
+  function groundHeightAt(tris, x, z) {
+    let best = 0;
+    for (const t of tris) {
+      if (x < t.minX || x > t.maxX || z < t.minZ || z > t.maxZ) continue;
+      const d = (t.bz - t.cz) * (t.ax - t.cx) + (t.cx - t.bx) * (t.az - t.cz);
+      if (Math.abs(d) < 1e-12) continue; // edge-on
+      const l1 = ((t.bz - t.cz) * (x - t.cx) + (t.cx - t.bx) * (z - t.cz)) / d;
+      const l2 = ((t.cz - t.az) * (x - t.cx) + (t.ax - t.cx) * (z - t.cz)) / d;
+      const l3 = 1 - l1 - l2;
+      if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) continue;
+      const y = l1 * t.ay + l2 * t.by + l3 * t.cy;
+      if (y > best) best = y;
+    }
+    return best >= GROUND_LIFT_MIN ? best : 0;
+  }
+
   function bodyHeightOf(state) { return state.crouched ? CROUCH_HEIGHT : STAND_HEIGHT; }
 
   function newBodyState() {
@@ -1862,6 +1926,7 @@
     let boundingBoxes = []; // [{footprint, lootMarker}] solid colliders, see selectSolidItems()
     let overheadBoxes = []; // colliders that start above head height, see selectOverheadItems()
     let colliderList = [];  // boundingBoxes + overheadBoxes: everything the vertical movement tests against
+    let groundTris = [];    // visible ground-layer triangles, see groundHeightAt()
     let floorLimits = null; // see floorWalkLimits()
     // scene.json-declared "walk up and press E" nodes (loot
     // crates today, a mining node's respawn timer tomorrow — see the
@@ -2169,6 +2234,8 @@
     const body = newBodyState();
     // 0 = standing, 1 = fully crouched; eases the eye height and the model squash toward body.crouched.
     let crouchBlend = 0;
+    // Height of the visible ground layer under the character (null until the first frame of a scene), see groundHeightAt().
+    let surfaceLift = null;
     const CROUCH_SQUASH = CROUCH_HEIGHT / STAND_HEIGHT;
     const CROUCH_EASE_RATE = 16;
     const moveEnv = {
@@ -2406,8 +2473,10 @@
       boundingBoxes = [];
       overheadBoxes = [];
       colliderList = [];
+      groundTris = [];
       Object.assign(body, newBodyState());
       crouchBlend = 0;
+      surfaceLift = null;
       const declaredFloor = sceneData.floor || {};
       const floor = {
         size: (Array.isArray(declaredFloor.size) && declaredFloor.size.length >= 2 && declaredFloor.size.every(Number.isFinite)) ? declaredFloor.size : [10, 10],
@@ -2557,7 +2626,9 @@
             lootMarker
           });
         });
-        placedItems.push({ footprint, lootMarker, solid: obj.solid !== false && obj.collision !== false });
+        const item = { footprint, lootMarker, solid: obj.solid !== false && obj.collision !== false };
+        placedItems.push(item);
+        if (isGroundLayer(item)) collectGroundTriangles(model.primitives, placement, groundTris);
       });
       // Oriented footprints from the models' real bounds (not a box
       // centered on the placement origin), minus rugs, overhead objects and
@@ -2941,8 +3012,13 @@
       crouchBlend += (crouchTarget - crouchBlend) * Math.min(1, dt * CROUCH_EASE_RATE);
       if (Math.abs(crouchTarget - crouchBlend) < 0.01) crouchBlend = crouchTarget;
       // Crouching lowers the eye and squashes the model toward the feet; the feet stay on whatever is underfoot.
-      camera.pos[1] = standingEyeY * (1 - crouchBlend * (1 - CROUCH_SQUASH)) + body.feetY;
-      const characterBaseY = body.feetY;
+      // The drawn model (and the eye) never sits below the visible ground layer under it: body.feetY is the support
+      // height, this is only what is shown. Eased so crossing the edge of a path does not pop.
+      const groundTarget = groundHeightAt(groundTris, camera.pos[0], camera.pos[2]);
+      if (surfaceLift === null || Math.abs(groundTarget - surfaceLift) < 0.0005) surfaceLift = groundTarget;
+      else surfaceLift += (groundTarget - surfaceLift) * Math.min(1, dt * GROUND_LIFT_EASE);
+      const characterBaseY = Math.max(body.feetY, surfaceLift);
+      camera.pos[1] = standingEyeY * (1 - crouchBlend * (1 - CROUCH_SQUASH)) + characterBaseY;
       lastCharacterBaseY = characterBaseY; // see getCharacterFloorY() below
 
       // Portal proximity check (planar distance, camera Y ignored).
@@ -3347,7 +3423,7 @@
       setBlocking: (on) => { blocking = !!on; },
       getActionPose: () => Object.assign({}, lastActionPose),
       // The character's FLOOR-relative height (0 = standing on the ground,
-      // positive while jumping or standing on something) — see the comment
+      // positive while jumping, standing on something or on a raised ground layer) — see the comment
       // above characterBaseY's own declaration in frame(). This is what
       // viewer.js's currentLocalPose() broadcasts as the `y` of a presence
       // move/sync, NOT camera.pos[1] (the eye height a first-person camera
@@ -3363,7 +3439,7 @@
       // crouched, current body height, the eased crouch amount and the drawn model's squash and base height).
       getMovementState: () => ({
         feetY: body.feetY, vy: body.vy, grounded: body.grounded, jumpsUsed: body.jumpsUsed,
-        crouched: body.crouched, bodyHeight: bodyHeightOf(body), crouchBlend,
+        crouched: body.crouched, bodyHeight: bodyHeightOf(body), crouchBlend, surfaceLift: surfaceLift || 0,
         // From the matrix the model was last drawn with: vertical scale relative to the character's own size
         // (1 standing, CROUCH_HEIGHT / STAND_HEIGHT crouched) and the height of its feet.
         modelSquash: lastCharBase[5] / characterScale, modelBaseY: lastCharBase[13]
@@ -4095,7 +4171,7 @@
     movement: {
       STAND_HEIGHT, CROUCH_HEIGHT, STEP_UP, BARRIER_HEIGHT, FLAT_SOLID_MAX_Y, JUMP_SPEED, GRAVITY,
       blocksBody, bodyPenetration, supportTop, ceilingHit, standBlocked, newBodyState, stepBody, isBarrier,
-      bodyHeightOf, movePosition
+      bodyHeightOf, movePosition, isGroundLayer, collectGroundTriangles, groundHeightAt, GROUND_LIFT_MIN
     },
     previewCharacter,
     cache: {

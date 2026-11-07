@@ -492,4 +492,42 @@ class Sim {
   pass('headed in 24 directions with x16 jump height, the character never leaves the Lobby floor');
 }
 
+// ---------- 15. visible ground layers ----------
+{
+  // Synthetic: a flat 0.04 layer over x 0..4, z 0..4 (two triangles), with a ramp triangle on its edge.
+  const flat = { positions: new Float32Array([0, 0.04, 0, 4, 0.04, 0, 4, 0.04, 4, 0, 0.04, 0, 4, 0.04, 4, 0, 0.04, 4]) };
+  const tris = M.collectGroundTriangles([flat], new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), []);
+  assert.strictEqual(tris.length, 2);
+  assert(Math.abs(M.groundHeightAt(tris, 1, 1) - 0.04) < 1e-9 && Math.abs(M.groundHeightAt(tris, 3.9, 0.1) - 0.04) < 1e-9, 'height inside the layer');
+  assert.strictEqual(M.groundHeightAt(tris, 5, 1), 0, 'no layer outside');
+  const shifted = M.collectGroundTriangles([flat], L.placementMatrix({ position: [10, 0, 0], rotationYRad: 0, scale: 1 }), []);
+  assert(Math.abs(M.groundHeightAt(shifted, 11, 1) - 0.04) < 1e-9 && M.groundHeightAt(shifted, 1, 1) === 0, 'the placement moves the layer');
+  const low = { positions: new Float32Array([0, 0.004, 0, 4, 0.004, 0, 4, 0.004, 4]) };
+  assert.strictEqual(M.groundHeightAt(M.collectGroundTriangles([low], new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]), []), 3, 1), 0, 'a floor texture below the sole depth does not lift');
+  pass('ground-layer height is sampled from the layer triangles, placed correctly, and ignores floor textures');
+
+  // The shipped Lobby: only the outdoor layers are ground layers, and the indoor floor and rugs lift nothing.
+  const lobbyDir = path.join(REPO, 'demo-domain-a');
+  const scene = JSON.parse(fs.readFileSync(path.join(lobbyDir, 'spatial', 'lobby', 'scene.json'), 'utf8'));
+  const gtris = [];
+  const flagged = new Set();
+  for (const o of scene.objects) {
+    const buf = fs.readFileSync(path.join(lobbyDir, o.model));
+    const { json, bin } = L.parseGLB(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    const model = L.extractPrimitives(json, bin);
+    const pl = L.normalizePlacement(o);
+    const item = { footprint: L.placedFootprint(model.bounds, pl), solid: o.solid !== false && o.collision !== false };
+    if (M.isGroundLayer(item)) { flagged.add(path.basename(o.model, '.glb')); M.collectGroundTriangles(model.primitives, L.placementMatrix(pl), gtris); }
+  }
+  assert.deepStrictEqual([...flagged].sort(), ['riverBanks', 'townGround', 'townPaths'], 'ground layers are the town ground, paths and river banks, got ' + [...flagged]);
+  const at = (x, z) => M.groundHeightAt(gtris, x, z);
+  assert.strictEqual(at(0, 2.5), 0, 'indoors lifts nothing');
+  assert.strictEqual(at(-2.28, 1.65), 0, 'a rug indoors lifts nothing');
+  assert(at(3.2, 8.8) >= 0.03 && at(3.2, 8.8) <= 0.06, 'the paving outside the entrance is lifted by its thickness, got ' + at(3.2, 8.8));
+  assert(Math.abs(at(-18, -12) - 0.015) < 0.002, 'bare ground is lifted by its own 0.015, got ' + at(-18, -12));
+  assert(Math.abs(at(0.5, 11) - 0.052) < 0.003, 'the thickest paving is lifted by 0.052, got ' + at(0.5, 11));
+  assert.strictEqual(at(200, 200), 0, 'nothing beyond the layers');
+  pass('Lobby: outdoor paving and ground lift the drawn feet (' + at(3.2, 8.8).toFixed(3) + ' on the paving, ' + at(-18, -12).toFixed(3) + ' on bare ground), indoors and rugs do not');
+}
+
 console.log('\nAll ' + checks + ' movement checks passed.');

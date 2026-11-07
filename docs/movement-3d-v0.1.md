@@ -23,6 +23,8 @@ Walking and running speed, camera controls, first-person mode, equipment and jum
 - **Portals and loot.** Portal triggers still use ground distance only, so a jump over a portal marker still enters it. A claimed loot crate stops blocking and stops supporting.
 - **Action Bar.** Poses and blocking are drawn on the model only and do not affect jumping or crouching. In the air the legs hold the neutral pose.
 
+- **Outdoor ground.** Grass, paving and river banks are thin non-solid layers 0.015 to 0.05 above the floor level. The drawn model and the eye are lifted to the visible layer under the character (eased across edges), so shoes stay above the ground when standing, crouching or landing. Support and collision are unchanged (`getMovementState().feetY`); indoor floors and rugs are not affected. `getMovementState().surfaceLift` shows the current lift.
+
 Known limit: small items resting on a larger piece (a monitor on a desk) are covered by the piece underneath and are not separate colliders, so a character standing on the desk can walk through them.
 
 ## Try it in the Lobby
