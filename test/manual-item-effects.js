@@ -124,9 +124,11 @@ function injectClasses(docroot) {
   // 'down' (the issuer cannot answer).
   const specFaults = new Map();
   let specFetches = 0;
+  const specFetchLog = []; // { digest, at } per lookup, to tell a retry after the wallet's retry window from an unwanted one
   await context.route((url) => url.pathname === '/atlas/asset/class' && url.searchParams.has('specDigest'), async (route) => {
     specFetches += 1;
     const digest = new URL(route.request().url()).searchParams.get('specDigest');
+    specFetchLog.push({ digest, at: Date.now() });
     const fault = specFaults.get(digest);
     const cors = { 'access-control-allow-origin': '*', 'content-type': 'application/json' };
     if (fault === 'unknown') return route.fulfill({ status: 404, headers: cors, body: JSON.stringify({ error: 'unknown item spec', code: 'item-spec-unknown' }) });
@@ -355,7 +357,12 @@ function injectClasses(docroot) {
     const fetchesBefore = specFetches;
     await state();
     await state();
-    assertTrue(specFetches === fetchesBefore, 'verified specs are cached and a failed lookup is not retried at once (' + (specFetches - fetchesBefore) + ' extra lookups)');
+    // A failed lookup may be retried once the wallet's 60 s window has passed, which a slow machine can reach.
+    const early = specFetchLog.slice(fetchesBefore).filter((f, i) => {
+      const before = specFetchLog.slice(0, fetchesBefore + i).reverse().find((g) => g.digest === f.digest);
+      return !before || f.at - before.at < 59000;
+    });
+    assertTrue(early.length === 0, 'verified specs are cached and a failed lookup is not retried at once (' + early.length + ' extra lookups)');
     await equip('setAvatarSlot', 'ring2', null);
     await reapply();
     console.log('PASS: unknown and unreachable specs are inert, and lookups are not repeated');

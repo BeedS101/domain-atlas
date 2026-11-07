@@ -17,7 +17,7 @@
     { "position": [10, 0, -2], "portalIndex": 5 }
   ],
   "interactables": [
-    { "position": [-4, 0.5, -2], "label": "Bronze Compass", "action": "issue", "class": "atlas.wearable", "oncePerUser": true },
+    { "position": [-4, 0.5, -2], "label": "Bronze Compass", "action": "issue", "class": "atlas.tool.bronze_compass", "oncePerUser": true },
     { "position": [4, 0.5, -2], "label": "Merchant's Signet Ring", "action": "issue", "class": "atlas.wearable.ring", "oncePerUser": true },
     { "position": [0, 0.4, 2], "label": "Play Chess", "action": "open-chess" },
     { "position": [0, 0.5, -3.5], "label": "Subscription Card", "action": "issue", "class": "atlas.membership", "oncePerUser": true }

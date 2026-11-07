@@ -171,7 +171,7 @@ const realNode = std.lintCatalog(realNodeCatalog());
 const realPhp = runPhp('lint-real');
 for (const [label, r] of [['Node', realNode], ['PHP', realPhp]]) {
   check(r.errors.length === 0, label + ' catalog: no class uses a reserved key without an itemSpec' + (r.errors.length ? ' ' + JSON.stringify(r.errors.slice(0, 5)) : ''));
-  check(r.checked.length === 0, label + ' catalog: no class claims the standard yet (' + r.skipped + ' classes outside it)');
+  check(same(r.checked, ['atlas.tool.bronze_compass']), label + ' catalog: the Bronze Compass is the only class that claims the standard (' + r.skipped + ' classes outside it)');
   const legacy = Object.keys(r.legacy).sort();
   console.log('INFO: ' + label + ' catalog legacy effect keys on ' + legacy.length + ' classes: ' + legacy.map((c) => c + ' [' + r.legacy[c].map((k) => k.replace('atlas.avatar.', '')).join(', ') + ']').join('; '));
 }

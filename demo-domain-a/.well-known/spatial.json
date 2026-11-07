@@ -138,8 +138,9 @@
         "discoverable": true,
         "identityRequired": false,
         "itemDropsAllowed": true,
-        "acceptedItemClasses": [],
-        "trustedIssuers": "self"
+        "acceptedItemClasses": ["atlas.tool.bronze_compass"],
+        "trustedIssuers": "self",
+        "itemEffects": { "capabilities": ["atlas.cap.compass"] }
       },
       "profile": {
         "genre": "lobby",

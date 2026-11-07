@@ -529,6 +529,7 @@ let equipmentReapplyTimer = null;
 let characterEquipsInFlight = 0; // the window's own equip applies its changes itself, in order
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !EQUIPMENT_STORAGE_KEYS.some((k) => k in changes)) return;
+  refreshCompassHud(); // reads wallet state only, so it need not wait for the scene to finish re-applying models
   clearTimeout(equipmentReapplyTimer);
   equipmentReapplyTimer = setTimeout(async () => {
     if (characterEquipsInFlight > 0) return;
@@ -548,6 +549,44 @@ window.AtlasCapabilities = {
     return () => window.removeEventListener('atlas-item-effects-changed', listener);
   }
 };
+
+// Compass HUD: visible only in a 3D world, and only while an equipped standard item provides
+// atlas.cap.compass there (the world's policy.itemEffects and item filters have already been applied by the
+// wallet). It turns with the character's actual facing, read each frame from the renderer.
+let compassHud = null;
+let compassHudSeq = 0;
+let compassHudFrame = 0;
+
+function compassHudTick() {
+  compassHudFrame = 0;
+  if (!compassHud || !compassHud.isVisible()) return;
+  if (!active3D) { compassHud.setVisible(false); return; }
+  const heading = AtlasCompassHud.headingOf(active3D.getCharacterFacingWorldDir());
+  if (heading !== null) compassHud.update(heading);
+  compassHudFrame = requestAnimationFrame(compassHudTick);
+}
+
+function setCompassHudVisible(on) {
+  if (on) {
+    if (!compassHud) compassHud = AtlasCompassHud.create(document.body);
+    compassHud.setVisible(true);
+    if (!compassHudFrame) compassHudFrame = requestAnimationFrame(compassHudTick);
+  } else if (compassHud) {
+    compassHud.setVisible(false);
+  }
+}
+
+async function refreshCompassHud() {
+  const seq = ++compassHudSeq;
+  if (!active3D || typeof AtlasCompassHud === 'undefined') { setCompassHudVisible(false); return; }
+  let on = false;
+  try {
+    on = (await AtlasCapabilities.providers('atlas.cap.compass')).length > 0;
+  } catch (err) { on = false; }
+  if (seq !== compassHudSeq) return; // a newer refresh (world change, equip change) supersedes this one
+  setCompassHudVisible(on && !!active3D);
+}
+window.addEventListener('atlas-item-effects-changed', () => { refreshCompassHud(); });
 
 function currentLocalPose() {
   if (!active3D) return null;
@@ -2523,6 +2562,7 @@ async function enterWorld(worldId, anchorId) {
   // for the 2D path.
   await flushCameraDistance(); // a portal hop right after scrolling must still reopen at the latest zoom
   if (active3D) { active3D.destroy(); active3D = null; refreshCharacterScaleControl(); }
+  refreshCompassHud(); // no 3D scene any more: hides the compass at once
   window.__atlasActive3D = null; // same test-observability convention as window.__atlasScene
   disconnectPresence(); // leaving whichever world was active before also means leaving its presence room
   disconnectChat(); // ...and its chat room — chat reconnects fresh below for whichever renderer path this world actually takes (2D or 3D), but ONLY if the new world actually opted in — see refreshChatAvailability() just below
@@ -2729,6 +2769,7 @@ async function enterWorld(worldId, anchorId) {
       });
       window.__atlasActive3D = active3D;
       await active3D.ready;
+      refreshCompassHud();
       refreshCharacterScaleControl(); // the new scene's size owns or releases the slider immediately
       hideSceneLoadProgress(); // loading finished — the render loop is about to take over the canvas
       // Whatever's already dropped in this world (from a previous visit, or

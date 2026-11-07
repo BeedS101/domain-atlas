@@ -1956,6 +1956,22 @@ const ATLAS_ASSET_CATALOG_BASE = [
       'com.example.material' => 'pewter',
     ],
   ],
+  // Item Standard compass: a trinket-slot tool whose only effect is the heading display (atlas.cap.compass).
+  // Distinct from the older 'atlas.wearable' Bronze Compass above, which stays an ordinary credential.
+  // Keep in step with the same class in issuer-server/server.js; test/compass-demo.js compares the two.
+  'atlas.tool.bronze_compass' => [
+    'name' => 'Bronze Compass (Standard)', 'modelPath' => '/assets/compass.glb', 'thumbnailPath' => '/assets/compass.png',
+    'fungible' => false, 'presentation' => 'collectible', 'tradeScope' => 'bound',
+    'properties' => [
+      'atlas.rarity' => 'common',
+      'com.example.issuedFor' => 'Opening the lobby crate',
+    ],
+    'itemSpec' => [
+      'category' => 'tool',
+      'slot' => 'trinket',
+      'capabilities' => ['atlas.cap.compass'],
+    ],
+  ],
   // The "subscribe to this domain" credential for the mail system below:
   // requesting one of these is what a wallet's mail-check loop treats as
   // opting in to hearing from this domain (see atlas/mail/check.php) —

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Item Standard v0.1, issuer integration (docs/item-standard-v0.1.md): runs the same scenario against the Node
-// and the PHP issuer and requires identical outcomes. The shipped catalogs have no class with an itemSpec, so
-// the test injects its own classes (test/fixtures/item-standard-issuer.json) into the running code; nothing in
+// and the PHP issuer and requires identical outcomes. The shipped catalogs have a single class with an itemSpec
+// (the Bronze Compass), so the test injects its own classes (test/fixtures/item-standard-issuer.json) into the running code; nothing in
 // the repository changes. Needs php on the PATH.
 //   node test/item-standard-issuer.js
 //
