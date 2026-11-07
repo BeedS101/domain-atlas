@@ -1298,6 +1298,180 @@
     }));
   }
 
+  // ---------- vertical movement (pure, no GL) ----------
+  //
+  // The character is a vertical capsule approximated by a circle (PLAYER_RADIUS) from its feet up to its body
+  // height. Colliders are the placed objects' oriented footprints with their real vertical extent: a body
+  // collides with one when the two overlap in height, walks or lands on it when its top is at most STEP_UP above
+  // the feet, and passes under it when its underside is above the head. A collider whose top reaches BARRIER_HEIGHT
+  // (a wall, a hedge, a pillar, a tall plinth) is never stood on or hopped, so no jump, buff or double jump gets
+  // over it; so is a flat solid (FLAT_SOLID_MAX_Y). Pieces in between (crates, sofas, benches, low shelves) are
+  // hurdles and platforms.
+
+  const STAND_HEIGHT = 1.8;
+  const CROUCH_HEIGHT = 1.2;
+  const STEP_UP = 0.08;
+  const BARRIER_HEIGHT = 1.0;
+  // A solid whose top is below this (a water sheet, a low rim, a flat table top) is a boundary, not something to
+  // climb: it blocks exactly as it did before heights mattered and is never stood on or hopped.
+  const FLAT_SOLID_MAX_Y = 0.15;
+  // Objects that start above head height still matter once the character is airborne or has to stand up.
+  const OVERHEAD_JUMP_LIMIT = 6;
+  const SUPPORT_RADIUS = PLAYER_RADIUS * 0.7;
+  const JUMP_SPEED = 3.2;
+  const GRAVITY = 9.0;
+  const VERTICAL_EPS = 1e-4;
+  const MAX_SUBSTEP = 1 / 60;
+
+  // Objects hanging above head height (a beam, a sign): not part of selectSolidItems(), but real colliders for a
+  // jumping head or a character that wants to stand.
+  function selectOverheadItems(items) {
+    return items.filter((it) => it.footprint && it.solid !== false && it.footprint.minY >= OVERHEAD_MIN_Y && it.footprint.minY < OVERHEAD_JUMP_LIMIT);
+  }
+
+  function isBarrier(fp) {
+    return fp.maxY < FLAT_SOLID_MAX_Y || (fp.maxY >= BARRIER_HEIGHT && fp.minY < OVERHEAD_MIN_Y);
+  }
+
+  // Does a collider stop a body whose feet are at feetY and whose height is `height` (given the footprints already
+  // overlap)?
+  function blocksBody(fp, feetY, height) {
+    if (isBarrier(fp)) return fp.minY < feetY + height;
+    if (fp.maxY <= feetY + STEP_UP + VERTICAL_EPS) return false; // underfoot: walked onto or landed on
+    if (fp.minY >= feetY + height - VERTICAL_EPS) return false;  // wholly above the head
+    return true;
+  }
+
+  function colliderIgnored(box, env) {
+    return !!(env && env.ignore && env.ignore(box));
+  }
+
+  // How deep (x, z) is inside the colliders that stop this body: the summed penetration, as collisionDepth uses.
+  function bodyPenetration(colliders, x, z, feetY, height, env) {
+    let depth = 0;
+    for (const box of colliders) {
+      if (colliderIgnored(box, env)) continue;
+      if (!blocksBody(box.footprint, feetY, height)) continue;
+      depth += footprintDepth(box.footprint, x, z, PLAYER_RADIUS);
+    }
+    return depth;
+  }
+
+  // The height of the highest thing under the feet that can be stood on: the floor (0), or a collider's top that is
+  // no more than STEP_UP above the feet. Barriers never support.
+  function supportTop(colliders, x, z, feetY, env) {
+    let top = 0;
+    for (const box of colliders) {
+      const fp = box.footprint;
+      if (isBarrier(fp) || fp.maxY > feetY + STEP_UP + VERTICAL_EPS || fp.maxY <= top) continue;
+      if (colliderIgnored(box, env)) continue;
+      if (footprintDepth(fp, x, z, SUPPORT_RADIUS) > 0) top = fp.maxY;
+    }
+    return top;
+  }
+
+  // The lowest underside the head would cross while rising from oldHead to newHead, or null.
+  function ceilingHit(colliders, x, z, oldHead, newHead, env) {
+    let hit = null;
+    for (const box of colliders) {
+      const fp = box.footprint;
+      if (fp.minY < oldHead - VERTICAL_EPS || fp.minY >= newHead || (hit !== null && fp.minY >= hit)) continue;
+      if (colliderIgnored(box, env)) continue;
+      if (footprintDepth(fp, x, z, PLAYER_RADIUS) > 0) hit = fp.minY;
+    }
+    return hit;
+  }
+
+  // True when something hangs in the headroom between the crouched and the standing height.
+  function standBlocked(colliders, x, z, feetY, env) {
+    for (const box of colliders) {
+      const fp = box.footprint;
+      if (blocksBody(fp, feetY, CROUCH_HEIGHT) || !blocksBody(fp, feetY, STAND_HEIGHT)) continue;
+      if (colliderIgnored(box, env)) continue;
+      if (footprintDepth(fp, x, z, PLAYER_RADIUS) > 0) return true;
+    }
+    return false;
+  }
+
+  // Moves pos ([x, y, z]) by (dx, dz) unless that lands deeper in something solid. A player who starts inside
+  // something solid (an anchor spawn too close to furniture, a drop that landed in a box) must be able to walk
+  // out: while already overlapping, any move that doesn't go deeper is allowed instead of freezing them in place.
+  // depthAt(x, z) is 0 when free. Returns whether the move happened.
+  function movePosition(pos, dx, dz, depthAt) {
+    const nx = pos[0] + dx, nz = pos[2] + dz;
+    const nextDepth = depthAt(nx, nz);
+    if (nextDepth > 0 && nextDepth > depthAt(pos[0], pos[2])) return false;
+    pos[0] = nx;
+    pos[2] = nz;
+    return true;
+  }
+
+  function bodyHeightOf(state) { return state.crouched ? CROUCH_HEIGHT : STAND_HEIGHT; }
+
+  function newBodyState() {
+    return { feetY: 0, vy: 0, grounded: true, jumpsUsed: 0, crouched: false, spaceDown: false };
+  }
+
+  // Advances one body by dt seconds. `input` is { space, crouch } as held keys; `env` is { x, z, colliders,
+  // jumpSpeed, ignore } with the body's current floor position and the jump launch speed (buffs already in it).
+  // Jumping: from the ground, then once more in the air on a fresh press; the count only resets on landing on
+  // something. Crouching: only on the ground, and standing up waits until the headroom is clear.
+  function stepBody(s, input, dt, env) {
+    const c = env.colliders;
+    const wantCrouch = !!input.crouch;
+    if (!s.crouched) {
+      if (wantCrouch && s.grounded) s.crouched = true;
+    } else if (!(wantCrouch && s.grounded) && !standBlocked(c, env.x, env.z, s.feetY, env)) {
+      s.crouched = false;
+    }
+
+    const pressed = !!input.space && !s.spaceDown;
+    s.spaceDown = !!input.space;
+    if (input.space) {
+      if (s.grounded) {
+        if (!s.crouched || !standBlocked(c, env.x, env.z, s.feetY, env)) {
+          s.crouched = false;
+          s.grounded = false;
+          s.vy = env.jumpSpeed;
+          s.jumpsUsed = 1;
+        }
+      } else if (pressed && s.jumpsUsed === 1) {
+        s.vy = env.jumpSpeed;
+        s.jumpsUsed = 2;
+      }
+    }
+
+    const steps = Math.max(1, Math.ceil(dt / MAX_SUBSTEP));
+    const h = dt / steps;
+    for (let i = 0; i < steps; i += 1) {
+      if (s.grounded) {
+        const top = supportTop(c, env.x, env.z, s.feetY, env);
+        if (top > s.feetY) s.feetY = top;
+        else if (top < s.feetY - VERTICAL_EPS) {
+          if (s.feetY - top <= STEP_UP) s.feetY = top;
+          else { s.grounded = false; s.vy = 0; s.jumpsUsed = Math.max(s.jumpsUsed, 1); } // stepped off an edge
+        }
+      }
+      if (!s.grounded) {
+        // Exact for constant gravity: advance by the mean velocity over the step.
+        const v0 = s.vy;
+        s.vy -= GRAVITY * h;
+        const prev = s.feetY;
+        let next = prev + ((v0 + s.vy) / 2) * h;
+        const height = bodyHeightOf(s);
+        if (s.vy > 0) {
+          const ceiling = ceilingHit(c, env.x, env.z, prev + height, next + height, env);
+          if (ceiling !== null) { next = ceiling - height; s.vy = 0; }
+        } else {
+          const top = supportTop(c, env.x, env.z, prev, env);
+          if (next <= top + VERTICAL_EPS) { next = top; s.vy = 0; s.grounded = true; s.jumpsUsed = 0; }
+        }
+        s.feetY = next;
+      }
+    }
+    return s;
+  }
+
   // Where a floor is centered: scene.json floor.center ([x, z], default the
   // origin), so a floor can extend further on one side than the other.
   function floorCenter(floor) {
@@ -1686,6 +1860,8 @@
     let floorPrim = null;
     let portalTriggers = []; // [{position:[x,z], radius, portalIndex, ring}]
     let boundingBoxes = []; // [{footprint, lootMarker}] solid colliders, see selectSolidItems()
+    let overheadBoxes = []; // colliders that start above head height, see selectOverheadItems()
+    let colliderList = [];  // boundingBoxes + overheadBoxes: everything the vertical movement tests against
     let floorLimits = null; // see floorWalkLimits()
     // scene.json-declared "walk up and press E" nodes (loot
     // crates today, a mining node's respawn timer tomorrow — see the
@@ -1987,22 +2163,22 @@
     function onMouseDown(e) { heldMouseButtons.add(e.button); }
     function onMouseUp(e) { heldMouseButtons.delete(e.button); }
 
-    // Jump/crouch are purely a camera-height effect layered on top of the
-    // standing eye height captured here — collision is XZ-only (see
-    // tryMove/boundingBoxes) and portal triggers only look at X/Z too, so
-    // neither needs to know about this; it's just what the camera shows.
+    // Vertical state of the local character: feet height above the floor, jump count, crouch (see stepBody).
+    // The camera and the model follow body.feetY; collision uses it and the body height (standing or crouched).
     const standingEyeY = camera.pos[1];
-    let jumpOffset = 0, jumpVelocity = 0, airborne = false;
-    const JUMP_SPEED = 3.2, GRAVITY = 9.0, CROUCH_AMOUNT = 0.6;
+    const body = newBodyState();
+    // 0 = standing, 1 = fully crouched; eases the eye height and the model squash toward body.crouched.
+    let crouchBlend = 0;
+    const CROUCH_SQUASH = CROUCH_HEIGHT / STAND_HEIGHT;
+    const CROUCH_EASE_RATE = 16;
+    const moveEnv = {
+      x: 0, z: 0, jumpSpeed: JUMP_SPEED, colliders: colliderList,
+      // A looted crate no longer blocks, supports or bumps anything.
+      ignore: (box) => !!(box.lootMarker && opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(box.lootMarker))
+    };
 
-    // Bug #138: typing a space (or any WASD/arrow/Shift/Ctrl key) into ANY
-    // text field — the chat box, a contact's notes, an alias input, a
-    // search box, Compose, Calendar, anywhere — was leaking straight
-    // through into movement, because this listener is on `window` and
-    // never checked what actually had focus. `isTypingTarget()` covers
-    // every text-entry control generically (not just the chat input by
-    // ID) so this stays correct as new text fields get added elsewhere in
-    // the wallet without anyone having to remember to update this list.
+    // The key listeners are on `window`, so typing into any text field (chat, notes, search, compose) must not
+    // move the character. This covers every text-entry control generically rather than listing inputs by id.
     function isTypingTarget(el) {
       if (!el) return false;
       if (el.isContentEditable) return true;
@@ -2088,7 +2264,7 @@
         const heightOffset = (cameraDistance / MAX_CAMERA_DISTANCE) * MAX_FOLLOW_HEIGHT;
         eye = [
           camera.pos[0] - fwd[0] * cameraDistance,
-          standingEyeY + lastCharacterBaseY + heightOffset - fwd[1] * cameraDistance,
+          standingEyeY * (1 - crouchBlend * (1 - CROUCH_SQUASH)) + lastCharacterBaseY + heightOffset - fwd[1] * cameraDistance,
           camera.pos[2] - fwd[2] * cameraDistance
         ];
       } else {
@@ -2228,6 +2404,10 @@
       applyCharacterScaleDefaults();
       placedPrimitives = [];
       boundingBoxes = [];
+      overheadBoxes = [];
+      colliderList = [];
+      Object.assign(body, newBodyState());
+      crouchBlend = 0;
       const declaredFloor = sceneData.floor || {};
       const floor = {
         size: (Array.isArray(declaredFloor.size) && declaredFloor.size.length >= 2 && declaredFloor.size.every(Number.isFinite)) ? declaredFloor.size : [10, 10],
@@ -2383,6 +2563,8 @@
       // centered on the placement origin), minus rugs, overhead objects and
       // anything resting on another solid — see selectSolidItems().
       boundingBoxes = selectSolidItems(placedItems);
+      overheadBoxes = selectOverheadItems(placedItems);
+      colliderList = boundingBoxes.concat(overheadBoxes);
 
       portalTriggers = (sceneData.portalMarkers || []).map((m) => {
         const kind = opts.portalKind(m.portalIndex);
@@ -2674,36 +2856,21 @@
     }
 
     // How deep (x, z) is inside solid space: the summed penetration of every
-    // box the player's circle overlaps, plus how far it is past the floor
+    // box that stops the body at its current height, plus how far it is past the floor
     // edge. 0 means free. Shared by tryMove() and the isPositionBlocked()
     // debug hook below, so there's exactly one place that knows a claimed
     // crate's box no longer blocks anything.
     function collisionDepth(x, z) {
-      let depth = floorOverrun(floorLimits, x, z);
-      for (const box of boundingBoxes) {
-        // An already-claimed crate is skipped the same way it's skipped in
-        // the draw loop above — no invisible wall left where a looted box
-        // used to be.
-        if (box.lootMarker && opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(box.lootMarker)) continue;
-        depth += footprintDepth(box.footprint, x, z, PLAYER_RADIUS);
-      }
-      return depth;
+      // Floor limits apply at every height; colliders only where they overlap the body vertically (blocksBody).
+      // moveEnv.ignore skips an already-claimed crate, as the draw loop does: no invisible wall where a looted
+      // box used to be.
+      moveEnv.colliders = colliderList;
+      return floorOverrun(floorLimits, x, z) + bodyPenetration(colliderList, x, z, body.feetY, bodyHeightOf(body), moveEnv);
     }
 
     function isBlockedAt(x, z) { return collisionDepth(x, z) > 0; }
 
-    function tryMove(dx, dz) {
-      const next = [camera.pos[0] + dx, camera.pos[2] + dz];
-      const nextDepth = collisionDepth(next[0], next[1]);
-      // A player who starts inside something solid (an anchor spawn too
-      // close to furniture, a drop that landed in a box) must be able to
-      // walk out: while already overlapping, any move that doesn't go
-      // deeper is allowed instead of freezing them in place.
-      if (nextDepth > 0 && nextDepth > collisionDepth(camera.pos[0], camera.pos[2])) return false;
-      camera.pos[0] = next[0];
-      camera.pos[2] = next[1];
-      return true;
-    }
+    function tryMove(dx, dz) { return movePosition(camera.pos, dx, dz, collisionDepth); }
 
     let lastT = performance.now();
     let rafId = null;
@@ -2752,36 +2919,30 @@
       // snapping straight back to the neutral pose the instant movement
       // stops rather than easing out — simple, and at this art style's
       // scale/duration the difference isn't visible.
-      if (isMoving) walkPhase += dt * (speed > 3 ? 11 : 8);
-      const limbSwing = isMoving ? Math.sin(walkPhase) * 0.55 : 0;
+      // The legs only cycle on the ground; in the air they hold the neutral pose.
+      const walking = isMoving && body.grounded;
+      if (walking) walkPhase += dt * (speed > 3 ? 11 : 8);
+      const limbSwing = walking ? Math.sin(walkPhase) * 0.55 : 0;
       const actionPose = actionPoseStep(dt);
 
-      // Jump: a simple vertical arc layered on top of the standing eye
-      // height. Space only starts a new jump while grounded (the
-      // `!airborne` guard), so holding it down doesn't launch a second jump
-      // mid-air.
       // Jump height scales with the square of launch velocity (basic
       // projectile motion under constant GRAVITY), so a shoe's or hat's
       // own atlas.avatar.*JumpMultiplier — each a HEIGHT multiplier — are
       // multiplied together first (both slots stack) and then applied as
       // sqrt(combined) here to land on the actual combined height bonus
-      // rather than a velocity bonus that would overshoot it.
-      if (keys['Space'] && !airborne) { airborne = true; jumpVelocity = JUMP_SPEED * Math.sqrt(localAvatarShoeJumpMultiplier * localAvatarHatJumpMultiplier * localAvatarExtras.jump); }
-      if (airborne) {
-        jumpOffset += jumpVelocity * dt;
-        jumpVelocity -= GRAVITY * dt;
-        if (jumpOffset <= 0) { jumpOffset = 0; jumpVelocity = 0; airborne = false; }
-      }
-      // Crouch: only while grounded, so a mid-air Ctrl press doesn't yank
-      // the camera down mid-jump.
-      const crouchOffset = (!airborne && (keys['ControlLeft'] || keys['ControlRight'])) ? CROUCH_AMOUNT : 0;
-      camera.pos[1] = standingEyeY + jumpOffset - crouchOffset;
-      // The character's feet sit at this same relative height (0 = normal
-      // standing ground level) — jump lifts it, crouch lowers it, exactly
-      // like the camera, since XZ position and vertical offset are shared
-      // between "where the camera is" and "where the character stands" in
-      // both view modes.
-      const characterBaseY = jumpOffset - crouchOffset;
+      // rather than a velocity bonus that would overshoot it. The same launch
+      // speed is used for the second, mid-air jump.
+      moveEnv.x = camera.pos[0];
+      moveEnv.z = camera.pos[2];
+      moveEnv.colliders = colliderList;
+      moveEnv.jumpSpeed = JUMP_SPEED * Math.sqrt(localAvatarShoeJumpMultiplier * localAvatarHatJumpMultiplier * localAvatarExtras.jump);
+      stepBody(body, { space: !!keys['Space'], crouch: !!(keys['ControlLeft'] || keys['ControlRight']) }, dt, moveEnv);
+      const crouchTarget = body.crouched ? 1 : 0;
+      crouchBlend += (crouchTarget - crouchBlend) * Math.min(1, dt * CROUCH_EASE_RATE);
+      if (Math.abs(crouchTarget - crouchBlend) < 0.01) crouchBlend = crouchTarget;
+      // Crouching lowers the eye and squashes the model toward the feet; the feet stay on whatever is underfoot.
+      camera.pos[1] = standingEyeY * (1 - crouchBlend * (1 - CROUCH_SQUASH)) + body.feetY;
+      const characterBaseY = body.feetY;
       lastCharacterBaseY = characterBaseY; // see getCharacterFloorY() below
 
       // Portal proximity check (planar distance, camera Y ignored).
@@ -2900,7 +3061,7 @@
         const heightOffset = (cameraDistance / MAX_CAMERA_DISTANCE) * MAX_FOLLOW_HEIGHT;
         viewEye = [
           camera.pos[0] - viewFwd[0] * cameraDistance,
-          standingEyeY + characterBaseY + heightOffset - viewFwd[1] * cameraDistance,
+          standingEyeY * (1 - crouchBlend * (1 - CROUCH_SQUASH)) + characterBaseY + heightOffset - viewFwd[1] * cameraDistance,
           camera.pos[2] - viewFwd[2] * cameraDistance
         ];
       }
@@ -3000,9 +3161,12 @@
       // toward a DIFFERENT direction than the camera, i.e. exactly the
       // strafing case. Negating here is what makes mat4RotateY spin the
       // same way characterYaw's own [sin,-cos] convention expects.
+      // Crouch squashes the body vertically (after the yaw, so it stays along world up) toward the feet.
+      const charScale = mat4Scale(characterScale);
+      charScale[5] = characterScale * (1 - crouchBlend * (1 - CROUCH_SQUASH));
       const charBase = mat4Multiply(
         mat4Translate(camera.pos[0], characterBaseY, camera.pos[2]),
-        mat4Multiply(mat4RotateY(-characterYaw), mat4Scale(characterScale))
+        mat4Multiply(mat4RotateY(-characterYaw), charScale)
       );
       // Stashed so getCharacterFacingWorldDir() (below, in the returned
       // API) can read the SAME matrix that actually got used to place the
@@ -3183,7 +3347,7 @@
       setBlocking: (on) => { blocking = !!on; },
       getActionPose: () => Object.assign({}, lastActionPose),
       // The character's FLOOR-relative height (0 = standing on the ground,
-      // negative while crouching, positive mid-jump) — see the comment
+      // positive while jumping or standing on something) — see the comment
       // above characterBaseY's own declaration in frame(). This is what
       // viewer.js's currentLocalPose() broadcasts as the `y` of a presence
       // move/sync, NOT camera.pos[1] (the eye height a first-person camera
@@ -3195,6 +3359,15 @@
       // standing on it, which is exactly the bug this getter exists to
       // prevent from creeping back in.
       getCharacterFloorY: () => lastCharacterBaseY,
+      // Debug/test hook: the vertical movement state (feet height, vertical speed, grounded, jumps used,
+      // crouched, current body height, the eased crouch amount and the drawn model's squash and base height).
+      getMovementState: () => ({
+        feetY: body.feetY, vy: body.vy, grounded: body.grounded, jumpsUsed: body.jumpsUsed,
+        crouched: body.crouched, bodyHeight: bodyHeightOf(body), crouchBlend,
+        // From the matrix the model was last drawn with: vertical scale relative to the character's own size
+        // (1 standing, CROUCH_HEIGHT / STAND_HEIGHT crouched) and the height of its feet.
+        modelSquash: lastCharBase[5] / characterScale, modelBaseY: lastCharBase[13]
+      }),
       // A second, independent debug hook: where the character's own local
       // -Z ("its front") actually ends up in world space once rendered.
       // Reads lastCharBase — the EXACT matrix frame() used to place every
@@ -3914,9 +4087,15 @@
     // without a WebGL context.
     layout: {
       normalizePlacement, placementMatrix, placedFootprint, footprintDepth,
-      selectSolidItems, floorWalkLimits, floorOverrun, floorCenter, eyeHeightFrom,
+      selectSolidItems, selectOverheadItems, floorWalkLimits, floorOverrun, floorCenter, eyeHeightFrom,
       parseGLB, extractPrimitives, normalizeFog, PLAYER_RADIUS,
       normalizeDropPolicy, DEFAULT_DROP_POLICY, imageDimensions, modelStats, dropPolicyViolation, estimateGltfCost
+    },
+    // Pure vertical-movement core, exposed for tests (see stepBody).
+    movement: {
+      STAND_HEIGHT, CROUCH_HEIGHT, STEP_UP, BARRIER_HEIGHT, FLAT_SOLID_MAX_Y, JUMP_SPEED, GRAVITY,
+      blocksBody, bodyPenetration, supportTop, ceilingHit, standBlocked, newBodyState, stepBody, isBarrier,
+      bodyHeightOf, movePosition
     },
     previewCharacter,
     cache: {

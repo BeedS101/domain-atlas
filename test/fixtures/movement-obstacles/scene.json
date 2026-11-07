@@ -1,0 +1,20 @@
+{
+  "floor": {"size": [28, 28], "center": [0, 0], "color": "#2e3a30"},
+  "characterScale": 0.5,
+  "ambientLight": {"intensity": 0.65},
+  "directionalLight": {"direction": [-0.45, -1, -0.35]},
+  "camera": {"start": [0, 1.6, 8], "startYaw": 0},
+  "objects": [
+    {"model": "/assets/furniture/cardboardBoxClosed.glb", "position": [-11.106, 0, 0.106], "rotationY": 0, "scale": 1},
+    {"model": "/assets/furniture/cardboardBoxClosed.glb", "position": [-8.212, 0, 0.212], "rotationY": 0, "scale": 2},
+    {"model": "/assets/furniture/loungeSofa.glb", "position": [-4.795, 0, 0.49], "rotationY": 90, "scale": 1},
+    {"model": "/assets/lobby/interior/bookcaseClosedWide.glb", "position": [-1.875, 0, 0.4], "rotationY": 90, "scale": 1},
+    {"model": "/assets/lobby/exterior/wall.glb", "position": [0.2, 0, 0.04], "rotationY": 0, "scale": 1.6},
+    {"model": "/assets/lobby/exterior/wall.glb", "position": [3.2, 1.4, 0.04], "rotationY": 0, "scale": 1.6},
+    {"model": "/assets/lobby/exterior/wall.glb", "position": [6.2, 2.2, 0.04], "rotationY": 0, "scale": 1.6},
+    {"model": "/assets/town/hedge.glb", "position": [10, 0, 0], "rotationY": 0, "scale": 1}
+  ],
+  "portalMarkers": [],
+  "interactables": [],
+  "anchors": []
+}
