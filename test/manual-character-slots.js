@@ -8,7 +8,9 @@
 // preview); (3) the off hand shows a model in the left hand; (4) rings and trinkets equip, an item moves
 // between the two ring slots instead of sitting in both, and their buffs multiply into the world's speed,
 // jump and reach; (5) the visible parts reach other players through the presence payload and are validated
-// there; (6) taking items off clears everything; (7) the choices survive leaving and re-entering the world.
+// there; (6) taking items off clears everything; (7) the choices survive leaving and re-entering the world;
+// (8) the Stats sub-menu totals the base values and item bonuses, lists the buffs, and Agility, Strength and
+// Dexterity change the speed, jump and reach used in the world.
 const { chromium } = require('playwright');
 const fs = require('fs');
 const os = require('os');
@@ -235,6 +237,53 @@ function assertTrue(cond, msg) { if (!cond) throw new Error(msg); }
     assertTrue(!cleared.e && cleared.speed === 1 && cleared.jump === 1 && cleared.interact === 1, 'cleared: ' + JSON.stringify(cleared));
     assertTrue(Object.keys(await frame.evaluate(() => AtlasWallet.getAvatarSlotIds())).length === 0, 'nothing stored');
     console.log('PASS: everything off');
+    console.log('STEP 11: the Stats sub-menu totals base values, item bonuses and the buffs they give');
+    const mintLater = async (props) => {
+      const payload = { ownerPublicKey: identity.publicKey, assetClass: 'atlas.wearable', properties: props,
+        adminAuth: { action: '/atlas/asset/mint', domain: lab.host, issuedAt: new Date().toISOString(), nonce: crypto.randomBytes(12).toString('hex') } };
+      const r = await lab.postRaw('/atlas/asset/mint', { payload, proof: signPayload(admin, payload) });
+      assertTrue(r.status === 200, 'mint: ' + r.text);
+      await walletPage.evaluate(async ({ o, origin, cred }) => { const e = await AtlasWallet.queueBridgeOffer(o, origin, cred); await AtlasWallet.claimBridgeOffer(o, e.id); }, { o: identity.publicKey, origin: lab.origin, cred: r.json });
+      return r.json.id;
+    };
+    minted.statRing = await mintLater({ 'atlas.avatar.slot': 'ring', 'atlas.avatar.stat.agility': '20', 'atlas.avatar.stat.strength': '5', 'atlas.avatar.stat.health': '50', 'atlas.avatar.stat.luck': '-3' });
+    minted.statCharm = await mintLater({ 'atlas.avatar.slot': 'trinket', 'atlas.avatar.stat.agility': '5', 'atlas.avatar.stat.dexterity': '10', 'atlas.avatar.stat.defense': '9999' });
+    await frame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true })));
+    await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 40000 });
+    await frame.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyC', bubbles: true })));
+    await frame.waitForFunction(() => document.getElementById('characterScreen').classList.contains('active') && !!window.__atlasCharacterPreview, null, { timeout: 60000 });
+    assertTrue(await frame.evaluate(() => !document.getElementById('characterView').hidden && document.getElementById('characterStatsView').hidden), 'the Character sub-menu is the default');
+    const statsOf = () => frame.evaluate(() => {
+      const out = {};
+      for (const r of document.querySelectorAll('#characterStatsList .stat-row')) out[r.dataset.stat] = r.querySelector('.stat-value').textContent;
+      return { rows: out, buffs: Array.from(document.querySelectorAll('#characterBuffList .buff-row')).map((b) => b.textContent), empty: !!document.querySelector('#characterBuffList .empty-note') };
+    });
+    await frame.locator('.character-subtab[data-view="stats"]').click();
+    await frame.waitForFunction(() => document.getElementById('characterView').hidden && !document.getElementById('characterStatsView').hidden, null, { timeout: 20000 });
+    let st = await statsOf();
+    assertTrue(Object.keys(st.rows).join() === 'health,mana,stamina,agility,strength,focus,dexterity,defense,luck,charisma', 'stat rows: ' + Object.keys(st.rows).join());
+    assertTrue(st.rows.health === '100' && st.rows.agility === '10' && st.rows.charisma === '10' && st.empty && st.buffs.length === 0, 'bare character: ' + JSON.stringify(st));
+    await frame.locator('.character-subtab[data-view="character"]').click();
+    await pickChoice('ring1', 'statRing');
+    await pickChoice('trinket1', 'statCharm');
+    await frame.locator('.character-subtab[data-view="stats"]').click();
+    st = await statsOf();
+    const want = { health: '150', mana: '100', stamina: '100', agility: '35', strength: '15', focus: '10', dexterity: '20', defense: '510', luck: '7', charisma: '10' };
+    assertTrue(JSON.stringify(st.rows) === JSON.stringify(want), 'totals: ' + JSON.stringify(st.rows));
+    for (const text of ['Health +50', 'Agility +25', 'Strength +5', 'Dexterity +10', 'Defense +500', 'Luck -3', 'Speed ×1.25', 'Jump ×1.05', 'Reach ×1.1']) assertTrue(st.buffs.includes(text), 'buff list has ' + text + ': ' + JSON.stringify(st.buffs));
+    const live = await frame.evaluate(() => { const e = window.__atlasActive3D.getLocalAvatarExtras(); return { speed: e.speed, jump: e.jump, interact: e.interact }; });
+    assertTrue(Math.abs(live.speed - 1.25) < 1e-9 && Math.abs(live.jump - 1.05) < 1e-9 && Math.abs(live.interact - 1.1) < 1e-9, 'stat-driven movement in the world: ' + JSON.stringify(live));
+    if (process.env.SHOT_DIR) await site.screenshot({ path: path.join(process.env.SHOT_DIR, 'stats.png') });
+    await frame.locator('.character-subtab[data-view="character"]').click();
+    await frame.waitForFunction(() => !document.getElementById('characterView').hidden, null, { timeout: 20000 });
+    await frame.locator('.character-slot[data-slot="ring1"]').click();
+    await frame.waitForFunction(() => !document.getElementById('characterSlotUnequipBtn').hidden, null, { timeout: 20000 });
+    await frame.locator('#characterSlotUnequipBtn').click();
+    await frame.waitForFunction(() => document.getElementById('characterSlotUnequipBtn').hidden, null, { timeout: 20000 });
+    await frame.locator('.character-subtab[data-view="stats"]').click();
+    st = await statsOf();
+    assertTrue(st.rows.agility === '15' && st.rows.health === '100' && !st.buffs.includes('Health +50'), 'taking the ring off lowers the totals: ' + JSON.stringify(st.rows));
+    console.log('PASS: stats, buff totals and stat-driven movement');
     ok = true;
   } finally {
     await context.close().catch(() => {});

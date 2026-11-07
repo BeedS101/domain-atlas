@@ -872,6 +872,17 @@
      rather than a small held item. */
   /* Character window (wallet -> Character tab, or the C key in a world): the live character in the middle
      with one block per equip slot either side; a clicked block lists what the wallet holds for that slot. */
+  .character-subtabs { display: flex; gap: 6px; margin: 2px 0 8px; }
+  .character-subtab { flex: 1; padding: 6px 8px; background: #16232a; border: 1px solid #2c3c44; border-radius: 6px; color: #d7e0e4; cursor: pointer; font: inherit; }
+  .character-subtab.active-subtab { border-color: #57a593; background: #1d3038; }
+  #characterStatsList { display: flex; flex-direction: column; gap: 2px; }
+  .stat-row { display: grid; grid-template-columns: 1fr auto 44px; gap: 8px; align-items: baseline; padding: 5px 8px; background: #16232a; border-radius: 4px; }
+  .stat-name .stat-note { color: #8aa0a9; font-size: 11px; }
+  .stat-detail { color: #8aa0a9; font-size: 11px; }
+  .stat-value { text-align: right; font-weight: 600; }
+  .stat-value.up { color: #7bd1a6; }
+  .stat-value.down { color: #e08a7b; }
+  .buff-row { padding: 5px 8px; background: #16232a; border-radius: 4px; margin-top: 2px; font-size: 13px; }
   .character-stage { display: grid; grid-template-columns: 66px 1fr 66px; gap: 8px; align-items: stretch; margin-top: 6px; }
   .character-slots { display: flex; flex-direction: column; justify-content: center; gap: 6px; }
   .character-slots-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 8px; }
@@ -1667,35 +1678,47 @@
     <!-- Character window: see viewer.js's "Character window" section. The slot blocks are buttons; a clicked one
          fills #characterSlotPanel with the wallet items that fit it. -->
     <div id="characterScreen" class="wallet-screen">
-      <div class="character-stage">
-        <div class="character-slots">
-          <button type="button" class="character-slot" data-slot="hat"><span class="slot-name">Hat</span><span class="slot-icon" aria-hidden="true">&#9650;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="neck"><span class="slot-name">Neck</span><span class="slot-icon" aria-hidden="true">&#9675;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="shoulders"><span class="slot-name">Shoulders</span><span class="slot-icon" aria-hidden="true">&#9644;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="outfit"><span class="slot-name">Outfit</span><span class="slot-icon" aria-hidden="true">&#9632;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="gloves"><span class="slot-name">Gloves</span><span class="slot-icon" aria-hidden="true">&#9633;</span><span class="slot-item">Empty</span></button>
+      <div class="character-subtabs" role="tablist">
+        <button type="button" class="character-subtab active-subtab" data-view="character" role="tab" aria-selected="true">Character</button>
+        <button type="button" class="character-subtab" data-view="stats" role="tab" aria-selected="false">Stats</button>
+      </div>
+      <div id="characterView">
+        <div class="character-stage">
+          <div class="character-slots">
+            <button type="button" class="character-slot" data-slot="hat"><span class="slot-name">Hat</span><span class="slot-icon" aria-hidden="true">&#9650;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="neck"><span class="slot-name">Neck</span><span class="slot-icon" aria-hidden="true">&#9675;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="shoulders"><span class="slot-name">Shoulders</span><span class="slot-icon" aria-hidden="true">&#9644;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="outfit"><span class="slot-name">Outfit</span><span class="slot-icon" aria-hidden="true">&#9632;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="gloves"><span class="slot-name">Gloves</span><span class="slot-icon" aria-hidden="true">&#9633;</span><span class="slot-item">Empty</span></button>
+          </div>
+          <canvas id="characterWindowCanvas" width="368" height="640"></canvas>
+          <div class="character-slots">
+            <button type="button" class="character-slot" data-slot="hand"><span class="slot-name">Hand</span><span class="slot-icon" aria-hidden="true">&#9874;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="offhand"><span class="slot-name">Off hand</span><span class="slot-icon" aria-hidden="true">&#9873;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="legs"><span class="slot-name">Legs</span><span class="slot-icon" aria-hidden="true">&#9646;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="shoes"><span class="slot-name">Shoes</span><span class="slot-icon" aria-hidden="true">&#9644;</span><span class="slot-item">Empty</span></button>
+          </div>
         </div>
-        <canvas id="characterWindowCanvas" width="368" height="640"></canvas>
-        <div class="character-slots">
-          <button type="button" class="character-slot" data-slot="hand"><span class="slot-name">Hand</span><span class="slot-icon" aria-hidden="true">&#9874;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="offhand"><span class="slot-name">Off hand</span><span class="slot-icon" aria-hidden="true">&#9873;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="legs"><span class="slot-name">Legs</span><span class="slot-icon" aria-hidden="true">&#9646;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="shoes"><span class="slot-name">Shoes</span><span class="slot-icon" aria-hidden="true">&#9644;</span><span class="slot-item">Empty</span></button>
+        <div class="character-slots-row">
+            <button type="button" class="character-slot" data-slot="ring1"><span class="slot-name">Ring 1</span><span class="slot-icon" aria-hidden="true">&#9711;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="ring2"><span class="slot-name">Ring 2</span><span class="slot-icon" aria-hidden="true">&#9711;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="trinket1"><span class="slot-name">Trinket 1</span><span class="slot-icon" aria-hidden="true">&#9670;</span><span class="slot-item">Empty</span></button>
+            <button type="button" class="character-slot" data-slot="trinket2"><span class="slot-name">Trinket 2</span><span class="slot-icon" aria-hidden="true">&#9670;</span><span class="slot-item">Empty</span></button>
+        </div>
+        <div id="characterSlotPanel" hidden>
+          <div class="subhead" id="characterSlotTitle"></div>
+          <div id="characterSlotNote" class="empty-note"></div>
+          <div id="characterSlotList" class="item-list"></div>
+          <div class="btn-col" style="margin-top:8px;">
+            <button id="characterSlotUnequipBtn" type="button" class="btn-secondary">Take it off</button>
+          </div>
         </div>
       </div>
-      <div class="character-slots-row">
-          <button type="button" class="character-slot" data-slot="ring1"><span class="slot-name">Ring 1</span><span class="slot-icon" aria-hidden="true">&#9711;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="ring2"><span class="slot-name">Ring 2</span><span class="slot-icon" aria-hidden="true">&#9711;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="trinket1"><span class="slot-name">Trinket 1</span><span class="slot-icon" aria-hidden="true">&#9670;</span><span class="slot-item">Empty</span></button>
-          <button type="button" class="character-slot" data-slot="trinket2"><span class="slot-name">Trinket 2</span><span class="slot-icon" aria-hidden="true">&#9670;</span><span class="slot-item">Empty</span></button>
-      </div>
-      <div id="characterSlotPanel" hidden>
-        <div class="subhead" id="characterSlotTitle"></div>
-        <div id="characterSlotNote" class="empty-note"></div>
-        <div id="characterSlotList" class="item-list"></div>
-        <div class="btn-col" style="margin-top:8px;">
-          <button id="characterSlotUnequipBtn" type="button" class="btn-secondary">Take it off</button>
-        </div>
+      <div id="characterStatsView" hidden>
+        <div class="subhead">Stats</div>
+        <div id="characterStatsList"></div>
+        <div class="subhead" style="margin-top:12px;">Buffs from equipped items</div>
+        <div id="characterBuffList"></div>
       </div>
       <div id="characterStatus" class="mono" role="status" aria-live="polite"></div>
     </div>

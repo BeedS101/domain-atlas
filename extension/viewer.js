@@ -6999,14 +6999,20 @@ function buffSummary(speed, jump, reach) {
   return parts.join(' · ');
 }
 
-// The extras object for what is equipped in the extra slots, from a wallet and an equipped map.
-function extrasFromEquipped(wallet, equipped) {
+// { slotId: asset | null } for every slot of an equipped map, from a wallet.
+function equippedAssetsOf(wallet, equipped) {
   const assets = {};
-  for (const id of EXTRA_SLOT_IDS) {
+  for (const id of Object.keys(equipped)) {
     const entry = equipped[id] ? wallet.find((e) => e.credential.id === equipped[id]) : null;
     assets[id] = entry ? entry.credential.asset : null;
   }
-  return AtlasWallet.avatarExtrasFromSlots(assets);
+  return assets;
+}
+
+// The extras object (colours, off-hand model, movement multipliers including what the stats add) for a wallet
+// and an equipped map.
+function extrasFromEquipped(wallet, equipped) {
+  return AtlasWallet.avatarExtrasFromSlots(equippedAssetsOf(wallet, equipped));
 }
 
 let selectedCharacterSlot = null;
@@ -7063,6 +7069,7 @@ async function refreshCharacterWindow(wallet, equipped) {
     }
   }
   renderCharacterSlotPanel(wallet, equipped);
+  renderCharacterStats(wallet, equipped);
 }
 
 async function readEquippedSlots() {
@@ -7120,6 +7127,80 @@ function renderCharacterSlotPanel(wallet, equipped) {
   characterSlotUnequipBtn.hidden = !equippedId;
 }
 
+// ---------- Character window sub-menus: Character and Stats ----------
+
+const characterViewEl = document.getElementById('characterView');
+const characterStatsViewEl = document.getElementById('characterStatsView');
+const characterStatsListEl = document.getElementById('characterStatsList');
+const characterBuffListEl = document.getElementById('characterBuffList');
+let characterSubView = 'character';
+
+function formatMultiplier(v) {
+  return '×' + (Math.round(v * 100) / 100).toString();
+}
+
+function renderCharacterStats(wallet, equipped) {
+  if (!characterStatsListEl || !characterBuffListEl) return;
+  const sheet = AtlasWallet.avatarStatSheet(equippedAssetsOf(wallet, equipped));
+  const effectLabel = { speed: 'speed', jump: 'jump height', reach: 'reach' };
+  characterStatsListEl.textContent = '';
+  for (const r of sheet.stats) {
+    const row = document.createElement('div');
+    row.className = 'stat-row';
+    row.dataset.stat = r.id;
+    const name = document.createElement('span');
+    name.className = 'stat-name';
+    name.textContent = r.label;
+    if (r.effect) {
+      const note = document.createElement('span');
+      note.className = 'stat-note';
+      note.textContent = ' (' + effectLabel[r.effect] + ')';
+      name.appendChild(note);
+    }
+    const value = document.createElement('span');
+    value.className = 'stat-value' + (r.bonus > 0 ? ' up' : r.bonus < 0 ? ' down' : '');
+    value.textContent = String(r.total);
+    value.title = r.base + (r.bonus ? (r.bonus > 0 ? ' + ' : ' - ') + Math.abs(r.bonus) : '') + ' = ' + r.total;
+    const detail = document.createElement('span');
+    detail.className = 'stat-detail';
+    detail.textContent = r.bonus ? (r.bonus > 0 ? '+' : '') + r.bonus : '';
+    row.append(name, detail, value);
+    characterStatsListEl.appendChild(row);
+  }
+  characterBuffListEl.textContent = '';
+  const lines = [];
+  for (const r of sheet.stats) if (r.bonus) lines.push({ key: r.id, text: r.label + ' ' + (r.bonus > 0 ? '+' : '') + r.bonus });
+  const mv = sheet.movement;
+  const round2 = (v) => Math.round(v * 100) / 100;
+  if (round2(mv.speed) !== 1) lines.push({ key: 'speed', text: 'Speed ' + formatMultiplier(mv.speed) });
+  if (round2(mv.jump) !== 1) lines.push({ key: 'jump', text: 'Jump ' + formatMultiplier(mv.jump) });
+  if (round2(mv.reach) !== 1) lines.push({ key: 'reach', text: 'Reach ' + formatMultiplier(mv.reach) });
+  if (!lines.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-note';
+    empty.textContent = 'Nothing equipped adds a buff.';
+    characterBuffListEl.appendChild(empty);
+  }
+  for (const l of lines) {
+    const li = document.createElement('div');
+    li.className = 'buff-row';
+    li.dataset.buff = l.key;
+    li.textContent = l.text;
+    characterBuffListEl.appendChild(li);
+  }
+}
+
+function showCharacterSubView(which) {
+  characterSubView = which === 'stats' ? 'stats' : 'character';
+  if (characterViewEl) characterViewEl.hidden = characterSubView !== 'character';
+  if (characterStatsViewEl) characterStatsViewEl.hidden = characterSubView !== 'stats';
+  for (const btn of characterScreen.querySelectorAll('.character-subtab')) {
+    btn.classList.toggle('active-subtab', btn.dataset.view === characterSubView);
+    btn.setAttribute('aria-selected', btn.dataset.view === characterSubView ? 'true' : 'false');
+  }
+  if (characterSubView === 'stats' && characterWindowState) renderCharacterStats(characterWindowState.wallet, characterWindowState.equipped);
+}
+
 async function equipCharacterSlot(slot, assetId) {
   const def = CHARACTER_SLOTS[slot];
   const wallet = characterWindowState ? characterWindowState.wallet : await readOwnWallet();
@@ -7155,6 +7236,7 @@ async function openCharacterScreen() {
     look[slot] = entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null;
   }
   await refreshCharacterWindow(wallet, equipped);
+  showCharacterSubView('character');
   if (!characterWindowCanvasEl) return;
   disposeCharacterPreview();
   // A disposed preview leaves its canvas with a lost WebGL context, so each opening draws on a fresh canvas.
@@ -7179,6 +7261,8 @@ async function openCharacterScreen() {
 characterTabBtn && characterTabBtn.addEventListener('click', openCharacterScreen);
 
 characterScreen && characterScreen.addEventListener('click', async (e) => {
+  const subTab = e.target.closest('.character-subtab');
+  if (subTab) { showCharacterSubView(subTab.dataset.view); return; }
   const slotBtn = e.target.closest('.character-slot');
   if (slotBtn) {
     selectedCharacterSlot = selectedCharacterSlot === slotBtn.dataset.slot ? null : slotBtn.dataset.slot;

@@ -1,6 +1,6 @@
 # Character window
 
-The viewer shows the player's character with one block per equip slot (thirteen in all). It opens from the wallet's Character tab, or with the C key anywhere in a world (C again closes the panel; the key is ignored while typing).
+The viewer shows the player's character with one block per equip slot (thirteen in all), under two sub-menus: Character (the default) and Stats. It opens from the wallet's Character tab, or with the C key anywhere in a world (C again closes the panel; the key is ignored while typing).
 
 ## Slots
 
@@ -30,6 +30,22 @@ An item in any of the nine extra slots may add gameplay buffs with `atlas.avatar
 The visible parts (gloves, legs, shoulders, neck colours and the off-hand model) travel over presence as `glovesColor`, `legsColor`, `shouldersColor`, `neckColor` and `offHandModel`, validated like the existing look fields. Rings, trinkets and buffs stay local.
 
 Test: `xvfb-run -a node test/manual-character-slots.js` (set `SHOT_DIR` to save screenshots).
+
+## Stats
+
+The Stats sub-menu lists ten stats and, under them, the buffs of everything equipped, totalled.
+
+| Stat | Base | Effect |
+| --- | --- | --- |
+| Health, Mana, Stamina | 100 | Shown only |
+| Agility | 10 | Each point above or below 10 changes speed by 1% |
+| Strength | 10 | Same, for jump height |
+| Dexterity | 10 | Same, for interaction reach |
+| Focus, Defense, Luck, Charisma | 10 | Shown only |
+
+Any equipped item, in any of the thirteen slots, adds to a stat with the property `atlas.avatar.stat.<id>` (`health`, `mana`, `stamina`, `agility`, `strength`, `focus`, `dexterity`, `defense`, `luck`, `charisma`): a whole number from -100 to 500 per item, and a stat's total never drops below 0. The buff list shows each stat bonus plus the combined Speed, Jump and Reach multipliers of the hat, shoes and extra slots with the stat contribution folded in. The world uses the same numbers: the stat factors multiply into the extra-slot multipliers, which stay clamped to 0.25 to 3 before the hat and shoe multipliers apply.
+
+Stat properties are signed when an asset is issued, so only newly issued items carry them. The stats are local to the player's wallet; they are not sent over presence.
 
 ## Hand item
 

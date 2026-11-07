@@ -3037,6 +3037,52 @@ const AtlasWallet = (() => {
     return Number.isFinite(n) && n > 0 ? Math.min(3, Math.max(0.25, n)) : 1;
   }
 
+  // ---------- character stats ----------
+  //
+  // Every character starts from a fixed base and equipped items add to it with `atlas.avatar.stat.<id>`
+  // (a whole number, -100 to 500 per item; the total never drops below 0). Agility, Strength and Dexterity
+  // also act on movement: each point above its base of 10 adds 1% to speed, jump and interaction reach
+  // respectively (each point below takes 1% away). The other stats are shown only.
+  const AVATAR_STATS = [
+    { id: 'health', label: 'Health', base: 100 },
+    { id: 'mana', label: 'Mana', base: 100 },
+    { id: 'stamina', label: 'Stamina', base: 100 },
+    { id: 'agility', label: 'Agility', base: 10, effect: 'speed' },
+    { id: 'strength', label: 'Strength', base: 10, effect: 'jump' },
+    { id: 'focus', label: 'Focus', base: 10 },
+    { id: 'dexterity', label: 'Dexterity', base: 10, effect: 'reach' },
+    { id: 'defense', label: 'Defense', base: 10 },
+    { id: 'luck', label: 'Luck', base: 10 },
+    { id: 'charisma', label: 'Charisma', base: 10 }
+  ];
+  const AVATAR_STAT_EFFECT_PER_POINT = 0.01;
+
+  function avatarStatBonusOfAsset(asset, statId) {
+    const n = Math.round(Number(((asset && asset.properties) || {})['atlas.avatar.stat.' + statId]));
+    return Number.isFinite(n) ? Math.max(-100, Math.min(500, n)) : 0;
+  }
+
+  // From a map { slotId: asset | null } over every equipment slot: the stat rows, the movement factors the
+  // stats contribute and the movement totals of all equipped items (hat, shoes and the extra slots included).
+  // Pure.
+  function avatarStatSheet(slotAssets) {
+    const assets = Object.keys(slotAssets || {}).map((k) => slotAssets[k]).filter(Boolean);
+    const stats = AVATAR_STATS.map((def) => {
+      const bonus = assets.reduce((sum, a) => sum + avatarStatBonusOfAsset(a, def.id), 0);
+      return { id: def.id, label: def.label, base: def.base, bonus, total: Math.max(0, def.base + bonus), effect: def.effect || null };
+    });
+    const factors = statMovementFactors(slotAssets);
+    const hat = avatarHatPropertiesFromAsset(slotAssets && slotAssets.hat) || { speedMultiplier: 1, jumpMultiplier: 1, interactRangeMultiplier: 1 };
+    const shoes = avatarShoePropertiesFromAsset(slotAssets && slotAssets.shoes) || { speedMultiplier: 1, jumpMultiplier: 1 };
+    const extras = avatarExtrasFromSlots(slotAssets);
+    const movement = {
+      speed: hat.speedMultiplier * shoes.speedMultiplier * extras.speedMultiplier,
+      jump: hat.jumpMultiplier * shoes.jumpMultiplier * extras.jumpMultiplier,
+      reach: hat.interactRangeMultiplier * extras.interactRangeMultiplier
+    };
+    return { stats, factors, movement };
+  }
+
   // From a map { slotId: asset | null } to what the renderer takes: colours, the off-hand model and the
   // combined multipliers. Pure.
   function avatarExtrasFromSlots(slotAssets) {
@@ -3052,10 +3098,23 @@ const AtlasWallet = (() => {
       out.jumpMultiplier *= clampAvatarMultiplier(props['atlas.avatar.jumpMultiplier']);
       out.interactRangeMultiplier *= clampAvatarMultiplier(props['atlas.avatar.interactRangeMultiplier']);
     }
-    out.speedMultiplier = clampAvatarMultiplier(out.speedMultiplier);
-    out.jumpMultiplier = clampAvatarMultiplier(out.jumpMultiplier);
-    out.interactRangeMultiplier = clampAvatarMultiplier(out.interactRangeMultiplier);
+    const factors = statMovementFactors(slotAssets);
+    out.speedMultiplier = clampAvatarMultiplier(out.speedMultiplier * factors.speed);
+    out.jumpMultiplier = clampAvatarMultiplier(out.jumpMultiplier * factors.jump);
+    out.interactRangeMultiplier = clampAvatarMultiplier(out.interactRangeMultiplier * factors.interactRange);
     return out;
+  }
+
+  // The movement factors Agility, Strength and Dexterity contribute for a map of equipped assets.
+  function statMovementFactors(slotAssets) {
+    const total = (id) => {
+      const def = AVATAR_STATS.find((d) => d.id === id);
+      let sum = def.base;
+      for (const k of Object.keys(slotAssets || {})) if (slotAssets[k]) sum += avatarStatBonusOfAsset(slotAssets[k], id);
+      return Math.max(0, sum) - def.base;
+    };
+    const f = (id) => clampAvatarMultiplier(1 + total(id) * AVATAR_STAT_EFFECT_PER_POINT);
+    return { speed: f('agility'), jump: f('strength'), interactRange: f('dexterity') };
   }
 
   async function saveAvatarSlots(ownerPublicKey, map) {
@@ -3099,18 +3158,31 @@ const AtlasWallet = (() => {
     return assetId || null;
   }
 
-  // The renderer-ready extras for what this identity has equipped (owned items only).
-  async function getAvatarExtras() {
+  // The equipped asset of every equipment slot, { slotId: asset | null }, owned items only.
+  async function getEquippedAvatarAssets() {
     const identity = await getIdentity();
-    if (!identity) return avatarExtrasFromSlots({});
-    const ids = await getAvatarSlotIds();
-    const wallet = Object.keys(ids).length ? await getWallet(identity.publicKey) : [];
+    if (!identity) return {};
+    const ids = Object.assign({
+      hat: await getAvatarHatAssetId(), outfit: await getAvatarLookAssetId(),
+      shoes: await getAvatarShoesAssetId(), hand: await getAvatarHandAssetId()
+    }, await getAvatarSlotIds());
+    const wallet = Object.values(ids).some(Boolean) ? await getWallet(identity.publicKey) : [];
     const assets = {};
-    for (const id of Object.keys(ids)) {
-      const entry = wallet.find((e) => e.credential.id === ids[id]);
-      assets[id] = entry ? entry.credential.asset : null;
+    for (const slot of Object.keys(ids)) {
+      const entry = ids[slot] ? wallet.find((e) => e.credential.id === ids[slot]) : null;
+      assets[slot] = entry ? entry.credential.asset : null;
     }
-    return avatarExtrasFromSlots(assets);
+    return assets;
+  }
+
+  // The renderer-ready extras for what this identity has equipped (owned items only), including the movement
+  // the character stats contribute.
+  async function getAvatarExtras() {
+    return avatarExtrasFromSlots(await getEquippedAvatarAssets());
+  }
+
+  async function getAvatarStatSheet() {
+    return avatarStatSheet(await getEquippedAvatarAssets());
   }
 
   async function splitForDrop(credential, amount) {
@@ -10544,7 +10616,7 @@ const AtlasWallet = (() => {
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
     getAvatarShoes, getAvatarShoesAssetId, setAvatarShoes, avatarShoePropertiesFromAsset,
     getAvatarHand, getAvatarHandAssetId, setAvatarHand, avatarHandPropertiesFromAsset, avatarSlotsOfAsset,
-    getAvatarSlotIds, getAvatarSlotAssetId, setAvatarSlot, getAvatarExtras, avatarExtrasFromSlots, avatarExtraKindOfAsset,
+    getAvatarSlotIds, getAvatarSlotAssetId, setAvatarSlot, getAvatarExtras, avatarExtrasFromSlots, avatarExtraKindOfAsset, AVATAR_STATS, avatarStatSheet, getAvatarStatSheet, getEquippedAvatarAssets,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,
