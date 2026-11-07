@@ -2644,16 +2644,13 @@
         const placement = mat4Translate(m.position[0], m.position[1] || 0, m.position[2]);
         // `hideMarker: true` skips only this ring/beacon drawing, for a scene
         // that places its own portal model there; the walk-in trigger below
-        // is the same either way. `ringOnly: true` keeps the floor ring and
-        // drops the tall beacon, for a doorway the beacon would stand in front of.
+        // is the same either way.
         let ring = null, beacon = null;
         if (m.hideMarker !== true) {
           ring = buildPortalRing(gl, m.radius || 1.2, 24, kind);
+          beacon = buildPortalBeacon(gl, m.radius || 1.2, kind);
           ring.modelMatrix = placement;
-          if (m.ringOnly !== true) {
-            beacon = buildPortalBeacon(gl, m.radius || 1.2, kind);
-            beacon.modelMatrix = placement;
-          }
+          beacon.modelMatrix = placement;
         }
         return { position: m.position, radius: m.radius || 1.2, portalIndex: m.portalIndex, kind, ring, beacon };
       });

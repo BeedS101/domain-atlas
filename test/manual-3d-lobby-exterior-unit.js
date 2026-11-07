@@ -84,20 +84,21 @@ const ORIGINAL = (name) => {
   // before this pass (fingerprint of the whole file), which fixes every placement, solid flag and option.
   const interiorMap = (m) => { const w = /^\/assets\/lobby\/exterior\/(wall\w*)\.glb$/.exec(m); return w ? interiorTool.URL_DIR + w[1] + '.glb' : null; };
   const propMap = (m) => { const p = /^\/assets\/lobby\/exterior\/(\w+?)B?\.glb$/.exec(m); return p ? '/assets/outdoor/' + p[1] + '.glb' : m === '/assets/town/pineB.glb' ? '/assets/town/pine.glb' : null; };
-  // The mine entrance marker and anchor came after that scene (docs/mining-burrow-v0.1.md); take them out before comparing.
-  const reverted = { ...scene, portalMarkers: scene.portalMarkers.filter((m) => m.portalIndex === 0), anchors: scene.anchors.filter((a) => a.id !== 'mine-entrance'), objects: scene.objects.map((o) => ({ ...o, model: interiorMap(o.model) || propMap(o.model) || o.model })) };
+  // The mine entrance marker, anchor and gate came after that scene (docs/mining-burrow-v0.1.md); take them out before comparing.
+  const sceneObjs = scene.objects.filter((o) => o.model !== '/assets/portals/minePortal.glb');
+  const reverted = { ...scene, portalMarkers: scene.portalMarkers.filter((m) => m.portalIndex === 0), anchors: scene.anchors.filter((a) => a.id !== 'mine-entrance'), objects: sceneObjs.map((o) => ({ ...o, model: interiorMap(o.model) || propMap(o.model) || o.model })) };
   assert.strictEqual(sha(JSON.stringify(reverted)), BEFORE_SCENE_SHA, 'scene.json differs from the previous scene by more than model URLs');
   const head = reverted;
-  assert.strictEqual(scene.objects.length, 265, 'object count');
-  const swapped = scene.objects.filter((o, i) => o.model !== head.objects[i].model).length;
+  assert.strictEqual(sceneObjs.length, 265, 'object count');
+  const swapped = sceneObjs.filter((o, i) => o.model !== head.objects[i].model).length;
   assert.strictEqual(swapped, 101, 'objects moved to a textured variant');
-  scene.objects.forEach((o, i) => { if (o.model !== head.objects[i].model) assert(/^\/assets\/lobby\/exterior\/\w+\.glb$|^\/assets\/town\/pineB\.glb$/.test(o.model), o.model); });
+  sceneObjs.forEach((o, i) => { if (o.model !== head.objects[i].model) assert(/^\/assets\/lobby\/exterior\/\w+\.glb$|^\/assets\/town\/pineB\.glb$/.test(o.model), o.model); });
   assert.strictEqual(scene.characterScale, 0.5);
   // every solid collides exactly as before
-  const now = collision(scene), before = collision(head);
+  const now = collision({ ...scene, objects: sceneObjs }), before = collision(head);
   assert.strictEqual(now.solids.length, before.solids.length);
   now.items.forEach((it, i) => { close(it.footprint.min || it.footprint, before.items[i].footprint.min || before.items[i].footprint, 1e-6, 'footprint ' + i); assert.strictEqual(it.solid, before.items[i].solid); });
-  pass(scene.objects.length + ' objects, all placement and solid flags, markers, interactables, camera, lights and characterScale 0.5 are unchanged; collision footprints are identical');
+  pass(sceneObjs.length + ' objects, all placement and solid flags, markers, interactables, camera, lights and characterScale 0.5 are unchanged; collision footprints are identical');
 }
 
 // ---- 4. materials ----

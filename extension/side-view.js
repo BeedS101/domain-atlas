@@ -1,6 +1,12 @@
 // Side-view renderer ("sideview-v1"): a small side-scrolling world drawn procedurally on a 2D canvas, with a
 // walking and jumping character. Nothing is loaded: the level is a text grid in scene.json, and rock, timber,
-// light and the character are all drawn from it. No wallet, storage or network access; the viewer passes in
+// light and the character are all drawn from it.
+//
+// Light: the world is dark with a small ambient floor (AMBIENT) so terrain edges and the exit stay findable. Only
+// the scene's own fixed sources light their surroundings (lanterns, crystals, the daylight mouth, a skylight, the
+// glowing ore of a collapse). The character carries no light. Portable light belongs to a later, verified
+// `atlas.cap.light` item that the world's policy.itemEffects permits; this file reads no wallet or item data, so
+// nothing the character holds or wears can light the burrow. No wallet, storage or network access; the viewer passes in
 // what it needs (look colours, a portal callback, an input guard).
 //
 // Scene format:
@@ -142,6 +148,33 @@
     return p;
   }
 
+  // ---------- light (pure) ----------
+
+  const AMBIENT = 0.14; // how much of the scene shows where no source reaches
+
+  // Fixed light sources of a scene. x, y in tiles; r the radius; a the strength at the centre (0..1).
+  function lightSources(scene) {
+    const out = [];
+    for (const d of (scene && scene.decor) || []) {
+      if (d.type === 'lantern') out.push({ kind: 'lantern', x: d.x, y: d.y - 0.3, r: 5.2, a: 0.82 });
+      else if (d.type === 'crystals') out.push({ kind: 'crystals', x: d.x, y: d.y - 0.5, r: 3.6, a: 0.6 });
+      else if (d.type === 'mouth') out.push({ kind: 'mouth', x: d.x + (d.w || 3) / 2, y: d.y - (d.h || 4) / 2, r: 6.5, a: 0.95 });
+      else if (d.type === 'skylight') out.push({ kind: 'skylight', x: d.x + (d.w || 2) / 2, y: d.y + (d.h || 6) * 0.5, r: 5.5, a: 0.55 });
+    }
+    for (const b of (scene && scene.blocked) || []) out.push({ kind: 'ore', x: b.rect[0] + b.rect[2] / 2, y: b.rect[1] + b.rect[3] / 2, r: 3.6, a: 0.4 });
+    return out;
+  }
+
+  // How visible a point is, AMBIENT (no light) to 1, from the fixed sources alone.
+  function lightAt(sources, x, y) {
+    let v = AMBIENT;
+    for (const s of sources) {
+      const d = Math.hypot(x - s.x, y - s.y);
+      if (d < s.r) v = 1 - (1 - v) * (1 - s.a * (1 - d / s.r));
+    }
+    return v;
+  }
+
   function rectsOverlap(p, r) {
     return p.x + BODY_W / 2 > r[0] && p.x - BODY_W / 2 < r[0] + r[2] && p.y > r[1] && p.y - BODY_H < r[1] + r[3];
   }
@@ -165,6 +198,7 @@
     const decor = scene.decor || [];
     const landmarks = scene.landmarks || [];
     const blockedInfo = scene.blocked || [];
+    const sources = lightSources(scene);
     let look = normalizeLook(opts.look);
     const player = newPlayer(spawn[0], spawn[1]);
     const keys = {};
@@ -175,6 +209,7 @@
     const exitCooldown = new Set();
     const camera = { x: spawn[0], y: spawn[1] - 2 };
     const dark = document.createElement('canvas');
+    let lastExitDir = null;
     let rafId = null, last = performance.now(), time = 0, destroyed = false, frames = 0;
     const motes = [];
     for (let i = 0; i < 46; i += 1) motes.push({ x: Math.random() * level.w, y: Math.random() * level.h, s: 0.2 + Math.random() * 0.5, p: Math.random() * 6.28 });
@@ -493,12 +528,12 @@
       ctx.restore();
     }
 
-    // Darkness with lit holes: lanterns, crystals, the daylight mouth and a small light on the character.
+    // Darkness with lit holes, one per fixed source of the scene; none follows the character.
     function drawLight(X) {
       if (dark.width !== X.w || dark.height !== X.h) { dark.width = X.w; dark.height = X.h; }
       const d = dark.getContext('2d');
       d.globalCompositeOperation = 'source-over';
-      d.fillStyle = 'rgba(6,4,12,0.64)'; d.fillRect(0, 0, X.w, X.h);
+      d.fillStyle = 'rgba(6,4,12,' + (1 - AMBIENT) + ')'; d.fillRect(0, 0, X.w, X.h);
       d.globalCompositeOperation = 'destination-out';
       const hole = (wx, wy, r, a) => {
         const px = sx(wx, X), py = sy(wy, X), pr = r * X.ppt;
@@ -506,14 +541,7 @@
         g.addColorStop(0, 'rgba(0,0,0,' + a + ')'); g.addColorStop(1, 'rgba(0,0,0,0)');
         d.fillStyle = g; d.fillRect(px - pr, py - pr, pr * 2, pr * 2);
       };
-      hole(player.x, player.y - 0.9, 4.4, 0.7);
-      for (const dc of decor) {
-        if (dc.type === 'lantern') hole(dc.x, dc.y - 0.3, 5.2 + 0.2 * Math.sin(time * 7 + dc.x), 0.82);
-        else if (dc.type === 'crystals') hole(dc.x, dc.y - 0.5, 3.6, 0.6);
-        else if (dc.type === 'mouth') hole(dc.x + (dc.w || 3) / 2, dc.y - (dc.h || 4) / 2, 6.5, 0.95);
-        else if (dc.type === 'skylight') hole(dc.x + (dc.w || 2) / 2, dc.y + (dc.h || 6) * 0.5, 5.5, 0.55);
-      }
-      for (const b of blockedInfo) hole(b.rect[0] + b.rect[2] / 2, b.rect[1] + b.rect[3] / 2, 4.6, 0.5);
+      for (const src of sources) hole(src.x, src.y, src.kind === 'lantern' ? src.r + 0.2 * Math.sin(time * 7 + src.x) : src.r, src.a);
       ctx.drawImage(dark, 0, 0);
       // warm and cool tints over the lit parts
       ctx.globalCompositeOperation = 'lighter';
@@ -529,6 +557,33 @@
       }
       ctx.globalCompositeOperation = 'source-over';
       for (const b of blockedInfo) drawCollapseGlow(b, X);
+    }
+
+    // What stays readable in the dark: a faint line along every walkable top edge and timber platform.
+    function drawAmbientEdges(X) {
+      const p = X.ppt;
+      const x0 = Math.max(0, Math.floor((0 - X.ox) / p)), x1 = Math.min(level.w - 1, Math.ceil((X.w - X.ox) / p));
+      const y0 = Math.max(0, Math.floor((0 - X.oy) / p)), y1 = Math.min(level.h - 1, Math.ceil((X.h - X.oy) / p));
+      for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) {
+        if (level.oneWay[y][x]) { ctx.fillStyle = 'rgba(190,150,100,0.34)'; ctx.fillRect(sx(x, X), sy(y, X), p + 1, 2); }
+        else if (level.solid[y][x] && !level.blocked[y][x] && y > 0 && !level.solid[y - 1][x] && !level.oneWay[y - 1][x]) { ctx.fillStyle = 'rgba(150,150,175,0.2)'; ctx.fillRect(sx(x, X), sy(y, X), p + 1, 2); }
+      }
+    }
+
+    // The character's own faint outline of colour, so it can be followed in the dark. It lights nothing around it.
+    function drawPlayerAmbient(X) {
+      ctx.save(); ctx.globalAlpha = 0.34; drawPlayer(X); ctx.restore();
+    }
+
+    // Which way the exit is while it is off-screen: 'left', 'right' or null.
+    function exitDirection(X) {
+      for (const ex of exits) {
+        const cx = sx(ex.rect[0] + ex.rect[2] / 2, X);
+        if (cx >= 0 && cx <= X.w) return null;
+      }
+      if (!exits.length) return null;
+      const ex = exits[0];
+      return ex.rect[0] + ex.rect[2] / 2 < player.x ? 'left' : 'right';
     }
 
     function drawMotes(X) {
@@ -572,11 +627,21 @@
       drawPlayer(X);
       drawMotes(X);
       drawLight(X);
+      drawAmbientEdges(X);
+      drawPlayerAmbient(X);
       // exits and signs read through the dark
       for (const ex of exits) {
         const px = sx(ex.rect[0], X), py = sy(ex.rect[1], X);
         ctx.font = '600 13px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,238,190,0.95)';
         ctx.fillText(ex.label, px + ex.rect[2] * X.ppt / 2, py - 10);
+      }
+      const dir = exitDirection(X);
+      lastExitDir = dir;
+      if (dir) {
+        const label = (dir === 'left' ? '< ' : '') + (exits[0].label || 'Exit') + (dir === 'right' ? ' >' : '');
+        ctx.font = '600 14px sans-serif'; ctx.textAlign = dir === 'left' ? 'left' : 'right';
+        ctx.fillStyle = 'rgba(255,238,190,0.8)';
+        ctx.fillText(label, dir === 'left' ? 18 : X.w - 18, 150);
       }
       drawHud(X);
     }
@@ -608,9 +673,14 @@
         return {
           x: player.x, y: player.y, vx: player.vx, vy: player.vy, grounded: player.grounded, facing: player.facing,
           frames, nearLandmark: nearLandmark ? nearLandmark.id : null, toast: toast && toast.until > time ? toast.text : null,
-          look: Object.assign({}, look)
+          look: Object.assign({}, look),
+          lightAtPlayer: lightAt(sources, player.x, player.y - 0.9), exitHint: lastExitDir
         };
       },
+      lightAt(x, y) { return lightAt(sources, x, y); },
+      lightSources: sources,
+      // Screen position of a point in tiles, as last drawn, for tests that read pixels.
+      worldToScreen(x, y) { const X = view(); return { x: sx(x, X), y: sy(y, X), ppt: X.ppt }; },
       // The movement and jump rules are the pure ones above; this advances them without waiting for a frame.
       debugStep(inputState, seconds) { step(level, player, inputState, seconds); }
     };
@@ -618,6 +688,7 @@
 
   const api = {
     create, parseLevel, newPlayer, step, supportBelow, rectsOverlap,
+    lightSources, lightAt, AMBIENT,
     BODY_W, BODY_H, SPEED, GRAVITY, JUMP_V, MAX_FALL
   };
   global.AtlasSideView = api;

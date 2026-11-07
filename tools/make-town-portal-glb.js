@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Generates the low-poly stone travel gates that stand on a world's portal:
 //   demo-domain-a/assets/portals/townPortal.glb      (Lobby -> Plaza)
+//   demo-domain-a/assets/portals/minePortal.glb      (Lobby -> Mining Burrow)
 //   demo-domain-b/assets/portals/galleryPortal.glb   (Gallery -> Workshop)
 // Everything is original and made in this script: the textures are drawn
 // procedurally, encoded as PNG and embedded in the GLB (no external files, no
@@ -23,7 +24,7 @@
 // plaque text is the label of the portal the gate stands on, read from that
 // domain's manifest (see TARGETS), on one line or split over two.
 //
-// Usage: node tools/make-town-portal-glb.js [--only townPortal|galleryPortal]
+// Usage: node tools/make-town-portal-glb.js [--only townPortal|minePortal|galleryPortal]
 //                                           [--label "TEXT"] [--palette same-domain|cross-domain|key]
 
 const fs = require('fs');
@@ -340,6 +341,7 @@ function buildGeometry(label, palette) {
 // follow the portal's kind.
 const TARGETS = [
   { name: 'townPortal', out: path.join('demo-domain-a', 'assets', 'portals', 'townPortal.glb'), domain: 'demo-domain-a', world: 'lobby', portal: 0, palette: 'same-domain' },
+  { name: 'minePortal', out: path.join('demo-domain-a', 'assets', 'portals', 'minePortal.glb'), domain: 'demo-domain-a', world: 'lobby', portal: 1, palette: 'same-domain' },
   { name: 'galleryPortal', out: path.join('demo-domain-b', 'assets', 'portals', 'galleryPortal.glb'), domain: 'demo-domain-b', world: 'gallery', portal: 0, palette: 'same-domain' }
 ];
 

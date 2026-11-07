@@ -270,6 +270,38 @@ const peakOf = (v) => (v * v) / (2 * SV.GRAVITY);
     }
   }
   pass('no reachable position overlaps rock');
+
+  // light: only the scene's fixed sources light it, and a good share of the walkable ground is genuinely dark
+  const sources = SV.lightSources(scene);
+  const lightOf = (p) => SV.lightAt(sources, p.x, p.y - 0.9);
+  const dark = reached.filter((p) => lightOf(p) < 0.3).length;
+  const lit = reached.filter((p) => lightOf(p) > 0.6).length;
+  assert(dark / reached.length > 0.25, 'a quarter or more of the walkable ground is dark, got ' + (100 * dark / reached.length).toFixed(0) + '%');
+  assert(lit / reached.length > 0.1, 'and some of it is well lit, got ' + (100 * lit / reached.length).toFixed(0) + '%');
+  assert(lightOf(sp0()) > 0.4, 'the spawn is lit well enough to start from');
+  assert(SV.lightAt(sources, 2.5, 10) > 0.8, 'the daylight at the mine mouth is bright');
+  assert(SV.lightAt(sources, 36, 30) === SV.AMBIENT && SV.AMBIENT > 0.05 && SV.AMBIENT < 0.25, 'far from every source only the small ambient floor shows (' + SV.AMBIENT + ')');
+  pass('light: ' + (100 * dark / reached.length).toFixed(0) + '% of the walkable ground is dark (under 30%), ' + (100 * lit / reached.length).toFixed(0) + '% well lit; ambient floor ' + SV.AMBIENT);
+  function sp0() { return { x: scene.spawn[0], y: scene.spawn[1] }; }
+}
+
+// ---- no portable light ----
+{
+  const src = fs.readFileSync(path.join(REPO, 'extension', 'side-view.js'), 'utf8');
+  const code = src.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  assert(!/AtlasWallet|AtlasCapabilities|AtlasItemEffects|chrome\.storage|fetch\(/.test(code), 'the renderer reads no wallet, item or capability data');
+  assert(!/atlas\.cap\.light/.test(code), 'no light capability is implemented');
+  const i = code.indexOf('function drawLight');
+  const light = code.slice(i, code.indexOf('function drawAmbientEdges'));
+  assert(!/player/.test(light), 'the darkness pass never looks at the character');
+  assert(SV.lightSources(scene).every((l) => ['lantern', 'crystals', 'mouth', 'skylight', 'ore'].includes(l.kind)), 'every source is a fixed feature of the scene');
+  // moving the character does not change the light anywhere
+  const before = [[5, 10], [30, 17], [47, 14]].map(([x, y]) => SV.lightAt(SV.lightSources(scene), x, y));
+  const p = SV.newPlayer(scene.spawn[0], scene.spawn[1]);
+  sim(p, { right: true }, 3);
+  const after = [[5, 10], [30, 17], [47, 14]].map(([x, y]) => SV.lightAt(SV.lightSources(scene), x, y));
+  assert.deepStrictEqual(after, before, 'the light map does not depend on where the character is');
+  pass('the character carries no light, and the renderer reads no wallet, item or capability data');
 }
 
 // ---- manifest and Lobby wiring ----
@@ -300,6 +332,7 @@ const peakOf = (v) => (v * v) / (2 * SV.GRAVITY);
   assert.deepStrictEqual(ls.portalMarkers[0], { position: [0, 0, 4.7], radius: 0.8, portalIndex: 0, hideMarker: true }, 'the Plaza gate marker is unchanged');
   const mk = ls.portalMarkers[1];
   assert.strictEqual(mk.portalIndex, 1);
+  assert.strictEqual(mk.hideMarker, true, 'the gate model is the marker, no ring or beacon is drawn');
   const anchor = ls.anchors.find((a) => a.id === 'mine-entrance');
   assert(anchor, 'the Lobby has the mine-entrance anchor');
   assert(ls.anchors.find((a) => a.id === 'reading-nook'), 'the existing anchor is unchanged');
@@ -313,6 +346,22 @@ const peakOf = (v) => (v * v) / (2 * SV.GRAVITY);
     assert(Math.abs(mk.position[0] - M.entranceX) < 0.5, 'the trigger is in line with the mine mouth');
     assert(mk.position[2] > M.maxZ - 0.2 && mk.position[2] < M.maxZ + 1.5, 'the trigger is in front of the hill face (z ' + mk.position[2] + ', face ' + M.maxZ + ')');
   }
+  // the orange same-domain stone gate (tools/make-town-portal-glb.js) stands just inside the mouth, non-solid
+  const gate = ls.objects.filter((o) => o.model === '/assets/portals/minePortal.glb');
+  assert.strictEqual(gate.length, 1, 'one gate at the mine');
+  assert.strictEqual(gate[0].solid, false, 'the gate adds no collision');
+  assert(Math.abs(gate[0].position[0] - M.entranceX) < 0.01, 'centred on the mouth');
+  const depth = 0.56 * gate[0].scale, w = 1.9 * gate[0].scale, h = 2.0 * gate[0].scale;
+  assert(gate[0].position[2] - depth / 2 >= M.maxZ - 0.9 && gate[0].position[2] + depth / 2 <= M.maxZ, 'inside the dark recess, not poking out of the hill face');
+  assert(w < M.entranceW && h < M.entranceH, 'fits the opening (' + w.toFixed(2) + ' x ' + h.toFixed(2) + ' in ' + M.entranceW + ' x ' + M.entranceH + ')');
+  assert.strictEqual(gate[0].rotationY, 0, 'faces out of the mine');
+  const townGate = ls.objects.find((o) => o.model === '/assets/portals/townPortal.glb');
+  assert(townGate && townGate.solid === false, 'the Plaza gate is as before');
+  const gen = require(path.join(REPO, 'tools', 'make-town-portal-glb.js'));
+  const target = gen.TARGETS.find((t) => t.name === 'minePortal');
+  assert(target && target.palette === 'same-domain' && target.portal === 1 && target.world === 'lobby', 'the gate comes from the existing generator, same-domain (orange) palette');
+  assert(fs.readFileSync(path.join(REPO, 'demo-domain-a', 'assets', 'portals', 'minePortal.glb')).equals(gen.buildTarget(target).glb), 'the gate file is exactly what the generator produces, plaque "' + gen.portalLabel(target) + '"');
+  pass('mine gate: the existing stone gate model in the orange palette, centred and inside the recess, non-solid, plaque "' + gen.portalLabel(target) + '"');
   const near = (ls.objects || []).filter((o) => o.position && Math.hypot(o.position[0] - mk.position[0], o.position[2] - mk.position[2]) < 0.7 && o.position[1] === 0);
   assert.strictEqual(near.length, 0, 'no placed object sits on the trigger');
   pass('Lobby scene: trigger at (' + mk.position[0] + ', ' + mk.position[2] + ') in front of the mine mouth, return anchor ' + planar(anchor.position, mk.position).toFixed(1) + ' away facing out');

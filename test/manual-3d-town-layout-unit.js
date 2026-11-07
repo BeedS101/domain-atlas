@@ -41,7 +41,9 @@ const townObjects = scene.objects.filter((o) => OUTDOOR.test(o.model));
 // interior-material versions at the same placement and adds a floor and a plaque, so map those back; the
 // building's walls use the exterior-finish variants, which map back to the interior ones first.
 const interiorTool = require(path.join(REPO, 'tools', 'make-lobby-interior-assets.js'));
-const interiorNow = scene.objects.filter((o) => !OUTDOOR.test(o.model));
+// The mine's own gate (docs/mining-burrow-v0.1.md) is checked in test/mining-burrow.js.
+const MINE_GATE = '/assets/portals/minePortal.glb';
+const interiorNow = scene.objects.filter((o) => !OUTDOOR.test(o.model) && o.model !== MINE_GATE);
 const interiorAdded = new Set(interiorTool.NEW_OBJECTS.map((o) => o.model));
 const interior = interiorNow.filter((o) => !interiorAdded.has(o.model)).map((o) => {
   const m = /^\/assets\/lobby\/(?:interior|exterior)\/(\w+)\.glb$/.exec(o.model);

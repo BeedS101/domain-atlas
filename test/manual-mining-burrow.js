@@ -149,6 +149,14 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
       window.removeEventListener = (t, f, o) => { if (t === 'keydown' && f && f.name === 'sideKeyDown') window.__sideKeyListeners--; return rem(t, f, o); };
     });
 
+    // peak feet height of one Space jump in place, so "as before" is measured, not assumed (the hat's jump buff is random)
+    const jumpPeak = async () => {
+      await frame.evaluate(() => { window.__mv = { peak: 0, live: true }; const t = () => { const a = window.__atlasActive3D; if (a) window.__mv.peak = Math.max(window.__mv.peak, a.getMovementState().feetY); if (window.__mv.live) requestAnimationFrame(t); }; requestAnimationFrame(t); });
+      await tap('Space', 250);
+      await sleep(1800);
+      return frame.evaluate(() => { window.__mv.live = false; return window.__mv.peak; });
+    };
+
     console.log('STEP 2: the Lobby with its equipment, before the trip');
     await enter3D('lobby', 'Lobby');
     await waitHud(true);
@@ -160,16 +168,43 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     assertTrue(same(Object.keys(capsBefore), ['atlas.cap.compass']), 'the compass capability is active in the Lobby: ' + JSON.stringify(capsBefore));
     const hatBefore = await frame.evaluate(() => window.__atlasActive3D.getLocalAvatarHatSpeedMultiplier());
     assertTrue(Math.abs(hatBefore - hatSpeed) < 1e-6, 'the hat buff applies: ' + hatBefore);
+    await focusFrame();
+    await settle3();
+    const peakBefore = await jumpPeak();
+    assertTrue(peakBefore > 0.4, '3D jump works before the trip: ' + peakBefore.toFixed(3));
+    await settle3();
     let v = await view();
     assertTrue(v.world === 'lobby' && v.canvas3d && !v.canvas2d && v.bar && v.hud && !v.side, 'Lobby view state: ' + JSON.stringify(v));
     console.log('PASS: Lobby with the compass HUD, the Action Bar, hat buff x' + hatBefore);
 
-    console.log('STEP 3: the mine entrance in the Lobby is visible and does nothing until walked into');
+    console.log('STEP 3: the mine entrance in the Lobby shows the orange stone gate and does nothing until walked into');
     await place3(-11.6, -8.5);
     await frame.evaluate(() => { const a = window.__atlasActive3D; a.camera.yaw = 0; });
     await sleep(900);
     await shot('01-lobby-at-mine');
+    const picture = await site.screenshot();
+    const share = await walletPage.evaluate(async (b64) => {
+      const bmp = await createImageBitmap(await (await fetch('data:image/png;base64,' + b64)).blob());
+      const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+      const g = c.getContext('2d'); g.drawImage(bmp, 0, 0);
+      const area = (x0, y0, x1, y1) => {
+        const d = g.getImageData(x0, y0, x1 - x0, y1 - y0).data; let orange = 0, dark = 0, n = 0;
+        for (let i = 0; i < d.length; i += 4) { n++; const r = d[i], gg = d[i + 1], b = d[i + 2]; if (r > 140 && r - b > 70 && r > gg + 30) orange++; if (r + gg + b < 90) dark++; }
+        return { orange: orange / n, dark: dark / n };
+      };
+      return { mouth: area(470, 290, 810, 640) };
+    }, picture.toString('base64'));
+    assertTrue(share.mouth.orange > 0.08, 'the orange portal fills the mine mouth: ' + JSON.stringify(share.mouth));
+    assertTrue(share.mouth.dark < 0.6, 'the mouth is not just a black hole any more: ' + JSON.stringify(share.mouth));
     assertTrue((await world()) === 'lobby', 'standing near the mine does not enter it');
+    // the hill's collision is unchanged: beside the opening the character is stopped at the rock face, as before
+    for (const x of [-13.7, -9.4]) {
+      await place3(x, -10.5);
+      await focusFrame();
+      await down('KeyW'); await sleep(1500); await up('KeyW');
+      const stopped = await s3();
+      assertTrue(stopped.pos[2] > -12.85 && stopped.pos[2] < -12.2, 'walking north at x ' + x + ' stops at the hill face, z ' + stopped.pos[2].toFixed(2));
+    }
     await place3(-11.6, -10.4);
     await sleep(900);
     assertTrue((await world()) === 'lobby', 'standing 1.6 from the mouth does not enter it');
@@ -266,6 +301,50 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     await frame.evaluate(() => window.__atlasSideView.teleport(18.6, 6));
     await svUntil((s) => s.grounded && Math.abs(s.y - 6) < 0.02); await sleep(600); await shot('07-lookout');
 
+    console.log('STEP 5b: the dark - no light on the character, a limited ambient, light only from fixed sources');
+    const lum = (wx, wy, r) => frame.evaluate(({ wx, wy, r }) => {
+      const sc = window.__atlasSideView.worldToScreen(wx, wy);
+      const half = Math.max(2, Math.round(r * sc.ppt));
+      const d = document.getElementById('scene').getContext('2d').getImageData(Math.round(sc.x) - half, Math.round(sc.y) - half, half * 2, half * 2).data;
+      let sum = 0, n = 0;
+      for (let i = 0; i < d.length; i += 4) { sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]; n++; }
+      return sum / n;
+    }, { wx, wy, r });
+    const park = async (x, y) => { await frame.evaluate(({ x, y }) => window.__atlasSideView.teleport(x, y), { x, y }); await svUntil((s) => s.grounded && Math.abs(s.y - y) < 0.02); await sleep(1200); };
+    const sources = await frame.evaluate(() => window.__atlasSideView.lightSources.map((l) => ({ kind: l.kind, x: l.x, y: l.y, r: l.r })));
+    assertTrue(sources.length > 8 && sources.every((l) => ['lantern', 'crystals', 'mouth', 'skylight', 'ore'].includes(l.kind)), 'light comes from fixed features only: ' + sources.map((l) => l.kind).join(','));
+    // a spot in the lower tunnel well away from every source
+    const P = { x: 37.6, y: 19 };
+    await park(P.x, P.y);
+    st = await sv();
+    assertTrue(st.lightAtPlayer < 0.2, 'standing in a dark passage: light there is ' + st.lightAtPlayer.toFixed(3));
+    const Q = { x: P.x - 1.6, y: 18.2 };
+    const near = await lum(Q.x, Q.y, 0.45);
+    await shot('09-dark-passage');
+    await park(P.x - 8, P.y);
+    const far = await lum(Q.x, Q.y, 0.45);
+    assertTrue(Math.abs(near - far) < 2, 'the character standing 1.6 tiles away or 8 tiles away makes no difference to the dark around it: ' + near.toFixed(2) + ' vs ' + far.toFixed(2));
+    assertTrue(near < 40, 'the dark passage is dark: luminance ' + near.toFixed(1) + ' of 255');
+    // the same kind of spot lit by a real source is much brighter
+    await park(31.5, 19);
+    const lanternLum = await lum(31.5, 17.8, 0.45);
+    assertTrue(lanternLum > near * 3 && lanternLum > 60, 'a fixed lantern does light its surroundings: ' + lanternLum.toFixed(1) + ' vs ' + near.toFixed(1));
+    // the character stays distinguishable
+    await park(P.x, P.y);
+    const body = await lum(P.x, P.y - 0.8, 0.1);
+    const around = await lum(P.x - 1.0, P.y - 0.8, 0.1);
+    assertTrue(body - around > 12, 'the character\'s silhouette stands out in the dark: body ' + body.toFixed(1) + ' vs surroundings ' + around.toFixed(1));
+    // floors stay readable
+    const floorEdge = await lum(P.x + 0.5, 19.03, 0.04);
+    const rockBelow = await lum(P.x + 0.5, 20.5, 0.15);
+    assertTrue(floorEdge - rockBelow > 3, 'the floor line is faintly visible in the dark: ' + floorEdge.toFixed(1) + ' vs ' + rockBelow.toFixed(1));
+    // the way out can be found from the dark
+    assertTrue((await sv()).exitHint === 'left', 'an off-screen exit is hinted at the screen edge: ' + (await sv()).exitHint);
+    assertTrue(same(Object.keys(await frame.evaluate(async () => { const c = await AtlasCapabilities.active(); return Object.fromEntries(Object.entries(c).filter(([k]) => k === 'atlas.cap.light')); })), []), 'no light capability is provided by anything equipped');
+    await park(7, 12);
+    assertTrue((await sv()).exitHint === null, 'no hint while the exit is on screen');
+    console.log('PASS: the dark is dark (luminance ' + near.toFixed(1) + '), unaffected by the character (' + far.toFixed(1) + '), lantern ' + lanternLum.toFixed(1) + ', silhouette ' + body.toFixed(1) + ' vs ' + around.toFixed(1) + ', exit hint works');
+
     console.log('STEP 6: keys are ignored while typing and while the wallet is open');
     await frame.evaluate(() => window.__atlasSideView.teleport(30, 12));
     await svUntil((s) => s.grounded);
@@ -342,11 +421,8 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     await site.keyboard.down('Digit1');
     await frame.waitForFunction(() => document.querySelector('.ab-slot[data-slot="strike-right"]').classList.contains('firing'), null, { timeout: 4000 });
     await site.keyboard.up('Digit1');
-    await frame.evaluate(() => { window.__mv = { peak: 0, live: true }; const t = () => { const a = window.__atlasActive3D; if (a) window.__mv.peak = Math.max(window.__mv.peak, a.getMovementState().feetY); if (window.__mv.live) requestAnimationFrame(t); }; requestAnimationFrame(t); });
-    await tap('Space', 250);
-    await sleep(1500);
-    const mv = await frame.evaluate(() => { window.__mv.live = false; return window.__mv; });
-    assertTrue(mv.peak > 0.5 && mv.peak < 0.65, '3D jumping works as before, peak ' + mv.peak.toFixed(3));
+    const peakAfter = await jumpPeak();
+    assertTrue(Math.abs(peakAfter - peakBefore) < 0.03, '3D jumping is the same as before the trip: ' + peakBefore.toFixed(3) + ' then ' + peakAfter.toFixed(3));
     await down('ControlLeft'); await sleep(600);
     assertTrue((await s3()).crouched, '3D crouching works');
     await up('ControlLeft');
