@@ -94,7 +94,7 @@ function noKeyIn(label, value) {
     noKeyIn('join response', a.text);
     const b = await post('/presence/poll/join', { domain: 'example.com', world: 'lobby', name: 'Bob' });
     check(b.body.roster.length === 1 && b.body.roster[0].id === a.body.publicId && b.body.roster[0].name === 'Alice', 'a second joiner sees Alice by her publicId and name');
-    check(Object.keys(b.body.roster[0]).sort().join(',') === 'handModel,hatColor,id,name,pantsColor,shirtColor,shoeColor,shoeScale,x,y,yaw,z', 'roster entries expose only id, name, pose and look');
+    check(Object.keys(b.body.roster[0]).sort().join(',') === 'glovesColor,handModel,hatColor,id,legsColor,name,neckColor,offHandModel,pantsColor,shirtColor,shoeColor,shoeScale,shouldersColor,x,y,yaw,z', 'roster entries expose only id, name, pose and look');
     noKeyIn('roster', b.text);
     const sync = await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5 });
     noKeyIn('sync response', sync.text);
@@ -107,6 +107,14 @@ function noKeyIn(label, value) {
       await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5, handModel: bad });
       check((await post('/presence/poll/sync', { id: a.body.id })).body.roster.find((m) => m.name === 'Bob').handModel == null, 'a held-item value of ' + JSON.stringify(bad).slice(0, 30) + ' is dropped');
     }
+    // The extra worn parts: colours are bounded strings, the off-hand model follows the held-item rule.
+    const bobOf = async () => (await post('/presence/poll/sync', { id: a.body.id })).body.roster.find((m) => m.name === 'Bob');
+    await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5, glovesColor: '#c0392b', legsColor: '#2c3e9a', shouldersColor: '#d4a017', neckColor: '#8e44ad', offHandModel: held });
+    let bob = await bobOf();
+    check(bob.glovesColor === '#c0392b' && bob.legsColor === '#2c3e9a' && bob.shouldersColor === '#d4a017' && bob.neckColor === '#8e44ad' && bob.offHandModel === held, 'worn colours and the off-hand model reach the other member');
+    await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5, glovesColor: 'x'.repeat(64), legsColor: 7, shouldersColor: {}, neckColor: null, offHandModel: 'javascript:alert(1)' });
+    bob = await bobOf();
+    check(bob.glovesColor === 'x'.repeat(16) && bob.legsColor == null && bob.shouldersColor == null && bob.neckColor == null && bob.offHandModel == null, 'over-long colours are cut to 16 characters and other malformed worn values are dropped');
     await post('/presence/poll/sync', { id: b.body.id, x: 1, y: 0, z: 2, yaw: 0.5 });
     const st = await get('/presence/status?domain=example.com&world=lobby');
     check(st.status === 200 && JSON.stringify(st.body) === '{"count":2}', 'status is exactly a count');

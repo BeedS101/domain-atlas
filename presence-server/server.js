@@ -496,7 +496,8 @@ function rosterOf(room, exceptConnId) {
     if (id === exceptConnId) return;
     roster.push({
       id: member.publicId, name: member.name, x: member.x, y: member.y, z: member.z, yaw: member.yaw,
-      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null, hatColor: member.hatColor || null, shoeColor: member.shoeColor || null, shoeScale: member.shoeScale || null, handModel: member.handModel || null
+      shirtColor: member.shirtColor || null, pantsColor: member.pantsColor || null, hatColor: member.hatColor || null, shoeColor: member.shoeColor || null, shoeScale: member.shoeScale || null, handModel: member.handModel || null,
+      glovesColor: member.glovesColor || null, legsColor: member.legsColor || null, shouldersColor: member.shouldersColor || null, neckColor: member.neckColor || null, offHandModel: member.offHandModel || null
     });
   });
   return roster;
@@ -585,9 +586,16 @@ function moveMember(connId, x, y, z, yaw, look) {
   const shoeColor = sanitizeColor(look && look.shoeColor);
   const shoeScale = sanitizeScale(look && look.shoeScale);
   const handModel = sanitizeHandModel(look && look.handModel);
+  // The other equipment slots: four colours and the off-hand model.
+  const glovesColor = sanitizeColor(look && look.glovesColor);
+  const legsColor = sanitizeColor(look && look.legsColor);
+  const shouldersColor = sanitizeColor(look && look.shouldersColor);
+  const neckColor = sanitizeColor(look && look.neckColor);
+  const offHandModel = sanitizeHandModel(look && look.offHandModel);
   member.x = x; member.y = y; member.z = z; member.yaw = yaw;
   member.shirtColor = shirtColor; member.pantsColor = pantsColor; member.hatColor = hatColor; member.shoeColor = shoeColor; member.shoeScale = shoeScale; member.handModel = handModel;
-  broadcast(loc.room, connId, { type: 'moved', id: member.publicId, x, y, z, yaw, shirtColor, pantsColor, hatColor, shoeColor, shoeScale, handModel });
+  member.glovesColor = glovesColor; member.legsColor = legsColor; member.shouldersColor = shouldersColor; member.neckColor = neckColor; member.offHandModel = offHandModel;
+  broadcast(loc.room, connId, { type: 'moved', id: member.publicId, x, y, z, yaw, shirtColor, pantsColor, hatColor, shoeColor, shoeScale, handModel, glovesColor, legsColor, shouldersColor, neckColor, offHandModel });
   return true;
 }
 
@@ -812,7 +820,7 @@ function handleConnection(socket, peerAddress) {
         const now = Date.now();
         if (now - lastMoveAt < MOVE_MIN_INTERVAL_MS) return;
         lastMoveAt = now;
-        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor, hatColor: msg.hatColor, shoeColor: msg.shoeColor, shoeScale: msg.shoeScale, handModel: msg.handModel });
+        moveMember(connId, Number(msg.x), Number(msg.y), Number(msg.z), Number(msg.yaw), { shirtColor: msg.shirtColor, pantsColor: msg.pantsColor, hatColor: msg.hatColor, shoeColor: msg.shoeColor, shoeScale: msg.shoeScale, handModel: msg.handModel, glovesColor: msg.glovesColor, legsColor: msg.legsColor, shouldersColor: msg.shouldersColor, neckColor: msg.neckColor, offHandModel: msg.offHandModel });
         return;
       }
 
@@ -1174,7 +1182,7 @@ const server = http.createServer(async (req, res) => {
       const member = loc.room.get(connId);
       if (!member || member.transport !== 'poll') return sendJson(res, 404, { error: 'unknown or expired presence id — rejoin' });
       member.lastSeen = Date.now();
-      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor, hatColor: body.hatColor, shoeColor: body.shoeColor, shoeScale: body.shoeScale, handModel: body.handModel });
+      if (body.x !== undefined) moveMember(connId, Number(body.x), Number(body.y), Number(body.z), Number(body.yaw), { shirtColor: body.shirtColor, pantsColor: body.pantsColor, hatColor: body.hatColor, shoeColor: body.shoeColor, shoeScale: body.shoeScale, handModel: body.handModel, glovesColor: body.glovesColor, legsColor: body.legsColor, shouldersColor: body.shouldersColor, neckColor: body.neckColor, offHandModel: body.offHandModel });
       return sendJson(res, 200, { roster: rosterOf(loc.room, connId) });
     }
 

@@ -2969,6 +2969,10 @@ const AtlasWallet = (() => {
     const identity = await getIdentity();
     if (!identity) throw new Error('Unlock your wallet first.');
     await saveAvatarHand(identity.publicKey, assetId || null);
+    if (assetId) {
+      const map = await getAvatarSlotIds();
+      if (map.offhand === assetId) { delete map.offhand; await saveAvatarSlots(identity.publicKey, map); }
+    }
     return assetId || null;
   }
 
@@ -2989,7 +2993,7 @@ const AtlasWallet = (() => {
     return entry ? avatarHandPropertiesFromAsset(entry.credential.asset) : null; // no longer owned: graceful fallback to an empty hand
   }
 
-  // Which equip slots an asset can go in: 'outfit', 'hat', 'shoes', 'hand'. Pure; the character window uses it
+  // Which equip slots an asset can go in: 'outfit', 'hat', 'shoes', 'hand', plus the extra slots below. Pure; the character window uses it
   // to list what the wallet holds for a clicked slot.
   function avatarSlotsOfAsset(asset) {
     const slots = [];
@@ -2997,7 +3001,116 @@ const AtlasWallet = (() => {
     if (avatarHatPropertiesFromAsset(asset)) slots.push('hat');
     if (avatarShoePropertiesFromAsset(asset)) slots.push('shoes');
     if (avatarHandPropertiesFromAsset(asset)) slots.push('hand');
+    const kind = avatarExtraKindOfAsset(asset);
+    if (kind) for (const id of AVATAR_EXTRA_SLOTS) if (AVATAR_EXTRA_SLOT_KIND[id] === kind) slots.push(id);
     return slots;
+  }
+
+  // ---------- more equipment slots: off hand, gloves, legs, shoulders, neck, two rings, two trinkets ----------
+  //
+  // An item says which slot it fits with the property `atlas.avatar.slot`, one of: offhand, gloves, legs,
+  // shoulders, neck, ring, trinket (a ring fits either ring slot, a trinket either trinket slot). What it needs
+  // beyond that depends on the kind:
+  //   gloves, legs, shoulders, neck: `atlas.avatar.color`, a '#rrggbb' colour drawn on the character
+  //   offhand: an absolute http(s) `model`, drawn in the left hand like the hand slot's item
+  //   ring, trinket: nothing (they are shown in the character window only)
+  // Any of them may also carry `atlas.avatar.speedMultiplier`, `atlas.avatar.jumpMultiplier` and
+  // `atlas.avatar.interactRangeMultiplier`; the totals are the product over every equipped slot, kept
+  // between 0.25 and 3. An item is equipped in at most one slot (and the off hand and hand never hold the
+  // same item). Stored per identity under one key, encrypted at rest, with the same revoked-credential
+  // fallback as the other slots.
+  const AVATAR_EXTRA_SLOTS = ['offhand', 'gloves', 'legs', 'shoulders', 'neck', 'ring1', 'ring2', 'trinket1', 'trinket2'];
+  const AVATAR_EXTRA_SLOT_KIND = { offhand: 'offhand', gloves: 'gloves', legs: 'legs', shoulders: 'shoulders', neck: 'neck', ring1: 'ring', ring2: 'ring', trinket1: 'trinket', trinket2: 'trinket' };
+  const AVATAR_COLOR_KINDS = ['gloves', 'legs', 'shoulders', 'neck'];
+
+  function avatarExtraKindOfAsset(asset) {
+    const props = (asset && asset.properties) || {};
+    const kind = props['atlas.avatar.slot'];
+    if (typeof kind !== 'string' || !Object.values(AVATAR_EXTRA_SLOT_KIND).includes(kind)) return null;
+    if (AVATAR_COLOR_KINDS.includes(kind) && !/^#[0-9a-fA-F]{6}$/.test(String(props['atlas.avatar.color'] || ''))) return null;
+    if (kind === 'offhand' && !/^https?:\/\//i.test(String((asset && asset.model) || ''))) return null;
+    return kind;
+  }
+
+  function clampAvatarMultiplier(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? Math.min(3, Math.max(0.25, n)) : 1;
+  }
+
+  // From a map { slotId: asset | null } to what the renderer takes: colours, the off-hand model and the
+  // combined multipliers. Pure.
+  function avatarExtrasFromSlots(slotAssets) {
+    const out = { glovesColor: null, legsColor: null, shouldersColor: null, neckColor: null, offHandModel: null, speedMultiplier: 1, jumpMultiplier: 1, interactRangeMultiplier: 1 };
+    for (const id of AVATAR_EXTRA_SLOTS) {
+      const asset = slotAssets && slotAssets[id];
+      const kind = asset ? avatarExtraKindOfAsset(asset) : null;
+      if (!kind || AVATAR_EXTRA_SLOT_KIND[id] !== kind) continue;
+      const props = asset.properties || {};
+      if (AVATAR_COLOR_KINDS.includes(kind)) out[kind + 'Color'] = props['atlas.avatar.color'];
+      if (kind === 'offhand') out.offHandModel = asset.model;
+      out.speedMultiplier *= clampAvatarMultiplier(props['atlas.avatar.speedMultiplier']);
+      out.jumpMultiplier *= clampAvatarMultiplier(props['atlas.avatar.jumpMultiplier']);
+      out.interactRangeMultiplier *= clampAvatarMultiplier(props['atlas.avatar.interactRangeMultiplier']);
+    }
+    out.speedMultiplier = clampAvatarMultiplier(out.speedMultiplier);
+    out.jumpMultiplier = clampAvatarMultiplier(out.jumpMultiplier);
+    out.interactRangeMultiplier = clampAvatarMultiplier(out.interactRangeMultiplier);
+    return out;
+  }
+
+  async function saveAvatarSlots(ownerPublicKey, map) {
+    const { atlasAvatarSlots } = await chrome.storage.local.get('atlasAvatarSlots');
+    const all = atlasAvatarSlots || {};
+    const identity = await getIdentity();
+    all[ownerPublicKey] = await encryptAtRest(identity, 'avatarSlots', map);
+    await chrome.storage.local.set({ atlasAvatarSlots: all });
+  }
+
+  // { slotId: assetId } for the slots that have something equipped.
+  async function getAvatarSlotIds() {
+    const identity = await getIdentity();
+    if (!identity) return {};
+    const { atlasAvatarSlots } = await chrome.storage.local.get('atlasAvatarSlots');
+    const stored = await decryptAtRestAndMigrate(identity, 'avatarSlots', (atlasAvatarSlots || {})[identity.publicKey], {}, (v) => saveAvatarSlots(identity.publicKey, v));
+    const out = {};
+    if (stored && typeof stored === 'object') for (const id of AVATAR_EXTRA_SLOTS) if (typeof stored[id] === 'string' && stored[id]) out[id] = stored[id];
+    return out;
+  }
+
+  async function getAvatarSlotAssetId(slot) {
+    return (await getAvatarSlotIds())[slot] || null;
+  }
+
+  // Equips `assetId` (or empties the slot when null). An item already in another of these slots, or in the
+  // hand slot, moves instead of being in two places.
+  async function setAvatarSlot(slot, assetId) {
+    if (!AVATAR_EXTRA_SLOTS.includes(slot)) throw new Error('Unknown equipment slot.');
+    const identity = await getIdentity();
+    if (!identity) throw new Error('Unlock your wallet first.');
+    const map = await getAvatarSlotIds();
+    if (assetId) {
+      for (const other of AVATAR_EXTRA_SLOTS) if (other !== slot && map[other] === assetId) delete map[other];
+      if (slot === 'offhand' && (await getAvatarHandAssetId()) === assetId) await saveAvatarHand(identity.publicKey, null);
+      map[slot] = assetId;
+    } else {
+      delete map[slot];
+    }
+    await saveAvatarSlots(identity.publicKey, map);
+    return assetId || null;
+  }
+
+  // The renderer-ready extras for what this identity has equipped (owned items only).
+  async function getAvatarExtras() {
+    const identity = await getIdentity();
+    if (!identity) return avatarExtrasFromSlots({});
+    const ids = await getAvatarSlotIds();
+    const wallet = Object.keys(ids).length ? await getWallet(identity.publicKey) : [];
+    const assets = {};
+    for (const id of Object.keys(ids)) {
+      const entry = wallet.find((e) => e.credential.id === ids[id]);
+      assets[id] = entry ? entry.credential.asset : null;
+    }
+    return avatarExtrasFromSlots(assets);
   }
 
   async function splitForDrop(credential, amount) {
@@ -10431,6 +10544,7 @@ const AtlasWallet = (() => {
     getAvatarHat, getAvatarHatAssetId, setAvatarHat, avatarHatPropertiesFromAsset,
     getAvatarShoes, getAvatarShoesAssetId, setAvatarShoes, avatarShoePropertiesFromAsset,
     getAvatarHand, getAvatarHandAssetId, setAvatarHand, avatarHandPropertiesFromAsset, avatarSlotsOfAsset,
+    getAvatarSlotIds, getAvatarSlotAssetId, setAvatarSlot, getAvatarExtras, avatarExtrasFromSlots, avatarExtraKindOfAsset,
     dropItem, pickUpItem, getWorldDrops, splitForDrop,
     proposeIntent, verifySignedPayload,
     submitTradeIntent, fetchTradeListings, fetchTradableClasses, fetchAssetClassInfo, claimTradeListing, cancelTradeListing,

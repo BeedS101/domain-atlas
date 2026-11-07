@@ -436,7 +436,12 @@ function presence_roster_of($room, $exceptToken) {
       'hatColor' => isset($member['hatColor']) ? $member['hatColor'] : null,
       'shoeColor' => isset($member['shoeColor']) ? $member['shoeColor'] : null,
       'shoeScale' => isset($member['shoeScale']) ? $member['shoeScale'] : null,
-      'handModel' => isset($member['handModel']) ? $member['handModel'] : null
+      'handModel' => isset($member['handModel']) ? $member['handModel'] : null,
+      'glovesColor' => isset($member['glovesColor']) ? $member['glovesColor'] : null,
+      'legsColor' => isset($member['legsColor']) ? $member['legsColor'] : null,
+      'shouldersColor' => isset($member['shouldersColor']) ? $member['shouldersColor'] : null,
+      'neckColor' => isset($member['neckColor']) ? $member['neckColor'] : null,
+      'offHandModel' => isset($member['offHandModel']) ? $member['offHandModel'] : null
     ];
   }
   return $roster;

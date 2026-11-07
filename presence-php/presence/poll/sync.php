@@ -37,6 +37,8 @@ $result = with_presence_store_locked(function (&$doc) use ($id, $body) {
         $room[$id]['shoeColor'] = presence_sanitize_color($body['shoeColor'] ?? null);
         $room[$id]['shoeScale'] = presence_sanitize_scale($body['shoeScale'] ?? null);
         $room[$id]['handModel'] = presence_sanitize_hand_model($body['handModel'] ?? null);
+        foreach (['glovesColor', 'legsColor', 'shouldersColor', 'neckColor'] as $field) $room[$id][$field] = presence_sanitize_color($body[$field] ?? null);
+        $room[$id]['offHandModel'] = presence_sanitize_hand_model($body['offHandModel'] ?? null);
       }
     }
     $roster = presence_roster_of($room, $id);

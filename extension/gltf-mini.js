@@ -1567,6 +1567,9 @@
     // drawCharacterAt's hatColor param below); its own baked-in color here
     // is never used for that reason, but buildBox still needs one.
     const HAT_H = 0.12, HAT_SIZE = HEAD_SIZE * 1.25;
+    // Equipment pieces drawn only when the matching slot is equipped: a cuff over the end of each arm
+    // (gloves), a pad on top of each arm (shoulders) and a band at the top of the torso (neck).
+    const GLOVE_H = 0.17, PAD_H = 0.17, NECK_H = 0.10;
     const hipY = LEG_LEN;
     const shoulderY = hipY + TORSO_H;
     const skin = [0.85, 0.68, 0.53, 1];
@@ -1581,6 +1584,11 @@
       hat: buildBox(gl, HAT_SIZE, HEAD_SIZE, HEAD_SIZE + HAT_H, HAT_SIZE, skin),
       armL: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
       armR: buildBox(gl, ARM_W, -ARM_LEN, 0, ARM_D, skin),
+      gloveL: buildBox(gl, ARM_W * 1.2, -ARM_LEN, -ARM_LEN + GLOVE_H, ARM_D * 1.2, skin),
+      gloveR: buildBox(gl, ARM_W * 1.2, -ARM_LEN, -ARM_LEN + GLOVE_H, ARM_D * 1.2, skin),
+      padL: buildBox(gl, ARM_W * 1.6, -PAD_H + 0.05, 0.05, ARM_D * 1.6, skin),
+      padR: buildBox(gl, ARM_W * 1.6, -PAD_H + 0.05, 0.05, ARM_D * 1.6, skin),
+      neck: buildBox(gl, 0.27, -0.08, NECK_H - 0.08, 0.27, skin),
       legL: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, PANTS_COLOR),
       legR: buildBox(gl, LEG_W, -LEG_LEN, 0, LEG_D, PANTS_COLOR),
       shoeL, shoeR,
@@ -1626,6 +1634,21 @@
     const shirtColor = hexToRgba01(look.shirtColor);
     const pantsColor = hexToRgba01(look.pantsColor);
     return (shirtColor || pantsColor) ? { shirtColor, pantsColor } : null;
+  }
+
+  // The equipment slots beyond hat, outfit, shoes and hand, as one object: colours for gloves, legs, shoulders
+  // and neck, a model URL for the off hand, and optional speed/jump/reach multipliers (the product over every
+  // equipped slot). Colours travel as '#rrggbb', the off-hand model as an absolute http(s) URL; anything else
+  // is dropped.
+  function resolveAvatarExtras(extras) {
+    const e = extras || {};
+    const model = (v) => (typeof v === 'string' && /^https?:\/\/\S+$/i.test(v) && v.length <= 400) ? v : null;
+    const mult = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(3, Math.max(0.25, n)) : 1; };
+    return {
+      gloves: hexToRgba01(e.glovesColor), legs: hexToRgba01(e.legsColor), shoulders: hexToRgba01(e.shouldersColor), neck: hexToRgba01(e.neckColor),
+      offHand: model(e.offHandModel),
+      speed: mult(e.speedMultiplier), jump: mult(e.jumpMultiplier), interact: mult(e.interactRangeMultiplier)
+    };
   }
 
   // ---------- public entry point ----------
@@ -1885,7 +1908,8 @@
     // The held item (hand slot): { handModel: absolute GLB URL } or null. Own and other players' models are
     // loaded once each under the world-drop limits (loadDropModel), at most HAND_MODEL_MAX_URLS distinct URLs.
     let localAvatarHandModel = (opts.localAvatarHand && opts.localAvatarHand.handModel) || null;
-    const HAND_MODEL_MAX_URLS = 8;
+    let localAvatarExtras = resolveAvatarExtras(opts.localAvatarExtras);
+    const HAND_MODEL_MAX_URLS = 16;
     const handModels = new Map(); // url -> { model, matrix } | 'loading' | 'failed'
     function ensureHandModel(url) {
       if (handModels.has(url)) return;
@@ -2665,7 +2689,7 @@
       // share this one base value — an equipped shoe's and hat's own
       // atlas.avatar.*SpeedMultiplier stack multiplicatively, since they're
       // two separate equip slots that can both be worn at the same time.
-      const speed = ((keys['ShiftLeft'] || keys['ShiftRight']) ? 4.5 : 2.4) * localAvatarShoeSpeedMultiplier * localAvatarHatSpeedMultiplier;
+      const speed = ((keys['ShiftLeft'] || keys['ShiftRight']) ? 4.5 : 2.4) * localAvatarShoeSpeedMultiplier * localAvatarHatSpeedMultiplier * localAvatarExtras.speed;
       const forward = [Math.sin(camera.yaw), -Math.cos(camera.yaw)];
       const right = [Math.cos(camera.yaw), Math.sin(camera.yaw)];
       let mx = 0, mz = 0;
@@ -2712,7 +2736,7 @@
       // multiplied together first (both slots stack) and then applied as
       // sqrt(combined) here to land on the actual combined height bonus
       // rather than a velocity bonus that would overshoot it.
-      if (keys['Space'] && !airborne) { airborne = true; jumpVelocity = JUMP_SPEED * Math.sqrt(localAvatarShoeJumpMultiplier * localAvatarHatJumpMultiplier); }
+      if (keys['Space'] && !airborne) { airborne = true; jumpVelocity = JUMP_SPEED * Math.sqrt(localAvatarShoeJumpMultiplier * localAvatarHatJumpMultiplier * localAvatarExtras.jump); }
       if (airborne) {
         jumpOffset += jumpVelocity * dt;
         jumpVelocity -= GRAVITY * dt;
@@ -2778,7 +2802,7 @@
         const dz = camera.pos[2] - trigger.position[2];
         const dist = Math.hypot(dx, dz);
         const cooldownUntil = interactCooldownUntil.get(idx) || 0;
-        if (dist < trigger.radius * localAvatarHatInteractRangeMultiplier && t >= cooldownUntil && !(opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(trigger.marker))) {
+        if (dist < trigger.radius * localAvatarHatInteractRangeMultiplier * localAvatarExtras.interact && t >= cooldownUntil && !(opts.isMarkerAlreadyOwned && opts.isMarkerAlreadyOwned(trigger.marker))) {
           nearby.push({ idx, marker: trigger.marker, dist });
         }
       });
@@ -2796,7 +2820,7 @@
         const dz = camera.pos[2] - entry.position[2];
         const dist = Math.hypot(dx, dz);
         const cooldownUntil = interactCooldownUntil.get(dropId) || 0;
-        if (dist < entry.radius * localAvatarHatInteractRangeMultiplier && t >= cooldownUntil) {
+        if (dist < entry.radius * localAvatarHatInteractRangeMultiplier * localAvatarExtras.interact && t >= cooldownUntil) {
           nearby.push({ idx: dropId, marker: entry.marker, dist });
         }
       });
@@ -2980,9 +3004,10 @@
       // would put the camera inside its torso and fill the screen with the
       // shirt colour. The upper body is skipped then; legs and shoes stay.
       const upperBodyAboveEye = cameraDistance <= HEAD_VISIBLE_DISTANCE && characterScale * character.shoulderY > standingEyeY - 0.1;
-      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale, hideUpperBody, handUrl) => {
+      const drawCharacterAt = (base, swing, showHead, colors, hatColor, shoeColor, shoeScale, hideUpperBody, handUrl, extras) => {
         const shirtColor = colors && colors.shirtColor;
-        const pantsColor = colors && colors.pantsColor;
+        // A legs item overrides the outfit's trousers.
+        const pantsColor = (extras && extras.legs) || (colors && colors.pantsColor);
         const drawPart = (localMatrix, part, colorOverride) => {
           bindAndDraw({ vao: part.vao, color: colorOverride || part.color, modelMatrix: mat4Multiply(base, localMatrix) }, view, projection);
         };
@@ -2990,21 +3015,28 @@
           drawPart(mat4Translate(0, character.shoulderY, 0), character.head);
           if (hatColor) drawPart(mat4Translate(0, character.shoulderY, 0), character.hat, hatColor);
         }
+        const drawHeld = (url, armLocal) => {
+          if (!url) return;
+          ensureHandModel(url);
+          const held = handModels.get(url);
+          if (held && typeof held === 'object') {
+            const toHand = mat4Multiply(base, mat4Multiply(armLocal, held.matrix));
+            held.model.primitives.forEach((prim) => {
+              bindAndDraw({ vao: prim.vao, color: prim.color, modelMatrix: mat4Multiply(toHand, prim.nodeMatrix) }, view, projection);
+            });
+          }
+        };
         if (!hideUpperBody) {
           drawPart(mat4Translate(0, character.hipY, 0), character.torso, shirtColor);
-          drawPart(mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing)), character.armL);
+          if (extras && extras.neck) drawPart(mat4Translate(0, character.shoulderY, 0), character.neck, extras.neck);
+          const armLLocal = mat4Multiply(mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(swing));
+          drawPart(armLLocal, character.armL);
           const armRLocal = mat4Multiply(mat4Translate(character.shoulderOffsetX, character.shoulderY, 0), mat4RotateX(-swing));
           drawPart(armRLocal, character.armR);
-          if (handUrl) {
-            ensureHandModel(handUrl);
-            const held = handModels.get(handUrl);
-            if (held && typeof held === 'object') {
-              const toHand = mat4Multiply(base, mat4Multiply(armRLocal, held.matrix));
-              held.model.primitives.forEach((prim) => {
-                bindAndDraw({ vao: prim.vao, color: prim.color, modelMatrix: mat4Multiply(toHand, prim.nodeMatrix) }, view, projection);
-              });
-            }
-          }
+          if (extras && extras.gloves) { drawPart(armLLocal, character.gloveL, extras.gloves); drawPart(armRLocal, character.gloveR, extras.gloves); }
+          if (extras && extras.shoulders) { drawPart(armLLocal, character.padL, extras.shoulders); drawPart(armRLocal, character.padR, extras.shoulders); }
+          drawHeld(handUrl, armRLocal);
+          drawHeld(extras && extras.offHand, armLLocal);
         }
         const legLLocal = mat4Multiply(mat4Translate(-character.hipOffsetX, character.hipY, 0), mat4RotateX(-swing));
         const legRLocal = mat4Multiply(mat4Translate(character.hipOffsetX, character.hipY, 0), mat4RotateX(swing));
@@ -3016,7 +3048,7 @@
           drawPart(legRLocal, shoePair.shoeR, shoeColor);
         }
       };
-      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale, upperBodyAboveEye, localAvatarHandModel);
+      drawCharacterAt(charBase, limbSwing, cameraDistance > HEAD_VISIBLE_DISTANCE, localAvatarColors, localAvatarHatColor, localAvatarShoeColor, localAvatarShoeVisualScale, upperBodyAboveEye, localAvatarHandModel, localAvatarExtras);
 
       // Other visitors (#66) — interpolate each toward its last known
       // network position/yaw (upsertRemotePlayer, in the returned API,
@@ -3040,7 +3072,7 @@
         // player's arms/legs would turn to face the mirror of wherever
         // they're actually walking.
         const rpBase = mat4Multiply(mat4Translate(rp.x, rp.y, rp.z), mat4Multiply(mat4RotateY(-rp.yaw), mat4Scale(sceneCharacterScale)));
-        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor, rp.shoeColor, rp.shoeScale, false, rp.handModel); // always show the head — this is never our own first-person view
+        drawCharacterAt(rpBase, rpSwing, true, rp.colors, rp.hatColor, rp.shoeColor, rp.shoeScale, false, rp.handModel, rp.extras); // always show the head — this is never our own first-person view
       });
 
       rafId = requestAnimationFrame(frame);
@@ -3273,6 +3305,10 @@
         // The held item: an absolute http(s) URL or null. Checked here as well as by the presence server.
         const hasHandUpdate = 'handModel' in state;
         const handModel = (hasHandUpdate && typeof state.handModel === 'string' && /^https?:\/\/\S+$/i.test(state.handModel) && state.handModel.length <= 400) ? state.handModel : null;
+        // The other equipment slots arrive as flat fields; any of them present updates the whole set.
+        const EXTRA_KEYS = ['glovesColor', 'legsColor', 'shouldersColor', 'neckColor', 'offHandModel'];
+        const hasExtrasUpdate = EXTRA_KEYS.some((k) => k in state);
+        const extras = hasExtrasUpdate ? resolveAvatarExtras(state) : null;
         const existing = remotePlayers.get(id);
         if (existing) {
           existing.tx = x; existing.ty = y; existing.tz = z; existing.tyaw = yaw;
@@ -3281,8 +3317,9 @@
           if (hasShoeUpdate) existing.shoeColor = shoeColor;
           if (hasShoeScaleUpdate) existing.shoeScale = shoeScale;
           if (hasHandUpdate) existing.handModel = handModel;
+          if (hasExtrasUpdate) existing.extras = extras;
         } else {
-          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null, shoeColor: hasShoeUpdate ? shoeColor : null, shoeScale: hasShoeScaleUpdate ? shoeScale : null, handModel: hasHandUpdate ? handModel : null });
+          remotePlayers.set(id, { x, y, z, yaw, tx: x, ty: y, tz: z, tyaw: yaw, walkPhase: 0, colors: hasLookUpdate ? colors : null, hatColor: hasHatUpdate ? hatColor : null, shoeColor: hasShoeUpdate ? shoeColor : null, shoeScale: hasShoeScaleUpdate ? shoeScale : null, handModel: hasHandUpdate ? handModel : null, extras: hasExtrasUpdate ? extras : null });
         }
       },
       removeRemotePlayer: (id) => { remotePlayers.delete(id); },
@@ -3294,7 +3331,7 @@
       // interpolation is genuinely happening frame to frame.
       getRemotePlayerRenderState: (id) => {
         const rp = remotePlayers.get(id);
-        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null, shoeColor: rp.shoeColor || null, shoeScale: rp.shoeScale || null, handModel: rp.handModel || null } : null;
+        return rp ? { x: rp.x, y: rp.y, z: rp.z, yaw: rp.yaw, colors: rp.colors || null, hatColor: rp.hatColor || null, shoeColor: rp.shoeColor || null, shoeScale: rp.shoeScale || null, handModel: rp.handModel || null, extras: rp.extras || null } : null;
       },
       // Live setter for this viewer's OWN equipped look (the wallet-card
       // equip/unequip action) — same "no scene reload needed" treatment as
@@ -3326,6 +3363,9 @@
       },
       // Live setter for the hand slot: { handModel: URL } or null to empty the hand.
       setLocalAvatarHand: (hand) => { localAvatarHandModel = (hand && hand.handModel) || null; },
+      // The other equipment slots, see resolveAvatarExtras().
+      setLocalAvatarExtras: (extras) => { localAvatarExtras = resolveAvatarExtras(extras); },
+      getLocalAvatarExtras: () => localAvatarExtras,
       // Debug/test hooks: the local held-item URL, and whether its model has loaded ('loading' | 'ready' |
       // 'failed' | null with nothing held).
       getLocalAvatarHandModel: () => localAvatarHandModel,
@@ -3663,20 +3703,25 @@
     // character.
     let shoeColor = hexToRgba01(opts.avatarShoes && opts.avatarShoes.shoeColor);
     let shoeScale = (opts.avatarShoes && opts.avatarShoes.visualScale) || 1;
-    // The held item: { handModel: URL } from wallet.js's getAvatarHand(). Its model is fetched under the same
-    // limits as a dropped item and uploaded to this preview's own context; a failed load leaves the hand empty.
-    let handUrl = null, held = null, handToken = 0;
-    function setHandModel(url) {
-      const token = ++handToken;
-      handUrl = url || null;
-      if (held) { try { releaseModelGpu(gl, held.model); } catch (e) { /* context may already be gone */ } held = null; }
+    // The held items: the hand slot ({ handModel: URL } from wallet.js's getAvatarHand()) and the off hand
+    // (extras.offHand). Each model is fetched under the same limits as a dropped item and uploaded to this
+    // preview's own context; a failed load leaves that hand empty.
+    const heldSlots = { hand: { url: null, held: null, token: 0 }, offHand: { url: null, held: null, token: 0 } };
+    function setHeldModel(name, url) {
+      const slot = heldSlots[name];
+      const token = ++slot.token;
+      slot.url = url || null;
+      if (slot.held) { try { releaseModelGpu(gl, slot.held.model); } catch (e) { /* context may already be gone */ } slot.held = null; }
       if (!url) return;
       buildModel(gl, url, undefined, undefined, DEFAULT_DROP_POLICY).then((model) => {
-        if (lost || token !== handToken) { try { releaseModelGpu(gl, model); } catch (e) { /* ignore */ } return; }
-        held = { model, matrix: handItemMatrix(character, model.bounds) };
-      }, (err) => { console.warn('hand model not shown in preview:', url, err && err.message); });
+        if (lost || token !== slot.token) { try { releaseModelGpu(gl, model); } catch (e) { /* ignore */ } return; }
+        slot.held = { model, matrix: handItemMatrix(character, model.bounds) };
+      }, (err) => { console.warn(name + ' model not shown in preview:', url, err && err.message); });
     }
+    function setHandModel(url) { setHeldModel('hand', url); }
+    let extras = resolveAvatarExtras(opts.avatarExtras);
     setHandModel(opts.avatarHand && opts.avatarHand.handModel);
+    setHeldModel('offHand', extras.offHand);
 
     // Frame the whole standing character, same "fit to view" idea as
     // previewModel()'s bounding-radius camera, sized off the character's
@@ -3728,11 +3773,17 @@
       drawPart(base, mat4Translate(0, character.shoulderY, 0), character.head, null, projection);
       if (hatColor) drawPart(base, mat4Translate(0, character.shoulderY, 0), character.hat, hatColor, projection);
       drawPart(base, mat4Translate(0, character.hipY, 0), character.torso, colors && colors.shirtColor, projection);
-      drawPart(base, mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0), character.armL, null, projection);
+      if (extras.neck) drawPart(base, mat4Translate(0, character.shoulderY, 0), character.neck, extras.neck, projection);
+      const armLLocal = mat4Translate(-character.shoulderOffsetX, character.shoulderY, 0);
       const armRLocal = mat4Translate(character.shoulderOffsetX, character.shoulderY, 0);
+      drawPart(base, armLLocal, character.armL, null, projection);
       drawPart(base, armRLocal, character.armR, null, projection);
-      if (held) {
-        const toHand = mat4Multiply(base, mat4Multiply(armRLocal, held.matrix));
+      if (extras.gloves) { drawPart(base, armLLocal, character.gloveL, extras.gloves, projection); drawPart(base, armRLocal, character.gloveR, extras.gloves, projection); }
+      if (extras.shoulders) { drawPart(base, armLLocal, character.padL, extras.shoulders, projection); drawPart(base, armRLocal, character.padR, extras.shoulders, projection); }
+      [[heldSlots.hand, armRLocal], [heldSlots.offHand, armLLocal]].forEach(([slot, armLocal]) => {
+        const held = slot.held;
+        if (!held) return;
+        const toHand = mat4Multiply(base, mat4Multiply(armLocal, held.matrix));
         held.model.primitives.forEach((prim) => {
           const v = prim.vao;
           const model = mat4Multiply(toHand, prim.nodeMatrix);
@@ -3758,11 +3809,12 @@
             gl.drawArrays(gl.TRIANGLES, 0, v.indexCount);
           }
         });
-      }
+      });
       const legLLocal = mat4Translate(-character.hipOffsetX, character.hipY, 0);
       const legRLocal = mat4Translate(character.hipOffsetX, character.hipY, 0);
-      drawPart(base, legLLocal, character.legL, colors && colors.pantsColor, projection);
-      drawPart(base, legRLocal, character.legR, colors && colors.pantsColor, projection);
+      const pantsOverride = extras.legs || (colors && colors.pantsColor);
+      drawPart(base, legLLocal, character.legL, pantsOverride, projection);
+      drawPart(base, legRLocal, character.legR, pantsOverride, projection);
       if (shoeColor) {
         const shoePair = getShoeGeometryForScale(gl, character, shoeScale);
         drawPart(base, legLLocal, shoePair.shoeL, shoeColor, projection);
@@ -3789,6 +3841,11 @@
       },
       // The hand slot: accepts { handModel: URL } or null for an empty hand.
       setHand(hand) { setHandModel(hand && hand.handModel); },
+      // The other equipment slots, see resolveAvatarExtras().
+      setExtras(next) { extras = resolveAvatarExtras(next); setHeldModel('offHand', extras.offHand); },
+      getExtras: () => extras,
+      getOffHandModel: () => heldSlots.offHand.url,
+      isOffHandModelLoaded: () => !!heldSlots.offHand.held,
       // Same live-update treatment for the Size slider, in case this panel
       // is open while it's dragged.
       setScale(s) { scale = clampCharacterScale(s); },
@@ -3798,13 +3855,13 @@
       getHatColor: () => hatColor,
       getShoeColor: () => shoeColor,
       getShoeVisualScale: () => shoeScale,
-      getHandModel: () => handUrl,
-      isHandModelLoaded: () => !!held,
+      getHandModel: () => heldSlots.hand.url,
+      isHandModelLoaded: () => !!heldSlots.hand.held,
       dispose() {
         if (lost) return;
         lost = true;
         if (rafId !== null) cancelAnimationFrame(rafId);
-        if (held) { releaseModelGpu(gl, held.model); held = null; }
+        Object.keys(heldSlots).forEach((k) => { const h = heldSlots[k]; if (h.held) { releaseModelGpu(gl, h.held.model); h.held = null; } });
         gl.deleteTexture(prog.fallbackTexture);
         adjustLiveTextures(gl, -1);
         const loseCtx = gl.getExtension('WEBGL_lose_context');

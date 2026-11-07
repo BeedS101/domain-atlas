@@ -140,6 +140,18 @@ function connect() {
     if (echoedToSelf) throw new Error('A should not receive its own move broadcast back');
     console.log('PASS: move broadcast correct, no self-echo');
 
+    console.log('STEP 3b: worn parts ride along with a move; malformed values are dropped');
+    const lamp = 'https://example.com/assets/lantern.glb';
+    await new Promise((r) => setTimeout(r, 60));
+    a.send({ type: 'move', x: 1.5, y: 0, z: -2.25, yaw: 0.7, glovesColor: '#c0392b', legsColor: '#2c3e9a', shouldersColor: '#d4a017', neckColor: '#8e44ad', offHandModel: lamp });
+    let worn = await b.next();
+    if (worn.glovesColor !== '#c0392b' || worn.legsColor !== '#2c3e9a' || worn.shouldersColor !== '#d4a017' || worn.neckColor !== '#8e44ad' || worn.offHandModel !== lamp) throw new Error('Worn parts did not reach B: ' + JSON.stringify(worn));
+    await new Promise((r) => setTimeout(r, 60));
+    a.send({ type: 'move', x: 1.5, y: 0, z: -2.25, yaw: 0.7, glovesColor: 5, legsColor: {}, offHandModel: 'javascript:alert(1)' });
+    worn = await b.next();
+    if (worn.glovesColor != null || worn.legsColor != null || worn.offHandModel != null) throw new Error('Malformed worn values should be dropped: ' + JSON.stringify(worn));
+    console.log('PASS: worn parts relayed and validated over the socket');
+
     console.log('STEP 4: a client in a DIFFERENT room (different world) is isolated — never sees A or B\'s traffic');
     const c = await connect();
     c.send({ type: 'join', domain: 'localhost:8001', world: 'plaza', name: 'Carol' });

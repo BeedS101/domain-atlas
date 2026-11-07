@@ -443,6 +443,8 @@ let localAvatarShoesInfo = null;
 // And for the fourth (hand) slot: { handModel: URL } from wallet.js's getAvatarHand(). Kept in sync by
 // applyAvatarHandToScene().
 let localAvatarHandInfo = null;
+// The remaining equipment slots as renderer-ready extras (see wallet.js avatarExtrasFromSlots()).
+let localAvatarExtrasInfo = null;
 
 // Settings -> Player character's live preview (MiniGLTF.previewCharacter())
 // — only exists while the Settings screen is actually open (see
@@ -492,6 +494,14 @@ async function applyAvatarHandToScene(resolved) {
   if (characterPreview && characterPreview.setHand) characterPreview.setHand(localAvatarHandInfo);
 }
 
+// Same as applyAvatarHandToScene() above, for the other equipment slots. `resolved` is the extras object when
+// the caller has already worked it out.
+async function applyAvatarExtrasToScene(resolved) {
+  localAvatarExtrasInfo = resolved !== undefined ? resolved : await AtlasWallet.getAvatarExtras();
+  if (active3D && active3D.setLocalAvatarExtras) active3D.setLocalAvatarExtras(localAvatarExtrasInfo);
+  if (characterPreview && characterPreview.setExtras) characterPreview.setExtras(localAvatarExtrasInfo);
+}
+
 function currentLocalPose() {
   if (!active3D) return null;
   const pos = active3D.camera.pos;
@@ -516,7 +526,13 @@ function currentLocalPose() {
     // no hatScale to broadcast alongside hatColor.
     shoeScale: (localAvatarShoesInfo && localAvatarShoesInfo.visualScale) || null,
     // The held item's model URL, which other players load under the world-drop limits.
-    handModel: (localAvatarHandInfo && localAvatarHandInfo.handModel) || null
+    handModel: (localAvatarHandInfo && localAvatarHandInfo.handModel) || null,
+    // Only the visible parts of the other slots travel; their buffs only affect the wearer's own controls.
+    glovesColor: (localAvatarExtrasInfo && localAvatarExtrasInfo.glovesColor) || null,
+    legsColor: (localAvatarExtrasInfo && localAvatarExtrasInfo.legsColor) || null,
+    shouldersColor: (localAvatarExtrasInfo && localAvatarExtrasInfo.shouldersColor) || null,
+    neckColor: (localAvatarExtrasInfo && localAvatarExtrasInfo.neckColor) || null,
+    offHandModel: (localAvatarExtrasInfo && localAvatarExtrasInfo.offHandModel) || null
   };
 }
 
@@ -2535,6 +2551,7 @@ async function enterWorld(worldId, anchorId) {
       localAvatarHatInfo = await AtlasWallet.getAvatarHat();
       localAvatarShoesInfo = await AtlasWallet.getAvatarShoes();
       localAvatarHandInfo = await AtlasWallet.getAvatarHand();
+      localAvatarExtrasInfo = await AtlasWallet.getAvatarExtras();
 
       active3D = MiniGLTF.init(scene3dCanvas, {
         // gltf-mini.js reads sceneData.camera.start once, at init time, as
@@ -2656,6 +2673,7 @@ async function enterWorld(worldId, anchorId) {
         localAvatarShoes: localAvatarShoesInfo,
         // The held item (hand slot), seeded the same way.
         localAvatarHand: localAvatarHandInfo,
+        localAvatarExtras: localAvatarExtrasInfo,
         // Scene asset download progress (#36) — see updateSceneLoadProgress()
         // above and loadScene()'s own comment in gltf-mini.js for why this
         // counts unique models, not placed instances.
@@ -6948,12 +6966,47 @@ const CHARACTER_SLOTS = {
   }
 };
 
+// The slots stored together by wallet.js (setAvatarSlot): their value is the whole extras object.
+const EXTRA_SLOT_DEFS = [
+  ['offhand', 'Off hand', 'Nothing in off hand', 'Shown in your left hand', 'Put it away'],
+  ['gloves', 'Gloves', 'No gloves on', '', 'Take gloves off'],
+  ['legs', 'Legs', 'No leg armour', '', 'Take legs off'],
+  ['shoulders', 'Shoulders', 'No shoulder pads', '', 'Take shoulders off'],
+  ['neck', 'Neck', 'Nothing on neck', '', 'Take it off'],
+  ['ring1', 'Ring 1', 'No ring', '', 'Take ring off'],
+  ['ring2', 'Ring 2', 'No ring', '', 'Take ring off'],
+  ['trinket1', 'Trinket 1', 'No trinket', '', 'Remove trinket'],
+  ['trinket2', 'Trinket 2', 'No trinket', '', 'Remove trinket']
+];
+const EXTRA_SLOT_IDS = EXTRA_SLOT_DEFS.map((d) => d[0]);
+for (const [id, label, empty, note, unequip] of EXTRA_SLOT_DEFS) {
+  CHARACTER_SLOTS[id] = {
+    label, empty, unequip, extra: true,
+    getId: () => AtlasWallet.getAvatarSlotAssetId(id), setId: (assetId) => AtlasWallet.setAvatarSlot(id, assetId),
+    meta: (asset) => {
+      const p = (asset && asset.properties) || {};
+      const buffs = buffSummary(Number(p['atlas.avatar.speedMultiplier']) || 1, Number(p['atlas.avatar.jumpMultiplier']) || 1, Number(p['atlas.avatar.interactRangeMultiplier']) || 1);
+      return [note, buffs].filter(Boolean).join(' · ');
+    }
+  };
+}
+
 function buffSummary(speed, jump, reach) {
   const parts = [];
   if (speed && speed !== 1) parts.push('speed ×' + speed);
   if (jump && jump !== 1) parts.push('jump ×' + jump);
   if (reach && reach !== 1) parts.push('reach ×' + reach);
   return parts.join(' · ');
+}
+
+// The extras object for what is equipped in the extra slots, from a wallet and an equipped map.
+function extrasFromEquipped(wallet, equipped) {
+  const assets = {};
+  for (const id of EXTRA_SLOT_IDS) {
+    const entry = equipped[id] ? wallet.find((e) => e.credential.id === equipped[id]) : null;
+    assets[id] = entry ? entry.credential.asset : null;
+  }
+  return AtlasWallet.avatarExtrasFromSlots(assets);
 }
 
 let selectedCharacterSlot = null;
@@ -7014,7 +7067,9 @@ async function refreshCharacterWindow(wallet, equipped) {
 
 async function readEquippedSlots() {
   const out = {};
-  for (const slot of Object.keys(CHARACTER_SLOTS)) out[slot] = await CHARACTER_SLOTS[slot].getId();
+  for (const slot of ['hat', 'outfit', 'shoes', 'hand']) out[slot] = await CHARACTER_SLOTS[slot].getId();
+  Object.assign(out, await AtlasWallet.getAvatarSlotIds());
+  for (const id of EXTRA_SLOT_IDS) if (!out[id]) out[id] = null;
   return out;
 }
 
@@ -7071,9 +7126,18 @@ async function equipCharacterSlot(slot, assetId) {
   const entry = assetId ? wallet.find((e) => e.credential.id === assetId) : null;
   if (assetId && !entry) return;
   await def.setId(assetId);
-  await def.apply(entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null);
+  // An item moves rather than sitting in two slots, and the hand and off hand never share one, so what
+  // is equipped is read back rather than patched.
+  const equipped = await readEquippedSlots();
+  if (def.extra) {
+    await applyAvatarExtrasToScene(extrasFromEquipped(wallet, equipped));
+    if (slot === 'offhand') await applyAvatarHandToScene();
+  } else {
+    await def.apply(entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null);
+    if (slot === 'hand') await applyAvatarExtrasToScene(extrasFromEquipped(wallet, equipped));
+  }
   if (characterStatusEl) characterStatusEl.textContent = assetId ? def.label + ' equipped.' : def.label + ' cleared.';
-  await refreshCharacterWindow(wallet, { ...(characterWindowState ? characterWindowState.equipped : await readEquippedSlots()), [slot]: assetId || null });
+  await refreshCharacterWindow(wallet, equipped);
   refreshInventoryDisplay().catch(() => {});
 }
 
@@ -7086,7 +7150,7 @@ async function openCharacterScreen() {
   const wallet = await readOwnWallet();
   const equipped = await readEquippedSlots();
   const look = {};
-  for (const slot of Object.keys(CHARACTER_SLOTS)) {
+  for (const slot of ['hat', 'outfit', 'shoes', 'hand']) {
     const entry = equipped[slot] ? wallet.find((e) => e.credential.id === equipped[slot]) : null;
     look[slot] = entry ? CHARACTER_SLOT_PROPS[slot](entry.credential.asset) : null;
   }
@@ -7103,7 +7167,8 @@ async function openCharacterScreen() {
       avatarLook: look.outfit,
       avatarHat: look.hat,
       avatarShoes: look.shoes,
-      avatarHand: look.hand
+      avatarHand: look.hand,
+      avatarExtras: extrasFromEquipped(wallet, equipped)
     });
     window.__atlasCharacterPreview = characterPreview;
   } catch (err) {
