@@ -24,7 +24,7 @@ function atlas_install_pinned_files(): array {
         'config.example.php' => ['a210edd57036487c3601a8f44676574bd0baaea3035ce55124e838a4e62ae0df', 1558],
         'lib/.htaccess' => ['2635c4f28759072aaf54159e7b0254113f64a43b194a2de2be7ffb04a1d16224', 206],
         'lib/atlas-verify-crypto.php' => ['6332afb3901779450fef620a96be834f718c00084a52f256bc895f5540104a5f', 6734],
-        'lib/atlas-verify-fetch.php' => ['3b1d91f15ef620a96be834f718c00084a52f256bc895f5540104a5f', 3678],
+        'lib/atlas-verify-fetch.php' => ['3b1d91f15ef7f9d12f5571a91d67abc72861a9bfd319718b51c335a772266afa', 3678],
         'lib/atlas-verify.php' => ['27845fce4ae30afa89119b99c59ad7113f3f13b4ebf70c5ddd7df6a0a1ef3b9c', 21880],
         'verify.php' => ['c1b3fc95a6258b7d3723d60b5350706e9a0dfff2949cd85c3d0dc6850b5300e4', 5163],
     ];
