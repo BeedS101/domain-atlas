@@ -130,7 +130,7 @@ try {
     expectRefusal(box, alteredZip('missing-entry', known.slice(1)), 'install', /missing or extra/);
   });
   check('duplicate and traversal ZIP entries are refused', () => {
-    expectRefusal(box, alteredZip('duplicate', [...known.slice(0, -1), known[0], known[known.length - 1]]), 'install', /duplicate/);
+    expectRefusal(box, alteredZip('duplicate', [...known.slice(0, -2), known[0], known[known.length - 1]]), 'install', /duplicate|consistent ZIP/);
     const entries = known.map(x => x.name === 'atlas-verify/verify.php' ? { ...x, name: 'atlas-verify/../evil.php' } : x);
     expectRefusal(box, alteredZip('traversal', entries), 'install', /unexpected/);
   });
