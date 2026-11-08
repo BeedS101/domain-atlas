@@ -1,0 +1,102 @@
+# Runs the verifier package suite (build, independent archive check, content audit, live credentials from a
+# throw-away issuer-php) on every push and pull request. It deploys nothing and needs no secrets.
+name: verifier-package
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verifier-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }}${{ matrix.experimental && ' (informational)' || '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - php: '8.3'
+            experimental: false
+          - php: '8.1'
+            experimental: false
+          # The package targets PHP 7.4; this run is the first real check of that claim and does not block merges
+          # until it has been seen green.
+          - php: '7.4'
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, openssl, json, mbstring
+          coverage: none
+          ini-values: display_errors=Off
+
+      - name: Versions
+        run: |
+          node --version
+          php --version
+          python3 --version
+
+      - name: Source files still match the manifest lock
+        run: node tools/package/build-package.js packages/atlas-verify/manifest.json --check
+
+      - name: Build the archive
+        run: node tools/package/build-package.js packages/atlas-verify/manifest.json --out "$RUNNER_TEMP/packages"
+
+      - name: Independent archive check and published checksum
+        run: |
+          version="$(tr -d '[:space:]' < verifier-php/VERSION)"
+          python3 -I tools/package/check-package.py packages/atlas-verify/manifest.json "$RUNNER_TEMP/packages/atlas-verify-${version}.zip"
+          cd "$RUNNER_TEMP/packages" && sha256sum -c "atlas-verify-${version}.zip.sha256"
+
+      - name: Package audit reads PHP 8 and PHP 7.4 tokens the same way
+        run: node test/verifier-audit-tokens.js
+
+      - name: Verifier package test suite
+        run: node test/verifier-package.js
+
+      - name: Endpoint abuse limits
+        run: node test/verifier-endpoint-abuse.js
+
+      - name: Protocol limits (unsigned issuer identity and label)
+        run: node test/verifier-protocol-limits.js
+
+      - name: Private configuration outside the web root
+        run: node test/verifier-private-config.js
+
+      - name: Issuer suspension list (PHP)
+        run: node test/issuer-suspension-list-php.js
+
+      - name: Issuer admin status reads (PHP)
+        run: node test/admin-site-status-php.js
+
+      - name: Other code that changes the suspension list (PHP)
+        run: |
+          node test/manual-suspend-php.js
+          node test/manual-clawback-php.js
+          node test/manual-delivery-hold-recovery.js
+
+      - name: Keep the archive and checksums
+        if: matrix.php == '8.3'
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-verify-package
+          path: |
+            ${{ runner.temp }}/packages/atlas-verify-*.zip
+            ${{ runner.temp }}/packages/atlas-verify-*.sha256
+          if-no-files-found: error
+          retention-days: 14

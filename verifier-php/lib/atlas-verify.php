@@ -26,13 +26,14 @@ if (PHP_SAPI !== 'cli' && isset($_SERVER['SCRIPT_FILENAME']) && realpath($_SERVE
 require_once __DIR__ . '/atlas-verify-crypto.php';
 require_once __DIR__ . '/atlas-verify-fetch.php';
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const CREDENTIAL_TYPE = 'domain-atlas-asset/1.0';
 const MAX_CREDENTIAL_BYTES = 262144;
 const MAX_KEY_DOCUMENT_BYTES = 262144;
 const MAX_STATUS_DOCUMENT_BYTES = 4194304;
 const MAX_STATUS_ENTRIES = 20000;
 const MAX_KEY_ENTRIES = 1000;
+const MAX_REASON_CHARACTERS = 200;
 const MAX_SAFE_INTEGER = 9007199254740991;
 
 // ---------- configuration ----------
@@ -132,6 +133,11 @@ function parse_time($value) {
   return $seconds + $fraction;
 }
 
+// At most $max characters (not bytes) of $text, so a long issuer-supplied string cannot inflate a verdict or be cut inside a character.
+function clip_text($text, $max) {
+  return preg_match('/^.{0,' . (int) $max . '}/su', $text, $m) === 1 ? $m[0] : '';
+}
+
 function prop($object, $name) {
   return is_object($object) && property_exists($object, $name) ? $object->$name : null;
 }
@@ -195,7 +201,7 @@ function revocation_ids($doc) {
   foreach ($list as $entry) {
     $id = prop($entry, 'id');
     if (!($entry instanceof \stdClass) || !is_string($id) || $id === '') return null;
-    $ids[$id] = is_string(prop($entry, 'reason')) ? prop($entry, 'reason') : null;
+    $ids[$id] = is_string(prop($entry, 'reason')) ? clip_text(prop($entry, 'reason'), MAX_REASON_CHARACTERS) : null;
   }
   return $ids;
 }
