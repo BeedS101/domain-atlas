@@ -207,7 +207,7 @@ async function main() {
     await assertResult('valid upload passes preflight without touching destination', async () => {
       const r = await request(srv, 'POST');
       assert.equal(r.status, 200, r.text);
-      assert.match(r.text, /Preflight passed/);
+      assert.match(r.text, /preflight passed/i);
       assert.equal(fs.existsSync(path.join(documentRoot, 'atlas-verify')), false);
       assert.equal(fs.existsSync(path.join(privateDir, 'verify-config.php')), false);
     });
