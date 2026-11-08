@@ -5,7 +5,7 @@
 ## Purpose and limits
 
 - Installs **only** the fixed atlas-verify **0.1.1** package, once, in an empty atlas-verify/ directory in a separately configured test website.
-- Checks the archive against immutable path, size and SHA-256 locks embedded in verified-install.php. It ignores untrusted paths in the ZIP and refuses additions, omissions, duplicates, symlinks and corrupted files. No remote download URLs, no Composer and no shell commands.
+- Checks the **complete reproducible 0.1.1 ZIP** against its pinned SHA-256 (`e3a431fdc124beba68e157845bcb2f7a6ad11751c7d92774dfbd021ef6a9b365`), as well as the immutable path, size and SHA-256 locks embedded in verified-install.php. It ignores untrusted paths in the ZIP and refuses additions, omissions, duplicates, symlinks and corrupted files. No remote download URLs, no Composer and no shell commands.
 - Generates private verifier configuration itself from a server-side allowlist of HTTPS issuers. Defaults to required suspension documents. No issuer, wallet, keys, revocation lists, Domain Atlas Core or live services are modified.
 - Before writing anything, validates the test-domain marker, separate writable private directory (0700), trusted issuers and absence of any existing installation. Uses a staged package and an atomic directory rename, and refuses overwrites.
 - Has an authenticated HTTPS-only web front-end. The operator provisions the installer settings **outside** the document root. There is no default password, no unauthenticated setup mode and no arbitrary destination path accepted from HTTP.
@@ -52,6 +52,7 @@ An auto-installer that accepts an arbitrary URL or arbitrary destination path co
 ## Automated tests
 
 - node test/verifier-verified-installer.js exercises preflight, modified ZIPs (extra/missing/duplicate/traversal entries, incorrect file hashes, changed PACKAGE.json), unsafe configuration, one-time installation, PHP configuration loading, existing-file refusal and no-write-on-refusal in throwaway directories.
+- node test/verifier-installer-http.js exercises the actual multipart upload endpoint, missing configuration, wrong host, missing HTTPS flag, invalid operator token, tampered ZIP, preflight, installation, replay refusal, and GET status from the installed verifier. It uses **loopback HTTP with an artificially set PHP HTTPS environment flag** and does **not** test real HTTPS/TLS or cPanel/proxy security.
 - GitHub Actions runs these tests on PHP 7.4, 8.1 and 8.3 with PHP zip enabled.
 - The pinned package builder, verifier cryptography, main issuer, live domains and original verifier package lock are unchanged.
 
