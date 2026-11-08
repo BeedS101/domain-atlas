@@ -2615,7 +2615,7 @@ function atlas_create_file_no_clobber($file, $text, $mode = 0644) {
     if (function_exists('fsync')) @fsync($fh);
     fclose($fh);
     if ($written !== strlen($text) || !$flushed) throw new Exception('could not write ' . $name . ' in full', 503);
-    atlas_fault_point('revocations:init-tmp-written');
+    atlas_fault_point($name === 'atlas-suspensions.json' ? 'suspensions:init-tmp-written' : 'revocations:init-tmp-written');
     if (@link($tmp, $file)) return true;
     if (file_exists($file) || is_link($file)) return false;
     // No hard links on this file system: create the file exclusively instead.
@@ -2684,7 +2684,23 @@ function atlas_initialise_revocations_for_new_issuer() {
     return;
   }
   @mkdir(dirname($file), 0755, true);
-  atlas_create_file_no_clobber($file, json_encode(['revoked' => []], JSON_PRETTY_PRINT), 0644);
+  if (atlas_create_file_no_clobber($file, json_encode(['revoked' => []], JSON_PRETTY_PRINT), 0644)) {
+    atlas_initialise_suspensions_for_new_issuer();
+  }
+}
+
+// A new issuer publishes an empty suspension list from the start, as issuer-server does at boot, so a verifier finds a
+// valid document instead of a 404 before the first suspension. Only reached for a brand-new issuer, right after its
+// empty revocation list was created; an existing deployment is never given one here. Best effort: a failure is logged
+// and the list is then created on first use, as before.
+function atlas_initialise_suspensions_for_new_issuer() {
+  $file = atlas_suspensions_file();
+  if (file_exists($file) || is_link($file)) return;
+  try {
+    atlas_create_file_no_clobber($file, json_encode(['suspended' => []], JSON_PRETTY_PRINT), 0644);
+  } catch (Exception $e) {
+    error_log('atlas: could not publish an empty suspension list: ' . $e->getMessage());
+  }
 }
 
 function load_or_create_keypair() {
@@ -2902,6 +2918,7 @@ function atlas_write_file_atomic($file, $text, $newMode = 0644) {
     if ($written !== strlen($text) || !$flushed) throw new Exception('could not write ' . $name . ' in full; the existing file was not changed', 503);
     @chmod($tmp, $perms);
     if ($file === atlas_revocations_file()) atlas_fault_point('txn:revoke-tmp-written');
+    if ($file === atlas_suspensions_file()) atlas_fault_point('suspensions:write-tmp-written');
     if (!@rename($tmp, $file)) throw new Exception('could not replace ' . $name . '; the existing file was not changed', 503);
     $ok = true;
     atlas_fsync_dir($dir);
@@ -3006,32 +3023,82 @@ function atlas_revoke($id, $reason) {
 // everything else in this file. Mirrors issuer-server/server.js's
 // readSuspensions()/findSuspension()/isSuspended().
 
-function read_suspensions() {
-  $file = atlas_suspensions_file();
-  $fh = fopen($file, 'c+');
-  if ($fh === false) return ['suspended' => []];
-  flock($fh, LOCK_EX);
-  $data = stream_get_contents($fh);
+// The list is state the issuer enforces and publishes, so it is never guessed at. A list that does not exist yet is
+// the only empty case (nothing has been suspended; an issuer that predates the published list has none until its first
+// suspension). A list that exists but is zero-length, is not valid JSON or has no "suspended" array is an error (503): a truncated write looks exactly like an empty file, and treating it as empty
+// would make every suspended credential spendable again and let the next write replace what was lost. The file is
+// left exactly as found, for the operator to inspect. Reading never creates the file: a zero-length file left by a
+// read could not be told apart from a truncated list afterwards.
+function atlas_suspensions_unavailable($reason) {
+  error_log('atlas: SUSPENSION LIST NOT USABLE: ' . $reason . ' (' . atlas_suspensions_file() . ' was left unchanged)');
+  return new Exception('the suspension list ' . $reason . '; refusing to treat it as empty and leaving it unchanged - restore ' .
+    'atlas-suspensions.json from a backup, or, if nothing was ever suspended, replace it with {"suspended": []}', 503);
+}
+
+function atlas_suspensions_parse($data) {
+  if ($data === false) throw atlas_suspensions_unavailable('could not be read');
+  if ($data === '') throw atlas_suspensions_unavailable('is empty (zero bytes)');
   $doc = json_decode($data, true);
-  if (!is_array($doc)) $doc = ['suspended' => []];
-  $now = time();
-  $changed = false;
-  $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($now, &$changed) {
-    $expiresAt = $s['expiresAt'] ?? null;
-    if ($expiresAt === null || strtotime($expiresAt) > $now) return true; // still in effect, keep
-    if (($s['onExpire'] ?? 'lift') === 'finalize') atlas_revoke($s['id'], 'redeemed');
-    $changed = true;
-    return false; // expired — drop it either way; 'finalize' already got its revoke above
-  }));
-  if ($changed) {
-    ftruncate($fh, 0);
-    rewind($fh);
-    fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-    fflush($fh);
-  }
-  flock($fh, LOCK_UN);
-  fclose($fh);
+  if (!is_array($doc)) throw atlas_suspensions_unavailable('is not valid JSON');
+  if (!isset($doc['suspended']) || !is_array($doc['suspended'])) throw atlas_suspensions_unavailable('has no "suspended" list');
   return $doc;
+}
+
+// Every read-modify-write holds an exclusive lock on a private lock file (not on the list: the list is replaced by
+// renaming a finished temporary file over it, so a reader, or the web server serving the published copy, sees the old
+// list or the new one, never a half-written or zero-length file).
+function atlas_suspensions_lock_file() {
+  return __DIR__ . '/atlas-suspensions.json.lock';
+}
+
+function atlas_suspensions_lock() {
+  $lock = @fopen(atlas_suspensions_lock_file(), 'c');
+  if ($lock === false) throw new Exception('could not open the suspension list lock', 503);
+  flock($lock, LOCK_EX);
+  return $lock;
+}
+
+function atlas_suspensions_unlock($lock) {
+  flock($lock, LOCK_UN);
+  fclose($lock);
+}
+
+// The parsed list, or null when there is none and $create is false. With $create, a missing list is first created whole
+// (a valid empty document linked into place in one step), so no writer ever exposes a zero-length file. Call with the
+// lock held.
+function atlas_suspensions_load($create) {
+  $file = atlas_suspensions_file();
+  clearstatcache(true, $file);
+  if (!file_exists($file) && !is_link($file)) {
+    if (!$create) return null;
+    atlas_create_file_no_clobber($file, json_encode(['suspended' => []], JSON_PRETTY_PRINT), 0644);
+  }
+  return atlas_suspensions_parse(@file_get_contents($file));
+}
+
+function atlas_suspensions_store($doc) {
+  atlas_write_file_atomic(atlas_suspensions_file(), json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+}
+
+function read_suspensions() {
+  $lock = atlas_suspensions_lock();
+  try {
+    $doc = atlas_suspensions_load(false);
+    if ($doc === null) return ['suspended' => []];
+    $now = time();
+    $changed = false;
+    $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($now, &$changed) {
+      $expiresAt = $s['expiresAt'] ?? null;
+      if ($expiresAt === null || strtotime($expiresAt) > $now) return true; // still in effect, keep
+      if (($s['onExpire'] ?? 'lift') === 'finalize') atlas_revoke($s['id'], 'redeemed');
+      $changed = true;
+      return false; // expired — drop it either way; 'finalize' already got its revoke above
+    }));
+    if ($changed) atlas_suspensions_store($doc);
+    return $doc;
+  } finally {
+    atlas_suspensions_unlock($lock);
+  }
 }
 
 function find_suspension($id) {
@@ -3055,42 +3122,33 @@ function is_suspended($id) {
 // duplicates; read_suspensions() above already resolved anything expired
 // before this function ever sees the list.
 function atlas_suspend($id, $reason, $expiresAt, $onExpire = 'lift') {
-  $file = atlas_suspensions_file();
-  $fh = fopen($file, 'c+');
-  flock($fh, LOCK_EX);
-  $data = stream_get_contents($fh);
-  $doc = json_decode($data, true);
-  if (!is_array($doc)) $doc = ['suspended' => []];
-  $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($id) { return ($s['id'] ?? null) !== $id; }));
-  $doc['suspended'][] = ['id' => $id, 'suspendedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason ?: 'issuer-request', 'expiresAt' => $expiresAt ?: null, 'onExpire' => $onExpire === 'finalize' ? 'finalize' : 'lift'];
-  ftruncate($fh, 0);
-  rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-  fflush($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
+  $lock = atlas_suspensions_lock();
+  try {
+    $doc = atlas_suspensions_load(true);
+    $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($id) { return ($s['id'] ?? null) !== $id; }));
+    $doc['suspended'][] = ['id' => $id, 'suspendedAt' => gmdate('Y-m-d\TH:i:s\Z'), 'reason' => $reason ?: 'issuer-request', 'expiresAt' => $expiresAt ?: null, 'onExpire' => $onExpire === 'finalize' ? 'finalize' : 'lift'];
+    atlas_suspensions_store($doc);
+  } finally {
+    atlas_suspensions_unlock($lock);
+  }
 }
 
 // Returns whether an entry was actually there to remove — lets the
 // endpoint tell an admin "there was nothing to lift" from "done" without
-// a separate lookup first.
+// a separate lookup first. A missing list has nothing to lift and is not created.
 function atlas_unsuspend($id) {
-  $file = atlas_suspensions_file();
-  $fh = fopen($file, 'c+');
-  flock($fh, LOCK_EX);
-  $data = stream_get_contents($fh);
-  $doc = json_decode($data, true);
-  if (!is_array($doc)) $doc = ['suspended' => []];
-  $before = count($doc['suspended']);
-  $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($id) { return ($s['id'] ?? null) !== $id; }));
-  $wasSuspended = count($doc['suspended']) !== $before;
-  ftruncate($fh, 0);
-  rewind($fh);
-  fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-  fflush($fh);
-  flock($fh, LOCK_UN);
-  fclose($fh);
-  return $wasSuspended;
+  $lock = atlas_suspensions_lock();
+  try {
+    $doc = atlas_suspensions_load(false);
+    if ($doc === null) return false;
+    $before = count($doc['suspended']);
+    $doc['suspended'] = array_values(array_filter($doc['suspended'], function ($s) use ($id) { return ($s['id'] ?? null) !== $id; }));
+    $wasSuspended = count($doc['suspended']) !== $before;
+    if ($wasSuspended) atlas_suspensions_store($doc);
+    return $wasSuspended;
+  } finally {
+    atlas_suspensions_unlock($lock);
+  }
 }
 
 // Suspension changes a demo route may make, each as one locked
@@ -3100,24 +3158,20 @@ function atlas_unsuspend($id) {
 //     none; returns false when one already exists.
 //   atlas_unsuspend_if_reason(): removes the suspension only when it carries
 //     $reason; returns 'none', 'removed' or 'other'.
-function atlas_suspensions_locked($fn) {
-  $fh = fopen(atlas_suspensions_file(), 'c+');
-  if ($fh === false) throw new Exception('could not open the suspension list', 503);
-  flock($fh, LOCK_EX);
+function atlas_suspensions_locked($fn, $create = true) {
+  $lock = atlas_suspensions_lock();
   try {
-    $doc = json_decode(stream_get_contents($fh), true);
-    if (!is_array($doc) || !isset($doc['suspended']) || !is_array($doc['suspended'])) $doc = ['suspended' => []];
-    list($changed, $result) = $fn($doc);
-    if ($changed) {
-      ftruncate($fh, 0);
-      rewind($fh);
-      fwrite($fh, json_encode($doc, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-      fflush($fh);
+    $doc = atlas_suspensions_load($create);
+    if ($doc === null) {
+      $empty = ['suspended' => []];
+      list($changed, $result) = $fn($empty);
+      return $result;
     }
+    list($changed, $result) = $fn($doc);
+    if ($changed) atlas_suspensions_store($doc);
     return $result;
   } finally {
-    flock($fh, LOCK_UN);
-    fclose($fh);
+    atlas_suspensions_unlock($lock);
   }
 }
 function atlas_suspend_if_free($id, $reason) {
@@ -3136,7 +3190,7 @@ function atlas_unsuspend_if_reason($id, $reason) {
       return [true, 'removed'];
     }
     return [false, 'none'];
-  });
+  }, false);
 }
 
 // See atlas_asset_history_file()'s own comment above. Called alongside

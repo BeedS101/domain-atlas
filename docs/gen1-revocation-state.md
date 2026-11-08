@@ -19,14 +19,18 @@ Only when the issuer key is generated, and only if nothing shows the deployment 
 
 Evidence that the deployment has been used, any one of which withholds the list:
 
-- a published `atlas-*.json` in `.well-known/` (key document, suspensions, reviewer key, or the list itself);
+- a published `atlas-*.json` in `.well-known/` (key document, suspensions, reviewer key, or the list itself). A new PHP
+  issuer publishes an empty `atlas-suspensions.json` together with its empty revocation list, so a copy that later loses
+  its key and list is treated as established, like any other copy with published state;
 - an `atlas-*.json` state file in the state folder (`ATLAS_STATE_DIR` for Node, `lib/` for PHP), such as a mail,
   subscriber, ledger, recovery or class-patch store. These do not count: files an operator places by hand before
   the first start (`*-config.json`, the admin roster, `atlas-trusted-trade-peers-store.json`,
   `atlas-federation-blocklist.json`) and stores that sign-in and throttling create before anything is issued
   (`atlas-admin-*`, `atlas-login-nonces-store.json`, `atlas-mail-nonces-store.json`,
   `atlas-federation-relay-rate-store.json`, `atlas-calendar-store.json`, `atlas-visits-store.json`);
-  A zero-length file is not evidence either (a store creates one when it is first read; it holds nothing);
+  A zero-length file is not evidence either (older code created one whenever the list was first read; it holds
+  nothing, so it proves nothing about a deployment). It is still never treated as an empty suspension list: see
+  section 8;
 - the reviewer private key;
 - anything in `replay/`, `holdings/` or `txn/` (dotfiles such as `.htaccess` do not count), including the
   `atlas-private-dir.txt` folder and `lib/` for PHP;
@@ -78,7 +82,7 @@ cannot produce a list it would itself refuse.
   together; `test/manual-museum-ticket-stall.js` and `test/manual-domain-identity-pin.js` do this.
 - Node and PHP behave the same for every row in sections 1 and 2; the differences are only where the refusal
   appears (Node: per operation after a logged start; PHP: per request).
-- Not changed: the suspensions list (still recreated when missing), key rotation and the published key document,
+- The suspension list is handled separately and more cautiously than before: see section 8. Not changed: key rotation and the published key document,
   mining rewards, holding limits.
 
 ## 5. A new issuer, and a wrongly withheld list
@@ -130,3 +134,36 @@ cannot produce a list it would itself refuse.
 | S11 | a crash while the list is being created; a list that already exists is kept when the key is generated |
 | S12 | simultaneous first starts (16 PHP requests; two Node processes) |
 | parity | the statuses from S3, S5 and S6 are compared between Node and PHP |
+
+## 8. The suspension list (PHP issuer)
+
+`.well-known/atlas-suspensions.json` is published and enforced like the revocation list, so the PHP issuer treats it with
+the same rule: state that exists is never guessed at or replaced. It differs in one way. An issuer installed before the
+list was published has none until its first suspension, and that is legitimate.
+
+| State of the file | Behaviour |
+|---|---|
+| New issuer (key being generated, no evidence of use) | a valid `{"suspended": []}` is created together with the empty revocation list, as a finished temporary file linked into place in one step, so a reader sees no file or the whole file and concurrent first requests end with exactly one list. An existing file is never replaced, whatever it holds. A crash in the middle leaves no list (the issuer then behaves as an older one), never a zero-length or partial one |
+| Missing, key exists | nothing is suspended; reads, spends and unsuspends create nothing; the first suspension creates the list whole |
+| Valid | read and changed as before; each change writes a finished temporary file and renames it over the list under a lock file (`lib/atlas-suspensions.json.lock`), so the published list is never partly written |
+| Zero-length, not valid JSON (truncated), not an object, or without a `suspended` array | 503 for everything that reads or changes the list: spends and other presentation checks, suspend, unsuspend, the admin list. The file is not touched, copied or replaced; the refusal is logged with the path. Issuing a new credential does not consult the list and keeps working. The published file is whatever is on disk, so verifiers see an unreadable document and answer `unavailable` |
+
+A zero-length file cannot be told apart from a truncated list: old code created one whenever the list was first read,
+and an interrupted in-place rewrite produced the same file. The issuer therefore never decides which it is. Entries with
+no id or of the wrong type are still tolerated and kept, as the admin screen already expects.
+
+Recovery is a decision of the operator, who has the backups and knows the history:
+
+1. Do not delete or edit anything yet. Note the file's size and modified time, and copy it away if it has any content.
+2. If a backup of `.well-known/atlas-suspensions.json` exists, restore the newest one. Suspensions made after that backup are
+   not in it; re-apply those from your own records.
+3. If the issuer has never suspended anything (or every suspension has been lifted) replace the file with exactly
+   `{"suspended": []}` (mode 644, owned by the PHP account). From the next request the issuer works again.
+4. With neither a backup nor certainty, treat the suspension history as lost and decide whether the held credentials
+   must be re-suspended by hand; the issuer cannot reconstruct it.
+
+Site Doctor (`docs/site-doctor.md`) already reports an unreadable list with the same advice. Before upgrading an issuer, check `.well-known/atlas-suspensions.json`: a size of 0 means that, after the upgrade,
+spends are refused until step 2 or 3 above. A missing file needs nothing.
+
+Tests: `node test/issuer-suspension-list-php.js` (new issuer, simultaneous starts, crash during creation and during a
+write, missing list, eight kinds of unreadable list, parallel writers, recovery by the operator).

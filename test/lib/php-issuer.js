@@ -1,7 +1,9 @@
 // Starts a throw-away copy of issuer-php on a free local port, with a fresh key and no inherited state, and offers the
 // few operations a credential's life needs: issue, split, revoke, suspend, unsuspend.
 //
-//   const issuer = await startIssuer();     issuer.base, issuer.origin, issuer.domain, issuer.requests (every request line)
+//   const issuer = await startIssuer();     issuer.base, issuer.origin, issuer.domain, issuer.dir, issuer.requests (every request line)
+//   startIssuer({ prepare(bundleDir) {}, env: {}, workers: 1 })  prepare runs on the fresh copy before the server starts; env is
+//                                           added to the server's environment; workers > 1 serves requests in parallel
 //   await issuer.issue(ownerPublicKey, 'atlas.badge', 1)
 //   await issuer.stop();                    stops the server and deletes the copy
 'use strict';
@@ -33,17 +35,20 @@ function rawPublicKey(publicKey) {
   return Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]).toString('base64url');
 }
 
-async function startIssuer() {
+async function startIssuer(options) {
+  options = options || {};
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-issuer-'));
   const bundle = path.join(dir, 'issuer');
   fs.cpSync(path.join(REPO, 'issuer-php'), bundle, { recursive: true });
   cleanIssuerPhpState(bundle);
+  if (options.prepare) options.prepare(bundle);
   const adminPair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const adminKey = rawPublicKey(adminPair.publicKey);
   fs.writeFileSync(path.join(bundle, 'lib', 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: adminKey, addedAt: new Date().toISOString() }] }));
   const port = await freePort();
   const requests = [];
-  const proc = spawn('php', ['-d', 'opcache.enable=0', '-S', 'localhost:' + port, 'test-router.php'], { cwd: bundle, stdio: ['ignore', 'ignore', 'pipe'] });
+  const env = Object.assign({}, process.env, options.workers > 1 ? { PHP_CLI_SERVER_WORKERS: String(options.workers) } : {}, options.env || {});
+  const proc = spawn('php', ['-d', 'opcache.enable=0', '-S', 'localhost:' + port, 'test-router.php'], { cwd: bundle, env, stdio: ['ignore', 'ignore', 'pipe'] });
   let started = false;
   proc.stderr.on('data', (chunk) => {
     for (const line of chunk.toString().split('\n')) {
@@ -86,6 +91,8 @@ async function startIssuer() {
     revoke: (id, reason) => ok(adminRequest('/atlas/revoke', { id, reason: reason || 'test' }), 'revoke'),
     suspend: (id, fields) => ok(adminRequest('/atlas/suspend', Object.assign({ id }, fields || {})), 'suspend'),
     unsuspend: (id) => ok(adminRequest('/atlas/unsuspend', { id }), 'unsuspend'),
+    post,
+    admin: adminRequest,
     published: async (name) => { const r = await fetch(base + '/.well-known/' + name); return { status: r.status, text: await r.text() }; },
     stop: async () => {
       proc.kill();

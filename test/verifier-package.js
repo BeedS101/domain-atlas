@@ -315,24 +315,33 @@ const randomDouble = () => { const b = Buffer.alloc(8); for (let i = 0; i < 8; i
   const owner = newOwner();
   const badge = await issuer.issue(owner, 'atlas.badge');
   const first = await verify(badge);
-  // a fresh issuer has not published a suspension list yet: required by default, so the answer is "cannot verify"
-  line((await issuer.published('atlas-suspensions.json')).status === 404, 'a freshly installed issuer publishes no suspension list yet (HTTP 404)');
-  expectVerdict('default settings fail closed while the suspension list is unpublished', first, 'unavailable', 'suspension-unavailable');
-  line(first.json.checks.signature === 'pass' && first.json.checks.revocation === 'pass' && first.json.checks.keyValidAtIssuance === 'pass', 'the failure is reported precisely: signature, key and revocation passed, only suspension is unavailable', first.json && first.json.checks);
+  // a new issuer publishes an empty suspension list from its first request, so the strict default verifies at once
+  const listFile = path.join(issuer.dir, '.well-known', 'atlas-suspensions.json');
+  line((await issuer.published('atlas-suspensions.json')).status === 200, 'a new issuer publishes its (empty) suspension list from the first request');
+  expectVerdict('with the default (strict) settings a credential from a new issuer verifies', first, 'verified', 'verified');
 
-  // the same verifier, configured for an issuer that publishes the suspension list lazily
+  // an older issuer, installed before it published the list: absent (404) until the first suspension, and a zero-length
+  // file once any presentation check has read it
   const lazyDir = extract(zipA, path.join(work, 'lazy-install'));
   writeConfig(lazyDir, { trustedIssuers: { [issuer.origin]: { suspensions: 'optional' } }, allowInsecureLoopback: true });
   const lazy = await startPhp(lazyDir, await freePort());
   const verifyLazy = (credential, extra) => postJson(lazy.base + '/verify.php', Object.assign({ credential }, extra || {}));
-  expectVerdict('a genuine anonymous credential verifies (suspensions optional, list unpublished)', await verifyLazy(badge), 'verified', 'verified');
+  const publishedList = fs.readFileSync(listFile);
+  fs.rmSync(listFile);
+  const legacyAbsent = await verify(badge);
+  expectVerdict('older issuer, list not published (404): strict settings fail closed', legacyAbsent, 'unavailable', 'suspension-unavailable');
+  line(legacyAbsent.json.checks.signature === 'pass' && legacyAbsent.json.checks.revocation === 'pass' && legacyAbsent.json.checks.keyValidAtIssuance === 'pass', 'the failure is reported precisely: signature, key and revocation passed, only suspension is unavailable', legacyAbsent.json && legacyAbsent.json.checks);
+  expectVerdict('older issuer, list not published (404): suspensions "optional" verifies', await verifyLazy(badge), 'verified', 'verified');
+  fs.writeFileSync(listFile, '');
+  expectVerdict('older issuer, zero-length list: strict settings fail closed', await verify(badge), 'unavailable', 'suspension-unavailable');
+  expectVerdict('older issuer, zero-length list: "optional" does not hide it (only a 404 is relaxed)', await verifyLazy(badge), 'unavailable', 'suspension-unavailable');
+  fs.writeFileSync(listFile, publishedList);
+  expectVerdict('once the list is a valid empty document both settings verify', await verifyLazy(badge), 'verified', 'verified');
   const bare = await postJson(lazy.base + '/verify.php', badge);
   expectVerdict('the bare credential is accepted as the request body too', bare, 'verified');
   expectVerdict('expectIssuer matching the credential is accepted', await verifyLazy(badge, { expectIssuer: issuer.origin }), 'verified');
 
-  // suspensions list now exists once an admin action created it
   await issuer.suspend(badge.id, { reason: 'test hold' });
-  line((await issuer.published('atlas-suspensions.json')).status === 200, 'the issuer now publishes a suspension list');
   expectVerdict('a suspended credential is reported suspended (default settings)', await verify(badge), 'suspended', 'suspended');
   expectVerdict('a suspended credential is reported suspended (optional settings)', await verifyLazy(badge), 'suspended', 'suspended');
   await issuer.unsuspend(badge.id);

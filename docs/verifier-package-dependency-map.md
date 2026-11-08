@@ -1,4 +1,4 @@
-# atlas-verify 0.1.0: dependency map
+# atlas-verify 0.1.1: dependency map
 
 What the verifier package contains, what each file needs, where every line of it came from, and every outbound request it
 can make. The function, host and file-type lists below are enforced by `test/lib/package-audit.js`: a new call, host or
@@ -11,8 +11,8 @@ entry names its source in this repository, its SHA-256 and its size; the build s
 
 | Package path | Source in the repository | Role | Lines |
 |---|---|---|---|
-| `verify.php` | `verifier-php/verify.php` | HTTP entry point (GET status, POST verdict) | 97 |
-| `lib/atlas-verify.php` | `verifier-php/lib/atlas-verify.php` | trust configuration, document reading, verdict logic | 443 |
+| `verify.php` | `verifier-php/verify.php` | HTTP entry point (GET status, POST verdict) | 102 |
+| `lib/atlas-verify.php` | `verifier-php/lib/atlas-verify.php` | trust configuration, document reading, verdict logic | 449 |
 | `lib/atlas-verify-crypto.php` | `verifier-php/lib/atlas-verify-crypto.php` | base64url, DER conversion, P-256 verify, canonical JSON | 159 |
 | `lib/atlas-verify-fetch.php` | `verifier-php/lib/atlas-verify-fetch.php` | bounded HTTPS GET (curl, stream fallback) | 72 |
 | `config.example.php` | `verifier-php/config.example.php` | documented template; the operator copies it to `config.php` | |
@@ -124,8 +124,8 @@ the reference PHP issuer agrees on every document without an empty object, a sup
 
 ## 7. Evidence
 
-`node test/verifier-package.js` (under a minute, no network beyond localhost) runs 209 checks against the archive, not the
-source folder. `php test/verifier-php/matrix.php <dir>` runs 177 of those directly. Summary by area:
+`node test/verifier-package.js` (under a minute, no network beyond localhost) runs 212 checks against the archive, not the
+source folder. `php test/verifier-php/matrix.php <dir>` runs 178 of those directly. Summary by area:
 
 - build and reproducibility: two builds from different directories, time zones and locales are byte-identical; 20
   refusal cases for the builder; damage cases for the checker
@@ -144,6 +144,12 @@ source folder. `php test/verifier-php/matrix.php <dir>` runs 177 of those direct
   `allow_url_fopen=0`, no `php.ini`
 - no runtime dependency on other sites: proxy and canary servers receive nothing, the issuer sees only GETs for its three
   documents
+
+Added in the hardening follow-up, each also run from the built archive: `test/verifier-endpoint-abuse.js` (55 checks:
+cost to the issuer per kind of request, oversize and malformed bodies, access token, methods, bounded upstream answers),
+`test/verifier-protocol-limits.js` (10 checks: what the signature does not cover), and `test/verifier-private-config.js`
+(9 checks: configuration kept outside the web root). Inputs, outbound requests and the function list in this document are
+unchanged by them; 0.1.1 added one `preg_match` pattern and one `json_encode` check inside functions already listed.
 
 Mutation checks were run by hand: a revocation failure turned into a pass, a signing function added, a hard-coded external
 URL, and byte-order key sorting each fail the suite.

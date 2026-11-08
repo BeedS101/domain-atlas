@@ -39,7 +39,7 @@ The response is always JSON. HTTP 200 means the check ran; the result is in the 
   "checks": {"issuerTrusted": "pass", "keyPublished": "pass", "keyValidAtIssuance": "pass",
              "signature": "pass", "revocation": "pass", "suspension": "pass", "expiry": "pass"},
   "checkedAt": "2026-01-01T00:00:00Z",
-  "verifier": {"name": "atlas-verify", "version": "0.1.0"}
+  "verifier": {"name": "atlas-verify", "version": "0.1.1"}
 }
 ```
 
@@ -76,3 +76,29 @@ See `config.example.php`. `trustedIssuers` is required. The issuer is always cho
 credential names; a request cannot add one. `pinnedKeys` optionally restricts an issuer to specific public keys.
 `accessTokenSha256` optionally protects the endpoint with a bearer token. `allowedOrigins` enables CORS for named browser
 origins only.
+
+## Protecting the endpoint
+
+The package has no rate limit and keeps no state. If the endpoint is reachable by the public, set `accessTokenSha256` for
+known callers and rate-limit the `verify.php` path at the web server or CDN. A request for a genuine credential costs the
+issuer three small requests; one with a bad signature costs one; anything refused earlier costs none. Lowering
+`maxBodyBytes` (for example to 16384) is safe for ordinary credentials. Details are in the repository's
+`docs/verifier-endpoint-protection.md`.
+
+## Keeping the configuration private
+
+`config.php` can be a one-line stub that returns the real configuration kept outside the web root:
+
+```php
+<?php
+return require '/home/ACCOUNT/atlas-private/verify-config.php';
+```
+
+If that file is missing, unreadable, not an array or lists no issuer, every request is refused. Details in
+`docs/verifier-private-config.md`.
+
+## Known limits of the credential format
+
+The signature does not cover the credential's type label or `issuer.domain`; the verifier ties the issuer to `config.php`
+instead (domain match, optional `pinnedKeys`). Do not let two live domains share an issuer key. See
+`docs/verifier-protocol-limitations.md`.

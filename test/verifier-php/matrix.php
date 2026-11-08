@@ -188,6 +188,9 @@ $d = $good(); $d['atlas-revocations.json'] = $okDoc(['revoked' => [['id' => 'urn
 expect('a listed credential is revoked', run($cred, $d), 'revoked', 'revoked');
 $d = $good(); $d['atlas-revocations.json'] = $okDoc(['revoked' => [['id' => 'urn:other']]]);
 expect('another credential being revoked does not matter', run($cred, $d), 'verified');
+$d = $good(); $d['atlas-revocations.json'] = $okDoc(['revoked' => [['id' => $cred['id'], 'reason' => str_repeat("\u{e9}", 5000)]]]);
+$res = run($cred, $d);
+check('a long revocation reason is clipped to 200 characters, on a character boundary', $res['status'] === 'revoked' && strlen($res['reason']) < 600 && json_encode($res) !== false && substr_count($res['reason'], "\u{e9}") === 200, strlen($res['reason']));
 $susp = function ($entries) use ($good, $okDoc) { $d = $good(); $d['atlas-suspensions.json'] = $okDoc(['suspended' => $entries]); return $d; };
 expect('indefinitely suspended', run($cred, $susp([['id' => $cred['id'], 'reason' => 'r', 'expiresAt' => null, 'onExpire' => 'lift']])), 'suspended', 'suspended');
 expect('suspended with a future deadline', run($cred, $susp([['id' => $cred['id'], 'reason' => 'r', 'expiresAt' => '2026-07-01T00:00:00Z', 'onExpire' => 'lift']])), 'suspended', 'suspended');

@@ -27,7 +27,12 @@ function atlas_verify_send($status, $body, $cors = null) {
     header('Access-Control-Allow-Methods: POST, GET, OPTIONS');
     header('Access-Control-Allow-Headers: Content-Type, Authorization');
   }
-  echo json_encode($body, JSON_UNESCAPED_SLASHES);
+  $json = json_encode($body, JSON_UNESCAPED_SLASHES);
+  if ($json === false) {
+    http_response_code(500);
+    $json = '{"valid":false,"status":"unavailable","code":"internal-error","reason":"the verdict could not be encoded"}';
+  }
+  echo $json;
   exit;
 }
 

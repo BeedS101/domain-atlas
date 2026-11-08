@@ -1,7 +1,7 @@
 {
   "format": "domain-atlas-package-manifest/1",
   "name": "atlas-verify",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "root": "atlas-verify",
   "files": [
     {
@@ -22,14 +22,14 @@
       "path": "README.md",
       "source": "verifier-php/README.md",
       "mode": "0644",
-      "sha256": "404df0bb6bb61e703d151162050b394ebe73485d02a0ea997e80519be2b03f50",
-      "size": 3759
+      "sha256": "d8797f998bf76de54379d647a747d9da7cf7125371e0ba317ad331714cb21123",
+      "size": 4956
     },
     {
       "path": "VERSION",
       "source": "verifier-php/VERSION",
       "mode": "0644",
-      "sha256": "e9dd8507f4bf0c6f42458e41aea833ad0bd3f6127272335eee9bf4d58541ed67",
+      "sha256": "80447316529fc62014fbaa047fb67c51ac30e32830cda370405349d8d66d196c",
       "size": 6
     },
     {
@@ -64,15 +64,15 @@
       "path": "lib/atlas-verify.php",
       "source": "verifier-php/lib/atlas-verify.php",
       "mode": "0644",
-      "sha256": "709dc64ad7ce3980592218b315f4c00f797713a7cdb8799dd95d2769a1c31b64",
-      "size": 21554
+      "sha256": "27845fce4ae30afa89119b99c59ad7113f3f13b4ebf70c5ddd7df6a0a1ef3b9c",
+      "size": 21880
     },
     {
       "path": "verify.php",
       "source": "verifier-php/verify.php",
       "mode": "0644",
-      "sha256": "5e1909d41164da9b530a0481aef058bdf2dc8f161ff7c0ec71492f3257277577",
-      "size": 4966
+      "sha256": "c1b3fc95a6258b7d3723d60b5350706e9a0dfff2949cd85c3d0dc6850b5300e4",
+      "size": 5163
     }
   ]
 }

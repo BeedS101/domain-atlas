@@ -1,8 +1,10 @@
 # Clean Package Builder and Independent Verifier: review notes
 
-Branch `feature/clean-verifier-package`, branched from `main` at `2d9a407`. Nothing is deployed or merged. No existing
-file was changed except one `.gitignore` line (`dist/`, the builder's default output folder), and no existing installation,
-issuer, protocol field or credential is touched. The issuing side is untouched and the licensing issuer is not started.
+Status: merged to `main` as `e0e83b5` (developed on `feature/clean-verifier-package`, branched from `2d9a407`). The merge
+changed no existing source file, issuer, protocol field or installation, and the package is not installed on any site. The
+`dist/` rule in `.gitignore` described in the first version of this note did not make it into that merge; it, the CI
+workflow and the other items in "Hardening follow-up" at the end of this note came afterwards. The issuing side is
+untouched by the milestone itself and the licensing issuer is not started.
 
 The dependency map is in `docs/verifier-package-dependency-map.md`.
 
@@ -18,13 +20,13 @@ the configured issuer, and installs by uploading a folder and copying one config
 | `packages/atlas-verify/manifest.json` | the explicit, version-locked file list: path, source, mode, SHA-256 and size of every file |
 | `tools/package/build-package.js` | builds the ZIP from the manifest; refuses any source that differs from the lock; `--lock` records hashes on purpose, `--check` verifies only |
 | `tools/package/check-package.py` | independent checker (shares no code with the builder): re-hashes, parses the ZIP byte by byte, compares both SHA-256 files, rebuilds the archive and requires identical bytes |
-| `test/verifier-package.js` | 209 end-to-end checks run against the extracted archive |
-| `test/verifier-php/matrix.php` | the verdict matrix (177 checks), also run by the test above |
+| `test/verifier-package.js` | 212 end-to-end checks run against the extracted archive |
+| `test/verifier-php/matrix.php` | the verdict matrix (178 checks), also run by the test above |
 | `test/verifier-php/audit-tokens.php`, `canonical.php`, `test/lib/package-audit.js`, `test/lib/php-issuer.js` | test support |
 | `docs/` | the dependency map and these notes |
 
-Result of the last run: 209 of 209 checks passed. The archive built from this tree is `atlas-verify-0.1.0.zip` (about 47 KB,
-11 files); two builds from different directories, time zones and locales are byte-identical, and the Python rebuild matches.
+Result of the run at the merge: 209 of 209 checks passed on `atlas-verify-0.1.0.zip` (about 47 KB, 11 files). After the
+hardening follow-up the same suite passes 212 of 212 on `atlas-verify-0.1.1.zip`; two builds from different directories, time zones and locales are byte-identical, and the Python rebuild matches.
 
 ## What the inspection of the three repositories found
 
@@ -63,7 +65,8 @@ negative (revoked, suspended, expired) outranks an unreadable document, so the a
 
 ## Decisions for approval
 
-1. **Suspension list on a fresh issuer.** The reference issuer creates `atlas-suspensions.json` lazily, so a new issuer
+1. **Suspension list on a fresh issuer.** (Resolved in the hardening follow-up: `issuer-php` now publishes an empty list when it
+   creates a new issuer; see below. The original finding follows.) The reference issuer created `atlas-suspensions.json` lazily, so a new issuer
    answers 404 until its first suspension (the test shows this). With the default policy such a credential is `unavailable`,
    not verified. The operator can set `'suspensions' => 'optional'` for an issuer, which treats a 404 on that one document
    (and only that) as "nothing suspended". Recommended: change the issuer, in a separate step, to publish an empty list at
@@ -105,7 +108,7 @@ negative (revoked, suspended, expired) outranks an unreadable document, so the a
 
 ## Follow-ups outside this milestone
 
-- Issuer: publish an empty `atlas-suspensions.json` at initialization (see decision 1).
+- Issuer: publish an empty `atlas-suspensions.json` at initialization (done in the hardening follow-up).
 - Issuer: align `canonicalize` with the JavaScript implementations for empty objects and extreme numbers, or document the envelope.
 - Issuer and Node server: make `verify_foreign_*` fail closed, or leave it and state why; separate change.
 - The wizard step that installs this package: compare the downloaded archive with its published `.zip.sha256` before
@@ -115,10 +118,70 @@ negative (revoked, suspended, expired) outranks an unreadable document, so the a
 ## How to reproduce
 
 ```
-node test/verifier-package.js                      all 209 checks, under a minute
+node test/verifier-package.js                      all 212 checks, under a minute
 node tools/package/build-package.js packages/atlas-verify/manifest.json --out dist/packages
-python3 -I tools/package/check-package.py packages/atlas-verify/manifest.json dist/packages/atlas-verify-0.1.0.zip
-sha256sum -c dist/packages/atlas-verify-0.1.0.zip.sha256
+python3 -I tools/package/check-package.py packages/atlas-verify/manifest.json dist/packages/atlas-verify-0.1.1.zip
+sha256sum -c dist/packages/atlas-verify-0.1.1.zip.sha256
 ```
 
 Requires Node 18 or newer, Python 3, PHP 8.x with openssl and curl, and `unzip`, `sha256sum`.
+
+## Hardening follow-up
+
+Done after the independent review of `e0e83b5`, on branch `hardening/verifier-ci-and-docs`. The credential format, the
+existing issuer endpoints and asset behaviour, the Core repository and every live site are unchanged; no key was touched.
+
+1. **CI.** `.github/workflows/verifier-package.yml` runs on every push and pull request: the manifest lock check, the build,
+   the independent archive check and published checksum, then the verifier package suite, endpoint abuse limits, protocol
+   limits, private configuration, the issuer suspension list and the issuer admin status reads. PHP 8.3 and 8.1 block;
+   PHP 7.4 is informational until it has been seen green (it has never been run here). No secrets, no deployment, read-only
+   token.
+2. **Repository hygiene.** `dist/` is ignored and this note no longer describes the work as unmerged.
+3. **Empty suspension list for a new issuer** (`issuer-php/lib/store.php`, kept in its own commits). A fresh PHP issuer now
+   publishes `{"suspended": []}` when it creates its revocation list, under the same conditions (key being generated, no
+   evidence of an established deployment), as a finished file linked into place in one step. It is never rewritten,
+   never created for an existing issuer or in the withheld-state case, and written with the revocation list's mode. An
+   earlier version of this change also replaced an existing zero-length list with an empty one; that was withdrawn after
+   review, because a zero-length file cannot be told apart from a truncated list and replacing it could erase suspensions.
+   Existing state is now handled by a separate rule (`docs/gen1-revocation-state.md`, section 8): a missing list is still
+   "nothing suspended" (and is no longer created by a read), a zero-length or otherwise unreadable list makes every
+   operation that depends on it answer 503 and is left untouched, and the operator restores or re-initialises it
+   deliberately. Suspension changes are now written atomically, so the issuer stops producing zero-length lists itself.
+   `test/issuer-suspension-list-php.js` (32 checks, including simultaneous first requests, a crash during creation and
+   during a write, and eight kinds of unreadable list) covers all of it; `test/manual-gen1-revocation-state.js` (248),
+   `test/manual-suspend-php.js` and `test/admin-site-status-php.js` still pass. The verifier default stays strict
+   (`suspensions: required`).
+4. **Endpoint abuse limits** (`test/verifier-endpoint-abuse.js`, 55 checks; `docs/verifier-endpoint-protection.md`). The test
+   measured the cost model (three requests to the issuer for a genuine credential, one for a bad signature, none for
+   anything refused earlier) and found one real defect: a 300,000-character revocation reason came back whole in the
+   verdict. Verifier 0.1.1 clips reasons to 200 characters, and a verdict that cannot be encoded now gives a 500 with
+   `unavailable`. Rate limiting is deliberately not in the package, because it needs writable state; the document sets out
+   the layers to use instead.
+5. **Protocol limitation** (`test/verifier-protocol-limits.js`, 10 checks; `docs/verifier-protocol-limitations.md`). The
+   signature covers `{id, asset, owner, quantity, supersedes, issuedAt}` only. A credential whose `issuer.domain` is edited
+   verifies at any domain that publishes the same key, and each domain has its own revocation list. The verifier's
+   configuration (domain match, `pinnedKeys`) is the mitigation. No format change was made.
+6. **Private configuration** (`test/verifier-private-config.js`, 9 checks; `docs/verifier-private-config.md`). A one-line
+   `config.php` stub can return a file kept above the web root. This works with the existing code.
+
+### Compatibility risks
+
+- The verifier changed from 0.1.0 to 0.1.1 (reason clipping, encoding failure, README, lock). 0.1.0 was never installed on a
+  site. A clipped reason is the only change in a response a caller could see; verdicts, status codes and codes are the same.
+- The issuer now creates one extra file, `.well-known/atlas-suspensions.json`, the first time a new PHP issuer initialises,
+  and one lock file, `lib/atlas-suspensions.json.lock`, the first time the list is read or changed. Anything that treated
+  the list's absence as meaningful will see an empty list on a new issuer.
+- **An existing issuer whose `atlas-suspensions.json` is zero bytes will refuse spends (503) after this change until the
+  operator restores or re-initialises it.** Older code created a zero-length file whenever the list was first read, so
+  an issuer that has handled a presentation check but never suspended anything may well have one. Check the file's size
+  before upgrading (section 8 of `docs/gen1-revocation-state.md` has the procedure); a missing file needs nothing. Before
+  this change such an issuer treated the file as empty and published it as an unreadable document, so verifiers already
+  answered `unavailable`; the difference is that the issuer's own spend checks now refuse too, instead of assuming
+  nothing is suspended.
+- The same strictness applies to a list that is truncated or not a list. Previously a suspend or unsuspend on such a file
+  replaced it with a one-entry list, erasing what was there; it now refuses and leaves it.
+- A deleted list on an issuer installed after this change is indistinguishable from a legacy issuer that never
+  suspended anything, so it is still read as empty; there is no marker to tell the two apart.
+- `suspensions: optional` remains available and is still the right setting for issuers installed before this change that
+  have never suspended anything.
+- The CI workflow has not run on GitHub. Its steps were run locally in the same order, on PHP 8.3 only.
