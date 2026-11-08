@@ -157,7 +157,7 @@ existing issuer endpoints and asset behaviour, the Core repository and every liv
    verdict. Verifier 0.1.1 clips reasons to 200 characters, and a verdict that cannot be encoded now gives a 500 with
    `unavailable`. Rate limiting is deliberately not in the package, because it needs writable state; the document sets out
    the layers to use instead.
-5. **Protocol limitation** (`test/verifier-protocol-limits.js`, 10 checks; `docs/verifier-protocol-limitations.md`). The
+5. **Protocol limitation** (`test/verifier-protocol-limits.js`, 11 checks; `docs/verifier-protocol-limitations.md`). The
    signature covers `{id, asset, owner, quantity, supersedes, issuedAt}` only. A credential whose `issuer.domain` is edited
    verifies at any domain that publishes the same key, and each domain has its own revocation list. The verifier's
    configuration (domain match, `pinnedKeys`) is the mitigation. No format change was made.
@@ -212,3 +212,10 @@ the package; the package files and the archive are unchanged.
 - **A flaky case in the verdict matrix.** The "standard alphabet" signature case translated `-` and `_` to `+` and `/`; about one
   signature in sixteen contains neither, so the translation changed nothing and the valid credential verified. It now signs
   again until the signature contains one of them.
+- **Timing in the protocol-limits test (second Actions run).** PHP 8.1 failed two checks with `key-not-valid-at-issuance`.
+  A key's `validFrom` is the time its issuer first published it, to the second. The test issued the credential at issuer A
+  before the cloned issuer B had published its key, so whenever a second boundary fell in between, B's key history began
+  after the credential's `issuedAt` and the relabelled copy was refused for that reason instead of showing the limitation.
+  The credential is now issued after both issuers have published, and a setup check asserts both key histories cover it.
+  The verifier's key-validity check is unchanged. Reproduced before the fix (2 of 15 runs failed; 5 of 5 with a 1.1 s delay
+  forced into each setup step); after it 0 of 60 failed, and 0 of 5 with the forced delays.

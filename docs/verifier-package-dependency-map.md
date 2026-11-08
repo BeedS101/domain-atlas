@@ -147,7 +147,7 @@ source folder. `php test/verifier-php/matrix.php <dir>` runs 179 of those direct
 
 Added in the hardening follow-up, each also run from the built archive: `test/verifier-endpoint-abuse.js` (55 checks:
 cost to the issuer per kind of request, oversize and malformed bodies, access token, methods, bounded upstream answers),
-`test/verifier-protocol-limits.js` (10 checks: what the signature does not cover), and `test/verifier-private-config.js`
+`test/verifier-protocol-limits.js` (11 checks: what the signature does not cover), and `test/verifier-private-config.js`
 (9 checks: configuration kept outside the web root). Inputs, outbound requests and the function list in this document are
 unchanged by them; 0.1.1 added one `preg_match` pattern and one `json_encode` check inside functions already listed.
 

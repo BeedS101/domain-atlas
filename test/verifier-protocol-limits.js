@@ -34,7 +34,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v));
   const a = await startIssuer();
   cleanup.push(() => a.stop());
   const owner = newOwner();
-  const original = await a.issue(owner, 'atlas.badge');
+  await a.issue(owner, 'atlas.badge'); // makes A create and publish its key; the credential used below is issued later
   const keyPem = fs.readFileSync(path.join(a.dir, 'lib', 'issuer-private-key.pem'));
   const b = await startIssuer({
     prepare: (bundle) => {
@@ -45,8 +45,16 @@ const clone = (v) => JSON.parse(JSON.stringify(v));
   });
   cleanup.push(() => b.stop());
   await b.issue(owner, 'atlas.badge'); // makes B publish its key document (the same key as A)
+  // A key's validFrom is the time its issuer first published it, to the second. The credential is issued only now, after
+  // both issuers have published, so its issuedAt can never fall before either validFrom, whatever second boundary the
+  // setup happened to cross. (Issuing it before B published made the relabelled copy fail with key-not-valid-at-issuance
+  // whenever a boundary fell in between: not the limitation under test.)
+  const original = await a.issue(owner, 'atlas.badge');
   const keyOf = async (issuer) => JSON.parse((await issuer.published('atlas-key.json')).text).keys.map((k) => k.publicKey);
   line(JSON.stringify(await keyOf(a)) === JSON.stringify(await keyOf(b)), 'setup: the clone publishes the same issuer key as the original');
+  const validFromOf = async (issuer) => JSON.parse((await issuer.published('atlas-key.json')).text).keys.map((k) => Date.parse(k.validFrom));
+  const issuedAtMs = Date.parse(original.issuedAt);
+  line((await validFromOf(a)).concat(await validFromOf(b)).every((t) => t <= issuedAtMs), 'setup: the credential was issued after both issuers published their key, so both key histories cover it', { issuedAt: original.issuedAt, a: await validFromOf(a), b: await validFromOf(b) });
 
   async function verifierFor(name, config) {
     const dir = extractPackage(zip, path.join(work, name));
