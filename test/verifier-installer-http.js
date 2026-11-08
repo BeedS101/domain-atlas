@@ -116,7 +116,7 @@ async function main() {
     "if ($uri === '/install-verifier-web.php') { require " + escapePhp(path.join(installerDir,'install-verifier-web.php')) + "; return true; }",
     'return false;',
     ''
-  ].join('\\n'));
+  ].join('\n'));
   const settings = '<?php\nreturn [\n' +
     " 'tokenSha256' => " + escapePhp(tokenHash) + ",\n" +
     " 'expectedHost' => " + escapePhp(expectedHost) + ",\n" +
