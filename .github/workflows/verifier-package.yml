@@ -69,6 +69,9 @@ jobs:
       - name: Verifier package test suite
         run: node test/verifier-package.js
 
+      - name: Offline verifier setup assistant
+        run: node test/verifier-setup-wizard.js
+
       - name: Endpoint abuse limits
         run: node test/verifier-endpoint-abuse.js
 

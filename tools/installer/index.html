@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+<title>Domain Atlas — verifier setup assistant</title>
+<style>
+:root { color-scheme: light; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #f4f6f9; color: #17243a; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 28px 16px 60px; }
+main { max-width: 760px; margin: auto; }
+h1 { font-size: 2rem; margin-bottom: .2em; }
+h2 { font-size: 1.2rem; }
+p, li { line-height: 1.55; }
+.muted { color: #4d596b; }
+.panel { background: white; border: 1px solid #d6deea; border-radius: 12px; padding: 22px; margin-top: 18px; }
+label { display: block; font-weight: 650; margin-bottom: 8px; }
+input[type=text], textarea { width: 100%; padding: 12px; border: 1px solid #94a4b6; border-radius: 7px; font: 1rem ui-monospace, Consolas, monospace; }
+textarea { min-height: 100px; }
+small { display: block; color: #546173; margin: 7px 0 18px; }
+.row { display: flex; align-items: flex-start; gap: 10px; margin: 15px 0; }
+.row label { font-weight: normal; margin: 0; }
+button { background: #163f79; color: white; border: 0; border-radius: 7px; padding: 12px 17px; font-weight: 650; cursor: pointer; }
+button.secondary { background: #e5eefa; color: #163f79; border: 1px solid #9cb8d9; }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid #ffaf44; outline-offset: 2px; }
+.buttons { display: flex; gap: 12px; flex-wrap: wrap; }
+.error { color: #8e1717; font-weight: 650; white-space: pre-wrap; }
+code { overflow-wrap: anywhere; }
+.notice { border-left: 4px solid #a37420; padding-left: 12px; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <p class="muted">Domain Atlas / atlas-verify 0.1.1 / setup assistant v0.1</p>
+  <h1>Configure a standalone credential verifier</h1>
+  <p>This assistant generates configuration files in your browser. It <strong>does not</strong> upload files, fetch code, contact issuers, or change your server. No wallet, issuer, Core or Chainblock installation is required.</p>
+</header>
+<section class="panel">
+  <h2>1. Choose who to trust</h2>
+  <form id="setup" novalidate>
+    <label for="issuers">Trusted issuer origins — one HTTPS origin per line</label>
+    <textarea id="issuers" spellcheck="false" placeholder="https://evtec.co.za&#10;https://domain-atlas.co.za" required></textarea>
+    <small>Only list domains you explicitly trust. Use domain origins, not URLs with paths. A verifier never learns new trusted issuers from a credential.</small>
+
+    <label for="privatePath">Absolute private configuration path on your host</label>
+    <input id="privatePath" type="text" spellcheck="false" autocomplete="off" placeholder="/home/your-account/atlas-private/verify-config.php" required>
+    <small>Replace ACCOUNT with your hosting account name. Create the directory yourself <strong>outside public_html</strong>. The wizard cannot verify your server's filesystem layout.</small>
+
+    <div class="row">
+      <input id="legacy" type="checkbox">
+      <label for="legacy"><strong>Legacy issuer compatibility:</strong> allow a missing suspension list (HTTP 404) for trusted issuers. Leave unchecked by default; this does not bypass invalid or unreadable published lists.</label>
+    </div>
+    <button type="submit">Generate configuration files</button>
+    <p id="error" class="error" role="alert" aria-live="assertive"></p>
+  </form>
+</section>
+<section class="panel" id="result" hidden>
+  <h2>2. Save the two files</h2>
+  <p id="summary"></p>
+  <div class="buttons">
+    <button id="downloadPrivate" type="button">Download private verify-config.php</button>
+    <button id="downloadStub" type="button" class="secondary">Download public config.php stub</button>
+  </div>
+  <p class="muted">The private file contains issuer configuration. The public stub contains only a PHP require path, and must remain protected from source disclosure.</p>
+  <h2>3. Install manually on an isolated PHP test site</h2>
+  <ol>
+    <li>Build the pinned <code>atlas-verify-0.1.1.zip</code> using the repository package builder and verify its SHA-256/checksums. Do not download an unpinned executable archive.</li>
+    <li>Extract the verifier package into your intended <code>atlas-verify/</code> web directory. Do not replace existing issuer files.</li>
+    <li>Create the private directory outside the document root (mode 0700). Put <code>verify-config.php</code> there (mode 0600 or 0400). Upload <code>config.php</code> into the verifier directory, beside <code>verify.php</code>.</li>
+    <li>Confirm Apache denies direct access to <code>config.php</code> and <code>lib/</code>, or configure equivalent rules on other web servers. Restrict public access to <code>verify.php</code> with an access token, proxy protection and rate limits before exposing it broadly.</li>
+    <li>Open <code>https://your-test-site.example/atlas-verify/verify.php</code>. Require <code>"configured": true</code>, then POST a known valid and a revoked credential to check actual issuer communication and refusal behavior.</li>
+  </ol>
+  <p class="notice">Safety: this is an evaluation/setup helper, <strong>not</strong> a one-click installer or a production security audit. The repository is currently All Rights Reserved; publishing it does not authorize third-party redistribution or deployment.</p>
+</section>
+<footer class="muted"><p>Runs fully offline. Nothing you enter is uploaded or stored by this assistant.</p></footer>
+</main>
+<script src="./verifier-setup.js"></script>
+<script>
+(function () {
+  'use strict';
+  const form = document.getElementById('setup');
+  const error = document.getElementById('error');
+  const result = document.getElementById('result');
+  const summary = document.getElementById('summary');
+  let generated = null;
+
+  function download(name, content) {
+    const url = URL.createObjectURL(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // No server interaction; defer URL cleanup until the browser finishes the download.
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  function invalidate() { generated = null; result.hidden = true; error.textContent = ''; }
+  form.addEventListener('input', invalidate);
+  form.addEventListener('submit', function (event) {
+    event.preventDefault();
+    invalidate();
+    try {
+      generated = window.VerifierSetup.generate({
+        issuers: document.getElementById('issuers').value,
+        privatePath: document.getElementById('privatePath').value,
+        suspensions: document.getElementById('legacy').checked ? 'optional' : 'required'
+      });
+      summary.textContent = generated.trustedIssuers.length + ' trusted issuer(s), suspension policy: ' + generated.suspensionMode + '.';
+      result.hidden = false;
+    } catch (e) {
+      error.textContent = e.message || 'Invalid configuration.';
+    }
+  });
+  document.getElementById('downloadPrivate').addEventListener('click', function () {
+    if (generated) download('verify-config.php', generated.privateConfig);
+  });
+  document.getElementById('downloadStub').addEventListener('click', function () {
+    if (generated) download('config.php', generated.stub);
+  });
+})();
+</script>
+</body>
+</html>
