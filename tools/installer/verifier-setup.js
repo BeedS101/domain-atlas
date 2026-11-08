@@ -26,6 +26,7 @@
   function normalizePrivatePath(value) {
     if (typeof value !== 'string') throw new Error('Enter an absolute private configuration path.');
     const path = value.trim();
+    if (/^\/home\/ACCOUNT\//.test(path)) throw new Error('Replace ACCOUNT with your actual hosting account name.');
     if (!/^\/[A-Za-z0-9._/-]+\/verify-config\.php$/.test(path) || path.includes('//') ||
         path.split('/').some(function (part) { return part === '..' || part === '.'; })) {
       throw new Error('Use an absolute Unix path ending in /verify-config.php, without spaces or traversal.');
