@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const net = require('node:net');
+const http = require('node:http');
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const builder = require('../tools/package/build-package');
@@ -77,19 +78,42 @@ async function stopPhp(srv) {
     srv.proc.kill('SIGTERM');
   });
 }
+function rawRequest(url, method, host, body, contentType) {
+  const parsed = new URL(url);
+  return new Promise((resolve, reject) => {
+    const headers = { Host: host };
+    if (body) {
+      headers['Content-Type'] = contentType;
+      headers['Content-Length'] = String(body.length);
+    }
+    const req = http.request({
+      host: '127.0.0.1', port: Number(parsed.port), path: parsed.pathname, method, headers
+    }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', reject);
+    });
+    req.setTimeout(10000, () => req.destroy(new Error('HTTP timeout')));
+    req.on('error', reject);
+    req.end(body || undefined);
+  });
+}
+
 async function request(srv, method, host, credentials, archive, intent) {
-  const options = {
-    method, headers: { Host: host || expectedHost }, signal: AbortSignal.timeout(10000)
-  };
-  if (method === 'POST') {
-    const form = new FormData();
-    form.append('token', credentials === undefined ? token : credentials);
-    form.append('intent', intent || 'check');
-    form.append('package', new Blob([archive || fs.readFileSync(zipPath)], { type: 'application/zip' }), 'atlas-verify-0.1.1.zip');
-    options.body = form;
-  }
-  const response = await fetch(srv.url + '/install-verifier-web.php', options);
-  return { status: response.status, text: await response.text() };
+  const hostname = host || expectedHost;
+  if (method !== 'POST') return rawRequest(srv.url + '/install-verifier-web.php', method, hostname);
+  const boundary = '----atlas-verifier-installer-test-' + crypto.randomBytes(8).toString('hex');
+  const file = archive || fs.readFileSync(zipPath);
+  const field = (name, value) => Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="' + name + '"\r\n\r\n' + value + '\r\n');
+  const fileHeader = Buffer.from('--' + boundary + '\r\nContent-Disposition: form-data; name="package"; filename="atlas-verify-0.1.1.zip"\r\nContent-Type: application/zip\r\n\r\n');
+  const body = Buffer.concat([
+    field('token', credentials === undefined ? token : credentials),
+    field('intent', intent || 'check'),
+    fileHeader, file,
+    Buffer.from('\r\n--' + boundary + '--\r\n')
+  ]);
+  return rawRequest(srv.url + '/install-verifier-web.php', 'POST', hostname, body, 'multipart/form-data; boundary=' + boundary);
 }
 
 async function main() {
@@ -149,9 +173,9 @@ async function main() {
     // Requests still use HTTP on loopback: *not* evidence of real TLS enforcement.
     srv = await startPhp(installerDir, { ATLAS_INSTALL_SETTINGS: settingsPath, ATLAS_TEST_SIMULATE_TLS: '1' });
     await assertResult('test-only router supplies the intended Host and simulated TLS state', async () => {
-      const response = await fetch(srv.url + '/__atlas_test_request', { headers: { Host: expectedHost } });
+      const response = await rawRequest(srv.url + '/__atlas_test_request', 'GET', expectedHost);
       assert.equal(response.status, 200);
-      const j = await response.json();
+      const j = JSON.parse(response.text);
       assert.equal(j.host, expectedHost);
       assert.equal(j.https, 'on');
     });
