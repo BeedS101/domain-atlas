@@ -87,8 +87,14 @@ function atlas_install_verified_archive(string $zipPath): array {
                 atlas_install_fail('Package metadata disagrees with locked file hashes.');
             }
         }
-        unset($actual['PACKAGE.json']); // Package metadata was validated but is installed from the archive as well.
-        $actual['PACKAGE.json'] = json_encode($package, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+        // The verified package builder produces one deterministic byte-for-byte ZIP.
+        // Pin that complete archive in addition to the per-file SHA-256 checks above.
+        // Repacking the same PHP files with altered ZIP metadata is not an authorized release.
+        $archiveHash = hash_file('sha256', $zipPath);
+        if (!is_string($archiveHash) || !hash_equals('e3a431fdc124beba68e157845bcb2f7a6ad11751c7d92774dfbd021ef6a9b365', $archiveHash)) {
+            atlas_install_fail('ZIP does not match the pinned reproducible 0.1.1 archive.');
+        }
+        // Preserve the validated PACKAGE.json bytes instead of rewriting its JSON.
         // Only trusted fixed names are ever used in filesystem paths.
         return $actual;
     } finally {
