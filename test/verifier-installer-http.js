@@ -17,6 +17,7 @@ const documentRoot = path.join(dir, 'public-site');
 const privateDir = path.join(dir, 'operator-private');
 const zipPath = path.join(dir, 'atlas-verify-0.1.1.zip');
 const settingsPath = path.join(privateDir, 'installer-settings.php');
+const routerPath = path.join(dir, 'test-only-router.php');
 const expectedHost = 'verifier-test.example';
 const token = 't'.repeat(48); // test fixture ONLY, never real operator token
 const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
@@ -43,7 +44,7 @@ async function startPhp(docroot, overrides) {
   for (let attempt = 0; attempt < 4; attempt++) {
     const port = await freePort();
     let stderr = '';
-    const proc = spawn('php', ['-d', 'opcache.enable=0', '-S', '127.0.0.1:' + port, '-t', docroot], {
+    const proc = spawn('php', ['-d', 'opcache.enable=0', '-S', '127.0.0.1:' + port, '-t', docroot, routerPath], {
       cwd: docroot,
       env: { ...process.env, ...(overrides || {}), PHP_CLI_SERVER_WORKERS: '1' },
       stdio: ['ignore', 'ignore', 'pipe']
@@ -99,6 +100,23 @@ async function main() {
   const manifest = builder.readManifest(path.join(repo, 'packages/atlas-verify/manifest.json'));
   const archive = builder.build(manifest, builder.loadSources(manifest)).zip;
   fs.writeFileSync(zipPath, archive);
+  // PHP's built-in HTTP server correctly does not regard HTTPS=on in its environment
+  // as real TLS. A private throw-away router injects that server variable for
+  // positive-branch testing only. This file never ships with an installer.
+  fs.writeFileSync(routerPath, [
+    '<?php',
+    "if (getenv('ATLAS_TEST_SIMULATE_TLS') === '1') $_SERVER['HTTPS'] = 'on';",
+    "else $_SERVER['HTTPS'] = 'off';",
+    '$uri = parse_url($_SERVER[\'REQUEST_URI\'], PHP_URL_PATH);',
+    "if ($uri === '/__atlas_test_request') {",
+    " header('Content-Type: application/json');",
+    " echo json_encode(['host' => $_SERVER['HTTP_HOST'] ?? null, 'https' => $_SERVER['HTTPS'] ?? null]);",
+    ' return true;',
+    '}',
+    "if ($uri === '/install-verifier-web.php') { require " + escapePhp(path.join(installerDir,'install-verifier-web.php')) + "; return true; }",
+    'return false;',
+    ''
+  ].join('\\n'));
   const settings = '<?php\nreturn [\n' +
     " 'tokenSha256' => " + escapePhp(tokenHash) + ",\n" +
     " 'expectedHost' => " + escapePhp(expectedHost) + ",\n" +
@@ -119,7 +137,7 @@ async function main() {
     });
     await stopPhp(srv); srv = null;
 
-    noTls = await startPhp(installerDir, { ATLAS_INSTALL_SETTINGS: settingsPath, HTTPS: 'off' });
+    noTls = await startPhp(installerDir, { ATLAS_INSTALL_SETTINGS: settingsPath, ATLAS_TEST_SIMULATE_TLS: '0' });
     await assertResult('operator settings cannot bypass HTTPS requirement', async () => {
       const r = await request(noTls, 'GET');
       assert.equal(r.status, 403, r.text);
@@ -129,7 +147,14 @@ async function main() {
 
     // Set HTTPS in the PHP process environment to exercise PHP's guarded branch.
     // Requests still use HTTP on loopback: *not* evidence of real TLS enforcement.
-    srv = await startPhp(installerDir, { ATLAS_INSTALL_SETTINGS: settingsPath, HTTPS: 'on' });
+    srv = await startPhp(installerDir, { ATLAS_INSTALL_SETTINGS: settingsPath, ATLAS_TEST_SIMULATE_TLS: '1' });
+    await assertResult('test-only router supplies the intended Host and simulated TLS state', async () => {
+      const response = await fetch(srv.url + '/__atlas_test_request', { headers: { Host: expectedHost } });
+      assert.equal(response.status, 200);
+      const j = await response.json();
+      assert.equal(j.host, expectedHost);
+      assert.equal(j.https, 'on');
+    });
     await assertResult('wrong hostname is refused even when operator settings and TLS flag exist', async () => {
       const r = await request(srv, 'GET', 'another-test.example');
       assert.equal(r.status, 403, r.text);
@@ -178,7 +203,7 @@ async function main() {
       assert.match(r.text, /already exists/);
     });
     await stopPhp(srv); srv = null;
-    const site = await startPhp(documentRoot, { ATLAS_INSTALL_SETTINGS: '', HTTPS: 'off' });
+    const site = await startPhp(documentRoot, { ATLAS_INSTALL_SETTINGS: '', ATLAS_TEST_SIMULATE_TLS: '0' });
     try {
       await assertResult('installed verifier answers its own status endpoint as configured', async () => {
         const response = await fetch(site.url + '/atlas-verify/verify.php', { signal: AbortSignal.timeout(10000) });
