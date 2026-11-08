@@ -519,7 +519,10 @@ const randomDouble = () => { const b = Buffer.alloc(8); for (let i = 0; i < 8; i
   const snapshot = tree(cleanA);
   writeConfig(cleanA, { trustedIssuers: [issuer.origin], allowInsecureLoopback: true });
   const snapshotConfigured = tree(cleanA);
-  const cleanServer = await startPhp(cleanA, await freePort());
+  // The PHP process gets a temp directory of its own, so the check below sees only what the verifier created and not
+  // whatever else shares the machine's /tmp (CI setup steps, other tools).
+  const serverTmp = fs.mkdtempSync(path.join(work, 'server-tmp-'));
+  const cleanServer = await startPhp(cleanA, await freePort(), ['-d', 'sys_temp_dir=' + serverTmp, '-d', 'upload_tmp_dir=' + serverTmp, '-d', 'session.save_path=' + serverTmp], { TMPDIR: serverTmp });
   const warm = await postJson(cleanServer.base + '/verify.php', { credential: fresh });
   await postJson(cleanServer.base + '/verify.php', { credential: forged });
   await postJson(cleanServer.base + '/verify.php', 'junk');
@@ -527,8 +530,11 @@ const randomDouble = () => { const b = Buffer.alloc(8); for (let i = 0; i < 8; i
   line(JSON.stringify(after) === JSON.stringify(snapshotConfigured), 'serving requests writes nothing: every file and directory is unchanged afterwards');
   line(Object.keys(snapshotConfigured).filter((n) => !(n in snapshot)).join() === 'config.php', 'the only difference from a fresh extraction is the operator\'s config.php');
   line(warm.status === 200, 'the clean installation answers (' + (warm.json && warm.json.code) + ')');
-  const tmpDirEntries = fs.readdirSync(os.tmpdir()).filter((n) => /^(php|sess_|atlas-verify)/.test(n) && fs.statSync(path.join(os.tmpdir(), n)).mtimeMs > Date.now() - 60000 && !n.startsWith('atlas-verify-test-'));
-  line(tmpDirEntries.length === 0, 'no session, cache or temporary files were left in the system temp directory', tmpDirEntries);
+  const leftovers = fs.readdirSync(serverTmp);
+  line(leftovers.length === 0, 'no session, cache or temporary files were created in the verifier process\'s own temp directory', leftovers);
+  const controlDir = fs.mkdtempSync(path.join(work, 'control-tmp-'));
+  spawnSync('php', ['-n', '-d', 'sys_temp_dir=' + controlDir, '-r', "tempnam(sys_get_temp_dir(), 'probe');"]);
+  line(fs.readdirSync(controlDir).length === 1, 'control: a file PHP creates through its temp directory does show up in an isolated one, so the check above can fail');
 
   // restricted PHP: open_basedir confined to the install, and no allow_url_fopen (curl only)
   const confined = await startPhp(cleanA, await freePort(), ['-d', 'open_basedir=' + cleanA + ':/tmp', '-d', 'allow_url_fopen=0', '-d', 'display_errors=0']);
@@ -536,8 +542,36 @@ const randomDouble = () => { const b = Buffer.alloc(8); for (let i = 0; i < 8; i
   line(confinedRes.status === 200 && confinedRes.json && confinedRes.json.checks.signature === 'pass', 'works with open_basedir confined to the install and allow_url_fopen off (curl transport)', confinedRes.text.slice(0, 200));
   const minimal = spawnSync('php', ['-n', '-r', "require '" + path.join(cleanA, 'lib', 'atlas-verify.php') + "'; echo DomainAtlas\\Verify\\VERSION;"], { encoding: 'utf8' });
   line(minimal.stdout.trim() === manifest.version, 'the library loads with no php.ini and no optional extensions loaded');
-  const noOpenssl = spawnSync('php', ['-n', '-r', "require '" + path.join(cleanA, 'lib', 'atlas-verify.php') + "'; $t = DomainAtlas\\Verify\\load_trust_config(['trustedIssuers' => ['https://issuer.example']]); $v = DomainAtlas\\Verify\\verify_credential_json(file_get_contents('php://stdin'), array_values($t['issuers'])[0], ['fetch' => function () { return ['status' => 404, 'body' => '']; }]); echo $v['status'] . '/' . $v['code'];"], { input: JSON.stringify(fresh).replace(issuer.domain, 'issuer.example'), encoding: 'utf8' });
-  line(!/^verified/.test(noOpenssl.stdout) && noOpenssl.stdout.length > 0, 'without the openssl extension nothing verifies (' + noOpenssl.stdout.trim() + ')');
+  // PHP with the openssl functions removed and everything else the library needs present. disable_functions removes them
+  // whether openssl is built in or a shared module (php -n alone only removes shared ones), and a missing json extension
+  // would end in a fatal error instead of a verdict, so the test loads what the library needs and requires a real answer.
+  const phpWith = (args, input, file) => spawnSync('php', [...args, file], { input, encoding: 'utf8' });
+  const hasFunction = (args, fn) => spawnSync('php', [...args, '-r', "echo function_exists('" + fn + "') ? 1 : 0;"], { encoding: 'utf8' }).stdout === '1';
+  const libraryArgs = ['-n', '-d', 'display_errors=0', '-d', 'log_errors=0'];
+  for (const [fn, ext] of Object.entries({ json_decode: 'json', filter_var: 'filter', hash: 'hash', preg_match: 'pcre', gmdate: 'date' })) {
+    if (!hasFunction(libraryArgs, fn)) libraryArgs.push('-d', 'extension=' + ext);
+  }
+  line(['json_decode', 'filter_var', 'hash', 'preg_match', 'gmdate'].every((fn) => hasFunction(libraryArgs, fn)), 'the stripped-down PHP has json, filter, hash, pcre and date loaded');
+  const probeFile = path.join(work, 'no-openssl-probe.php');
+  fs.writeFileSync(probeFile, `<?php
+require '${path.join(cleanA, 'lib', 'atlas-verify.php').replace(/\\/g, '/')}';
+$trust = DomainAtlas\\Verify\\load_trust_config(['trustedIssuers' => ['https://issuer.example']]);
+$fetches = 0;
+$verdict = DomainAtlas\\Verify\\verify_credential_json(stream_get_contents(STDIN), array_values($trust['issuers'])[0], ['fetch' => function () use (&$fetches) { $fetches++; return ['status' => 404, 'body' => '']; }]);
+echo json_encode(['openssl' => function_exists('openssl_verify') || function_exists('openssl_pkey_get_public'), 'json' => function_exists('json_decode'), 'status' => $verdict['status'], 'code' => $verdict['code'], 'issuerTrusted' => $verdict['checks']['issuerTrusted'], 'fetches' => $fetches]);
+`);
+  const credentialForProbe = JSON.stringify(Object.assign({}, fresh, { issuer: Object.assign({}, fresh.issuer, { domain: 'issuer.example' }) }));
+  const noOpenssl = phpWith([...libraryArgs, '-d', 'disable_functions=openssl_verify,openssl_pkey_get_public'], credentialForProbe, probeFile);
+  let noOpensslResult = null;
+  try { noOpensslResult = JSON.parse(noOpenssl.stdout); } catch (e) { /* reported below */ }
+  line(noOpenssl.status === 0 && noOpenssl.stderr === '' && noOpensslResult !== null, 'the no-openssl run finishes normally and prints a structured result (no PHP fatal error)', { status: noOpenssl.status, stdout: noOpenssl.stdout.slice(0, 200), stderr: noOpenssl.stderr.slice(0, 200) });
+  line(noOpensslResult !== null && noOpensslResult.openssl === false && noOpensslResult.json === true, 'in that run the openssl functions are gone and json_decode is present', noOpensslResult);
+  line(noOpensslResult !== null && noOpensslResult.status === 'unavailable' && noOpensslResult.code === 'missing-openssl' && noOpensslResult.issuerTrusted === 'pass' && noOpensslResult.fetches === 0,
+    'without the openssl extension a trusted issuer\'s credential answers unavailable / missing-openssl, before any document is fetched', noOpensslResult);
+  const withOpenssl = phpWith(libraryArgs, credentialForProbe, probeFile);
+  let withOpensslResult = null;
+  try { withOpensslResult = JSON.parse(withOpenssl.stdout); } catch (e) { /* reported below */ }
+  line(withOpensslResult !== null && withOpensslResult.code !== 'missing-openssl' && withOpensslResult.fetches > 0, 'control: the same run with openssl present goes on to fetch the issuer\'s documents, so the check above can fail', withOpensslResult || withOpenssl.stdout.slice(0, 200));
   line(Object.keys(tree(cleanA)).length === Object.keys(snapshotConfigured).length, 'the command-line runs also left the installation unchanged');
   // preserved credentials: the earlier credentials still verify now, from a second clean install of the same archive
   const again = extract(zipA, path.join(work, 'clean-b'));

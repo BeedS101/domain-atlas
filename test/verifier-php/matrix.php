@@ -280,8 +280,13 @@ $sigBytes = base64_decode(strtr($cred['signature'], '-_', '+/') . '==');
 $flip = $sigBytes; $flip[10] = chr(ord($flip[10]) ^ 1);
 $c2 = $cred; $c2['signature'] = b64u($flip);
 expect('one flipped signature bit -> bad-signature', run($c2, $good()), 'invalid', 'bad-signature');
-foreach (['short' => b64u(substr($sigBytes, 0, 63)), 'long' => b64u($sigBytes . "\0"), 'padded' => $cred['signature'] . '==', 'standard alphabet' => strtr($cred['signature'], '-_', '+/'), 'empty' => '', 'not a string' => 12, 'null' => null] as $label => $sig) {
-  $c3 = $cred; $c3['signature'] = $sig;
+// The standard-alphabet case needs a signature that contains '-' or '_' (most do; about one in sixteen does not, and
+// translating such a signature changes nothing, leaving a valid credential). Sign again until it does.
+$withUrlChars = $cred;
+for ($try = 0; $try < 200 && strpbrk($withUrlChars['signature'], '-_') === false; $try++) $withUrlChars = make_credential($key, $DOMAIN);
+check('setup: a signature containing - or _ exists for the standard-alphabet case', strpbrk($withUrlChars['signature'], '-_') !== false);
+foreach (['short' => b64u(substr($sigBytes, 0, 63)), 'long' => b64u($sigBytes . "\0"), 'padded' => $cred['signature'] . '==', 'standard alphabet' => strtr($withUrlChars['signature'], '-_', '+/'), 'empty' => '', 'not a string' => 12, 'null' => null] as $label => $sig) {
+  $c3 = $label === 'standard alphabet' ? $withUrlChars : $cred; $c3['signature'] = $sig;
   $res = run($c3, $good());
   check("signature $label is refused", $res['status'] === 'invalid' && !$res['valid'], 'got ' . $res['status'] . '/' . $res['code']);
 }

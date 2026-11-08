@@ -20,13 +20,13 @@ the configured issuer, and installs by uploading a folder and copying one config
 | `packages/atlas-verify/manifest.json` | the explicit, version-locked file list: path, source, mode, SHA-256 and size of every file |
 | `tools/package/build-package.js` | builds the ZIP from the manifest; refuses any source that differs from the lock; `--lock` records hashes on purpose, `--check` verifies only |
 | `tools/package/check-package.py` | independent checker (shares no code with the builder): re-hashes, parses the ZIP byte by byte, compares both SHA-256 files, rebuilds the archive and requires identical bytes |
-| `test/verifier-package.js` | 212 end-to-end checks run against the extracted archive |
-| `test/verifier-php/matrix.php` | the verdict matrix (178 checks), also run by the test above |
+| `test/verifier-package.js` | 217 end-to-end checks run against the extracted archive |
+| `test/verifier-php/matrix.php` | the verdict matrix (179 checks), also run by the test above |
 | `test/verifier-php/audit-tokens.php`, `canonical.php`, `test/lib/package-audit.js`, `test/lib/php-issuer.js` | test support |
 | `docs/` | the dependency map and these notes |
 
 Result of the run at the merge: 209 of 209 checks passed on `atlas-verify-0.1.0.zip` (about 47 KB, 11 files). After the
-hardening follow-up the same suite passes 212 of 212 on `atlas-verify-0.1.1.zip`; two builds from different directories, time zones and locales are byte-identical, and the Python rebuild matches.
+hardening follow-up the same suite passes 217 of 217 on `atlas-verify-0.1.1.zip`; two builds from different directories, time zones and locales are byte-identical, and the Python rebuild matches.
 
 ## What the inspection of the three repositories found
 
@@ -118,7 +118,7 @@ negative (revoked, suspended, expired) outranks an unreadable document, so the a
 ## How to reproduce
 
 ```
-node test/verifier-package.js                      all 212 checks, under a minute
+node test/verifier-package.js                      all 217 checks, under a minute
 node tools/package/build-package.js packages/atlas-verify/manifest.json --out dist/packages
 python3 -I tools/package/check-package.py packages/atlas-verify/manifest.json dist/packages/atlas-verify-0.1.1.zip
 sha256sum -c dist/packages/atlas-verify-0.1.1.zip.sha256
@@ -185,3 +185,30 @@ existing issuer endpoints and asset behaviour, the Core repository and every liv
 - `suspensions: optional` remains available and is still the right setting for issuers installed before this change that
   have never suspended anything.
 - The CI workflow has not run on GitHub. Its steps were run locally in the same order, on PHP 8.3 only.
+
+### CI compatibility fixes (after the first GitHub Actions run)
+
+The first run passed 211 of 212 checks on PHP 8.3 and 8.1 and 209 of 212 on PHP 7.4. All three failures were in the tests, not
+the package; the package files and the archive are unchanged.
+
+- **Temporary-file check.** It looked at the whole system temp directory for recent `php*` files, so files left by the
+  runner's PHP setup (`php8.3_extensions`, `php_8.3-nts+ubuntu24.04.tar.zst`) failed it. The verifier's PHP process now gets a
+  temp directory of its own (`sys_temp_dir`, `upload_tmp_dir`, `session.save_path`) and the check requires that directory to
+  stay empty, with a control showing a file PHP creates there is seen. Files elsewhere in `/tmp` no longer matter.
+- **Token audit on PHP 7.4.** PHP 8 returns `\stdClass` as one token; PHP 7.4 returns a backslash token and a name token, so
+  `new \stdClass()` looked like a call to `stdClass` and a class called `\`. `audit-tokens.php` now merges qualified names
+  into one token before any rule runs, so both versions give the same result, and looks for PHP 8 syntax (`?->`, `match`,
+  `enum`, `readonly`, attributes) in the source text as well as by token, because 7.4 has no tokens for them.
+  `test/verifier-audit-tokens.js` (26 checks) runs the audit in a mode that rewrites the PHP 8 token stream into the 7.4 one
+  and requires identical output for every package file, plus fixtures for each construct. This is a simulation: the PHP 7.4
+  CI job is the real proof and has not been seen green yet. The audit is not weaker: qualified calls such as
+  `\file_put_contents()` and static calls on unlisted classes were invisible to the old script on PHP 8 and are now caught.
+- **No-OpenSSL check.** It used `php -n`, which removes only extensions loaded from `php.ini`. Where OpenSSL is built in the test
+  never removed it (it passed only because the stubbed fetch answered 404), and where `json` is a loadable module (PHP 7.4
+  packages) it hit a fatal error and still passed on any non-empty output. It now removes the OpenSSL functions with
+  `disable_functions`, loads `json`, `filter`, `hash`, `pcre` and `date` when a build needs them as modules, and requires exit 0,
+  empty stderr and the structured verdict `unavailable` / `missing-openssl` with no document fetched, plus a control run that
+  proceeds to fetch when OpenSSL is present.
+- **A flaky case in the verdict matrix.** The "standard alphabet" signature case translated `-` and `_` to `+` and `/`; about one
+  signature in sixteen contains neither, so the translation changed nothing and the valid credential verified. It now signs
+  again until the signature contains one of them.

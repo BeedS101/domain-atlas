@@ -124,8 +124,8 @@ the reference PHP issuer agrees on every document without an empty object, a sup
 
 ## 7. Evidence
 
-`node test/verifier-package.js` (under a minute, no network beyond localhost) runs 212 checks against the archive, not the
-source folder. `php test/verifier-php/matrix.php <dir>` runs 178 of those directly. Summary by area:
+`node test/verifier-package.js` (under a minute, no network beyond localhost) runs 217 checks against the archive, not the
+source folder. `php test/verifier-php/matrix.php <dir>` runs 179 of those directly. Summary by area:
 
 - build and reproducibility: two builds from different directories, time zones and locales are byte-identical; 20
   refusal cases for the builder; damage cases for the checker

@@ -63,6 +63,9 @@ jobs:
           python3 -I tools/package/check-package.py packages/atlas-verify/manifest.json "$RUNNER_TEMP/packages/atlas-verify-${version}.zip"
           cd "$RUNNER_TEMP/packages" && sha256sum -c "atlas-verify-${version}.zip.sha256"
 
+      - name: Package audit reads PHP 8 and PHP 7.4 tokens the same way
+        run: node test/verifier-audit-tokens.js
+
       - name: Verifier package test suite
         run: node test/verifier-package.js
 
