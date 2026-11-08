@@ -1,0 +1,78 @@
+{
+  "format": "domain-atlas-package-manifest/1",
+  "name": "atlas-verify",
+  "version": "0.1.0",
+  "root": "atlas-verify",
+  "files": [
+    {
+      "path": ".htaccess",
+      "source": "verifier-php/.htaccess",
+      "mode": "0644",
+      "sha256": "584c354de00dbbd0a029a885c526372d3b6ed1837d98208fb1ef10113bc6c6e7",
+      "size": 291
+    },
+    {
+      "path": "LICENSE",
+      "source": "LICENSE",
+      "mode": "0644",
+      "sha256": "2969e207d9c404fa47af9adee059ac1c3ac06ab25fe564a3d841b88143ceda20",
+      "size": 1173
+    },
+    {
+      "path": "README.md",
+      "source": "verifier-php/README.md",
+      "mode": "0644",
+      "sha256": "404df0bb6bb61e703d151162050b394ebe73485d02a0ea997e80519be2b03f50",
+      "size": 3759
+    },
+    {
+      "path": "VERSION",
+      "source": "verifier-php/VERSION",
+      "mode": "0644",
+      "sha256": "e9dd8507f4bf0c6f42458e41aea833ad0bd3f6127272335eee9bf4d58541ed67",
+      "size": 6
+    },
+    {
+      "path": "config.example.php",
+      "source": "verifier-php/config.example.php",
+      "mode": "0644",
+      "sha256": "a210edd57036487c3601a8f44676574bd0baaea3035ce55124e838a4e62ae0df",
+      "size": 1558
+    },
+    {
+      "path": "lib/.htaccess",
+      "source": "verifier-php/lib/.htaccess",
+      "mode": "0644",
+      "sha256": "2635c4f28759072aaf54159e7b0254113f64a43b194a2de2be7ffb04a1d16224",
+      "size": 206
+    },
+    {
+      "path": "lib/atlas-verify-crypto.php",
+      "source": "verifier-php/lib/atlas-verify-crypto.php",
+      "mode": "0644",
+      "sha256": "6332afb3901779450fef620a96be834f718c00084a52f256bc895f5540104a5f",
+      "size": 6734
+    },
+    {
+      "path": "lib/atlas-verify-fetch.php",
+      "source": "verifier-php/lib/atlas-verify-fetch.php",
+      "mode": "0644",
+      "sha256": "3b1d91f15ef7f9d12f5571a91d67abc72861a9bfd319718b51c335a772266afa",
+      "size": 3678
+    },
+    {
+      "path": "lib/atlas-verify.php",
+      "source": "verifier-php/lib/atlas-verify.php",
+      "mode": "0644",
+      "sha256": "709dc64ad7ce3980592218b315f4c00f797713a7cdb8799dd95d2769a1c31b64",
+      "size": 21554
+    },
+    {
+      "path": "verify.php",
+      "source": "verifier-php/verify.php",
+      "mode": "0644",
+      "sha256": "5e1909d41164da9b530a0481aef058bdf2dc8f161ff7c0ec71492f3257277577",
+      "size": 4966
+    }
+  ]
+}

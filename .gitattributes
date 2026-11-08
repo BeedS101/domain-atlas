@@ -1,0 +1,4 @@
+# Files packaged by tools/package/build-package.js are hashed byte for byte: keep LF line endings on every platform.
+verifier-php/** text eol=lf
+packages/** text eol=lf
+LICENSE text eol=lf
