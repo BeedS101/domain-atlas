@@ -140,6 +140,11 @@ try {
       : x);
     expectRefusal(box, alteredZip('wrong-package', entries), 'install', /metadata/);
   });
+  check('repacked ZIP with identical files but different entry order is refused', () => {
+    const repacked = alteredZip('repacked-same-files', [...known].reverse());
+    expectRefusal(box, repacked, 'install', /pinned reproducible/);
+    assert.equal(fs.existsSync(path.join(box.web, 'atlas-verify')), false);
+  });
   check('successful one-time installation writes only the verified package and private config', () => {
     const result = invoke(box, packagePath, 'install');
     assert.equal(result.ok, true, JSON.stringify(result));
@@ -149,6 +154,7 @@ try {
     for (const { f, data } of sources) {
       assert.deepEqual(fs.readFileSync(path.join(box.web, 'atlas-verify', f.path)), data, f.path);
     }
+    assert.deepEqual(fs.readFileSync(path.join(box.web, 'atlas-verify/PACKAGE.json')), builder.packageJson(manifest, sources));
     assert.equal(fs.existsSync(path.join(box.web, 'atlas-verify/config.php')), true);
     assert.equal(fs.existsSync(path.join(box.priv, 'verify-config.php')), true);
     assert.equal(fs.statSync(path.join(box.priv, 'verify-config.php')).mode & 0o077, 0);
