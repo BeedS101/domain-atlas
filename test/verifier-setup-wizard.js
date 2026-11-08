@@ -12,7 +12,7 @@ function check(name, fn) {
   try { fn(); checks++; console.log('PASS ' + name); }
   catch (e) { console.error('FAIL ' + name + ': ' + e.stack); process.exitCode = 1; }
 }
-const base = { issuers: 'https://issuer.example', privatePath: '/home/ACCOUNT/atlas-private/verify-config.php' };
+const base = { issuers: 'https://issuer.example', privatePath: '/home/testaccount/atlas-private/verify-config.php' };
 
 check('lowercase issuer and strip HTTPS default port', function () {
   assert.equal(setup.normalizeOrigin('  https://ISSUER.example:443/ '), 'https://issuer.example');
@@ -37,6 +37,9 @@ check('reject duplicate normalized trusted issuers', function () {
 check('require 1–10 origins', function () {
   assert.throws(function () { setup.generate(Object.assign({}, base, { issuers: '' })); }, /between 1 and 10/);
   assert.throws(function () { setup.generate(Object.assign({}, base, { issuers: Array.from({ length: 11 }, function (_, i) { return 'https://issuer' + i + '.example'; }).join('\n') })); }, /between 1 and 10/);
+});
+check('reject the example ACCOUNT path until replaced', function () {
+  assert.throws(function () { setup.generate(Object.assign({}, base, { privatePath: '/home/ACCOUNT/atlas-private/verify-config.php' })); }, /Replace ACCOUNT/);
 });
 check('reject traversal, relative paths, and public web roots', function () {
   for (const p of ['config.php', '/home/test/../verify-config.php', '/home/test//verify-config.php',
@@ -67,7 +70,7 @@ check('generate one stable distinct entry for every origin', function () {
 });
 check('stub uses the requested private path, not an embedded issuer list', function () {
   const out = setup.generate(base);
-  assert.equal(out.stub, "<?php\n// Install alongside verify.php as config.php.\nreturn require '/home/ACCOUNT/atlas-private/verify-config.php';\n");
+  assert.equal(out.stub, "<?php\n// Install alongside verify.php as config.php.\nreturn require '/home/testaccount/atlas-private/verify-config.php';\n");
   assert.doesNotMatch(out.stub, /trustedIssuers/);
 });
 check('PHP accepts generated configuration and rejects syntax errors', function () {
