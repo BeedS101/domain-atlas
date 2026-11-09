@@ -387,7 +387,7 @@ Each stage ships separately, with tests, on its own branch.
    private forms, the account references, derived accounts, a per-account index, paged reads and the invariant checker,
    with tests including conservation under random operation sequences and a check that no public route returns a key of
    a private coin. This is built as the library `chain-labs/lib/ledger.php` with its tests (stage 2a); the coin
-   creation form gaining the single or multi choice and the public or private choice follows as stage 2b.
+   creation form gaining the single or multi choice and the public or private choice is stage 2b: `coin26.php` records the mode, visibility, partners and threshold in the genesis it hashes, and a multi coin stays pending. Opening the ledger store from that record waits for the funding stage, when the treasury key exists.
 3. Funding: treasury account and the faucet policy.
 4. Spend in single mode, end to end on one node: proposal, execution, receipts and recovery, and the signed `holdings`
    lookup with its challenge. This is the first stage a wallet can use.

@@ -13,7 +13,7 @@ here is a demonstration with no monetary value.
 | 19, 20 | `federation.html`, `federation.php`, `federation20.html`, `federation20.php` | Two domains exchange signed ping messages. |
 | 21, 22, 23 | `events21.*`, `events22.*`, `compare23.*` | Signed demo events, offline catch-up, and signed state-commitment comparison. No balances move. |
 | 25 | `supply25.*` | Read-only audit of each domain's own TEST-GOLD ledger. |
-| 26 | `coin26.*` | Coin registry. A coin is registered on one domain only. |
+| 26 | `coin26.*` | Coin registry. A coin is registered on one domain only. It is created as single or multi authority and as a public or private ledger; a multi coin names its partner domains and threshold and stays pending until they sign. |
 | 27, 28 | `index.html`, `market27.*`, `market-login28.php` | Read-only coin directory aggregating both registries; wallet login for it. |
 | 29 | `ledger29.php` | Read-only signed balance query. |
 | 30, 31 | `account30.php`, `accounts31.php` | Signed zero-balance account opening and account discovery. |
@@ -69,7 +69,7 @@ whole units, at most 10^12. The `lib` folder must be uploaded with the PHP files
 The PHP files were imported from the deployed files. `SOURCE.sha256` records the SHA-256 of each file as it stands (PHP
 hashed with LF line endings, since the deployed copies use CRLF). Eleven of them differ from the received copies in one
 line each, where a hard-coded domain list was replaced by a call to `lib/hosts.php`; nothing else changed. The HTML pages
-differ from the received copies only in removed decorative text and emoji. Change a PHP file deliberately, then refresh
+differ from the received copies only in removed decorative text and emoji. `coin26.php` and `coin26.html` were then extended for the coin creation choices and also differ from the received copies. Change a PHP file deliberately, then refresh
 its line in `SOURCE.sha256`.
 
 ## Checks
@@ -77,3 +77,4 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-import.js
     node test/chain-labs-config.js
     php test/chain-labs-ledger.php
+    node test/chain-labs-coin-form.js
