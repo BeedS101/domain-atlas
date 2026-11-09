@@ -160,8 +160,8 @@ In a public coin the two forms are the same record.
 coin. The secret is not in the genesis, which is public; the genesis carries only a hash of it, so every domain can
 check it holds the right one. The authority creates it and sends it to each co-approver over the signed peer channel
 while the genesis is being signed, and every roster domain keeps it as private state. The secret must exist because an
-unkeyed hash would let anyone who holds a public key compute its reference and look it up. The treasury account has a
-fixed, public label so total supply can be audited.
+unkeyed hash would let anyone who holds a public key compute its reference and look it up. The genesis publishes the treasury's
+reference (`treasuryRef`; the key itself in a public coin), so the treasury balance and total supply can be audited.
 
 **What this protects, and what it does not.**
 
@@ -386,7 +386,8 @@ Each stage ships separately, with tests, on its own branch.
 2. Ledger store: genesis with the authority mode, the visibility and every roster signature, the log with its public and
    private forms, the account references, derived accounts, a per-account index, paged reads and the invariant checker,
    with tests including conservation under random operation sequences and a check that no public route returns a key of
-   a private coin. The coin creation form gains the single or multi choice and the public or private choice.
+   a private coin. This is built as the library `chain-labs/lib/ledger.php` with its tests (stage 2a); the coin
+   creation form gaining the single or multi choice and the public or private choice follows as stage 2b.
 3. Funding: treasury account and the faucet policy.
 4. Spend in single mode, end to end on one node: proposal, execution, receipts and recovery, and the signed `holdings`
    lookup with its challenge. This is the first stage a wallet can use.

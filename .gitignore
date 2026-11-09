@@ -107,3 +107,6 @@ issuer-php/atlas/studio/inc/storage-root.php
 
 # Package archives written by tools/package/build-package.js
 dist/
+
+issuer-php/lib/mint-allowance/
+issuer-server/mint-allowance/

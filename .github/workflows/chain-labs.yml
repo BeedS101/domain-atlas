@@ -8,12 +8,14 @@ on:
       - 'chain-labs/**'
       - 'test/chain-labs-import.js'
       - 'test/chain-labs-config.js'
+      - 'test/chain-labs-ledger.php'
       - '.github/workflows/chain-labs.yml'
   pull_request:
     paths:
       - 'chain-labs/**'
       - 'test/chain-labs-import.js'
       - 'test/chain-labs-config.js'
+      - 'test/chain-labs-ledger.php'
       - '.github/workflows/chain-labs.yml'
 
 permissions:
@@ -48,3 +50,4 @@ jobs:
         run: |
           node test/chain-labs-import.js
           node test/chain-labs-config.js
+          php test/chain-labs-ledger.php

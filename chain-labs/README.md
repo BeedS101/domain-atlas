@@ -45,6 +45,25 @@ all, so every lab refuses every request, and the problem is written to the PHP e
 uploaded with the PHP files; it holds a deny rule and the library refuses a direct request. The HTML pages still carry
 their own copy of the two domain names.
 
+## Ledger store
+
+`lib/ledger.php` is the storage and rules layer for the coin ledger described in `docs/chain-labs-spend-protocol.md`. No
+lab uses it yet. It is a library over one SQLite file per node:
+
+- a genesis (authority mode, visibility, roster, threshold, supply) that every roster domain signs before the coin opens
+  with entry 0, which credits the treasury;
+- a hash-chained log in which each entry has a public form and a private form. A public coin's two forms are the same
+  record; a private coin's public form carries `HMAC-SHA256` account references instead of keys;
+- owner-signed transfers (raw P-256 key and signature, as the wallet produces them), a per-account sequence number and
+  a per-owner nonce, an authority signature, and approvals from other roster domains up to the coin's threshold;
+- paged public reads by coin, by entry range and by account reference, an owner view that resolves references for the
+  key holder only, and `ledger_check`, which recomputes every balance, sequence number, reference, index row and
+  signature from the log and reports any difference from the stored tables.
+
+Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
+sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
+whole units, at most 10^12. The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.
+
 ## Provenance
 
 The PHP files were imported from the deployed files. `SOURCE.sha256` records the SHA-256 of each file as it stands (PHP
@@ -57,3 +76,4 @@ its line in `SOURCE.sha256`.
 
     node test/chain-labs-import.js
     node test/chain-labs-config.js
+    php test/chain-labs-ledger.php
