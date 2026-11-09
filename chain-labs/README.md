@@ -31,7 +31,7 @@ here is a demonstration with no monetary value.
 ## Provenance
 
 The PHP files are a verbatim import of the deployed files; `SOURCE.sha256` records the SHA-256 of every file as
-received. The HTML pages differ from the received copies only in removed decorative text and emoji. Change a PHP file
+received (PHP hashed with LF line endings, since the deployed copies use CRLF). The HTML pages differ from the received copies only in removed decorative text and emoji. Change a PHP file
 deliberately, then refresh its line in `SOURCE.sha256`.
 
 ## Checks

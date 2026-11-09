@@ -26,8 +26,10 @@ console.log('\n== source integrity');
 const manifest = {};
 for (const l of read('SOURCE.sha256').split('\n')) { const m = /^([a-f0-9]{64}) [ *](.+)$/.exec(l); if (m) manifest[m[2]] = m[1]; }
 line(php.every((f) => manifest[f]) && html.every((f) => manifest[f]), 'every PHP and HTML file has a line in SOURCE.sha256', files.filter((f) => /\.(php|html)$/.test(f) && !manifest[f]));
-const changedPhp = php.filter((f) => crypto.createHash('sha256').update(fs.readFileSync(path.join(DIR, f))).digest('hex') !== manifest[f]);
-line(changedPhp.length === 0, php.length + ' PHP files match the deployed source byte for byte', changedPhp);
+// Line endings are normalised first: the deployed files use CRLF, a checkout may use either.
+const lf = (f) => Buffer.from(fs.readFileSync(path.join(DIR, f), 'utf8').replace(/\r\n/g, '\n'));
+const changedPhp = php.filter((f) => crypto.createHash('sha256').update(lf(f)).digest('hex') !== manifest[f]);
+line(changedPhp.length === 0, php.length + ' PHP files match the deployed source (line endings aside)', changedPhp);
 
 console.log('\n== php syntax and shape');
 for (const f of php) {
