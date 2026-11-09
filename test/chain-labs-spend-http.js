@@ -98,7 +98,7 @@ const statementOk = (a, key) => a.statement.domain === A && a.statement.key === 
     const o2 = await op('open', { coinId: sec.id, ...tooMany });
     line(o2.status === 201 && o2.json.coin.genesis.visibility === 'private' && o2.json.coin.genesis.faucet.maxAmount === '30000', 'a private coin opens, with a faucet policy if the operator gives one', o2.json);
     const o3 = await op('open', { coinId: mul.id });
-    line(o3.status === 400 && o3.json.code === 'needs-partners', 'a multi coin does not open on one domain', o3.json);
+    line(o3.status === 502 && o3.json.code === 'peer-down', 'a multi coin does not open while its partner does not answer', o3.json);
     const list = (await get('action=coins')).json;
     line(list.coins.length === 2 && list.coins.every((c) => c.state === 'active') && list.domainKey.includes('BEGIN PUBLIC KEY'), 'the two opened coins are listed with the domain key', list);
     const keyFile = path.join(priv, 'treasury-' + pub.id + '.json');

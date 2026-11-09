@@ -53,7 +53,7 @@ function spend_submit(PDO $db, string $coinId, array $authorization, int $now): 
     $known = spend_proposal($db, $coinId, $digest);
     if ($known) return spend_view($known);
     spend_expire($db, $coinId, $now);
-    $prepared = ledger_prepare_transfer($db, $coinId, $authorization, $now);
+    ledger_prepare_transfer($db, $coinId, $authorization, max($now, ledger_head_time($db, $coinId)));
     $payload = $authorization['payload'];
     try {
         $db->prepare("INSERT INTO ledger_proposals(coin_id,digest,from_key,nonce,authorization_json,status,created_at) VALUES(?,?,?,?,?,'pending',?)")
@@ -89,8 +89,10 @@ function spend_execute(PDO $db, string $coinId, string $digest, string $authorit
     // head, unless that other process has already executed this very proposal.
     for ($attempt = 0;; $attempt++) {
         try {
-            $prepared = ledger_prepare_transfer($db, $coinId, $authorization, $now);
-            $done = ledger_commit($db, $coinId, $prepared, ledger_sign($authorityPrivatePem, $prepared['hash']), [], $now);
+            // A request that started earlier than the entry just written executes at that entry's time, not before it.
+            $clock = max($now, ledger_head_time($db, $coinId));
+            $prepared = ledger_prepare_transfer($db, $coinId, $authorization, $clock);
+            $done = ledger_commit($db, $coinId, $prepared, ledger_sign($authorityPrivatePem, $prepared['hash']), [], $clock);
             break;
         } catch (LedgerError $e) {
             $current = spend_proposal($db, $coinId, $digest);

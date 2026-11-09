@@ -147,8 +147,13 @@ function ledger_schema(PDO $db): void
     $db->exec("CREATE TABLE IF NOT EXISTS ledger_proposals(
         coin_id TEXT NOT NULL, digest TEXT NOT NULL, from_key TEXT NOT NULL, nonce TEXT NOT NULL, authorization_json TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('pending','executed','expired','rejected')), created_at INTEGER NOT NULL,
-        executed_index INTEGER, reason TEXT, PRIMARY KEY(coin_id,digest), UNIQUE(coin_id,from_key,nonce))");
+        executed_index INTEGER, reason TEXT, prepared_json TEXT, approvals_json TEXT, PRIMARY KEY(coin_id,digest), UNIQUE(coin_id,from_key,nonce))");
+    // A table made before the approval columns existed gets them.
+    $have = array_column($db->query('PRAGMA table_info(ledger_proposals)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+    foreach (['prepared_json', 'approvals_json'] as $column) if (!in_array($column, $have, true)) $db->exec('ALTER TABLE ledger_proposals ADD COLUMN ' . $column . ' TEXT');
     $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_pending ON ledger_proposals(coin_id,from_key) WHERE status='pending'");
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_approved(coin_id TEXT NOT NULL, idx INTEGER NOT NULL, hash TEXT NOT NULL, executed_at INTEGER NOT NULL, PRIMARY KEY(coin_id,idx))');
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_peer_nonces(sender TEXT NOT NULL, nonce TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(sender,nonce))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_challenges(challenge TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_nonces(coin_id TEXT NOT NULL, owner_key TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(coin_id,owner_key,nonce))');
 }
@@ -303,6 +308,30 @@ function ledger_add_genesis_signature(PDO $db, string $coinId, string $domain, s
     $db->prepare('INSERT OR REPLACE INTO ledger_genesis_sigs(coin_id,domain,signature) VALUES(?,?,?)')->execute([$coinId, $domain, $signature]);
 }
 
+// Entry 0 as every domain derives it: the initial units credited to the treasury. $approvals are the genesis signatures.
+function ledger_genesis_entry(array $coin, array $approvals): array
+{
+    $genesis = $coin['genesis'];
+    $treasuryKey = (string) $coin['treasury_key'];
+    $ref = $genesis['visibility'] === 'private' ? ledger_ref((string) $coin['ref_secret'], $treasuryKey) : $treasuryKey;
+    if ($ref !== $genesis['treasuryRef']) ledger_fail('bad-genesis', 'the treasury does not match the genesis');
+    $public = ['type' => 'genesis', 'coinId' => $coin['coin_id'], 'index' => 0, 'prevHash' => $coin['genesis_digest'], 'executedAt' => $genesis['createdAt'],
+        'amount' => $genesis['initialUnits'], 'from' => null, 'to' => $ref];
+    $hash = ledger_digest($public);
+    return ['public' => $public, 'private' => ['hash' => $hash, 'from' => null, 'to' => $treasuryKey, 'authorization' => null], 'hash' => $hash, 'approvals' => $approvals, 'ref' => $ref];
+}
+
+// Writes entry 0 and opens the coin. Runs inside the caller's transaction.
+function ledger_write_genesis_entry(PDO $db, array $coin, array $entry, string $authoritySignature): void
+{
+    $coinId = $coin['coin_id'];
+    $db->prepare('INSERT INTO ledger_log(coin_id,idx,hash,prev_hash,public_json,private_json,authority_sig,approvals_json) VALUES(?,?,?,?,?,?,?,?)')
+        ->execute([$coinId, 0, $entry['hash'], $coin['genesis_digest'], ledger_canonical($entry['public']), ledger_canonical($entry['private']), $authoritySignature, ledger_canonical($entry['approvals'])]);
+    $db->prepare('INSERT INTO ledger_accounts(coin_id,account_key,ref,units,seq) VALUES(?,?,?,?,0)')->execute([$coinId, $coin['treasury_key'], $entry['ref'], (int) $coin['genesis']['initialUnits']]);
+    $db->prepare('INSERT INTO ledger_account_entries(coin_id,ref,pos,idx) VALUES(?,?,0,0)')->execute([$coinId, $entry['ref']]);
+    $db->prepare("UPDATE ledger_coins SET state='active' WHERE coin_id=?")->execute([$coinId]);
+}
+
 // Opens the coin once every roster domain has signed its genesis: credits the initial units to the treasury as entry 0.
 function ledger_activate(PDO $db, string $coinId, string $authorityPrivatePem): void
 {
@@ -310,27 +339,45 @@ function ledger_activate(PDO $db, string $coinId, string $authorityPrivatePem): 
     try {
         $coin = ledger_coin($db, $coinId);
         if ($coin['state'] !== 'pending') ledger_fail('not-pending', 'the coin is already active');
-        $genesis = $coin['genesis'];
         $sigs = $db->prepare('SELECT domain,signature FROM ledger_genesis_sigs WHERE coin_id=? ORDER BY domain');
         $sigs->execute([$coinId]);
         $have = [];
         foreach ($sigs->fetchAll(PDO::FETCH_ASSOC) as $row) $have[$row['domain']] = $row['signature'];
-        foreach ($genesis['roster'] as $member) if (!isset($have[$member['domain']])) ledger_fail('genesis-unsigned', $member['domain'] . ' has not signed the genesis');
-        $treasuryKey = (string) $coin['treasury_key'];
-        $secret = $coin['ref_secret'];
-        $ref = $genesis['visibility'] === 'private' ? ledger_ref((string) $secret, $treasuryKey) : $treasuryKey;
-        if ($ref !== $genesis['treasuryRef']) ledger_fail('bad-genesis', 'the treasury does not match the genesis');
-        $public = ['type' => 'genesis', 'coinId' => $coinId, 'index' => 0, 'prevHash' => $coin['genesis_digest'], 'executedAt' => $genesis['createdAt'],
-            'amount' => $genesis['initialUnits'], 'from' => null, 'to' => $ref];
-        $hash = ledger_digest($public);
-        $private = ['hash' => $hash, 'from' => null, 'to' => $treasuryKey, 'authorization' => null];
+        foreach ($coin['genesis']['roster'] as $member) if (!isset($have[$member['domain']])) ledger_fail('genesis-unsigned', $member['domain'] . ' has not signed the genesis');
         $approvals = [];
         foreach ($have as $domain => $sig) $approvals[] = ['domain' => $domain, 'signature' => $sig];
-        $db->prepare('INSERT INTO ledger_log(coin_id,idx,hash,prev_hash,public_json,private_json,authority_sig,approvals_json) VALUES(?,?,?,?,?,?,?,?)')
-            ->execute([$coinId, 0, $hash, $coin['genesis_digest'], ledger_canonical($public), ledger_canonical($private), ledger_sign($authorityPrivatePem, $hash), ledger_canonical($approvals)]);
-        $db->prepare('INSERT INTO ledger_accounts(coin_id,account_key,ref,units,seq) VALUES(?,?,?,?,0)')->execute([$coinId, $treasuryKey, $ref, (int) $genesis['initialUnits']]);
-        $db->prepare('INSERT INTO ledger_account_entries(coin_id,ref,pos,idx) VALUES(?,?,0,0)')->execute([$coinId, $ref]);
-        $db->prepare("UPDATE ledger_coins SET state='active' WHERE coin_id=?")->execute([$coinId]);
+        $entry = ledger_genesis_entry($coin, $approvals);
+        ledger_write_genesis_entry($db, $coin, $entry, ledger_sign($authorityPrivatePem, $entry['hash']));
+        $db->exec('COMMIT');
+    } catch (Throwable $e) {
+        ledger_rollback($db);
+        throw $e;
+    }
+}
+
+// A co-approver installs entry 0 as the authority wrote it, after checking it as the checker would: the entry is the one
+// its own genesis gives, every roster domain's genesis signature is there, and the authority signed it.
+function ledger_mirror_genesis(PDO $db, string $coinId, array $record): void
+{
+    $db->exec('BEGIN IMMEDIATE');
+    try {
+        $coin = ledger_coin($db, $coinId);
+        if ($coin['state'] !== 'pending') ledger_fail('not-pending', 'the coin is already active');
+        $genesis = $coin['genesis'];
+        $approvals = $record['approvals'] ?? null;
+        if (!is_array($approvals)) ledger_fail('bad-entry', 'entry 0 has no genesis signatures');
+        $have = [];
+        foreach ($approvals as $a) {
+            $key = is_array($a) && is_string($a['domain'] ?? null) ? ledger_roster_key($genesis, $a['domain']) : null;
+            if ($key === null || isset($have[$a['domain']]) || !ledger_verify($key, $coin['genesis_digest'], $a['signature'] ?? null)) ledger_fail('bad-approval', 'a genesis signature does not verify');
+            $have[$a['domain']] = true;
+        }
+        foreach ($genesis['roster'] as $member) if (!isset($have[$member['domain']])) ledger_fail('genesis-unsigned', $member['domain'] . ' has not signed the genesis');
+        $entry = ledger_genesis_entry($coin, $approvals);
+        if (ledger_canonical($record['public'] ?? null) !== ledger_canonical($entry['public']) || ledger_canonical($record['private'] ?? null) !== ledger_canonical($entry['private']) || ($record['hash'] ?? null) !== $entry['hash']) ledger_fail('bad-entry', 'entry 0 is not the one the genesis gives');
+        $authorityKey = ledger_roster_key($genesis, $genesis['authority']);
+        if ($authorityKey === null || !ledger_verify($authorityKey, $entry['hash'], $record['authoritySignature'] ?? null)) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
+        ledger_write_genesis_entry($db, $coin, $entry, $record['authoritySignature']);
         $db->exec('COMMIT');
     } catch (Throwable $e) {
         ledger_rollback($db);
@@ -466,6 +513,63 @@ function ledger_prepare_transfer(PDO $db, string $coinId, array $authorization, 
     return ['public' => $public, 'private' => ['hash' => $hash, 'from' => $t['from'], 'to' => $t['to'], 'authorization' => $authorization], 'hash' => $hash];
 }
 
+// The form of an entry for the next index: both forms present, extending the head, the hash matching the public form.
+// Returns [public, private, hash].
+function ledger_check_frame(PDO $db, array $coin, array $prepared): array
+{
+    $coinId = $coin['coin_id'];
+    $public = $prepared['public'] ?? null;
+    $private = $prepared['private'] ?? null;
+    if (!is_array($public) || !is_array($private)) ledger_fail('bad-entry', 'the entry has no public and private forms');
+    $head = ledger_head($db, $coinId);
+    if (($public['index'] ?? null) !== $head['index'] + 1) ledger_fail('wrong-index', 'the entry does not follow the head');
+    if (($public['prevHash'] ?? null) !== $head['hash']) ledger_fail('wrong-prev', 'the entry does not extend the head hash');
+    if (($public['coinId'] ?? null) !== $coinId || ($public['type'] ?? null) !== 'transfer') ledger_fail('bad-entry', 'only transfers can be committed');
+    $shape = array_keys($public);
+    sort($shape);
+    if ($shape !== ['amount', 'coinId', 'executedAt', 'from', 'index', 'prevHash', 'to', 'type']) ledger_fail('bad-entry', 'the public form has the wrong fields');
+    $hash = ledger_digest($public);
+    if (($private['hash'] ?? null) !== $hash || ($prepared['hash'] ?? null) !== $hash) ledger_fail('bad-hash', 'the entry hash does not match its public form');
+    return [$public, $private, $hash];
+}
+
+// The state rules of an entry against the current accounts: the owner's authorization, the references, the nonce, the
+// sequence number, the balance, the time and the faucet. Writes nothing. Every domain that applies or approves an entry
+// runs these against its own copy.
+function ledger_validate_state(PDO $db, array $coin, array $public, array $private, int $now): array
+{
+    $coinId = $coin['coin_id'];
+    $authorization = $private['authorization'] ?? null;
+    if (!is_array($authorization)) ledger_fail('bad-entry', 'the private form has no authorization');
+    $t = ledger_check_authorization($coin, $authorization, $now);
+    if (($private['from'] ?? null) !== $t['from'] || ($private['to'] ?? null) !== $t['to']) ledger_fail('bad-entry', 'the private form does not match the authorization');
+    if ($public['amount'] !== (string) $t['amount']) ledger_fail('bad-entry', 'the public amount does not match the authorization');
+    $fromRef = ledger_account_ref($coin, $t['from']);
+    $toRef = ledger_account_ref($coin, $t['to']);
+    if ($public['from'] !== $fromRef || $public['to'] !== $toRef) ledger_fail('bad-entry', 'the public references do not match the keys');
+    $nonce = $db->prepare('SELECT 1 FROM ledger_nonces WHERE coin_id=? AND owner_key=? AND nonce=?');
+    $nonce->execute([$coinId, $t['from'], $t['nonce']]);
+    if ($nonce->fetchColumn()) ledger_fail('replayed', 'this nonce was already used');
+    $from = ledger_account_row($db, $coinId, $t['from']);
+    if (!$from) ledger_fail('no-account', 'the sender has no account');
+    if ((int) $from['seq'] !== $t['baseSeq']) ledger_fail('stale', 'the sender account has moved on since this was signed');
+    if ((int) $from['units'] < $t['amount']) ledger_fail('insufficient', 'the sender holds less than the amount');
+    $at = ledger_check_executed_at($public['executedAt'], $authorization['payload'], ledger_head_time($db, $coinId));
+    if (abs($at - $now) > LEDGER_CLOCK_SKEW_SECONDS) ledger_fail('bad-time', 'executedAt is not close to the current time');
+    ledger_faucet_check($db, $coin, $t['from'], $t['to'], $t['amount'], $at);
+    return ['t' => $t, 'at' => $at, 'fromRef' => $fromRef, 'toRef' => $toRef];
+}
+
+// What a co-approver runs before signing: the entry is whole, extends its own head and is valid against its own accounts.
+function ledger_validate_prepared(PDO $db, string $coinId, array $prepared, int $now): array
+{
+    $coin = ledger_coin($db, $coinId);
+    if ($coin['state'] !== 'active') ledger_fail('not-active', 'the coin is ' . $coin['state']);
+    [$public, $private, $hash] = ledger_check_frame($db, $coin, $prepared);
+    ledger_validate_state($db, $coin, $public, $private, $now);
+    return ['public' => $public, 'private' => $private, 'hash' => $hash];
+}
+
 // Writes a prepared entry once the authority has signed its hash and enough approvers have signed the approval bytes.
 // Everything is checked again inside one write transaction, so two commits of the same index cannot both succeed.
 function ledger_commit(PDO $db, string $coinId, array $prepared, string $authoritySignature, array $approvals, int $now): array
@@ -475,18 +579,7 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         $coin = ledger_coin($db, $coinId);
         $genesis = $coin['genesis'];
         if ($coin['state'] !== 'active') ledger_fail('not-active', 'the coin is ' . $coin['state']);
-        $public = $prepared['public'] ?? null;
-        $private = $prepared['private'] ?? null;
-        if (!is_array($public) || !is_array($private)) ledger_fail('bad-entry', 'the entry has no public and private forms');
-        $head = ledger_head($db, $coinId);
-        if (($public['index'] ?? null) !== $head['index'] + 1) ledger_fail('wrong-index', 'the entry does not follow the head');
-        if (($public['prevHash'] ?? null) !== $head['hash']) ledger_fail('wrong-prev', 'the entry does not extend the head hash');
-        if (($public['coinId'] ?? null) !== $coinId || ($public['type'] ?? null) !== 'transfer') ledger_fail('bad-entry', 'only transfers can be committed');
-        $shape = array_keys($public);
-        sort($shape);
-        if ($shape !== ['amount', 'coinId', 'executedAt', 'from', 'index', 'prevHash', 'to', 'type']) ledger_fail('bad-entry', 'the public form has the wrong fields');
-        $hash = ledger_digest($public);
-        if (($private['hash'] ?? null) !== $hash || ($prepared['hash'] ?? null) !== $hash) ledger_fail('bad-hash', 'the entry hash does not match its public form');
+        [$public, $private, $hash] = ledger_check_frame($db, $coin, $prepared);
         $authorityKey = ledger_roster_key($genesis, $genesis['authority']);
         if ($authorityKey === null || !ledger_verify($authorityKey, $hash, $authoritySignature)) ledger_fail('bad-authority-signature', 'the authority signature does not verify');
         // Approvals: the authority counts once through its signature above; every other approver is a distinct roster domain.
@@ -502,25 +595,11 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
             $kept[] = ['domain' => $domain, 'signature' => $approval['signature']];
         }
         if (count($approvers) < (int) $coin['threshold']) ledger_fail('not-enough-approvals', 'the entry has ' . count($approvers) . ' of ' . $coin['threshold'] . ' required approvals');
-        // The private form must agree with the public one and carry a valid owner authorization.
-        $authorization = $private['authorization'] ?? null;
-        if (!is_array($authorization)) ledger_fail('bad-entry', 'the private form has no authorization');
-        $t = ledger_check_authorization($coin, $authorization, $now);
-        if (($private['from'] ?? null) !== $t['from'] || ($private['to'] ?? null) !== $t['to']) ledger_fail('bad-entry', 'the private form does not match the authorization');
-        if ($public['amount'] !== (string) $t['amount']) ledger_fail('bad-entry', 'the public amount does not match the authorization');
-        $fromRef = ledger_account_ref($coin, $t['from']);
-        $toRef = ledger_account_ref($coin, $t['to']);
-        if ($public['from'] !== $fromRef || $public['to'] !== $toRef) ledger_fail('bad-entry', 'the public references do not match the keys');
-        $nonce = $db->prepare('SELECT 1 FROM ledger_nonces WHERE coin_id=? AND owner_key=? AND nonce=?');
-        $nonce->execute([$coinId, $t['from'], $t['nonce']]);
-        if ($nonce->fetchColumn()) ledger_fail('replayed', 'this nonce was already used');
-        $from = ledger_account_row($db, $coinId, $t['from']);
-        if (!$from) ledger_fail('no-account', 'the sender has no account');
-        if ((int) $from['seq'] !== $t['baseSeq']) ledger_fail('stale', 'the sender account has moved on since this was signed');
-        if ((int) $from['units'] < $t['amount']) ledger_fail('insufficient', 'the sender holds less than the amount');
-        $at = ledger_check_executed_at($public['executedAt'], $authorization['payload'], ledger_head_time($db, $coinId));
-        if (abs($at - $now) > LEDGER_CLOCK_SKEW_SECONDS) ledger_fail('bad-time', 'executedAt is not close to the current time');
-        ledger_faucet_check($db, $coin, $t['from'], $t['to'], $t['amount'], $at);
+        $checked = ledger_validate_state($db, $coin, $public, $private, $now);
+        $t = $checked['t'];
+        $at = $checked['at'];
+        $fromRef = $checked['fromRef'];
+        $toRef = $checked['toRef'];
         // Apply. A recipient without an account gets one.
         $db->prepare('UPDATE ledger_accounts SET units=units-?, seq=seq+1 WHERE coin_id=? AND account_key=?')->execute([$t['amount'], $coinId, $t['from']]);
         $to = ledger_account_row($db, $coinId, $t['to']);
@@ -552,6 +631,39 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         ledger_rollback($db);
         throw $e;
     }
+}
+
+// ---------- sharing the log between roster domains ----------
+
+// The whole log entry, private form included: what one roster domain sends another so it can keep an identical copy.
+function ledger_records_after(PDO $db, string $coinId, int $after, int $limit): array
+{
+    ledger_coin($db, $coinId);
+    $rows = $db->prepare('SELECT * FROM ledger_log WHERE coin_id=? AND idx>? ORDER BY idx LIMIT ?');
+    $rows->execute([$coinId, $after, max(1, min(LEDGER_PAGE_MAX, $limit))]);
+    $out = [];
+    foreach ($rows->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $out[] = ['index' => (int) $row['idx'], 'public' => json_decode($row['public_json'], true), 'private' => json_decode($row['private_json'], true), 'hash' => $row['hash'],
+            'authoritySignature' => $row['authority_sig'], 'approvals' => json_decode($row['approvals_json'], true)];
+    }
+    return $out;
+}
+
+// Applies an entry received from the authority to this copy, with every check a commit makes: the hash chain, the
+// authority's signature, enough distinct roster approvals, the owner's signature, the balances and the faucet. The time
+// checks are made as of the entry's own time, since it was executed earlier.
+function ledger_mirror_apply(PDO $db, string $coinId, array $record): array
+{
+    $index = $record['index'] ?? null;
+    if (!is_int($index)) ledger_fail('bad-entry', 'the record has no index');
+    if ($index === 0) {
+        ledger_mirror_genesis($db, $coinId, $record);
+        return ['index' => 0, 'hash' => $record['hash']];
+    }
+    $at = is_array($record['public'] ?? null) && is_string($record['public']['executedAt'] ?? null) ? strtotime($record['public']['executedAt']) : false;
+    if ($at === false) ledger_fail('bad-time', 'the entry has no readable time');
+    return ledger_commit($db, $coinId, ['public' => $record['public'], 'private' => $record['private'] ?? null, 'hash' => $record['hash'] ?? null],
+        (string) ($record['authoritySignature'] ?? ''), is_array($record['approvals'] ?? null) ? $record['approvals'] : [], $at);
 }
 
 // ---------- reads for everyone: public forms only ----------
@@ -794,8 +906,9 @@ function ledger_treasury_key_load(string $dir, string $coinId): array
 }
 
 // An operator grant: a transfer from the treasury, signed by the treasury key. It is prepared and checked like any other
-// transfer, including the faucet limits; the authority and approvers then sign and commit it.
-function ledger_grant(PDO $db, string $coinId, array $treasury, string $recipientKey, string $amount, int $now): array
+// transfer, including the faucet limits; the authority and approvers then sign and commit it. A multi authority coin
+// submits the signed authorization as a proposal instead.
+function ledger_grant_authorization(PDO $db, string $coinId, array $treasury, string $recipientKey, string $amount, int $now): array
 {
     $coin = ledger_coin($db, $coinId);
     if (($treasury['key'] ?? null) !== $coin['treasury_key']) ledger_fail('not-treasury', 'that is not the coin\'s treasury key');
@@ -804,5 +917,10 @@ function ledger_grant(PDO $db, string $coinId, array $treasury, string $recipien
     $payload = ['type' => 'atlas.ledger.transfer', 'v' => 1, 'coinId' => $coinId, 'from' => $coin['treasury_key'], 'to' => $recipientKey, 'amount' => $amount,
         'baseSeq' => (int) $row['seq'], 'baseHead' => ledger_head($db, $coinId)['hash'], 'nonce' => bin2hex(random_bytes(16)),
         'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $now), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $now + 300)];
-    return ledger_prepare_transfer($db, $coinId, ['payload' => $payload, 'signature' => ledger_owner_sign($treasury['private'], $payload)], $now);
+    return ['payload' => $payload, 'signature' => ledger_owner_sign($treasury['private'], $payload)];
+}
+
+function ledger_grant(PDO $db, string $coinId, array $treasury, string $recipientKey, string $amount, int $now): array
+{
+    return ledger_prepare_transfer($db, $coinId, ledger_grant_authorization($db, $coinId, $treasury, $recipientKey, $amount, $now), $now);
 }

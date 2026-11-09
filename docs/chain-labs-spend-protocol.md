@@ -412,10 +412,28 @@ Each stage ships separately, with tests, on its own branch.
    identified by the digest of the signed payload; a single authority coin executes them at once and answers with the
    receipt (the signed log entry); recovery finishes what a crash left. `holdings` answers public coins to anyone and
    private coins to a request the key signed over a single-use challenge, which names the domain and the key. The
-   operator opens a registered coin as a ledger and makes treasury grants through the same endpoint. Multi coins are
-   stored as pending proposals and wait for stage 5.
+   operator opens a registered coin as a ledger and makes treasury grants through the same endpoint.
 5. Spend in multi mode: approval and execution between two and three local PHP nodes in the test suite, with all-of and
    2-of-3 thresholds, including concurrent double spends, a domain down, and crash injection.
+   Built as `lib/peer.php`, the `peer` route and the multi paths of `spend34.php`:
+   - Domains talk through signed envelopes (`atlas.peer.request`: sender, receiver, action, body, time, nonce) that the
+     receiver checks against the key it pinned for the sender; actions are `genesis`, `sync`, `approve` and `notify`.
+     Pinned keys and addresses come from `chainlabs-peers.json` in the private folder (or `peer_public_pem_b64` for the
+     single peer of a two-domain lab); the domains a host may name as partners come from the optional `partners` list of
+     `chainlabs-config.json`.
+   - Opening: the authority registers the coin, every roster domain checks the genesis against its own key and the keys it
+     pinned for the others, signs it, and picks up entry 0 from the authority. Opening can be repeated while a partner is down.
+   - Execution: the authority prepares the entry, stores it with the proposal, asks roster domains until it has the
+     threshold, writes the entry and tells the others, who catch up from the authority and apply every entry with the same
+     checks as a commit. A crash after the approvals is finished by recovery without asking again.
+   - A co-approver catches up first, then checks the entry against its own copy (head, signatures, balance, faucet), and
+     refuses a second, different entry for an index it approved less than two skew windows ago.
+   - That last rule stops an authority that asks twice only when every domain must approve. Below that, two quorums can
+     meet only at the authority, so a fork is detected by head comparison (stage 6), not prevented.
+   - Concurrent proposals: partners refuse the loser of a race for one index; the authority asks again once the winner is
+     written. An entry takes the time of the entry before it when the request began earlier.
+   - A partner catches up lazily when it is asked for a coin, a receipt or a proposal, and when it is asked to approve. A
+     holdings lookup does not catch up first; the wallet compares domains in stage 8.
 6. Mirroring: catch-up, head comparison and the freeze rule, for multi coins.
 7. Purchase with Gold, with the limits in the genesis, tested with crash injection at each step of 10.3.
 8. Wallet: the Ledger tab as a list of domains with the `holdings` lookup, the transfer signing flow and Buy with Gold,

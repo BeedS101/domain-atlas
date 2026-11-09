@@ -33,7 +33,7 @@ function lib(configJson) {
     fs.writeFileSync(file, configJson);
     env.CHAINLABS_CONFIG = file;
   }
-  const code = "require '" + LIB + "'; echo json_encode(['hosts' => chainlabs_hosts(), 'peers' => chainlabs_peer_map(), 'is' => array_map('chainlabs_is_host', ['evtec.co.za', 'a.example', 'EVTEC.co.za', 'evtec.co.za:443', ''])]);";
+  const code = "require '" + LIB + "'; echo json_encode(['hosts' => chainlabs_hosts(), 'peers' => chainlabs_peer_map(), 'partners' => array_map('chainlabs_partners', chainlabs_hosts()), 'is' => array_map('chainlabs_is_host', ['evtec.co.za', 'a.example', 'EVTEC.co.za', 'evtec.co.za:443', ''])]);";
   const out = execFileSync('php', ['-r', code], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   fs.rmSync(tmp, { recursive: true, force: true });
   return JSON.parse(out);
@@ -55,6 +55,9 @@ const three = lib(JSON.stringify({ hosts: ['a.example', 'b.example', 'c.example'
 line(three.hosts.length === 3 && same(three.peers, {}), 'three hosts with no peers list have no peers', three);
 const withPeers = lib(JSON.stringify({ hosts: ['a.example', 'b.example', 'c.example'], peers: { 'a.example': 'b.example', 'b.example': 'a.example' } }));
 line(same(withPeers.peers, { 'a.example': 'b.example', 'b.example': 'a.example' }), 'an explicit peers list is used as given', withPeers.peers);
+line(same(withPeers.partners, [['b.example'], ['a.example'], []]), 'without a partners list a host\'s partner is its peer', withPeers.partners);
+const withPartners = lib(JSON.stringify({ hosts: ['a.example', 'b.example', 'c.example'], partners: { 'a.example': ['b.example', 'c.example'], 'b.example': ['a.example'] } }));
+line(same(withPartners.partners, [['b.example', 'c.example'], ['a.example'], []]), 'a partners list names several partners for a host', withPartners.partners);
 const one = lib(JSON.stringify({ hosts: ['solo.example'] }));
 line(same(one.hosts, ['solo.example']) && same(one.peers, {}), 'a single host is allowed and has no peer', one);
 
@@ -76,6 +79,12 @@ const bad = {
   'a peer that is not a host': '{"hosts":["a.example","b.example"],"peers":{"a.example":"c.example"}}',
   'a host that peers with itself': '{"hosts":["a.example","b.example"],"peers":{"a.example":"a.example"}}',
   'peers as a list': '{"hosts":["a.example","b.example"],"peers":["b.example"]}',
+  'partners that are not a map': '{"hosts":["a.example","b.example"],"partners":["b.example"]}',
+  'a partner that is not a host': '{"hosts":["a.example","b.example"],"partners":{"a.example":["c.example"]}}',
+  'a host that is its own partner': '{"hosts":["a.example","b.example"],"partners":{"a.example":["a.example"]}}',
+  'the same partner twice': '{"hosts":["a.example","b.example"],"partners":{"a.example":["b.example","b.example"]}}',
+  'an empty partner list': '{"hosts":["a.example","b.example"],"partners":{"a.example":[]}}',
+  'partners given for a host that is not listed': '{"hosts":["a.example","b.example"],"partners":{"z.example":["b.example"]}}',
   'too large': JSON.stringify({ hosts: ['a.example'], pad: 'x'.repeat(9000) }),
 };
 for (const [name, content] of Object.entries(bad)) {

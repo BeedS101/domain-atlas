@@ -24,8 +24,8 @@ try{
  $have=array_column($db->query('PRAGMA table_info(coins)')->fetchAll(PDO::FETCH_ASSOC),'name');
  foreach(['mode'=>"TEXT NOT NULL DEFAULT 'single'",'visibility'=>"TEXT NOT NULL DEFAULT 'public'",'roster'=>"TEXT NOT NULL DEFAULT '[]'",'threshold'=>'INTEGER NOT NULL DEFAULT 1','state'=>"TEXT NOT NULL DEFAULT 'registered'"] as $col=>$def)if(!in_array($col,$have,true))$db->exec('ALTER TABLE coins ADD COLUMN '.$col.' '.$def);
 }catch(Throwable $e){done26(503,['ok'=>false,'error'=>'Cannot open isolated coin registry']);}
-// Partner domains a multi coin may name: the domain this host exchanges messages with.
-function partners26(string $host):array{$peer=chainlabs_peer_map()[$host]??null;return is_string($peer)&&$peer!==$host?[$peer]:[];}
+// Partner domains a multi coin may name. Opening the ledger needs a key pinned for each.
+function partners26(string $host):array{return chainlabs_partners($host);}
 function display26(int $units,int $decimals):string{
  if(!$decimals)return (string)$units;
  $s=str_pad((string)$units,$decimals+1,'0',STR_PAD_LEFT);

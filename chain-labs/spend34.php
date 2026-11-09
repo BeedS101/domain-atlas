@@ -5,9 +5,13 @@ declare(strict_types=1);
  *
  * Reads:  GET coins, coin, receipt, proposal.
  * Wallet: POST challenge, holdings (public coins to anyone, private coins to a key-signed challenge), propose (an
- *         owner-signed transfer, executed at once by this domain for a single authority coin).
- * Operator (private operator token): POST open (opens a coin of the coin registry as a ledger), grant (a treasury spend).
- * Storage: chain34.sqlite and the treasury key files in the private folder beside the web root, never inside it.
+ *         owner-signed transfer: executed at once by this domain for a single authority coin; for a multi authority coin the
+ *         authority collects approvals from the other domains first and answers 202 while it waits for them).
+ * Operator (private operator token): POST open (opens a coin of the coin registry as a ledger, a multi authority coin with
+ *         its partner domains), grant (a treasury spend), recover (finishes pending multi authority proposals).
+ * Domains: POST peer, a request signed by another domain of the coin (genesis, sync, approve, notify).
+ * Storage: chain34.sqlite, the treasury key files and chainlabs-peers.json (pinned partner keys) in the private folder beside
+ *          the web root, never inside it.
  */
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -19,7 +23,7 @@ if (empty($_SERVER['HTTPS']) || $_SERVER['HTTPS'] === 'off') reply34(403, ['ok' 
 $host = strtolower($_SERVER['HTTP_HOST'] ?? '');
 require __DIR__.'/lib/hosts.php';
 if (!chainlabs_is_host($host)) reply34(400, ['ok' => false, 'error' => 'Unrecognized host']);
-require __DIR__ . '/lib/spend.php';
+require __DIR__ . '/lib/peer.php';
 $root = realpath($_SERVER['DOCUMENT_ROOT'] ?? '');
 $private = $root ? realpath(dirname($root) . '/chainblock-labs-private') : false;
 if (!$private || str_starts_with($private . '/', $root . '/')) reply34(503, ['ok' => false, 'error' => 'Private storage unavailable']);
@@ -31,6 +35,8 @@ $admin = is_array($c) ? ($c['admin_token_hex'] ?? null) : null;
 $domainKey = $domainPrivate ? openssl_pkey_get_private($domainPrivate) : false;
 if (!$domainKey || !is_string($admin) || !preg_match('/^[a-f0-9]{64}$/D', $admin)) reply34(503, ['ok' => false, 'error' => 'Invalid operator configuration']);
 $domainPublic = openssl_pkey_get_details($domainKey)['key'];
+$peerConfig = peer_load_config($host, $private, $c, chainlabs_peer_map());
+$node = ['domain' => $host, 'private' => $domainPrivate, 'pinned' => $peerConfig['pinned']];
 try {
     $db = ledger_open($private . '/chain34.sqlite');
 } catch (Throwable $e) {
@@ -41,15 +47,17 @@ const SPEND34_STATUS = [
     'bad-signature' => 401, 'bad-challenge' => 401, 'unknown-coin' => 404, 'unknown-proposal' => 404, 'unknown-entry' => 404,
     'stale' => 409, 'replayed' => 409, 'pending-exists' => 409, 'insufficient' => 409, 'closed' => 409, 'not-active' => 409, 'expired' => 409,
     'wrong-index' => 409, 'wrong-prev' => 409, 'key-exists' => 409, 'busy' => 429, 'needs-approvals' => 202,
+    'unknown-peer' => 403, 'not-in-roster' => 403, 'not-authority' => 409, 'equivocation' => 409, 'exists' => 409, 'not-pending' => 409,
+    'peer-down' => 502, 'peer-bad-answer' => 502, 'bad-history' => 502, 'not-enough-approvals' => 503,
 ];
 function fail34(LedgerError $e): never
 {
     reply34(SPEND34_STATUS[$e->reason] ?? 400, ['ok' => false, 'code' => $e->reason, 'error' => $e->getMessage()]);
 }
-function body34(): array
+function body34(int $limit = 8192): array
 {
-    if ((int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 8192) reply34(413, ['ok' => false, 'error' => 'Request too large']);
-    $raw = file_get_contents('php://input', false, null, 0, 8193);
+    if ((int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > $limit) reply34(413, ['ok' => false, 'error' => 'Request too large']);
+    $raw = file_get_contents('php://input', false, null, 0, $limit + 1);
     if ($raw === '' || $raw === false) return [];
     $data = json_decode($raw, true);
     if (!is_array($data) || array_is_list($data)) reply34(400, ['ok' => false, 'error' => 'Invalid JSON']);
@@ -67,9 +75,37 @@ function operator34(array $m, string $admin): void
     if (!is_string($t) || !preg_match('/^[a-f0-9]{64}$/D', $t) || !hash_equals($admin, $t)) reply34(403, ['ok' => false, 'error' => 'Incorrect operator token']);
 }
 
+// A partner domain of a multi authority coin brings its copy level with the authority before it answers a read; an
+// authority that does not answer leaves the copy as it is.
+function catchup34(PDO $db, array $node, array $peerConfig, string $coinId, int $now): void
+{
+    try {
+        $coin = ledger_coin($db, $coinId);
+        if ($coin['mode'] !== 'multi' || $coin['genesis']['authority'] === $node['domain'] || !in_array($coin['state'], ['pending', 'active'], true)) return;
+        peer_catch_up($db, $node, $coinId, peer_http_sender($peerConfig, 4), $now);
+    } catch (Throwable $e) {
+    }
+}
+
+// Submits a signed transfer to the authority of a multi coin and collects approvals. Returns [status, body] for reply34: 201
+// with the receipt, or 202 with the proposal when the other domains have not approved yet (it stays pending and recovery or
+// a repeat of the request finishes it).
+function execute_multi34(PDO $db, array $node, callable $send, string $coinId, array $authorization, int $now): array
+{
+    $state = spend_submit($db, $coinId, $authorization, $now);
+    try {
+        return [201, ['ok' => true, 'receipt' => peer_execute($db, $node, $coinId, $state['digest'], $send, $now)]];
+    } catch (LedgerError $e) {
+        if (!in_array($e->reason, ['not-enough-approvals', 'peer-down'], true)) throw $e;
+        $row = spend_proposal($db, $coinId, $state['digest']);
+        return [202, ['ok' => true, 'code' => 'needs-approvals', 'proposal' => $row ? spend_view($row) : $state, 'note' => $e->getMessage()]];
+    }
+}
+
 $method = $_SERVER['REQUEST_METHOD'];
 $action = $_GET['action'] ?? '';
 $now = time();
+$send = peer_http_sender($peerConfig);
 try {
     if ($method === 'GET' && $action === 'coins') {
         $out = [];
@@ -81,13 +117,19 @@ try {
         reply34(200, ['ok' => true, 'domain' => $host, 'domainKey' => $domainPublic, 'coins' => $out]);
     }
     if ($method === 'GET' && $action === 'coin') {
-        reply34(200, ['ok' => true] + ledger_public_coin($db, arg34('coin', '/^[a-f0-9]{32}$/D')));
+        $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
+        catchup34($db, $node, $peerConfig, $coinId, $now);
+        reply34(200, ['ok' => true] + ledger_public_coin($db, $coinId));
     }
     if ($method === 'GET' && $action === 'receipt') {
-        reply34(200, ['ok' => true, 'receipt' => spend_receipt($db, arg34('coin', '/^[a-f0-9]{32}$/D'), (int) arg34('index', '/^\d{1,9}$/D'))]);
+        $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
+        catchup34($db, $node, $peerConfig, $coinId, $now);
+        reply34(200, ['ok' => true, 'receipt' => spend_receipt($db, $coinId, (int) arg34('index', '/^\d{1,9}$/D'))]);
     }
     if ($method === 'GET' && $action === 'proposal') {
-        $row = spend_proposal($db, arg34('coin', '/^[a-f0-9]{32}$/D'), arg34('digest', '/^[a-f0-9]{64}$/D'));
+        $coinId = arg34('coin', '/^[a-f0-9]{32}$/D');
+        catchup34($db, $node, $peerConfig, $coinId, $now);
+        $row = spend_proposal($db, $coinId, arg34('digest', '/^[a-f0-9]{64}$/D'));
         if (!$row) reply34(404, ['ok' => false, 'code' => 'unknown-proposal', 'error' => 'no such proposal']);
         $view = spend_view($row);
         if ($row['status'] === 'executed') $view['receipt'] = spend_receipt($db, $row['coin_id'], (int) $row['executed_index']);
@@ -109,14 +151,20 @@ try {
         if (!is_array($payload) || !is_string($payload['coinId'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $payload['coinId'])) reply34(400, ['ok' => false, 'error' => 'Expected a signed transfer']);
         $coin = ledger_coin($db, $payload['coinId']);
         if ($coin['mode'] !== 'single') {
-            $state = spend_submit($db, $payload['coinId'], $authorization, $now);
-            reply34(202, ['ok' => true, 'proposal' => $state, 'note' => 'Waiting for approvals from the other domains']);
+            if ($coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Propose to the authority of this coin', 'authority' => $coin['genesis']['authority']]);
+            reply34(...execute_multi34($db, $node, $send, $payload['coinId'], $authorization, $now));
         }
         reply34(201, ['ok' => true, 'receipt' => spend_submit_and_execute($db, $payload['coinId'], $authorization, $domainPrivate, $now)]);
     }
 
+    // Another domain of a coin. The request is signed with that domain's key and checked against the key pinned here.
+    if ($action === 'peer') {
+        $envelope = body34(65536);
+        reply34(200, ['ok' => true, 'answer' => peer_handle($db, $node, $envelope, $now, peer_http_sender($peerConfig, 8))]);
+    }
+
     // Operator actions.
-    if ($action === 'open' || $action === 'grant') {
+    if ($action === 'open' || $action === 'grant' || $action === 'recover') {
         $m = body34();
         operator34($m, $admin);
         $coinId = $m['coinId'] ?? null;
@@ -130,10 +178,33 @@ try {
         $q->execute([$coinId, $host]);
         $row = $q->fetch(PDO::FETCH_ASSOC);
         if (!$row) reply34(404, ['ok' => false, 'code' => 'unknown-coin', 'error' => 'Coin not registered on this domain']);
-        if (($row['mode'] ?? 'single') !== 'single') reply34(400, ['ok' => false, 'code' => 'needs-partners', 'error' => 'A multi authority coin opens once its partner domains can sign the genesis']);
-        $known = $db->prepare('SELECT 1 FROM ledger_coins WHERE coin_id=?');
+        $multi = ($row['mode'] ?? 'single') === 'multi';
+        $known = $db->prepare('SELECT state FROM ledger_coins WHERE coin_id=?');
         $known->execute([$coinId]);
-        if ($known->fetchColumn()) reply34(409, ['ok' => false, 'code' => 'already-open', 'error' => 'This coin already has a ledger']);
+        $state = $known->fetchColumn();
+        if ($state !== false && !($multi && $state === 'pending')) reply34(409, ['ok' => false, 'code' => 'already-open', 'error' => 'This coin already has a ledger']);
+        if ($multi) {
+            // A coin that is waiting for signatures keeps its genesis and reference secret, so opening can be repeated.
+            $roster = json_decode((string) $row['roster'], true);
+            if (!is_array($roster) || ($roster[0] ?? null) !== $host || count($roster) < 2) reply34(400, ['ok' => false, 'error' => 'The coin record has no usable roster']);
+            $unpinned = array_values(array_filter($roster, fn($d) => $d !== $host && !isset($peerConfig['pinned'][$d])));
+            if ($unpinned) reply34(400, ['ok' => false, 'code' => 'needs-partners', 'error' => 'No key is pinned for: ' . implode(', ', $unpinned), 'missing' => $unpinned]);
+            $treasury = is_file($private . '/treasury-' . $coinId . '.json') ? ledger_treasury_key_load($private, $coinId) : ledger_treasury_key_create($private, $coinId);
+            if ($state === 'pending') {
+                $held = ledger_coin($db, $coinId);
+                $genesis = $held['genesis'];
+                $secret = $held['ref_secret'];
+            } else {
+                $isPrivate = ($row['visibility'] ?? 'public') === 'private';
+                $secret = $isPrivate ? bin2hex(random_bytes(32)) : null;
+                $members = array_map(fn($d) => ['domain' => $d, 'key' => $d === $host ? $domainPublic : $peerConfig['pinned'][$d]], $roster);
+                $genesis = ledger_genesis(['coinId' => $coinId, 'symbol' => $row['symbol'], 'name' => $row['name'], 'decimals' => (int) $row['decimals'], 'maxUnits' => (string) $row['max_units'],
+                    'initialUnits' => (string) $row['initial_units'], 'treasuryKey' => $treasury['key'], 'mode' => 'multi', 'visibility' => $isPrivate ? 'private' : 'public',
+                    'roster' => $members, 'threshold' => (int) $row['threshold'], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null]);
+            }
+            peer_open_multi($db, $node, $genesis, $treasury['key'], $secret, $send, $now);
+            reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
+        }
         $isPrivate = ($row['visibility'] ?? 'public') === 'private';
         $secret = $isPrivate ? bin2hex(random_bytes(32)) : null;
         // A key file left by an attempt that stopped before the ledger was written is reused, never replaced.
@@ -146,13 +217,22 @@ try {
         ledger_activate($db, $coinId, $domainPrivate);
         reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
     }
+    if ($action === 'recover') {
+        $coin = ledger_coin($db, $coinId);
+        if ($coin['mode'] !== 'multi' || $coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Only the authority of a multi authority coin recovers']);
+        reply34(200, ['ok' => true, 'results' => peer_recover($db, $node, $coinId, $send, $now)]);
+    }
     if ($action === 'grant') {
         $to = $m['to'] ?? null;
         $amount = $m['amount'] ?? null;
         if (!is_string($to) || !is_string($amount)) reply34(400, ['ok' => false, 'error' => 'Expected to and amount']);
-        $prepared = ledger_grant($db, $coinId, ledger_treasury_key_load($private, $coinId), $to, $amount, $now);
         $coin = ledger_coin($db, $coinId);
-        if ($coin['mode'] !== 'single') reply34(202, ['ok' => false, 'code' => 'needs-approvals', 'error' => 'A multi authority coin needs approvals from the other domains']);
+        if ($coin['mode'] !== 'single') {
+            if ($coin['genesis']['authority'] !== $host) reply34(409, ['ok' => false, 'code' => 'not-authority', 'error' => 'Grant from the authority of this coin']);
+            $authorization = ledger_grant_authorization($db, $coinId, ledger_treasury_key_load($private, $coinId), $to, $amount, $now);
+            reply34(...execute_multi34($db, $node, $send, $coinId, $authorization, $now));
+        }
+        $prepared = ledger_grant($db, $coinId, ledger_treasury_key_load($private, $coinId), $to, $amount, $now);
         $done = ledger_commit($db, $coinId, $prepared, ledger_sign($domainPrivate, $prepared['hash']), [], $now);
         reply34(201, ['ok' => true, 'receipt' => spend_receipt($db, $coinId, $done['index'])]);
     }

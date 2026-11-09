@@ -201,6 +201,17 @@ t(count(array_filter($outs, fn($x) => !str_starts_with($x, 'OK '))) === 0, 'and 
 t(ledger_check($pdb, $pc['coin']) === [], 'the checker passes after the parallel run', ledger_check($pdb, $pc['coin']));
 t(ledger_check($db, $c['coin']) === [] && ledger_check($db, $r['coin']) === [], 'the checker passes on the coins used above', [ledger_check($db, $c['coin']), ledger_check($db, $r['coin'])]);
 
+// A request that began before the entry just written is executed at that entry's time, not refused for being behind it.
+[$cdb] = fresh();
+$cc = make_coin($cdb, 'CLK');
+$cu = owner();
+pay($cdb, $cc, $cc['treasury'], $cu['key'], '1000');
+$NOW += 7;
+pay($cdb, $cc, $cc['treasury'], $cu['key'], '10');
+$NOW -= 7;
+$late = pay($cdb, $cc, $cu, owner()['key'], '5');
+t($late['entry']['executedAt'] === gmdate('Y-m-d\TH:i:s\Z', $NOW + 7) && ledger_check($cdb, $cc['coin']) === [], 'a request that started before the newest entry executes at that entry\'s time', $late['entry']['executedAt'] ?? null);
+
 echo "\n== a private coin's receipts\n";
 $pv = make_coin($db, 'PRV', 'single', 'private');
 $x = owner(); $y = owner();
