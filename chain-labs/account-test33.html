@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chainblock Labs 33 — Account Test Station</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,Arial,sans-serif;background:#111827;color:#e5e7eb}
+body{max-width:920px;margin:32px auto;padding:0 18px}h1{font-size:1.8rem}p{line-height:1.5}
+.panel{border:1px solid #374151;border-radius:14px;padding:18px;margin:15px 0;background:#1f2937}
+button{background:#60a5fa;color:#0b1020;padding:11px 17px;border-radius:9px;border:0;font-weight:700;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}pre{overflow:auto;white-space:pre-wrap;word-break:break-word;background:#0b1220;padding:14px;border-radius:8px}
+small,.hint{color:#cbd5e1}.good{color:#86efac}.bad{color:#fca5a5}code{overflow-wrap:anywhere}
+</style><!-- atlas-labs:styles:start -->
+<style>
+.atlas-labs-risk,.atlas-labs-footer{box-sizing:border-box;font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:inherit}
+.atlas-labs-risk{margin:1rem auto;padding:.7rem .9rem;max-width:900px;border:1px solid rgba(214,158,46,.7);border-left:4px solid rgba(214,158,46,.95);border-radius:6px;background:rgba(214,158,46,.12)}
+.atlas-labs-risk a,.atlas-labs-footer a{color:inherit;text-decoration:underline;font-weight:600}
+.atlas-labs-footer{clear:both;position:relative;margin:3rem auto 0;max-width:900px;padding:1rem .5rem 1.5rem;border-top:1px solid rgba(128,128,128,.45);text-align:center;opacity:.9}
+.atlas-labs-footer p{margin:.25rem 0;font:inherit}
+</style>
+<!-- atlas-labs:styles:end -->
+</head><body>
+<!-- atlas-labs:risk:start -->
+<div class="atlas-labs-risk" role="note"><strong>Experimental platform — use at your own risk.</strong> Assets, tokens, credits and credentials here are demonstrations with no monetary value and no promise of redemption. <a href="/terms/">Terms &amp; Conditions</a></div>
+<!-- atlas-labs:risk:end -->
+<h1>Chainblock Labs 33 — Account Test Station</h1>
+<p>Tests Labs 30 account opening, Labs 31 discovery and Labs 29 balance reads on <strong id="host"></strong>, with a <strong>temporary test-only P-256 identity</strong>. No extension access, Gold, minting or real funds.</p>
+<section class="panel"><strong>Safety</strong><p class="hint">The private key stays in this browser page's memory and is discarded when the page closes or reloads. A corresponding <em>empty public account</em> remains in the site's experimental SQLite ledger. Never treat this identity as a recoverable wallet or deposit assets to it.</p>
+<p id="coin"></p><button id="run">Run all four checks</button> <button id="clear" disabled>Clear on-screen log</button></section>
+<section class="panel"><strong>Test results</strong><p id="status" role="status" aria-live="polite">Ready. No requests sent.</p><pre id="log" aria-label="Test results">—</pre></section>
+<p class="hint"><small>Run this page from each domain's own <code>/chain-labs/</code> folder over HTTPS. It contacts same-origin Labs PHP endpoints only. Results are experimental and balances are unsigned server reports.</small></p>
+<script>
+(()=>{
+'use strict';
+const host=location.hostname;
+const allowed=['evtec.co.za','domain-atlas.co.za'];
+const run=document.getElementById('run'),clear=document.getElementById('clear'),log=document.getElementById('log'),status=document.getElementById('status');
+document.getElementById('host').textContent=host;
+const coin=host==='evtec.co.za'?'GOPH':'MWC';
+document.getElementById('coin').textContent='Test coin: '+coin+' · Network: chainblock-labs29-'+host;
+let lines=[];
+function line(name,ok,detail){lines.push((ok?'PASS':'FAIL')+' — '+name+(detail?'\n  '+detail:''));log.textContent=lines.join('\n\n');}
+function canonical(v){if(v===null||typeof v!=='object')return JSON.stringify(v);if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}';}
+function b64(bytes){return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+function nonce(){return Array.from(crypto.getRandomValues(new Uint8Array(24)),x=>x.toString(16).padStart(2,'0')).join('');}
+function url(file,action){return location.origin+'/chain-labs/'+file+'?action='+action;}
+async function post(u,body){const response=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store',credentials:'omit',redirect:'error'});let json;try{json=await response.json();}catch{throw Error('Non-JSON response (HTTP '+response.status+')');}return {status:response.status,body:json};}
+async function main(){
+lines=[];log.textContent='Running…';status.textContent='Generating a temporary identity…';run.disabled=true;clear.disabled=true;
+try{
+if(!allowed.includes(host)||location.protocol!=='https:')throw Error('Open this page via HTTPS on one of the two authorized domains');
+if(!crypto.subtle)throw Error('WebCrypto unavailable');
+const pair=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign','verify']);
+const pub=b64(await crypto.subtle.exportKey('raw',pair.publicKey));
+const network='chainblock-labs29-'+host;
+const build=async(type,target,includeCoin=true)=>{
+ const payload={type,v:1,audience:target,network,nonce:nonce(),issuedAt:new Date().toISOString().replace(/\.\d{3}Z$/,'Z')};
+ if(includeCoin)payload.coin=coin;
+ const data=new TextEncoder().encode(canonical(payload));
+ const signature=b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},pair.privateKey,data));
+ return {payload,proof:{publicKey:pub,signature}};
+};
+const openUrl=url('account30.php','open');
+status.textContent='Opening zero-balance account…';
+const opening=await build('atlas.ledger.account.open',openUrl);
+const a=await post(openUrl,opening);
+line('1. Open empty account',a.status===201&&a.body.amount==='0'&&a.body.created===true,'HTTP '+a.status+'; '+(a.body.code||a.body.error||'?'));
+if(a.status!==201)throw Error('Opening did not succeed; remaining checks skipped. '+(a.body.code||''));
+const replay=await post(openUrl,opening);
+line('2. Replay same signed opening',replay.status===409&&replay.body.code==='replayed-request','HTTP '+replay.status+'; '+(replay.body.code||'?'));
+const accountsUrl=url('accounts31.php','accounts');
+status.textContent='Discovering account under signed proof…';
+const list=await post(accountsUrl,await build('atlas.ledger.accounts',accountsUrl,false));
+const found=Array.isArray(list.body.accounts)&&list.body.accounts.some(x=>x.ownerKey===pub&&x.network===network&&x.coin===coin&&x.accountId===a.body.accountId);
+line('3. Signed account discovery',list.status===200&&found,'HTTP '+list.status+'; accounts returned: '+(list.body.count??'?')+'; matching ID: '+found);
+const balanceUrl=url('ledger29.php','balance');
+status.textContent='Reading zero balance…';
+const bal=await post(balanceUrl,await build('atlas.ledger.balance',balanceUrl));
+const valid=bal.status===200&&bal.body.amount==='0'&&bal.body.decimals===6&&bal.body.ownerKey===pub&&bal.body.coin===coin&&bal.body.network===network;
+line('4. Signed zero-balance read',valid,'HTTP '+bal.status+'; amount '+String(bal.body.amount)+' minor units; verified request only, response UNSIGNED');
+status.textContent=lines.every(x=>x.startsWith('PASS'))?'Four checks passed. Temporary browser key will be discarded when this page closes.':'Some checks failed; see details.';
+}catch(e){line('Test stopped',false,e.message);status.textContent='Tests could not finish — see error.';}
+finally{run.disabled=false;clear.disabled=false;}
+}
+run.addEventListener('click',main);
+clear.addEventListener('click',()=>{lines=[];log.textContent='—';status.textContent='Log cleared. Accounts created previously remain on the test ledger.';clear.disabled=true;});
+})();
+</script><!-- atlas-labs:footer:start -->
+<footer class="atlas-labs-footer"><p>© 2026 Bruno da Silva. All rights reserved.</p><p><a href="/terms/">Terms &amp; Conditions</a> | Experimental Platform — Use at Your Own Risk</p></footer>
+<!-- atlas-labs:footer:end -->
+</body></html>

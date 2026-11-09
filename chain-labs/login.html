@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Chainblock Labs 16 — PHP Verification</title><style>body{max-width:750px;margin:3em auto;padding:0 1.2em;font:16px/1.55 system-ui;background:#111d2d;color:#f2f7ff}section{border:1px solid #40546e;border-radius:14px;padding:20px;margin:20px 0}button{padding:12px 18px;border-radius:8px;border:0;background:#9bdcff;color:#123;font-weight:700;cursor:pointer}button:disabled{opacity:.5}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#081422;padding:12px;border-radius:6px}a{color:#9bdcff}</style><!-- atlas-labs:styles:start -->
+<style>.atlas-labs-risk,.atlas-labs-footer{box-sizing:border-box;font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:inherit}.atlas-labs-risk{margin:1rem auto;padding:.7rem .9rem;max-width:900px;border:1px solid rgba(214,158,46,.7);border-left:4px solid rgba(214,158,46,.95);border-radius:6px;background:rgba(214,158,46,.12)}.atlas-labs-risk a,.atlas-labs-footer a{color:inherit;text-decoration:underline;font-weight:600}.atlas-labs-footer{clear:both;position:relative;margin:3rem auto 0;max-width:900px;padding:1rem .5rem 1.5rem;border-top:1px solid rgba(128,128,128,.45);text-align:center;opacity:.9}.atlas-labs-footer p{margin:.25rem 0;font:inherit}</style>
+<!-- atlas-labs:styles:end -->
+</head><body>
+<!-- atlas-labs:risk:start -->
+<div class="atlas-labs-risk" role="note"><strong>Experimental platform — use at your own risk.</strong> Assets, tokens, credits and credentials here are demonstrations with no monetary value and no promise of redemption. <a href="/terms/">Terms &amp; Conditions</a></div>
+<!-- atlas-labs:risk:end --><p>CHAINBLOCK LABS 16</p><h1>Wallet ↔ PHP verification</h1><p>This test verifies a freshly signed challenge on your hosting server. It does not issue, transfer or spend any assets.</p><section><button id="run">Connect & verify wallet</button><pre id="out">Ready.</pre></section><p><a href="./">Return to wallet-connection demo</a></p><script>
+(()=>{'use strict';let btn=document.getElementById('run'),out=document.getElementById('out');btn.onclick=async()=>{btn.disabled=true;try{
+if(!window.atlasWallet)throw Error('Wallet bridge not detected. Enable the extension and reload.');
+let id=await window.atlasWallet.getIdentity();if(!id.allowed||!id.publicKey)throw Error('Wallet identity not available or not permitted.');
+out.textContent='Requesting a fresh server challenge…';
+let res=await fetch('./verify.php',{credentials:'same-origin',cache:'no-store'});let challenge=await res.json();if(!res.ok||!challenge.ok)throw Error(challenge.error||'Challenge request failed');
+out.textContent='Wallet confirmation required…';
+let signed=await window.atlasWallet.requestSignature(challenge.challenge);
+if(!signed.allowed||!signed.result)throw Error('Wallet signing cancelled or permission denied.');
+if(signed.result.publicKey!==id.publicKey)throw Error('Wallet identity changed during signing.');
+out.textContent='Verifying the signature with PHP…';
+res=await fetch('./verify.php',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({envelope:signed.result})});
+let verified=await res.json();if(!res.ok||!verified.verified)throw Error(verified.error||'Server verification failed');
+out.textContent='✓ PHP verified your wallet signature!\nPublic key: '+verified.publicKey.slice(0,32)+'…\n\nThis is demo login only; no coins or spending permissions.';
+}catch(e){out.textContent='Not verified: '+e.message}finally{btn.disabled=false}}})();
+</script><!-- atlas-labs:footer:start -->
+<footer class="atlas-labs-footer"><p>© 2026 Bruno da Silva. All rights reserved.</p><p><a href="/terms/">Terms &amp; Conditions</a> | Experimental Platform — Use at Your Own Risk</p></footer>
+<!-- atlas-labs:footer:end -->
+</body></html>
