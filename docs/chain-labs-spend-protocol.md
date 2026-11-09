@@ -44,6 +44,10 @@ Goals:
    and a named partner domain). The choice is fixed in the genesis and shown wherever the coin is shown.
 8. A coin can be bought with Gold (Au) through a domain-run purchase that delivers the coin once, and never takes Gold
    without delivering.
+9. When a coin is created, the creator also chooses public or private visibility. Both can be scanned; a private coin's
+   public view shows account references in place of keys (section 4.6).
+10. A wallet finds its assets by asking a list of domains, with nothing to open and no ledger state of its own
+    (section 11.1).
 
 Non-goals:
 
@@ -70,7 +74,7 @@ more co-approvers; a single authority coin has none.
 ### 4.2 Genesis
 
 A coin is created by a genesis record: coin id, symbol, decimals, maximum units, initial units, the treasury account,
-the authority mode, the roster and the policy. Every domain in the roster signs its digest, replacing the unsigned
+the authority mode, the visibility (section 4.6), the roster and the policy. Every domain in the roster signs its digest, replacing the unsigned
 genesis hash. A coin whose genesis lacks any roster signature is pending and cannot hold or move funds. The initial units are credited to the treasury account in log entry 0, so the whole
 supply is held in accounts from the start and supply never changes afterwards.
 
@@ -108,6 +112,9 @@ every balance from the log alone.
 Amounts are non-negative integers in minor units, written as decimal strings in JSON and handled as integers in
 code, never as floats. The existing cap of 10^12 units per coin stays.
 
+Each entry exists in two forms, a public form and a private form, described in section 4.6. In a public coin they carry
+the same account keys and are served alike.
+
 ### 4.5 Messages
 
 All messages are canonical JSON (sorted keys, no whitespace) and signed with P-256 over the canonical bytes. Names and
@@ -124,6 +131,50 @@ fields below are the design; exact encodings are fixed in the build stage.
 the sender's `seq` equals `baseSeq`, which is what makes a stale or replayed proposal fail. The wallet signs the
 proposal through the existing signing bridge; the page's manifest must list the signing purpose, and the wallet asks
 the owner to confirm the request before it signs.
+
+### 4.6 Visibility
+
+The creator picks the visibility on the coin creation form, next to the authority mode, and it is part of the genesis
+that every roster domain signs. The default is public. It is fixed for the life of the coin; see open question 13 for
+making a private coin public later.
+
+| Visibility | What anyone can read | What only the key's owner can read |
+| --- | --- | --- |
+| Public | Everything: account keys, balances, every entry, the full history of any key | Nothing is withheld |
+| Private | The coin, its roster and policy, total supply, the log head, and every entry in its public form: sequence, time, type, amount, and an account reference in place of each key | The entry in its private form and the key behind a reference, through a lookup signed by that key |
+
+Both kinds are scannable (section 11.2). The difference is whether the scanner can say whose an account is.
+
+**Two entry forms.** In a private coin each log entry has:
+
+- a public form: `index`, `prevHash`, `executedAt`, type, amount, and `fromRef` and `toRef`, the account references. The
+  authority signs it and every approving domain signs its digest. The hash chain and the receipts run over this form, so
+  anyone can verify the chain, the head and the domain signatures without any key being exposed;
+- a private form: the public form plus the real keys, the owner's authorization and the nonce. Only the roster domains
+  keep it. Each approving domain validates the private form, including the owner's signature, and signs the public
+  digest only after that.
+
+In a public coin the two forms are the same record.
+
+**References.** `ref = HMAC-SHA256(refSecret, key)`, encoded as base64url, where `refSecret` is a random value made per
+coin. The secret is not in the genesis, which is public; the genesis carries only a hash of it, so every domain can
+check it holds the right one. The authority creates it and sends it to each co-approver over the signed peer channel
+while the genesis is being signed, and every roster domain keeps it as private state. The secret must exist because an
+unkeyed hash would let anyone who holds a public key compute its reference and look it up. The treasury account has a
+fixed, public label so total supply can be audited.
+
+**What this protects, and what it does not.**
+
+- It hides account keys from the public view. Amounts, times and the pattern of an account's activity stay visible, and
+  the same account keeps the same reference, so activity can still be linked and sometimes attributed. References are
+  pseudonyms, not anonymity, and the create form says so.
+- A public observer cannot re-check owner signatures, because the keys are not in the public form. They rely on the
+  authority, and in a multi coin the co-approvers, having checked the owner's signature before signing. That is the
+  trust a public coin does not need.
+- A reference cannot be checked publicly against a key, because the secret is needed to compute it. An owner who wants
+  to prove an account is theirs reveals the key, and a roster domain confirms it with a signed answer.
+- A roster domain always sees everything about its own coins, including private ones. Private means private from
+  other users and from the public scanner, not from the operators.
 
 ## 5. Spend flow
 
@@ -161,6 +212,8 @@ stops an authority that inflates a balance from getting a second signature.
 | The policy's approvals are present | Policy fixed in genesis; execution verifies the authority's approval and enough others to reach the threshold, all over the same digest |
 | No history rewrite | Hash chain; each domain holds the head and can attest it |
 | Time-limited authority | `expiresAt` on each proposal; expired proposals cannot execute |
+| Visibility fixed | Part of the genesis signed by every roster domain; no operation changes it |
+| A private coin's keys are never served publicly | Public routes read only the public form; the private form and the reference secret are served only to a request signed by the key concerned, or exchanged between roster domains |
 
 ## 7. Mirroring and disagreement
 
@@ -264,18 +317,52 @@ day, so a dishonest authority cannot drain the treasury beyond those limits with
 
 ## 11. Wallet-facing surface
 
-Four operations, each a signed request from the wallet key to the coin's authority:
+### 11.1 The Ledger tab: a list of domains
 
-1. Open an account (exists: `account30.php`).
-2. List my accounts (exists: `accounts31.php`).
-3. Read a balance (exists: `ledger29.php`; the answer gains the log head and the authority's signature, so it carries
-   a proof and no longer relies on TLS alone).
-4. Transfer (new): returns a receipt.
+The tab no longer opens accounts or holds ledger state. It holds a list of domains. For each domain on the list the
+wallet asks whether its key has any assets there and shows a reference to each result, built when the tab is opened.
+Nothing about the coins is stored in the wallet beyond the list and a cache of the last answers.
 
-The Ledger tab becomes one row per coin: coin, authority mode (single or multi), balance, whether the balance is
-proven or only reported, last checked, Refresh, Send and Remove. A coin that offers purchase also shows Buy with
-Gold. Adding a ledger is the consent. The issuer-signed account credentials and the
-receipt adapters are not needed, because the wallet's own signed requests identify it.
+- Adding a domain to the list is the consent to ask it. The list is part of the wallet's backup and restore, so a
+  restored wallet finds its assets again.
+- An account exists when a domain first credits the key (open question 4), so there is nothing to open.
+- The lookup is `holdings`: the wallet sends its public key to the domain, and the domain answers with a statement
+  signed by its own key, `atlas.ledger.holdings`, listing for each coin the coin id, symbol, visibility, authority
+  mode, the balance in minor units, the account `seq`, the log head hash and index, and the time of the statement. The
+  wallet verifies the signature against the key pinned from the domain's manifest and ignores any answer that fails,
+  is malformed or is larger than a fixed size.
+- For a public coin the request carries only the key. For a private coin the request is signed by the key over a fresh
+  challenge from the domain, and a domain returns private-coin results only to such a request. A domain answers a
+  request that is not signed with its public coins only.
+- The wallet asks the listed domains in parallel with a short timeout each and caches the answers. A domain that is down
+  shows its last answer with its age. One failing domain never blanks the tab.
+- A row reads "Domain X says you hold N of COIN, as of time T", with the mode, the visibility and a proven or reported
+  mark. A reference disappears if the domain stops listing it; the wallet does not own the balance.
+- The tab is read-only. Sending, Buy with Gold and approvals use the owner-signed spend flow of sections 5 and 10, added
+  in later stages and shown as actions on a row.
+
+The issuer-signed account credentials and the receipt adapters are not needed, because the wallet's own signed requests
+identify it.
+
+### 11.2 The scanner
+
+A read-only set of pages and routes on each domain that hosts a coin, like a block explorer.
+
+| Page | Shows |
+| --- | --- |
+| Coin | Genesis, authority mode, roster, threshold, visibility, total supply, treasury, log head and count |
+| Entries | The log in order, in pages, each with its hash and signatures |
+| Entry | One receipt, with a button that verifies the chain from the genesis to that entry |
+| Account | Balance, `seq` and history for a key (public coin) or a reference (private coin) |
+| Domains | For a multi coin, each roster domain's head and whether they agree; a frozen coin says so and why |
+
+A public coin shows keys on the account and entry pages. A private coin shows references and amounts and never a key, and
+the account page is reached by reference. A holder who knows their key can reach their own pages through the signed
+lookup of section 11.1. The scanner is a view over the same signed receipts the domains exchange, so a visitor can
+check what it shows.
+
+The scanner needs a small index for each account (its entries by position) and paged reads of the log, so a page view
+never walks a whole coin. Both come with the ledger store in stage 2.
 
 ## 12. Reuse
 
@@ -296,18 +383,21 @@ Each stage ships separately, with tests, on its own branch.
 
 1. Shared library and host config for `chain-labs/`; the hard-coded host lists move into configuration, including the
    list of peer domains. Behaviour unchanged.
-2. Ledger store: genesis with the authority mode and every roster signature, the log, derived accounts and the
-   invariant checker, with tests including conservation under random operation sequences. The coin creation form gains
-   the single or multi choice.
+2. Ledger store: genesis with the authority mode, the visibility and every roster signature, the log with its public and
+   private forms, the account references, derived accounts, a per-account index, paged reads and the invariant checker,
+   with tests including conservation under random operation sequences and a check that no public route returns a key of
+   a private coin. The coin creation form gains the single or multi choice and the public or private choice.
 3. Funding: treasury account and the faucet policy.
-4. Spend in single mode, end to end on one node: proposal, execution, receipts and recovery. This is the first stage
-   a wallet can use.
+4. Spend in single mode, end to end on one node: proposal, execution, receipts and recovery, and the signed `holdings`
+   lookup with its challenge. This is the first stage a wallet can use.
 5. Spend in multi mode: approval and execution between two and three local PHP nodes in the test suite, with all-of and
    2-of-3 thresholds, including concurrent double spends, a domain down, and crash injection.
 6. Mirroring: catch-up, head comparison and the freeze rule, for multi coins.
 7. Purchase with Gold, with the limits in the genesis, tested with crash injection at each step of 10.3.
-8. Wallet: the simplified Ledger tab, the transfer signing flow and Buy with Gold, in a new file with only small
-   changes to `viewer.js`.
+8. Wallet: the Ledger tab as a list of domains with the `holdings` lookup, the transfer signing flow and Buy with Gold,
+   in a new file with only small changes to `viewer.js`.
+9. Scanner: the coin, entries, entry, account and domains pages of section 11.2, with tests that a private coin's pages
+   never contain a key.
 
 ## 14. Open questions
 
@@ -328,6 +418,17 @@ Each stage ships separately, with tests, on its own branch.
     lowered to a minimum of two, with the authority always required.
 12. How a domain that has been down for a long time catches up. Default: it pulls missing receipts in order and may
     not approve anything until its head equals the authority's.
+13. Can a private coin be made public later? Default: yes, once, by a change signed by every roster domain; never the
+    other way.
+14. How the reference secret reaches the roster, and whether it can be rotated. Default: the authority sends it over the
+    signed peer channel during genesis signing; no rotation in the first version.
+15. Are amounts visible on a private coin? Default: yes. Hiding amounts needs different cryptography and is out of scope.
+16. Do the references stay fixed for the life of the coin, or can an owner ask for a new account reference? Default:
+    fixed; an owner who wants another reference opens a new key.
+17. Page size and rate limits for the scanner and the `holdings` lookup. Default: fixed page size, per-address limits
+    from the domain's existing abuse limits.
+18. Does the wallet show private-coin results from a domain only after the owner approves each lookup, or automatically
+    once the domain is on the list? Default: automatically, since adding the domain was the consent.
 
 ## 15. Not claimed
 
@@ -335,4 +436,6 @@ This is not consensus, not atomic settlement and not Byzantine fault tolerant. O
 domain can stop it. In a multi coin the authority and enough other domains must approve, so fewer than the threshold of
 compromised keys cannot move funds, and signed, chained receipts make a rewrite detectable. Owner keys have no recovery.
 A single authority coin has no independent check at all. Gold is a credential with no ledger behind it, so a purchase is
-worth what its issuer says. Nothing here has monetary value.
+worth what its issuer says. A private coin hides account keys from the public scanner and nothing else: amounts, timing and
+the pattern of activity stay visible, references are pseudonyms, and every roster domain sees everything. The public
+cannot re-verify owner signatures on a private coin. Nothing here has monetary value.
