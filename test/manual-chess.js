@@ -19,7 +19,7 @@
 // Chess needs no identity at all to PLAY (see handleInteractable's own
 // comment in viewer.js) — STEPs 1-9 below exercise that with no
 // onboarding/unlock step at all. Task #201 adds one exception: collecting a
-// win's reward (gold, plus a trophy for Hard) does mint a real credential,
+// win's reward (1 g of iron on Easy, silver on Medium, gold on Hard plus a trophy) does mint a real credential,
 // so STEPs 10-12 create an identity the ordinary onboarding way and check
 // it against the real wallet. Requires domain A's issuer-server on 8001 —
 // unlike the rest of this file, STEPs 10-12 do exercise a real mint against
@@ -84,12 +84,11 @@ async function clickSquare(frame, name) {
 // (AtlasWallet is a page global exactly like AtlasChess/chessGame above),
 // not off the status line alone, so these checks confirm a real credential
 // actually landed rather than just that the right words got printed.
-async function goldBalance(frame, publicKey) {
-  return frame.evaluate(async (publicKey) => {
+async function classBalance(frame, publicKey, cls) {
+  return frame.evaluate(async ([publicKey, cls]) => {
     const wallet = await AtlasWallet.getWallet(publicKey);
-    const entry = wallet.find((e) => e.credential.asset.class === 'atlas.element.gold');
-    return entry ? entry.credential.quantity : 0;
-  }, publicKey);
+    return wallet.filter((e) => e.credential.asset.class === cls).reduce((sum, e) => sum + e.credential.quantity, 0);
+  }, [publicKey, cls]);
 }
 
 async function trophyCount(frame, publicKey) {
@@ -249,7 +248,7 @@ async function injectPosition(frame, boardMap, opts) {
     await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('Create a wallet identity'), null, { timeout: 3000 });
     console.log('PASS: no-identity win degraded gracefully ->', await frame.locator('#chessStatus').textContent());
 
-    console.log('STEP 10: winning on Easy with a real identity mints exactly 5 gold, no trophy');
+    console.log('STEP 10: winning on Easy with a real identity mints exactly 1 g of iron, no trophy');
     // The chess modal sits above everything else (z-index, see viewer.html)
     // and intercepts clicks, so #walletBtn needs it closed first — reopened
     // via the stall right after, same as STEP 8 already does.
@@ -264,35 +263,53 @@ async function injectPosition(frame, boardMap, opts) {
     await winByBackRankMate(frame);
     await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), null, { timeout: 5000 });
     const easyStatusText = await frame.locator('#chessStatus').textContent();
-    if (!easyStatusText.includes('You earned 5 gold') || easyStatusText.includes('trophy')) throw new Error('Expected "You earned 5 gold!" with no trophy mention, got: ' + easyStatusText);
-    const goldAfterEasy = await goldBalance(frame, publicKey);
+    if (!easyStatusText.includes('You earned 1 g of iron') || easyStatusText.includes('trophy')) throw new Error('Expected "You earned 1 g of iron!" with no trophy mention, got: ' + easyStatusText);
     const trophiesAfterEasy = await trophyCount(frame, publicKey);
-    if (goldAfterEasy !== 5) throw new Error('Expected a 5-gold wallet balance after an Easy win, got: ' + goldAfterEasy);
+    if (await classBalance(frame, publicKey, 'atlas.element.iron') !== 1) throw new Error('Expected a 1 g iron balance after an Easy win');
+    if (await classBalance(frame, publicKey, 'atlas.element.gold') !== 0) throw new Error('Expected no gold after an Easy win');
     if (trophiesAfterEasy !== 0) throw new Error('Expected no trophy after an Easy win, got: ' + trophiesAfterEasy);
-    console.log('PASS: Easy win minted exactly 5 gold, no trophy ->', easyStatusText);
+    console.log('PASS: Easy win minted exactly 1 g of iron, no trophy ->', easyStatusText);
 
-    console.log('STEP 11: winning on Hard mints 20 gold AND a trophy');
+    console.log('STEP 11: winning on Medium mints 1 g of silver, no trophy');
+    await frame.locator('#chessDifficultyInput').selectOption('medium');
+    await winByBackRankMate(frame);
+    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), null, { timeout: 5000 });
+    const mediumStatusText = await frame.locator('#chessStatus').textContent();
+    if (!mediumStatusText.includes('You earned 1 g of silver') || mediumStatusText.includes('trophy')) throw new Error('Expected "You earned 1 g of silver!" with no trophy, got: ' + mediumStatusText);
+    if (await classBalance(frame, publicKey, 'atlas.element.silver') !== 1) throw new Error('Expected a 1 g silver balance after a Medium win');
+    if (await classBalance(frame, publicKey, 'atlas.element.iron') !== 1) throw new Error('Expected the iron balance to stay at 1 g');
+    console.log('PASS: Medium win minted exactly 1 g of silver ->', mediumStatusText);
+
+    console.log('STEP 12: winning on Hard mints 1 g of gold AND a trophy');
     await frame.locator('#chessDifficultyInput').selectOption('hard');
     await winByBackRankMate(frame);
     await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), null, { timeout: 5000 });
     const hardStatusText = await frame.locator('#chessStatus').textContent();
-    if (!hardStatusText.includes('You earned 20 gold') || !hardStatusText.includes('trophy')) throw new Error('Expected "You earned 20 gold + a trophy!", got: ' + hardStatusText);
-    const goldAfterHard = await goldBalance(frame, publicKey);
+    if (!hardStatusText.includes('You earned 1 g of gold') || !hardStatusText.includes('trophy')) throw new Error('Expected "You earned 1 g of gold + a trophy!", got: ' + hardStatusText);
     const trophiesAfterHard = await trophyCount(frame, publicKey);
-    if (goldAfterHard !== 25) throw new Error('Expected a 25-gold running total (5 + 20) after the Hard win, got: ' + goldAfterHard);
+    if (await classBalance(frame, publicKey, 'atlas.element.gold') !== 1) throw new Error('Expected a 1 g gold balance after the Hard win');
     if (trophiesAfterHard !== 1) throw new Error('Expected exactly one trophy after the first Hard win, got: ' + trophiesAfterHard);
-    console.log('PASS: Hard win minted 20 gold and a trophy ->', hardStatusText);
+    console.log('PASS: Hard win minted 1 g of gold and a trophy ->', hardStatusText);
 
-    console.log('STEP 12: winning on Hard again mints more gold but never a second trophy');
+    console.log('STEP 13: winning on Hard again mints more gold but never a second trophy');
     await winByBackRankMate(frame);
     await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), null, { timeout: 5000 });
     const secondHardStatusText = await frame.locator('#chessStatus').textContent();
     if (secondHardStatusText.includes('trophy')) throw new Error('Expected no trophy mention on a second Hard win (already held), got: ' + secondHardStatusText);
-    const goldAfterSecondHard = await goldBalance(frame, publicKey);
     const trophiesAfterSecondHard = await trophyCount(frame, publicKey);
-    if (goldAfterSecondHard !== 45) throw new Error('Expected a 45-gold running total (5 + 20 + 20) after the second Hard win, got: ' + goldAfterSecondHard);
+    if (await classBalance(frame, publicKey, 'atlas.element.gold') !== 2) throw new Error('Expected a 2 g gold running total after the second Hard win');
     if (trophiesAfterSecondHard !== 1) throw new Error('Expected the trophy count to stay at exactly one, got: ' + trophiesAfterSecondHard);
-    console.log('PASS: second Hard win added gold only — trophy stayed at exactly one ->', secondHardStatusText);
+    console.log('PASS: second Hard win added gold only - trophy stayed at exactly one ->', secondHardStatusText);
+
+    console.log('STEP 14: the weekly limit stops a fourth gold gram and says so');
+    await winByBackRankMate(frame);
+    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('You earned'), null, { timeout: 5000 });
+    await winByBackRankMate(frame);
+    await frame.waitForFunction(() => document.getElementById('chessStatus').textContent.includes('Weekly limit reached'), null, { timeout: 5000 });
+    const limitText = await frame.locator('#chessStatus').textContent();
+    const goldAtLimit = await classBalance(frame, publicKey, 'atlas.element.gold');
+    if (goldAtLimit !== 3) throw new Error('Expected gold to stop at 3 g, got: ' + goldAtLimit);
+    console.log('PASS: the fourth Hard win in a week mints nothing and reports the limit ->', limitText);
 
     console.log('\nALL CHESS CHECKS PASSED');
   } catch (err) {

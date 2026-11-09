@@ -98,7 +98,7 @@ async function projectInteractables(frame) {
     await frame.waitForFunction(() => document.getElementById('placeLabel').textContent.includes('Trading Post'), null, { timeout: 10000 });
     console.log('PASS: reached the Trading Post');
 
-    console.log('STEP 1: clicking the iron stall mints 20 iron for self');
+    console.log('STEP 1: clicking the iron stall mints 1 g of iron for self');
     const [ironStall, goldStall, silverStall, membershipDesk] = await projectInteractables(frame);
     if (!ironStall || ironStall.class !== 'atlas.element.iron') throw new Error('Expected the first interactable to be the iron stall, got: ' + JSON.stringify(ironStall));
     await frame.locator('#scene').click({ position: { x: ironStall.sx, y: ironStall.sy } });
@@ -114,7 +114,7 @@ async function projectInteractables(frame) {
     await frame.locator('#walletBtn').click();
     await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
-    console.log('STEP 2: clicking the gold stall mints 10 gold for self');
+    console.log('STEP 2: clicking the gold stall mints 1 g of gold for self');
     if (!goldStall || goldStall.class !== 'atlas.element.gold') throw new Error('Expected the second interactable to be the gold stall, got: ' + JSON.stringify(goldStall));
     // Status still reads STEP 1's "Collected ... iron." here — startsWith
     // ('Collected') alone would resolve instantly against that stale text
@@ -134,7 +134,7 @@ async function projectInteractables(frame) {
     await frame.locator('#walletBtn').click();
     await frame.waitForFunction(() => !document.getElementById('walletPanel').classList.contains('open'), null, { timeout: 5000 });
 
-    console.log('STEP 3: clicking the new silver stall mints 15 silver for self');
+    console.log('STEP 3: clicking the new silver stall mints 1 g of silver for self');
     if (!silverStall || silverStall.class !== 'atlas.element.silver') throw new Error('Expected the third interactable to be the silver stall, got: ' + JSON.stringify(silverStall));
     const statusBeforeSilver = await frame.locator('#status').textContent();
     await frame.locator('#scene').click({ position: { x: silverStall.sx, y: silverStall.sy } });
@@ -152,7 +152,7 @@ async function projectInteractables(frame) {
 
     console.log('STEP 4: clicking the "Join Trading Station" desk on the Trading Post sign issues a real membership credential');
     if (!membershipDesk || membershipDesk.class !== 'atlas.tradingstation.membership') throw new Error('Expected the fourth interactable to be the membership desk, got: ' + JSON.stringify(membershipDesk));
-    // Status already reads "Collected 15 g of atlas.element.silver." from
+    // Status already reads "Collected 1 g of atlas.element.silver." from
     // STEP 3 (task #206: quantities print as grams now) — startsWith
     // ('Collected') alone would resolve instantly
     // against that stale text, so wait for it to actually change first.

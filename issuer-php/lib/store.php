@@ -2067,6 +2067,10 @@ const ATLAS_ASSET_CATALOG_BASE = [
   // how much of a freely-mineable class atlas/asset/issue.php will mint to
   // an owner who already holds that much or more (verified against
   // presented current-holdings credentials, not trusted from the request).
+  // 'mintLimits' bounds fresh mints of the class by atlas/asset/issue.php
+  // whatever the caller says the mint is for: at most 'perRequest' units in
+  // one request and at most 'perWindow' units per owner key in any rolling
+  // 'windowSeconds'. Split, convert and trade re-mints are not counted.
   'atlas.element.iron' => [
     // Task #206: renamed to match the "<Name> (<Symbol>)" convention every
     // generated element already uses (see elements-catalog.php) — was
@@ -2076,6 +2080,7 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'fungible' => true, 'presentation' => 'collectible',
     'exchangeRate' => 20, // 20 iron == 1 gold
     'holdingCap' => 500,
+    'mintLimits' => ['perRequest' => 1, 'perWindow' => 3, 'windowSeconds' => 604800],
     // Task #205: the same real-property set (symbol/atomicNumber/category/
     // weight/density/conductivity) task #204 gave the other 115 elements,
     // added here too — mirrors issuer-server/server.js's entry exactly.
@@ -2095,6 +2100,7 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'isBaseCurrency' => true, // task #203 — this domain's chosen conversion anchor
     'exchangeRate' => 1,
     'holdingCap' => 500,
+    'mintLimits' => ['perRequest' => 1, 'perWindow' => 3, 'windowSeconds' => 604800],
     // Task #205: see the matching comment on atlas.element.iron above.
     'properties' => [
       'atlas.symbol' => 'Au', 'atlas.atomicNumber' => 79, 'atlas.category' => 'transition metal',
@@ -2113,6 +2119,7 @@ const ATLAS_ASSET_CATALOG_BASE = [
     'fungible' => true, 'presentation' => 'collectible',
     'exchangeRate' => 5, // 5 silver == 1 gold
     'holdingCap' => 500,
+    'mintLimits' => ['perRequest' => 1, 'perWindow' => 3, 'windowSeconds' => 604800],
     // Task #205: see the matching comment on atlas.element.iron above.
     'properties' => [
       'atlas.symbol' => 'Ag', 'atlas.atomicNumber' => 47, 'atlas.category' => 'transition metal',
@@ -2660,7 +2667,7 @@ function atlas_established_issuer_evidence() {
   }
   if (file_exists(__DIR__ . '/reviewer-private-key.pem')) $found[] = 'lib/reviewer-private-key.pem';
   $dirs = [];
-  foreach (['replay', 'holdings', 'txn'] as $sub) {
+  foreach (['replay', 'holdings', 'txn', 'mint-allowance'] as $sub) {
     $dirs[$sub . '/'] = [atlas_private_subdir($sub), __DIR__ . '/' . $sub];
   }
   foreach ($dirs as $label => $candidates) {

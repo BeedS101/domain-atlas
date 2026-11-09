@@ -379,10 +379,16 @@ item, and there is no delivery path for it yet.
 **Fungible resources (§5.4):**
 
 4. Walk back to Plaza, then through the **market** portal into the Trading
-   Post. Click **Mine 20 iron**, **Mine 10 gold**, and **Mine 15 silver** —
+   Post. Click **Mine 1 g iron**, **Mine 1 g gold**, and **Mine 1 g silver** —
    all three mint to your own self identity; each mint POSTs to the issuer,
    gets back a real signed `domain-atlas-resource/1.0` balance credential,
-   and verifies it the same way items are verified.
+   and verifies it the same way items are verified. The issuer allows 1 g per
+   request and 3 g per element per owner key in any rolling 7 days (the
+   catalog's `mintLimits`); beating the chess bot pays 1 g of iron (Easy),
+   silver (Medium) or gold (Hard) from the same allowance. A fourth gram in a
+   week is refused with a `weekly-limit` answer saying when more can be mined.
+   Isolated test issuers can switch this off with `ATLAS_MINT_LIMITS=off`;
+   a live issuer never sets it.
 5. Click **Send half** on a resource card to split a balance: the issuer
    validates the presented credential, then issues two new balances (a
    remainder back to the sender, the sent amount to the recipient) both
@@ -2022,7 +2028,7 @@ It proves the `worlds[]` manifest shape end to end, and a real working
 slice of §3.3, §5, §5.2, §5.4, §5.5, §6, §7, §11, and §12: an issuer
 signing real credentials — unique and fungible alike, under one shape, with
 real server-enforced scarcity (`maxSupply` limited editions, per-wallet
-`holdingCap`s) neither backend just leaves to client goodwill — a wallet
+`holdingCap`s and `mintLimits` on fresh gold, silver and iron) neither backend just leaves to client goodwill — a wallet
 verifying them with no shared account system, that verification holding up
 unchanged on a domain that was never involved in issuing it, an
 owner-signed transfer that moves an item between two independent keys, a

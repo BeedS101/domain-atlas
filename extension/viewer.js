@@ -4236,6 +4236,19 @@ function mergedAssetFields(entry) {
 // reads as "1.5 kg". Every call site that used to print a raw `quantity`
 // (wallet cards, trade dropdowns, listings, mail gifts, status messages,
 // the mining-stall toast) now runs it through this first.
+// The issuer's own wording from a wallet error such as 'Mint failed: {"error":"...","code":"weekly-limit"}';
+// any other error is returned as it came.
+function issuerErrorText(err) {
+  const message = err && err.message ? String(err.message) : String(err);
+  const start = message.indexOf('{');
+  if (start === -1) return message;
+  try {
+    const body = JSON.parse(message.slice(start));
+    if (body && typeof body.error === 'string') return body.error;
+  } catch (e) { /* not JSON: keep the original text */ }
+  return message;
+}
+
 function formatMass(grams) {
   if (!Number.isFinite(grams)) return String(grams);
   const trimmed = (n) => n.toFixed(2).replace(/\.?0+$/, '');
@@ -12671,8 +12684,8 @@ function renderChessAll() {
   renderChessStatus();
 }
 
-// Task #201: a real minted reward for a real win. Gold scales with
-// difficulty, and beating Hard also earns a one-off trophy keepsake. Reuses
+// A real minted reward for a real win: iron on Easy, silver on Medium, gold on Hard, and beating Hard also earns a
+// one-off trophy keepsake. Reuses
 // the exact same AtlasWallet.mintAsset() path the market's own Mine Gold
 // stall uses (see handleInteractable's 'mint' branch) — chess stays
 // scene-local right up until the instant it actually wins, at which point
@@ -12682,10 +12695,12 @@ function renderChessAll() {
 // maybeTriggerChessBotMove() already reads it live rather than freezing it
 // at "New game" time — difficulty has always been a live setting in this
 // build, not something pinned to a given game.
+// The reward is a fresh mint, so the issuer's limit on fresh mints of that element (a few grams per owner key per
+// rolling week, shared with the market's mining stalls) applies; a win past the limit is reported, not retried.
 const CHESS_WIN_REWARDS = {
-  easy: { gold: 5 },
-  medium: { gold: 10 },
-  hard: { gold: 20, trophy: true }
+  easy: { class: 'atlas.element.iron', name: 'iron', quantity: 1 },
+  medium: { class: 'atlas.element.silver', name: 'silver', quantity: 1 },
+  hard: { class: 'atlas.element.gold', name: 'gold', quantity: 1, trophy: true }
 };
 
 // Fires once, right after a move that ends the game with the player as the
@@ -12712,7 +12727,7 @@ async function maybeAwardChessWin() {
   }
   try {
     const domain = manifestDomainOf(currentManifest);
-    await AtlasWallet.mintAsset('self', domain, 'atlas.element.gold', reward.gold);
+    await AtlasWallet.mintAsset('self', domain, reward.class, reward.quantity);
     let trophyNote = '';
     if (reward.trophy) {
       // Client-side dedupe, same spirit as handleInteractable's 'issue'
@@ -12726,9 +12741,9 @@ async function maybeAwardChessWin() {
       }
     }
     await refreshInventoryDisplay();
-    if (chessGame === game) chessStatusEl.textContent += ' You earned ' + reward.gold + ' gold' + trophyNote + '!';
+    if (chessGame === game) chessStatusEl.textContent += ' You earned ' + formatMass(reward.quantity) + ' of ' + reward.name + trophyNote + '!';
   } catch (err) {
-    if (chessGame === game) chessStatusEl.textContent += ' (Reward mint failed: ' + err.message + ')';
+    if (chessGame === game) chessStatusEl.textContent += ' (Reward not minted: ' + issuerErrorText(err) + ')';
   }
 }
 
@@ -13246,7 +13261,7 @@ async function handleInteractable(marker) {
     statusEl.textContent = (marker.action === 'mint' ? 'Mint failed: '
       : marker.action === 'purchase' ? 'Purchase failed: '
       : marker.action === 'open-chest' ? (err && err.code === 'chest-already-opened' ? 'You have already opened this chest; your key was not used. ' : 'Chest not opened: ')
-      : 'Collect failed: ') + (err && err.code === 'chest-already-opened' ? '' : err.message);
+      : 'Collect failed: ') + (err && err.code === 'chest-already-opened' ? '' : marker.action === 'mint' ? issuerErrorText(err) : err.message);
   } finally {
     interactableBusyMarkers.delete(marker);
   }

@@ -994,6 +994,7 @@ const ASSET_CATALOG = {
     presentation: 'collectible',
     exchangeRate: 20, // 20 iron == 1 gold — most common of the three, so the most units per gold
     holdingCap: 500,
+    mintLimits: { perRequest: 1, perWindow: 3, windowSeconds: 604800 },
     // Task #205: the same real-property set (symbol/atomicNumber/category/
     // weight/density/conductivity) task #204 gave the other 115 elements,
     // added here too — reference values, same source/confidence level as
@@ -1017,6 +1018,7 @@ const ASSET_CATALOG = {
     isBaseCurrency: true, // task #203 — this domain's chosen conversion anchor; see the comment above
     exchangeRate: 1,
     holdingCap: 500,
+    mintLimits: { perRequest: 1, perWindow: 3, windowSeconds: 604800 },
     // Task #205: see the matching comment on atlas.element.iron above.
     properties: {
       'atlas.symbol': 'Au', 'atlas.atomicNumber': 79, 'atlas.category': 'transition metal',
@@ -1040,6 +1042,7 @@ const ASSET_CATALOG = {
     presentation: 'collectible',
     exchangeRate: 5, // 5 silver == 1 gold — mid-tier, between iron and gold
     holdingCap: 500,
+    mintLimits: { perRequest: 1, perWindow: 3, windowSeconds: 604800 },
     // Task #205: see the matching comment on atlas.element.iron above.
     properties: {
       'atlas.symbol': 'Ag', 'atlas.atomicNumber': 47, 'atlas.category': 'transition metal',
@@ -3435,6 +3438,89 @@ function holdingsNoteIssued(owner, asset, id, quantity) {
   if (asset && asset.fungible === true) {
     const entry = ASSET_CATALOG[asset.class];
     if (entry && typeof entry.holdingCap === 'number') holdingsRegister(owner, asset.class, [{ id, q: quantity }]);
+  }
+}
+
+// ---------- mint allowance (mintLimits) ----------
+// A class with `mintLimits` can be minted fresh only up to `perRequest` units at a time and up to `perWindow` units
+// per owner key in any rolling `windowSeconds`, whatever the caller says the mint is for (a mining stall and a game
+// reward alike). Each reservation is keyed by the request id (or a fresh id), so a retry of a request that reserved
+// but did not finish is not counted twice. Kept apart from the holdings index. Callers hold the owner lease around
+// reserve and release, and an unreadable record refuses the mint instead of guessing a count. Like the holding cap
+// this bounds one owner key, not one person.
+const MINT_ALLOWANCE_DIR = path.join(STATE_DIR, 'mint-allowance');
+// ATLAS_MINT_LIMITS=off switches the limits off for isolated test issuers only; a live issuer never sets it.
+const MINT_LIMITS_OFF = process.env.ATLAS_MINT_LIMITS === 'off';
+if (MINT_LIMITS_OFF) console.warn('Mint limits are OFF (ATLAS_MINT_LIMITS=off): for isolated test issuers only.');
+function mintLimitsFor(entry) { return !MINT_LIMITS_OFF && entry && entry.mintLimits ? entry.mintLimits : null; }
+function mintAllowanceFile(owner) {
+  return path.join(MINT_ALLOWANCE_DIR, createHash('sha256').update(String(owner)).digest('hex').slice(0, 40) + '.json');
+}
+function mintAllowanceRead(owner) {
+  let text;
+  try {
+    text = fs.readFileSync(mintAllowanceFile(owner), 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return { mints: {} };
+    throw storeUnavailable('the mint allowance record could not be read (' + err.code + ')');
+  }
+  let doc;
+  try { doc = JSON.parse(text); } catch (err) { doc = null; }
+  if (!doc || typeof doc.mints !== 'object' || doc.mints === null || Array.isArray(doc.mints)) {
+    throw storeUnavailable('the mint allowance record for this owner is unreadable; refusing to guess');
+  }
+  return doc;
+}
+function mintAllowanceWrite(owner, doc) {
+  fs.mkdirSync(MINT_ALLOWANCE_DIR, { recursive: true });
+  const mints = {};
+  for (const [cls, list] of Object.entries(doc.mints)) if (Array.isArray(list) && list.length) mints[cls] = list;
+  writeFileAtomic(mintAllowanceFile(owner), JSON.stringify({ owner, mints }));
+}
+function mintAllowanceLive(doc, cls, windowSeconds, now) {
+  const list = Array.isArray(doc.mints[cls]) ? doc.mints[cls] : [];
+  const live = [];
+  for (const e of list) {
+    if (!e || typeof e.k !== 'string' || !Number.isInteger(e.t) || !Number.isInteger(e.q) || e.q < 0) {
+      throw storeUnavailable('the mint allowance record for this owner is unreadable; refusing to guess');
+    }
+    if (e.t > now - windowSeconds) live.push(e);
+  }
+  return live.sort((a, b) => a.t - b.t);
+}
+// null when the quantity is reserved (or this key already reserved it), otherwise { used, retryAt } with retryAt in
+// epoch seconds.
+function mintAllowanceReserve(owner, cls, quantity, limits, key, now) {
+  const doc = mintAllowanceRead(owner);
+  const live = mintAllowanceLive(doc, cls, limits.windowSeconds, now);
+  let used = 0;
+  for (const e of live) {
+    if (e.k === key) return null;
+    used += e.q;
+  }
+  if (used + quantity > limits.perWindow) {
+    let running = used;
+    let retryAt = now + limits.windowSeconds;
+    for (const e of live) {
+      running -= e.q;
+      if (running + quantity <= limits.perWindow) { retryAt = e.t + limits.windowSeconds; break; }
+    }
+    return { used, retryAt };
+  }
+  live.push({ k: key, t: now, q: quantity });
+  doc.mints[cls] = live;
+  mintAllowanceWrite(owner, doc);
+  return null;
+}
+// Gives a reservation back when the mint it was for failed before anything was signed.
+function mintAllowanceRelease(owner, cls, key) {
+  try {
+    const doc = mintAllowanceRead(owner);
+    if (!Array.isArray(doc.mints[cls])) return;
+    doc.mints[cls] = doc.mints[cls].filter((e) => !e || e.k !== key);
+    mintAllowanceWrite(owner, doc);
+  } catch (err) {
+    console.error('could not release a mint allowance reservation:', err.message);
   }
 }
 
@@ -6233,6 +6319,14 @@ async function main() {
             return sendJson(res, 400, { error: 'quantity must be a positive integer for a fungible assetClass' });
           }
           mintQuantity = quantity;
+          // A class with mintLimits is minted in small steps only; a bigger request is refused before any lease or journal.
+          const perRequestLimits = mintLimitsFor(catalogEntry);
+          if (perRequestLimits && mintQuantity > perRequestLimits.perRequest) {
+            return sendJson(res, 400, {
+              error: `${catalogEntry.name} can be mined ${perRequestLimits.perRequest} at a time (asked for ${mintQuantity})`,
+              code: 'mint-too-large', perRequest: perRequestLimits.perRequest
+            });
+          }
         } else {
           if (quantity !== undefined && quantity !== null && quantity !== 1) {
             return sendJson(res, 400, { error: 'quantity must be 1 (or omitted) for a non-fungible assetClass' });
@@ -6266,10 +6360,12 @@ async function main() {
         // mints cannot both pass on the same count. Applies to every caller
         // of this endpoint (a mining stall and a game reward alike); split,
         // convert and trade re-mints move existing value and are not capped.
+        let ownerLeaseHeld = false;
         if (catalogEntry.fungible && typeof catalogEntry.holdingCap === 'number') {
           if (!(await holdLease(res, 'holdings:' + ownerPublicKey))) {
             return sendJson(res, 503, { error: 'this owner is being updated by another request - try again', code: 'busy' });
           }
+          ownerLeaseHeld = true;
           const { held, adopt } = await assessHoldings(ownerPublicKey, assetClass, existingBalances);
           if (adopt.length) holdingsRegister(ownerPublicKey, assetClass, adopt);
           if (held + mintQuantity > catalogEntry.holdingCap) {
@@ -6282,9 +6378,35 @@ async function main() {
           }
         }
 
+        // Rolling-window allowance for a class with mintLimits, checked after the holding cap so a refusal there uses
+        // none of it. The reservation is keyed by the request id (or a fresh id) and is given back if the mint fails
+        // before anything is signed. Applies to every caller of this endpoint.
+        let allowanceKey = null;
+        if (catalogEntry.fungible && mintLimitsFor(catalogEntry)) {
+          if (!ownerLeaseHeld && !(await holdLease(res, 'holdings:' + ownerPublicKey))) {
+            return sendJson(res, 503, { error: 'this owner is being updated by another request - try again', code: 'busy' });
+          }
+          const limits = mintLimitsFor(catalogEntry);
+          allowanceKey = issueReplayable ? 'r:' + issueRequestId : 'x:' + webcrypto.randomUUID();
+          const refused = mintAllowanceReserve(ownerPublicKey, assetClass, mintQuantity, limits, allowanceKey, Math.floor(Date.now() / 1000));
+          if (refused) {
+            return sendJson(res, 400, {
+              error: `Weekly limit reached for ${catalogEntry.name}: ${refused.used} of ${limits.perWindow} mined in the last ${Math.round(limits.windowSeconds / 86400)} days. More can be mined from ${new Date(refused.retryAt * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC.`,
+              code: 'weekly-limit', used: refused.used, limit: limits.perWindow,
+              windowSeconds: limits.windowSeconds, retryAt: new Date(refused.retryAt * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+            });
+          }
+        }
+
         // A first minting — never a reissue — so supersedes is always null here.
         const journalled = catalogEntry.fungible === true || issueReplayable;
-        const credential = await mintAssetByClass(ownerPublicKey, assetClass, mintQuantity, null, undefined, journalled);
+        let credential;
+        try {
+          credential = await mintAssetByClass(ownerPublicKey, assetClass, mintQuantity, null, undefined, journalled);
+        } catch (err) {
+          if (allowanceKey !== null) mintAllowanceRelease(ownerPublicKey, assetClass, allowanceKey);
+          throw err;
+        }
         if (journalled) {
           await commitReplacement(res, {
             requestId: issueReplayable ? issueRequestId : null, op: 'issue', predecessorIds: [], reason: null,

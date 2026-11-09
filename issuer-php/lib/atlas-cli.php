@@ -219,9 +219,9 @@ function cli_preflight($probe) {
   if ($base !== '') {
     cli_line(preg_match('#^(/|[A-Za-z]:[\\\\/])#', $base) && is_dir($base) ? 'PASS' : 'FAIL', 'private state directory configured outside lib/: ' . $base . (is_dir($base) ? (atlas_path_in_docroot($base) ? ' (inside the web root)' : ' (outside the web root)') : ' does not exist'));
   } else {
-    cli_line('INFO', 'private state is in lib/ (replay, holdings, txn); set lib/atlas-private-dir.txt to move it outside the web root before first use');
+    cli_line('INFO', 'private state is in lib/ (replay, holdings, txn, mint-allowance); set lib/atlas-private-dir.txt to move it outside the web root before first use');
   }
-  foreach (['replay', 'holdings', 'txn'] as $name) {
+  foreach (['replay', 'holdings', 'txn', 'mint-allowance'] as $name) {
     $dir = atlas_private_subdir($name);
     cli_directory($name . ' (private)', $dir, false, $probe && is_dir($dir));
     if (is_dir($dir)) {
@@ -272,7 +272,7 @@ function cli_counts() {
     $doc = json_decode((string) @file_get_contents($f), true);
     echo '  ' . str_pad(basename($f), 46) . str_pad((string) filesize($f), 9) . (is_array($doc) ? 'valid   ' . count($doc) : 'INVALID') . "\n";
   }
-  foreach (['replay', 'holdings', 'txn'] as $name) {
+  foreach (['replay', 'holdings', 'txn', 'mint-allowance'] as $name) {
     $n = 0;
     foreach ((array) @scandir(atlas_private_subdir($name)) as $f) if (substr($f, -5) === '.json') $n++;
     echo '  ' . str_pad($name . '/', 46) . $n . " file(s)\n";

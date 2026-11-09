@@ -19,6 +19,10 @@ async function waitFor(log, proc, text, ms, name) {
   });
 }
 
+// The weekly mint limits on gold, silver and iron are off by default here so tests that mint those in bulk keep
+// working; a test of the limits passes { env: { ATLAS_MINT_LIMITS: 'on' } }.
+const MINT_LIMITS_DEFAULT = { ATLAS_MINT_LIMITS: 'off' };
+
 // Options: { root } a directory holding another copy of issuer-server/ to run instead of this one (an earlier
 // revision, for negative controls); { env } extra environment for the issuer process; { user: 'nobody' } runs it as an
 // unprivileged account (the sandbox runs as root, which ignores file permissions), with the
@@ -52,15 +56,15 @@ async function startNode(port, options) {
     revFile: path.join(docroot, '.well-known', 'atlas-revocations.json'),
     keyFile: path.join(docroot, '.well-known', 'atlas-key.json'),
     dirsToWatch: [path.join(docroot, '.well-known'), state],
-    replayDir: path.join(state, 'replay'), holdingsDir: path.join(state, 'holdings'),
+    replayDir: path.join(state, 'replay'), holdingsDir: path.join(state, 'holdings'), allowanceDir: path.join(state, 'mint-allowance'),
     revLayout: (doc) => JSON.stringify(doc, null, 2),
     proc: null, log: [], unprivileged: options.user === 'nobody', txnDir: path.join(state, 'txn'),
-    env: Object.assign({}, options.env)
+    env: Object.assign({}, MINT_LIMITS_DEFAULT, options.env)
   };
   if (be.unprivileged) chownTree(tmp);
   be.start = async (env) => {
     be.log = [];
-    if (env !== undefined) be.env = Object.assign({}, env);
+    if (env !== undefined) be.env = Object.assign({}, MINT_LIMITS_DEFAULT, env);
     be.proc = launch('node', ['issuer-server/server.js'], {
       cwd: options.root || REPO, stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PORT: String(port), ATLAS_DOMAIN: domain, ATLAS_DOCROOT: docroot, ATLAS_STATE_DIR: state, ...be.env }
@@ -88,7 +92,7 @@ async function startPhp(port, options) {
   // bundle is a fresh domain unless the caller seeds it.
   const isState = (src) => {
     const rel = path.relative(options.source || path.join(REPO, 'issuer-php'), src).split(path.sep).join('/');
-    return /^lib\/(replay|holdings|txn)(\/|$)/.test(rel) || /^lib\/[^/]+\.(pem|lock)$/.test(rel) || /^lib\/atlas-[^/]*\.json(\.lock)?$/.test(rel) || /^\.well-known\/atlas-[^/]*\.json$/.test(rel);
+    return /^lib\/(replay|holdings|txn|mint-allowance)(\/|$)/.test(rel) || /^lib\/[^/]+\.(pem|lock)$/.test(rel) || /^lib\/atlas-[^/]*\.json(\.lock)?$/.test(rel) || /^\.well-known\/atlas-[^/]*\.json$/.test(rel);
   };
   fs.cpSync(options.source || path.join(REPO, 'issuer-php'), bundle, { recursive: true, filter: (src) => options.keepState || !isState(src) });
   fs.mkdirSync(path.join(bundle, '.well-known'), { recursive: true });
@@ -99,17 +103,17 @@ async function startPhp(port, options) {
     revFile: path.join(bundle, '.well-known', 'atlas-revocations.json'),
     keyFile: path.join(bundle, '.well-known', 'atlas-key.json'),
     dirsToWatch: [path.join(bundle, '.well-known'), path.join(bundle, 'lib')],
-    replayDir: path.join(bundle, 'lib', 'replay'), holdingsDir: path.join(bundle, 'lib', 'holdings'),
+    replayDir: path.join(bundle, 'lib', 'replay'), holdingsDir: path.join(bundle, 'lib', 'holdings'), allowanceDir: path.join(bundle, 'lib', 'mint-allowance'),
     revLayout: (doc) => JSON.stringify(doc, null, 4),
     proc: null, log: [], unprivileged: options.user === 'nobody', txnDir: path.join(bundle, 'lib', 'txn'),
-    env: Object.assign({}, options.env)
+    env: Object.assign({}, MINT_LIMITS_DEFAULT, options.env)
   };
   if (be.unprivileged) chownTree(tmp);
   // A crash point ends one request's script (exit 86) without stopping the server, so
   // crash tests run it without worker processes: one script at a time, state reread each request.
   be.start = async (env) => {
     be.log = [];
-    if (env !== undefined) be.env = Object.assign({}, env);
+    if (env !== undefined) be.env = Object.assign({}, MINT_LIMITS_DEFAULT, env);
     be.proc = launch('php', ['-S', '127.0.0.1:' + port, options.router || 'test-router.php'], {
       cwd: bundle, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(options.workers === 0 ? {} : { PHP_CLI_SERVER_WORKERS: String(options.workers || 4) }), ...be.env }
     }, be);

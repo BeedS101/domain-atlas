@@ -90,7 +90,7 @@ function doctor_check_entry($root, $e) {
 // Private state: matched by name only, never opened.
 function doctor_is_state($rel) {
   return (bool)preg_match('#(^|/)(atlas-[^/]*\.(json|lock)|[^/]*\.pem|[^/]*-lock-[^/]*|\.salt|storage-root\.php|private-dir\.php|atlas-private-dir\.txt|studio-config\.json|[^/]*config[^/]*\.json|lib/config\.php(\.off|\.bak)?)$#i', $rel)
-    || (bool)preg_match('#(^|/)(replay|holdings|txn|state)/#', $rel);
+    || (bool)preg_match('#(^|/)(replay|holdings|mint-allowance|txn|state)/#', $rel);
 }
 function doctor_is_host_file($rel) {
   return (bool)preg_match('#(^|/)(error_log|php\.ini|\.user\.ini|\.htaccess|\.ftpquota|cgi-bin|\.well-known/(acme-challenge|pki-validation)/.*)$#', $rel);
@@ -177,7 +177,7 @@ function doctor_extras($root, $known, $self, $budget, $byBase) {
       if (!isset($locks[$d])) $locks[$d] = [0, 0];
       $locks[$d][0]++; $locks[$d][1] += $s[2];
     }
-    elseif (preg_match('#^(.*?(?:^|/)(?:replay|holdings|txn|state)/)#', $s[0], $m)) $groups[$m[1]][] = $s; else $single[] = $s;
+    elseif (preg_match('#^(.*?(?:^|/)(?:replay|holdings|mint-allowance|txn|state)/)#', $s[0], $m)) $groups[$m[1]][] = $s; else $single[] = $s;
   }
   foreach ($locks as $d => $l) $single[] = [$d . '*.lock', '', $l[0], 'locks', $l[1]];
   foreach ($groups as $key => $list) {
@@ -573,7 +573,7 @@ function doctor_private_base($root) {
 function doctor_perm_kind($rel) {
   $b = basename($rel);
   if (preg_match('#(^|/)\.well-known/#', $rel)) return 'wk';
-  if (preg_match('#(^|/)(replay|holdings|txn|state)/#', $rel)) return 'state';
+  if (preg_match('#(^|/)(replay|holdings|mint-allowance|txn|state)/#', $rel)) return 'state';
   // A route that happens to be called config.php is code; the settings files named config.php live in a lib/ folder.
   if (preg_match('/^config\.php(\.off|\.bak)?$/i', $b) && basename(dirname($rel)) === 'lib') return 'secret';
   if (preg_match('/\.pem$|-config\.json$|^\.salt$/i', $b) || preg_match('/^atlas-admin-.*\.json$/', $b)) return 'secret';

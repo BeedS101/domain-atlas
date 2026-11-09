@@ -293,6 +293,93 @@ function atlas_holdings_modify($owner, $fn) {
   }
 }
 
+// ---------- mint allowance (mintLimits) ----------
+// A class with `mintLimits` can be minted fresh only up to `perRequest` units at a time and up to `perWindow`
+// units per owner key in any rolling `windowSeconds`, whatever the caller says the mint is for. Each reservation
+// is keyed by the request id (or the transaction id), so a retry of a request that reserved but did not finish
+// is not counted twice. Kept apart from the holdings index. Callers hold the owner lease (atlas_owner_lease)
+// around reserve and release, and an unreadable record refuses the mint instead of guessing a count.
+
+// The limits that apply to a catalog entry, or null. The environment variable ATLAS_MINT_LIMITS=off switches
+// them off for isolated test issuers only; a live issuer never sets it.
+function atlas_mint_limits_for($catalogEntry) {
+  if (getenv('ATLAS_MINT_LIMITS') === 'off') return null;
+  return isset($catalogEntry['mintLimits']) && is_array($catalogEntry['mintLimits']) ? $catalogEntry['mintLimits'] : null;
+}
+
+function atlas_mint_allowance_dir() { return atlas_private_subdir('mint-allowance'); }
+function atlas_mint_allowance_file($owner) {
+  return atlas_mint_allowance_dir() . '/' . substr(hash('sha256', (string) $owner), 0, 40) . '.json';
+}
+
+function atlas_mint_allowance_read($owner) {
+  $file = atlas_mint_allowance_file($owner);
+  if (!file_exists($file)) return ['mints' => []];
+  $text = @file_get_contents($file);
+  if ($text === false) throw new Exception('the mint allowance record could not be read; refusing to guess', 503);
+  $doc = json_decode($text, true);
+  if (!is_array($doc) || !isset($doc['mints']) || !is_array($doc['mints'])) throw new Exception('the mint allowance record for this owner is unreadable; refusing to guess', 503);
+  return $doc;
+}
+
+function atlas_mint_allowance_write($owner, $doc) {
+  atlas_private_subdir_ensure('mint-allowance');
+  $mints = [];
+  foreach ($doc['mints'] as $cls => $list) if (is_array($list) && $list) $mints[$cls] = array_values($list);
+  $text = json_encode(['owner' => $owner, 'mints' => (object) $mints], JSON_UNESCAPED_SLASHES);
+  if ($text === false) throw new Exception('could not encode the mint allowance record', 503);
+  atlas_write_file_atomic(atlas_mint_allowance_file($owner), $text, 0600);
+}
+
+// Entries of one class still inside the window, oldest first.
+function atlas_mint_allowance_live($doc, $cls, $windowSeconds, $now) {
+  $live = [];
+  foreach (isset($doc['mints'][$cls]) && is_array($doc['mints'][$cls]) ? $doc['mints'][$cls] : [] as $e) {
+    if (!is_array($e) || !isset($e['k'], $e['t'], $e['q']) || !is_int($e['t']) || !is_int($e['q']) || $e['q'] < 0) throw new Exception('the mint allowance record for this owner is unreadable; refusing to guess', 503);
+    if ($e['t'] > $now - $windowSeconds) $live[] = $e;
+  }
+  usort($live, function ($a, $b) { return $a['t'] <=> $b['t']; });
+  return $live;
+}
+
+// null when the quantity is reserved (or this key already reserved it), otherwise ['used' => units counted,
+// 'retryAt' => epoch second at which enough has left the window].
+function atlas_mint_allowance_reserve($owner, $cls, $quantity, $limits, $key, $now) {
+  $window = (int) $limits['windowSeconds'];
+  $doc = atlas_mint_allowance_read($owner);
+  $live = atlas_mint_allowance_live($doc, $cls, $window, $now);
+  $used = 0;
+  foreach ($live as $e) {
+    if ($e['k'] === $key) return null;
+    $used += $e['q'];
+  }
+  if ($used + $quantity > (int) $limits['perWindow']) {
+    $running = $used;
+    $retryAt = $now + $window;
+    foreach ($live as $e) {
+      $running -= $e['q'];
+      if ($running + $quantity <= (int) $limits['perWindow']) { $retryAt = $e['t'] + $window; break; }
+    }
+    return ['used' => $used, 'retryAt' => $retryAt];
+  }
+  $live[] = ['k' => $key, 't' => $now, 'q' => $quantity];
+  $doc['mints'][$cls] = $live;
+  atlas_mint_allowance_write($owner, $doc);
+  return null;
+}
+
+// Gives a reservation back when the mint it was for failed before anything was signed.
+function atlas_mint_allowance_release($owner, $cls, $key) {
+  try {
+    $doc = atlas_mint_allowance_read($owner);
+    if (!isset($doc['mints'][$cls]) || !is_array($doc['mints'][$cls])) return;
+    $doc['mints'][$cls] = array_values(array_filter($doc['mints'][$cls], function ($e) use ($key) { return !is_array($e) || ($e['k'] ?? null) !== $key; }));
+    atlas_mint_allowance_write($owner, $doc);
+  } catch (Exception $e) {
+    error_log('atlas: could not release a mint allowance reservation: ' . $e->getMessage());
+  }
+}
+
 function atlas_revoked_id_set() {
   $set = [];
   foreach (read_revocations()['revoked'] as $r) if (is_array($r) && isset($r['id'])) $set[$r['id']] = true;

@@ -78,6 +78,14 @@ if ($catalogEntry['fungible']) {
     send_json(400, ['error' => 'quantity must be a positive integer for a fungible assetClass']);
   }
   $mintQuantity = (int) $quantity;
+  // A class with mintLimits is minted in small steps only; a bigger request is refused before any lease or journal.
+  $mintLimits = atlas_mint_limits_for($catalogEntry);
+  if ($mintLimits !== null && $mintQuantity > $mintLimits['perRequest']) {
+    send_json(400, [
+      'error' => $catalogEntry['name'] . ' can be mined ' . $mintLimits['perRequest'] . ' at a time (asked for ' . $mintQuantity . ')',
+      'code' => 'mint-too-large', 'perRequest' => $mintLimits['perRequest'],
+    ]);
+  }
 } else {
   if ($quantity !== null && $quantity !== 1) {
     send_json(400, ['error' => 'quantity must be 1 (or omitted) for a non-fungible assetClass']);
@@ -136,11 +144,34 @@ if ($catalogEntry['fungible'] && isset($catalogEntry['holdingCap'])) {
   }
 }
 
+// Rolling-window allowance for a class with mintLimits, checked after the holding cap so a refusal there uses none
+// of it. The reservation is keyed by the request id (or this request's transaction id) and is given back if the
+// mint fails before anything is signed. Applies to every caller of this endpoint.
+$allowanceKey = null;
+if ($catalogEntry['fungible'] && atlas_mint_limits_for($catalogEntry) !== null) {
+  if (atlas_owner_lease($ownerPublicKey) !== null) send_json(503, ['error' => 'this owner is being updated by another request - try again', 'code' => 'busy']);
+  $limits = atlas_mint_limits_for($catalogEntry);
+  $allowanceKey = $issueReplayable ? 'r:' . $issueRequestId : ($issueTxn !== null ? 't:' . $issueTxn : 'x:' . atlas_uuid());
+  $refused = atlas_mint_allowance_reserve($ownerPublicKey, $assetClass, $mintQuantity, $limits, $allowanceKey, time());
+  if ($refused !== null) {
+    send_json(400, [
+      'error' => 'Weekly limit reached for ' . $catalogEntry['name'] . ': ' . $refused['used'] . ' of ' . $limits['perWindow'] . ' mined in the last ' . round($limits['windowSeconds'] / 86400) . ' days. More can be mined from ' . gmdate('Y-m-d H:i', $refused['retryAt']) . ' UTC.',
+      'code' => 'weekly-limit', 'used' => $refused['used'], 'limit' => (int) $limits['perWindow'],
+      'windowSeconds' => (int) $limits['windowSeconds'], 'retryAt' => gmdate('Y-m-d\TH:i:s\Z', $refused['retryAt']),
+    ]);
+  }
+}
+
 // A first minting — never a reissue — so supersedes is always null here.
 // See atlas/asset/reissue.php (SPEC.md §5.1.1) for the other caller of
 // issue_asset(), where supersedes names the id being replaced.
 $journalled = (bool) $catalogEntry['fungible'] || $issueReplayable;
-$credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $mintQuantity, null, null, $journalled);
+try {
+  $credential = mint_asset_by_class($kp['privateKey'], $kp['publicKeyB64url'], $ownerPublicKey, $assetClass, $mintQuantity, null, null, $journalled);
+} catch (Throwable $e) {
+  if ($allowanceKey !== null) atlas_mint_allowance_release($ownerPublicKey, $assetClass, $allowanceKey);
+  throw $e;
+}
 if ($journalled) {
   atlas_commit_replacement($issueReplayable ? $issueRequestId : null, 'issue', [], null, $issueParams, [$credential], $credential, $issueTxn);
 }

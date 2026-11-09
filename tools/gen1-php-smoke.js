@@ -84,7 +84,7 @@ const PRIVATE_PATHS = [
   '/lib/atlas-postoffice-members-store.json', '/lib/atlas-subscribers-store.json', '/lib/atlas-admin-keys-store.json',
   '/lib/atlas-recovery-secret.json', '/lib/atlas-ledger-receipts-config.json', '/lib/atlas-ledger-issuance-config.json',
   '/lib/bootstrap.php', '/lib/store.php', '/lib/atlas-cli.php', '/lib/', '/lib/.htaccess',
-  '/lib/replay/', '/lib/holdings/', '/lib/txn/', '/lib/txn/.htaccess', '/lib/atlas-revocations.lock'
+  '/lib/replay/', '/lib/holdings/', '/lib/mint-allowance/', '/lib/txn/', '/lib/txn/.htaccess', '/lib/atlas-revocations.lock'
 ].concat(values('--private-url'));
 const LOOKS_PRIVATE = /-----BEGIN|"signature"\s*:|"credential"\s*:|"responseJson"|"predecessors"|"held"\s*:|<\?php|function\s+\w+\s*\(/;
 
