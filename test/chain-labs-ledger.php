@@ -81,7 +81,7 @@ function new_db(): array
     return [ledger_open($file), $file];
 }
 // Builds, registers, signs and activates a coin. $n domains; the first is the authority.
-function world(string $mode, string $visibility, int $n = 1, ?int $threshold = null, string $initial = '1000000'): array
+function world(string $mode, string $visibility, int $n = 1, ?int $threshold = null, string $initial = '1000000', ?array $faucet = null): array
 {
     global $NOW;
     [$db, $file] = new_db();
@@ -90,7 +90,7 @@ function world(string $mode, string $visibility, int $n = 1, ?int $threshold = n
     $secret = $visibility === 'private' ? bin2hex(random_bytes(32)) : null;
     $genesis = ledger_genesis(['symbol' => 'TST', 'name' => 'Test coin', 'decimals' => 2, 'maxUnits' => '2000000', 'initialUnits' => $initial, 'treasuryKey' => $treasury['key'],
         'mode' => $mode, 'visibility' => $visibility, 'roster' => array_map(fn($d) => ['domain' => $d['domain'], 'key' => $d['pub']], $doms), 'threshold' => $threshold,
-        'createdAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 3600), 'refSecret' => $secret]);
+        'createdAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 3600), 'refSecret' => $secret, 'faucet' => $faucet]);
     ledger_register($db, $genesis, $treasury['key'], $secret);
     foreach ($doms as $d) ledger_add_genesis_signature($db, $genesis['coinId'], $d['domain'], ledger_genesis_sign($genesis, $d['priv']));
     ledger_activate($db, $genesis['coinId'], $doms[0]['priv']);
@@ -472,6 +472,152 @@ foreach ($procs as [$proc, $pipes]) { $results[] = trim(stream_get_contents($pip
 $wins = count(array_filter($results, fn($x) => $x === 'OK'));
 t($wins === 1, 'six processes committing two entries for one index: exactly one wins', $results);
 t(balance($race, $a['key']) === 90 && ledger_check($race['db'], $race['coin']) === [], 'the winner moved the funds once and the store is consistent', ledger_check($race['db'], $race['coin']));
+
+echo "\n== faucet policy in the genesis\n";
+$fb = array_merge($base, ['maxUnits' => '2000000', 'initialUnits' => '1000']);
+$okPolicy = ['maxAmount' => '100', 'perKeyLimit' => '250', 'cooldownSeconds' => 60];
+t(ledger_genesis($fb)['faucet'] === null, 'a coin with no faucet policy has none');
+t(ledger_genesis(array_merge($fb, ['faucet' => $okPolicy]))['faucet'] === $okPolicy, 'a faucet policy is kept in the genesis');
+t(ledger_genesis_digest(ledger_genesis(array_merge($fb, ['coinId' => $g1['coinId'], 'faucet' => $okPolicy]))) !== ledger_genesis_digest(ledger_genesis(array_merge($fb, ['coinId' => $g1['coinId'], 'faucet' => array_merge($okPolicy, ['cooldownSeconds' => 61])]))), 'the policy is part of what the roster signs');
+$badPolicies = [
+    'a policy that is a list' => ['100', '250', 60], 'a missing field' => ['maxAmount' => '100', 'perKeyLimit' => '250'],
+    'an extra field' => array_merge($okPolicy, ['note' => 'x']), 'a grant limit of 0' => array_merge($okPolicy, ['maxAmount' => '0']),
+    'a grant above the coin' => array_merge($okPolicy, ['maxAmount' => '3000000', 'perKeyLimit' => '3000000']),
+    'a key limit below the grant limit' => array_merge($okPolicy, ['perKeyLimit' => '99']), 'a key limit above the coin' => array_merge($okPolicy, ['perKeyLimit' => '2000001']),
+    'a negative cool-down' => array_merge($okPolicy, ['cooldownSeconds' => -1]), 'a cool-down as text' => array_merge($okPolicy, ['cooldownSeconds' => '60']),
+    'a cool-down above 30 days' => array_merge($okPolicy, ['cooldownSeconds' => 2592001]), 'amounts as numbers' => array_merge($okPolicy, ['maxAmount' => 100]),
+];
+foreach ($badPolicies as $name => $policy) t(refuses(fn() => ledger_genesis(array_merge($fb, ['faucet' => $policy])), 'bad-genesis') || refuses(fn() => ledger_genesis(array_merge($fb, ['faucet' => $policy])), 'bad-amount'), 'refused: ' . $name, why(fn() => ledger_genesis(array_merge($fb, ['faucet' => $policy]))));
+
+echo "\n== treasury key and operator grants\n";
+$pairA = ledger_new_owner_key();
+t(ledger_valid_owner_key($pairA['key']) && openssl_pkey_get_private($pairA['private']) !== false, 'a new owner key is in the wallet format');
+$payload = ['type' => 'x', 'n' => 1];
+t(ledger_owner_verify(ledger_canonical($payload), $pairA['key'], ledger_owner_sign($pairA['private'], $payload)), 'a signature made with it verifies as a wallet signature');
+t(!ledger_owner_verify(ledger_canonical(['type' => 'x', 'n' => 2]), $pairA['key'], ledger_owner_sign($pairA['private'], $payload)), 'it does not verify over other bytes');
+$kdir = sys_get_temp_dir() . '/ledger-keys-' . bin2hex(random_bytes(4));
+mkdir($kdir, 0700);
+$cid = bin2hex(random_bytes(16));
+$made = ledger_treasury_key_create($kdir, $cid);
+$file = $kdir . '/treasury-' . $cid . '.json';
+t(is_file($file) && (fileperms($file) & 0777) === 0600, 'the treasury key file is readable by its owner only');
+t(ledger_treasury_key_load($kdir, $cid) === $made, 'the treasury key loads back as it was made');
+t(refuses(fn() => ledger_treasury_key_create($kdir, $cid), 'key-exists'), 'a treasury key is never overwritten');
+t(refuses(fn() => ledger_treasury_key_load($kdir, bin2hex(random_bytes(16))), 'bad-key-file'), 'a missing key file is refused');
+t(refuses(fn() => ledger_treasury_key_load($kdir, '../etc'), 'bad-key-file') && refuses(fn() => ledger_treasury_key_create($kdir, '../x'), 'bad-key-file'), 'a coin id that is not 32 hex characters is refused');
+file_put_contents($file, '{"key":"abc","private":"x"}');
+t(refuses(fn() => ledger_treasury_key_load($kdir, $cid), 'bad-key-file'), 'a damaged key file is refused');
+
+echo "\n== faucet limits on treasury spends\n";
+$NOW = 1800000000;
+$fw = world('single', 'public', 1, null, '10000', $okPolicy);
+$fa = owner(); $fb2 = owner();
+$treasuryPair = ['key' => $fw['treasury']['key'], 'private' => $fw['treasury']['priv']];
+$grant = fn(string $to, string $amount) => function () use ($fw, $treasuryPair, $to, $amount) { global $NOW; return commit_prepared($fw, ledger_grant($fw['db'], $fw['coin'], $treasuryPair, $to, $amount, $NOW), 1); };
+t(refuses(fn() => ledger_grant($fw['db'], $fw['coin'], ['key' => $fa['key'], 'private' => $fa['priv']], $fb2['key'], '1', $NOW), 'not-treasury'), 'a grant needs the treasury key');
+$grant($fa['key'], '100')();
+t(balance($fw, $fa['key']) === 100, 'an operator grant moves units out of the treasury');
+t(refuses($grant($fa['key'], '10'), 'faucet-cooldown'), 'a second grant to the same key inside the cool-down is refused', why($grant($fa['key'], '10')));
+$grant($fb2['key'], '40')();
+t(balance($fw, $fb2['key']) === 40, 'another key is not held back by the first key\'s cool-down');
+t(refuses($grant($fb2['key'], '101'), 'faucet-amount'), 'a grant above the maximum is refused', why($grant($fb2['key'], '101')));
+$NOW += 61;
+$grant($fa['key'], '100')();
+$NOW += 61;
+t(refuses($grant($fa['key'], '100'), 'faucet-limit'), 'a grant that takes a key past its limit is refused', why($grant($fa['key'], '100')));
+$grant($fa['key'], '50')();
+t(balance($fw, $fa['key']) === 250, 'a grant up to the limit exactly is allowed');
+$NOW += 61;
+t(refuses($grant($fa['key'], '1'), 'faucet-limit'), 'nothing more can be granted to a key at its limit');
+transfer($fw, $fa, $fb2['key'], '240');
+t(balance($fw, $fb2['key']) === 280 && balance($fw, $fa['key']) === 10, 'spends between other accounts are not limited by the faucet');
+t(refuses($grant($fa['key'], '1'), 'faucet-limit'), 'passing units on does not reopen the limit');
+transfer($fw, $fb2, $fw['treasury']['key'], '200');
+t(balance($fw, $fw['treasury']['key']) === 10000 - 100 - 40 - 100 - 50 + 200, 'units can be returned to the treasury');
+t(ledger_check($fw['db'], $fw['coin']) === [], 'the checker passes on a coin with a faucet', ledger_check($fw['db'], $fw['coin']));
+$sum = (int) $fw['db']->query("SELECT COUNT(*) FROM ledger_faucet WHERE coin_id='" . $fw['coin'] . "'")->fetchColumn();
+t($sum === 2, 'the faucet totals are kept per recipient key');
+// Commit enforces the policy itself: the entry is prepared against a copy whose faucet rows were cleared.
+$NOW += 1000;
+$copy = tempnam(sys_get_temp_dir(), 'ledger-copy-') . '.sqlite';
+copy($fw['file'], $copy);
+$cdb = ledger_open($copy);
+$cdb->exec('DELETE FROM ledger_faucet');
+$forged = ledger_grant($cdb, $fw['coin'], $treasuryPair, $fa['key'], '100', $NOW);
+t(refuses(fn() => commit_prepared($fw, $forged, 1), 'faucet-limit'), 'commit refuses a grant the policy does not allow');
+t(refuses(fn() => ledger_grant($fw['db'], $fw['coin'], $treasuryPair, $fa['key'], '100', $NOW), 'faucet-limit'), 'preparing a grant already applies the policy');
+// The checker finds a log whose signed entries break the policy.
+$cdb2 = ledger_open($copy);
+$w2 = array_merge($fw, ['db' => $cdb2, 'file' => $copy]);
+commit_prepared($w2, $forged, 1);
+t(ledger_check($cdb2, $fw['coin']) !== [], 'the checker finds a signed entry that broke the faucet policy', ledger_check($cdb2, $fw['coin']));
+unlink($copy);
+$tam = [
+    'a faucet total changed' => "UPDATE ledger_faucet SET total=total+1",
+    'a faucet row removed' => "DELETE FROM ledger_faucet WHERE rowid=(SELECT MIN(rowid) FROM ledger_faucet)",
+    'a faucet last-grant time changed' => "UPDATE ledger_faucet SET last_at=last_at+5",
+    'a faucet row for an account that never received a grant' => "INSERT INTO ledger_faucet(coin_id,account_key,total,last_at) VALUES('" . $fw['coin'] . "','nobody',1,1)",
+];
+foreach ($tam as $name => $sql) {
+    $c = tempnam(sys_get_temp_dir(), 'ledger-tamper-') . '.sqlite';
+    copy($fw['file'], $c);
+    $d = ledger_open($c);
+    $d->exec($sql);
+    t(ledger_check($d, $fw['coin']) !== [], 'the checker finds: ' . $name);
+    unlink($c);
+}
+$pf = world('single', 'private', 1, null, '1000', ['maxAmount' => '10', 'perKeyLimit' => '15', 'cooldownSeconds' => 0]);
+$pk = owner();
+$ptre = ['key' => $pf['treasury']['key'], 'private' => $pf['treasury']['priv']];
+commit_prepared($pf, ledger_grant($pf['db'], $pf['coin'], $ptre, $pk['key'], '10', $NOW), 1);
+t(refuses(fn() => commit_prepared($pf, ledger_grant($pf['db'], $pf['coin'], $ptre, $pk['key'], '10', $NOW), 1), 'faucet-limit'), 'a private coin applies the limit to the key behind the reference');
+commit_prepared($pf, ledger_grant($pf['db'], $pf['coin'], $ptre, $pk['key'], '5', $NOW), 1);
+t(ledger_check($pf['db'], $pf['coin']) === [] && !str_contains(json_encode(ledger_public_entries($pf['db'], $pf['coin'])), $pk['key']), 'and no key reaches the public reads');
+
+echo "\n== the time of an entry\n";
+$tw = world('single', 'public');
+$tu = owner();
+transfer($tw, $tw['treasury'], $tu['key'], '100');
+$prep = ledger_prepare_transfer($tw['db'], $tw['coin'], authorization($tw, $tw['treasury'], $tu['key'], '1'), $NOW);
+$sigT = ledger_sign($tw['doms'][0]['priv'], $prep['hash']);
+$rehash = function (array $p, array $change) use ($tw) {
+    $p['public'] = array_merge($p['public'], $change);
+    $p['hash'] = ledger_digest($p['public']);
+    $p['private']['hash'] = $p['hash'];
+    return $p;
+};
+$late = $rehash($prep, ['executedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW + 4000)]);
+t(refuses(fn() => ledger_commit($tw['db'], $tw['coin'], $late, ledger_sign($tw['doms'][0]['priv'], $late['hash']), [], $NOW), 'bad-time'), 'an entry dated after its proposal expired is refused');
+$early = $rehash($prep, ['executedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 2000)]);
+t(refuses(fn() => ledger_commit($tw['db'], $tw['coin'], $early, ledger_sign($tw['doms'][0]['priv'], $early['hash']), [], $NOW), 'clock-behind'), 'an entry dated before the entry it follows is refused');
+$tw2 = world('single', 'public');
+$prep2 = ledger_prepare_transfer($tw2['db'], $tw2['coin'], authorization($tw2, $tw2['treasury'], owner()['key'], '1'), $NOW);
+$before = $rehash($prep2, ['executedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 3000)]);
+t(refuses(fn() => ledger_commit($tw2['db'], $tw2['coin'], $before, ledger_sign($tw2['doms'][0]['priv'], $before['hash']), [], $NOW), 'bad-time'), 'an entry dated before its proposal was issued is refused');
+$garbled = $rehash($prep, ['executedAt' => 'now']);
+t(refuses(fn() => ledger_commit($tw['db'], $tw['coin'], $garbled, ledger_sign($tw['doms'][0]['priv'], $garbled['hash']), [], $NOW), 'bad-time'), 'an entry with an unreadable time is refused');
+t(refuses(fn() => ledger_commit($tw['db'], $tw['coin'], $prep, $sigT, [], $NOW + 130), 'bad-time'), 'an entry far from the current time is refused', why(fn() => ledger_commit($tw['db'], $tw['coin'], $prep, $sigT, [], $NOW + 130)));
+t(refuses(fn() => ledger_prepare_transfer($tw['db'], $tw['coin'], authorization($tw, $tw['treasury'], $tu['key'], '1', null, ['issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 500), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW + 50)]), $NOW - 400), 'clock-behind'), 'a clock that runs behind the log cannot add entries');
+$tw3 = world('single', 'public');
+$skewed = ledger_prepare_transfer($tw3['db'], $tw3['coin'], authorization($tw3, $tw3['treasury'], owner()['key'], '1', null, ['issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW + 100), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW + 400)]), $NOW);
+$skewed = $rehash($skewed, ['executedAt' => gmdate('Y-m-d\TH:i:s\Z', $NOW - 30)]);
+t(refuses(fn() => ledger_commit($tw3['db'], $tw3['coin'], $skewed, ledger_sign($tw3['doms'][0]['priv'], $skewed['hash']), [], $NOW), 'bad-time'), 'an entry dated well before the proposal it executes is refused');
+// A forged log whose entries go backwards in time is found by the checker.
+$cp = tempnam(sys_get_temp_dir(), 'ledger-copy-') . '.sqlite';
+copy($tw['file'], $cp);
+$cd = ledger_open($cp);
+$orig = $cd->query("SELECT public_json FROM ledger_log WHERE idx=1")->fetchColumn();
+$cd->prepare("UPDATE ledger_log SET public_json=REPLACE(public_json, ?, ?) WHERE idx=1")->execute([gmdate('Y-m-d\TH:i:s\Z', $NOW), gmdate('Y-m-d\TH:i:s\Z', $NOW - 3000)]);
+$wc = array_merge($tw, ['db' => $cd, 'file' => $cp]);
+$savedNow = $NOW;
+$NOW = $savedNow - 100;
+$back = ledger_prepare_transfer($cd, $tw['coin'], authorization($wc, $tw['treasury'], $tu['key'], '2'), $NOW);
+commit_prepared($wc, $back, 1);
+$NOW = $savedNow;
+$cd->prepare("UPDATE ledger_log SET public_json=? WHERE idx=1")->execute([$orig]);
+$found = ledger_check($cd, $tw['coin']);
+t(count(array_filter($found, fn($x) => str_contains($x, 'clock-behind'))) === 1, 'the checker finds an entry dated before the one it follows', $found);
+unlink($cp);
 
 echo "\n== direct request\n";
 $port = random_int(20000, 40000);

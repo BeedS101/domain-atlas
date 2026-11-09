@@ -10,6 +10,7 @@ const LEDGER_PAGE_MAX = 100;
 const LEDGER_MAX_ROSTER = 5;
 const LEDGER_PROPOSAL_MAX_SECONDS = 600;
 const LEDGER_CLOCK_SKEW_SECONDS = 120;
+const LEDGER_MAX_COOLDOWN_SECONDS = 2592000;
 
 final class LedgerError extends RuntimeException
 {
@@ -142,6 +143,7 @@ function ledger_schema(PDO $db): void
         seq INTEGER NOT NULL CHECK(seq >= 0), PRIMARY KEY(coin_id,account_key), UNIQUE(coin_id,ref))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_account_entries(
         coin_id TEXT NOT NULL, ref TEXT NOT NULL, pos INTEGER NOT NULL, idx INTEGER NOT NULL, PRIMARY KEY(coin_id,ref,pos))');
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_faucet(coin_id TEXT NOT NULL, account_key TEXT NOT NULL, total INTEGER NOT NULL CHECK(total > 0), last_at INTEGER NOT NULL, PRIMARY KEY(coin_id,account_key))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_nonces(coin_id TEXT NOT NULL, owner_key TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(coin_id,owner_key,nonce))');
 }
 
@@ -161,7 +163,9 @@ function ledger_parse_units(mixed $text, string $what): int
 }
 
 // $in: coinId?, symbol, name, decimals, maxUnits, initialUnits (strings), treasuryKey, mode, visibility, roster
-// (list of ['domain', 'key' => public key PEM], the authority first), threshold?, createdAt, refSecret (private coins).
+// (list of ['domain', 'key' => public key PEM], the authority first), threshold?, createdAt, refSecret (private coins),
+// faucet? (null, or ['maxAmount', 'perKeyLimit' => unit strings, 'cooldownSeconds' => int]: limits on every spend from the
+// treasury; with none, treasury spends are unlimited).
 // Returns the genesis to be signed by every roster domain. The treasury key and the reference secret are not in it:
 // it carries the treasury's reference and a hash of the secret.
 function ledger_genesis(array $in): array
@@ -205,10 +209,11 @@ function ledger_genesis(array $in): array
     if (!is_string($coinId) || !preg_match('/^[a-f0-9]{32}$/D', $coinId)) ledger_fail('bad-genesis', 'coinId must be 32 hex characters');
     $createdAt = $in['createdAt'] ?? null;
     if (!is_string($createdAt) || !preg_match('/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/D', $createdAt)) ledger_fail('bad-genesis', 'createdAt must be a UTC time');
+    $faucet = ledger_faucet_policy($in['faucet'] ?? null, $max);
     $genesis = [
         'type' => 'atlas.ledger.genesis', 'v' => 1, 'coinId' => $coinId, 'symbol' => $symbol, 'name' => $name, 'decimals' => $decimals,
         'maxUnits' => (string) $max, 'initialUnits' => (string) $initial, 'mode' => $mode, 'visibility' => $visibility,
-        'authority' => $clean[0]['domain'], 'threshold' => $threshold, 'roster' => $clean, 'createdAt' => $createdAt,
+        'authority' => $clean[0]['domain'], 'threshold' => $threshold, 'roster' => $clean, 'faucet' => $faucet, 'createdAt' => $createdAt,
     ];
     if ($visibility === 'private') {
         $secret = $in['refSecret'] ?? null;
@@ -219,6 +224,22 @@ function ledger_genesis(array $in): array
         $genesis['treasuryRef'] = $treasury;
     }
     return $genesis;
+}
+
+function ledger_faucet_policy(mixed $faucet, int $max): ?array
+{
+    if ($faucet === null) return null;
+    if (!is_array($faucet) || array_is_list($faucet)) ledger_fail('bad-genesis', 'the faucet must be null or an object');
+    $keys = array_keys($faucet);
+    sort($keys);
+    if ($keys !== ['cooldownSeconds', 'maxAmount', 'perKeyLimit']) ledger_fail('bad-genesis', 'the faucet needs maxAmount, perKeyLimit and cooldownSeconds');
+    $grant = ledger_parse_units($faucet['maxAmount'], 'maxAmount');
+    $total = ledger_parse_units($faucet['perKeyLimit'], 'perKeyLimit');
+    if ($grant < 1 || $grant > $max) ledger_fail('bad-genesis', 'the faucet maxAmount must be at least 1 and within the coin');
+    if ($total < $grant || $total > $max) ledger_fail('bad-genesis', 'the faucet perKeyLimit must be at least maxAmount and within the coin');
+    $cooldown = $faucet['cooldownSeconds'];
+    if (!is_int($cooldown) || $cooldown < 0 || $cooldown > LEDGER_MAX_COOLDOWN_SECONDS) ledger_fail('bad-genesis', 'the faucet cooldownSeconds must be 0 to ' . LEDGER_MAX_COOLDOWN_SECONDS);
+    return ['maxAmount' => (string) $grant, 'perKeyLimit' => (string) $total, 'cooldownSeconds' => $cooldown];
 }
 
 function ledger_genesis_digest(array $genesis): string
@@ -240,7 +261,7 @@ function ledger_register(PDO $db, array $genesis, string $treasuryKey, ?string $
         'decimals' => $genesis['decimals'] ?? null, 'maxUnits' => $genesis['maxUnits'] ?? null, 'initialUnits' => $genesis['initialUnits'] ?? null,
         'mode' => $genesis['mode'] ?? null, 'visibility' => $genesis['visibility'] ?? null, 'treasuryKey' => $treasuryKey,
         'roster' => $genesis['roster'] ?? null, 'threshold' => $genesis['threshold'] ?? null, 'createdAt' => $genesis['createdAt'] ?? null,
-        'refSecret' => $refSecret,
+        'faucet' => $genesis['faucet'] ?? null, 'refSecret' => $refSecret,
     ]);
     if (ledger_canonical($again) !== ledger_canonical($genesis)) ledger_fail('bad-genesis', 'the genesis does not match its treasury key and reference secret');
     if ($genesis['visibility'] === 'public' && $refSecret !== null) ledger_fail('bad-genesis', 'a public coin has no reference secret');
@@ -327,6 +348,44 @@ function ledger_head(PDO $db, string $coinId): array
     return $head ? ['index' => (int) $head['idx'], 'hash' => $head['hash']] : ['index' => -1, 'hash' => ledger_coin($db, $coinId)['genesis_digest']];
 }
 
+// The execution time of the newest entry, as a Unix time.
+function ledger_head_time(PDO $db, string $coinId): int
+{
+    $row = $db->prepare('SELECT public_json FROM ledger_log WHERE coin_id=? ORDER BY idx DESC LIMIT 1');
+    $row->execute([$coinId]);
+    $public = json_decode((string) $row->fetchColumn(), true);
+    $at = is_array($public) && is_string($public['executedAt'] ?? null) ? strtotime($public['executedAt']) : false;
+    return $at === false ? 0 : $at;
+}
+
+// An entry's execution time: a UTC time inside the owner's proposal window, never before the entry it follows.
+function ledger_check_executed_at(mixed $executedAt, array $payload, int $previousAt): int
+{
+    if (!is_string($executedAt) || !preg_match('/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/D', $executedAt) || strtotime($executedAt) === false) ledger_fail('bad-time', 'executedAt must be a UTC time');
+    $at = strtotime($executedAt);
+    if ($at < $previousAt) ledger_fail('clock-behind', 'executedAt is before the previous entry');
+    if ($at < strtotime($payload['issuedAt']) - LEDGER_CLOCK_SKEW_SECONDS || $at >= strtotime($payload['expiresAt'])) ledger_fail('bad-time', 'executedAt is outside the proposal window');
+    return $at;
+}
+
+// The limits on spends from the treasury, against what each recipient has already received from it.
+function ledger_faucet_check(PDO $db, array $coin, string $from, string $to, int $amount, int $at): void
+{
+    $policy = $coin['genesis']['faucet'] ?? null;
+    if ($policy === null || $from !== $coin['treasury_key']) return;
+    if ($amount > (int) $policy['maxAmount']) ledger_fail('faucet-amount', 'a grant is at most ' . $policy['maxAmount']);
+    $row = $db->prepare('SELECT total,last_at FROM ledger_faucet WHERE coin_id=? AND account_key=?');
+    $row->execute([$coin['coin_id'], $to]);
+    $given = $row->fetch(PDO::FETCH_ASSOC) ?: ['total' => 0, 'last_at' => 0];
+    ledger_faucet_rules($policy, (int) $given['total'], (int) $given['last_at'], $amount, $at);
+}
+
+function ledger_faucet_rules(array $policy, int $total, int $lastAt, int $amount, int $at): void
+{
+    if ($total + $amount > (int) $policy['perKeyLimit']) ledger_fail('faucet-limit', 'a key can receive at most ' . $policy['perKeyLimit'] . ' from the treasury');
+    if ($total > 0 && $at < $lastAt + (int) $policy['cooldownSeconds']) ledger_fail('faucet-cooldown', 'this key received a grant too recently');
+}
+
 function ledger_account_ref(array $coin, string $key): string
 {
     return $coin['visibility'] === 'private' ? ledger_ref((string) $coin['ref_secret'], $key) : $key;
@@ -393,6 +452,8 @@ function ledger_prepare_transfer(PDO $db, string $coinId, array $authorization, 
     if ((int) $from['seq'] !== $t['baseSeq']) ledger_fail('stale', 'the sender account has moved on since this was signed');
     if ((int) $from['units'] < $t['amount']) ledger_fail('insufficient', 'the sender holds less than the amount');
     $head = ledger_head($db, $coinId);
+    $at = ledger_check_executed_at(gmdate('Y-m-d\TH:i:s\Z', $now), $authorization['payload'], ledger_head_time($db, $coinId));
+    ledger_faucet_check($db, $coin, $t['from'], $t['to'], $t['amount'], $at);
     $public = ['type' => 'transfer', 'coinId' => $coinId, 'index' => $head['index'] + 1, 'prevHash' => $head['hash'], 'executedAt' => gmdate('Y-m-d\TH:i:s\Z', $now),
         'amount' => (string) $t['amount'], 'from' => ledger_account_ref($coin, $t['from']), 'to' => ledger_account_ref($coin, $t['to'])];
     $hash = ledger_digest($public);
@@ -451,6 +512,9 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         if (!$from) ledger_fail('no-account', 'the sender has no account');
         if ((int) $from['seq'] !== $t['baseSeq']) ledger_fail('stale', 'the sender account has moved on since this was signed');
         if ((int) $from['units'] < $t['amount']) ledger_fail('insufficient', 'the sender holds less than the amount');
+        $at = ledger_check_executed_at($public['executedAt'], $authorization['payload'], ledger_head_time($db, $coinId));
+        if (abs($at - $now) > LEDGER_CLOCK_SKEW_SECONDS) ledger_fail('bad-time', 'executedAt is not close to the current time');
+        ledger_faucet_check($db, $coin, $t['from'], $t['to'], $t['amount'], $at);
         // Apply. A recipient without an account gets one.
         $db->prepare('UPDATE ledger_accounts SET units=units-?, seq=seq+1 WHERE coin_id=? AND account_key=?')->execute([$t['amount'], $coinId, $t['from']]);
         $to = ledger_account_row($db, $coinId, $t['to']);
@@ -462,6 +526,10 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
         $supply = $db->prepare('SELECT COALESCE(SUM(units),0) FROM ledger_accounts WHERE coin_id=?');
         $supply->execute([$coinId]);
         if ((int) $supply->fetchColumn() !== (int) $coin['initial_units']) ledger_fail('supply-changed', 'the entry would change the total supply');
+        if (($genesis['faucet'] ?? null) !== null && $t['from'] === $coin['treasury_key']) {
+            $db->prepare('INSERT INTO ledger_faucet(coin_id,account_key,total,last_at) VALUES(?,?,?,?) ON CONFLICT(coin_id,account_key) DO UPDATE SET total=total+excluded.total, last_at=excluded.last_at')
+                ->execute([$coinId, $t['to'], $t['amount'], $at]);
+        }
         $db->prepare('INSERT INTO ledger_nonces(coin_id,owner_key,nonce) VALUES(?,?,?)')->execute([$coinId, $t['from'], $t['nonce']]);
         $db->prepare('INSERT INTO ledger_log(coin_id,idx,hash,prev_hash,public_json,private_json,authority_sig,approvals_json) VALUES(?,?,?,?,?,?,?,?)')
             ->execute([$coinId, $public['index'], $hash, $public['prevHash'], ledger_canonical($public), ledger_canonical($private), $authoritySignature, ledger_canonical($kept)]);
@@ -561,6 +629,9 @@ function ledger_check(PDO $db, string $coinId): array
     $refOf = [];
     $positions = [];
     $nonces = [];
+    $treasury = null;
+    $given = [];
+    $previousAt = 0;
     $private = $genesis['visibility'] === 'private';
     $refFor = static fn(string $key): string => $private ? ledger_ref((string) $coin['ref_secret'], $key) : $key;
     foreach ($rows->fetchAll(PDO::FETCH_ASSOC) as $row) {
@@ -586,7 +657,7 @@ function ledger_check(PDO $db, string $coinId): array
             }
             $treasuryKey = $priv['to'] ?? null;
             if (!is_string($treasuryKey) || $refFor($treasuryKey) !== $genesis['treasuryRef']) $problems[] = $where . 'the treasury key does not match its reference';
-            else { $units[$treasuryKey] = (int) $genesis['initialUnits']; $seq[$treasuryKey] = 0; $refOf[$treasuryKey] = $genesis['treasuryRef']; $positions[$genesis['treasuryRef']] = [0]; }
+            else { $treasury = $treasuryKey; $previousAt = strtotime($genesis['createdAt']); $units[$treasuryKey] = (int) $genesis['initialUnits']; $seq[$treasuryKey] = 0; $refOf[$treasuryKey] = $genesis['treasuryRef']; $positions[$genesis['treasuryRef']] = [0]; }
             continue;
         }
         $seen = [$genesis['authority'] => true];
@@ -605,6 +676,19 @@ function ledger_check(PDO $db, string $coinId): array
         $amount = (int) $payload['amount'];
         if (($priv['from'] ?? null) !== $from || ($priv['to'] ?? null) !== $to || ($public['amount'] ?? null) !== $payload['amount']) $problems[] = $where . 'the private and public forms disagree';
         if (($public['from'] ?? null) !== $refFor($from) || ($public['to'] ?? null) !== $refFor($to)) $problems[] = $where . 'the public references do not match the keys';
+        try {
+            $at = ledger_check_executed_at($public['executedAt'] ?? null, $payload, $previousAt);
+            $previousAt = $at;
+            $policy = $genesis['faucet'] ?? null;
+            if ($policy !== null && $from === $treasury) {
+                if ($amount > (int) $policy['maxAmount']) throw new LedgerError('faucet-amount', 'over the grant limit');
+                $g = $given[$to] ?? ['total' => 0, 'last' => 0];
+                ledger_faucet_rules($policy, $g['total'], $g['last'], $amount, $at);
+                $given[$to] = ['total' => $g['total'] + $amount, 'last' => $at];
+            }
+        } catch (LedgerError $e) {
+            $problems[] = $where . $e->reason . ': ' . $e->getMessage();
+        }
         if (isset($nonces[$from . '|' . $payload['nonce']])) $problems[] = $where . 'repeats a nonce';
         $nonces[$from . '|' . $payload['nonce']] = true;
         if (($seq[$from] ?? -1) !== $payload['baseSeq']) $problems[] = $where . 'is not signed against the sender\'s sequence number';
@@ -638,8 +722,79 @@ function ledger_check(PDO $db, string $coinId): array
     $extra = $db->prepare('SELECT COUNT(DISTINCT ref) FROM ledger_account_entries WHERE coin_id=?');
     $extra->execute([$coinId]);
     if ((int) $extra->fetchColumn() !== count($positions)) $problems[] = 'the entry index holds an account the log does not';
+    $faucetRows = $db->prepare('SELECT account_key,total,last_at FROM ledger_faucet WHERE coin_id=?');
+    $faucetRows->execute([$coinId]);
+    $storedGiven = [];
+    foreach ($faucetRows->fetchAll(PDO::FETCH_ASSOC) as $r) $storedGiven[$r['account_key']] = ['total' => (int) $r['total'], 'last' => (int) $r['last_at']];
+    ksort($storedGiven);
+    ksort($given);
+    if ($storedGiven !== $given) $problems[] = 'the stored faucet totals do not match the log';
     $stored = $db->prepare('SELECT COUNT(*) FROM ledger_nonces WHERE coin_id=?');
     $stored->execute([$coinId]);
     if ((int) $stored->fetchColumn() !== count($nonces)) $problems[] = 'the stored nonces do not match the log';
     return $problems;
+}
+
+// ---------- the treasury key and operator grants ----------
+
+// A new wallet-format key pair: the public key as the wallet gives it (65 raw bytes, base64url) and the private key PEM.
+function ledger_new_owner_key(): array
+{
+    $key = openssl_pkey_new(['curve_name' => 'prime256v1', 'private_key_type' => OPENSSL_KEYTYPE_EC]);
+    if ($key === false) ledger_fail('no-key', 'a key could not be generated');
+    openssl_pkey_export($key, $private);
+    $d = openssl_pkey_get_details($key);
+    $point = "\x04" . str_pad($d['ec']['x'], 32, "\x00", STR_PAD_LEFT) . str_pad($d['ec']['y'], 32, "\x00", STR_PAD_LEFT);
+    return ['key' => ledger_b64u_encode($point), 'private' => $private];
+}
+
+// Signs a payload the way a wallet does: canonical bytes, raw r||s.
+function ledger_owner_sign(string $privatePem, array $payload): string
+{
+    if (!openssl_sign(ledger_canonical($payload), $der, $privatePem, OPENSSL_ALGO_SHA256)) ledger_fail('no-signature', 'signing failed');
+    $offset = 2;
+    $raw = '';
+    for ($i = 0; $i < 2; $i++) {
+        $len = ord($der[$offset + 1]);
+        $raw .= str_pad(ltrim(substr($der, $offset + 2, $len), "\x00"), 32, "\x00", STR_PAD_LEFT);
+        $offset += 2 + $len;
+    }
+    return ledger_b64u_encode($raw);
+}
+
+// Creates the treasury key file for a coin: readable by its owner only, never overwritten. $dir is the private folder.
+function ledger_treasury_key_create(string $dir, string $coinId): array
+{
+    if (!preg_match('/^[a-f0-9]{32}$/D', $coinId) || !is_dir($dir)) ledger_fail('bad-key-file', 'a coin id and an existing folder are needed');
+    $file = rtrim($dir, '/\\') . '/treasury-' . $coinId . '.json';
+    $pair = ledger_new_owner_key();
+    $handle = @fopen($file, 'x');
+    if ($handle === false) ledger_fail('key-exists', 'a treasury key already exists for this coin');
+    chmod($file, 0600);
+    fwrite($handle, json_encode($pair, JSON_UNESCAPED_SLASHES));
+    fclose($handle);
+    return $pair;
+}
+
+function ledger_treasury_key_load(string $dir, string $coinId): array
+{
+    if (!preg_match('/^[a-f0-9]{32}$/D', $coinId)) ledger_fail('bad-key-file', 'a coin id is needed');
+    $raw = @file_get_contents(rtrim($dir, '/\\') . '/treasury-' . $coinId . '.json');
+    $pair = is_string($raw) ? json_decode($raw, true) : null;
+    if (!is_array($pair) || !ledger_valid_owner_key($pair['key'] ?? null) || !is_string($pair['private'] ?? null) || openssl_pkey_get_private($pair['private']) === false) ledger_fail('bad-key-file', 'the treasury key file is missing or unreadable');
+    return ['key' => $pair['key'], 'private' => $pair['private']];
+}
+
+// An operator grant: a transfer from the treasury, signed by the treasury key. It is prepared and checked like any other
+// transfer, including the faucet limits; the authority and approvers then sign and commit it.
+function ledger_grant(PDO $db, string $coinId, array $treasury, string $recipientKey, string $amount, int $now): array
+{
+    $coin = ledger_coin($db, $coinId);
+    if (($treasury['key'] ?? null) !== $coin['treasury_key']) ledger_fail('not-treasury', 'that is not the coin\'s treasury key');
+    $row = ledger_account_row($db, $coinId, $coin['treasury_key']);
+    if (!$row) ledger_fail('no-account', 'the treasury has no account yet');
+    $payload = ['type' => 'atlas.ledger.transfer', 'v' => 1, 'coinId' => $coinId, 'from' => $coin['treasury_key'], 'to' => $recipientKey, 'amount' => $amount,
+        'baseSeq' => (int) $row['seq'], 'baseHead' => ledger_head($db, $coinId)['hash'], 'nonce' => bin2hex(random_bytes(16)),
+        'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $now), 'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', $now + 300)];
+    return ledger_prepare_transfer($db, $coinId, ['payload' => $payload, 'signature' => ledger_owner_sign($treasury['private'], $payload)], $now);
 }

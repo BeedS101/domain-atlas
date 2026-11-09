@@ -60,6 +60,12 @@ lab uses it yet. It is a library over one SQLite file per node:
   key holder only, and `ledger_check`, which recomputes every balance, sequence number, reference, index row and
   signature from the log and reports any difference from the stored tables.
 
+A genesis may carry a faucet policy (`maxAmount`, `perKeyLimit`, `cooldownSeconds`) that limits every spend from the
+treasury key; the commit, the prepare step and the checker all enforce it, and an entry's `executedAt` is checked against
+the previous entry and the owner's proposal window so the cool-down cannot be gamed. The treasury key is made by
+`ledger_treasury_key_create` into the private folder (mode 0600, never overwritten), and `ledger_grant` builds an
+operator grant signed with it. The coin creation form does not offer a faucet policy yet.
+
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
 whole units, at most 10^12. The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.

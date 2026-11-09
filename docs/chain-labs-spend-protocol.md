@@ -256,8 +256,24 @@ not make the attack impossible: an authority that withholds service still stops 
 The treasury is an ordinary account created in entry 0. A spend from the treasury is a normal transfer: signed by
 the treasury key, approved under the coin's policy, conserving supply. A faucet is then a policy on treasury spends: a
 per-key limit, a maximum amount and a cool-down, written into the genesis and checked by every approving domain at approval time.
-Who holds the treasury key, and whether faucet claims are automatic or operator-driven, are open questions below. No
-code path may credit an account other than by a transfer.
+No code path may credit an account other than by a transfer.
+
+**The policy.** The genesis carries `faucet`, either `null` (treasury spends are unlimited) or three fields:
+`maxAmount`, the most one grant may be; `perKeyLimit`, the most one recipient key may ever receive from the treasury;
+and `cooldownSeconds`, the least time between two grants to the same key (0 to 30 days). `perKeyLimit` is at least
+`maxAmount` and neither exceeds the coin's maximum. The limits apply to every spend whose sender is the treasury key
+and to nothing else: units passed on by a recipient, or returned to the treasury, do not reopen a limit. Each domain
+that applies an entry checks them against totals it derived from the log, and the checker recomputes them.
+
+**Custody and grants.** The treasury key is an ordinary wallet key pair made by the authority when the coin is created
+and kept in the authority's private folder in a file readable by its owner only; it is never in the genesis, which
+carries only its reference. Grants are operator-driven: the operator asks the authority to grant an amount to a key, the
+authority signs the transfer with the treasury key, and the transfer is approved and committed like any other. A
+wallet-initiated claim route is not part of this stage.
+
+**Entry time.** The cool-down relies on each entry's `executedAt`, so every domain checks it: a UTC time that is not
+earlier than the previous entry, inside the owner's proposal window (from two minutes before `issuedAt` up to
+`expiresAt`), and within two minutes of the committing domain's own clock.
 
 ## 10. Purchasing with Gold (Au)
 
@@ -388,7 +404,8 @@ Each stage ships separately, with tests, on its own branch.
    with tests including conservation under random operation sequences and a check that no public route returns a key of
    a private coin. This is built as the library `chain-labs/lib/ledger.php` with its tests (stage 2a); the coin
    creation form gaining the single or multi choice and the public or private choice is stage 2b: `coin26.php` records the mode, visibility, partners and threshold in the genesis it hashes, and a multi coin stays pending. Opening the ledger store from that record waits for the funding stage, when the treasury key exists.
-3. Funding: treasury account and the faucet policy.
+3. Funding: treasury account and the faucet policy. Built as the faucet policy in the genesis, enforced by the library
+   and the checker, the treasury key custody helpers and the operator grant (the library only).
 4. Spend in single mode, end to end on one node: proposal, execution, receipts and recovery, and the signed `holdings`
    lookup with its challenge. This is the first stage a wallet can use.
 5. Spend in multi mode: approval and execution between two and three local PHP nodes in the test suite, with all-of and
@@ -403,8 +420,8 @@ Each stage ships separately, with tests, on its own branch.
 ## 14. Open questions
 
 1. Which domain is the authority for a coin? Default: the issuing domain.
-2. Who holds the treasury key, and is the faucet automatic or operator-driven? Default: an operator key held by the
-   authority, with operator-driven faucet grants.
+2. Who holds the treasury key, and is the faucet automatic or operator-driven? Default, now built: an operator key
+   held by the authority, with operator-driven faucet grants (section 9).
 3. Is the owner's authorization signed through the page bridge, the extension, or both? The bridge needs the page
    manifest to list the purpose; the extension can sign directly. Default: both, same payload.
 4. Should a transfer to an unopened recipient create the account? Default: yes, as part of the same entry.
