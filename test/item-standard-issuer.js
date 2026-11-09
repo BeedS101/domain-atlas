@@ -113,7 +113,7 @@ class Backend {
 async function startNode(b, variant) {
   b.proc = spawn('node', ['-r', path.join(__dirname, 'lib', 'item-standard-inject.js'), 'issuer-server/server.js'], {
     cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PORT: String(b.port), ATLAS_DOMAIN: 'localhost:' + b.port, ATLAS_STATE_DIR: b.state, ATLAS_DOCROOT: b.docroot, ITEMSTD_VARIANT: String(variant) }
+    env: { ...process.env, ATLAS_PRIVATE_MINT: 'off', PORT: String(b.port), ATLAS_DOMAIN: 'localhost:' + b.port, ATLAS_STATE_DIR: b.state, ATLAS_DOCROOT: b.docroot, ITEMSTD_VARIANT: String(variant) }
   });
   let log = '';
   b.proc.stderr.on('data', (d) => { log += d; });
@@ -135,7 +135,7 @@ async function startPhp(b, variant) {
   if (!text.includes(anchor)) throw new Error('store.php no longer has the catalog line the item standard test injects at');
   fs.writeFileSync(store, text.replace(anchor, "define('ATLAS_ASSET_CATALOG', array_merge(ATLAS_ASSET_CATALOG_BASE, atlas_elements_catalog(), require __DIR__ . '/item-standard-test-classes.php'));"));
   writePhpClasses(b, variant);
-  b.proc = spawn('php', ['-d', 'opcache.enable=0', '-S', 'localhost:' + b.port, 'test-router.php'], { cwd: b.bundle, stdio: ['ignore', 'pipe', 'pipe'] });
+  b.proc = spawn('php', ['-d', 'opcache.enable=0', '-S', 'localhost:' + b.port, 'test-router.php'], { cwd: b.bundle, env: { ...process.env, ATLAS_PRIVATE_MINT: 'off' }, stdio: ['ignore', 'pipe', 'pipe'] });
   await new Promise((res, rej) => {
     const t = setTimeout(() => rej(new Error('php did not start')), 8000);
     b.proc.stderr.on('data', (d) => { if (String(d).includes('started')) { clearTimeout(t); res(); } });

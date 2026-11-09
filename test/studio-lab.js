@@ -134,7 +134,7 @@ class StudioLab {
     lab.origin = lab.base;
     lab.host = 'localhost:' + lab.port;
     if (!opts.reuse) lab.writeConfig(opts);
-    lab.env = Object.assign({}, process.env, {
+    lab.env = Object.assign({}, process.env, { ATLAS_PRIVATE_MINT: 'off' }, {
       ATLAS_PRIVATE_DIR: lab.private, ATLAS_STUDIO_STORAGE_ROOT: lab.studio, PHP_CLI_SERVER_WORKERS: String(opts.workers || 4),
     }, opts.crashAt ? { ATLAS_TEST_CRASH_AT: opts.crashAt } : {}, opts.env || {});
     await lab.listen();

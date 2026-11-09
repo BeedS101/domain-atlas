@@ -42,7 +42,7 @@ const freePort = () => new Promise((resolve) => { const s = net.createServer(); 
   fs.cpSync(BUNDLE_DIR, bundle, { recursive: true });
   const port = await freePort();
   const BASE = 'http://localhost:' + port;
-  const proc = spawn('php', ['-S', 'localhost:' + port, 'test-router.php'], { cwd: bundle, stdio: ['ignore', 'ignore', 'pipe'] });
+  const proc = spawn('php', ['-S', 'localhost:' + port, 'test-router.php'], { cwd: bundle, env: { ...process.env, ATLAS_PRIVATE_MINT: 'off' }, stdio: ['ignore', 'ignore', 'pipe'] });
   const stderr = [];
   proc.stderr.on('data', (d) => stderr.push(d.toString()));
   for (let i = 0; i < 100 && !stderr.join('').includes('started'); i++) await new Promise((r) => setTimeout(r, 50));

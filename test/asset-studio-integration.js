@@ -917,7 +917,7 @@ async function credentialVerifies(l, cred) {
     const port = await new Promise((resolve) => { const s = require('net').createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
     const proc = spawn('node', ['issuer-server/server.js'], {
       cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'],
-      env: Object.assign({}, process.env, { PORT: String(port), ATLAS_DOMAIN: 'localhost:' + port, ATLAS_STATE_DIR: path.join(dir, 'state'), ATLAS_DOCROOT: path.join(dir, 'docroot') }),
+      env: Object.assign({}, process.env, { ATLAS_PRIVATE_MINT: 'off', PORT: String(port), ATLAS_DOMAIN: 'localhost:' + port, ATLAS_STATE_DIR: path.join(dir, 'state'), ATLAS_DOCROOT: path.join(dir, 'docroot') }),
     });
     try {
       fs.mkdirSync(path.join(dir, 'docroot', '.well-known'), { recursive: true });

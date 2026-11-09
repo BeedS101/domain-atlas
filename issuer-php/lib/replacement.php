@@ -293,6 +293,37 @@ function atlas_holdings_modify($owner, $fn) {
   }
 }
 
+// ---------- who may use the public mint ----------
+// POST /atlas/asset/issue serves this domain's own pages and the wallet extension, nobody else: the class must be
+// one the domain offers (ATLAS_PUBLIC_MINT_CLASSES) and the request must come from this site's own origin, a
+// browser extension, or a listed trusted origin. A browser page on another site, or a request that names no origin,
+// is refused. The origin header is set by the browser, so this stops other sites' pages; it does not stop a
+// program that writes its own headers, which is why the class list and mintLimits also apply. The variable
+// ATLAS_PRIVATE_MINT=off switches both checks off for isolated test issuers only; a live issuer never sets it.
+function atlas_private_mint_off() { return getenv('ATLAS_PRIVATE_MINT') === 'off'; }
+
+function atlas_public_mint_offered($assetClass) {
+  return atlas_private_mint_off() || in_array($assetClass, ATLAS_PUBLIC_MINT_CLASSES, true);
+}
+
+function atlas_mint_origin_allowed() {
+  if (atlas_private_mint_off()) return true;
+  $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+  if (!is_string($origin) || $origin === '' || $origin === 'null') return false;
+  $parts = parse_url($origin);
+  if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) return false;
+  $scheme = strtolower($parts['scheme']);
+  if (in_array($scheme, ['chrome-extension', 'moz-extension', 'safari-web-extension'], true)) return true;
+  if ($scheme !== 'http' && $scheme !== 'https') return false;
+  $hostPort = strtolower($parts['host'] . (isset($parts['port']) ? ':' . $parts['port'] : ''));
+  if ($hostPort === strtolower(atlas_domain())) return true;
+  $extra = ATLAS_MINT_TRUSTED_ORIGINS;
+  $env = getenv('ATLAS_MINT_ORIGINS');
+  if ($env !== false && $env !== '') foreach (explode(',', $env) as $o) $extra[] = trim($o);
+  foreach ($extra as $o) if ($o !== '' && strtolower(rtrim($o, '/')) === strtolower($scheme . '://' . $hostPort)) return true;
+  return false;
+}
+
 // ---------- mint allowance (mintLimits) ----------
 // A class with `mintLimits` can be minted fresh only up to `perRequest` units at a time and up to `perWindow`
 // units per owner key in any rolling `windowSeconds`, whatever the caller says the mint is for. Each reservation

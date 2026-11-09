@@ -3448,6 +3448,43 @@ function holdingsNoteIssued(owner, asset, id, quantity) {
 // but did not finish is not counted twice. Kept apart from the holdings index. Callers hold the owner lease around
 // reserve and release, and an unreadable record refuses the mint instead of guessing a count. Like the holding cap
 // this bounds one owner key, not one person.
+// ---------- who may use the public mint ----------
+// POST /atlas/asset/issue serves this domain's own pages and the wallet extension, nobody else: the class must be
+// one the domain offers (PUBLIC_MINT_CLASSES) and the request must come from this site's own origin, a browser
+// extension, or a listed trusted origin. A browser page on another site, or a request that names no origin, is
+// refused. The origin header is set by the browser, so this stops other sites' pages; it does not stop a program
+// that writes its own headers, which is why the class list and mintLimits also apply. ATLAS_PRIVATE_MINT=off
+// switches both checks off for isolated test issuers only; a live issuer never sets it.
+const PRIVATE_MINT_OFF = process.env.ATLAS_PRIVATE_MINT === 'off';
+if (PRIVATE_MINT_OFF) console.warn('Private mint checks are OFF (ATLAS_PRIVATE_MINT=off): for isolated test issuers only.');
+const PUBLIC_MINT_CLASSES = new Set([
+  'atlas.element.iron', 'atlas.element.gold', 'atlas.element.silver',
+  'atlas.credit.balance', 'atlas.currency.alpha', 'atlas.currency.beta', 'atlas.demo.clawback.funds',
+  'atlas.membership', 'atlas.postoffice.membership', 'atlas.tradingstation.membership', 'atlas.demo.governance.membership',
+  'atlas.trophy.chess', 'atlas.tool.bronze_compass', 'atlas.wearable.ring', 'atlas.trinket.pin', 'atlas.trinket.charm', 'atlas.badge',
+  'atlas.avatar.hat.cap', 'atlas.avatar.hat.sunhat', 'atlas.avatar.outfit.dusk', 'atlas.avatar.outfit.forest',
+  'atlas.avatar.shoes.boots', 'atlas.avatar.shoes.sneakers',
+  'atlas.demo.attestation.filing', 'atlas.demo.coupon', 'atlas.demo.email.ticket', 'atlas.demo.login.badge',
+  'atlas.demo.supplychain.widget', 'atlas.demo.clawback.token',
+  'atlas.demo.cafeteria.sandwich', 'atlas.demo.cafeteria.juice', 'atlas.demo.cafeteria.snack',
+]);
+// Other sites whose pages may call the public mint, as full origins; ATLAS_MINT_ORIGINS adds more, comma-separated.
+const MINT_TRUSTED_ORIGINS = [];
+function publicMintOffered(assetClass) { return PRIVATE_MINT_OFF || PUBLIC_MINT_CLASSES.has(assetClass); }
+function mintOriginAllowed(req) {
+  if (PRIVATE_MINT_OFF) return true;
+  const origin = req.headers.origin;
+  if (typeof origin !== 'string' || origin === '' || origin === 'null') return false;
+  let u;
+  try { u = new URL(origin); } catch (e) { return false; }
+  if (['chrome-extension:', 'moz-extension:', 'safari-web-extension:'].includes(u.protocol)) return true;
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  const hostPort = u.host.toLowerCase();
+  if (hostPort === String(req.headers.host || '').toLowerCase()) return true;
+  const extra = MINT_TRUSTED_ORIGINS.concat((process.env.ATLAS_MINT_ORIGINS || '').split(',').map((s) => s.trim()));
+  return extra.some((o) => o && o.replace(/\/+$/, '').toLowerCase() === u.protocol + '//' + hostPort);
+}
+
 const MINT_ALLOWANCE_DIR = path.join(STATE_DIR, 'mint-allowance');
 // ATLAS_MINT_LIMITS=off switches the limits off for isolated test issuers only; a live issuer never sets it.
 const MINT_LIMITS_OFF = process.env.ATLAS_MINT_LIMITS === 'off';
@@ -6306,6 +6343,14 @@ async function main() {
           // atlas.membership is intentionally excluded there), so this
           // also names ASSET_CATALOG directly for the full picture.
           return sendJson(res, 400, { error: 'Unknown assetClass. See GET /atlas/trade/catalog for tradable classes, or ASSET_CATALOG in issuer-server/server.js (plus issuer-server/elements-catalog.js) for the full list.' });
+        }
+
+        // The public route serves this domain's own pages only, and only for classes the domain offers.
+        if (!mintOriginAllowed(req)) {
+          return sendJson(res, 403, { error: "minting is open to this domain's own pages only", code: 'mint-origin-refused' });
+        }
+        if (!publicMintOffered(assetClass)) {
+          return sendJson(res, 403, { error: `${catalogEntry.name} is not offered by this domain`, code: 'mint-not-offered' });
         }
 
         // fungible: true — quantity is caller-chosen and must be a positive

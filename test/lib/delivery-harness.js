@@ -331,7 +331,7 @@ function startNodeIssuer({ port, stateDir, docrootDir, env }) {
   return new Promise((resolve, reject) => {
     const proc = spawn('node', ['issuer-server/server.js'], {
       cwd: ROOT,
-      env: { ...process.env, ATLAS_MINT_LIMITS: 'off', PORT: String(port), ATLAS_DOMAIN: 'localhost:' + port, ATLAS_STATE_DIR: stateDir, ATLAS_DOCROOT: docrootDir, ...(env || {}) },
+      env: { ...process.env, ATLAS_MINT_LIMITS: 'off', ATLAS_PRIVATE_MINT: 'off', PORT: String(port), ATLAS_DOMAIN: 'localhost:' + port, ATLAS_STATE_DIR: stateDir, ATLAS_DOCROOT: docrootDir, ...(env || {}) },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let started = false;
@@ -346,7 +346,7 @@ function startNodeIssuer({ port, stateDir, docrootDir, env }) {
 // need "the process died" restart the server to model it.
 function startPhpIssuer({ port, bundleDir, env }) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('php', ['-S', 'localhost:' + port, 'test-router.php'], { cwd: bundleDir, env: { ...process.env, ATLAS_MINT_LIMITS: 'off', ...(env || {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn('php', ['-S', 'localhost:' + port, 'test-router.php'], { cwd: bundleDir, env: { ...process.env, ATLAS_MINT_LIMITS: 'off', ATLAS_PRIVATE_MINT: 'off', ...(env || {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
     const timer = setTimeout(() => reject(new Error('php -S did not start in time')), 5000);
     let started = false;
     const exited = new Promise((r) => proc.on('exit', (code) => { if (!started) reject(new Error('php -S exited early with code ' + code)); r(code); }));

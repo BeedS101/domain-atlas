@@ -142,7 +142,7 @@ that file's own comment on `ATLAS_STATE_DIR` for why a second instance
 needs its *own* state folder rather than sharing domain A's):
 
 ```bash
-PORT=8002 ATLAS_DOMAIN=localhost:8002 ATLAS_DOCROOT=demo-domain-b ATLAS_STATE_DIR=issuer-server/domain-b-state node issuer-server/server.js
+PORT=8002 ATLAS_DOMAIN=localhost:8002 ATLAS_DOCROOT=demo-domain-b ATLAS_STATE_DIR=issuer-server/domain-b-state ATLAS_MINT_ORIGINS=http://localhost:8001 node issuer-server/server.js
 ```
 
 Confirm both are up:
@@ -389,6 +389,25 @@ item, and there is no delivery path for it yet.
    week is refused with a `weekly-limit` answer saying when more can be mined.
    Isolated test issuers can switch this off with `ATLAS_MINT_LIMITS=off`;
    a live issuer never sets it.
+
+   The mint route is not a public service: `POST /atlas/asset/issue` answers
+   only for the classes the domain offers (the list in `issuer-php/lib/store.php`
+   and `issuer-server/server.js`; the generated elements other than iron, gold
+   and silver are not on it, so they cannot be minted and converted into gold)
+   and only for requests whose origin is this site's own pages, a browser
+   extension, or a trusted origin. A request with no origin, or from another
+   site's page, gets `mint-origin-refused`; a class not on the list gets
+   `mint-not-offered`. Anything else is minted by an administrator only. To let
+   a sibling site's pages mint here (the federation demo does), list its origin
+   in `ATLAS_MINT_TRUSTED_ORIGINS` (`store.php`) or start the issuer with
+   `ATLAS_MINT_ORIGINS=https://sibling.example` (for the local demo, domain B's
+   issuer needs `ATLAS_MINT_ORIGINS=http://localhost:8001`). The origin header
+   is set by browsers; it stops other sites' pages, not a program that writes
+   its own headers, which is why the class list and weekly limits also apply.
+   Isolated test issuers switch the class and origin checks off with
+   `ATLAS_PRIVATE_MINT=off`; export it together with `ATLAS_MINT_LIMITS=off`
+   before running the manual tests that mint in bulk. A live issuer never sets
+   either.
 5. Click **Send half** on a resource card to split a balance: the issuer
    validates the presented credential, then issues two new balances (a
    remainder back to the sender, the sent amount to the recipient) both

@@ -67,6 +67,15 @@ if (!empty(ATLAS_ASSET_CATALOG[$assetClass]['restrictedIssuance'])) {
   ]);
 }
 
+// The public route serves this domain's own pages only, and only for classes the domain offers. Checked before
+// any lease, reservation or signing.
+if (!atlas_mint_origin_allowed()) {
+  send_json(403, ['error' => 'minting is open to this domain\'s own pages only', 'code' => 'mint-origin-refused']);
+}
+if (!atlas_public_mint_offered($assetClass)) {
+  send_json(403, ['error' => ATLAS_ASSET_CATALOG[$assetClass]['name'] . ' is not offered by this domain', 'code' => 'mint-not-offered']);
+}
+
 // fungible: true — quantity is caller-chosen and must be a positive
 // integer. fungible: false — quantity is always exactly 1 (SPEC.md §5):
 // accept it omitted, or explicitly 1, but reject anything else rather

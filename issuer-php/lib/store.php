@@ -2538,6 +2538,24 @@ const ATLAS_ASSET_CATALOG_BASE = [
 require_once __DIR__ . '/elements-catalog.php';
 define('ATLAS_ASSET_CATALOG', array_merge(ATLAS_ASSET_CATALOG_BASE, atlas_elements_catalog()));
 
+// The only classes a visitor's page may mint through POST /atlas/asset/issue: what this domain's own scenes and
+// demo pages offer. Any other class (the generated elements, restricted classes, anything added later) is minted
+// only by an administrator, so the public route cannot be used to create value nothing on the site offers.
+const ATLAS_PUBLIC_MINT_CLASSES = [
+  'atlas.element.iron', 'atlas.element.gold', 'atlas.element.silver',
+  'atlas.credit.balance', 'atlas.currency.alpha', 'atlas.currency.beta', 'atlas.demo.clawback.funds',
+  'atlas.membership', 'atlas.postoffice.membership', 'atlas.tradingstation.membership', 'atlas.demo.governance.membership',
+  'atlas.trophy.chess', 'atlas.tool.bronze_compass', 'atlas.wearable.ring', 'atlas.trinket.pin', 'atlas.trinket.charm', 'atlas.badge',
+  'atlas.avatar.hat.cap', 'atlas.avatar.hat.sunhat', 'atlas.avatar.outfit.dusk', 'atlas.avatar.outfit.forest',
+  'atlas.avatar.shoes.boots', 'atlas.avatar.shoes.sneakers',
+  'atlas.demo.attestation.filing', 'atlas.demo.coupon', 'atlas.demo.email.ticket', 'atlas.demo.login.badge',
+  'atlas.demo.supplychain.widget', 'atlas.demo.clawback.token',
+  'atlas.demo.cafeteria.sandwich', 'atlas.demo.cafeteria.juice', 'atlas.demo.cafeteria.snack',
+];
+// Other sites whose pages may call the public mint, as full origins (for example 'https://sibling.example'). The
+// environment variable ATLAS_MINT_ORIGINS adds more, comma-separated. Empty by default.
+const ATLAS_MINT_TRUSTED_ORIGINS = [];
+
 // Builds the `asset` wrapper (name/class/model/thumbnail/fungible/
 // presentation/properties) for a class, resolving model/thumbnail paths
 // against the current request's domain. Returns null for an unknown

@@ -47,7 +47,7 @@ async function startIssuer(options) {
   fs.writeFileSync(path.join(bundle, 'lib', 'atlas-admin-keys-store.json'), JSON.stringify({ keys: [{ publicKey: adminKey, addedAt: new Date().toISOString() }] }));
   const port = await freePort();
   const requests = [];
-  const env = Object.assign({}, process.env, { ATLAS_MINT_LIMITS: 'off' }, options.workers > 1 ? { PHP_CLI_SERVER_WORKERS: String(options.workers) } : {}, options.env || {});
+  const env = Object.assign({}, process.env, { ATLAS_MINT_LIMITS: 'off', ATLAS_PRIVATE_MINT: 'off' }, options.workers > 1 ? { PHP_CLI_SERVER_WORKERS: String(options.workers) } : {}, options.env || {});
   const proc = spawn('php', ['-d', 'opcache.enable=0', '-S', 'localhost:' + port, 'test-router.php'], { cwd: bundle, env, stdio: ['ignore', 'ignore', 'pipe'] });
   let started = false;
   proc.stderr.on('data', (chunk) => {

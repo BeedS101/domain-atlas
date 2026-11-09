@@ -19,9 +19,10 @@ async function waitFor(log, proc, text, ms, name) {
   });
 }
 
-// The weekly mint limits on gold, silver and iron are off by default here so tests that mint those in bulk keep
-// working; a test of the limits passes { env: { ATLAS_MINT_LIMITS: 'on' } }.
-const MINT_LIMITS_DEFAULT = { ATLAS_MINT_LIMITS: 'off' };
+// The weekly mint limits on gold, silver and iron and the class and origin checks of the public mint are off by
+// default here so tests that mint in bulk keep working; a test of them passes { env: { ATLAS_MINT_LIMITS: 'on',
+// ATLAS_PRIVATE_MINT: 'on' } }.
+const MINT_LIMITS_DEFAULT = { ATLAS_MINT_LIMITS: 'off', ATLAS_PRIVATE_MINT: 'off' };
 
 // Options: { root } a directory holding another copy of issuer-server/ to run instead of this one (an earlier
 // revision, for negative controls); { env } extra environment for the issuer process; { user: 'nobody' } runs it as an
