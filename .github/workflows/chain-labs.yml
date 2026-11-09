@@ -7,11 +7,13 @@ on:
     paths:
       - 'chain-labs/**'
       - 'test/chain-labs-import.js'
+      - 'test/chain-labs-config.js'
       - '.github/workflows/chain-labs.yml'
   pull_request:
     paths:
       - 'chain-labs/**'
       - 'test/chain-labs-import.js'
+      - 'test/chain-labs-config.js'
       - '.github/workflows/chain-labs.yml'
 
 permissions:
@@ -43,4 +45,6 @@ jobs:
           extensions: openssl, pdo_sqlite, curl
 
       - name: Chain labs checks
-        run: node test/chain-labs-import.js
+        run: |
+          node test/chain-labs-import.js
+          node test/chain-labs-config.js
