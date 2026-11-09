@@ -18,6 +18,7 @@ here is a demonstration with no monetary value.
 | 29 | `ledger29.php` | Read-only signed balance query. |
 | 30, 31 | `account30.php`, `accounts31.php` | Signed zero-balance account opening and account discovery. |
 | 33 | `account-test33.html` | Runs account opening, discovery and a balance read with a throwaway test key. |
+| 34 | `spend34.php` | Spending, receipts and holdings for single authority coins. An owner-signed transfer is executed at once and answered with a signed receipt; a signed `holdings` lookup lists a key's coins, private coins only to a key-signed challenge; the operator opens a registered coin as a ledger and makes treasury grants. Not imported: written for the chain build. |
 
 ## Running state
 
@@ -64,7 +65,12 @@ A genesis may carry a faucet policy (`maxAmount`, `perKeyLimit`, `cooldownSecond
 treasury key; the commit, the prepare step and the checker all enforce it, and an entry's `executedAt` is checked against
 the previous entry and the owner's proposal window so the cool-down cannot be gamed. The treasury key is made by
 `ledger_treasury_key_create` into the private folder (mode 0600, never overwritten), and `ledger_grant` builds an
-operator grant signed with it. The coin creation form does not offer a faucet policy yet.
+operator grant signed with it. The coin creation form does not offer a faucet policy yet; the operator gives one when opening a coin.
+
+`lib/spend.php` adds owner proposals kept until they execute (one waiting per sender, expiring, the same proposal answered
+the same way), execution by the authority of a single authority coin with a signed receipt, recovery that finishes the
+proposals a crash left waiting, and the signed holdings statement with its single-use challenges. `spend34.php` serves
+them over HTTPS; its tests run the real endpoint with keys and signatures made the way a wallet makes them.
 
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
@@ -84,3 +90,5 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-config.js
     php test/chain-labs-ledger.php
     node test/chain-labs-coin-form.js
+    php test/chain-labs-spend.php
+    node test/chain-labs-spend-http.js

@@ -144,6 +144,12 @@ function ledger_schema(PDO $db): void
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_account_entries(
         coin_id TEXT NOT NULL, ref TEXT NOT NULL, pos INTEGER NOT NULL, idx INTEGER NOT NULL, PRIMARY KEY(coin_id,ref,pos))');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_faucet(coin_id TEXT NOT NULL, account_key TEXT NOT NULL, total INTEGER NOT NULL CHECK(total > 0), last_at INTEGER NOT NULL, PRIMARY KEY(coin_id,account_key))');
+    $db->exec("CREATE TABLE IF NOT EXISTS ledger_proposals(
+        coin_id TEXT NOT NULL, digest TEXT NOT NULL, from_key TEXT NOT NULL, nonce TEXT NOT NULL, authorization_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','executed','expired','rejected')), created_at INTEGER NOT NULL,
+        executed_index INTEGER, reason TEXT, PRIMARY KEY(coin_id,digest), UNIQUE(coin_id,from_key,nonce))");
+    $db->exec("CREATE UNIQUE INDEX IF NOT EXISTS ledger_one_pending ON ledger_proposals(coin_id,from_key) WHERE status='pending'");
+    $db->exec('CREATE TABLE IF NOT EXISTS ledger_challenges(challenge TEXT PRIMARY KEY, expires_at INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE IF NOT EXISTS ledger_nonces(coin_id TEXT NOT NULL, owner_key TEXT NOT NULL, nonce TEXT NOT NULL, PRIMARY KEY(coin_id,owner_key,nonce))');
 }
 
@@ -538,6 +544,8 @@ function ledger_commit(PDO $db, string $coinId, array $prepared, string $authori
             $pos->execute([$coinId, $ref]);
             $db->prepare('INSERT INTO ledger_account_entries(coin_id,ref,pos,idx) VALUES(?,?,?,?)')->execute([$coinId, $ref, (int) $pos->fetchColumn(), $public['index']]);
         }
+        $db->prepare("UPDATE ledger_proposals SET status='executed', executed_index=? WHERE coin_id=? AND from_key=? AND nonce=? AND status='pending'")
+            ->execute([$public['index'], $coinId, $t['from'], $t['nonce']]);
         $db->exec('COMMIT');
         return ['index' => $public['index'], 'hash' => $hash];
     } catch (Throwable $e) {

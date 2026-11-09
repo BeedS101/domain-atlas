@@ -87,9 +87,9 @@ console.log('\n== the labs use the library');
 const php = fs.readdirSync(DIR).filter((f) => f.endsWith('.php'));
 const named = php.filter((f) => /evtec\.co\.za|domain-atlas\.co\.za/.test(fs.readFileSync(path.join(DIR, f), 'utf8')));
 line(named.length === 0, 'no lab file names a domain any more', named);
-const users = ['account30', 'accounts31', 'coin26', 'ledger29', 'supply25', 'market27', 'compare23', 'events21', 'events22', 'federation', 'federation20'];
+const users = ['account30', 'accounts31', 'coin26', 'ledger29', 'supply25', 'market27', 'compare23', 'events21', 'events22', 'federation', 'federation20', 'spend34'];
 const missing = users.filter((f) => !/require __DIR__\.'\/lib\/hosts\.php';/.test(fs.readFileSync(path.join(DIR, f + '.php'), 'utf8')));
-line(missing.length === 0, 'the eleven labs that check the host load the library', missing);
+line(missing.length === 0, 'every lab that checks the host loads the library', missing);
 
 console.log('\n== each lab answers the configured hosts and refuses others');
 const REFUSAL = /unknown-host|unknown host|unknown node|unrecognized (host|node)|unexpected host/i;

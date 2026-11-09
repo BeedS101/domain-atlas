@@ -408,6 +408,12 @@ Each stage ships separately, with tests, on its own branch.
    and the checker, the treasury key custody helpers and the operator grant (the library only).
 4. Spend in single mode, end to end on one node: proposal, execution, receipts and recovery, and the signed `holdings`
    lookup with its challenge. This is the first stage a wallet can use.
+   Built as `lib/spend.php` and the endpoint `spend34.php`. Proposals are stored pending, one per sender, and
+   identified by the digest of the signed payload; a single authority coin executes them at once and answers with the
+   receipt (the signed log entry); recovery finishes what a crash left. `holdings` answers public coins to anyone and
+   private coins to a request the key signed over a single-use challenge, which names the domain and the key. The
+   operator opens a registered coin as a ledger and makes treasury grants through the same endpoint. Multi coins are
+   stored as pending proposals and wait for stage 5.
 5. Spend in multi mode: approval and execution between two and three local PHP nodes in the test suite, with all-of and
    2-of-3 thresholds, including concurrent double spends, a domain down, and crash injection.
 6. Mirroring: catch-up, head comparison and the freeze rule, for multi coins.

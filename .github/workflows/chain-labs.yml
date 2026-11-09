@@ -1,4 +1,4 @@
-# Lints the chain-labs PHP, checks it against the recorded source hashes and runs the refusal smoke test, the ledger store tests and the coin form tests. It deploys
+# Lints the chain-labs PHP, checks it against the recorded source hashes and runs the refusal smoke test, and the ledger store, coin form, spending and endpoint tests. It deploys
 # nothing and needs no secrets. The labs use PHP 8.1 features (never return type, array_is_list).
 name: chain-labs
 
@@ -10,6 +10,8 @@ on:
       - 'test/chain-labs-config.js'
       - 'test/chain-labs-ledger.php'
       - 'test/chain-labs-coin-form.js'
+      - 'test/chain-labs-spend.php'
+      - 'test/chain-labs-spend-http.js'
       - '.github/workflows/chain-labs.yml'
   pull_request:
     paths:
@@ -18,6 +20,8 @@ on:
       - 'test/chain-labs-config.js'
       - 'test/chain-labs-ledger.php'
       - 'test/chain-labs-coin-form.js'
+      - 'test/chain-labs-spend.php'
+      - 'test/chain-labs-spend-http.js'
       - '.github/workflows/chain-labs.yml'
 
 permissions:
@@ -54,3 +58,5 @@ jobs:
           node test/chain-labs-config.js
           php test/chain-labs-ledger.php
           node test/chain-labs-coin-form.js
+          php test/chain-labs-spend.php
+          node test/chain-labs-spend-http.js
