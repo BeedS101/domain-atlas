@@ -9,7 +9,7 @@ function done26(int $s,array $v): never{http_response_code($s);echo json_encode(
 if(!extension_loaded('pdo_sqlite'))done26(503,['ok'=>false,'error'=>'PDO SQLite required']);
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')done26(403,['ok'=>false,'error'=>'HTTPS required']);
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-if(!in_array($host,['evtec.co.za','domain-atlas.co.za'],true))done26(400,['ok'=>false,'error'=>'Unrecognized host']);
+require __DIR__.'/lib/hosts.php';if(!chainlabs_is_host($host))done26(400,['ok'=>false,'error'=>'Unrecognized host']);
 $origin='https://'.$host;
 $root=realpath($_SERVER['DOCUMENT_ROOT']??'');$private=$root?realpath(dirname($root).'/chainblock-labs-private'):false;
 if(!$private||str_starts_with($private.'/',$root.'/'))done26(503,['ok'=>false,'error'=>'Missing private storage']);

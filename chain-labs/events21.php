@@ -9,7 +9,7 @@ function out21(int $s,array $v): never {http_response_code($s);echo json_encode(
 if(!extension_loaded('openssl')||!extension_loaded('pdo_sqlite')||!extension_loaded('curl'))out21(503,['ok'=>false,'error'=>'Requires OpenSSL, PDO SQLite and cURL']);
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')out21(403,['ok'=>false,'error'=>'HTTPS required']);
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-$nodes=['evtec.co.za'=>'domain-atlas.co.za','domain-atlas.co.za'=>'evtec.co.za'];
+require __DIR__.'/lib/hosts.php';$nodes=chainlabs_peer_map();
 if(!isset($nodes[$host]))out21(400,['ok'=>false,'error'=>'Unknown node hostname']);
 $peer=$nodes[$host];$origin='https://'.$host;
 $root=realpath($_SERVER['DOCUMENT_ROOT']??'');if(!$root)out21(503,['ok'=>false,'error'=>'No document root']);

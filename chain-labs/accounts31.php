@@ -11,7 +11,7 @@ function finish31(int $status,string $code,string $message,array $data=[]):never
 if(!extension_loaded('pdo_sqlite')||!extension_loaded('openssl'))finish31(503,'unavailable','SQLite or OpenSSL missing');
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')finish31(403,'https-required','HTTPS required');
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-if(!in_array($host,['evtec.co.za','domain-atlas.co.za'],true))finish31(400,'unknown-host','Unknown host');
+require __DIR__.'/lib/hosts.php';if(!chainlabs_is_host($host))finish31(400,'unknown-host','Unknown host');
 if(($_SERVER['REQUEST_METHOD']??'')!=='POST'||($_GET['action']??'')!=='accounts')finish31(404,'unknown-operation','Unknown operation');
 $operation='https://'.$host.'/chain-labs/accounts31.php?action=accounts';
 $network='chainblock-labs29-'.$host;

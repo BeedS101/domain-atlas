@@ -9,7 +9,7 @@ function reply(int $code,array $data): never {http_response_code($code);echo jso
 if(!extension_loaded('pdo_sqlite')||!extension_loaded('curl'))reply(503,['ok'=>false,'error'=>'PDO SQLite and cURL required']);
 if(($_SERVER['HTTPS']??'')==='off'||empty($_SERVER['HTTPS']))reply(403,['ok'=>false,'error'=>'HTTPS required']);
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-$peers=['evtec.co.za'=>'domain-atlas.co.za','domain-atlas.co.za'=>'evtec.co.za'];
+require __DIR__.'/lib/hosts.php';$peers=chainlabs_peer_map();
 if(!isset($peers[$host]))reply(400,['ok'=>false,'error'=>'Unexpected host; only the two demo domains allowed']);
 $peer=$peers[$host];$origin='https://'.$host;
 $doc=realpath($_SERVER['DOCUMENT_ROOT']??'');

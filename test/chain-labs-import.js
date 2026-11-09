@@ -17,7 +17,8 @@ function line(ok, text, detail) {
   if (!ok) failures++;
   console.log((ok ? 'PASS ' : 'FAIL ') + text + (!ok && detail !== undefined ? ' :: ' + (typeof detail === 'string' ? detail : JSON.stringify(detail)).slice(0, 300) : ''));
 }
-const files = fs.readdirSync(DIR);
+const entries = fs.readdirSync(DIR);
+const files = entries.filter((f) => fs.statSync(path.join(DIR, f)).isFile());
 const php = files.filter((f) => f.endsWith('.php')).sort();
 const html = files.filter((f) => f.endsWith('.html')).sort();
 const read = (f) => fs.readFileSync(path.join(DIR, f), 'utf8');
@@ -56,8 +57,10 @@ for (const f of html.concat(php)) {
 line(leftovers.length === 0, 'no emoji, mascot or joke text in any page or endpoint', leftovers);
 
 console.log('\n== no private material in the folder');
-const stray = files.filter((f) => !/\.(php|html|md|sha256)$/.test(f));
-line(stray.length === 0, 'only PHP, HTML, README and the hash list are present', stray);
+const stray = entries.filter((f) => !/\.(php|html|md|sha256)$/.test(f) && f !== 'lib');
+line(stray.length === 0, 'only PHP, HTML, README, the hash list and the lib folder are present', stray);
+const libFiles = fs.readdirSync(path.join(DIR, 'lib')).sort();
+line(JSON.stringify(libFiles) === JSON.stringify(['.htaccess', 'hosts.php']), 'the lib folder holds the host library and its deny rule only', libFiles);
 const secret = files.filter((f) => /BEGIN (EC |RSA )?PRIVATE KEY|"d"\s*:\s*"[A-Za-z0-9_-]{40,}"/.test(read(f)));
 line(secret.length === 0, 'no private key material in any file', secret);
 
@@ -67,6 +70,7 @@ async function smoke() {
   const root = path.join(work, 'public');
   fs.mkdirSync(root);
   for (const f of php) fs.copyFileSync(path.join(DIR, f), path.join(root, f));
+  fs.cpSync(path.join(DIR, 'lib'), path.join(root, 'lib'), { recursive: true });
   const port = 20000 + Math.floor(Math.random() * 20000);
   const server = spawn('php', ['-S', '127.0.0.1:' + port, '-t', root], { stdio: 'ignore' });
   await new Promise((r) => setTimeout(r, 800));

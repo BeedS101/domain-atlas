@@ -9,7 +9,7 @@ function reply25(int $status,array $body): never {http_response_code($status);ec
 if(!extension_loaded('pdo_sqlite'))reply25(503,['ok'=>false,'error'=>'PDO SQLite extension unavailable']);
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')reply25(403,['ok'=>false,'error'=>'HTTPS required']);
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-if(!in_array($host,['evtec.co.za','domain-atlas.co.za'],true))reply25(400,['ok'=>false,'error'=>'Unknown node']);
+require __DIR__.'/lib/hosts.php';if(!chainlabs_is_host($host))reply25(400,['ok'=>false,'error'=>'Unknown node']);
 if($_SERVER['REQUEST_METHOD']!=='GET'||($_GET['action']??'')!=='audit')reply25(404,['ok'=>false,'error'=>'Unknown action']);
 $root=realpath($_SERVER['DOCUMENT_ROOT']??'');
 if(!$root)reply25(503,['ok'=>false,'error'=>'Document root unavailable']);

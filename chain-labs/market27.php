@@ -8,7 +8,7 @@ header('X-Content-Type-Options: nosniff');
 function answer27(int $status,array $data): never {http_response_code($status);echo json_encode($data,JSON_UNESCAPED_SLASHES|JSON_INVALID_UTF8_SUBSTITUTE);exit;}
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')answer27(403,['ok'=>false,'error'=>'HTTPS required']);
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-$nodes=['evtec.co.za','domain-atlas.co.za'];
+require __DIR__.'/lib/hosts.php';$nodes=chainlabs_hosts();
 if(!in_array($host,$nodes,true))answer27(400,['ok'=>false,'error'=>'Unrecognized host']);
 if($_SERVER['REQUEST_METHOD']!=='GET'||($_GET['action']??'')!=='list')answer27(404,['ok'=>false,'error'=>'Unknown action']);
 if(!extension_loaded('curl'))answer27(503,['ok'=>false,'error'=>'PHP cURL required']);

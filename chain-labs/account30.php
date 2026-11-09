@@ -8,7 +8,7 @@ if(($_SERVER['REQUEST_METHOD']??'')!=='POST'||($_GET['action']??'')!=='open')out
 if(!extension_loaded('openssl')||!extension_loaded('pdo_sqlite'))out30(503,'unavailable','Missing OpenSSL or SQLite');
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')out30(403,'https-required','HTTPS required');
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-if(!in_array($host,['evtec.co.za','domain-atlas.co.za'],true))out30(400,'unknown-host','Unknown host');
+require __DIR__.'/lib/hosts.php';if(!chainlabs_is_host($host))out30(400,'unknown-host','Unknown host');
 $operation='https://'.$host.'/chain-labs/account30.php?action=open';$network='chainblock-labs29-'.$host;
 $root=realpath($_SERVER['DOCUMENT_ROOT']??'');$private=$root?realpath(dirname($root).'/chainblock-labs-private'):false;
 if(!$private||str_starts_with($private.'/',$root.'/')||!is_file($private.'/coin26.sqlite'))out30(503,'unavailable','Private registry unavailable');

@@ -9,7 +9,7 @@ function respond29(int $code,array $body):never{http_response_code($code);echo j
 if(!extension_loaded('pdo_sqlite')||!extension_loaded('openssl'))respond29(503,['ok'=>false,'error'=>'OpenSSL and PDO_SQLITE required']);
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')respond29(403,['ok'=>false,'error'=>'HTTPS required']);
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-if(!in_array($host,['evtec.co.za','domain-atlas.co.za'],true))respond29(400,['ok'=>false,'error'=>'Unknown host']);
+require __DIR__.'/lib/hosts.php';if(!chainlabs_is_host($host))respond29(400,['ok'=>false,'error'=>'Unknown host']);
 $doc=realpath($_SERVER['DOCUMENT_ROOT']??'');$private=$doc?realpath(dirname($doc).'/chainblock-labs-private'):false;
 if(!$private||str_starts_with($private.'/',$doc.'/'))respond29(503,['ok'=>false,'error'=>'Private storage unavailable']);
 $path=$private.'/coin26.sqlite';
