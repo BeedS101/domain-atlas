@@ -130,6 +130,20 @@ domain has signed its genesis. A partner needs the authority's key pinned (`chai
 `peer_public_pem_b64` of its federation configuration for the two-domain pair) and the authority needs the partner's; `open`
 names a partner with no pinned key. Nothing is minted into any wallet: a key holds units only after a `grant` from the treasury.
 
+### Selling a coin for Gold (purchase policy)
+
+The Coin Creation Studio can give a coin an optional Gold purchase policy. It is the `purchase` object of the genesis that `lib/ledger.php`
+already validates (`priceClass`, `issuerKey`, `unitsPerPrice`, `minPrice`, `perKeyUnits`, `perDayUnits`); the form asks for it in coins and Au and
+`lib/policy.php` turns it into ledger units. Coins per 1 Au sets the price (1 coin costs 1 / rate Au), the smallest purchase is a whole number of
+Au, and the limits per receiving key and per 24 hours are in coins. Everything the ledger would refuse is refused, and so are a smallest purchase
+the limits cannot cover and a per-key limit above the daily one.
+
+* `coin26.php?action=preview` (operator token) checks the policy and returns it in full, as lines to read, with warnings and a fingerprint. It stores nothing.
+* `create` with a policy needs `purchaseDigest`, the fingerprint of the policy that was shown for the same name, symbol, decimals and supply, otherwise 409 `policy-not-confirmed`. The form shows the review first and creates on a second press; changing any field withdraws the review.
+* The registry keeps the policy in the `purchase` column. `spend34.php?action=open` uses only that policy, re-validates it, and writes it into the signed genesis; a policy sent with the request that differs from the registered one is refused (`policy-mismatch`). A coin registered without a policy opens with the genesis it always had, so existing registered coins do not change unless the operator registers a new one.
+* `chainlabs-gold-issuers.json` in the private folder (optional) lists the issuers whose keys and classes may be chosen: `{"issuers": [{"name": "...", "domain": "...", "key": "<raw public key>", "classes": ["atlas.element.gold"]}]}`. Without it only `atlas.element.gold` is accepted, with any well-formed key, and the review says the key is not checked. A list that cannot be read, or an empty one, authorises nobody. The list is checked again when the coin is opened.
+* Having a policy does not turn real purchases on. Buying needs a `gold-adapter.php` in the private folder and an issuer with its hold endpoint enabled (see `docs/gold-reservation.md`); neither exists on the live domains.
+
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
 whole units, at most 10^12 (13 digits, so the largest legal supply is written with 13 digits and anything above it is refused). The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.
@@ -139,7 +153,7 @@ whole units, at most 10^12 (13 digits, so the largest legal supply is written wi
 The PHP files were imported from the deployed files. `SOURCE.sha256` records the SHA-256 of each file as it stands (PHP
 hashed with LF line endings, since the deployed copies use CRLF). Eleven of them differ from the received copies in one
 line each, where a hard-coded domain list was replaced by a call to `lib/hosts.php`; nothing else changed. The HTML pages
-differ from the received copies only in removed decorative text and emoji. `coin26.php` and `coin26.html` were then extended for the coin creation choices and also differ from the received copies. Change a PHP file deliberately, then refresh
+differ from the received copies only in removed decorative text and emoji. `coin26.php`, `coin26.html` and `spend34.php` were then extended for the coin creation choices and the purchase policy and also differ from the received copies. Change a PHP file deliberately, then refresh
 its line in `SOURCE.sha256`.
 
 ## Checks
@@ -156,9 +170,11 @@ its line in `SOURCE.sha256`.
     node test/chain-labs-purchase-http.js
     node test/chain-labs-wallet.js
     node test/chain-labs-scan-http.js
+    node test/chain-labs-policy-http.js
 
 The wallet screen and the scanner page are checked in a real browser (needs Chromium and a display; not part of the workflow):
 
     xvfb-run -a node test/manual-chain-labs-tab.js
     xvfb-run -a node test/manual-chain-labs-scanner.js
     xvfb-run -a node test/manual-chain-labs-studio.js
+    xvfb-run -a node test/manual-chain-labs-studio-policy.js

@@ -9,7 +9,7 @@ function done26(int $s,array $v): never{http_response_code($s);echo json_encode(
 if(!extension_loaded('pdo_sqlite'))done26(503,['ok'=>false,'error'=>'PDO SQLite required']);
 if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off')done26(403,['ok'=>false,'error'=>'HTTPS required']);
 $host=strtolower($_SERVER['HTTP_HOST']??'');
-require __DIR__.'/lib/hosts.php';if(!chainlabs_is_host($host))done26(400,['ok'=>false,'error'=>'Unrecognized host']);
+require __DIR__.'/lib/hosts.php';require __DIR__.'/lib/policy.php';if(!chainlabs_is_host($host))done26(400,['ok'=>false,'error'=>'Unrecognized host']);
 $origin='https://'.$host;
 $root=realpath($_SERVER['DOCUMENT_ROOT']??'');$private=$root?realpath(dirname($root).'/chainblock-labs-private'):false;
 if(!$private||str_starts_with($private.'/',$root.'/'))done26(503,['ok'=>false,'error'=>'Missing private storage']);
@@ -22,7 +22,7 @@ try{
  $db->exec('PRAGMA busy_timeout=5000');
  $db->exec('CREATE TABLE IF NOT EXISTS coins(id TEXT PRIMARY KEY,domain TEXT NOT NULL,name TEXT NOT NULL,symbol TEXT NOT NULL,decimals INTEGER NOT NULL,max_units INTEGER NOT NULL,initial_units INTEGER NOT NULL,treasury_units INTEGER NOT NULL,description TEXT NOT NULL,created_at TEXT NOT NULL,genesis_hash TEXT NOT NULL UNIQUE,UNIQUE(domain,symbol),CHECK(initial_units<=max_units),CHECK(treasury_units=initial_units))');
  $have=array_column($db->query('PRAGMA table_info(coins)')->fetchAll(PDO::FETCH_ASSOC),'name');
- foreach(['mode'=>"TEXT NOT NULL DEFAULT 'single'",'visibility'=>"TEXT NOT NULL DEFAULT 'public'",'roster'=>"TEXT NOT NULL DEFAULT '[]'",'threshold'=>'INTEGER NOT NULL DEFAULT 1','state'=>"TEXT NOT NULL DEFAULT 'registered'"] as $col=>$def)if(!in_array($col,$have,true))$db->exec('ALTER TABLE coins ADD COLUMN '.$col.' '.$def);
+ foreach(['mode'=>"TEXT NOT NULL DEFAULT 'single'",'visibility'=>"TEXT NOT NULL DEFAULT 'public'",'roster'=>"TEXT NOT NULL DEFAULT '[]'",'threshold'=>'INTEGER NOT NULL DEFAULT 1','state'=>"TEXT NOT NULL DEFAULT 'registered'",'purchase'=>'TEXT'] as $col=>$def)if(!in_array($col,$have,true))$db->exec('ALTER TABLE coins ADD COLUMN '.$col.' '.$def);
 }catch(Throwable $e){done26(503,['ok'=>false,'error'=>'Cannot open isolated coin registry']);}
 // Partner domains a multi coin may name. Opening the ledger needs a key pinned for each.
 function partners26(string $host):array{return chainlabs_partners($host);}
@@ -41,7 +41,7 @@ function units26(mixed $raw,int $d):int|false{
  return $u>=0&&$u<=1000000000000?$u:false;
 }
 $action=$_GET['action']??'';
-if($_SERVER['REQUEST_METHOD']==='GET'&&$action==='options')done26(200,['ok'=>true,'node'=>$host,'partners'=>partners26($host),'modes'=>['single','multi'],'visibilities'=>['public','private']]);
+if($_SERVER['REQUEST_METHOD']==='GET'&&$action==='options'){$allow=policy_allowlist($private);done26(200,['ok'=>true,'node'=>$host,'partners'=>partners26($host),'modes'=>['single','multi'],'visibilities'=>['public','private'],'purchase'=>['defaultClass'=>POLICY_DEFAULT_CLASS,'issuers'=>$allow,'listed'=>$allow!==null]]);}
 // Where each coin stands on the ledger, which spend34.php opens from this registry: none, pending (the partner domains have not all signed), active or frozen.
 function ledger26(string $private):array{
  $file=$private.'/chain34.sqlite';
@@ -53,15 +53,15 @@ function ledger26(string $private):array{
 }
 if($_SERVER['REQUEST_METHOD']==='GET'&&$action==='list'){
  $ledger=ledger26($private);
- $rows=$db->query('SELECT id,domain,name,symbol,decimals,max_units,initial_units,treasury_units,description,created_at,genesis_hash,mode,visibility,roster,threshold,state FROM coins ORDER BY rowid DESC LIMIT 40')->fetchAll(PDO::FETCH_ASSOC);
+ $rows=$db->query('SELECT id,domain,name,symbol,decimals,max_units,initial_units,treasury_units,description,created_at,genesis_hash,mode,visibility,roster,threshold,state,purchase FROM coins ORDER BY rowid DESC LIMIT 40')->fetchAll(PDO::FETCH_ASSOC);
  $coins=[];
- foreach($rows as $r)$coins[]=['id'=>$r['id'],'domain'=>$r['domain'],'name'=>$r['name'],'symbol'=>$r['symbol'],'decimals'=>(int)$r['decimals'],'maxSupply'=>display26((int)$r['max_units'],(int)$r['decimals']),'initialSupply'=>display26((int)$r['initial_units'],(int)$r['decimals']),'treasurySupply'=>display26((int)$r['treasury_units'],(int)$r['decimals']),'description'=>$r['description'],'createdAt'=>$r['created_at'],'genesisHash'=>$r['genesis_hash'],'mode'=>$r['mode'],'visibility'=>$r['visibility'],'roster'=>json_decode($r['roster'],true)?:[],'threshold'=>(int)$r['threshold'],'state'=>$r['state'],'ledger'=>$ledger[$r['id']]??$ledger['*']??'none'];
+ foreach($rows as $r)$coins[]=['id'=>$r['id'],'domain'=>$r['domain'],'name'=>$r['name'],'symbol'=>$r['symbol'],'decimals'=>(int)$r['decimals'],'maxSupply'=>display26((int)$r['max_units'],(int)$r['decimals']),'initialSupply'=>display26((int)$r['initial_units'],(int)$r['decimals']),'treasurySupply'=>display26((int)$r['treasury_units'],(int)$r['decimals']),'description'=>$r['description'],'createdAt'=>$r['created_at'],'genesisHash'=>$r['genesis_hash'],'mode'=>$r['mode'],'visibility'=>$r['visibility'],'roster'=>json_decode($r['roster'],true)?:[],'threshold'=>(int)$r['threshold'],'state'=>$r['state'],'purchase'=>$r['purchase']!==null?json_decode((string)$r['purchase'],true):null,'ledger'=>$ledger[$r['id']]??$ledger['*']??'none'];
  done26(200,['ok'=>true,'node'=>$host,'coins'=>$coins,'testOnly'=>true,'notice'=>'Local unsigned demo registry; not minted into wallet balances']);
 }
-if($_SERVER['REQUEST_METHOD']!=='POST'||$action!=='create')done26(404,['ok'=>false,'error'=>'Unknown action']);
+if($_SERVER['REQUEST_METHOD']!=='POST'||!in_array($action,['create','preview'],true))done26(404,['ok'=>false,'error'=>'Unknown action']);
 if(($_SERVER['HTTP_ORIGIN']??'')!==$origin)done26(403,['ok'=>false,'error'=>'Origin mismatch']);
-if((int)($_SERVER['CONTENT_LENGTH']??0)>4096)done26(413,['ok'=>false,'error'=>'Request too large']);
-$m=json_decode(file_get_contents('php://input',false,null,0,4097),true);
+if((int)($_SERVER['CONTENT_LENGTH']??0)>8192)done26(413,['ok'=>false,'error'=>'Request too large']);
+$m=json_decode(file_get_contents('php://input',false,null,0,8193),true);
 if(!is_array($m))done26(400,['ok'=>false,'error'=>'Invalid JSON']);
 $t=$m['adminToken']??null;
 if(!is_string($t)||!preg_match('/^[0-9a-f]{64}$/D',$t)||!hash_equals($admin,$t))done26(403,['ok'=>false,'error'=>'Incorrect operator token']);
@@ -80,12 +80,21 @@ if($mode==='multi'){
  $roster=array_merge([$host],$named);$threshold=$m['threshold']??count($roster);
  if(!is_int($threshold)||$threshold<2||$threshold>count($roster))done26(400,['ok'=>false,'error'=>'Threshold must be between 2 and the number of domains']);
 }elseif(isset($m['partners'])&&$m['partners']!==[])done26(400,['ok'=>false,'error'=>'A single coin has no partner domains']);
+// An optional Gold purchase policy: checked in full here, shown for confirmation, and kept with the coin. It goes into the signed genesis when the coin is opened and opening uses nothing else.
+$policy=null;
+if(array_key_exists('purchase',$m)&&$m['purchase']!==null){
+ try{$review=policy_normalize($m['purchase'],$d,$max,$initial,$symbol,policy_allowlist($private));}catch(LedgerError $e){done26(400,['ok'=>false,'code'=>$e->reason,'error'=>'Purchase policy: '.$e->getMessage()]);}
+ $policy=$review['policy'];
+ if($action==='preview')done26(200,['ok'=>true,'purchase'=>$policy,'lines'=>$review['lines'],'warnings'=>$review['warnings'],'digest'=>$review['digest']]);
+ if(!is_string($m['purchaseDigest']??null)||!hash_equals($review['digest'],$m['purchaseDigest']))done26(409,['ok'=>false,'code'=>'policy-not-confirmed','error'=>'The purchase policy was not confirmed as shown. Review it again.']);
+}elseif($action==='preview')done26(400,['ok'=>false,'error'=>'There is no purchase policy to review']);
 $state=$mode==='multi'?'pending':'registered';
 $id=bin2hex(random_bytes(16));$created=gmdate('Y-m-d\TH:i:s\Z');
 $genesis=['type'=>'chainblock-labs26-demo-coin','version'=>2,'id'=>$id,'domain'=>$host,'name'=>$name,'symbol'=>$symbol,'decimals'=>$d,'maxUnits'=>$max,'initialUnits'=>$initial,'description'=>$description,'createdAt'=>$created,'authority'=>$host,'mode'=>$mode,'visibility'=>$visibility,'roster'=>$roster,'threshold'=>$threshold];
+if($policy!==null)$genesis['purchase']=$policy;
 $hash=hash('sha256',json_encode($genesis,JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR));
 try{
- $q=$db->prepare('INSERT INTO coins (id,domain,name,symbol,decimals,max_units,initial_units,treasury_units,description,created_at,genesis_hash,mode,visibility,roster,threshold,state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
- $q->execute([$id,$host,$name,$symbol,$d,$max,$initial,$initial,$description,$created,$hash,$mode,$visibility,json_encode($roster),$threshold,$state]);
+ $q=$db->prepare('INSERT INTO coins (id,domain,name,symbol,decimals,max_units,initial_units,treasury_units,description,created_at,genesis_hash,mode,visibility,roster,threshold,state,purchase) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+ $q->execute([$id,$host,$name,$symbol,$d,$max,$initial,$initial,$description,$created,$hash,$mode,$visibility,json_encode($roster),$threshold,$state,$policy===null?null:ledger_canonical($policy)]);
 }catch(PDOException $e){if(str_contains($e->getMessage(),'UNIQUE'))done26(409,['ok'=>false,'error'=>'Symbol already registered on this domain']);done26(503,['ok'=>false,'error'=>'Could not save coin']);}
-done26(201,['ok'=>true,'id'=>$id,'symbol'=>$symbol,'genesisHash'=>$hash,'maxSupply'=>display26($max,$d),'initialSupply'=>display26($initial,$d),'mode'=>$mode,'visibility'=>$visibility,'roster'=>$roster,'threshold'=>$threshold,'state'=>$state,'genesis'=>$genesis,'note'=>'Created only in local demo registry. Treasury amount is recorded, not spendable by any wallet.']);
+done26(201,['ok'=>true,'id'=>$id,'symbol'=>$symbol,'genesisHash'=>$hash,'maxSupply'=>display26($max,$d),'initialSupply'=>display26($initial,$d),'mode'=>$mode,'visibility'=>$visibility,'roster'=>$roster,'threshold'=>$threshold,'state'=>$state,'purchase'=>$policy,'genesis'=>$genesis,'note'=>'Created only in local demo registry. Treasury amount is recorded, not spendable by any wallet.']);

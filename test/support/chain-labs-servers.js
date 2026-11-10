@@ -100,7 +100,16 @@ function call(n, file, method, query, body) {
 const get = (n, q) => call(n, 'spend34', 'GET', q);
 const post = (n, q, body) => call(n, 'spend34', 'POST', q, body);
 const scan = (n, q) => call(n, 'scan35', 'GET', q);
-const op = (n, action, body) => post(n, 'action=' + action, { adminToken: n.token, ...body });
+// A coin's purchase policy lives in its registry row (the Coin Creation Studio puts it there) and opening uses only that. Tests that give a
+// ready-made ledger policy at open time register it the way the Studio would have, then open without one.
+const { execFileSync: execPolicy } = require('child_process');
+function registerPolicy(n, coinId, policy) {
+  execPolicy('php', ['-r', '$d=new PDO("sqlite:"."' + path.join(n.priv, 'coin26.sqlite') + '");$q=$d->prepare("UPDATE coins SET purchase=? WHERE id=?");$q->execute([$argv[1],$argv[2]]);', JSON.stringify(policy), coinId]);
+}
+const op = async (n, action, body) => {
+  if (action === 'open' && body && body.purchase !== undefined && body.purchase !== null) { registerPolicy(n, body.coinId, body.purchase); const { purchase, ...rest } = body; body = rest; }
+  return post(n, 'action=' + action, { adminToken: n.token, ...body });
+};
 const createCoin = (n, symbol, extra = {}) => call(n, 'coin26', 'POST', 'action=create', { name: 'Coin ' + symbol, symbol, decimals: 2, maxSupply: '100000', initialSupply: '1000', description: '', adminToken: n.token, ...extra });
 const NOW = () => Math.floor(Date.now() / 1000);
 const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');

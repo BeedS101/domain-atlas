@@ -30,6 +30,7 @@ $host = strtolower($_SERVER['HTTP_HOST'] ?? '');
 require __DIR__.'/lib/hosts.php';
 if (!chainlabs_is_host($host)) reply34(400, ['ok' => false, 'error' => 'Unrecognized host']);
 require __DIR__ . '/lib/purchase.php';
+require __DIR__ . '/lib/policy.php';
 $root = realpath($_SERVER['DOCUMENT_ROOT'] ?? '');
 $private = $root ? realpath(dirname($root) . '/chainblock-labs-private') : false;
 if (!$private || str_starts_with($private . '/', $root . '/')) reply34(503, ['ok' => false, 'error' => 'Private storage unavailable']);
@@ -214,6 +215,16 @@ try {
         $row = $q->fetch(PDO::FETCH_ASSOC);
         if (!$row) reply34(404, ['ok' => false, 'code' => 'unknown-coin', 'error' => 'Coin not registered on this domain']);
         $multi = ($row['mode'] ?? 'single') === 'multi';
+        // The purchase policy is the one the Studio checked and the operator confirmed, kept in the registry. A policy sent with the
+        // request must be that same policy; none can be added or changed here.
+        try {
+            $policy = policy_from_row($row, policy_allowlist($private));
+        } catch (LedgerError $e) {
+            reply34(400, ['ok' => false, 'code' => $e->reason, 'error' => $e->getMessage()]);
+        }
+        if (array_key_exists('purchase', $m) && $m['purchase'] !== null && ($policy === null || ledger_canonical($m['purchase']) !== ledger_canonical($policy))) {
+            reply34(400, ['ok' => false, 'code' => 'policy-mismatch', 'error' => 'The purchase policy of a coin is the one registered with it in the Coin Creation Studio']);
+        }
         $known = $db->prepare('SELECT state FROM ledger_coins WHERE coin_id=?');
         $known->execute([$coinId]);
         $state = $known->fetchColumn();
@@ -236,7 +247,7 @@ try {
                 $members = array_map(fn($d) => ['domain' => $d, 'key' => $d === $host ? $domainPublic : $peerConfig['pinned'][$d]], $roster);
                 $genesis = ledger_genesis(['coinId' => $coinId, 'symbol' => $row['symbol'], 'name' => $row['name'], 'decimals' => (int) $row['decimals'], 'maxUnits' => (string) $row['max_units'],
                     'initialUnits' => (string) $row['initial_units'], 'treasuryKey' => $treasury['key'], 'mode' => 'multi', 'visibility' => $isPrivate ? 'private' : 'public',
-                    'roster' => $members, 'threshold' => (int) $row['threshold'], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $m['purchase'] ?? null]);
+                    'roster' => $members, 'threshold' => (int) $row['threshold'], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $policy]);
             }
             peer_open_multi($db, $node, $genesis, $treasury['key'], $secret, $send, $now);
             reply34(201, ['ok' => true, 'coin' => ledger_public_coin($db, $coinId), 'treasuryRef' => $genesis['treasuryRef']]);
@@ -247,7 +258,7 @@ try {
         $treasury = is_file($private . '/treasury-' . $coinId . '.json') ? ledger_treasury_key_load($private, $coinId) : ledger_treasury_key_create($private, $coinId);
         $genesis = ledger_genesis(['coinId' => $coinId, 'symbol' => $row['symbol'], 'name' => $row['name'], 'decimals' => (int) $row['decimals'], 'maxUnits' => (string) $row['max_units'],
             'initialUnits' => (string) $row['initial_units'], 'treasuryKey' => $treasury['key'], 'mode' => 'single', 'visibility' => $isPrivate ? 'private' : 'public',
-            'roster' => [['domain' => $host, 'key' => $domainPublic]], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $m['purchase'] ?? null]);
+            'roster' => [['domain' => $host, 'key' => $domainPublic]], 'createdAt' => (string) $row['created_at'], 'refSecret' => $secret, 'faucet' => $m['faucet'] ?? null, 'purchase' => $policy]);
         ledger_register($db, $genesis, $treasury['key'], $secret);
         ledger_add_genesis_signature($db, $coinId, $host, ledger_genesis_sign($genesis, $domainPrivate));
         ledger_activate($db, $coinId, $domainPrivate);
@@ -273,7 +284,7 @@ try {
         if ($action === 'purchase-cancel') {
             $requestId = $m['requestId'] ?? null;
             if (!is_string($requestId) || !preg_match('/^[a-f0-9]{32,64}$/D', $requestId)) reply34(400, ['ok' => false, 'error' => 'Invalid requestId']);
-            purchase_cancel($db, $gold, $coinId, $requestId);
+            purchase_cancel($db, $gold, $coinId, $requestId, $node);
             reply34(200, ['ok' => true]);
         }
         reply34(200, ['ok' => true, 'results' => purchase_recover($db, $node, $gold, ledger_treasury_key_load($private, $coinId), $coinId, $coin['mode'] === 'multi' ? $send : null, $now)]);

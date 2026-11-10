@@ -12,7 +12,11 @@ declare(strict_types=1);
 //            wallet signed it, signature and key re-labelled for the issuer's envelope, not re-signed).
 //   begin    tells the issuer that delivery is about to be tried; from there the hold no longer lapses.
 //   finish   asks the issuer to spend the held credential: the price is burned and the rest goes back to the owner.
-//   release  asks the issuer to free the hold, saying the ledger has ruled the delivery out.
+//   release  asks the issuer to free the hold. After delivery was begun the issuer frees it only against the closure this ledger signs
+//            (lib/purchase.php purchase_closure) and that the issuer's own configuration trusts; the token alone cannot.
+//   holding  every domain that approves a sale asks the issuer, not the authority, for its signed status of the hold (public, read-only,
+//            answered only to someone who knows the request id) and approves only if it says this credential is held for exactly this
+//            sale: same coin, price, receiving key, owner and signed intent, and delivering or already spent.
 // Key encoding: a wallet key and an issuer owner key are the same thing, the raw uncompressed P-256 point (65 bytes) in base64url, and
 // both sign the canonical text of a payload as raw r||s, so nothing is converted. The ledger's intent {payload, signature} becomes
 // the issuer's {payload, proof: {signerRole: 'raw-ecdsa', publicKey: <owner>, signature}}.
@@ -173,9 +177,37 @@ function gold_issuer_adapter(array $config): array
             $remainder = $body['result']['balance']['credential'] ?? null;
             return ['balance' => is_array($remainder) ? gold_issuer_pack($remainder) : null];
         },
-        'release' => static function (string $requestId, string $credentialId = '') use ($hold, $holdId): void {
-            [$status, $body] = $hold(['action' => 'cancel', 'requestId' => $requestId, 'credentialId' => $credentialId, 'holdId' => $holdId($credentialId, $requestId), 'deliveryRuledOut' => true]);
+        'release' => static function (string $requestId, string $credentialId = '', ?array $closure = null) use ($hold, $holdId): void {
+            [$status, $body] = $hold(['action' => 'cancel', 'requestId' => $requestId, 'credentialId' => $credentialId, 'holdId' => $holdId($credentialId, $requestId), 'closure' => $closure]);
             if ($status !== 200) ledger_fail('busy', 'the issuer could not free the hold yet');
+        },
+        'holding' => static function (string $requestId, array $held, array $intent, int $now) use ($http, $base, $timeout, $domain, $issuerKey): ?string {
+            $credential = gold_issuer_unpack($held);
+            if ($credential === null) return 'the credential is malformed';
+            $owner = $credential['owner']['publicKey'] ?? null;
+            $payload = $intent['payload'] ?? null;
+            if (!is_string($owner) || !is_array($payload)) return 'the sale has no owner or intent';
+            $query = http_build_query(['credentialId' => $credential['id'], 'requestId' => $requestId]);
+            [$status, $body] = $http('GET', $base . '/atlas/ledger/gold-hold-status?' . $query, null, null, $timeout);
+            if ($status === 404) return 'the issuer holds no Gold for this sale';
+            if ($status !== 200 || !is_array($body['attestation'] ?? null)) ledger_fail('busy', 'the issuer\'s hold status cannot be read yet');
+            $a = $body['attestation'];
+            $p = $a['payload'] ?? null;
+            if (!is_array($p) || !is_string($a['signature'] ?? null)) return 'the issuer\'s hold status is malformed';
+            try {
+                $signed = ledger_owner_verify(gold_issuer_canonical($p), $issuerKey, $a['signature']);
+            } catch (Throwable $e) {
+                $signed = false;
+            }
+            if (!$signed) return 'the hold status is not signed by the issuer';
+            $digest = hash('sha256', gold_issuer_canonical(['payload' => $payload, 'proof' => ['signerRole' => 'raw-ecdsa', 'publicKey' => $owner, 'signature' => $intent['signature'] ?? null]]));
+            $expected = ['type' => 'atlas.gold.hold.status', 'v' => 1, 'issuer' => $domain, 'credentialId' => $credential['id'], 'requestId' => $requestId, 'coinId' => $payload['coinId'] ?? null,
+                'price' => $payload['price'] ?? null, 'recipient' => $payload['recipient'] ?? null, 'owner' => $owner, 'intentDigest' => $digest];
+            foreach ($expected as $field => $value) if (($p[$field] ?? null) !== $value) return 'the hold is not for this sale (' . $field . ')';
+            $at = is_string($p['issuedAt'] ?? null) ? strtotime($p['issuedAt']) : false;
+            if ($at === false || abs($now - $at) > 300) return 'the hold status is not recent';
+            if (!in_array($p['state'] ?? null, ['delivering', 'finalized'], true)) return 'the issuer does not hold this credential for delivery (' . (is_string($p['state'] ?? null) ? $p['state'] : 'unknown') . ')';
+            return null;
         },
     ];
 }

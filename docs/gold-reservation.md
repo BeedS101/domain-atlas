@@ -29,7 +29,7 @@ States: `held` -> `delivering` -> `finalized`, or `held` / `delivering` -> `canc
 | State | Meaning | Ends by |
 |---|---|---|
 | held | reserved; no delivery attempted | `begin`, `cancel`, or lapse after 900 s (safe: delivery starts only after `begin`) |
-| delivering | the ledger is about to be asked, or has been | `finalize`, or `cancel` with `deliveryRuledOut: true`. **Never by time.** |
+| delivering | the ledger is about to be asked, or has been | `finalize`, or `cancel` with a closure signed by a trusted ledger domain (section 3a). **Never by time.** |
 | finalized | the credential was spent in one journaled transaction | terminal |
 | cancelled | Gold free again | terminal |
 
@@ -72,9 +72,33 @@ has ruled delivery out. Changes made for this:
 * `begin` hook: from there the hold does not lapse. A refusal ends the sale.
 * On a final failure the pending treasury proposal is rejected first, and the sale is abandoned only if no entry exists. Otherwise it
   continues as delivered.
-* `release` runs before the sale is marked abandoned; if it fails the sale stays journaled and is retried.
+* `release` runs before the sale is marked abandoned; if it fails the sale stays journaled and is retried. It carries the ledger's signed closure (3a).
+* `holding` hook: every domain that approves a sale asks the issuer whether the credential is held for it (3b).
 * A request already journaled is answered from its journal even if its credential is now spent or its intent has expired.
 * Optional `pack` hook: the credential is kept in the ledger as `{id, gold: <canonical text>}` (see 4).
+
+### 3a. Cancelling a hold that was begun
+
+The word of whoever holds the issuer's token is not evidence that a delivery cannot happen. A hold that is `held` (delivery never begun)
+is still cancelled by the token alone, since nothing can have been delivered. A `delivering` hold is cancelled only with a **closure**:
+`{payload: {type: 'atlas.ledger.purchase.closure', v: 1, domain, coinId, requestId, credentialId, price, headIndex, headHash, closedAt}, signature}`,
+signed with the ledger domain's key (`purchase_closure` in `chain-labs/lib/purchase.php`). The ledger makes one only after it looked: no entry
+delivers the request and the sale's pending treasury transfer was rejected, so it cannot be executed later; a delivered sale gets none
+(`cannot-cancel`). The issuer accepts it only from a domain listed in `ledgerAuthorities` of `lib/atlas-gold-hold-config.json`
+(`{"a.example": "<PEM public key>"}`), only for exactly this coin, request, credential and price, and only if it is at most 15 minutes old.
+It keeps the closure in the hold record. With no `ledgerAuthorities`, a delivering hold cannot be cancelled by anyone until the file is changed.
+
+### 3b. Partner verification
+
+`GET /atlas/ledger/gold-hold-status?credentialId=...&requestId=...` (public, read-only, on only while holds are on) returns the hold's state
+signed with the issuer's key: `atlas.gold.hold.status` with the credential, request, coin, price, receiving key, owner, a digest of the owner's
+signed intent and the state (`held`, `delivering`, `finalized`, `cancelled`, `lapsed`). Nothing is returned for a request id that holds
+nothing, and the id cannot be guessed. A domain that approves a sale (the `holding` hook of `chain-labs/lib/gold-issuer.php`, called from
+`purchase_check_entry`) fetches this itself and approves only if the signature is the issuer's named in the coin's policy, every field matches the
+entry's sale (same coin, price, receiving key, owner and the digest of the intent in the entry), the status is under five minutes old, and the state is
+`delivering` or `finalized`. An issuer that cannot be reached is a transient refusal (the sale waits); a hold that is missing, only `held`, cancelled,
+or for another sale is a refusal. So an authority that never held the Gold, held it without beginning delivery, or held it for a different
+sale cannot collect the partner's approval, and a hold the issuer has cancelled cannot gain approvals afterwards.
 
 ## 4. Integration notes (intent format and keys)
 
@@ -89,25 +113,28 @@ has ruled delivery out. Changes made for this:
 
 ## 5. Enabling (separately, not part of this change)
 
-Issuer: `lib/atlas-gold-hold-config.json` = `{"enabled": true, "tokenSha256": "<sha256 of the operator token>"}`. Apache must pass the
+Issuer: `lib/atlas-gold-hold-config.json` = `{"enabled": true, "tokenSha256": "<sha256 of the operator token>", "ledgerAuthorities": {"<ledger domain>": "<its public key PEM>"}}`. Apache must pass the
 `Authorization` header to PHP (`SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1` or a rewrite rule). Chain labs: a
 `gold-adapter.php` in the private folder returning `gold_issuer_adapter([...])`; the authority adapter holds the token, partners'
 adapters do not. Neither is done on evtec.co.za or domain-atlas.co.za.
 
 ## 6. Remaining limitations
 
-1. **Partners cannot see holds.** A partner domain of a multi authority coin verifies the credential offline and checks the
-   issuer's revocation list. It cannot tell that the authority actually holds the Gold. A compromised authority could deliver
-   without a hold; the Gold is then at risk of being spent elsewhere. Mitigation would be a public read-only hold status that
-   partners check before approving; not built.
-2. **The operator token can cancel a delivering hold** by asserting `deliveryRuledOut`. That is the ledger operator's judgement: if
-   it is wrong, coins are delivered and the Gold is free. The token holder is the ledger authority, who controls the treasury key
-   anyway.
+Real purchases stay off on every live domain: no `gold-adapter.php`, no hold config. What the two blockers look like now:
+
+1. **Partners see holds.** Closed by 3b, for multi authority coins. A single authority coin has no other domain to ask; its buyer trusts that
+   authority, as with any single authority coin. A partner whose adapter has no `holding` hook (the test stand-in) does not ask.
+2. **A compromised authority (its signing key and its token) can still lie.** It can sign a closure for a sale it did deliver, or collect
+   approvals while the hold is `delivering` and cancel the hold with a forged closure before committing the entry. The closure removes the
+   token alone as a way to free Gold that is being delivered, ties each cancel to the sale and keeps the evidence; it does not make the ledger's
+   own word independent. Closing this needs the partners to witness the closure (they refuse to approve the request ever again and sign that
+   they hold no entry for it) or to check the hold when they receive the committed entry. Not built.
 3. **The hold file is a single file.** Losing it (restore from an old backup, deletion) removes holds. Credentials with a
    `delivering` hold would then be spendable while a sale may be delivered. A missing file is read as no holds because that is the
    state of a fresh issuer; the issuer cannot tell the two apart. Backups must include `lib/holds/`.
 4. **Node issuer.** `issuer-server` has no hold endpoint and does not enforce holds. It cannot back a purchase.
 5. **A lapse needs a new intent.** After a crash between `lock` and journaling, the hold lapses after 15 minutes and the same signed
    intent cannot be reused.
-6. **No owner-signed cancel.** Only the ledger operator ends a hold early; the owner waits for the lapse (held) or the operator.
-7. **Test scale.** File-based, sized for the demo (500 active holds). Not load tested.
+6. **No owner-signed cancel.** Only the ledger (with a closure) ends a begun hold early; the owner waits for the lapse (held) or the ledger.
+7. **Status is polled, not pushed, and not rate limited here.** Limits per address are left to the web server in front of it.
+8. **Test scale.** File-based, sized for the demo (500 active holds). Not load tested.

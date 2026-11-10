@@ -20,6 +20,8 @@ const { register } = require('./lib/owner-auth');
 const { A, B, nodes, wallet: rawWallet, start, stop, post, get, op, createCoin, NOW, iso, hex, units, sleep } = S;
 
 const GOLD = 'atlas.element.gold';
+const canon = S.canon;
+const holdIdOf = (credId, rid) => crypto.createHash('sha256').update('atlas-gold-hold|' + credId + '|' + rid).digest('hex').slice(0, 32);
 const TOKEN = crypto.randomBytes(24).toString('hex');
 const TOKEN_SHA = crypto.createHash('sha256').update(TOKEN).digest('hex');
 const wallet = () => { const w = rawWallet(); register({ publicKey: w.key, privateKey: w.privateKey }); return w; };
@@ -27,7 +29,7 @@ let failures = 0, total = 0;
 const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((ok ? 'PASS ' : 'FAIL ') + text + (!ok && detail !== undefined ? ' :: ' + JSON.stringify(detail).slice(0, 500) : '')); };
 
 const adapterFile = (n, issuer, o) => "<?php\nrequire_once '" + path.join(n.root, 'lib', 'gold-issuer.php') + "';\n$cfg = json_decode('" + JSON.stringify({
-  issuerUrl: issuer.base, issuerDomain: issuer.domain, issuerKey: o.issuerKey, token: o.token || undefined, timeout: 5 }) + "', true);\n$o = __DIR__ . '/issuer-key-override.txt';\nif (is_file($o)) $cfg['issuerKey'] = trim((string) file_get_contents($o));\n$g = gold_issuer_adapter($cfg);\n"
+  issuerUrl: issuer.base, issuerDomain: issuer.domain, issuerKey: o.issuerKey, token: o.token || undefined, timeout: 5 }) + "', true);\n$o = __DIR__ . '/issuer-key-override.txt';\nif (is_file($o)) $cfg['issuerKey'] = trim((string) file_get_contents($o));\n$u = __DIR__ . '/issuer-url-override.txt';\nif (is_file($u)) $cfg['issuerUrl'] = trim((string) file_get_contents($u));\n$g = gold_issuer_adapter($cfg);\n$m = is_file(__DIR__ . '/rogue-mode.txt') ? trim((string) file_get_contents(__DIR__ . '/rogue-mode.txt')) : '';\nif ($m === 'nohold') { $g['lock'] = fn() => null; $g['begin'] = fn() => null; $g['release'] = fn() => null; $g['finish'] = fn($r, $c, $p) => ['balance' => null]; }\nif ($m === 'nobegin') { $g['begin'] = fn() => null; }\nif ($m === 'nolockbegin') { $g['lock'] = fn() => null; $g['begin'] = fn() => null; $g['release'] = fn() => null; }\n"
   + "$g['crash'] = function (string $p) { $f = __DIR__ . '/crash-at.txt'; if (is_file($f) && trim((string) file_get_contents($f)) === $p) { @unlink($f); exit(86); } };\nreturn $g;\n";
 const crashAt = (n, point) => fs.writeFileSync(path.join(n.priv, 'crash-at.txt'), point);
 const crashed = (r) => r.status === 0 || (r.status === 200 && r.json === null);
@@ -36,7 +38,7 @@ const crashed = (r) => r.status === 0 || (r.status === 200 && r.json === null);
   const issuer = await startPhp(8961 + Math.floor(Math.random() * 100), { workers: 0 });
   const IA = api(issuer);
   const issuerKey = JSON.parse(fs.readFileSync(issuer.keyFile, 'utf8')).keys[0].publicKey;
-  fs.writeFileSync(path.join(issuer.bundle, 'lib', 'atlas-gold-hold-config.json'), JSON.stringify({ enabled: true, tokenSha256: TOKEN_SHA }));
+  fs.writeFileSync(path.join(issuer.bundle, 'lib', 'atlas-gold-hold-config.json'), JSON.stringify({ enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: { [A]: nodes[A].pair.publicKey.export({ type: 'spki', format: 'pem' }) } }));
   const holdsPath = path.join(issuer.bundle, 'lib', 'holds', 'holds.json');
   const holds = () => { try { return JSON.parse(fs.readFileSync(holdsPath, 'utf8')).holds; } catch (e) { return {}; } };
   const holdOf = (cred) => holds()[cred.id];
@@ -208,6 +210,102 @@ const crashed = (r) => r.status === 0 || (r.status === 200 && r.json === null);
       fs.rmSync(path.join(b.priv, 'issuer-key-override.txt'));
       const late = await recover(a, osc.id);
       line(await units(a, w, osc.id) === '0' && (await trySplit(g, w)).status === 200, 'the cancelled sale cannot be delivered later, and the owner can spend the Gold', [late.json, await units(a, w, osc.id)]);
+    }
+
+    console.log('\n== a partner checks the hold with the issuer, not with the authority');
+    {
+      // The authority's adapter is replaced by one that does not hold the credential, or holds it without beginning delivery, or lets the
+      // issuer cancel: whatever the authority's own code says, the partner asks the issuer and approves only a sale it holds for delivery.
+      const rogue = (mode) => fs.writeFileSync(path.join(a.priv, 'rogue-mode.txt'), mode);
+      const buyRogue = async (w, qty, price) => { const g = await mint(w, qty); return { g, ...(await buy(a, w, osc.id, g, price)) }; };
+      {
+        const w = wallet();
+        rogue('nohold');
+        const sale = await buyRogue(w, 100, 20);
+        line(sale.res.status !== 201 && await units(a, w, osc.id) === '0' && !holdOf(sale.g) && !revoked().has(sale.g.id), 'an authority that does not hold the Gold delivers nothing: the partner finds no hold at the issuer', [sale.res.status, sale.res.json]);
+        line(await S.level(osc.id, [A, B]) !== undefined && (await entries(a, osc.id)) === (await entries(b, osc.id)), 'and neither domain wrote an entry');
+        const again = await recover(a, osc.id);
+        line(await units(a, w, osc.id) === '0', 'recovery does not get it through either', again.json);
+        await op(a, 'purchase-cancel', { coinId: osc.id, requestId: sale.requestId });
+      }
+      {
+        const w = wallet();
+        rogue('nobegin');
+        const sale = await buyRogue(w, 100, 20);
+        const h = holdOf(sale.g);
+        line(sale.res.status !== 201 && await units(a, w, osc.id) === '0' && h && h.state === 'held', 'an authority that holds the Gold but never begins delivery: the partner sees a hold that is only held and refuses', [sale.res.status, h && h.state]);
+        await op(a, 'purchase-cancel', { coinId: osc.id, requestId: sale.requestId });
+        line(holdOf(sale.g).state === 'cancelled', 'the sale is cancelled and the Gold freed');
+      }
+      {
+        // Another sale of the same credential holds it: a different recipient and request, so the intent digest differs.
+        const w = wallet(), other = wallet();
+        const g = await mint(w, 100);
+        fs.rmSync(path.join(a.priv, 'rogue-mode.txt'), { force: true });
+        const real = await buy(a, w, osc.id, g, 20, { recipient: other.key });
+        line(real.res.status === 201 && await units(a, other, osc.id) === '200', 'a sale with its own hold goes through (the partner finds the hold for exactly that sale)', real.res);
+        const g2 = await mint(w, 100);
+        const i2 = intent(w, osc.id, g2, 20, hex(16), w.key);
+        const decoy = intent(w, osc.id, g2, 20, i2.payload.requestId, other.key);
+        await holdCall({ action: 'reserve', requestId: decoy.payload.requestId, credential: g2, intent: { payload: decoy.payload, proof: { signerRole: 'raw-ecdsa', publicKey: w.key, signature: decoy.signature } } });
+        await holdCall({ action: 'begin', credentialId: g2.id, requestId: decoy.payload.requestId, holdId: holdIdOf(g2.id, decoy.payload.requestId) });
+        rogue('nolockbegin');
+        const sale = await buy(a, w, osc.id, g2, 20, { requestId: i2.payload.requestId, intent: i2 });
+        line(sale.res.status !== 201 && await units(a, w, osc.id) === '0', 'the hold is for another recipient than the one being delivered to: the partner refuses', [sale.res.status, sale.res.json]);
+        await op(a, 'purchase-cancel', { coinId: osc.id, requestId: sale.requestId });
+      }
+      fs.rmSync(path.join(a.priv, 'rogue-mode.txt'));
+      {
+        const w = wallet();
+        const g = await mint(w, 100);
+        const issuerDown = await buy(a, w, osc.id, g, 20);
+        line(issuerDown.res.status === 201, 'with the real adapter again the same kind of sale goes through', issuerDown.res);
+      }
+      {
+        // The issuer cannot be asked by the partner: the partner does not approve, and the sale waits rather than failing for good.
+        const w = wallet();
+        const g = await mint(w, 100);
+        fs.writeFileSync(path.join(b.priv, 'issuer-url-override.txt'), 'http://127.0.0.1:9');
+        const waiting = await buy(a, w, osc.id, g, 20);
+        line(waiting.res.status !== 201 && await units(a, w, osc.id) === '0' && holdOf(g) && holdOf(g).state === 'delivering', 'a partner that cannot reach the issuer does not approve, and the sale stays pending with the Gold held', [waiting.res.status, waiting.res.json]);
+        fs.rmSync(path.join(b.priv, 'issuer-url-override.txt'));
+        const rec = await recover(a, osc.id);
+        line(await units(a, w, osc.id) === '200' && revokeCount(g.id) === 1, 'when the partner can reach the issuer again recovery delivers once and spends once', [rec.json, await units(a, w, osc.id)]);
+      }
+    }
+
+    console.log('\n== cancelling a sale that was begun');
+    {
+      const w = wallet();
+      const g = await mint(w, 100);
+      fs.writeFileSync(path.join(b.priv, 'issuer-key-override.txt'), issuerKey.slice(0, -2) + 'AA');
+      const stuck = await buy(a, w, osc.id, g, 20);
+      line(stuck.res.status !== 201 && holdOf(g).state === 'delivering', 'a begun sale that cannot be delivered', stuck.res.status);
+      // The token alone, as an operator or an intruder holding it would do.
+      const bare = await holdCall({ action: 'cancel', credentialId: g.id, requestId: stuck.requestId, holdId: holdIdOf(g.id, stuck.requestId), deliveryRuledOut: true });
+      line(bare.status === 409 && bare.body.code === 'closure-required' && holdOf(g).state === 'delivering' && (await trySplit(g, w)).status !== 200, 'the token alone cannot free the Gold', bare);
+      const cancelled = await op(a, 'purchase-cancel', { coinId: osc.id, requestId: stuck.requestId });
+      const h = holdOf(g);
+      line(cancelled.status === 200 && h.state === 'cancelled' && h.closure && h.closure.payload.domain === A && h.closure.payload.requestId === stuck.requestId, 'the ledger\'s own cancel frees it with the closure the ledger signed, which the hold keeps', [cancelled, h && h.closure]);
+      fs.rmSync(path.join(b.priv, 'issuer-key-override.txt'));
+      line((await trySplit(g, w)).status === 200 && await units(a, w, osc.id) === '0', 'the Gold is spendable by its owner and nothing was delivered');
+      // A closure is not made for a sale that was delivered.
+      const w2 = wallet();
+      const g2 = await mint(w2, 100);
+      const done = await buy(a, w2, osc.id, g2, 20);
+      const late = await op(a, 'purchase-cancel', { coinId: osc.id, requestId: done.requestId });
+      line(done.res.status === 201 && late.status !== 200 && holdOf(g2).state === 'finalized' && revokeCount(g2.id) === 1, 'a delivered sale cannot be cancelled and gets no closure', late);
+      // Forging a closure needs the ledger domain's key: one signed with another key is refused by the issuer.
+      const w3 = wallet();
+      const g3 = await mint(w3, 100);
+      fs.writeFileSync(path.join(b.priv, 'issuer-key-override.txt'), issuerKey.slice(0, -2) + 'AA');
+      const stuck3 = await buy(a, w3, osc.id, g3, 20);
+      const forged = { type: 'atlas.ledger.purchase.closure', v: 1, domain: A, coinId: osc.id, requestId: stuck3.requestId, credentialId: g3.id, price: 20, headIndex: 0, headHash: '0'.repeat(64), closedAt: iso(NOW()) };
+      const fake = await holdCall({ action: 'cancel', credentialId: g3.id, requestId: stuck3.requestId, holdId: holdIdOf(g3.id, stuck3.requestId),
+        closure: { payload: forged, signature: crypto.sign('sha256', Buffer.from(canon(forged)), nodes[B].pair.privateKey).toString('base64url') } });
+      line(fake.status === 409 && holdOf(g3).state === 'delivering', 'a closure signed with another domain\'s key is refused', fake);
+      fs.rmSync(path.join(b.priv, 'issuer-key-override.txt'));
+      await op(a, 'purchase-cancel', { coinId: osc.id, requestId: stuck3.requestId });
     }
 
     console.log('\n== the operator\'s token is not the owner');

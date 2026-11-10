@@ -264,4 +264,9 @@ function purchase_check_entry(?array $gold, array $coin, array $public, array $p
     $v = purchase_verify($gold, $coin, $evidence['intent'] ?? null, $evidence['credential'] ?? null, $now, false);
     if ($v['requestId'] !== $public['purchase']['requestId'] || $v['price'] !== $public['purchase']['price']) ledger_fail('bad-purchase', 'the entry is not the sale the buyer asked for');
     if ($v['recipient'] !== ($private['to'] ?? null)) ledger_fail('bad-purchase', 'the entry delivers to another key than the buyer named');
+    // The authority's word that it holds the credential is not enough: the code that holds it is asked directly, when this domain's adapter can.
+    if (is_callable($gold['holding'] ?? null)) {
+        $refused = $gold['holding']((string) $v['requestId'], $evidence['credential'], $evidence['intent'], $now);
+        if ($refused !== null) ledger_fail('bad-purchase', 'the price credential is not held for this sale: ' . $refused);
+    }
 }

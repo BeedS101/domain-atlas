@@ -25,6 +25,17 @@ const iso = (t) => new Date(t * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
 const now = () => Math.floor(Date.now() / 1000);
 const hex = (n) => crypto.randomBytes(n).toString('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A ledger domain this issuer trusts to close sales, and the closure it signs (the ledger's purchase_closure: DER signature over the canonical payload).
+const LEDGER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+const OTHER_LEDGER = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+const LEDGER_DOMAIN = 'ledger.example';
+const canon = (v) => Array.isArray(v) ? '[' + v.map(canon).join(',') + ']' : (v && typeof v === 'object') ? '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}' : JSON.stringify(v);
+const authorities = () => ({ [LEDGER_DOMAIN]: LEDGER.publicKey.export({ type: 'spki', format: 'pem' }) });
+const closureFor = (cred, intent, over, key) => {
+  const payload = { type: 'atlas.ledger.purchase.closure', v: 1, domain: LEDGER_DOMAIN, coinId: intent.payload.coinId, requestId: intent.payload.requestId, credentialId: cred.id, price: intent.payload.price,
+    headIndex: 3, headHash: 'f'.repeat(64), closedAt: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), ...(over || {}) };
+  return { payload, signature: crypto.sign('sha256', Buffer.from(canon(payload)), (key || LEDGER).privateKey).toString('base64url') };
+};
 const holdId = (credId, rid) => crypto.createHash('sha256').update('atlas-gold-hold|' + credId + '|' + rid).digest('hex').slice(0, 32);
 
 let failures = 0, total = 0;
@@ -86,7 +97,7 @@ async function setup(be) {
     config(be, { enabled: true });
     r = await raw(be, reserveBody(g0, i0));
     line(r.status === 404, 'a config without a token hash is still off', r);
-    config(be, { enabled: true, tokenSha256: TOKEN_SHA });
+    config(be, { enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: authorities() });
     r = await raw(be, reserveBody(g0, i0), null);
     line(r.status === 401, 'no token is refused', r);
     r = await raw(be, reserveBody(g0, i0), 'x'.repeat(48));
@@ -249,11 +260,95 @@ async function setup(be) {
     line(r.status !== 200 && r.body.code === 'held', 'a delivering hold does not lapse, however long it has been', r);
     line(/^ERR 409/.test(operatorRevoke(be, g6.id)), 'and the operator cannot revoke it either');
     r = await act(be, 'cancel', g6, i6);
-    line(r.status === 409 && r.body.code === 'delivery-may-have-committed', 'it is cancelled only when the ledger has ruled delivery out', r);
+    line(r.status === 409 && r.body.code === 'closure-required', 'it is cancelled only with a closure from the ledger', r);
     r = await act(be, 'cancel', g6, i6, { deliveryRuledOut: true });
-    line(r.status === 200 && r.body.hold.state === 'cancelled', 'and then it is', r);
+    line(r.status === 409 && r.body.code === 'closure-required' && readHolds(be)[g6.id].state === 'delivering', 'the token saying so is not enough', r);
+    const badClosures = [
+      ['signed by a ledger the issuer does not trust', closureFor(g6, i6, {}, OTHER_LEDGER)],
+      ['from a domain the issuer does not list', closureFor(g6, i6, { domain: 'stranger.example' })],
+      ['for another request', closureFor(g6, i6, { requestId: hex(16) })],
+      ['for another credential', closureFor(g6, i6, { credentialId: 'x' + g6.id })],
+      ['for another coin', closureFor(g6, i6, { coinId: 'd'.repeat(32) })],
+      ['for another price', closureFor(g6, i6, { price: 21 })],
+      ['older than fifteen minutes', closureFor(g6, i6, { closedAt: iso(now() - 1000) })],
+      ['dated in the future', closureFor(g6, i6, { closedAt: iso(now() + 600) })],
+      ['with a field added', closureFor(g6, i6, { extra: 1 })],
+      ['with another type', closureFor(g6, i6, { type: 'atlas.ledger.transfer' })],
+      ['with a field changed after signing', (() => { const c = closureFor(g6, i6); c.payload.headIndex = 4; return c; })()],
+      ['with a broken signature', (() => { const c = closureFor(g6, i6); c.signature = 'AAAA' + c.signature.slice(4); return c; })()],
+      ['that is not an object', 'closed'],
+    ];
+    for (const [name, closure] of badClosures) {
+      r = await act(be, 'cancel', g6, i6, { closure });
+      line(r.status === 409 && r.body.code === 'closure-required' && readHolds(be)[g6.id].state === 'delivering', 'a closure ' + name + ' does not cancel it', r);
+    }
+    config(be, { enabled: true, tokenSha256: TOKEN_SHA });
+    r = await act(be, 'cancel', g6, i6, { closure: closureFor(g6, i6) });
+    line(r.status === 409 && r.body.code === 'closure-required', 'without trusted ledger domains in its configuration nothing cancels it', r);
+    config(be, { enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: { [LEDGER_DOMAIN]: 'not a key', 'bad domain': authorities()[LEDGER_DOMAIN] } });
+    r = await act(be, 'cancel', g6, i6, { closure: closureFor(g6, i6) });
+    line(r.status === 409 && r.body.code === 'closure-required', 'unusable entries in the list trust nobody', r);
+    config(be, { enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: authorities() });
+    r = await raw(be, { action: 'cancel', ...ref(g6, i6, holdId(g6.id, i6.payload.requestId)), closure: closureFor(g6, i6) }, 'z'.repeat(48));
+    line(r.status === 401, 'a closure does not stand in for the token', r);
+    const good = closureFor(g6, i6);
+    r = await act(be, 'cancel', g6, i6, { closure: good });
+    line(r.status === 200 && r.body.hold.state === 'cancelled' && JSON.stringify(readHolds(be)[g6.id].closure) === JSON.stringify(good), 'a closure signed by the trusted ledger for this sale cancels it, and is kept in the record', r);
     r = await A.post('/atlas/asset/split', { credential: g6, sendAmount: 5, toPublicKey: other, requestId: hex(16) });
     line(r.status === 200, 'after which the Gold is free', r);
+
+    console.log('\n== the hold status a partner reads');
+    {
+      const issuerRaw = Buffer.from(JSON.parse(fs.readFileSync(be.keyFile, 'utf8')).keys[0].publicKey, 'base64url');
+      const issuerPub = crypto.createPublicKey({ key: Buffer.concat([Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'), issuerRaw]), format: 'der', type: 'spki' });
+      const statusUrl = (cred, rid) => be.base + '/atlas/ledger/gold-hold-status?credentialId=' + encodeURIComponent(cred) + '&requestId=' + encodeURIComponent(rid);
+      const status = async (cred, rid, init) => { const res = await fetch(statusUrl(cred, rid), init); return { status: res.status, body: await res.json().catch(() => null), cache: res.headers.get('cache-control') }; };
+      const signedOk = (a) => crypto.verify('sha256', Buffer.from(canon(a.payload)), { key: issuerPub, dsaEncoding: 'ieee-p1363' }, Buffer.from(a.signature, 'base64url'));
+      const gs = await mint(A, owner, GOLD, 80);
+      const is = intentFor(owner, gs, { price: 20 });
+      r = await status(gs.id, is.payload.requestId);
+      line(r.status === 404 && r.body.code === 'unknown-hold' && !r.body.attestation, 'before anything is held there is no status, and no signature is given', r);
+      await raw(be, reserveBody(gs, is));
+      r = await status(gs.id, is.payload.requestId);
+      const a = r.body && r.body.attestation;
+      line(r.status === 200 && a && a.payload.state === 'held' && signedOk(a), 'a held credential has a status signed by the issuer\'s key', r);
+      line(a && a.payload.type === 'atlas.gold.hold.status' && a.payload.credentialId === gs.id && a.payload.requestId === is.payload.requestId && a.payload.coinId === COIN && a.payload.price === 20
+        && a.payload.recipient === is.payload.recipient && a.payload.owner === owner && /^\d{4}-\d\d-\d\dT/.test(a.payload.issuedAt), 'it names the credential, request, coin, price, receiving key and owner', a && a.payload);
+      line(a && a.payload.intentDigest === crypto.createHash('sha256').update(canon({ payload: is.payload, proof: is.proof })).digest('hex'), 'and the digest of the owner\'s signed intent, which a partner recomputes from the entry');
+      line(/no-store/.test(r.cache || ''), 'it is not cached');
+      await act(be, 'begin', gs, is);
+      r = await status(gs.id, is.payload.requestId);
+      line(r.body.attestation.payload.state === 'delivering' && signedOk(r.body.attestation), 'delivering after begin', r);
+      const tampered = JSON.parse(JSON.stringify(r.body.attestation));
+      tampered.payload.state = 'finalized';
+      line(!signedOk(tampered), 'a changed status no longer verifies');
+      await act(be, 'finalize', gs, is);
+      r = await status(gs.id, is.payload.requestId);
+      line(r.body.attestation.payload.state === 'finalized' && signedOk(r.body.attestation), 'finalized once the Gold is spent', r);
+      r = await status(g6.id, i6.payload.requestId);
+      line(r.body.attestation.payload.state === 'cancelled', 'cancelled once it is cancelled', r);
+      r = await status(gs.id, hex(16));
+      line(r.status === 404 && !r.body.attestation, 'another request id for the same credential has no status');
+      r = await status(gs.id, 'not-a-request');
+      line(r.status === 400, 'a malformed request id is refused', r);
+      r = await status('', is.payload.requestId);
+      line(r.status === 400 || r.status === 404, 'so is a missing credential', r);
+      r = await status(gs.id, is.payload.requestId, { method: 'POST', body: '{}' });
+      line(r.status === 405, 'it only answers GET', r);
+      r = await status(gs.id, is.payload.requestId, { headers: { Authorization: 'Bearer ' + 'z'.repeat(48) } });
+      line(r.status === 200, 'it needs no token: the request id is what has to be known', r.status);
+      editHolds(be, (h) => { h[gs.id].state = 'held'; h[gs.id].expiresAt = now() - 10; });
+      r = await status(gs.id, is.payload.requestId);
+      line(r.body.attestation.payload.state === 'lapsed', 'a hold that lapsed says so', r);
+      config(be, { enabled: true });
+      r = await status(gs.id, is.payload.requestId);
+      line(r.status === 404, 'with the holds off it answers nothing', r);
+      config(be, { enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: authorities() });
+      fs.writeFileSync(holdsFile(be), '{ not json');
+      r = await status(gs.id, is.payload.requestId);
+      line(r.status === 503 && !r.body.attestation, 'an unreadable hold list gives no status; it is never read as empty', r);
+      fs.writeFileSync(holdsFile(be), JSON.stringify({ holds: {} }));
+    }
 
     console.log('\n== revocation, suspension and the operator');
     {
@@ -357,7 +452,7 @@ async function setup(be) {
     console.log('\n== a crash at every step (one request at a time)');
     {
       const C = api(crash);
-      config(crash, { enabled: true, tokenSha256: TOKEN_SHA });
+      config(crash, { enabled: true, tokenSha256: TOKEN_SHA, ledgerAuthorities: authorities() });
       let co = newOwner();
       const attempt = async (point, setup, step, verify, name) => {
         co = newOwner();

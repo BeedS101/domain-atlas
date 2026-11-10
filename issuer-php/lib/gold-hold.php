@@ -45,15 +45,20 @@ class AtlasHoldError extends Exception
 
 function atlas_hold_config_file() { return __DIR__ . '/atlas-gold-hold-config.json'; }
 
-// ['enabled' => bool, 'tokenSha256' => ?string]. Anything other than a clear opt-in is off.
+// ['enabled' => bool, 'tokenSha256' => ?string, 'ledgerAuthorities' => [domain => public key PEM]]. Anything other than a clear opt-in is off.
+// ledgerAuthorities are the ledger domains whose signed closures (see atlas_hold_closure_problem) may end a delivering hold.
 function atlas_hold_config() {
-    $cfg = ['enabled' => false, 'tokenSha256' => null];
+    $cfg = ['enabled' => false, 'tokenSha256' => null, 'ledgerAuthorities' => []];
     $file = atlas_hold_config_file();
     if (!is_file($file)) return $cfg;
     $f = json_decode((string) @file_get_contents($file), true);
     if (!is_array($f) || ($f['enabled'] ?? false) !== true) return $cfg;
     if (!is_string($f['tokenSha256'] ?? null) || !preg_match('/^[a-f0-9]{64}$/D', $f['tokenSha256'])) return $cfg;
-    return ['enabled' => true, 'tokenSha256' => $f['tokenSha256']];
+    $authorities = [];
+    foreach (is_array($f['ledgerAuthorities'] ?? null) ? $f['ledgerAuthorities'] : [] as $domain => $pem) {
+        if (is_string($domain) && preg_match('/^[a-z0-9.-]{3,253}$/D', $domain) && is_string($pem) && openssl_pkey_get_public($pem) !== false) $authorities[$domain] = $pem;
+    }
+    return ['enabled' => true, 'tokenSha256' => $f['tokenSha256'], 'ledgerAuthorities' => $authorities];
 }
 
 // ---------- the store ----------
@@ -332,9 +337,30 @@ function atlas_hold_finalize($kp, $credId, $requestId, $holdId, $now) {
     }
 }
 
-// Ends a hold without spending. A held one may always be cancelled. One that is delivering is cancelled only on the ledger operator's
-// say-so (the ledger has ruled the delivery out), never by time. A spent one cannot be cancelled.
-function atlas_hold_cancel($credId, $requestId, $holdId, $now, $deliveryRuledOut = false) {
+// What a ledger domain signs when it has closed a sale: no entry delivers the request, the pending transfer was rejected, and the
+// request can no longer be delivered. {payload: {type, v, domain, coinId, requestId, credentialId, price, headIndex, headHash,
+// closedAt}, signature} with the domain's key (DER, base64url, over the canonical payload). Returns a reason, or null.
+function atlas_hold_closure_problem($closure, $rec, $now) {
+    if (!is_array($closure) || !is_array($closure['payload'] ?? null) || !is_string($closure['signature'] ?? null)) return 'no closure was given';
+    $p = $closure['payload'];
+    $keys = array_keys($p);
+    sort($keys);
+    if ($keys !== ['closedAt', 'coinId', 'credentialId', 'domain', 'headHash', 'headIndex', 'price', 'requestId', 'type', 'v']) return 'the closure has the wrong fields';
+    if ($p['type'] !== 'atlas.ledger.purchase.closure' || $p['v'] !== 1) return 'the closure is not a ledger closure';
+    $authorities = atlas_hold_config()['ledgerAuthorities'];
+    if (!is_string($p['domain']) || !isset($authorities[$p['domain']])) return 'the ledger domain is not one this issuer trusts to close sales';
+    if ($p['coinId'] !== $rec['coinId'] || $p['requestId'] !== $rec['requestId'] || $p['credentialId'] !== $rec['credentialId'] || $p['price'] !== $rec['price']) return 'the closure is for another sale';
+    $at = is_string($p['closedAt']) && preg_match('/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/D', $p['closedAt']) ? strtotime($p['closedAt']) : false;
+    if ($at === false || $at < $now - 900 || $at > $now + 60) return 'the closure is not recent';
+    $sig = b64url_decode($closure['signature']);
+    if (!is_string($sig) || !ecdsa_verify_der($authorities[$p['domain']], $sig, canonicalize($p))) return 'the closure is not signed by that ledger domain';
+    return null;
+}
+
+// Ends a hold without spending. A held one may always be cancelled: delivery has not been tried. One that is delivering is cancelled only
+// with a closure signed by a ledger domain this issuer trusts, which says the sale can no longer be delivered; the token alone is
+// not enough and time never is. A spent one cannot be cancelled.
+function atlas_hold_cancel($credId, $requestId, $holdId, $now, $closure = null) {
     $busy = atlas_spend_lock_stripe($credId);
     if ($busy !== null) throw new AtlasHoldError('busy', $busy, 503);
     $rec = atlas_hold_find($credId, $requestId, $holdId);
@@ -349,11 +375,14 @@ function atlas_hold_cancel($credId, $requestId, $holdId, $now, $deliveryRuledOut
         if ($state === 'finalized') throw new AtlasHoldError('finalized', 'the Gold was spent', 409);
         // A spend that committed but did not get to record itself is still a spend.
         if (is_revoked($credId)) throw new AtlasHoldError('finalized', 'the credential is spent; finalize the hold to record it', 409);
-        if ($state === 'delivering' && $deliveryRuledOut !== true) {
-            throw new AtlasHoldError('delivery-may-have-committed', 'delivery was begun for this hold; it can be cancelled only once the ledger has ruled the delivery out', 409);
+        $changes = ['state' => 'cancelled', 'cancelledAt' => $now];
+        if ($state === 'delivering') {
+            $problem = atlas_hold_closure_problem($closure, $rec, $now);
+            if ($problem !== null) throw new AtlasHoldError('closure-required', 'delivery was begun for this hold; it can be cancelled only with a closure from the ledger: ' . $problem, 409);
+            $changes['closure'] = $closure;
         }
-        $view = atlas_holds_modify(function (&$doc) use ($credId, $holdId, $now) {
-            atlas_hold_set($doc, $credId, $holdId, ['state' => 'cancelled', 'cancelledAt' => $now]);
+        $view = atlas_holds_modify(function (&$doc) use ($credId, $holdId, $changes) {
+            atlas_hold_set($doc, $credId, $holdId, $changes);
             return atlas_hold_view($doc['holds'][$credId], $now);
         });
         atlas_fault_point('hold:cancelled');
@@ -365,6 +394,34 @@ function atlas_hold_cancel($credId, $requestId, $holdId, $now, $deliveryRuledOut
 
 function atlas_hold_status($credId, $requestId, $holdId, $now) {
     return atlas_hold_view(atlas_hold_find($credId, $requestId, $holdId), $now);
+}
+
+// What anyone who knows the credential and the request id may ask: is this credential held for this sale, as the issuer says. Signed with
+// the issuer's key (the one that signs the credentials) so a ledger domain checks it without trusting the connection, and bound to the
+// owner's signed intent by its digest. Nothing is revealed that the sale does not put on the ledger; the request id cannot be guessed.
+function atlas_hold_public_status($kp, $credId, $requestId, $now) {
+    if (!is_string($credId) || $credId === '' || !is_string($requestId) || !preg_match('/^[a-f0-9]{32,64}$/D', $requestId)) throw new AtlasHoldError('bad-request', 'credentialId and requestId are required', 400);
+    $rec = atlas_holds_read()['holds'][$credId] ?? null;
+    if (!is_array($rec) || $rec['requestId'] !== $requestId) throw new AtlasHoldError('unknown-hold', 'no such hold', 404);
+    $payload = ['type' => 'atlas.gold.hold.status', 'v' => 1, 'issuer' => atlas_domain(), 'holdId' => $rec['holdId'], 'credentialId' => $rec['credentialId'], 'requestId' => $rec['requestId'],
+        'coinId' => $rec['coinId'], 'price' => $rec['price'], 'recipient' => $rec['recipient'], 'owner' => $rec['owner'], 'intentDigest' => $rec['intentDigest'],
+        'state' => atlas_hold_effective($rec, $now), 'issuedAt' => gmdate('Y-m-d\TH:i:s\Z', $now)];
+    return ['payload' => $payload, 'signature' => atlas_sign($kp['privateKey'], $payload)];
+}
+
+// GET /atlas/ledger/gold-hold-status?credentialId=...&requestId=... : off with the hold endpoint, and read-only.
+function atlas_hold_status_endpoint() {
+    require_get();
+    if (!atlas_hold_config()['enabled']) send_json(404, ['error' => 'not found', 'code' => 'disabled']);
+    try {
+        $kp = atlas_load_keys();
+        send_json(200, ['ok' => true, 'attestation' => atlas_hold_public_status($kp, $_GET['credentialId'] ?? null, $_GET['requestId'] ?? null, time())]);
+    } catch (AtlasHoldError $e) {
+        send_json($e->getCode(), ['error' => $e->getMessage(), 'code' => $e->reason]);
+    } catch (Exception $e) {
+        $c = (int) $e->getCode();
+        send_json($c >= 400 && $c < 600 ? $c : 500, ['error' => $e->getMessage(), 'code' => 'unavailable']);
+    }
 }
 
 // ---------- the endpoint ----------
@@ -397,7 +454,7 @@ function atlas_hold_endpoint() {
         }
         if ($action === 'begin') send_json(200, ['ok' => true, 'hold' => atlas_hold_begin($credId, $requestId, $holdId, $now)]);
         if ($action === 'finalize') send_json(200, ['ok' => true, 'result' => atlas_hold_finalize($kp, $credId, $requestId, $holdId, $now)]);
-        if ($action === 'cancel') send_json(200, ['ok' => true, 'hold' => atlas_hold_cancel($credId, $requestId, $holdId, $now, ($body['deliveryRuledOut'] ?? false) === true)]);
+        if ($action === 'cancel') send_json(200, ['ok' => true, 'hold' => atlas_hold_cancel($credId, $requestId, $holdId, $now, $body['closure'] ?? null)]);
         if ($action === 'status') send_json(200, ['ok' => true, 'hold' => atlas_hold_status($credId, $requestId, $holdId, $now)]);
         send_json(400, ['error' => 'unknown action', 'code' => 'bad-request']);
     } catch (AtlasHoldError $e) {
