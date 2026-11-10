@@ -45,3 +45,10 @@ Add its repo-relative path to `pages.json` under `notice` (interactive page: foo
 Listed under `excluded` in `pages.json`: the browser-extension UI pages, `tools/scene-editor.html`,
 `experiments/`, `directory-server/index.html` (a separate reference service with its own host), `docs/` and the
 templates in this folder.
+
+## Demo collection
+
+`demos.json` lists every public demo page, the backend routes it calls and whether it runs on both demo domains. `tools/demo-directory.js`
+keeps the two domains' copies of a shared page identical, generates the "Demo directory" section of both home pages (between
+`<!-- atlas-demos:start/end -->`) and the table in `docs/demo-collection-deployment.md`; `--check` verifies them
+(`node test/demo-directory.js`). A new page is added to `pages.json` here as well. See `docs/demo-collection-deployment.md`.

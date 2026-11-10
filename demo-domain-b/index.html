@@ -25,6 +25,12 @@
   .labs-name{ display: block; color: #2a5fa8; font-weight: 600; }
   .labs-badge{ display: inline-block; margin: 0.25rem 0 0.35rem; padding: 0.05rem 0.5rem; border: 1px solid rgba(214,158,46,.7); border-radius: 999px; background: rgba(214,158,46,.14); font-size: 0.75rem; }
   .labs-desc{ display: block; font-size: 0.92rem; }
+  .labs-dir{ margin-top: 2rem; }
+  .labs-dir h2{ margin: 0 0 0.3rem; font-size: 1.25rem; }
+  .labs-dir h3{ margin: 1.2rem 0 0.5rem; font-size: 1.02rem; }
+  .labs-dir .labs-note{ margin: 0 0 0.9rem; color: #6b7d87; font-size: 0.95rem; }
+  .labs-badge.labs-cross{ margin-left: 0.4rem; border-color: rgba(42,95,168,.55); background: rgba(42,95,168,.1); }
+  .labs-where{ display: block; margin-top: 0.35rem; font-size: 0.85rem; color: #6b7d87; }
 </style>
 <!-- atlas-site:head:start -->
 <style>
@@ -59,6 +65,43 @@
       <li><a class="labs-card" href="/chain-labs/coin26.html"><span class="labs-name">Coin Creation Studio</span><span class="labs-badge">Experimental</span><span class="labs-desc">Register a demo coin. The page is public; creating a coin needs this domain's operator token.</span></a></li>
     </ul>
   </section>
+
+<!-- atlas-demos:start -->
+  <section class="labs-dir" aria-labelledby="demosHeading">
+    <h2 id="demosHeading">Demo directory</h2>
+    <p class="labs-note"><strong>Experimental demos.</strong> Every demo here is a demonstration: its assets, tokens and credentials have no monetary value and no promise of redemption. A demo marked with a domain name opens on that domain, because it cannot run safely on this one.</p>
+    <h3>Credentials and everyday uses</h3>
+    <ul class="labs-grid">
+        <li><a class="labs-card" href="/business-demo.html"><span class="labs-name">Credential demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Issue, verify, transfer and redeem a signed credential in two minutes, with no installation.</span></a></li>
+        <li><a class="labs-card" href="/cafeteria-demo.html"><span class="labs-name">Purchase demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Buy something with a signed balance, then present a signed receipt to collect it.</span></a></li>
+        <li><a class="labs-card" href="/login-demo.html"><span class="labs-name">Login demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Use a credential as a second factor at sign-in; revoke it and the next sign-in fails.</span></a></li>
+        <li><a class="labs-card" href="/warranty-demo.html"><span class="labs-name">Warranty demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Follow a warranty certificate from factory to retailer to owner and through resales.</span></a></li>
+        <li><a class="labs-card" href="/email-ticket-demo.html"><span class="labs-name">Email ticket demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Hand a credential to someone with only an email address. The send step is a mockup and emails nothing.</span></a></li>
+        <li><a class="labs-card" href="/recall-demo.html"><span class="labs-name">Supply-chain recall demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Recall a whole class of goods with one signed patch that reaches every current holder.</span></a></li>
+    </ul>
+    <h3>Trust, approval and governance</h3>
+    <ul class="labs-grid">
+        <li><a class="labs-card" href="/attestation-demo.html"><span class="labs-name">Attestation demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">A second, independent key vouches for something it did not issue.</span></a></li>
+        <li><a class="labs-card" href="/bank-demo.html"><span class="labs-name">Treasury approval demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">A treasury transfer that only executes once enough named officers have signed.</span></a></li>
+        <li><a class="labs-card" href="/clawback-demo.html"><span class="labs-name">Suspend and clawback demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Freeze a stolen credential, then release it or claw it back to its rightful owner.</span></a></li>
+        <li><a class="labs-card" href="/governance-demo.html"><span class="labs-name">Governance and voting demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Open-enrolment voting: one vote each, a visible tally, closing at a fixed deadline.</span></a></li>
+        <li><a class="labs-card" href="/oracle-demo.html"><span class="labs-name">Oracle-triggered payout demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">An independent flight-status oracle reports a delay and a payout mints automatically.</span></a></li>
+        <li><a class="labs-card" href="/reserve-bank-demo.html"><span class="labs-name">Reserve bank demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Seven acts of a two-tier currency system, from reserve mint to audit and clawback.</span></a></li>
+    </ul>
+    <h3>Two domains working together</h3>
+    <ul class="labs-grid">
+        <li><a class="labs-card" href="/federation-demo.html"><span class="labs-name">Cross-domain federation demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">Two real domains exchange a Post Office message, each checking the other's published key.</span></a></li>
+        <li><a class="labs-card" href="/txlab.html"><span class="labs-name">Multi-domain transaction authorization lab</span><span class="labs-badge">Experimental</span><span class="labs-desc">Two independently keyed domains must both sign a test transfer before it executes.</span></a></li>
+        <li><a class="labs-card" href="/multi-issuer.html"><span class="labs-name">Multi-issuer portable asset lab</span><span class="labs-badge">Experimental</span><span class="labs-desc">One portable test asset issued jointly by two domains, exportable and verifiable anywhere.</span></a></li>
+    </ul>
+    <h3>Wallet extension and worlds</h3>
+    <ul class="labs-grid">
+        <li><a class="labs-card" href="/wallet-bridge-demo.html"><span class="labs-name">Wallet bridge demo</span><span class="labs-badge">Experimental</span><span class="labs-desc">A page asks the wallet extension who you are, for a signature or to keep an item, each with your approval.</span></a></li>
+        <li><a class="labs-card" href="https://evtec.co.za/compass-listing.html" rel="noopener"><span class="labs-name">Product page pinned to a spot in a world</span><span class="labs-badge">Experimental</span><span class="labs-badge labs-cross">On evtec.co.za</span><span class="labs-desc">An ordinary listing page whose spatial link points at the Compass Stall in Plaza.</span><span class="labs-where">Opens on evtec.co.za. It points at Plaza, a world only evtec.co.za declares.</span></a></li>
+        <li><a class="labs-card" href="https://evtec.co.za/blog-post.html" rel="noopener"><span class="labs-name">Blog post pinned to a spot in a world</span><span class="labs-badge">Experimental</span><span class="labs-badge labs-cross">On evtec.co.za</span><span class="labs-desc">An ordinary post whose spatial link points at the reading nook in the Lobby.</span><span class="labs-where">Opens on evtec.co.za. It points at the Lobby, a world only evtec.co.za declares.</span></a></li>
+    </ul>
+  </section>
+<!-- atlas-demos:end -->
 
   <div class="callout">
     <h2>Walking into these spaces needs the wallet extension</h2>

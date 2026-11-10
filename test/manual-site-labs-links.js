@@ -50,7 +50,7 @@ async function serve(site) {
       console.log('\n== ' + d.site + (d.site === 'demo-domain-a' ? ' (evtec.co.za)' : ' (domain-atlas.co.za)'));
 
       const before = execFileSync('git', ['show', 'HEAD:' + d.site + '/index.html'], { cwd: REPO }).toString();
-      const outside = (t) => t.replace(/[ \t]*<section class="labs"[\s\S]*?<\/section>\n\n/, '').replace(/^ {2}\.labs[^\n]*\n/gm, '');
+      const outside = (t) => t.replace(/[ \t]*<section class="labs"[\s\S]*?<\/section>\n\n/, '').replace(/[ \t]*<!-- atlas-demos:start -->[\s\S]*?<!-- atlas-demos:end -->\n\n?/, '').replace(/^ {2}\.labs[^\n]*\n/gm, '');
       line(outside(html) === outside(before), 'nothing else on the page changed: removing the new section and its styles gives back the previous page');
 
       const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });

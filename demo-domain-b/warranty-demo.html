@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain Atlas — Warranty Demo</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root {
+    --ink: #14212c; --muted: #5c6b74; --line: #dfe6ea; --bg-card: #fff;
+    --green: #1a7f4a; --green-bg: #eaf6ef; --red: #a3271f; --red-bg: #fdefee;
+    --accent: #2a5fa8; --accent-bg: #eaf1fb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 3rem auto 6rem;
+    padding: 0 1.5rem; color: var(--ink); line-height: 1.55;
+  }
+  h1 { margin-bottom: 0.2rem; font-size: 1.7rem; }
+  p.tag { color: var(--muted); margin-top: 0; }
+  p.lede { font-size: 1.02rem; }
+  code { background: #eef1f3; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+  .panel {
+    border: 1px solid var(--line); border-radius: 10px; padding: 1.25rem 1.4rem; margin: 1.4rem 0;
+    background: var(--bg-card);
+  }
+  .panel h2 { margin-top: 0; font-size: 1.05rem; }
+  .panel.pitch { background: var(--accent-bg); border-color: var(--accent); }
+  .panel.pitch p { color: var(--ink); margin: 0; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.55rem 1.1rem; border-radius: 7px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  label { display: block; font-size: 0.86rem; font-weight: 600; margin: 0.7rem 0 0.25rem; }
+  textarea {
+    display: block; width: 100%; font-family: ui-monospace, monospace; font-size: 0.78rem;
+    padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 6px; resize: vertical;
+  }
+  input[type="text"], input[type="date"], input[type="number"] {
+    display: block; width: 100%; font: inherit; font-size: 0.9rem;
+    padding: 0.5rem 0.65rem; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 0.3rem;
+  }
+  .keyline {
+    font-family: ui-monospace, monospace; font-size: 0.78rem; background: #eef1f3; padding: 0.5rem 0.65rem;
+    border-radius: 6px; word-break: break-all; margin: 0.4rem 0;
+  }
+  .props { font-size: 0.86rem; color: var(--muted); }
+  .props div { margin: 0.1rem 0; }
+  .result { font-size: 0.86rem; padding: 0.5rem 0.65rem; border-radius: 6px; margin-top: 0.6rem; }
+  .result.ok { background: var(--green-bg); color: var(--green); }
+  .result.err { background: var(--red-bg); color: var(--red); }
+  .card {
+    border: 1px solid var(--line); border-radius: 9px; padding: 1rem; background: #fbfcfd;
+    display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem;
+  }
+  .card h3 { margin: 0; font-size: 1rem; }
+  .badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em;
+    text-transform: uppercase; padding: 0.15em 0.55em; border-radius: 999px; width: fit-content;
+  }
+  .badge.ok { background: var(--green-bg); color: var(--green); }
+  .badge.err { background: var(--red-bg); color: var(--red); }
+  .badge.pending { background: #eee; color: var(--muted); }
+  details.raw { font-size: 0.8rem; margin-top: 0.1rem; }
+  details.raw summary { cursor: pointer; color: var(--accent); }
+  details.raw pre {
+    background: #14212c; color: #d8e3ea; padding: 0.6rem 0.7rem; border-radius: 6px; overflow-x: auto;
+    font-size: 0.75rem; white-space: pre-wrap; word-break: break-all;
+  }
+  .fillVerifyBtn { display: block; margin-top: 0.55rem; font-size: 0.8rem; padding: 0.4rem 0.8rem; }
+  .footnote { font-size: 0.85rem; color: var(--muted); margin-top: 2.5rem; }
+  a { color: var(--accent); }
+</style>
+<!-- atlas-site:head:start -->
+<style>
+.atlas-site-footer{box-sizing:border-box;clear:both;margin:3rem 0 0;padding:1rem 0 1.5rem;border-top:1px solid rgba(128,128,128,.4);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-align:center;color:inherit;opacity:.8}
+.atlas-site-footer p{margin:.2rem 0;font:inherit;color:inherit}
+.atlas-site-footer a{color:inherit;text-decoration:underline}
+.atlas-risk-notice{box-sizing:border-box;margin:0 0 1rem;padding:.6rem .9rem;border:1px solid rgba(214,158,46,.7);border-left-width:4px;border-radius:6px;background:rgba(214,158,46,.14);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:inherit;overflow-wrap:anywhere}
+.atlas-risk-notice a{color:inherit;font-weight:600;text-decoration:underline}
+</style>
+<!-- atlas-site:head:end -->
+</head>
+<body>
+<!-- atlas-site:notice:start -->
+<aside class="atlas-risk-notice" role="note" aria-label="Experimental platform notice">
+  <strong>Experimental platform — use at your own risk.</strong> Assets, tokens, credits and credentials here are demonstrations with no monetary value and no promise of redemption. <a href="/terms/">Terms &amp; Conditions</a>
+</aside>
+<!-- atlas-site:notice:end -->
+  <h1>A warranty that travels with the product</h1>
+  <p class="tag">A two-minute, no-installation demo of a factory-to-retailer-to-owner credential chain.</p>
+  <p class="lede">
+    One certificate, one physical unit: a factory mints it with a real serial number, a
+    retailer stamps the actual sale date onto it when it's sold, and from that moment the
+    warranty clock is running — for however many owners the product passes through next.
+    Selling it secondhand doesn't reset anything or need anyone's permission from the
+    factory: the same certificate, with its original serial number and sale date intact,
+    simply changes hands. In a real deployment, minting and stamping would be authenticated
+    operator actions — a factory login, a retailer login — the way
+    <a href="/atlas-admin/" target="_blank" rel="noopener">this domain's Admin Panel</a>
+    models them for a real operator. This page plays both parts for you, one click at a
+    time, so you can see the whole chain without needing an operator login of your own —
+    transferring ownership below is the one step a real product owner would actually do
+    themselves.
+  </p>
+
+  <div class="panel pitch">
+    <h2>What this looks like for a real manufacturer</h2>
+    <p>
+      A serial number an operator authenticated at manufacture time, a sale date stamped
+      by whichever authorized retailer actually made the sale, and a warranty status
+      anyone can compute themselves from those two signed facts — no phone call to the
+      factory required to find out if a used appliance is still covered, and no way for a
+      reseller to quietly extend or backdate it, since both facts are signed by the
+      factory's own key.
+    </p>
+  </div>
+
+  <div class="panel" id="identityPanel">
+    <h2>Your identity</h2>
+    <p class="props" style="margin-top:0;">
+      A wallet keypair generated right here in this tab — this is who the factory mints
+      the certificate to first.
+    </p>
+    <div class="keyline" id="yourPublicKey"></div>
+    <button type="button" id="copyKeyBtn" class="secondary">Copy public key</button>
+  </div>
+
+  <div class="panel" id="mintPanel">
+    <h2>Step 1 of 4 — the factory mints a certificate</h2>
+    <p class="props" style="margin-top:0;">
+      A real factory authenticates once, at manufacture time, before assigning a serial
+      number. Pick whatever serial you like — this page mints the certificate straight to
+      the identity above, playing the factory's part for you. Because a visitor chose the
+      serial, the certificate is minted as a separate self-serve class, so it can never pass
+      for a real factory certificate; only this page's own factory key can stamp its sale.
+    </p>
+    <label for="serialInput">Serial number</label>
+    <input type="text" id="serialInput" value="SN-0001" maxlength="40" pattern="[A-Za-z0-9-]+">
+    <div style="margin-top:0.6rem;">
+      <button type="button" id="mintBtn">Mint certificate</button>
+    </div>
+    <div id="mintResult"></div>
+  </div>
+
+  <div class="panel" id="cardPanel" style="display:none;">
+    <h2>The certificate</h2>
+    <div id="certificateCard"></div>
+  </div>
+
+  <div class="panel" id="historyPanel" style="display:none;">
+    <h2>Full history</h2>
+    <p class="props" style="margin-top:0;">
+      A genuine call to <code>GET /atlas/asset/history</code> — walks this certificate's own
+      <code>supersedes</code> chain back through every stamped sale and every resale, one
+      archived link at a time, each one still an independently verifiable signed credential
+      in its own right. Nothing about this is specific to warranties — any class can opt into
+      the same archive, this is just the first one that does.
+    </p>
+    <button type="button" id="historyBtn" class="secondary">View full history</button>
+    <div id="historyResult"></div>
+  </div>
+
+  <div class="panel" id="reissuePanel" style="display:none;">
+    <h2>Step 2 of 4 — the retailer stamps the sale</h2>
+    <p class="props" style="margin-top:0;">
+      Fill in a sale date, a warranty length, and the retailer's name — this page stamps
+      them onto the certificate for you, the same generic reissue mechanism the museum
+      exhibit's info card and a mistagged item's tradeScope already use elsewhere on this
+      site, just playing the retailer's part in one click.
+    </p>
+    <label for="saleDateInput">Sale date</label>
+    <input type="date" id="saleDateInput">
+    <label for="warrantyMonthsInput">Warranty length (months)</label>
+    <input type="number" id="warrantyMonthsInput" value="24" min="1">
+    <label for="retailerInput">Retailer name</label>
+    <input type="text" id="retailerInput" value="Example Retailer">
+    <div style="margin-top:0.6rem;">
+      <button type="button" id="stampBtn">Stamp the sale</button>
+    </div>
+    <div id="stampResult"></div>
+  </div>
+
+  <div class="panel" id="transferPanel" style="display:none;">
+    <h2>Step 3 of 4 — ownership changes hands</h2>
+    <p class="props" style="margin-top:0;">
+      A genuine call to <code>POST /atlas/asset/transfer</code>, signed by whoever
+      currently holds the certificate — no factory or retailer involved at all. Click as
+      many times as you like to simulate the product being resold again and again; the
+      serial number, sale date, and warranty status travel with it unchanged every time.
+    </p>
+    <button type="button" id="transferBtn">Transfer to a new owner</button>
+    <div id="transferResult"></div>
+  </div>
+
+  <div class="panel" id="verifyPanel">
+    <h2>Step 4 of 4 — verify the certificate independently</h2>
+    <p class="props" style="margin-top:0;">
+      Runs entirely in your own browser: fetches this domain's public key and revocation
+      list — the same two public files anyone could fetch directly — then checks the
+      signature and looks the id up in the revocation list. Nothing here trusts this page.
+    </p>
+    <textarea id="verifyInput" rows="8" placeholder='Paste a certificate&#8217;s raw JSON here, or click &#8220;Try verifying this one&#8221; on the card above.'></textarea>
+    <div style="margin-top:0.6rem;">
+      <button type="button" id="verifyBtn">Verify</button>
+    </div>
+    <div id="verifyResult"></div>
+  </div>
+
+  <p class="footnote">
+    Nothing on this page is stored in a database anywhere, and reloading it starts a fresh
+    identity from scratch. <button id="resetBtn" class="secondary" type="button" style="display:none;">Start over</button>
+    <a href="/">Back to the plaza</a>.
+  </p>
+
+<script>
+(function () {
+  'use strict';
+  const subtle = crypto.subtle;
+
+  function b64urlEncode(bytes) {
+    let bin = '';
+    const arr = new Uint8Array(bytes);
+    for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function b64urlDecode(str) {
+    const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  // Same shape as issuer-server/server.js's canonicalize() and
+  // extension/wallet.js's own copy — sorted-key JSON, no whitespace.
+  function canonicalize(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return '[' + value.map(canonicalize).join(',') + ']';
+    const keys = Object.keys(value).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalize(value[k])).join(',') + '}';
+  }
+  async function genIdentity() {
+    const kp = await subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    const raw = await subtle.exportKey('raw', kp.publicKey);
+    return { kp, publicKey: b64urlEncode(raw) };
+  }
+  async function signWithSelf(identity, payload) {
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const sig = await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, identity.kp.privateKey, data);
+    return { signerRole: 'raw-ecdsa', publicKey: identity.publicKey, signature: b64urlEncode(sig) };
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, body: json };
+  }
+  async function verifyCredentialIndependently(credential) {
+    const [keyDoc, revDoc] = await Promise.all([
+      fetch('/.well-known/atlas-key.json', { cache: 'no-store' }).then((r) => r.json()),
+      fetch('/.well-known/atlas-revocations.json', { cache: 'no-store' }).then((r) => r.json()).catch(() => ({ revoked: [] }))
+    ]);
+    const issuedAt = new Date(credential.issuedAt).getTime();
+    const activeKey = (keyDoc.keys || []).find((k) => {
+      const from = new Date(k.validFrom).getTime();
+      const until = k.validUntil ? new Date(k.validUntil).getTime() : Infinity;
+      return k.publicKey === credential.issuer.publicKey && issuedAt >= from && issuedAt <= until;
+    });
+    if (!activeKey) return { valid: false, reason: 'issuer key was not valid at issuedAt' };
+    const payload = {
+      id: credential.id, asset: credential.asset, owner: credential.owner,
+      quantity: credential.quantity, supersedes: credential.supersedes, issuedAt: credential.issuedAt
+    };
+    const data = new TextEncoder().encode(canonicalize(payload));
+    const publicKey = await subtle.importKey('raw', b64urlDecode(activeKey.publicKey), { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']);
+    const sigOk = await subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, b64urlDecode(credential.signature), data);
+    if (!sigOk) return { valid: false, reason: "signature doesn't match the issuer's key" };
+    const revoked = (revDoc.revoked || []).some((r) => r.id === credential.id);
+    if (revoked) return { valid: false, reason: 'revoked by the issuer' };
+    return { valid: true, reason: "signature verified against the issuer's current key; not revoked" };
+  }
+
+  let you = null;            // {kp, publicKey} — this tab's own identity, the FIRST owner
+  let factory = null;        // the demo authority this page plays as factory and retailer
+  let currentHolder = null;  // whichever identity currently holds the certificate (starts as `you`)
+  let currentCredential = null;
+
+  // Computed purely from the stamped properties, never from a signed
+  // asset.expiresAt — a warranty certificate deliberately carries no
+  // protocol-level expiry (see the ASSET_CATALOG entry's own comment):
+  // that would also block transferring a product whose warranty already
+  // lapsed, which is exactly backwards for a used-goods resale.
+  function warrantyStatus(properties) {
+    const saleDate = properties && properties['com.example.saleDate'];
+    const months = properties && Number(properties['com.example.warrantyMonths']);
+    if (!saleDate || !months) return { label: 'Not started yet — no sale stamped', cls: 'pending' };
+    const start = new Date(saleDate);
+    if (isNaN(start.getTime())) return { label: 'com.example.saleDate is not a valid date', cls: 'err' };
+    const end = new Date(start);
+    end.setMonth(end.getMonth() + months);
+    const daysLeft = Math.round((end.getTime() - Date.now()) / 86400000);
+    const endStr = end.toISOString().slice(0, 10);
+    if (daysLeft >= 0) return { label: 'Active until ' + endStr + ' (' + daysLeft + ' days remaining)', cls: 'ok' };
+    return { label: 'Expired ' + Math.abs(daysLeft) + ' days ago (' + endStr + ')', cls: 'err' };
+  }
+
+  function rawDetails(credential) {
+    return JSON.stringify({
+      id: credential.id,
+      owner: credential.owner.publicKey.slice(0, 24) + '…',
+      issuer: credential.issuer.domain,
+      asset: credential.asset
+    }, null, 2);
+  }
+
+  function renderCard() {
+    const c = currentCredential;
+    const status = warrantyStatus(c.asset.properties);
+    const serial = (c.asset.properties && c.asset.properties['com.example.serialNumber']) || '(not set)';
+    const retailer = c.asset.properties && c.asset.properties['com.example.retailer'];
+    const el = document.getElementById('certificateCard');
+    el.innerHTML =
+      '<div class="card">' +
+      '<span class="badge ' + status.cls + '">' + status.label + '</span>' +
+      '<h3>' + c.asset.name + '</h3>' +
+      '<div class="props">' +
+      '<div>Serial: ' + serial + '</div>' +
+      (retailer ? '<div>Sold by: ' + retailer + '</div>' : '') +
+      '<div>Current owner: ' + c.owner.publicKey.slice(0, 24) + '…' + (c.owner.publicKey === you.publicKey ? ' (you)' : '') + '</div>' +
+      '</div>' +
+      '<details class="raw"><summary>View raw signed credential</summary><pre></pre>' +
+      '<button class="fillVerifyBtn secondary" type="button">Try verifying this one independently ↓</button></details>' +
+      '</div>';
+    el.querySelector('.raw pre').textContent = rawDetails(c);
+    el.querySelector('.fillVerifyBtn').addEventListener('click', () => {
+      document.getElementById('verifyInput').value = JSON.stringify(c, null, 2);
+      document.getElementById('verifyPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      runVerify();
+    });
+    document.getElementById('cardPanel').style.display = '';
+    document.getElementById('historyPanel').style.display = '';
+    document.getElementById('reissuePanel').style.display = '';
+    document.getElementById('transferPanel').style.display = '';
+    // A fresh mint/stamp/transfer makes the certificate's own `supersedes`
+    // move, so any history shown for the PREVIOUS credential is now stale —
+    // clear it rather than leave a result that no longer matches what's
+    // displayed above it.
+    document.getElementById('historyResult').innerHTML = '';
+  }
+
+  document.getElementById('copyKeyBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(you.publicKey);
+      document.getElementById('copyKeyBtn').textContent = 'Copied!';
+      setTimeout(() => { document.getElementById('copyKeyBtn').textContent = 'Copy public key'; }, 1500);
+    } catch (err) {
+      // Clipboard access can be blocked in some contexts — the key is
+      // already selectable text right above the button either way.
+    }
+  });
+
+  document.getElementById('mintBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('mintBtn');
+    const result = document.getElementById('mintResult');
+    const serial = document.getElementById('serialInput').value.trim();
+    if (!serial) {
+      result.className = 'result err';
+      result.textContent = 'Enter a serial number first.';
+      return;
+    }
+    btn.disabled = true;
+    result.className = 'result pending';
+    result.textContent = 'Minting…';
+    try {
+      factory = await genIdentity();
+      const res = await postJson('/atlas/demo/warranty/mint', {
+        ownerPublicKey: you.publicKey,
+        authorityPublicKey: factory.publicKey,
+        properties: { 'com.example.serialNumber': serial }
+      });
+      if (!res.ok) throw new Error((res.body && res.body.error) || 'mint failed');
+      currentCredential = res.body;
+      currentHolder = you;
+      result.className = 'result ok';
+      result.textContent = 'Minted — certificate ' + currentCredential.id + '.';
+      renderCard();
+      document.getElementById('resetBtn').style.display = '';
+      document.getElementById('reissuePanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (err) {
+      result.className = 'result err';
+      result.textContent = 'Could not mint: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('stampBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('stampBtn');
+    const result = document.getElementById('stampResult');
+    const saleDate = document.getElementById('saleDateInput').value;
+    const warrantyMonths = Number(document.getElementById('warrantyMonthsInput').value);
+    const retailer = document.getElementById('retailerInput').value.trim();
+    if (!saleDate || !warrantyMonths || !retailer) {
+      result.className = 'result err';
+      result.textContent = 'Fill in a sale date, a warranty length, and a retailer name.';
+      return;
+    }
+    btn.disabled = true;
+    result.className = 'result pending';
+    result.textContent = 'Stamping…';
+    try {
+      const properties = {
+        'com.example.saleDate': saleDate,
+        'com.example.warrantyMonths': warrantyMonths,
+        'com.example.retailer': retailer
+      };
+      // Signed by the factory's demo key, never the owner's
+      // (issuer-php/lib/demo-authority.php).
+      const payload = { purpose: 'atlas.demo.request/1', action: 'demo-stamp-sale', credentialId: currentCredential.id,
+        domain: location.host, issuedAt: new Date().toISOString(), properties };
+      const res = await postJson('/atlas/demo/warranty/stamp-sale', {
+        credential: currentCredential, properties, intent: { payload, proof: await signWithSelf(factory, payload) }
+      });
+      if (!res.ok) throw new Error((res.body && res.body.error) || 'stamp failed');
+      currentCredential = res.body.newCredential;
+      result.className = 'result ok';
+      result.textContent = 'Sale stamped on ' + currentCredential.id + '.';
+      renderCard();
+      document.getElementById('transferPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (err) {
+      result.className = 'result err';
+      result.textContent = 'Could not stamp the sale: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('transferBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('transferBtn');
+    const result = document.getElementById('transferResult');
+    btn.disabled = true;
+    result.className = 'result pending';
+    result.textContent = 'Generating a new owner and transferring…';
+    try {
+      const nextOwner = await genIdentity();
+      const payload = { credentialId: currentCredential.id, recipientPublicKey: nextOwner.publicKey, action: 'transfer' };
+      const proof = await signWithSelf(currentHolder, payload);
+      const res = await postJson('/atlas/asset/transfer', { credential: currentCredential, recipientPublicKey: nextOwner.publicKey, intent: { payload, proof } });
+      if (!res.ok) throw new Error((res.body && res.body.error) || 'transfer failed');
+      currentCredential = res.body.credential;
+      currentHolder = nextOwner;
+      result.className = 'result ok';
+      result.textContent = 'Transferred — new owner ' + nextOwner.publicKey.slice(0, 24) + '…, same serial, same warranty facts.';
+      renderCard();
+    } catch (err) {
+      result.className = 'result err';
+      result.textContent = 'Could not transfer: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('historyBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('historyBtn');
+    const result = document.getElementById('historyResult');
+    // The current credential's own body is never itself archived — only
+    // what it replaced is — so the walk starts from ITS `supersedes`, not
+    // its own id. See atlas/asset/history.php's own comment (WYSIWYS-
+    // adjacent reasoning: this page already trusts its own currentCredential,
+    // so no extra verification round trip happens here, only the fetch).
+    const startId = currentCredential.supersedes;
+    if (!startId) {
+      result.innerHTML = '<p class="props">This is the original mint — nothing came before it.</p>';
+      return;
+    }
+    btn.disabled = true;
+    result.innerHTML = '<p class="props">Loading…</p>';
+    try {
+      const res = await fetch('/atlas/asset/history?id=' + encodeURIComponent(startId));
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || 'history lookup failed');
+      const chain = body.chain || [];
+      if (chain.length === 0) {
+        result.innerHTML = '<p class="props">No archived history found for this certificate.</p>';
+        return;
+      }
+      result.innerHTML = chain.map((c, i) => {
+        const p = (c.asset && c.asset.properties) || {};
+        return '<div class="card">' +
+          '<h3>Link ' + (i + 1) + ' of ' + chain.length + '</h3>' +
+          '<div class="props">' +
+          '<div>Serial: ' + (p['com.example.serialNumber'] || '(not set)') + '</div>' +
+          (p['com.example.retailer'] ? '<div>Sold by: ' + p['com.example.retailer'] + '</div>' : '') +
+          (p['com.example.saleDate'] ? '<div>Sale date: ' + p['com.example.saleDate'] + '</div>' : '') +
+          '<div>Owner at the time: ' + c.owner.publicKey.slice(0, 24) + '…</div>' +
+          '<div>Retired ' + new Date(c.archivedAt).toLocaleString() + ' — reason: ' + c.reason + '</div>' +
+          '</div></div>';
+      }).join('');
+    } catch (err) {
+      result.innerHTML = '<p class="result err">Could not load history: ' + err.message + '</p>';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  async function runVerify() {
+    const resultEl = document.getElementById('verifyResult');
+    resultEl.className = 'result';
+    resultEl.textContent = 'Checking…';
+    let credential;
+    try {
+      credential = JSON.parse(document.getElementById('verifyInput').value);
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = "That's not valid JSON.";
+      return;
+    }
+    try {
+      const verdict = await verifyCredentialIndependently(credential);
+      resultEl.className = 'result ' + (verdict.valid ? 'ok' : 'err');
+      resultEl.textContent = (verdict.valid ? '✓ Valid — ' : '✗ Not valid — ') + verdict.reason;
+    } catch (err) {
+      resultEl.className = 'result err';
+      resultEl.textContent = 'Could not verify: ' + err.message;
+    }
+  }
+  document.getElementById('verifyBtn').addEventListener('click', runVerify);
+
+  document.getElementById('resetBtn').addEventListener('click', () => {
+    window.location.reload();
+  });
+
+  (async () => {
+    you = await genIdentity();
+    document.getElementById('yourPublicKey').textContent = you.publicKey;
+    document.getElementById('saleDateInput').value = new Date().toISOString().slice(0, 10);
+  })();
+})();
+</script>
+<!-- atlas-site:footer:start -->
+<footer class="atlas-site-footer">
+  <p>© 2026 Bruno da Silva. All rights reserved.</p>
+  <p><a href="/terms/">Terms &amp; Conditions</a> | Experimental Platform — Use at Your Own Risk</p>
+</footer>
+<!-- atlas-site:footer:end -->
+</body>
+</html>

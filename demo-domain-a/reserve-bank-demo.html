@@ -869,6 +869,12 @@
   let consortiumRequestId = null;
   let consortiumThisDomain = null;
 
+  // On a deployed domain the sibling defaults to the other deployed domain; a local copy keeps the markup default.
+  (function () {
+    const peer = { 'evtec.co.za': 'domain-atlas.co.za', 'domain-atlas.co.za': 'evtec.co.za' }[location.hostname];
+    if (peer) document.getElementById('siblingDomainInput').value = peer;
+  })();
+
   function updateConsortiumProgress(request) {
     const need = request.requiredApprovals, have = request.approvals.length;
     document.getElementById('consortiumProgressText').textContent = request.status === 'executed'

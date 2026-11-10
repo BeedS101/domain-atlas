@@ -111,7 +111,7 @@
 
   <div class="panel caution">
     <p>
-      <strong>Domain B, for real:</strong> the field below defaults to <code>domain-atlas.co.za</code> —
+      <strong>Domain B, for real:</strong> the field below defaults to <code id="domainBDefault">domain-atlas.co.za</code> —
       this project's own second, genuinely separate registered domain, an independent deployment of the
       same software with its own generated keypair on its own server. Nothing on this page is simulated:
       every call below crosses a real network boundary between two domains that have never shared a
@@ -219,6 +219,13 @@
   'use strict';
   const subtle = crypto.subtle;
   const DOMAIN_A = location.host;
+  // On a deployed domain, Domain B defaults to the other deployed domain; a local copy keeps the markup default.
+  (function () {
+    const peer = { 'evtec.co.za': 'domain-atlas.co.za', 'domain-atlas.co.za': 'evtec.co.za' }[location.hostname];
+    if (!peer) return;
+    document.getElementById('domainBInput').value = peer;
+    document.getElementById('domainBDefault').textContent = peer;
+  })();
 
   function b64urlEncode(bytes) {
     let bin = '';
