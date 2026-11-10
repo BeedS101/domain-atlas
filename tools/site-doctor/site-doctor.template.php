@@ -311,7 +311,8 @@ function doctor_env($root) {
   return ['checks' => $checks, 'setup' => $setup, 'facts' => [
     'phpVersion' => PHP_VERSION, 'sapi' => PHP_SAPI, 'os' => PHP_OS, 'host' => $host, 'maxExecutionTime' => (string)ini_get('max_execution_time'), 'memoryLimit' => (string)ini_get('memory_limit'),
     'webRoot' => $root, 'home' => $parent],
-    'detected' => is_file($root . '/bank-demo.html') ? 'a' : (is_file($root . '/wallet-bridge-demo.html') ? 'b' : 'none'),
+    // Most demo pages are on both domains; the wallet bridge demo is only on site B and the pinned-spot listing only on site A.
+    'detected' => is_file($root . '/wallet-bridge-demo.html') ? 'b' : (is_file($root . '/compass-listing.html') ? 'a' : 'none'),
     'detectedMods' => (is_file($root . '/atlas/call/info.php') ? 'c' : '') . (is_file($root . '/presence/status.php') ? 'p' : '')];
 }
 

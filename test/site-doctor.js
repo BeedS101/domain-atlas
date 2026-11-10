@@ -183,6 +183,22 @@ const issue = (res) => res.json.results.map((r) => r[0] + ' ' + r[1]);
     assert.ok(scan.json.total > 400);
   });
 
+  await check('demo site detection uses the pages only one domain has, since most demo pages are on both', async () => {
+    const page = (n) => path.join(root, n);
+    const had = fs.existsSync(page('wallet-bridge-demo.html'));
+    const kept = fs.existsSync(page('compass-listing.html')) ? fs.readFileSync(page('compass-listing.html')) : null;
+    assert.strictEqual((await call('env')).json.detected, 'a');
+    fs.writeFileSync(page('wallet-bridge-demo.html'), '<!doctype html>');
+    fs.rmSync(page('compass-listing.html'), { force: true });
+    assert.ok(fs.existsSync(page('bank-demo.html')), 'site B now has the shared demo pages too');
+    assert.strictEqual((await call('env')).json.detected, 'b');
+    fs.rmSync(page('wallet-bridge-demo.html'));
+    assert.strictEqual((await call('env')).json.detected, 'none');
+    if (kept) fs.writeFileSync(page('compass-listing.html'), kept);
+    if (had) fs.writeFileSync(page('wallet-bridge-demo.html'), '<!doctype html>');
+    assert.strictEqual((await call('env')).json.detected, 'a');
+  });
+
   await check('scan resumes from a cursor and covers the same entries', async () => {
     const all = await call('scan', { site: 'a' });
     const tail = await call('scan', { site: 'a', cursor: '100' });
