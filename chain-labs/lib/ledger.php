@@ -175,7 +175,9 @@ function ledger_valid_domain(mixed $domain): bool
 
 function ledger_parse_units(mixed $text, string $what): int
 {
-    if (!is_string($text) || !preg_match('/^(0|[1-9][0-9]{0,11})$/D', $text)) ledger_fail('bad-amount', $what . ' must be a whole number of units written without a sign or leading zeros');
+    // 13 digits: LEDGER_MAX_UNITS itself (10^12) has 13, so the digit cap alone must not refuse the largest legal supply;
+    // the value check below is what enforces the limit.
+    if (!is_string($text) || !preg_match('/^(0|[1-9][0-9]{0,12})$/D', $text)) ledger_fail('bad-amount', $what . ' must be a whole number of units written without a sign or leading zeros');
     $units = (int) $text;
     if ($units > LEDGER_MAX_UNITS) ledger_fail('bad-amount', $what . ' is above the limit of ' . LEDGER_MAX_UNITS . ' units');
     return $units;

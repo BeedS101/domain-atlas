@@ -141,6 +141,19 @@ $bad = [
     'a private coin without a secret' => ['visibility' => 'private'], 'a bad coin id' => ['coinId' => 'xyz'], 'a bad date' => ['createdAt' => 'yesterday'],
 ];
 foreach ($bad as $name => $change) t(refuses(fn() => ledger_genesis(array_merge($base, $change)), in_array($name, ['a lower-case symbol', 'a one-letter symbol', 'decimals 7', 'decimals as a string', 'max 0', 'initial above max', 'an unknown mode', 'an unknown visibility', 'a bad treasury key', 'an empty roster', 'a single coin with two domains', 'a bad domain name', 'a roster key that is not a key', 'a private coin without a secret', 'a bad coin id', 'a bad date'], true) ? 'bad-genesis' : 'bad-amount'), 'refused: ' . $name, why(fn() => ledger_genesis(array_merge($base, $change))));
+// The largest legal supply is 10^12 units, which is 13 digits: it must be accepted exactly, and nothing above it.
+$gophLike = array_merge($base, ['symbol' => 'GOPH', 'decimals' => 6, 'maxUnits' => '1000000000000', 'initialUnits' => '10000000000']);
+$gg = ledger_genesis($gophLike);
+t($gg['maxUnits'] === '1000000000000' && $gg['initialUnits'] === '10000000000', 'a 6 decimal coin with 1,000,000 maximum and 10,000 initial supply has the genesis the Studio expects');
+t(ledger_genesis(array_merge($gophLike, ['initialUnits' => '1000000000000']))['initialUnits'] === '1000000000000', 'an initial supply equal to the limit is accepted');
+t(ledger_parse_units('1000000000000', 'x') === 1000000000000, 'exactly the unit limit parses');
+t(ledger_parse_units('999999999999', 'x') === 999999999999, 'one below the limit parses');
+foreach (['1000000000001', '9999999999999', '10000000000000', '99999999999999', '0100000000000', '-1000000000000', '+1000000000000', '1e12', '1000000000000.0', ' 1000000000000', "1000000000000\n"] as $badUnits) {
+    t(refuses(fn() => ledger_parse_units($badUnits, 'x'), 'bad-amount'), 'the amount ' . json_encode($badUnits) . ' is refused');
+}
+t(refuses(fn() => ledger_genesis(array_merge($gophLike, ['maxUnits' => '1000000000001'])), 'bad-amount'), 'a maximum above the limit is still refused by the genesis');
+t(refuses(fn() => ledger_genesis(array_merge($gophLike, ['initialUnits' => '1000000000001'])), 'bad-amount'), 'an initial supply above the limit is still refused');
+t(refuses(fn() => ledger_genesis(array_merge($gophLike, ['maxUnits' => 1000000000000])), 'bad-amount'), 'an integer rather than a string is still refused');
 $multiRoster = [['domain' => 'a.example', 'key' => ec_pair()['pub']], ['domain' => 'b.example', 'key' => ec_pair()['pub']], ['domain' => 'c.example', 'key' => ec_pair()['pub']]];
 $multi = array_merge($base, ['mode' => 'multi', 'roster' => $multiRoster]);
 t(ledger_genesis($multi)['threshold'] === 3, 'a multi coin defaults to every domain approving');

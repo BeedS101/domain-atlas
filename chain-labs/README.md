@@ -112,7 +112,7 @@ names a partner with no pinned key. Nothing is minted into any wallet: a key hol
 
 Every commit runs in one `BEGIN IMMEDIATE` transaction that re-checks the entry index, previous hash, signatures, nonce,
 sequence number and balance, so concurrent commits of one index have exactly one winner. Amounts are decimal strings of
-whole units, at most 10^12. The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.
+whole units, at most 10^12 (13 digits, so the largest legal supply is written with 13 digits and anything above it is refused). The `lib` folder must be uploaded with the PHP files; the library refuses a direct request.
 
 ## Provenance
 

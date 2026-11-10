@@ -32,9 +32,11 @@ function display26(int $units,int $decimals):string{
  return substr($s,0,-$decimals).'.'.substr($s,-$decimals);
 }
 function units26(mixed $raw,int $d):int|false{
- if(!is_string($raw)||!preg_match('/^(0|[1-9][0-9]{0,11})(?:\.[0-9]{1,6})?$/D',$raw))return false;
+ if(!is_string($raw)||!preg_match('/^(0|[1-9][0-9]{0,12})(?:\.[0-9]{1,6})?$/D',$raw))return false;
  $parts=explode('.',$raw,2);$fraction=$parts[1]??'';
  if(strlen($fraction)>$d)return false;
+ // The limit is 10^12 base units, 13 digits: a coin with no decimals may have 13 whole digits, and each decimal takes one away. The bound below decides the exact value; this keeps the product from overflowing first.
+ if(strlen($parts[0])>13-$d)return false;
  $u=(int)$parts[0]*(10**$d)+(int)str_pad($fraction,$d,'0');
  return $u>=0&&$u<=1000000000000?$u:false;
 }

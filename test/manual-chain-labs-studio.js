@@ -22,8 +22,10 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
   const a = nodes[A], b = nodes[B];
   const browser = await playwright.chromium.launch();
   try {
-    const goph = (await createCoin(a, 'GOPH', { initialSupply: '10000' })).json;
-    const osc = (await createCoin(a, 'OSC', { mode: 'multi', partners: [B], threshold: 2 })).json;
+    // Registered the way the live domain has them: 6 decimals, a maximum of 1,000,000 (10^12 base units) and 10,000 to start.
+    const def = { decimals: 6, maxSupply: '1000000', initialSupply: '10000' };
+    const goph = (await createCoin(a, 'GOPH', def)).json;
+    const osc = (await createCoin(a, 'OSC', { ...def, mode: 'multi', partners: [B], threshold: 2 })).json;
     line(goph.state === 'registered' && osc.state === 'pending', 'setup: the studio registered a single and a multi coin', [goph.state, osc.state]);
     line((await scan(a, 'action=coins')).json.coins.length === 0 && (await get(a, 'action=coins')).json.coins.length === 0, 'registered coins are not on the ledger, so the scanner and the wallet list nothing');
 
@@ -61,7 +63,7 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     await page.locator('#opToken').fill(a.token);
     await card('GOPH').getByRole('button', { name: 'Open on the ledger' }).click();
     const opened = await settle(/GOPH is open on the ledger/);
-    line(/Head: entry 0, 1 entry/.test(opened) && /Treasury holds 1000000 base units/.test(opened), 'it opens, and entry 0 credits the treasury', opened);
+    line(/Head: entry 0, 1 entry/.test(opened) && /Treasury holds 10000000000 base units/.test(opened), 'it opens, and entry 0 credits the treasury', opened);
     await card('GOPH').getByRole('link', { name: 'View in the scanner' }).waitFor();
     line((await card('GOPH').getByRole('button', { name: /Open on the ledger/ }).count()) === 0 && (await card('GOPH').getByRole('link', { name: 'View in the scanner' }).count()) === 1, 'the button is replaced by a link to the scanner');
     const again = await post(a, 'action=open', { adminToken: a.token, coinId: goph.id });
@@ -107,20 +109,20 @@ const line = (ok, text, detail) => { total++; if (!ok) failures++; console.log((
     line(/Granted 12\.5 GOPH/.test(await settle(/Granted|Could not grant/)), 'a grant from the treasury is made in the coin\'s own decimals');
     const h = (await post(a, 'action=holdings', { key: w.key })).json;
     const held = h.statement && h.statement.coins.find((c) => c.coinId === goph.id);
-    line(held && held.units === '1250' && held.symbol === 'GOPH', 'the holdings lookup the wallet uses finds it', h);
+    line(held && held.units === '12500000' && held.symbol === 'GOPH', 'the holdings lookup the wallet uses finds it', h);
     const acct = (await scan(a, 'action=account&coin=' + goph.id + '&ref=' + w.key)).json;
-    line(acct.ok && acct.units === '1250', 'and so does the scanner');
+    line(acct.ok && acct.units === '12500000', 'and so does the scanner');
     await page.locator('#grantTo').fill(w.key);
-    await page.locator('#grantAmount').fill('0.001');
+    await page.locator('#grantAmount').fill('0.0000001');
     await page.locator('#opToken').fill(a.token);
     await page.getByRole('button', { name: 'Grant from the treasury' }).click();
-    line(/at most 2 decimals/.test(await settle(/at most 2/)), 'an amount with more decimals than the coin has is refused before it is sent');
+    line(/at most 6 decimals/.test(await settle(/at most 6/)), 'an amount with more decimals than the coin has is refused before it is sent');
     await page.locator('#grantAmount').fill('1');
     await page.locator('#grantTo').fill('not a key');
     await page.locator('#opToken').fill(a.token);
     await page.getByRole('button', { name: 'Grant from the treasury' }).click();
     line(/Could not grant/.test(await settle(/Could not grant: (?!Enter)/)), 'and a recipient that is not a wallet key is refused by the ledger');
-    line((await post(a, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === goph.id).units === '1250', 'with nothing granted by either');
+    line((await post(a, 'action=holdings', { key: w.key })).json.statement.coins.find((c) => c.coinId === goph.id).units === '12500000', 'with nothing granted by either');
     line(errors.length === 0, 'the page logged no errors', errors);
   } finally {
     await browser.close();
