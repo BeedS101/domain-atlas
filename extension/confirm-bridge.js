@@ -306,7 +306,7 @@
               const done = r.status === 'done';
               show(bel('div', { className: 'line', id: 'buyResult', role: 'status' }, done
                   ? 'Bought ' + AtlasChainLabs.formatUnits(prepared.units, prepared.decimals) + ' ' + prepared.symbol + '. ' + prepared.domain + ' delivered the coin and returned the rest of your Gold. It now shows in your wallet’s Ledger tab.'
-                  : 'The sale is waiting for the other domains. The wallet keeps it; open the Ledger tab and choose Try again to finish it.'),
+                  : 'The sale is waiting for the other domains' + (r.note ? ': ' + r.note : '.') + ' The wallet keeps it. Press Buy with Gold on this coin again, or open the Ledger tab, to check on it; do not start a new purchase.'),
                 buyButtons([{ label: 'Close', primary: true, onClick: () => close({ status: r.status }) }]));
             } catch (err) {
               show(buyProblem(err && err.message ? err.message : 'The purchase did not go through.'), buyButtons([{ label: 'Close', onClick: () => close(null) }]));
@@ -316,9 +316,46 @@
         ]));
     }
 
+    // A purchase this wallet already sent and the domain has not finished is resumed, never started again: a second request would try
+    // to spend the same Gold for a different sale, which the issuer refuses while the first holds it.
+    function waitingStep(p) {
+      const amount = p.units ? AtlasChainLabs.formatUnits(p.units, p.decimals) + ' ' + p.symbol : p.symbol || 'the coin';
+      const status = bel('div', { className: 'line', id: 'buyWaiting', role: 'status' }, 'A purchase of ' + amount + ' for ' + p.price + ' Gold is waiting at ' + p.domain + '.' + (p.note ? ' The domain says: ' + p.note : ' It is waiting for the other domains.'));
+      const problem = bel('div', { className: 'line problem', role: 'status' });
+      show(status, problem,
+        buyButtons([
+          { label: 'Close', onClick: () => close(null) },
+          { label: 'Check again', primary: true, onClick: async (btn) => {
+            btn.disabled = true;
+            problem.textContent = '';
+            clearTimeout(inactivityTimer);
+            try {
+              const r = await chain.resumeBuy(p.requestId);
+              if (r.status === 'done') {
+                show(bel('div', { className: 'line', id: 'buyResult', role: 'status' }, 'Bought ' + amount + '. ' + p.domain + ' delivered the coin and returned the rest of your Gold. It now shows in your wallet’s Ledger tab.'),
+                  buyButtons([{ label: 'Close', primary: true, onClick: () => close({ status: 'done' }) }]));
+              } else {
+                status.textContent = 'Still waiting at ' + p.domain + '.' + (r.note ? ' The domain says: ' + r.note : '');
+                btn.disabled = false;
+              }
+            } catch (err) {
+              problem.textContent = err && err.message ? err.message : 'The purchase did not go through.';
+              btn.disabled = false;
+            }
+            restartInactivity(300000);
+          } }
+        ]));
+    }
+
     let listed = false;
     try { listed = (await chain.domains()).some((d) => d.domain === domain); } catch (err) { failure('The wallet could not read its list of domains.'); return; }
-    if (listed) { await formStep(); return; }
+    if (listed) {
+      let waiting = null;
+      try { waiting = (await chain.rows()).pendingBuys.find((p) => p.domain === domain && p.coinId === coinId) || null; } catch (err) { waiting = null; }
+      if (waiting) { waitingStep(waiting); return; }
+      await formStep();
+      return;
+    }
     // Reading a domain's terms needs its signing key pinned, which is what adding it to the list does.
     show(buyLine('Domain:', domain),
       bel('div', { className: 'line' }, domain + ' is not on your chain labs list. Continuing adds it: the wallet fetches the key the domain signs with, pins it, and asks the domain what your key holds. Nothing is bought yet.'),

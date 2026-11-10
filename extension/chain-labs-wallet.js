@@ -394,7 +394,7 @@
           coins: a ? a.coins.map((coin) => Object.assign({ amount: formatUnits(coin.units, coin.decimals) }, coin)) : []
         });
       }
-      return { domains: out, pendingSends: c.pendingSends, pendingBuys: c.pendingBuys.map((p) => ({ domain: p.domain, coinId: p.coinId, requestId: p.requestId, price: p.price, createdAt: p.createdAt })) };
+      return { domains: out, pendingSends: c.pendingSends, pendingBuys: c.pendingBuys.map((p) => ({ domain: p.domain, coinId: p.coinId, requestId: p.requestId, price: p.price, symbol: p.symbol, decimals: p.decimals, units: p.units, note: p.note || '', createdAt: p.createdAt })) };
     }
 
     // ---------- sending ----------
@@ -562,7 +562,12 @@
         return { status: 'done', receipt: j.receipt, balance: j.balance || null };
       }
       if (r.status === 201) throw Object.assign(new Error('The domain\'s receipt does not match what you signed, so it was not accepted.'), { code: 'bad-receipt' });
-      if (r.status === 202) return { status: 'waiting', requestId: prepared.requestId, note: j.note || '' };
+      if (r.status === 202) {
+        // What the domain is waiting for (for example which domain has not approved) is kept with the request so it can be shown again.
+        const note = typeof j.note === 'string' ? j.note.replace(/[\u0000-\u001f]+/g, ' ').trim().slice(0, 300) : '';
+        await mutateCache((cache) => { const held = cache.pendingBuys.find((x) => x.requestId === prepared.requestId); if (held) held.note = note; });
+        return { status: 'waiting', requestId: prepared.requestId, note };
+      }
       // A refusal ends the request unless the domain may still be holding it.
       if (r.status !== 0 && r.status < 500) {
         await dropBuy(prepared.requestId);

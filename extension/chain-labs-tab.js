@@ -180,7 +180,7 @@
         const prepared = p.prepared;
         panel = null;
         const r = await chain().buy(prepared);
-        notice = r.status === 'done' ? 'Bought. The domain delivered the coin and returned the rest of your Gold.' : 'The sale is waiting for the other domains. The wallet keeps it; try again from the list below.';
+        notice = r.status === 'done' ? 'Bought. The domain delivered the coin and returned the rest of your Gold.' : 'The sale is waiting for the other domains' + (r.note ? ': ' + r.note : '.') + ' The wallet keeps it; try again from the list below.';
       })));
       actions.appendChild(cancel());
       box.appendChild(actions);
@@ -203,11 +203,11 @@
     });
     view.pendingBuys.forEach((p) => {
       const card = el('div', { className: 'info-card chain-labs-pending' });
-      card.appendChild(el('div', { textContent: 'Waiting at ' + p.domain + ': a purchase for ' + p.price + ' Gold.' }));
+      card.appendChild(el('div', { textContent: 'Waiting at ' + p.domain + ': a purchase for ' + p.price + ' Gold.' + (p.note ? ' The domain says: ' + p.note : '') }));
       const actions = el('div', { className: 'item-actions' });
       actions.appendChild(button('Try again', () => act(async () => {
         const r = await chain().resumeBuy(p.requestId);
-        notice = r.status === 'done' ? 'Bought. The domain delivered the coin and returned the rest of your Gold.' : 'Still waiting.';
+        notice = r.status === 'done' ? 'Bought. The domain delivered the coin and returned the rest of your Gold.' : 'Still waiting' + (r.note ? ': ' + r.note : '.');
       })));
       actions.appendChild(button('Forget', () => act(() => chain().dropBuy(p.requestId), 'Forgotten here. If the domain was already holding the Gold for it, ask the domain\'s operator to cancel it.'), 'danger-btn'));
       card.appendChild(actions);
